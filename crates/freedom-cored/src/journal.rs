@@ -43,6 +43,11 @@ use crate::fsx::{self, Done};
 pub const JOURNAL: &str = "node-identity-journal.json";
 pub const DONE: &str = "node-identity-done.json";
 pub const STAGING: &str = "node-identity-staging.json";
+/// Nodes whose identity is known to be broken (a corrupt operation, or an
+/// untrusted journal), until a later write installs them. Persisted so every
+/// startup reports them, not only the one that found them.
+pub const UNRESOLVED: &str = "node-identity-unresolved.json";
+const NODES: [&str; 2] = ["bee", "radicle"];
 const STAGED_SUFFIX: &str = ".freedom-new";
 const MAX_DONE: usize = 32;
 /// The largest node identity file (and record) handled. Node configs and
@@ -95,6 +100,11 @@ struct Intent {
     op_id: String,
     node: String,
     root: PathBuf,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Unresolved {
+    nodes: Vec<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -173,6 +183,9 @@ pub enum Recovered {
     /// The staged files of an operation that died before its commit were
     /// removed.
     Discarded,
+    /// A journal left behind by an operation the done list already records
+    /// as finished (its removal didn't persist) was removed.
+    Cleaned,
 }
 
 /// Runs the four steps for one operation. `Err` means nothing was committed.
@@ -267,8 +280,20 @@ pub fn write(
         finish(identity_dir, &journal.op_id, status).map(|()| status)
     });
     Ok(match result {
-        Ok(OpStatus::Installed) => Outcome::Installed,
-        Ok(_) => Outcome::Corrupt,
+        Ok(OpStatus::Installed) => {
+            // This node's identity is whole again.
+            if let Err(e) = mark_unresolved(identity_dir, &[node], false) {
+                crate::log::warn(
+                    "could not clear the node's unresolved mark",
+                    serde_json::json!({ "error": e.kind().to_string() }),
+                );
+            }
+            Outcome::Installed
+        }
+        Ok(_) => {
+            let _ = mark_unresolved(identity_dir, &[node], true);
+            Outcome::Corrupt
+        }
         Err(e) => {
             crate::log::error(
                 "node identity install did not finish after commit",
@@ -289,7 +314,9 @@ pub fn recover(identity_dir: &Path) -> std::io::Result<Recovered> {
     let journal = match serde_json::from_slice::<Journal>(&bytes) {
         Ok(journal) if valid_journal(&journal, identity_dir) => journal,
         _ => {
-            // Never act on it: keep it aside for inspection.
+            // Never act on it: keep it aside for inspection. Which node it
+            // concerned is unknown, so both stay unresolved until rewritten.
+            mark_unresolved(identity_dir, &NODES, true)?;
             std::fs::rename(&path, identity_dir.join(format!("{JOURNAL}.corrupt")))?;
             sync_dir(identity_dir)?;
             crate::log::error(
@@ -299,8 +326,24 @@ pub fn recover(identity_dir: &Path) -> std::io::Result<Recovered> {
             return Ok(Recovered::Invalid);
         }
     };
+    // A journal whose operation the done list already records finished: only
+    // its removal didn't persist. Never replay it (its targets may have
+    // changed since); just remove it.
+    if read_done(identity_dir)?
+        .ops
+        .iter()
+        .any(|op| op.op_id == journal.op_id)
+    {
+        fsx::remove(&path, || true)?;
+        return Ok(Recovered::Cleaned);
+    }
+    // Durability barrier: the journal and its directory entry must persist
+    // before any member is installed from it.
+    File::open(&path)?.sync_all()?;
+    sync_dir(identity_dir)?;
     let corrupt = install(&journal)?;
     let status = if corrupt {
+        mark_unresolved(identity_dir, &[journal.node.as_str()], true)?;
         OpStatus::Corrupt
     } else {
         OpStatus::Installed
@@ -326,18 +369,52 @@ pub fn pending(identity_dir: &Path) -> Option<(String, String)> {
 /// record can't mask a current transaction. A consistent node directory
 /// alone doesn't count: it could still hold the old identity.
 pub fn op_status(identity_dir: &Path, op_id: &str) -> std::io::Result<OpStatus> {
+    let done = read_done(identity_dir)?;
+    // Op IDs are single-use, so a done record is final; a live journal with
+    // the same ID is then only a leftover whose removal didn't persist.
+    if let Some(op) = done.ops.iter().rev().find(|op| op.op_id == op_id) {
+        return Ok(op.status);
+    }
     if let Some(bytes) = read_record(&identity_dir.join(JOURNAL))?
         && serde_json::from_slice::<Journal>(&bytes).is_ok_and(|j| j.op_id == op_id)
     {
         return Ok(OpStatus::PendingRecovery);
     }
-    let done = read_done(identity_dir)?;
-    Ok(done
-        .ops
-        .iter()
-        .rev()
-        .find(|op| op.op_id == op_id)
-        .map_or(OpStatus::NotCommitted, |op| op.status))
+    Ok(OpStatus::NotCommitted)
+}
+
+/// The nodes recorded as unresolved (see [`UNRESOLVED`]).
+pub fn unresolved(identity_dir: &Path) -> std::io::Result<Vec<String>> {
+    Ok(match read_record(&identity_dir.join(UNRESOLVED))? {
+        Some(bytes) => serde_json::from_slice::<Unresolved>(&bytes)
+            .map(|u| u.nodes)
+            // Unreadable: assume the worst.
+            .unwrap_or_else(|_| NODES.iter().map(|n| (*n).to_owned()).collect()),
+        None => Vec::new(),
+    })
+}
+
+/// Adds (`broken`) or removes nodes from the unresolved set, durably.
+fn mark_unresolved(identity_dir: &Path, nodes: &[&str], broken: bool) -> std::io::Result<()> {
+    let mut set = unresolved(identity_dir)?;
+    let before = set.clone();
+    for node in nodes {
+        set.retain(|n| n != node);
+        if broken {
+            set.push((*node).to_owned());
+        }
+    }
+    set.sort();
+    set.dedup();
+    if set == before {
+        return Ok(());
+    }
+    if set.is_empty() {
+        fsx::remove(&identity_dir.join(UNRESOLVED), || true)?;
+        return Ok(());
+    }
+    ensure_dir(identity_dir)?;
+    put_record(identity_dir, UNRESOLVED, &Unresolved { nodes: set })
 }
 
 fn op_seen(identity_dir: &Path, op_id: &str) -> std::io::Result<bool> {
@@ -754,15 +831,62 @@ mod tests {
     }
 
     #[test]
-    fn a_live_journal_wins_over_an_old_done_record() {
+    fn a_completed_journal_left_behind_is_removed_not_replayed() {
         let tmp = tempfile::tempdir().unwrap();
         let (identity, root) = (tmp.path().join("identity"), tmp.path().join("bee"));
-        finish(&made(&identity), "op-1", OpStatus::Installed).unwrap();
-        committed_journal(&identity, &root, "op-1", b"k", b"c");
+        let journal = committed_journal(&identity, &root, "op-1", b"k", b"c");
+        // The op finished (done record), but the journal's removal didn't
+        // persist; since then the node rewrote its config.
+        std::fs::rename(&journal.files[0].staged, &journal.files[0].target).unwrap();
+        std::fs::rename(&journal.files[1].staged, &journal.files[1].target).unwrap();
+        finish(&identity, "op-1", OpStatus::Installed).unwrap();
+        std::fs::write(
+            identity.join(JOURNAL),
+            serde_json::to_vec(&journal).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(root.join("config.yaml"), b"changed by the node").unwrap();
+        assert_eq!(op_status(&identity, "op-1").unwrap(), OpStatus::Installed);
+        assert_eq!(recover(&identity).unwrap(), Recovered::Cleaned);
+        assert!(!identity.join(JOURNAL).exists());
         assert_eq!(
-            op_status(&identity, "op-1").unwrap(),
-            OpStatus::PendingRecovery
+            std::fs::read(root.join("config.yaml")).unwrap(),
+            b"changed by the node"
         );
+        assert_eq!(op_status(&identity, "op-1").unwrap(), OpStatus::Installed);
+        assert!(unresolved(&identity).unwrap().is_empty());
+    }
+
+    #[test]
+    fn broken_nodes_stay_unresolved_until_rewritten() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (identity, root) = (tmp.path().join("identity"), tmp.path().join("bee"));
+        // An untrusted journal: both nodes unresolved, across restarts.
+        made(&identity);
+        std::fs::write(identity.join(JOURNAL), b"{}").unwrap();
+        assert_eq!(recover(&identity).unwrap(), Recovered::Invalid);
+        assert_eq!(unresolved(&identity).unwrap(), ["bee", "radicle"]);
+        assert_eq!(recover(&identity).unwrap(), Recovered::Nothing);
+        assert_eq!(unresolved(&identity).unwrap(), ["bee", "radicle"]);
+        // Rewriting Bee resolves Bee only.
+        let files = bee_files(&root, b"k", b"c");
+        assert_eq!(
+            write(&identity, "op-b", "bee", &root, &files, || true).unwrap(),
+            Outcome::Installed
+        );
+        assert_eq!(unresolved(&identity).unwrap(), ["radicle"]);
+        // A corrupt operation marks its node.
+        let other = tmp.path().join("bee2");
+        let journal = committed_journal(&identity, &other, "op-c", b"k", b"c");
+        std::fs::remove_file(&journal.files[1].staged).unwrap();
+        assert!(matches!(
+            recover(&identity).unwrap(),
+            Recovered::Finished {
+                status: OpStatus::Corrupt,
+                ..
+            }
+        ));
+        assert_eq!(unresolved(&identity).unwrap(), ["bee", "radicle"]);
     }
 
     #[test]

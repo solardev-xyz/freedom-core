@@ -1665,27 +1665,14 @@ pub type NodeRecovery = Option<serde_json::Value>;
 
 fn startup_recovery(dir: &Path) -> NodeRecovery {
     match journal::recover(dir) {
-        Ok(journal::Recovered::Nothing) => None,
-        Ok(journal::Recovered::Discarded) => {
-            crate::log::info(
-                "removed the staged files of an interrupted node identity write",
-                serde_json::json!({}),
-            );
-            None
+        Ok(outcome) => {
+            if outcome != journal::Recovered::Nothing {
+                crate::log::info(
+                    "node identity recovery",
+                    serde_json::json!({ "outcome": format!("{outcome:?}") }),
+                );
+            }
         }
-        Ok(journal::Recovered::Finished {
-            op_id,
-            node,
-            status,
-        }) => {
-            crate::log::info(
-                "finished an interrupted node identity write",
-                serde_json::json!({ "status": status }),
-            );
-            (status != journal::OpStatus::Installed)
-                .then(|| serde_json::json!({ "status": status, "op_id": op_id, "node": node }))
-        }
-        Ok(journal::Recovered::Invalid) => Some(serde_json::json!({ "status": "corrupt" })),
         Err(e) => {
             crate::log::error(
                 "node identity recovery failed",
@@ -1696,8 +1683,18 @@ fn startup_recovery(dir: &Path) -> NodeRecovery {
                 report["op_id"] = op_id.into();
                 report["node"] = node.into();
             }
-            Some(report)
+            return Some(report);
         }
+    }
+    // Nodes known to be broken stay reported on every start, until a write
+    // installs them again.
+    match journal::unresolved(dir) {
+        Ok(nodes) if nodes.is_empty() => None,
+        Ok(nodes) if nodes.len() == 1 => {
+            Some(serde_json::json!({ "status": "corrupt", "node": nodes[0] }))
+        }
+        // Several, or unreadable: every node.
+        _ => Some(serde_json::json!({ "status": "corrupt" })),
     }
 }
 

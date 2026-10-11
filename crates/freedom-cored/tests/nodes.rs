@@ -330,7 +330,16 @@ fn startup_and_recover_finish_interrupted_writes() {
     let hello = core.hello();
     assert_eq!(
         hello["result"]["node_recovery"],
-        json!({ "status": "corrupt", "op_id": "op-broken", "node": "bee" })
+        json!({ "status": "corrupt", "node": "bee" })
+    );
+    // Reported again on the next start, until a write installs Bee.
+    core.close_stdin();
+    assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
+    let mut core = spawn("serve", &data, &locks, &[]);
+    let hello = core.hello();
+    assert_eq!(
+        hello["result"]["node_recovery"],
+        json!({ "status": "corrupt", "node": "bee" })
     );
 }
 
