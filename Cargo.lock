@@ -302,7 +302,6 @@ dependencies = [
  "base64",
  "fc-keys",
  "hex",
- "pbkdf2",
  "rand_core",
  "serde",
  "serde_json",

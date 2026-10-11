@@ -234,7 +234,9 @@ fn derive_key(
     iterations: u32,
 ) -> Result<Zeroizing<aes_gcm::Key<Aes256Gcm16>>, Error> {
     let mut key = Zeroizing::new(aes_gcm::Key::<Aes256Gcm16>::default());
-    pbkdf2::pbkdf2_hmac::<Sha256>(password, salt, iterations, key.as_mut_slice());
+    // fc-keys' PBKDF2 wipes its key pads and round buffers; the pbkdf2
+    // crate doesn't.
+    fc_keys::kdf::pbkdf2::<Sha256>(password, salt, iterations, key.as_mut_slice());
     Ok(key)
 }
 
