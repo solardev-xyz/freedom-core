@@ -319,7 +319,11 @@ pub fn recover(identity_dir: &Path) -> std::io::Result<Recovered> {
     }
     // Durability barrier: the journal and its directory entry must persist
     // before any member is installed from it.
-    File::open(&path)?.sync_all()?;
+    // Write access: Windows refuses to flush a read-only handle.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)?
+        .sync_all()?;
     sync_dir(identity_dir)?;
     let status = conclude(identity_dir, &journal)?;
     let _ = fsx::remove(&identity_dir.join(STAGING), || true);
