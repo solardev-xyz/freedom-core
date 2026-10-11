@@ -45,7 +45,7 @@ use fc_protocol::secret::{SecretBytes, SecretResponse};
 use fc_vault::format::{self, SealParams};
 use fc_vault::state::{LockReason, Locked, Prepared, Ticket, VaultState};
 use fc_vault::throttle::{Attempt, Outcome, Throttle};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
@@ -424,7 +424,10 @@ struct ImportParams<'a> {
 #[derive(Deserialize)]
 struct ReconcileParams<'a> {
     op: ReconcileOp,
-    fingerprint_before: Option<String>,
+    /// Required: `null` means main observed no vault before; a missing field
+    /// is unknown pre-state, never evidence of absence.
+    #[serde(default, deserialize_with = "present")]
+    fingerprint_before: Option<Option<String>>,
     #[serde(borrow)]
     password_b64: &'a RawValue,
     #[serde(borrow, default)]
@@ -887,10 +890,12 @@ impl Vault {
             "vault.reconcile" => {
                 let invalid = || ErrorBody::new(ErrorCode::InvalidArgument, "Invalid parameters");
                 let p = params::<ReconcileParams>(raw)?;
-                if p.fingerprint_before
-                    .as_deref()
-                    .is_some_and(|f| !is_fingerprint(f))
-                {
+                let before = p.fingerprint_before.ok_or_else(invalid)?;
+                if before.as_deref().is_some_and(|f| !is_fingerprint(f)) {
+                    return Err(invalid());
+                }
+                // A password change needs a vault before it.
+                if p.op == ReconcileOp::ChangePassword && before.is_none() {
                     return Err(invalid());
                 }
                 let password = secret(p.password_b64)?;
@@ -905,7 +910,7 @@ impl Vault {
                 };
                 Kind::Reconcile {
                     op: p.op,
-                    before: p.fingerprint_before,
+                    before,
                     password,
                     mnemonic,
                     install: p.install,
@@ -1280,6 +1285,12 @@ fn reconcile_reply(
         response = response.secret("mnemonic_b64", phrase.phrase().as_bytes());
     }
     response.finish().map(Some).map_err(|_| internal())
+}
+
+/// Distinguishes a present field (even `null`) from a missing one: with
+/// `#[serde(default)]`, missing is `None` and `null` is `Some(None)`.
+fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(d).map(Some)
 }
 
 /// A vault fingerprint: 64 lowercase hex digits (SHA-256).

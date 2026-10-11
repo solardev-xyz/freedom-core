@@ -227,8 +227,32 @@ fn main_internal_unthrottled_and_validated() {
         );
         assert_eq!(reply["error"]["code"], "invalid_argument", "{bad}");
     }
+    // Unknown pre-state is not "no vault before": the field is required,
+    // and a password change needs a vault before it.
+    for (id, params) in [
+        (
+            14,
+            json!({ "op": "create", "password_b64": b64("testpass1") }),
+        ),
+        (
+            15,
+            json!({ "op": "delete", "password_b64": b64("testpass1") }),
+        ),
+        (
+            16,
+            json!({ "op": "change_password", "fingerprint_before": null, "password_b64": b64("testpass1") }),
+        ),
+    ] {
+        let reply = core.call_shell(id, "vault.reconcile", params);
+        assert_eq!(reply["error"]["code"], "invalid_argument", "{reply}");
+        assert!(reply.get("result").is_none());
+    }
+    assert_eq!(
+        core.call(17, "vault.status", json!({}))["result"]["unlocked"],
+        true
+    );
     let unknown = core.call_shell(
-        14,
+        18,
         "vault.reconcile",
         json!({ "op": "rename", "fingerprint_before": null, "password_b64": b64("x") }),
     );
