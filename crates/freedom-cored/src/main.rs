@@ -7,12 +7,17 @@
 //! ```
 
 mod exit;
+mod fsx;
 mod gate;
 mod hardening;
 mod log;
+mod rng;
 mod serve;
 mod storage;
+mod testhooks;
 mod transport;
+mod vault;
+mod worker;
 
 use std::io::{Read, Write};
 use std::path::PathBuf;

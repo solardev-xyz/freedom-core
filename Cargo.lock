@@ -363,7 +363,12 @@ checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 name = "freedom-cored"
 version = "0.0.0"
 dependencies = [
+ "base64",
+ "fc-keys",
  "fc-protocol",
+ "fc-vault",
+ "getrandom",
+ "rand_core",
  "rustix",
  "serde",
  "serde_json",

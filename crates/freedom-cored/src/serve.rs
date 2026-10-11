@@ -6,7 +6,7 @@
 //! keep the loop from handling EOF, shutdown or lock. KDF work will run on
 //! worker threads and report back here.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender, TrySendError};
 use std::time::{Duration, Instant};
@@ -15,19 +15,20 @@ use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::frame::{Frame, KIND_JSON};
 use fc_protocol::message::{self, CallerKind, Context, Message, MessageError};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::exit::Exit;
 use crate::transport::{self, Credits};
+use crate::vault::{FileSnapshot, Finished, Out, Vault};
+use crate::worker::Worker;
 use crate::{gate, hardening, log};
 
-/// The vault file inside the identity directory.
-pub const VAULT_FILE: &str = "identity-vault.json";
-/// The largest vault file `vault.status` reads. Real vaults are about 1 KB.
-const MAX_VAULT_BYTES: u64 = 1 << 20;
 /// How long the writer may take to flush on exit.
 const EXIT_DRAIN: Duration = Duration::from_secs(2);
+/// How long exiting waits for a vault job past its commit point to finish
+/// and reply. A commit is a rename or unlink plus a directory flush; main's
+/// hang watchdog and reconciliation cover anything slower.
+const COMMIT_DRAIN: Duration = Duration::from_secs(5);
 
 pub struct Options {
     pub data_dir: PathBuf,
@@ -51,12 +52,35 @@ pub enum Event {
     ThreadDied(&'static str),
     ParentGone,
     /// The startup read of the vault file finished.
-    Snapshot(Result<StatusResult, &'static str>),
+    Snapshot(FileSnapshot),
+    /// A vault worker job finished.
+    JobDone(u64, Finished),
 }
 
 /// The methods this build implements, in `core.hello`'s capabilities. Only
 /// these names are ever logged; anything else is logged as `<unknown>`.
-const CAPABILITIES: &[&str] = &["core.hello", "core.shutdown", "vault.status"];
+const CAPABILITIES: &[&str] = &[
+    "core.hello",
+    "core.shutdown",
+    "vault.status",
+    "vault.lock",
+    "vault.touch",
+    "vault.unlock",
+    "vault.verify_password",
+    "vault.change_password",
+    "vault.delete",
+    "vault.export_mnemonic",
+    "vault.export_private_key",
+    "vault.create",
+    "vault.import",
+    "keys.generate_mnemonic",
+    "keys.validate_mnemonic",
+    "keys.addresses",
+    "keys.radicle_did",
+    "compat.private_key",
+    "compat.bee_wallet_key",
+    "compat.publisher_key",
+];
 
 pub fn run(options: &Options) -> Exit {
     hardening::harden();
@@ -87,6 +111,9 @@ pub fn run(options: &Options) -> Exit {
         Ok(writer) => writer,
         Err(_) => return Exit::Internal,
     };
+    let Ok(worker) = Worker::spawn(events_tx.clone()) else {
+        return Exit::Internal;
+    };
     // The status snapshot is read once, on its own thread: the gate makes
     // this process the only writer, so it never needs re-reading, and slow
     // storage can't hold up the loop (deadline, EOF, parent exit). core.hello
@@ -100,11 +127,16 @@ pub fn run(options: &Options) -> Exit {
     }
 
     let mut core = Core {
-        snapshot: None,
+        snapshot_ready: false,
         pending_hello: None,
         out: writer.queue,
         hello_done: false,
         last_request_id: 0,
+        vault: Vault::new(
+            gate.identity_dir.clone(),
+            fc_vault::state::DEFAULT_AUTO_LOCK_MS,
+        ),
+        worker,
     };
     let hello_deadline = options.started + options.hello_timeout;
     let exit = loop {
@@ -113,11 +145,24 @@ pub fn run(options: &Options) -> Exit {
             break Exit::Protocol;
         }
         let timeout = if core.hello_done {
-            Duration::from_secs(3600)
+            core.vault
+                .next_wakeup()
+                .map_or(Duration::from_secs(3600), |at| {
+                    at.saturating_duration_since(Instant::now())
+                })
         } else {
             hello_deadline.saturating_duration_since(Instant::now())
         };
-        match events.recv_timeout(timeout) {
+        let received = events.recv_timeout(timeout);
+        // Whatever arrived, first apply what is due (auto-lock, deadlines):
+        // a busy queue must not postpone either.
+        if core.hello_done {
+            let outs = core.vault.tick();
+            if let Flow::Exit(exit) = core.dispatch(outs) {
+                break exit;
+            }
+        }
+        match received {
             Ok(Event::Frame(frame)) => {
                 let flow = core.handle_frame(&frame);
                 drop(frame);
@@ -155,10 +200,17 @@ pub fn run(options: &Options) -> Exit {
                 break Exit::Ok;
             }
             Ok(Event::Snapshot(snapshot)) => {
-                core.snapshot = Some(snapshot);
+                core.vault.set_snapshot(snapshot);
+                core.snapshot_ready = true;
                 if let Some(id) = core.pending_hello.take()
                     && let Flow::Exit(exit) = core.hello_reply(id)
                 {
+                    break exit;
+                }
+            }
+            Ok(Event::JobDone(job, output)) => {
+                let outs = core.vault.job_done(job, output);
+                if let Flow::Exit(exit) = core.dispatch(outs) {
                     break exit;
                 }
             }
@@ -166,8 +218,30 @@ pub fn run(options: &Options) -> Exit {
             Err(RecvTimeoutError::Disconnected) => break Exit::Ok,
         }
     };
-    // Let the writer flush what's queued (e.g. the shutdown reply), but never
-    // wait on a peer that stopped reading: exiting releases the gate.
+    // Wipe the vault and revoke pre-commit work. Work past its commit point
+    // finishes and replies before exit (bounded). Then let the writer flush
+    // what's queued, but never wait on a peer that stopped reading: exiting
+    // releases the gate.
+    let outs = core.vault.shutdown();
+    let _ = core.dispatch(outs);
+    let until = Instant::now() + COMMIT_DRAIN;
+    while core.vault.committing() {
+        let Some(left) = until.checked_duration_since(Instant::now()) else {
+            log::error(
+                "a committed vault job did not finish before exit",
+                serde_json::json!({}),
+            );
+            break;
+        };
+        match events.recv_timeout(left) {
+            Ok(Event::JobDone(job, finished)) => {
+                let outs = core.vault.job_done(job, finished);
+                let _ = core.dispatch(outs);
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
     drop(core);
     let _ = writer.done.recv_timeout(EXIT_DRAIN);
     drop(gate);
@@ -180,26 +254,13 @@ fn spawn_snapshot(identity_dir: PathBuf, events: Sender<Event>) -> bool {
     std::thread::Builder::new()
         .name("snapshot".into())
         .spawn(move || {
-            test_delay();
-            let _ = events.send(Event::Snapshot(vault_status(&identity_dir)));
+            crate::testhooks::snapshot_delay();
+            let _ = events.send(Event::Snapshot(crate::vault::startup_snapshot(
+                &identity_dir,
+            )));
         })
         .is_ok()
 }
-
-/// Debug builds only: `FREEDOM_CORED_TEST_SNAPSHOT_DELAY_MS` stalls the
-/// snapshot read, to test that slow storage can't hold up the loop.
-#[cfg(debug_assertions)]
-fn test_delay() {
-    if let Some(ms) = std::env::var("FREEDOM_CORED_TEST_SNAPSHOT_DELAY_MS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-    {
-        std::thread::sleep(Duration::from_millis(ms));
-    }
-}
-
-#[cfg(not(debug_assertions))]
-fn test_delay() {}
 
 /// Starts the parent watcher. False if the thread can't be created.
 fn spawn_parent_watch(parent_pid: Option<u32>, events: Sender<Event>) -> bool {
@@ -223,13 +284,15 @@ enum Flow {
 }
 
 struct Core {
-    /// `None` until the startup read finishes.
-    snapshot: Option<Result<StatusResult, &'static str>>,
+    /// Whether the startup snapshot has arrived.
+    snapshot_ready: bool,
     /// A valid core.hello received before the snapshot was ready.
     pending_hello: Option<u64>,
     out: mpsc::SyncSender<Zeroizing<Vec<u8>>>,
     hello_done: bool,
     last_request_id: u64,
+    vault: Vault,
+    worker: Worker,
 }
 
 #[derive(Deserialize)]
@@ -237,7 +300,6 @@ struct HelloParams {
     protocol: u32,
     #[allow(dead_code)]
     shell_version: String,
-    #[allow(dead_code)]
     auto_lock_ms: u64,
 }
 
@@ -246,14 +308,6 @@ struct HelloResult {
     protocol: u32,
     core_version: &'static str,
     capabilities: &'static [&'static str],
-}
-
-#[derive(Serialize)]
-pub struct StatusResult {
-    exists: bool,
-    unlocked: bool,
-    epoch: Option<u64>,
-    fingerprint: Option<String>,
 }
 
 /// A method name that is safe to log: known names only.
@@ -329,8 +383,10 @@ impl Core {
                 );
                 Flow::Exit(Exit::Protocol)
             }
-            // Nothing long-running exists yet, so there is nothing to cancel.
-            Message::Cancel { .. } => Flow::Continue,
+            Message::Cancel { id } => {
+                let outs = self.vault.cancel(id);
+                self.dispatch(outs)
+            }
             // The core sends no requests yet, so any response is unsolicited.
             Message::Response { id, .. } => {
                 log::error(
@@ -366,14 +422,10 @@ impl Core {
                 Flow::Continue => Flow::Exit(Exit::Ok),
                 exit => exit,
             },
-            "vault.status" => match self.snapshot.as_ref().unwrap_or(&Err("other")) {
-                Ok(status) => self.result(id, status),
-                Err(kind) => self.error(
-                    id,
-                    ErrorBody::new(ErrorCode::Storage, "Storage error")
-                        .with_data(serde_json::json!({ "kind": kind })),
-                ),
-            },
+            method if Vault::handles(method) => {
+                let outs = self.vault.request(id, method, params, context.caller);
+                self.dispatch(outs)
+            }
             _ => self.error(
                 id,
                 ErrorBody::new(ErrorCode::UnknownMethod, "Unknown method"),
@@ -409,7 +461,8 @@ impl Core {
                 ErrorBody::new(ErrorCode::InvalidArgument, "core.hello was already sent"),
             );
         }
-        if self.snapshot.is_none() {
+        self.vault.set_auto_lock_ms(params.auto_lock_ms);
+        if !self.snapshot_ready {
             self.pending_hello = Some(id);
             return Flow::Continue;
         }
@@ -426,6 +479,26 @@ impl Core {
                 capabilities: CAPABILITIES,
             },
         )
+    }
+
+    /// Sends the vault's payloads and submits its jobs.
+    fn dispatch(&self, outs: Vec<Out>) -> Flow {
+        for out in outs {
+            let flow = match out {
+                Out::Send(payload) => self.send(&payload),
+                Out::Job(id, job) => {
+                    if self.worker.submit(id, job) {
+                        Flow::Continue
+                    } else {
+                        Flow::Exit(Exit::Internal)
+                    }
+                }
+            };
+            if let Flow::Exit(exit) = flow {
+                return Flow::Exit(exit);
+            }
+        }
+        Flow::Continue
     }
 
     fn result<R: Serialize>(&self, id: u64, result: &R) -> Flow {
@@ -459,46 +532,4 @@ impl Core {
             Err(TrySendError::Disconnected(_)) => Flow::Exit(Exit::Protocol),
         }
     }
-}
-
-/// The `vault.status` snapshot, read once at startup (the skeleton has no
-/// vault writes yet): whether the vault file exists and its SHA-256, which
-/// quick unlock binds to. Only a regular file of bounded size is read, so a
-/// FIFO or a huge file is refused. Reading never writes.
-fn vault_status(data_dir: &Path) -> Result<StatusResult, &'static str> {
-    let path = data_dir.join(VAULT_FILE);
-    let metadata = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(StatusResult {
-                exists: false,
-                unlocked: false,
-                epoch: None,
-                fingerprint: None,
-            });
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Err("permission"),
-        Err(_) => return Err("other"),
-    };
-    if !metadata.is_file() {
-        return Err("not_regular");
-    }
-    if metadata.len() > MAX_VAULT_BYTES {
-        return Err("too_large");
-    }
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Err("permission"),
-        Err(_) => return Err("other"),
-    };
-    let mut fingerprint = String::with_capacity(64);
-    for byte in Sha256::digest(&bytes) {
-        fingerprint.push_str(&format!("{byte:02x}"));
-    }
-    Ok(StatusResult {
-        exists: true,
-        unlocked: false,
-        epoch: None,
-        fingerprint: Some(fingerprint),
-    })
 }

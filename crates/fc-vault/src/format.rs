@@ -188,7 +188,39 @@ pub fn read_envelope(file: &str) -> Result<String, Error> {
 /// iteration counts as numbers or numeric strings, any algorithm label.
 pub fn open(file: &str, password: &[u8]) -> Result<Opened, Error> {
     let payload_json = read_envelope(file)?;
-    let payload: Payload = serde_json::from_str(&payload_json)
+    let (buffer, iterations) = decrypt_payload(&payload_json, password)?;
+    // Valid JSON of another shape: `decrypted.mnemonic` is undefined.
+    let plaintext: DecryptedPlaintext<'_> =
+        serde_json::from_slice(buffer.as_slice()).map_err(|_| Error::InvalidDecryptedMnemonic)?;
+    let raw = plaintext.mnemonic.ok_or(Error::InvalidDecryptedMnemonic)?;
+    let phrase = unescape_json_string(raw.get()).ok_or(Error::InvalidDecryptedMnemonic)?;
+    let mnemonic = Mnemonic::parse(&phrase).map_err(|_| Error::InvalidDecryptedMnemonic)?;
+    Ok(Opened {
+        mnemonic,
+        iterations,
+    })
+}
+
+/// Checks `password` as JS `vault.verifyPassword` does: the envelope must be
+/// JSON, and its `encrypted` payload must decrypt (to JSON). Unlike [`open`],
+/// it checks neither the envelope version nor the decrypted mnemonic. The
+/// plaintext is wiped.
+pub fn verify_password(file: &str, password: &[u8]) -> Result<(), Error> {
+    let envelope: Envelope =
+        serde_json::from_str(file).map_err(|_| Error::Corrupt("vault file is not valid JSON"))?;
+    let payload_json = envelope
+        .encrypted
+        .ok_or(Error::Corrupt("missing encrypted payload"))?;
+    decrypt_payload(&payload_json, password).map(|_| ())
+}
+
+/// passworder's `decrypt`: derives the key, decrypts, and requires the
+/// plaintext to be JSON. Returns the plaintext and the iteration count.
+fn decrypt_payload(
+    payload_json: &str,
+    password: &[u8],
+) -> Result<(Zeroizing<Vec<u8>>, u32), Error> {
+    let payload: Payload = serde_json::from_str(payload_json)
         .map_err(|_| Error::Corrupt("payload is not valid JSON"))?;
     let iterations = iterations_of(payload.key_metadata.as_ref())?;
     check_iterations(iterations)?;
@@ -222,20 +254,10 @@ pub fn open(file: &str, password: &[u8]) -> Result<Opened, Error> {
 
     // passworder parses inside the same try as decryption, so malformed
     // plaintext JSON is also "Incorrect password".
-    let plaintext: DecryptedPlaintext<'_> =
-        match serde_json::from_slice::<serde::de::IgnoredAny>(buffer.as_slice()) {
-            Err(_) => return Err(Error::IncorrectPassword),
-            // Valid JSON of another shape: `decrypted.mnemonic` is undefined.
-            Ok(_) => serde_json::from_slice(buffer.as_slice())
-                .map_err(|_| Error::InvalidDecryptedMnemonic)?,
-        };
-    let raw = plaintext.mnemonic.ok_or(Error::InvalidDecryptedMnemonic)?;
-    let phrase = unescape_json_string(raw.get()).ok_or(Error::InvalidDecryptedMnemonic)?;
-    let mnemonic = Mnemonic::parse(&phrase).map_err(|_| Error::InvalidDecryptedMnemonic)?;
-    Ok(Opened {
-        mnemonic,
-        iterations,
-    })
+    if serde_json::from_slice::<serde::de::IgnoredAny>(buffer.as_slice()).is_err() {
+        return Err(Error::IncorrectPassword);
+    }
+    Ok((buffer, iterations))
 }
 
 /// passworder's `keyMetadata.params.iterations`, converted as WebCrypto's
@@ -626,6 +648,45 @@ mod tests {
             "4 emoji = 8 UTF-16 units"
         );
         assert!(!is_strong_enough("ééééééé"));
+    }
+
+    #[test]
+    fn verify_password_only_decrypts_like_js() {
+        let plaintext = format!(r#"{{"mnemonic":"{PHRASE}"}}"#);
+        let good = file_with(plaintext.as_bytes(), b"pw", 16, META_1000);
+        assert_eq!(verify_password(&good, b"pw"), Ok(()));
+        assert_eq!(
+            verify_password(&good, b"nope"),
+            Err(Error::IncorrectPassword)
+        );
+        // JS verifyPassword ignores the envelope version...
+        let version_2 = good.replacen(r#""version":1"#, r#""version":2"#, 1);
+        assert_eq!(verify_password(&version_2, b"pw"), Ok(()));
+        assert!(matches!(
+            open(&version_2, b"pw"),
+            Err(Error::UnsupportedVersion(_))
+        ));
+        // ...and what the plaintext holds, as long as it is JSON.
+        let not_a_mnemonic = file_with(br#"{"other":1}"#, b"pw", 12, META_1000);
+        assert_eq!(verify_password(&not_a_mnemonic, b"pw"), Ok(()));
+        assert_eq!(
+            open(&not_a_mnemonic, b"pw").unwrap_err(),
+            Error::InvalidDecryptedMnemonic
+        );
+        // Plaintext that isn't JSON is "Incorrect password", as in passworder.
+        let not_json = file_with(b"not json", b"pw", 12, META_1000);
+        assert_eq!(
+            verify_password(&not_json, b"pw"),
+            Err(Error::IncorrectPassword)
+        );
+        assert!(matches!(
+            verify_password("{", b"pw"),
+            Err(Error::Corrupt(_))
+        ));
+        assert!(matches!(
+            verify_password(r#"{"version":1}"#, b"pw"),
+            Err(Error::Corrupt(_))
+        ));
     }
 
     #[test]
