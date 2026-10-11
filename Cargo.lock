@@ -295,6 +295,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fc-protocol"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
 name = "fc-vault"
 version = "0.0.0"
 dependencies = [
