@@ -102,6 +102,8 @@ pub enum OpError {
     /// The loop abandoned the job before its commit point (it already
     /// answered the request).
     Abandoned,
+    /// A request the core can't act on (`invalid_argument`).
+    Invalid(&'static str),
     Internal,
 }
 
@@ -141,6 +143,7 @@ impl OpError {
             }
             OpError::Storage(kind) => ErrorBody::new(ErrorCode::Storage, "Storage error")
                 .with_data(serde_json::json!({ "kind": kind })),
+            OpError::Invalid(message) => ErrorBody::new(ErrorCode::InvalidArgument, *message),
             OpError::Abandoned | OpError::Internal => {
                 ErrorBody::new(ErrorCode::Internal, "Internal error")
             }
@@ -478,14 +481,6 @@ struct OpStatusParams {
     op_id: String,
 }
 
-/// Operation IDs come from main: 1 to 64 of `[A-Za-z0-9._-]`.
-fn valid_op_id(op_id: &str) -> bool {
-    (1..=64).contains(&op_id.len())
-        && op_id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-}
-
 fn node_spec(p: NodeWriteParams) -> Option<NodeSpec> {
     let absolute = |dir: Option<String>| dir.map(PathBuf::from).filter(|path| path.is_absolute());
     match p.node.as_str() {
@@ -496,9 +491,9 @@ fn node_spec(p: NodeWriteParams) -> Option<NodeSpec> {
         }),
         "radicle" => {
             // The alias goes into the key comment and the .pub line.
-            let alias = p.alias.filter(|a| {
-                (1..=64).contains(&a.chars().count()) && !a.chars().any(char::is_control)
-            })?;
+            let alias = p
+                .alias
+                .filter(|a| (1..=64).contains(&a.len()) && !a.chars().any(char::is_control))?;
             Some(NodeSpec::Radicle {
                 home: absolute(p.home)?,
                 alias,
@@ -995,7 +990,7 @@ impl Vault {
             "nodes.write_identity" => {
                 let invalid = || ErrorBody::new(ErrorCode::InvalidArgument, "Invalid parameters");
                 let p = params::<NodeWriteParams>(raw)?;
-                if !valid_op_id(&p.op_id) {
+                if !journal::valid_op_id(&p.op_id) {
                     return Err(invalid());
                 }
                 let op_id = p.op_id.clone();
@@ -1012,7 +1007,7 @@ impl Vault {
             }
             "nodes.op_status" => {
                 let p = params::<OpStatusParams>(raw)?;
-                if !valid_op_id(&p.op_id) {
+                if !journal::valid_op_id(&p.op_id) {
                     return Err(ErrorBody::new(
                         ErrorCode::InvalidArgument,
                         "Invalid parameters",
@@ -1324,6 +1319,7 @@ impl Vault {
                         let status = match outcome {
                             journal::Outcome::Installed => "installed",
                             journal::Outcome::PendingRecovery => "pending_recovery",
+                            journal::Outcome::Corrupt => "corrupt",
                             // Abandoned jobs were already answered.
                             journal::Outcome::Abandoned => {
                                 return self.internal_reply(out, request);
@@ -1646,20 +1642,10 @@ fn hex(bytes: &[u8]) -> String {
 /// Startup work that touches storage, run off the event loop: adoption
 /// tightens an existing vault file to 0600 in place (metadata only; quick
 /// unlock's content fingerprint is unaffected), then the file is snapshot.
-pub fn startup_snapshot(dir: &Path) -> FileSnapshot {
+pub fn startup_snapshot(dir: &Path) -> (FileSnapshot, NodeRecovery) {
     // Finish an interrupted node identity write before anything else
     // (design 0001: before core.hello is answered and before any node write).
-    match journal::recover(dir) {
-        Ok(journal::Recovered::Nothing) => {}
-        Ok(journal::Recovered::Finished { status, .. }) => crate::log::info(
-            "finished an interrupted node identity write",
-            serde_json::json!({ "status": status }),
-        ),
-        Err(e) => crate::log::error(
-            "node identity recovery failed",
-            serde_json::json!({ "error": e.kind().to_string() }),
-        ),
-    }
+    let recovery = startup_recovery(dir);
     match fsx::tighten(&dir.join(VAULT_FILE)) {
         Ok(true) => crate::log::info("tightened the vault file to 0600", serde_json::json!({})),
         Ok(false) => {}
@@ -1668,7 +1654,51 @@ pub fn startup_snapshot(dir: &Path) -> FileSnapshot {
             serde_json::json!({ "error": e.kind().to_string() }),
         ),
     }
-    snapshot(dir)
+    (snapshot(dir), recovery)
+}
+
+/// What startup recovery leaves for main to act on, in `core.hello`'s
+/// `node_recovery`: `None` when every node identity is consistent; otherwise
+/// `{ status: "pending_recovery" | "corrupt", op_id?, node? }`, and main keeps
+/// that node stopped (design 0001: main starts a node only on `installed`).
+pub type NodeRecovery = Option<serde_json::Value>;
+
+fn startup_recovery(dir: &Path) -> NodeRecovery {
+    match journal::recover(dir) {
+        Ok(journal::Recovered::Nothing) => None,
+        Ok(journal::Recovered::Discarded) => {
+            crate::log::info(
+                "removed the staged files of an interrupted node identity write",
+                serde_json::json!({}),
+            );
+            None
+        }
+        Ok(journal::Recovered::Finished {
+            op_id,
+            node,
+            status,
+        }) => {
+            crate::log::info(
+                "finished an interrupted node identity write",
+                serde_json::json!({ "status": status }),
+            );
+            (status != journal::OpStatus::Installed)
+                .then(|| serde_json::json!({ "status": status, "op_id": op_id, "node": node }))
+        }
+        Ok(journal::Recovered::Invalid) => Some(serde_json::json!({ "status": "corrupt" })),
+        Err(e) => {
+            crate::log::error(
+                "node identity recovery failed",
+                serde_json::json!({ "error": e.kind().to_string() }),
+            );
+            let mut report = serde_json::json!({ "status": "pending_recovery" });
+            if let Some((op_id, node)) = journal::pending(dir) {
+                report["op_id"] = op_id.into();
+                report["node"] = node.into();
+            }
+            Some(report)
+        }
+    }
 }
 
 /// The vault file's SHA-256 (quick unlock binds to it), or `None` if
@@ -1991,6 +2021,7 @@ fn job_node_write(
     let keys = keys.ok_or(OpError::Internal)?;
     let built = nodes::build(spec, &keys, &mut OsRng).map_err(|e| match e {
         nodes::BuildError::Io(e) => storage(&e),
+        nodes::BuildError::Config(kind) => OpError::Storage(kind),
         nodes::BuildError::Keys | nodes::BuildError::Path => OpError::Internal,
     })?;
     drop(keys);
@@ -2002,8 +2033,20 @@ fn job_node_write(
             contents: contents.as_slice(),
         })
         .collect();
-    let outcome = journal::write(identity_dir, op_id, spec.name(), &files, || claim(control))
-        .map_err(|e| storage(&e))?;
+    let outcome = journal::write(
+        identity_dir,
+        op_id,
+        spec.name(),
+        spec.root(),
+        &files,
+        || claim(control),
+    )
+    .map_err(|e| match e {
+        journal::WriteError::Io(e) => storage(&e),
+        journal::WriteError::DuplicateOpId => OpError::Invalid("op_id already used"),
+        journal::WriteError::TooLarge => OpError::Storage("too_large"),
+        journal::WriteError::Layout => OpError::Internal,
+    })?;
     if outcome == journal::Outcome::Abandoned {
         return Err(OpError::Abandoned);
     }

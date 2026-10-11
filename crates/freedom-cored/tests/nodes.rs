@@ -251,15 +251,18 @@ fn a_lock_before_the_commit_writes_nothing() {
     assert!(walk(&bee).is_empty(), "{:?}", walk(&bee));
 }
 
-/// Leaves a committed but unfinished journal, as a crash after step 2 does.
-fn interrupted_write(identity: &Path, target_dir: &Path, op_id: &str) {
-    std::fs::create_dir_all(target_dir).unwrap();
+/// Leaves a committed but unfinished Bee journal, as a crash after step 2
+/// does: staged files plus the journal, targets still old.
+fn interrupted_write(identity: &Path, root: &Path, op_id: &str) {
+    std::fs::create_dir_all(root.join("keys")).unwrap();
     std::fs::create_dir_all(identity).unwrap();
     let mut files = Vec::new();
-    for (name, contents) in [("a", "new a"), ("b", "new b")] {
-        let target = target_dir.join(name);
+    for (target, contents) in [
+        (root.join("keys").join("swarm.key"), "new key"),
+        (root.join("config.yaml"), "new config"),
+    ] {
         std::fs::write(&target, "old").unwrap();
-        let staged = target_dir.join(format!("{name}.freedom-new"));
+        let staged = std::path::PathBuf::from(format!("{}.freedom-new", target.display()));
         std::fs::write(&staged, contents).unwrap();
         let digest: String = sha2::Sha256::digest(contents)
             .iter()
@@ -267,7 +270,7 @@ fn interrupted_write(identity: &Path, target_dir: &Path, op_id: &str) {
             .collect();
         files.push(json!({ "target": target, "staged": staged, "sha256": digest }));
     }
-    let journal = json!({ "op_id": op_id, "node": "bee", "files": files });
+    let journal = json!({ "op_id": op_id, "node": "bee", "root": root, "files": files });
     std::fs::write(
         identity.join("node-identity-journal.json"),
         journal.to_string(),
@@ -281,30 +284,157 @@ fn startup_and_recover_finish_interrupted_writes() {
     let node = root.path().join("node");
     interrupted_write(&data, &node, "op-crashed");
 
-    // The serve startup rolls it forward before core.hello is answered.
+    // The serve startup rolls it forward before core.hello is answered, and
+    // hello reports nothing left to do.
     let mut core = spawn("serve", &data, &locks, &[]);
-    core.hello();
+    let hello = core.hello();
+    assert_eq!(hello["result"]["node_recovery"], Value::Null);
     let status = core.call_shell(2, "nodes.op_status", json!({ "op_id": "op-crashed" }));
     assert_eq!(status["result"]["status"], "installed");
-    assert_eq!(std::fs::read_to_string(node.join("a")).unwrap(), "new a");
-    assert_eq!(std::fs::read_to_string(node.join("b")).unwrap(), "new b");
+    assert_eq!(
+        std::fs::read_to_string(node.join("keys/swarm.key")).unwrap(),
+        "new key"
+    );
+    assert_eq!(
+        std::fs::read_to_string(node.join("config.yaml")).unwrap(),
+        "new config"
+    );
     assert!(!data.join("node-identity-journal.json").exists());
     core.close_stdin();
     assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
 
-    // The recover subcommand does the same; a journal whose files are gone
-    // is reported corrupt.
+    // The recover subcommand does the same.
     let other = root.path().join("other");
     interrupted_write(&data, &other, "op-recover");
     let mut recover = spawn("recover", &data, &locks, &[]);
     assert_eq!(recover.line(), "recovered");
     assert_eq!(recover.exit_code(Duration::from_secs(5)), 0);
-    assert_eq!(std::fs::read_to_string(other.join("b")).unwrap(), "new b");
+    assert_eq!(
+        std::fs::read_to_string(other.join("config.yaml")).unwrap(),
+        "new config"
+    );
 
+    // A journal whose staged files are gone is corrupt: recover says so, and
+    // a serve startup reports it in core.hello.
     let gone = root.path().join("gone");
     interrupted_write(&data, &gone, "op-gone");
-    std::fs::remove_file(gone.join("a.freedom-new")).unwrap();
+    std::fs::remove_file(gone.join("keys/swarm.key.freedom-new")).unwrap();
     let mut recover = spawn("recover", &data, &locks, &[]);
     assert_eq!(recover.line(), "corrupt op-gone");
     assert_eq!(recover.exit_code(Duration::from_secs(5)), 0);
+
+    let broken = root.path().join("broken");
+    interrupted_write(&data, &broken, "op-broken");
+    std::fs::remove_file(broken.join("config.yaml.freedom-new")).unwrap();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    let hello = core.hello();
+    assert_eq!(
+        hello["result"]["node_recovery"],
+        json!({ "status": "corrupt", "op_id": "op-broken", "node": "bee" })
+    );
+}
+
+#[test]
+fn journals_a_writer_never_produces_are_set_aside_untouched() {
+    let (root, data, locks) = dirs();
+    std::fs::create_dir_all(&data).unwrap();
+    let vault = data.join("identity-vault.json");
+    std::fs::write(&vault, b"{}").unwrap();
+    let elsewhere = root.path().join("elsewhere");
+    std::fs::write(&elsewhere, b"other").unwrap();
+    let digest: String = sha2::Sha256::digest(b"other")
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let journal = json!({ "op_id": "x", "node": "bee", "root": data,
+        "files": [{ "target": vault, "staged": elsewhere, "sha256": digest }] });
+    std::fs::write(data.join("node-identity-journal.json"), journal.to_string()).unwrap();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    let hello = core.hello();
+    assert_eq!(
+        hello["result"]["node_recovery"],
+        json!({ "status": "corrupt" })
+    );
+    assert_eq!(std::fs::read(&vault).unwrap(), b"{}");
+    assert_eq!(std::fs::read(&elsewhere).unwrap(), b"other");
+    assert!(data.join("node-identity-journal.json.corrupt").exists());
+}
+
+#[test]
+fn op_ids_are_single_use_and_oversized_configs_are_refused() {
+    let (root, data, locks) = dirs();
+    let mut core = unlocked(&data, &locks, &[]);
+    let bee = root.path().join("bee");
+    let params =
+        json!({ "op_id": "op-1", "node": "bee", "data_dir": bee, "api_port": 1, "p2p_port": 2 });
+    assert_eq!(
+        core.call(3, "nodes.write_identity", params.clone())["result"]["status"],
+        "installed"
+    );
+    let again = core.call(4, "nodes.write_identity", params);
+    assert_eq!(again["error"]["code"], "invalid_argument", "{again}");
+    assert_eq!(again["error"]["message"], "op_id already used");
+
+    // A Radicle config larger than any node file: refused before staging.
+    let home = root.path().join("radicle");
+    std::fs::create_dir_all(&home).unwrap();
+    let big = format!("{{\"pad\":\"{}\"}}", "x".repeat(1 << 20));
+    std::fs::write(home.join("config.json"), &big).unwrap();
+    let refused = core.call(
+        5,
+        "nodes.write_identity",
+        json!({ "op_id": "op-2", "node": "radicle", "home": home, "alias": "me" }),
+    );
+    assert_eq!(refused["error"]["code"], "storage", "{refused}");
+    assert_eq!(refused["error"]["data"]["kind"], "too_large");
+    assert!(!home.join("keys").exists());
+    assert_eq!(
+        std::fs::read_to_string(home.join("config.json")).unwrap(),
+        big
+    );
+}
+
+#[test]
+fn an_unfinishable_recovery_is_reported_and_blocks_new_writes() {
+    let (root, data, locks) = dirs();
+    let node = root.path().join("node");
+    interrupted_write(&data, &node, "op-stuck");
+    // The install can't rename over a directory.
+    std::fs::remove_file(node.join("config.yaml")).unwrap();
+    std::fs::create_dir_all(node.join("config.yaml").join("inside")).unwrap();
+
+    let mut core = spawn("serve", &data, &locks, &[]);
+    let hello = core.hello();
+    assert_eq!(
+        hello["result"]["node_recovery"],
+        json!({ "status": "pending_recovery", "op_id": "op-stuck", "node": "bee" })
+    );
+    core.call(
+        2,
+        "vault.import",
+        json!({ "password_b64": b64("testpass1"), "mnemonic_b64": b64(ABANDON) }),
+    );
+    // A new write first tries to finish the outstanding journal, and refuses
+    // to replace it when that fails.
+    let other = root.path().join("other");
+    let refused = core.call(
+        3,
+        "nodes.write_identity",
+        json!({ "op_id": "op-new", "node": "bee", "data_dir": other, "api_port": 1, "p2p_port": 2 }),
+    );
+    assert_eq!(refused["error"]["code"], "storage", "{refused}");
+    assert!(!other.exists());
+    let status = core.call_shell(4, "nodes.op_status", json!({ "op_id": "op-stuck" }));
+    assert_eq!(status["result"]["status"], "pending_recovery");
+    core.close_stdin();
+    assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
+
+    // Once the obstacle is gone, the next start finishes it.
+    std::fs::remove_dir_all(node.join("config.yaml")).unwrap();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    assert_eq!(core.hello()["result"]["node_recovery"], Value::Null);
+    assert_eq!(
+        std::fs::read_to_string(node.join("config.yaml")).unwrap(),
+        "new config"
+    );
 }

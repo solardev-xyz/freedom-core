@@ -20,6 +20,8 @@ use fc_keys::freedom::FreedomKeys;
 use fc_keys::keystore::{self, KeystoreParams};
 use fc_keys::{multiformats, openssh};
 use rand_core::TryCryptoRng;
+
+use crate::journal;
 use serde_json::{Map, Value};
 use zeroize::Zeroizing;
 
@@ -44,11 +46,22 @@ impl NodeSpec {
             NodeSpec::Radicle { .. } => "radicle",
         }
     }
+
+    /// The directory the node's [`journal::layout`] is under.
+    pub fn root(&self) -> &Path {
+        match self {
+            NodeSpec::Bee { data_dir, .. } => data_dir,
+            NodeSpec::Radicle { home, .. } => home,
+        }
+    }
 }
+
+/// One file: where it goes, and its contents (wiped on drop).
+pub type NodeFile = (PathBuf, Zeroizing<Vec<u8>>);
 
 /// The files of one node identity, and its public identity for the reply.
 pub struct NodeFiles {
-    pub files: Vec<(PathBuf, Zeroizing<Vec<u8>>)>,
+    pub files: Vec<NodeFile>,
     /// `{ address }` for Bee, `{ did, node_id }` for Radicle.
     pub public: Map<String, Value>,
 }
@@ -60,6 +73,9 @@ pub enum BuildError {
     Path,
     /// Reading Radicle's existing config failed (not: it was malformed).
     Io(std::io::Error),
+    /// Radicle's existing config isn't a regular file of at most
+    /// [`journal::MAX_FILE`] (checked before opening it).
+    Config(&'static str),
 }
 
 pub fn build<R: TryCryptoRng + ?Sized>(
@@ -117,16 +133,14 @@ fn bee<R: TryCryptoRng + ?Sized>(
         Value::String(keys.bee_wallet.address().to_string()),
     );
     Ok(NodeFiles {
-        files: vec![
-            (
-                data_dir.join("keys").join("swarm.key"),
+        files: in_layout(
+            "bee",
+            data_dir,
+            vec![
                 Zeroizing::new(keystore.into_bytes()),
-            ),
-            (
-                data_dir.join("config.yaml"),
                 Zeroizing::new(config.as_bytes().to_vec()),
-            ),
-        ],
+            ],
+        )?,
         public,
     })
 }
@@ -141,13 +155,7 @@ fn radicle<R: TryCryptoRng + ?Sized>(
     let private =
         openssh::private_key_file(&keys.radicle, alias, rng).map_err(|_| BuildError::Keys)?;
     let public_line = openssh::public_key_line(&public_key, alias);
-    let config_path = home.join("config.json");
-    let existing = match std::fs::read_to_string(&config_path) {
-        Ok(text) => Some(text),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Some(String::new()),
-        Err(e) => return Err(BuildError::Io(e)),
-    };
+    let existing = read_config(&home.join("config.json"))?;
     let config = radicle_config(existing.as_deref(), alias);
     let mut public = Map::new();
     public.insert(
@@ -159,19 +167,54 @@ fn radicle<R: TryCryptoRng + ?Sized>(
         Value::String(multiformats::radicle_node_id(&public_key)),
     );
     Ok(NodeFiles {
-        files: vec![
-            (
-                home.join("keys").join("radicle"),
+        files: in_layout(
+            "radicle",
+            home,
+            vec![
                 Zeroizing::new(private.as_bytes().to_vec()),
-            ),
-            (
-                home.join("keys").join("radicle.pub"),
                 Zeroizing::new(public_line.into_bytes()),
-            ),
-            (config_path, Zeroizing::new(config.into_bytes())),
-        ],
+                Zeroizing::new(config.into_bytes()),
+            ],
+        )?,
         public,
     })
+}
+
+/// Pairs contents with the node's layout (same order as `journal::layout`).
+fn in_layout(
+    node: &str,
+    root: &Path,
+    contents: Vec<Zeroizing<Vec<u8>>>,
+) -> Result<Vec<NodeFile>, BuildError> {
+    let targets = journal::layout(node, root).ok_or(BuildError::Keys)?;
+    if targets.len() != contents.len() {
+        return Err(BuildError::Keys);
+    }
+    Ok(targets.into_iter().zip(contents).collect())
+}
+
+/// Radicle's existing config: `None` if absent. It must be a regular file
+/// (symlinks followed, as JS's readFileSync does) of bounded size; this is
+/// checked before opening it, so a FIFO can't block the worker. Invalid UTF-8
+/// reads as unparseable, which starts over as `{}` like the JS catch.
+fn read_config(path: &Path) -> Result<Option<String>, BuildError> {
+    use std::io::Read;
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(BuildError::Io(e)),
+    };
+    if !metadata.is_file() {
+        return Err(BuildError::Config("not_regular"));
+    }
+    if metadata.len() > journal::MAX_FILE {
+        return Err(BuildError::Config("too_large"));
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(journal::MAX_FILE + 1).read_to_end(&mut bytes))
+        .map_err(BuildError::Io)?;
+    Ok(Some(String::from_utf8(bytes).unwrap_or_default()))
 }
 
 /// `injectRadicleKey`'s config merge: parse the existing config (anything
@@ -199,8 +242,119 @@ pub fn radicle_config(existing: Option<&str>, alias: &str) -> String {
             config.insert("node".into(), Value::Object(node));
         }
     }
-    let ordered = js_order(Value::Object(config));
-    serde_json::to_string_pretty(&ordered).unwrap_or_else(|_| "{}".into())
+    let mut out = String::new();
+    stringify(&js_order(Value::Object(config)), 0, &mut out);
+    out
+}
+
+/// `JSON.stringify(value, null, 2)` for parsed JSON: two-space indentation,
+/// JavaScript string escaping, and numbers as JavaScript's `Number` prints
+/// them (parsed as doubles, as `JSON.parse` does).
+fn stringify(value: &Value, depth: usize, out: &mut String) {
+    let indent = |out: &mut String, depth: usize| {
+        for _ in 0..depth {
+            out.push_str("  ");
+        }
+    };
+    match value {
+        Value::Null => out.push_str("null"),
+        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Number(n) => out.push_str(&js_number(n.as_f64().unwrap_or(0.0))),
+        Value::String(s) => js_string(s, out),
+        Value::Array(items) if items.is_empty() => out.push_str("[]"),
+        Value::Array(items) => {
+            out.push_str("[\n");
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(",\n");
+                }
+                indent(out, depth + 1);
+                stringify(item, depth + 1, out);
+            }
+            out.push('\n');
+            indent(out, depth);
+            out.push(']');
+        }
+        Value::Object(map) if map.is_empty() => out.push_str("{}"),
+        Value::Object(map) => {
+            out.push_str("{\n");
+            for (i, (key, item)) in map.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(",\n");
+                }
+                indent(out, depth + 1);
+                js_string(key, out);
+                out.push_str(": ");
+                stringify(item, depth + 1, out);
+            }
+            out.push('\n');
+            indent(out, depth);
+            out.push('}');
+        }
+    }
+}
+
+/// JSON.stringify's string quoting.
+fn js_string(s: &str, out: &mut String) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+/// `Number.prototype.toString()` for a finite double (ECMAScript
+/// Number::toString): the shortest round-trip digits, in plain notation for
+/// exponents -7 < n <= 21, otherwise `d.ddde±n`.
+fn js_number(x: f64) -> String {
+    if x == 0.0 {
+        return "0".into();
+    }
+    if !x.is_finite() {
+        return "null".into();
+    }
+    // Rust's `{:e}` is the shortest round-trip representation: "d.ddde±x".
+    let sci = format!("{:e}", x.abs());
+    let (mantissa, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
+    let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+    let k = digits.len() as i64;
+    let n = exp.parse::<i64>().unwrap_or(0) + 1;
+    let mut out = String::new();
+    if x < 0.0 {
+        out.push('-');
+    }
+    if k <= n && n <= 21 {
+        out.push_str(&digits);
+        out.extend(std::iter::repeat_n('0', (n - k) as usize));
+    } else if 0 < n && n <= 21 {
+        out.push_str(&digits[..n as usize]);
+        out.push('.');
+        out.push_str(&digits[n as usize..]);
+    } else if -6 < n && n <= 0 {
+        out.push_str("0.");
+        out.extend(std::iter::repeat_n('0', (-n) as usize));
+        out.push_str(&digits);
+    } else {
+        out.push_str(&digits[..1]);
+        if k > 1 {
+            out.push('.');
+            out.push_str(&digits[1..]);
+        }
+        out.push('e');
+        out.push(if n > 0 { '+' } else { '-' });
+        out.push_str(&(n - 1).abs().to_string());
+    }
+    out
 }
 
 /// Reorders object keys as JavaScript enumerates them: array-index keys
@@ -274,6 +428,31 @@ mod tests {
             radicle_config(Some(r#"{"b":1,"2":2,"1":3,"01":4}"#), "x"),
             "{\n  \"1\": 3,\n  \"2\": 2,\n  \"b\": 1,\n  \"01\": 4,\n  \"node\": {\n    \"alias\": \"x\"\n  }\n}"
         );
+    }
+
+    #[test]
+    fn numbers_and_strings_print_like_javascript() {
+        // Expected values from node: JSON.stringify(JSON.parse(text)).
+        let cases = [
+            ("1.0", "1"),
+            ("-0", "0"),
+            ("12345678901234567890", "12345678901234567000"),
+            ("1e21", "1e+21"),
+            ("1e20", "100000000000000000000"),
+            ("0.000001", "0.000001"),
+            ("0.0000001", "1e-7"),
+            ("1.5e-7", "1.5e-7"),
+            ("123.456", "123.456"),
+            ("-2.5e300", "-2.5e+300"),
+            ("0.1", "0.1"),
+        ];
+        for (input, expected) in cases {
+            let value: Value = serde_json::from_str(input).unwrap();
+            assert_eq!(js_number(value.as_f64().unwrap()), expected, "{input}");
+        }
+        let mut out = String::new();
+        js_string("a\"b\\c\n\u{1}\u{1f}é", &mut out);
+        assert_eq!(out, r#""a\"b\\c\n\u0001\u001fé""#);
     }
 
     #[test]

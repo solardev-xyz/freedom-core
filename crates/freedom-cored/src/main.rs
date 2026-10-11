@@ -143,7 +143,9 @@ fn recover(data_dir: &std::path::Path, lock_dir: &std::path::Path) -> Exit {
         Ok(journal::Recovered::Finished {
             op_id,
             status: journal::OpStatus::Corrupt,
+            ..
         }) => format!("corrupt {op_id}\n"),
+        Ok(journal::Recovered::Invalid) => "corrupt -\n".to_owned(),
         Ok(_) => "recovered\n".to_owned(),
         Err(e) => {
             log::error(

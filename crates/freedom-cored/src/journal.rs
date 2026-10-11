@@ -2,45 +2,84 @@
 //!
 //! A node identity is several files that must change together (Bee: the
 //! keystore and the config holding its password; Radicle: the key pair and
-//! the config). Node directories can be outside the profile, so the journal
-//! lives in the identity directory, where startup recovery always finds it.
+//! the config). Node directories can be outside the profile, so all records
+//! live in the identity directory, where startup recovery always finds them.
 //!
-//! 1. **Stage.** Each target gets `<target>.freedom-new` (exclusive create,
-//!    `0600`, fsync, directory fsync) and its SHA-256.
-//! 2. **Commit.** `<identityDir>/node-identity-journal.json` is written
-//!    atomically and durably, if the caller's commit gate allows it. It holds
-//!    `{ op_id, node, files: [{ target, staged, sha256 }] }` (absolute paths,
-//!    no key material).
-//! 3. **Install.** A target that already has its journaled digest is done;
-//!    otherwise its staged file is renamed over it. Then every affected
+//! 0. **Intent.** `node-identity-staging.json` (`{ op_id, node, root }`) is
+//!    written durably first, so the staged files of an operation that dies
+//!    before its commit can be found and removed.
+//! 1. **Stage.** Each file of the node's fixed [`layout`] gets
+//!    `<target>.freedom-new` (exclusive create, `0600`, fsync, directory
+//!    fsync, new directories persisted) and its SHA-256.
+//! 2. **Commit.** `node-identity-journal.json` (`{ op_id, node, root, files:
+//!    [{ target, staged, sha256 }] }`, no key material) is written through the
+//!    caller's commit gate, and must be durable before anything is installed.
+//! 3. **Install.** A target that already is a regular file with its digest is
+//!    done; otherwise its staged file is renamed over it. Then every affected
 //!    directory is fsynced.
-//! 4. **Finish.** `op_id` is added to `<identityDir>/node-identity-done.json`
-//!    (the last 32 operations), then the journal is removed.
+//! 4. **Finish.** The op is added to `node-identity-done.json` (the last 32
+//!    operations), durably; then the journal is removed.
 //!
 //! A failure before the commit removes the staged files: nothing changed. A
-//! failure after it keeps the journal: the result is `pending_recovery`, and
-//! [`recover`] (at startup, and in `freedom-cored recover`) finishes it.
+//! failure after it keeps the journal (`pending_recovery`); [`recover`] runs
+//! at startup, in `freedom-cored recover`, and before every new write.
+//!
+//! **Recovery trusts nothing it reads.** A journal is acted on only if it is
+//! exactly what [`write`] produces: a supported node, a normalized absolute
+//! root, the node's exact file layout under it with sibling staged names, and
+//! valid digests. Anything else is set aside as `….corrupt` and reported. Only
+//! regular files are hashed or installed; symlinks are never followed.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
-use crate::fsx;
+use crate::fsx::{self, Done};
 
 pub const JOURNAL: &str = "node-identity-journal.json";
 pub const DONE: &str = "node-identity-done.json";
+pub const STAGING: &str = "node-identity-staging.json";
 const STAGED_SUFFIX: &str = ".freedom-new";
 const MAX_DONE: usize = 32;
-/// Node identity files are small; anything larger can't be ours.
-const MAX_FILE: u64 = 1 << 20;
+/// The largest node identity file (and record) handled. Node configs and
+/// keys are a few KiB.
+pub const MAX_FILE: u64 = 1 << 20;
+
+/// The files of a node identity, in order, under its root (`data_dir` for
+/// Bee, `home` for Radicle). The single source of truth for writers and for
+/// recovery's validation.
+pub fn layout(node: &str, root: &Path) -> Option<Vec<PathBuf>> {
+    match node {
+        "bee" => Some(vec![
+            root.join("keys").join("swarm.key"),
+            root.join("config.yaml"),
+        ]),
+        "radicle" => Some(vec![
+            root.join("keys").join("radicle"),
+            root.join("keys").join("radicle.pub"),
+            root.join("config.json"),
+        ]),
+        _ => None,
+    }
+}
+
+/// Operation IDs come from main: 1 to 64 of `[A-Za-z0-9._-]`.
+pub fn valid_op_id(op_id: &str) -> bool {
+    (1..=64).contains(&op_id.len())
+        && op_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Journal {
     op_id: String,
     node: String,
+    root: PathBuf,
     files: Vec<JournalFile>,
 }
 
@@ -49,6 +88,13 @@ struct JournalFile {
     target: PathBuf,
     staged: PathBuf,
     sha256: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Intent {
+    op_id: String,
+    node: String,
+    root: PathBuf,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -78,15 +124,37 @@ pub struct FileSpec<'a> {
     pub contents: &'a [u8],
 }
 
-/// How a write ended.
+/// How a committed (or abandoned) write ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
-    /// All four steps completed.
+    /// All four steps completed durably.
     Installed,
-    /// Committed, but installing or finishing failed; the journal is kept.
+    /// Committed, but not (durably) installed or finished yet; the journal is
+    /// kept for recovery.
     PendingRecovery,
+    /// Committed, but its own staged files were gone at install: needs a
+    /// fresh write while unlocked.
+    Corrupt,
     /// The commit gate refused: nothing changed.
     Abandoned,
+}
+
+/// Why a write didn't commit. Nothing changed in any of these cases.
+#[derive(Debug)]
+pub enum WriteError {
+    Io(std::io::Error),
+    /// The op ID is already in the done list or the live journal.
+    DuplicateOpId,
+    /// Not a node layout this writer produces (a bug in the caller).
+    Layout,
+    /// A file is larger than [`MAX_FILE`].
+    TooLarge,
+}
+
+impl From<std::io::Error> for WriteError {
+    fn from(error: std::io::Error) -> Self {
+        WriteError::Io(error)
+    }
 }
 
 /// What [`recover`] did.
@@ -96,93 +164,140 @@ pub enum Recovered {
     /// A leftover journal was finished with this status.
     Finished {
         op_id: String,
+        node: String,
         status: OpStatus,
     },
+    /// A journal that isn't exactly what [`write`] produces was set aside
+    /// (`….corrupt`) without acting on it.
+    Invalid,
+    /// The staged files of an operation that died before its commit were
+    /// removed.
+    Discarded,
 }
 
-/// Runs the four steps for one operation. An error means nothing was
-/// committed (the staged files are removed).
+/// Runs the four steps for one operation. `Err` means nothing was committed.
+/// An outstanding journal is recovered first; if that fails, nothing is
+/// written.
 pub fn write(
     identity_dir: &Path,
     op_id: &str,
     node: &str,
+    root: &Path,
     files: &[FileSpec<'_>],
     commit: impl FnOnce() -> bool,
-) -> std::io::Result<Outcome> {
+) -> Result<Outcome, WriteError> {
+    let expected = layout(node, root).ok_or(WriteError::Layout)?;
+    if !valid_op_id(op_id)
+        || !normalized_absolute(root)
+        || root == identity_dir
+        || files.len() != expected.len()
+        || files.iter().zip(&expected).any(|(f, e)| &f.target != e)
+    {
+        return Err(WriteError::Layout);
+    }
+    if files.iter().any(|f| f.contents.len() as u64 > MAX_FILE) {
+        return Err(WriteError::TooLarge);
+    }
+    // Design 0001: recovery runs before any node write. An unresolved
+    // committed operation must never be replaced.
+    recover(identity_dir)?;
+    if op_seen(identity_dir, op_id)? {
+        return Err(WriteError::DuplicateOpId);
+    }
+    ensure_dir(identity_dir)?;
+
+    // 0. Intent, durably, before any staged file exists.
+    let intent = Intent {
+        op_id: op_id.to_owned(),
+        node: node.to_owned(),
+        root: root.to_owned(),
+    };
+    put_record(identity_dir, STAGING, &intent)?;
+
     // 1. Stage.
     let mut journal = Journal {
         op_id: op_id.to_owned(),
         node: node.to_owned(),
+        root: root.to_owned(),
         files: Vec::with_capacity(files.len()),
     };
     for file in files {
         match stage(file) {
             Ok(staged) => journal.files.push(staged),
             Err(e) => {
-                discard(&journal);
-                return Err(e);
+                discard(identity_dir, node, root);
+                return Err(e.into());
             }
         }
     }
+
     // 2. Commit.
     let encoded = serde_json::to_vec(&journal).map_err(std::io::Error::other)?;
-    std::fs::create_dir_all(identity_dir)?;
     match fsx::replace(&identity_dir.join(JOURNAL), &encoded, |_| Ok(()), commit) {
-        Ok(_) => {}
+        Ok(Done::Durable) => {}
+        // Committed but not durable: install nothing; recovery finishes it
+        // once the journal is known to persist.
+        Ok(Done::NotDurable) => {
+            let _ = fsx::remove(&identity_dir.join(STAGING), || true);
+            return Ok(Outcome::PendingRecovery);
+        }
         Err(fsx::WriteError::Abandoned) => {
-            discard(&journal);
+            discard(identity_dir, node, root);
             return Ok(Outcome::Abandoned);
         }
         Err(fsx::WriteError::Io(e)) => {
-            discard(&journal);
-            return Err(e);
+            discard(identity_dir, node, root);
+            return Err(e.into());
         }
         Err(fsx::WriteError::Check(reason)) => {
-            discard(&journal);
-            return Err(std::io::Error::other(reason));
+            discard(identity_dir, node, root);
+            return Err(std::io::Error::other(reason).into());
         }
     }
+    // The journal supersedes the intent.
+    let _ = fsx::remove(&identity_dir.join(STAGING), || true);
+
     // 3 and 4. After the commit, a failure leaves the journal for recovery.
-    match install(&journal).and_then(|corrupt| {
+    let result = install(&journal).and_then(|corrupt| {
         let status = if corrupt {
             OpStatus::Corrupt
         } else {
             OpStatus::Installed
         };
         finish(identity_dir, &journal.op_id, status).map(|()| status)
-    }) {
-        Ok(OpStatus::Installed) => Ok(Outcome::Installed),
-        // Our own staged files vanished between staging and install.
-        Ok(_) => Ok(Outcome::PendingRecovery),
+    });
+    Ok(match result {
+        Ok(OpStatus::Installed) => Outcome::Installed,
+        Ok(_) => Outcome::Corrupt,
         Err(e) => {
             crate::log::error(
-                "node identity install failed after commit",
+                "node identity install did not finish after commit",
                 serde_json::json!({ "error": e.kind().to_string() }),
             );
-            Ok(Outcome::PendingRecovery)
+            Outcome::PendingRecovery
         }
-    }
+    })
 }
 
-/// Finishes a leftover journal (step 3 with recovery rules, then step 4).
-/// A target with the right digest is done; otherwise a staged file with the
-/// right digest is renamed into place; if neither exists, the operation is
-/// `corrupt` and needs a fresh write while unlocked.
+/// Finishes a leftover journal, or removes the staged files of an operation
+/// that died before its commit.
 pub fn recover(identity_dir: &Path) -> std::io::Result<Recovered> {
     let path = identity_dir.join(JOURNAL);
-    let bytes = match read_bounded(&path)? {
-        Some(bytes) => bytes,
-        None => return Ok(Recovered::Nothing),
+    let Some(bytes) = read_record(&path)? else {
+        return discard_intent(identity_dir);
     };
-    let Ok(journal) = serde_json::from_slice::<Journal>(&bytes) else {
-        // Unreadable: keep it aside for inspection, never act on it.
-        let aside = identity_dir.join(format!("{JOURNAL}.corrupt"));
-        std::fs::rename(&path, aside)?;
-        crate::log::error(
-            "unreadable node identity journal set aside",
-            serde_json::json!({}),
-        );
-        return Ok(Recovered::Nothing);
+    let journal = match serde_json::from_slice::<Journal>(&bytes) {
+        Ok(journal) if valid_journal(&journal, identity_dir) => journal,
+        _ => {
+            // Never act on it: keep it aside for inspection.
+            std::fs::rename(&path, identity_dir.join(format!("{JOURNAL}.corrupt")))?;
+            sync_dir(identity_dir)?;
+            crate::log::error(
+                "invalid node identity journal set aside",
+                serde_json::json!({}),
+            );
+            return Ok(Recovered::Invalid);
+        }
     };
     let corrupt = install(&journal)?;
     let status = if corrupt {
@@ -191,48 +306,91 @@ pub fn recover(identity_dir: &Path) -> std::io::Result<Recovered> {
         OpStatus::Installed
     };
     finish(identity_dir, &journal.op_id, status)?;
+    let _ = fsx::remove(&identity_dir.join(STAGING), || true);
     Ok(Recovered::Finished {
         op_id: journal.op_id,
+        node: journal.node,
         status,
     })
 }
 
-/// `nodes.op_status`: from the done list and the journal. A consistent node
-/// directory alone doesn't count: it could still hold the old identity.
+/// The op ID and node of a valid outstanding journal, if one is there (for
+/// reporting a failed recovery).
+pub fn pending(identity_dir: &Path) -> Option<(String, String)> {
+    let bytes = read_record(&identity_dir.join(JOURNAL)).ok()??;
+    let journal: Journal = serde_json::from_slice(&bytes).ok()?;
+    valid_journal(&journal, identity_dir).then_some((journal.op_id, journal.node))
+}
+
+/// `nodes.op_status`. The live journal wins over the done list, so an old
+/// record can't mask a current transaction. A consistent node directory
+/// alone doesn't count: it could still hold the old identity.
 pub fn op_status(identity_dir: &Path, op_id: &str) -> std::io::Result<OpStatus> {
-    let done = read_done(identity_dir)?;
-    if let Some(op) = done.ops.iter().rev().find(|op| op.op_id == op_id) {
-        return Ok(op.status);
-    }
-    if let Some(bytes) = read_bounded(&identity_dir.join(JOURNAL))?
+    if let Some(bytes) = read_record(&identity_dir.join(JOURNAL))?
         && serde_json::from_slice::<Journal>(&bytes).is_ok_and(|j| j.op_id == op_id)
     {
         return Ok(OpStatus::PendingRecovery);
     }
-    Ok(OpStatus::NotCommitted)
+    let done = read_done(identity_dir)?;
+    Ok(done
+        .ops
+        .iter()
+        .rev()
+        .find(|op| op.op_id == op_id)
+        .map_or(OpStatus::NotCommitted, |op| op.status))
 }
 
-/// Step 1 for one file. A staged file left by an earlier crashed write
-/// (before its commit, so no journal names it) is replaced.
+fn op_seen(identity_dir: &Path, op_id: &str) -> std::io::Result<bool> {
+    Ok(op_status(identity_dir, op_id)? != OpStatus::NotCommitted)
+}
+
+/// A journal exactly as [`write`] produces it.
+fn valid_journal(journal: &Journal, identity_dir: &Path) -> bool {
+    let Some(expected) = layout(&journal.node, &journal.root) else {
+        return false;
+    };
+    valid_op_id(&journal.op_id)
+        && normalized_absolute(&journal.root)
+        && journal.root != identity_dir
+        && journal.files.len() == expected.len()
+        && journal.files.iter().zip(&expected).all(|(file, target)| {
+            &file.target == target
+                && file.staged == staged_path(target)
+                && file.sha256.len() == 64
+                && file
+                    .sha256
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
+}
+
+/// Absolute, with no `.` or `..` components.
+fn normalized_absolute(path: &Path) -> bool {
+    path.is_absolute()
+        && path.components().all(|c| {
+            matches!(
+                c,
+                Component::Prefix(_) | Component::RootDir | Component::Normal(_)
+            )
+        })
+}
+
+fn staged_path(target: &Path) -> PathBuf {
+    let mut name = target.as_os_str().to_owned();
+    name.push(STAGED_SUFFIX);
+    PathBuf::from(name)
+}
+
+/// Step 1 for one file. A staged file left by an earlier operation that died
+/// before its commit is replaced (recovery has run, so no journal needs it).
 fn stage(file: &FileSpec<'_>) -> std::io::Result<JournalFile> {
-    if !file.target.is_absolute() {
-        return Err(std::io::Error::other(
-            "node identity targets must be absolute",
-        ));
-    }
     let dir = file
         .target
         .parent()
         .ok_or_else(|| std::io::Error::other("target has no parent directory"))?;
-    std::fs::create_dir_all(dir)?;
-    let mut name = file.target.as_os_str().to_owned();
-    name.push(STAGED_SUFFIX);
-    let staged = PathBuf::from(name);
-    match std::fs::remove_file(&staged) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
+    ensure_dir(dir)?;
+    let staged = staged_path(&file.target);
+    remove_if_present(&staged)?;
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -253,7 +411,7 @@ fn stage(file: &FileSpec<'_>) -> std::io::Result<JournalFile> {
     Ok(JournalFile {
         target: file.target.clone(),
         staged,
-        sha256: hex_digest(file.contents),
+        sha256: hex(&Sha256::digest(file.contents)),
     })
 }
 
@@ -262,10 +420,12 @@ fn install(journal: &Journal) -> std::io::Result<bool> {
     let mut corrupt = false;
     let mut dirs: Vec<&Path> = Vec::new();
     for file in &journal.files {
-        if digest_of(&file.target)?.as_deref() == Some(file.sha256.as_str()) {
-            // Already in place; a duplicate staged copy is no longer needed.
-            let _ = std::fs::remove_file(&file.staged);
-        } else if digest_of(&file.staged)?.as_deref() == Some(file.sha256.as_str()) {
+        if regular_digest(&file.target)?.as_deref() == Some(file.sha256.as_str()) {
+            // Already in place; a leftover staged copy is not needed.
+            remove_if_present(&file.staged)?;
+        } else if regular_digest(&file.staged)?.as_deref() == Some(file.sha256.as_str()) {
+            // Replaces whatever is at the target, a symlink included, without
+            // following it.
             std::fs::rename(&file.staged, &file.target)?;
         } else {
             corrupt = true;
@@ -283,7 +443,9 @@ fn install(journal: &Journal) -> std::io::Result<bool> {
     Ok(corrupt)
 }
 
-/// Step 4: record the outcome, then remove the journal.
+/// Step 4: record the outcome durably, then remove the journal. If the
+/// removal isn't durable, a journal that reappears after a crash is finished
+/// again (idempotently); the durable done record already holds the outcome.
 fn finish(identity_dir: &Path, op_id: &str, status: OpStatus) -> std::io::Result<()> {
     let mut done = read_done(identity_dir)?;
     done.ops.retain(|op| op.op_id != op_id);
@@ -293,21 +455,29 @@ fn finish(identity_dir: &Path, op_id: &str, status: OpStatus) -> std::io::Result
     });
     let excess = done.ops.len().saturating_sub(MAX_DONE);
     done.ops.drain(..excess);
-    let encoded = serde_json::to_vec(&done).map_err(std::io::Error::other)?;
-    // The done list is bookkeeping: a failed directory flush after its
-    // rename doesn't matter here (the journal is removed after it anyway).
-    let _flushed = fsx::replace(&identity_dir.join(DONE), &encoded, |_| Ok(()), || true).map_err(
-        |e| match e {
-            fsx::WriteError::Io(e) => e,
-            other => std::io::Error::other(format!("{other:?}")),
-        },
-    )?;
-    fsx::remove(&identity_dir.join(JOURNAL), || true)?;
+    put_record(identity_dir, DONE, &done)?;
+    if fsx::remove(&identity_dir.join(JOURNAL), || true)? == Some(Done::NotDurable) {
+        crate::log::warn(
+            "node identity journal removal not flushed",
+            serde_json::json!({}),
+        );
+    }
     Ok(())
 }
 
+/// Writes a bookkeeping record durably; a failed directory flush is an error.
+fn put_record<T: Serialize>(identity_dir: &Path, name: &str, record: &T) -> std::io::Result<()> {
+    let encoded = serde_json::to_vec(record).map_err(std::io::Error::other)?;
+    match fsx::replace(&identity_dir.join(name), &encoded, |_| Ok(()), || true) {
+        Ok(Done::Durable) => Ok(()),
+        Ok(Done::NotDurable) => Err(std::io::Error::other("record not flushed")),
+        Err(fsx::WriteError::Io(e)) => Err(e),
+        Err(other) => Err(std::io::Error::other(format!("{other:?}"))),
+    }
+}
+
 fn read_done(identity_dir: &Path) -> std::io::Result<DoneList> {
-    match read_bounded(&identity_dir.join(DONE))? {
+    match read_record(&identity_dir.join(DONE))? {
         // An unreadable done list is treated as empty: op_status then falls
         // back to the journal, and the next finish rewrites it.
         Some(bytes) => Ok(serde_json::from_slice(&bytes).unwrap_or_default()),
@@ -315,16 +485,57 @@ fn read_done(identity_dir: &Path) -> std::io::Result<DoneList> {
     }
 }
 
-/// Removes the staged files of an operation that didn't commit.
-fn discard(journal: &Journal) {
-    for file in &journal.files {
-        let _ = std::fs::remove_file(&file.staged);
+/// Before the commit: removes this operation's staged files, then its
+/// intent record.
+fn discard(identity_dir: &Path, node: &str, root: &Path) {
+    for target in layout(node, root).unwrap_or_default() {
+        let _ = std::fs::remove_file(staged_path(&target));
     }
+    let _ = fsx::remove(&identity_dir.join(STAGING), || true);
 }
 
-/// A regular file's contents, if it exists and is at most [`MAX_FILE`].
-fn read_bounded(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
-    let metadata = match std::fs::metadata(path) {
+/// No journal: an intent left by an operation that died before its commit
+/// names staged files to remove (only the node layout's own).
+fn discard_intent(identity_dir: &Path) -> std::io::Result<Recovered> {
+    let path = identity_dir.join(STAGING);
+    let Some(bytes) = read_record(&path)? else {
+        return Ok(Recovered::Nothing);
+    };
+    if let Ok(intent) = serde_json::from_slice::<Intent>(&bytes)
+        && valid_op_id(&intent.op_id)
+        && normalized_absolute(&intent.root)
+        && intent.root != identity_dir
+        && let Some(targets) = layout(&intent.node, &intent.root)
+    {
+        for target in targets {
+            remove_if_present(&staged_path(&target))?;
+        }
+    }
+    fsx::remove(&path, || true)?;
+    Ok(Recovered::Discarded)
+}
+
+/// A bookkeeping record (journal, done list, intent): regular file, bounded.
+fn read_record(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if !metadata.is_file() || metadata.len() > MAX_FILE {
+        return Err(std::io::Error::other("unexpected node identity record"));
+    }
+    let mut bytes = Vec::new();
+    File::open(path)?
+        .take(MAX_FILE + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(Some(bytes))
+}
+
+/// The SHA-256 of a regular file (never through a symlink), hashed through a
+/// wiped buffer: node files hold private keys and passwords.
+fn regular_digest(path: &Path) -> std::io::Result<Option<String>> {
+    let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
@@ -332,23 +543,50 @@ fn read_bounded(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     if !metadata.is_file() || metadata.len() > MAX_FILE {
         return Ok(None);
     }
-    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
-    File::open(path)?
-        .take(MAX_FILE + 1)
-        .read_to_end(&mut bytes)?;
-    Ok(Some(bytes))
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = Zeroizing::new([0u8; 4096]);
+    loop {
+        let read = file.read(buffer.as_mut_slice())?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(Some(hex(&hasher.finalize())))
 }
 
-/// The SHA-256 of a file, if it exists (and could be ours).
-fn digest_of(path: &Path) -> std::io::Result<Option<String>> {
-    Ok(read_bounded(path)?.map(|bytes| hex_digest(&bytes)))
+fn remove_if_present(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
-fn hex_digest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+/// Creates `dir` and any missing ancestors, then persists each new entry in
+/// its parent, so a crash can't lose a directory that staged files are in.
+fn ensure_dir(dir: &Path) -> std::io::Result<()> {
+    let mut missing = Vec::new();
+    let mut current = Some(dir);
+    while let Some(path) = current {
+        if path.exists() {
+            break;
+        }
+        missing.push(path);
+        current = path.parent();
+    }
+    std::fs::create_dir_all(dir)?;
+    for created in missing.iter().rev() {
+        if let Some(parent) = created.parent() {
+            sync_dir(parent)?;
+        }
+    }
+    Ok(())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(unix)]
@@ -365,70 +603,98 @@ fn sync_dir(_dir: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    fn specs<'a>(dir: &Path, contents: &[&'a [u8]]) -> Vec<FileSpec<'a>> {
-        contents
+    fn bee_files<'a>(root: &Path, key: &'a [u8], config: &'a [u8]) -> Vec<FileSpec<'a>> {
+        let targets = layout("bee", root).unwrap();
+        vec![
+            FileSpec {
+                target: targets[0].clone(),
+                contents: key,
+            },
+            FileSpec {
+                target: targets[1].clone(),
+                contents: config,
+            },
+        ]
+    }
+
+    fn staged_left(root: &Path) -> Vec<PathBuf> {
+        layout("bee", root)
+            .unwrap()
             .iter()
-            .enumerate()
-            .map(|(i, c)| FileSpec {
-                target: dir.join(format!("node/f{i}")),
-                contents: c,
-            })
+            .map(|t| staged_path(t))
+            .filter(|p| p.exists())
             .collect()
     }
 
-    fn staged_left(dir: &Path) -> Vec<String> {
-        std::fs::read_dir(dir.join("node"))
-            .map(|entries| {
-                entries
-                    .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-                    .filter(|n| n.ends_with(STAGED_SUFFIX))
-                    .collect()
-            })
-            .unwrap_or_default()
+    fn made(dir: &Path) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        dir.to_owned()
+    }
+
+    fn committed_journal(
+        identity: &Path,
+        root: &Path,
+        op_id: &str,
+        key: &[u8],
+        config: &[u8],
+    ) -> Journal {
+        let files = bee_files(root, key, config);
+        let journal = Journal {
+            op_id: op_id.into(),
+            node: "bee".into(),
+            root: root.to_owned(),
+            files: files.iter().map(|f| stage(f).unwrap()).collect(),
+        };
+        made(identity);
+        std::fs::write(
+            identity.join(JOURNAL),
+            serde_json::to_vec(&journal).unwrap(),
+        )
+        .unwrap();
+        journal
     }
 
     #[test]
     fn installs_all_files_and_records_the_op() {
-        let root = tempfile::tempdir().unwrap();
-        let identity = root.path().join("identity");
-        let files = specs(root.path(), &[b"key", b"config"]);
-        let outcome = write(&identity, "op-1", "bee", &files, || true).unwrap();
-        assert_eq!(outcome, Outcome::Installed);
-        assert_eq!(std::fs::read(root.path().join("node/f0")).unwrap(), b"key");
+        let tmp = tempfile::tempdir().unwrap();
+        let (identity, root) = (tmp.path().join("identity"), tmp.path().join("bee"));
+        let files = bee_files(&root, b"key", b"config");
         assert_eq!(
-            std::fs::read(root.path().join("node/f1")).unwrap(),
-            b"config"
+            write(&identity, "op-1", "bee", &root, &files, || true).unwrap(),
+            Outcome::Installed
         );
-        assert!(staged_left(root.path()).is_empty());
+        assert_eq!(std::fs::read(root.join("keys/swarm.key")).unwrap(), b"key");
+        assert_eq!(std::fs::read(root.join("config.yaml")).unwrap(), b"config");
+        assert!(staged_left(&root).is_empty());
         assert!(!identity.join(JOURNAL).exists());
+        assert!(!identity.join(STAGING).exists());
         assert_eq!(op_status(&identity, "op-1").unwrap(), OpStatus::Installed);
         assert_eq!(
             op_status(&identity, "op-2").unwrap(),
             OpStatus::NotCommitted
         );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(root.path().join("node/f0"))
-                .unwrap()
-                .permissions()
-                .mode();
-            assert_eq!(mode & 0o777, 0o600);
-        }
+        // Op IDs are single-use.
+        assert!(matches!(
+            write(&identity, "op-1", "bee", &root, &files, || true),
+            Err(WriteError::DuplicateOpId)
+        ));
     }
 
     #[test]
     fn an_abandoned_write_changes_nothing() {
-        let root = tempfile::tempdir().unwrap();
-        let identity = root.path().join("identity");
-        std::fs::create_dir_all(root.path().join("node")).unwrap();
-        std::fs::write(root.path().join("node/f0"), b"old").unwrap();
-        let files = specs(root.path(), &[b"new", b"config"]);
-        let outcome = write(&identity, "op-1", "bee", &files, || false).unwrap();
-        assert_eq!(outcome, Outcome::Abandoned);
-        assert_eq!(std::fs::read(root.path().join("node/f0")).unwrap(), b"old");
-        assert!(!root.path().join("node/f1").exists());
-        assert!(staged_left(root.path()).is_empty());
+        let tmp = tempfile::tempdir().unwrap();
+        let (identity, root) = (tmp.path().join("identity"), tmp.path().join("bee"));
+        made(&root.join("keys"));
+        std::fs::write(root.join("keys/swarm.key"), b"old").unwrap();
+        let files = bee_files(&root, b"new", b"config");
+        assert_eq!(
+            write(&identity, "op-1", "bee", &root, &files, || false).unwrap(),
+            Outcome::Abandoned
+        );
+        assert_eq!(std::fs::read(root.join("keys/swarm.key")).unwrap(), b"old");
+        assert!(!root.join("config.yaml").exists());
+        assert!(staged_left(&root).is_empty());
+        assert!(!identity.join(STAGING).exists());
         assert_eq!(
             op_status(&identity, "op-1").unwrap(),
             OpStatus::NotCommitted
@@ -437,73 +703,107 @@ mod tests {
 
     #[test]
     fn recovery_rolls_a_committed_journal_forward() {
-        let root = tempfile::tempdir().unwrap();
-        let identity = root.path().join("identity");
-        std::fs::create_dir_all(root.path().join("node")).unwrap();
-        std::fs::write(root.path().join("node/f0"), b"old key").unwrap();
-        std::fs::write(root.path().join("node/f1"), b"old config").unwrap();
-        // Simulate a crash after the commit with one file installed.
-        let files = specs(root.path(), &[b"new key", b"new config"]);
-        let journal = Journal {
-            op_id: "op-7".into(),
-            node: "bee".into(),
-            files: files.iter().map(|f| stage(f).unwrap()).collect(),
-        };
+        let tmp = tempfile::tempdir().unwrap();
+        let (identity, root) = (tmp.path().join("identity"), tmp.path().join("bee"));
+        made(&root.join("keys"));
+        std::fs::write(root.join("keys/swarm.key"), b"old key").unwrap();
+        std::fs::write(root.join("config.yaml"), b"old config").unwrap();
+        let journal = committed_journal(&identity, &root, "op-7", b"new key", b"new config");
+        // A crash after one file was installed.
         std::fs::rename(&journal.files[0].staged, &journal.files[0].target).unwrap();
-        std::fs::create_dir_all(&identity).unwrap();
-        std::fs::write(
-            identity.join(JOURNAL),
-            serde_json::to_vec(&journal).unwrap(),
-        )
-        .unwrap();
         assert_eq!(
             op_status(&identity, "op-7").unwrap(),
             OpStatus::PendingRecovery
         );
-
-        let recovered = recover(&identity).unwrap();
         assert_eq!(
-            recovered,
+            recover(&identity).unwrap(),
             Recovered::Finished {
                 op_id: "op-7".into(),
+                node: "bee".into(),
                 status: OpStatus::Installed
             }
         );
         assert_eq!(
-            std::fs::read(root.path().join("node/f0")).unwrap(),
+            std::fs::read(root.join("keys/swarm.key")).unwrap(),
             b"new key"
         );
         assert_eq!(
-            std::fs::read(root.path().join("node/f1")).unwrap(),
+            std::fs::read(root.join("config.yaml")).unwrap(),
             b"new config"
         );
-        assert!(!identity.join(JOURNAL).exists());
         assert_eq!(op_status(&identity, "op-7").unwrap(), OpStatus::Installed);
         assert_eq!(recover(&identity).unwrap(), Recovered::Nothing);
     }
 
     #[test]
-    fn a_journal_whose_files_are_gone_is_corrupt() {
-        let root = tempfile::tempdir().unwrap();
-        let identity = root.path().join("identity");
-        let files = specs(root.path(), &[b"new key"]);
-        let journal = Journal {
-            op_id: "op-9".into(),
-            node: "radicle".into(),
-            files: files.iter().map(|f| stage(f).unwrap()).collect(),
-        };
-        std::fs::remove_file(&journal.files[0].staged).unwrap();
-        std::fs::create_dir_all(&identity).unwrap();
-        std::fs::write(
-            identity.join(JOURNAL),
-            serde_json::to_vec(&journal).unwrap(),
-        )
-        .unwrap();
-        let recovered = recover(&identity).unwrap();
+    fn a_new_write_finishes_the_outstanding_journal_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (identity, root) = (tmp.path().join("identity"), tmp.path().join("bee"));
+        committed_journal(&identity, &root, "op-old", b"old-op key", b"old-op config");
+        let other = tmp.path().join("bee2");
+        let files = bee_files(&other, b"k2", b"c2");
         assert_eq!(
-            recovered,
+            write(&identity, "op-new", "bee", &other, &files, || true).unwrap(),
+            Outcome::Installed
+        );
+        assert_eq!(op_status(&identity, "op-old").unwrap(), OpStatus::Installed);
+        assert_eq!(
+            std::fs::read(root.join("config.yaml")).unwrap(),
+            b"old-op config"
+        );
+    }
+
+    #[test]
+    fn a_live_journal_wins_over_an_old_done_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (identity, root) = (tmp.path().join("identity"), tmp.path().join("bee"));
+        finish(&made(&identity), "op-1", OpStatus::Installed).unwrap();
+        committed_journal(&identity, &root, "op-1", b"k", b"c");
+        assert_eq!(
+            op_status(&identity, "op-1").unwrap(),
+            OpStatus::PendingRecovery
+        );
+    }
+
+    #[test]
+    fn journals_that_writers_never_produce_are_set_aside() {
+        let tmp = tempfile::tempdir().unwrap();
+        let identity = made(&tmp.path().join("identity"));
+        let vault = identity.join("identity-vault.json");
+        std::fs::write(&vault, b"the vault").unwrap();
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::write(&elsewhere, b"other bytes").unwrap();
+        let digest = hex(&Sha256::digest(b"other bytes"));
+        let bad = [
+            // A target outside the node layout (the vault itself).
+            serde_json::json!({ "op_id": "x", "node": "bee", "root": identity,
+                "files": [{ "target": vault, "staged": elsewhere, "sha256": digest }] }),
+            // An unknown node with no files.
+            serde_json::json!({ "op_id": "x", "node": "ipfs", "root": tmp.path(), "files": [] }),
+            // A relative root.
+            serde_json::json!({ "op_id": "x", "node": "bee", "root": "rel", "files": [] }),
+        ];
+        for journal in bad {
+            std::fs::write(identity.join(JOURNAL), journal.to_string()).unwrap();
+            assert_eq!(recover(&identity).unwrap(), Recovered::Invalid);
+            assert!(!identity.join(JOURNAL).exists());
+            assert!(identity.join(format!("{JOURNAL}.corrupt")).exists());
+            assert_eq!(std::fs::read(&vault).unwrap(), b"the vault");
+            assert_eq!(std::fs::read(&elsewhere).unwrap(), b"other bytes");
+        }
+    }
+
+    #[test]
+    fn a_journal_whose_files_are_gone_is_corrupt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (identity, root) = (tmp.path().join("identity"), tmp.path().join("bee"));
+        let journal = committed_journal(&identity, &root, "op-9", b"k", b"c");
+        std::fs::remove_file(&journal.files[0].staged).unwrap();
+        assert_eq!(
+            recover(&identity).unwrap(),
             Recovered::Finished {
                 op_id: "op-9".into(),
+                node: "bee".into(),
                 status: OpStatus::Corrupt
             }
         );
@@ -511,50 +811,90 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_journal_is_set_aside() {
-        let root = tempfile::tempdir().unwrap();
-        let identity = root.path().join("identity");
-        std::fs::create_dir_all(&identity).unwrap();
-        std::fs::write(identity.join(JOURNAL), b"{not json").unwrap();
-        assert_eq!(recover(&identity).unwrap(), Recovered::Nothing);
-        assert!(!identity.join(JOURNAL).exists());
-        assert!(identity.join(format!("{JOURNAL}.corrupt")).exists());
+    fn staged_files_of_a_pre_commit_crash_are_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (identity, root) = (tmp.path().join("identity"), tmp.path().join("bee"));
+        made(&identity);
+        put_record(
+            &identity,
+            STAGING,
+            &Intent {
+                op_id: "op-3".into(),
+                node: "bee".into(),
+                root: root.clone(),
+            },
+        )
+        .unwrap();
+        for file in bee_files(&root, b"k", b"c") {
+            stage(&file).unwrap();
+        }
+        assert_eq!(staged_left(&root).len(), 2);
+        assert_eq!(recover(&identity).unwrap(), Recovered::Discarded);
+        assert!(staged_left(&root).is_empty());
+        assert!(!identity.join(STAGING).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_never_followed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (identity, root) = (tmp.path().join("identity"), tmp.path().join("bee"));
+        let journal = committed_journal(&identity, &root, "op-5", b"new key", b"new config");
+        // A target that is a symlink to a file with the right bytes is still
+        // replaced by the real file, and the referent is untouched.
+        let referent = tmp.path().join("referent");
+        std::fs::write(&referent, b"new key").unwrap();
+        std::os::unix::fs::symlink(&referent, &journal.files[0].target).unwrap();
+        assert!(matches!(
+            recover(&identity).unwrap(),
+            Recovered::Finished {
+                status: OpStatus::Installed,
+                ..
+            }
+        ));
+        let target = std::fs::symlink_metadata(&journal.files[0].target).unwrap();
+        assert!(target.is_file());
+        assert_eq!(std::fs::read(&referent).unwrap(), b"new key");
     }
 
     #[test]
-    fn stale_staged_files_are_replaced_and_the_done_list_is_bounded() {
-        let root = tempfile::tempdir().unwrap();
-        let identity = root.path().join("identity");
-        std::fs::create_dir_all(root.path().join("node")).unwrap();
-        std::fs::write(
-            root.path().join(format!("node/f0{STAGED_SUFFIX}")),
-            b"stale",
-        )
-        .unwrap();
+    fn layouts_and_sizes_are_enforced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (identity, root) = (tmp.path().join("identity"), tmp.path().join("bee"));
+        let wrong = [FileSpec {
+            target: root.join("other"),
+            contents: b"x",
+        }];
+        assert!(matches!(
+            write(&identity, "op", "bee", &root, &wrong, || true),
+            Err(WriteError::Layout)
+        ));
+        assert!(matches!(
+            write(&identity, "op", "bee", Path::new("relative"), &[], || true),
+            Err(WriteError::Layout)
+        ));
+        let big = vec![0u8; MAX_FILE as usize + 1];
+        let files = bee_files(&root, &big, b"c");
+        assert!(matches!(
+            write(&identity, "op", "bee", &root, &files, || true),
+            Err(WriteError::TooLarge)
+        ));
+        assert!(staged_left(&root).is_empty());
+    }
+
+    #[test]
+    fn the_done_list_is_bounded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (identity, root) = (tmp.path().join("identity"), tmp.path().join("bee"));
         for i in 0..40 {
-            let files = specs(root.path(), &[b"x"]);
+            let files = bee_files(&root, b"x", b"y");
             assert_eq!(
-                write(&identity, &format!("op-{i}"), "bee", &files, || true).unwrap(),
+                write(&identity, &format!("op-{i}"), "bee", &root, &files, || true).unwrap(),
                 Outcome::Installed
             );
         }
         let done = read_done(&identity).unwrap();
         assert_eq!(done.ops.len(), MAX_DONE);
         assert_eq!(done.ops[0].op_id, "op-8");
-        assert_eq!(
-            op_status(&identity, "op-0").unwrap(),
-            OpStatus::NotCommitted
-        );
-        assert_eq!(op_status(&identity, "op-39").unwrap(), OpStatus::Installed);
-    }
-
-    #[test]
-    fn relative_targets_are_refused() {
-        let root = tempfile::tempdir().unwrap();
-        let files = [FileSpec {
-            target: PathBuf::from("relative/f0"),
-            contents: b"x",
-        }];
-        assert!(write(root.path(), "op", "bee", &files, || true).is_err());
     }
 }
