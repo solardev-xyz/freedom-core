@@ -9,6 +9,10 @@ The code holds users' keys and money. Every rule below exists for that reason.
 1. **Never delete files** unless the user asks you to or confirms it.
 2. **Logic crates do no I/O.** No files, sockets, env vars, threads, async runtimes, or wall-clock reads. Time, randomness and storage come in as parameters or traits, so tests can inject them. The logic crates are `fc-keys`, `fc-vault`, `fc-evm`, `fc-naming` and the others marked "logic" in #644. They must compile for iOS and Android (CI checks this), and stay usable inside a Chromium build later.
 3. **No raw private key or seed leaves the core.**
+   - **Exceptions:**
+     - user-requested backup exports (`vault.export_*`) and the onboarding display of the mnemonic, which are permanent;
+     - the temporary `compat.*` exports listed in `docs/design/0001-freedom-cored.md`, which Phase 2 deletes.
+     Any new exception needs a design change.
    - Signing APIs take a key reference, never key bytes.
    - Secret types zeroize on drop.
    - Secret types implement no `Debug`/`Display` that prints the bytes, and no `Serialize`.
