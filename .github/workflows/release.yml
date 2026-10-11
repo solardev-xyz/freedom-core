@@ -1,0 +1,165 @@
+name: Release
+
+# Builds freedom-cored for every platform Freedom Browser ships on and
+# publishes the archives plus SHA256SUMS as a GitHub release. freedom-browser
+# pins a release tag and the digest of its SHA256SUMS (see RELEASING.md).
+#
+# A tag push (vX.Y.Z, matching the workspace version) publishes. A manual run,
+# or a PR that changes this file, builds and smoke-tests every target without
+# publishing.
+
+on:
+  push:
+    tags: ["v*"]
+  # Dry runs: a change to this workflow builds every target in its PR.
+  pull_request:
+    paths: [".github/workflows/release.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: check tag
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.tag.outputs.publish }}
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - id: tag
+        name: Tag must match the workspace version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+              echo "tag $GITHUB_REF_NAME does not match workspace version $version" >&2
+              exit 1
+            fi
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "tag=v$version-dryrun" >> "$GITHUB_OUTPUT"
+          fi
+
+  create:
+    name: create draft release
+    needs: check
+    if: needs.check.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.check.outputs.tag }}
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft \
+            --title "freedom-cored $TAG" \
+            --notes "freedom-cored binaries for Freedom Browser. Verify archives against SHA256SUMS."
+
+  build:
+    name: build (${{ matrix.asset }})
+    needs: [check, create]
+    # Runs for dry runs too (create is skipped then).
+    if: always() && needs.check.result == 'success' && (needs.create.result == 'success' || needs.create.result == 'skipped')
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { runner: macos-latest, target: aarch64-apple-darwin, asset: darwin-arm64, native: true }
+          - { runner: macos-latest, target: x86_64-apple-darwin, asset: darwin-amd64, native: false }
+          # Static musl binaries: no dependency on the distribution's glibc.
+          - { runner: ubuntu-latest, target: x86_64-unknown-linux-musl, asset: linux-amd64, native: true }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, asset: linux-arm64, native: true }
+          - { runner: windows-latest, target: x86_64-pc-windows-msvc, asset: windows-amd64, native: true }
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.check.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
+      - name: Build
+        shell: bash
+        env:
+          # Windows: link the C runtime statically (no VC++ redistributable).
+          RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static' || '' }}
+        run: cargo build --locked --release -p freedom-cored --target ${{ matrix.target }}
+      - name: Smoke test (usage exits 64)
+        if: matrix.native
+        shell: bash
+        run: |
+          set +e
+          bin=target/${{ matrix.target }}/release/freedom-cored
+          [ -f "$bin.exe" ] && bin="$bin.exe"
+          "$bin" 2>/dev/null
+          code=$?
+          set -e
+          echo "exit code $code"
+          [ "$code" = 64 ]
+      - name: Package
+        shell: bash
+        run: |
+          name="freedom-cored-${TAG}-${{ matrix.asset }}"
+          mkdir -p dist
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            archive="$name.zip"
+            (cd target/${{ matrix.target }}/release && 7z a -tzip "$GITHUB_WORKSPACE/dist/$archive" freedom-cored.exe >/dev/null)
+          else
+            archive="$name.tar.gz"
+            tar -C target/${{ matrix.target }}/release -czf "dist/$archive" freedom-cored
+          fi
+          (cd dist && (sha256sum "$archive" 2>/dev/null || shasum -a 256 "$archive") > "$archive.sha256")
+          cat "dist/$archive.sha256"
+      - name: Upload to the draft release
+        if: needs.check.outputs.publish == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY"
+
+  publish:
+    name: SHA256SUMS and publish
+    needs: [check, build]
+    if: needs.check.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.check.outputs.tag }}
+    steps:
+      - name: Assemble SHA256SUMS
+        run: |
+          mkdir sums && cd sums
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.sha256'
+          count=$(ls *.sha256 | wc -l)
+          [ "$count" = 5 ] || { echo "expected 5 checksums, got $count" >&2; exit 1; }
+          cat *.sha256 | sort -k2 > SHA256SUMS
+          cat SHA256SUMS
+          echo "digest of SHA256SUMS (pin this in freedom-browser):"
+          sha256sum SHA256SUMS
+          gh release upload "$TAG" SHA256SUMS --repo "$GITHUB_REPOSITORY"
+          for f in *.sha256; do gh release delete-asset "$TAG" "$f" --repo "$GITHUB_REPOSITORY" --yes; done
+      - name: Publish
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
