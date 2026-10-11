@@ -2,19 +2,23 @@
 //!
 //! - **Location:** `<lock-dir>/<sha256(canonical identity dir)>.lock`. The
 //!   lock directory is a per-user directory every Freedom build shares and
-//!   never deletes, so deleting or recreating the identity directory can't
-//!   affect the gate.
+//!   never deletes. It must not be the identity directory or inside it,
+//!   because deleting the identity directory would then delete the gate.
 //! - **Mechanism:** an OS lock (`flock`, `LockFileEx`) held for the life of
 //!   the process. The lock file is never truncated, renamed or unlinked.
 //! - **Storage qualification:** independent of locking. Known network
-//!   filesystems are refused, because a lock there may not exclude other
-//!   hosts.
+//!   filesystems are refused, and so is storage that can't be inspected.
+//! - **One directory:** the core works only in the canonical identity
+//!   directory whose gate it holds. The path is resolved again after locking,
+//!   and a change (a retargeted symlink) is refused.
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
+
+use crate::storage::{self, Qualification};
 
 /// How long contention is retried. Windows can release a lock a little
 /// after the owning process exits.
@@ -24,8 +28,13 @@ const CONTENTION_RETRY: Duration = Duration::from_secs(5);
 pub enum GateError {
     /// Another process holds the gate (exit 75).
     Held,
-    /// The identity or lock directory is on a network filesystem (exit 74).
-    NetworkFilesystem(String),
+    /// The lock or identity directory is on a network filesystem, or can't
+    /// be inspected (exit 74).
+    Unqualified(String),
+    /// The lock directory is the identity directory or inside it (exit 74).
+    LockInsideIdentity,
+    /// The identity directory resolved differently after locking (exit 74).
+    Moved,
     /// Any other storage failure (exit 74).
     Storage(std::io::Error),
 }
@@ -34,8 +43,12 @@ impl std::fmt::Display for GateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             GateError::Held => f.write_str("another process holds the identity directory's lock"),
-            GateError::NetworkFilesystem(fs) => write!(f, "refusing network filesystem {fs}"),
-            GateError::Storage(e) => write!(f, "storage error: {e}"),
+            GateError::Unqualified(reason) => write!(f, "refusing storage: {reason}"),
+            GateError::LockInsideIdentity => {
+                f.write_str("the lock directory must be outside the identity directory")
+            }
+            GateError::Moved => f.write_str("the identity directory changed while taking its lock"),
+            GateError::Storage(e) => write!(f, "storage error: {}", e.kind()),
         }
     }
 }
@@ -45,6 +58,8 @@ impl std::fmt::Display for GateError {
 pub struct Gate {
     _file: File,
     pub lock_path: PathBuf,
+    /// The canonical identity directory. Every operation uses this path.
+    pub identity_dir: PathBuf,
 }
 
 /// Qualifies storage, then takes the gate for `identity_dir`, retrying on
@@ -52,15 +67,22 @@ pub struct Gate {
 pub fn acquire(identity_dir: &Path, lock_dir: &Path) -> Result<Gate, GateError> {
     std::fs::create_dir_all(identity_dir).map_err(GateError::Storage)?;
     std::fs::create_dir_all(lock_dir).map_err(GateError::Storage)?;
-    let identity_dir = std::fs::canonicalize(identity_dir).map_err(GateError::Storage)?;
-    let lock_dir = std::fs::canonicalize(lock_dir).map_err(GateError::Storage)?;
-    for dir in [&identity_dir, &lock_dir] {
-        if let Some(fs) = crate::storage::network_filesystem(dir) {
-            return Err(GateError::NetworkFilesystem(fs));
+    let canonical_identity = std::fs::canonicalize(identity_dir).map_err(GateError::Storage)?;
+    let canonical_locks = std::fs::canonicalize(lock_dir).map_err(GateError::Storage)?;
+    if canonical_locks.starts_with(&canonical_identity) {
+        return Err(GateError::LockInsideIdentity);
+    }
+    for dir in [&canonical_identity, &canonical_locks] {
+        match storage::qualify(dir) {
+            Qualification::Local => {}
+            Qualification::Network(fs) => {
+                return Err(GateError::Unqualified(format!("network filesystem {fs}")));
+            }
+            Qualification::Unknown(reason) => return Err(GateError::Unqualified(reason)),
         }
     }
 
-    let lock_path = lock_dir.join(lock_file_name(&identity_dir));
+    let lock_path = canonical_locks.join(lock_file_name(&canonical_identity));
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -71,12 +93,7 @@ pub fn acquire(identity_dir: &Path, lock_dir: &Path) -> Result<Gate, GateError> 
     let started = Instant::now();
     loop {
         match file.try_lock() {
-            Ok(()) => {
-                return Ok(Gate {
-                    _file: file,
-                    lock_path,
-                });
-            }
+            Ok(()) => break,
             Err(TryLockError::WouldBlock) if started.elapsed() < CONTENTION_RETRY => {
                 std::thread::sleep(Duration::from_millis(100));
             }
@@ -84,6 +101,16 @@ pub fn acquire(identity_dir: &Path, lock_dir: &Path) -> Result<Gate, GateError> 
             Err(TryLockError::Error(e)) => return Err(GateError::Storage(e)),
         }
     }
+    // Resolve again under the lock: if the path now points elsewhere, this
+    // gate doesn't protect the directory we would be using.
+    if std::fs::canonicalize(identity_dir).map_err(GateError::Storage)? != canonical_identity {
+        return Err(GateError::Moved);
+    }
+    Ok(Gate {
+        _file: file,
+        lock_path,
+        identity_dir: canonical_identity,
+    })
 }
 
 /// The lock file's name: the SHA-256 of the canonical identity directory, so

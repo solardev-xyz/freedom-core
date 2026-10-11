@@ -36,7 +36,10 @@ impl From<&GateError> for Exit {
     fn from(error: &GateError) -> Self {
         match error {
             GateError::Held => Exit::LockHeld,
-            GateError::NetworkFilesystem(_) | GateError::Storage(_) => Exit::Storage,
+            GateError::Unqualified(_)
+            | GateError::LockInsideIdentity
+            | GateError::Moved
+            | GateError::Storage(_) => Exit::Storage,
         }
     }
 }

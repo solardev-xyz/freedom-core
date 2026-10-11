@@ -17,7 +17,7 @@ mod transport;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use exit::Exit;
 
@@ -56,10 +56,14 @@ fn parse_args() -> Option<Args> {
 }
 
 fn main() -> ExitCode {
-    ExitCode::from(run().code())
+    let started = Instant::now();
+    log::init();
+    let exit = run(started);
+    log::finish(Duration::from_millis(500));
+    ExitCode::from(exit.code())
 }
 
-fn run() -> Exit {
+fn run(started: Instant) -> Exit {
     let Some(args) = parse_args() else {
         log::error(USAGE, serde_json::json!({}));
         return Exit::Usage;
@@ -74,6 +78,7 @@ fn run() -> Exit {
             lock_dir,
             parent_pid: args.parent_pid,
             hello_timeout: Duration::from_millis(args.hello_timeout_ms),
+            started,
         }),
         "hold-lock" => hold_lock(&data_dir, &lock_dir),
         "recover" => recover(&data_dir, &lock_dir),
