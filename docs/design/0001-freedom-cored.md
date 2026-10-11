@@ -407,7 +407,7 @@ New code goes in `src/main/core/`:
 
 ### Rollback
 
-- **No runtime switch in packaged builds.** `FREEDOM_CORE=0` exists only when `!app.isPackaged`. A runtime switch would mean a release in which two writers, the JS vault and the core, share one identity directory without sharing the lock.
+- **No runtime switch.** A runtime switch would mean a release in which two writers, the JS vault and the core, share one identity directory without sharing the lock. Step 1's `FREEDOM_CORE=1` opt-in exists only in dev builds (`!app.isPackaged`), while the core does nothing yet. Step 2 removes it: from then on the core always runs, and no JS code path is left to switch back to.
 - **Rollback is a hotfix release** that reverts step 2. That's safe because the JS reads everything the core writes. `vectors/` checks vault files and Bee keystores written by Rust against the pinned JS, in CI, on every change.
 
 ### Quick unlock
