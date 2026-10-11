@@ -6,9 +6,13 @@ The code holds users' keys and money. Every rule below exists for that reason.
 
 ## Hard rules
 
-1. **Never delete files** unless the user asks you to or confirms it.
+1. **Deleting is fine** for generated output, scratch files, build artifacts, and branches or worktrees whose PR has merged. Clean up when disk space runs low.
 2. **Logic crates do no I/O.** No files, sockets, env vars, threads, async runtimes, or wall-clock reads. Time, randomness and storage come in as parameters or traits, so tests can inject them. The logic crates are `fc-keys`, `fc-vault`, `fc-evm`, `fc-naming` and the others marked "logic" in #644. They must compile for iOS and Android (CI checks this), and stay usable inside a Chromium build later.
 3. **No raw private key or seed leaves the core.**
+   - **Exceptions:**
+     - user-requested backup exports (`vault.export_*`) and the onboarding display of the mnemonic, which are permanent;
+     - the temporary `compat.*` exports listed in `docs/design/0001-freedom-cored.md`, which Phase 2 deletes.
+     Any new exception needs a design change.
    - Signing APIs take a key reference, never key bytes.
    - Secret types zeroize on drop.
    - Secret types implement no `Debug`/`Display` that prints the bytes, and no `Serialize`.
@@ -31,10 +35,9 @@ The code holds users' keys and money. Every rule below exists for that reason.
 ## Workflow
 
 - One branch and one git worktree per task, so agents don't share a checkout. Open a PR into `main`. Nothing is pushed to `main` directly.
-- CI must be green before merging.
-- Changes to keys, the vault, signing or approvals need two things before merge:
-  - **a review by the other model:** Claude reviews Codex's work and Codex reviews Claude's, posted as a PR comment;
-  - **the user's approval.**
+- **freedom-browser: open PRs only. Never merge into freedom-browser `main`, under any circumstance.**
+- **Merge gate:** every PR needs a review by the other model (Claude reviews Codex's work, Codex reviews Claude's), posted as a PR comment. Every finding must be fixed or explicitly answered. Once CI is green, the author squash-merges. The user is not a merge gate.
+- For keys, the vault, signing and approvals, the review must be adversarial: it checks parity against the JS reference, secret hygiene and failure paths, not just style.
 - Keep PRs small, one concern each. Say in the description what was verified and how.
 
 ## Commands
