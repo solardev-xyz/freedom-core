@@ -760,24 +760,57 @@ fn wire_fields_follow_design_0001() {
 
 // ---- The commit point (PR #9 confirmation pass) ----
 
-/// Each job stalls right after claiming its commit point, before the rename
-/// or unlink.
-const SLOW_COMMIT: (&str, &str) = ("FREEDOM_CORED_TEST_COMMIT_DELAY_MS", "1000");
+/// Each job stalls this long right after claiming its commit point, before
+/// the rename or unlink.
+const COMMIT_STALL: &str = "3000";
+
+/// Hooks that stall the commit and mark the moment it's claimed.
+fn commit_hooks(marker: &std::path::Path) -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "FREEDOM_CORED_TEST_COMMIT_DELAY_MS",
+            COMMIT_STALL.to_owned(),
+        ),
+        (
+            "FREEDOM_CORED_TEST_COMMIT_MARKER",
+            marker.display().to_string(),
+        ),
+    ]
+}
+
+fn env_refs<'a>(env: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a str)> {
+    env.iter().map(|(k, v)| (*k, v.as_str())).collect()
+}
+
+/// Waits until the core has claimed a commit point (the marker exists).
+fn wait_for_claim(marker: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !marker.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the job never claimed its commit point"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
 
 #[test]
 fn past_the_commit_point_the_reply_is_the_real_outcome() {
-    // A cancel and a deadline arriving after the claim don't apply: the
-    // delete happens and replies success, exactly once.
-    let env = [SLOW_COMMIT, ("FREEDOM_CORED_TEST_KDF_DEADLINE_MS", "3000")];
-    let (_root, data, mut core) = imported(&env);
+    // A cancel arriving after the claim doesn't apply: the delete happens
+    // and replies success, exactly once.
+    let marker_dir = tempfile::tempdir().unwrap();
+    let marker = marker_dir.path().join("claimed");
+    let env = commit_hooks(&marker);
+    let (_root, data, mut core) = imported(&env_refs(&env));
+    // The import above claimed a commit too; wait for the delete's own claim.
+    std::fs::remove_file(&marker).unwrap();
     let delete = request(
         3,
         "vault.delete",
         json!({ "password_b64": b64("testpass1") }),
     );
     core.send_raw(&frame(&delete));
-    // Let the KDF finish and the claim happen (well inside the 1 s stall).
-    std::thread::sleep(Duration::from_millis(1500));
+    wait_for_claim(&marker);
     core.send_raw(&cancel(3));
     let reply = core.response(3);
     assert_eq!(reply["result"], json!({}), "{reply}");
@@ -792,22 +825,28 @@ fn past_the_commit_point_the_reply_is_the_real_outcome() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_committed_job_past_its_deadline_does_not_spin_the_loop() {
-    let env = [
-        ("FREEDOM_CORED_TEST_COMMIT_DELAY_MS", "2500"),
-        ("FREEDOM_CORED_TEST_KDF_DEADLINE_MS", "1500"),
-    ];
+    let marker_dir = tempfile::tempdir().unwrap();
+    let marker = marker_dir.path().join("claimed");
+    let mut env = commit_hooks(&marker);
+    env[0].1 = "6000".into();
+    env.push(("FREEDOM_CORED_TEST_KDF_DEADLINE_MS", "4000".into()));
     let (_root, data, locks) = dirs();
-    let mut core = spawn_env("serve", &data, &locks, &[], &env);
+    let mut core = spawn_env("serve", &data, &locks, &[], &env_refs(&env));
     core.hello();
+    let sent = Instant::now();
     let create = request(
         2,
         "vault.create",
         json!({ "password_b64": b64("testpass1"), "words": 12 }),
     );
     core.send_raw(&frame(&create));
-    // The create claims its commit within ~1 s; its deadline passes at 1.5 s
-    // while the rename is still stalled. Measure CPU across that window.
-    std::thread::sleep(Duration::from_millis(1700));
+    wait_for_claim(&marker);
+    assert!(
+        sent.elapsed() < Duration::from_millis(3800),
+        "the KDF took too long for this test"
+    );
+    // Past the 4 s deadline, with the rename still stalled: measure CPU.
+    std::thread::sleep(Duration::from_millis(4200).saturating_sub(sent.elapsed()));
     let before = core.cpu_ticks();
     std::thread::sleep(Duration::from_millis(500));
     let spent = core.cpu_ticks() - before;
@@ -818,8 +857,11 @@ fn a_committed_job_past_its_deadline_does_not_spin_the_loop() {
 
 #[test]
 fn shutdown_waits_for_committed_work_and_sends_its_reply() {
+    let marker_dir = tempfile::tempdir().unwrap();
+    let marker = marker_dir.path().join("claimed");
+    let env = commit_hooks(&marker);
     let (_root, data, locks) = dirs();
-    let mut core = spawn_env("serve", &data, &locks, &[], &[SLOW_COMMIT]);
+    let mut core = spawn_env("serve", &data, &locks, &[], &env_refs(&env));
     core.hello();
     let create = request(
         2,
@@ -827,7 +869,7 @@ fn shutdown_waits_for_committed_work_and_sends_its_reply() {
         json!({ "password_b64": b64("testpass1"), "words": 12 }),
     );
     core.send_raw(&frame(&create));
-    std::thread::sleep(Duration::from_millis(1200));
+    wait_for_claim(&marker);
     core.send_raw(&frame(&request(3, "core.shutdown", json!({}))));
     // The shutdown is acknowledged, and the committed create still delivers
     // its phrase before the process exits.

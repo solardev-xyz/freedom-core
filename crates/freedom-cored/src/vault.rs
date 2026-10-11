@@ -45,7 +45,7 @@ use fc_protocol::secret::{SecretBytes, SecretResponse};
 use fc_vault::format::{self, SealParams};
 use fc_vault::state::{LockReason, Locked, Prepared, Ticket, VaultState};
 use fc_vault::throttle::{Attempt, Outcome, Throttle};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
@@ -198,6 +198,28 @@ pub enum JobOutput {
         result: Result<(), OpError>,
         commit: Option<Commit>,
     },
+    /// reconcile: `None` when the operation didn't commit.
+    Reconciled(Result<Option<Reconciled>, OpError>),
+}
+
+/// What `vault.reconcile` found for a committed create or import.
+#[derive(Default)]
+pub struct Reconciled {
+    addresses: Option<Addresses>,
+    /// create: the phrase for the onboarding display.
+    phrase: Option<Mnemonic>,
+    /// The secrets to install, only when `install` was asked for.
+    prepared: Option<Prepared>,
+}
+
+/// The mutation `vault.reconcile` checks (design 0001, "Reconciliation").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ReconcileOp {
+    Create,
+    Import,
+    ChangePassword,
+    Delete,
 }
 
 impl JobOutput {
@@ -207,7 +229,8 @@ impl JobOutput {
             JobOutput::Checked { commit, .. }
             | JobOutput::Written { commit, .. }
             | JobOutput::Changed { commit, .. } => commit.as_ref().map(|c| c.file.clone()),
-            JobOutput::Unlocked(_) => None,
+            // Read-only: unlock and reconcile change no file.
+            JobOutput::Unlocked(_) | JobOutput::Reconciled(_) => None,
         }
     }
 }
@@ -242,11 +265,24 @@ enum Kind {
         mnemonic: Mnemonic,
         overwrite: bool,
     },
+    Reconcile {
+        op: ReconcileOp,
+        before: Option<String>,
+        /// change_password: the new password.
+        password: SecretBytes,
+        /// import: the requested mnemonic.
+        mnemonic: Option<Mnemonic>,
+        install: bool,
+    },
 }
 
 impl Kind {
+    /// Reconcile isn't throttled: it checks a password main itself sent.
     fn throttled(&self) -> bool {
-        !matches!(self, Kind::Create { .. } | Kind::Import { .. })
+        !matches!(
+            self,
+            Kind::Create { .. } | Kind::Import { .. } | Kind::Reconcile { .. }
+        )
     }
 }
 
@@ -315,6 +351,7 @@ enum RunningKind {
     ExportPrivateKey(u32),
     Create,
     Import,
+    Reconcile { install: bool },
 }
 
 struct Running {
@@ -382,6 +419,21 @@ struct ImportParams<'a> {
     mnemonic_b64: &'a RawValue,
     #[serde(default)]
     overwrite: bool,
+}
+
+#[derive(Deserialize)]
+struct ReconcileParams<'a> {
+    op: ReconcileOp,
+    /// Required: `null` means main observed no vault before; a missing field
+    /// is unknown pre-state, never evidence of absence.
+    #[serde(default, deserialize_with = "present")]
+    fingerprint_before: Option<Option<String>>,
+    #[serde(borrow)]
+    password_b64: &'a RawValue,
+    #[serde(borrow, default)]
+    mnemonic_b64: Option<&'a RawValue>,
+    #[serde(default)]
+    install: bool,
 }
 
 #[derive(Deserialize)]
@@ -497,6 +549,7 @@ impl Vault {
                 | "vault.export_private_key"
                 | "vault.create"
                 | "vault.import"
+                | "vault.reconcile"
                 | "keys.generate_mnemonic"
                 | "keys.validate_mnemonic"
                 | "keys.addresses"
@@ -517,7 +570,9 @@ impl Vault {
         caller: CallerKind,
     ) -> Vec<Out> {
         let mut out = Vec::new();
-        if method.starts_with("compat.") && caller != CallerKind::Shell {
+        // compat.* and vault.reconcile are main-internal (design 0001).
+        let internal_only = method.starts_with("compat.") || method == "vault.reconcile";
+        if internal_only && caller != CallerKind::Shell {
             self.reply_error(
                 &mut out,
                 id,
@@ -832,6 +887,35 @@ impl Vault {
                     overwrite: p.overwrite,
                 }
             }
+            "vault.reconcile" => {
+                let invalid = || ErrorBody::new(ErrorCode::InvalidArgument, "Invalid parameters");
+                let p = params::<ReconcileParams>(raw)?;
+                let before = p.fingerprint_before.ok_or_else(invalid)?;
+                if before.as_deref().is_some_and(|f| !is_fingerprint(f)) {
+                    return Err(invalid());
+                }
+                // A password change needs a vault before it.
+                if p.op == ReconcileOp::ChangePassword && before.is_none() {
+                    return Err(invalid());
+                }
+                let password = secret(p.password_b64)?;
+                let mnemonic = match (p.op, p.mnemonic_b64) {
+                    (ReconcileOp::Import, Some(raw)) => {
+                        let phrase = secret(raw)?;
+                        let parsed = phrase.as_str().ok().and_then(|m| Mnemonic::parse(m).ok());
+                        Some(parsed.ok_or_else(invalid)?)
+                    }
+                    (ReconcileOp::Import, None) => return Err(invalid()),
+                    _ => None,
+                };
+                Kind::Reconcile {
+                    op: p.op,
+                    before,
+                    password,
+                    mnemonic,
+                    install: p.install,
+                }
+            }
             _ => return Err(ErrorBody::new(ErrorCode::UnknownMethod, "Unknown method")),
         };
         if self.queue.len() >= MAX_QUEUED {
@@ -953,6 +1037,26 @@ impl Vault {
                 RunningKind::Import,
                 Box::new(move |dir, control| {
                     job_import(dir, &password, mnemonic, overwrite, control)
+                }),
+            ),
+            Kind::Reconcile {
+                op,
+                before,
+                password,
+                mnemonic,
+                install,
+            } => (
+                RunningKind::Reconcile { install },
+                Box::new(move |dir, control| {
+                    JobOutput::Reconciled(job_reconcile(
+                        dir,
+                        op,
+                        before.as_deref(),
+                        &password,
+                        mnemonic.as_ref(),
+                        install,
+                        control,
+                    ))
                 }),
             ),
         };
@@ -1083,6 +1187,32 @@ impl Vault {
                 };
                 (Outcome::NotTried, reply)
             }
+            (RunningKind::Reconcile { install }, JobOutput::Reconciled(result)) => {
+                let reply = match result {
+                    Err(error) => Err(error.body(false)),
+                    Ok(None) => Ok(json_result(
+                        request,
+                        &serde_json::json!({ "status": "not_committed" }),
+                    )),
+                    Ok(Some(found)) => {
+                        // Installs only if main asked (no lock since the
+                        // mutation started) and no lock happened here since.
+                        if *install
+                            && let Some(prepared) = found.prepared
+                            && let Ok(epoch) =
+                                self.state
+                                    .install(running.ticket, prepared, self.auto_lock_ms, now)
+                        {
+                            out.push(Out::Send(event_payload(
+                                "vault.unlocked",
+                                &serde_json::json!({ "epoch": epoch.get() }),
+                            )));
+                        }
+                        reconcile_reply(request, found.addresses.as_ref(), found.phrase.as_ref())
+                    }
+                };
+                (Outcome::NotTried, reply)
+            }
             _ => (Outcome::NotTried, Err(internal())),
         };
         let (throttle, reply) = outcome;
@@ -1136,6 +1266,41 @@ impl Vault {
     }
 }
 
+/// A committed reconcile: `status`, the addresses (create, import) and the
+/// onboarding phrase (create).
+fn reconcile_reply(
+    request: u64,
+    addresses: Option<&Addresses>,
+    phrase: Option<&Mnemonic>,
+) -> Result<Option<Zeroizing<Vec<u8>>>, ErrorBody> {
+    let mut response = SecretResponse::new(request)
+        .public("status", &"committed")
+        .map_err(|_| internal())?;
+    if let Some(addresses) = addresses {
+        response = response
+            .public("addresses", addresses)
+            .map_err(|_| internal())?;
+    }
+    if let Some(phrase) = phrase {
+        response = response.secret("mnemonic_b64", phrase.phrase().as_bytes());
+    }
+    response.finish().map(Some).map_err(|_| internal())
+}
+
+/// Distinguishes a present field (even `null`) from a missing one: with
+/// `#[serde(default)]`, missing is `None` and `null` is `Some(None)`.
+fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(d).map(Some)
+}
+
+/// A vault fingerprint: 64 lowercase hex digits (SHA-256).
+fn is_fingerprint(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// create's reply: the addresses, and the phrase for backup display.
 fn create_reply(
     request: u64,
@@ -1174,7 +1339,7 @@ fn throttle_outcome(output: &JobOutput) -> Outcome {
         JobOutput::Checked { result, .. } | JobOutput::Changed { result, .. } => {
             result.as_ref().map(|_| ())
         }
-        JobOutput::Written { .. } => return Outcome::NotTried,
+        JobOutput::Written { .. } | JobOutput::Reconciled(_) => return Outcome::NotTried,
     };
     match result {
         Ok(_) => Outcome::Success,
@@ -1565,6 +1730,72 @@ fn job_import(
 
 /// A written vault's secrets, its addresses, and create's phrase.
 type NewVault = (Prepared, Addresses, Option<Mnemonic>);
+
+/// `vault.reconcile` (design 0001, "Reconciliation"): whether `op` actually
+/// committed, judged from the vault file as it is now. `before` is the
+/// fingerprint main recorded before the mutation.
+///
+/// | op | committed when |
+/// |---|---|
+/// | create | no vault before, one now, and it decrypts with `password` |
+/// | import | the fingerprint changed, and it decrypts to `requested` |
+/// | change_password | the fingerprint changed, and it decrypts with the new `password` |
+/// | delete | a vault before, none now |
+///
+/// A wrong password or a mismatch is `Ok(None)` (not committed); only
+/// storage errors are errors.
+fn job_reconcile(
+    dir: &Path,
+    op: ReconcileOp,
+    before: Option<&str>,
+    password: &SecretBytes,
+    requested: Option<&Mnemonic>,
+    install: bool,
+    control: &JobControl,
+) -> Result<Option<Reconciled>, OpError> {
+    if control.abandoned() {
+        return Err(OpError::Abandoned);
+    }
+    let contents = read_vault(dir)?;
+    let now = contents.as_deref().map(|c| sha256_hex(c.as_bytes()));
+    let changed = now.as_deref() != before;
+    let Some(contents) = contents else {
+        let deleted = op == ReconcileOp::Delete && before.is_some();
+        return Ok(deleted.then(Reconciled::default));
+    };
+    let committed_shape = match op {
+        ReconcileOp::Delete => false,
+        ReconcileOp::Create => before.is_none(),
+        ReconcileOp::Import | ReconcileOp::ChangePassword => changed,
+    };
+    if !committed_shape {
+        return Ok(None);
+    }
+    let Ok(opened) = format::open(&contents, password.as_bytes()) else {
+        return Ok(None);
+    };
+    match op {
+        ReconcileOp::ChangePassword => Ok(Some(Reconciled::default())),
+        ReconcileOp::Import
+            if requested.map(Mnemonic::phrase) != Some(opened.mnemonic.phrase()) =>
+        {
+            Ok(None)
+        }
+        _ => {
+            let addresses = addresses_of(&opened.mnemonic)?;
+            let phrase = if op == ReconcileOp::Create {
+                Some(Mnemonic::parse(opened.mnemonic.phrase()).map_err(|_| OpError::Internal)?)
+            } else {
+                None
+            };
+            Ok(Some(Reconciled {
+                addresses: Some(addresses),
+                phrase,
+                prepared: install.then(|| Prepared::new(opened.mnemonic)),
+            }))
+        }
+    }
+}
 
 /// Create and import do every fallible step before the write, so nothing
 /// can fail once the vault is committed.
