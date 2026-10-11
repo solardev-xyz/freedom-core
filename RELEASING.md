@@ -4,6 +4,11 @@ Freedom Browser ships `freedom-cored` inside the app. Each freedom-browser
 change that needs a newer core pins a freedom-core release (design 0001,
 "Migration in freedom-browser").
 
+0. **Notices.** The archives ship `THIRD-PARTY-NOTICES` next to the binary:
+   the licenses and notices of every crate statically linked into
+   `freedom-cored` on any release target. CI fails when it's stale; after a
+   dependency change run `cargo fetch --locked && python3
+   scripts/third-party-notices.py` and commit the result.
 1. **Bump the version** in a PR: `version` under `[workspace.package]` in
    `Cargo.toml`, **and** the lockfile, which records every workspace package's
    version: run `cargo check --workspace` and commit the updated `Cargo.lock`.

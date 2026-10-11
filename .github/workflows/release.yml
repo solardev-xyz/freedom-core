@@ -107,12 +107,14 @@ jobs:
         run: |
           name="freedom-cored-${TAG}-${{ matrix.asset }}"
           mkdir -p dist
+          # The binary, plus the notices of the crates it statically links.
           if [[ "${{ matrix.target }}" == *windows* ]]; then
             archive="$name.zip"
             (cd target/${{ matrix.target }}/release && 7z a -tzip "$GITHUB_WORKSPACE/dist/$archive" freedom-cored.exe >/dev/null)
+            7z a -tzip "dist/$archive" THIRD-PARTY-NOTICES >/dev/null
           else
             archive="$name.tar.gz"
-            tar -C target/${{ matrix.target }}/release -czf "dist/$archive" freedom-cored
+            tar -czf "dist/$archive" -C target/${{ matrix.target }}/release freedom-cored -C "$GITHUB_WORKSPACE" THIRD-PARTY-NOTICES
           fi
           (cd dist && (sha256sum "$archive" 2>/dev/null || shasum -a 256 "$archive") > "$archive.sha256")
           cat "dist/$archive.sha256"
