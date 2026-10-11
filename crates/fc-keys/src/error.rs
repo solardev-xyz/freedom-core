@@ -20,6 +20,13 @@ pub enum Error {
     /// The random number generator failed.
     #[error("random number generator failed")]
     Randomness,
+    /// The keystore's MAC doesn't match: wrong password or a damaged file.
+    #[error("incorrect keystore password")]
+    IncorrectPassword,
+    /// The keystore JSON is malformed or uses parameters this crate doesn't
+    /// accept.
+    #[error("invalid keystore: {0}")]
+    InvalidKeystore(&'static str),
     /// BIP-32 derivation failed (an invalid child key; probability ~2^-127).
     #[error("BIP-32 derivation failed")]
     Derivation,

@@ -1,5 +1,6 @@
 //! Key derivation for Freedom: BIP-39 mnemonics, BIP-32 (secp256k1) and
-//! SLIP-10 (Ed25519) derivation, and the path registry.
+//! SLIP-10 (Ed25519) derivation, the path registry, and the identity
+//! encoders the nodes need (Web3 keystore, OpenSSH, did:key, IPFS).
 //!
 //! This crate must reproduce freedom-browser's JS implementation exactly;
 //! `vectors/` holds the contract. It does no I/O, and randomness is passed in.
@@ -11,7 +12,10 @@ mod ed25519;
 mod error;
 pub mod freedom;
 pub mod kdf;
+pub mod keystore;
 mod mnemonic;
+pub mod multiformats;
+pub mod openssh;
 mod path;
 mod secp256k1;
 
