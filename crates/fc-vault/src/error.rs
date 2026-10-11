@@ -18,6 +18,19 @@ pub enum Error {
     /// time range).
     #[error("invalid parameters: {0}")]
     InvalidParams(&'static str),
+    /// The operation needs an unlocked vault (`VAULT_LOCKED_MESSAGE`).
+    #[error("Vault is locked")]
+    Locked,
+    /// A lock or another unlock happened after this unlock's ticket was
+    /// taken; the prepared secrets were wiped, not installed.
+    #[error("unlock revoked by a later lock")]
+    Revoked,
+    /// The generation counter is exhausted (2^64 locks and unlocks).
+    #[error("vault generation counter exhausted")]
+    Exhausted,
+    /// Key derivation failed.
+    #[error("key derivation: {0}")]
+    Keys(fc_keys::Error),
     /// The random number generator failed.
     #[error("random number generator failed")]
     Randomness,
