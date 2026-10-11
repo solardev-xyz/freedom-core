@@ -1,6 +1,6 @@
 # 0001: `freedom-cored`, the desktop core process
 
-**Status:** draft, revision 3. It incorporates both of Codex's reviews on PR #1. **Scope:** Phase 1 of [freedom-browser#644](https://github.com/solardev-xyz/freedom-browser/issues/644), plus the protocol contract that Phases 2–5 extend.
+**Status:** draft, revision 4. It incorporates Codex's three reviews on PR #1. **Scope:** Phase 1 of [freedom-browser#644](https://github.com/solardev-xyz/freedom-browser/issues/644), plus the protocol contract that Phases 2–5 extend.
 
 ## Summary
 
@@ -69,7 +69,7 @@ Stage 1 trusts Electron main: it holds the pipe, fills in the caller context, an
 ## Process model
 
 ```
-Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <identityDir> --parent-pid <main's pid>
+Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <identityDir> --lock-dir <locksDir> --parent-pid <main's pid>
      stdin  ──frames──▶
      stdout ◀──frames──
      stderr ◀──JSON log lines── (forwarded to main's log)
@@ -86,22 +86,28 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
 
 ### Lifetime lock
 
-- **The lock:**
-  - The core opens `<identityDir>/freedom-cored.lock` for read and write, creating it if needed, never truncating it, and with close-on-exec, which is Rust's default.
-  - It then takes `File::try_lock`, which is `flock` on Unix and `LockFileEx` on Windows.
+- **Where the lock lives:** in a stable, app-level directory that is never deleted. Main passes `--lock-dir`, which is `<profile catalog root>/locks`. The lock file is `<lock-dir>/<sha256(canonical identity dir)>.lock`.
+  - The canonical path resolves symlinks, so aliases of one identity directory share one lock.
+  - Deleting, moving or recreating the identity directory can't affect a lock that lives outside it.
+  - Bind mounts that give one directory several paths aren't covered, and are documented as unsupported.
+- **Taking the lock:**
+  - The core opens the file for read and write, creating it if needed, never truncating it, and with close-on-exec, which is Rust's default.
+  - It then takes `File::try_lock` (`flock` on Unix, `LockFileEx` on Windows).
 - **Outcomes:**
   - **Contention:** retry for 5 s (Windows can release a lock a little after process exit), then exit 75 (`lock_held`).
   - **Any other locking error:** exit 74 (`storage`). The core never runs without the lock.
-- **Storage qualification,** independent of whether locking succeeds. `flock` can succeed on network filesystems without excluding other hosts, so before locking, the core checks the filesystem of the identity directory:
-  - **Linux:** `statfs` magic numbers for NFS, SMB/CIFS, AFS, Ceph, 9p and FUSE network filesystems (sshfs, rclone).
+- **Storage qualification,** independent of whether locking succeeds. `flock` can succeed on network filesystems without excluding other hosts, so before locking, the core checks both the lock directory and the identity directory:
+  - **Linux:** `statfs` magic numbers for NFS, SMB/CIFS, AFS, Ceph, 9p and FUSE network filesystems.
   - **macOS:** `f_fstypename` in `nfs`, `smbfs`, `afpfs`, `webdav`, `ftp`.
   - **Windows:** `GetDriveTypeW` returning `DRIVE_REMOTE`.
 
-  A known network type means exit 74 with `storage { kind: "network_filesystem" }`. Unknown local types are accepted. The guarantee is therefore exclusion between cores on local storage, not detection of every exotic setup.
-- **One guard for every writer: `freedom-cored hold-lock --data-dir <dir>`.** It acquires the lock under the same rules, prints `locked`, and holds the lock until its stdin closes. These must use it:
-  - **Destructive operations:** profile delete and reset (`profile-catalog.js`) and data migrations. They start `hold-lock`, wait for `locked`, change the filesystem, then close stdin. No core can start in between, because the lock stays on the inode for the whole operation. Path aliases of one directory share an inode, so they're covered too.
-  - **The JS backend in dev builds** (`FREEDOM_CORE=0`) holds a `hold-lock` for the identity directory for the process lifetime. The same goes for any hotfix that reverts to the JS vault: it keeps shipping the binary for this purpose. So the JS vault and a core can never write the same directory at the same time.
-- **The lock file is never renamed, unlinked or recreated** while anything might hold it. Only an operation that itself holds `hold-lock` may remove the directory.
+  A known network type means exit 74 with `storage { kind: "network_filesystem" }`. The guarantee is exclusion between cores on local storage.
+- **One gate for every core-format writer.** The same `freedom-cored` binary provides two more subcommands, both of which take the gate under the same rules:
+  - **`hold-lock --data-dir … --lock-dir …`** prints `locked`, then holds the gate until its stdin closes. Profile delete and reset (`profile-catalog.js`) and data migrations hold it for the whole destructive operation. The gate lives outside the directory being removed, so no core can start until the operation releases it.
+  - **`recover --data-dir … --lock-dir …`** takes the gate, rolls forward any node-identity journal (see [Multi-file writes](#multi-file-writes)), prints `recovered` (or `corrupt` with details), then exits.
+- **The JS vault writer** (`FREEDOM_CORE=0` in dev builds, or a hotfix that reverts to the JS vault) can't hold an OS lock itself, because Node has no `flock`. So:
+  - **It runs `recover` at startup,** before it starts any node or writes any identity file. A journal that a core left behind is therefore always completed first. Such builds keep shipping the binary for this purpose.
+  - **Running the JS writer and a core on the same identity directory at the same time is unsupported.** Production never does it: packaged builds have no backend switch, and one profile process runs one backend. The only way to get there is a dev setup that shares `FREEDOM_IDENTITY_DATA` across backends, which is documented as unsupported.
 
 ### Shutdown, crashes and parent death
 
@@ -182,9 +188,14 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   - **After its commit point** (the vault rename, or the node journal being written), a transaction finishes with the material it already holds. It wipes that material, reinstalls nothing, and reports its committed public result.
   - **Replies already being serialized,** such as a `compat.private_key` reply, keep the copy they took. Lock stops new use; it can't recall bytes already handed out.
 - **Mutations** (create, import, change_password, delete, node writes) are serialized through one vault task.
-- **Limits:**
+- **Control messages need no admission.** `vault.lock`, `core.shutdown`, `cancel` and `vault.status` are handled inline on the I/O task:
+  - lock and shutdown revoke the epoch and wipe the resident secrets right away;
+  - cancel marks the target request;
+  - status answers from a snapshot.
+
+  None of them takes a slot, so nothing can crowd them out.
+- **Limits for everything else:**
   - At most 64 admitted requests; beyond that, `busy`.
-  - **Exempt from the cap:** `vault.lock`, `core.shutdown`, `cancel` and `vault.status` have their own reserve of 8, so lock and shutdown always get in.
   - At most 2 concurrent KDF jobs.
   - A slot is held until the underlying work actually finishes, not when its caller gives up.
 
@@ -194,26 +205,30 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   - A deadline is a total budget on a monotonic clock, starting when the core admits the request (queue time included). Defaults: 30 s for KDF methods, 5 s for everything else.
   - **The core enforces deadlines and always replies.** Main doesn't settle requests on its own timer. It runs only a hang watchdog: core deadline + 15 s. If the watchdog fires, main treats the core as hung, kills it, restarts it and [reconciles](#reconciliation).
 - **Before the commit point,** a deadline or `cancel` stops the operation and returns `deadline` or `cancelled`. Throttle attempts are reserved before a KDF starts, so concurrent guesses can't all slip past the check.
-- **After the commit point,** the rename of the vault file or the intent record of a multi-file write, the operation always runs to completion and reports its real outcome, even past the deadline.
+- **After the commit point** (the vault rename or unlink, or the journal write of a multi-file operation), the operation runs to completion and **always reports success**, even past the deadline. A failure after the commit point, such as a directory `fsync` error, doesn't turn into an error reply. It is reported as success with `durable: false`, and logged. So every error reply means "not committed", and only a missing reply needs reconciliation.
 - **Read-only operations** can be cancelled at any time.
 
 ### Reconciliation
 
 A reply can still go missing (core crash, hang watchdog), so every mutation can be reconciled. Main runs vault mutations one at a time, which means the state it records before a mutation belongs to exactly that operation.
 
-- **Before a mutation,** main records `vault.status` (`exists`, `fingerprint`, where the fingerprint is the SHA-256 of the vault file). If the mutation ends in anything but a reply (crash or hang), main restarts the core and calls **`vault.reconcile { op, fingerprint_before, password_b64, mnemonic_b64? }`**. The core checks the operation's actual effect:
+- **Before a mutation,** main records `vault.status` (`exists`, `fingerprint`, where the fingerprint is the SHA-256 of the vault file). If the mutation ends without a reply (crash or hang), main restarts the core and calls **`vault.reconcile { op, fingerprint_before, password_b64, mnemonic_b64?, install }`**. Error replies are always pre-commit (see above), so they need no reconciliation. The core checks the operation's actual effect:
 
   | `op` | committed when | then the core |
   |---|---|---|
-  | `create` | a vault exists now, it didn't before, and it decrypts with the password | unlocks (as create does) and returns `{ mnemonic, addresses }` |
-  | `import` | the fingerprint changed and the vault decrypts with the password to the requested mnemonic | unlocks (as import does) and returns `{ addresses }` |
+  | `create` | a vault exists now, it didn't before, and it decrypts with the password | returns `{ mnemonic, addresses }`; unlocks only if `install` |
+  | `import` | the fingerprint changed and the vault decrypts with the password to the requested mnemonic | returns `{ addresses }`; unlocks only if `install` |
   | `change_password` | the fingerprint changed and the vault decrypts with the **new** password | returns `{}`; the vault stays locked after the restart |
   | `delete` | a vault existed and is now absent | returns `{}` |
 
   Otherwise `vault.reconcile` returns `not_committed`, and main reports the original error.
 - **A committed result goes back to the original caller as a success.** `identity-manager.js` continues its normal success path: it writes `vault-meta.json`, and in Quick Setup the renderer stores the random password. So a core-only failure can no longer turn a written vault into a reported failure.
 - **A crash of main itself** between the core's commit and main's metadata write is the same window JS has today (vault file written, then metadata). It isn't new and isn't addressed here.
-- **If the core can't be restarted,** main reports `core_unavailable`. Retrying the same operation reconciles first.
+- **`install` respects locks that happened since.** Main tracks every lock it requested and every `vault.locked` event, across core generations. It passes `install: true` only if no lock happened after the mutation started. Otherwise the core works out the result with temporary secrets, wipes them, and leaves the vault locked. An acknowledged lock is never undone.
+- **If the core can't be restarted:**
+  - **The caller waits.** Main keeps retrying the restart for up to 60 s.
+  - **After that,** main reports `core_unavailable` and keeps a pending-recovery record in memory: the operation and its parameters, wiped once used. No other vault mutation is accepted until it has been reconciled. When the core is back, main reconciles first and runs the metadata continuation itself, by writing `vault-meta.json`.
+  - **Quick Setup:** a renderer that has meanwhile given up never stores the random password. So a vault with `userKnowsPassword: false` and no quick-unlock credential counts as an abandoned Quick Setup, and onboarding offers to start over with `vault.import { overwrite: true }`. Its phrase was never shown, and the identity can't have been funded.
 - **No accidental rewrites:** the core never rewrites the vault file except through create, import, change_password and delete. Startup, status, unlock and verify read it and never write it, so quick unlock's content fingerprint survives. Tightening the file's mode to `0600` changes metadata, not content.
 - **`vault.reconcile` doesn't count toward throttling.** It verifies a password main itself sent in the operation it is reconciling.
 
@@ -246,7 +261,7 @@ This covers node identities. **Bee:** `keys/swarm.key` plus `config.yaml`. **Rad
    Then `fsync` every affected directory.
 4. **Finish.** Add `op_id` to `<identityDir>/node-identity-done.json` (the last 32 operations, written atomically), then delete the journal and `fsync`.
 
-- **Recovery** runs at startup before `core.hello` is answered, and before any node write. For a leftover journal, repeat step 3 for each file:
+- **Recovery** runs before `core.hello` is answered, before any node write, and in `freedom-cored recover`, which JS-backend builds run at startup. For a leftover journal, repeat step 3 for each file:
   - a target with the right digest is done;
   - otherwise a staged file with the right digest is renamed into place;
   - if neither exists, the operation reports `node_identity_corrupt`, which needs a fresh write while unlocked; main shows that as a node error.
@@ -452,8 +467,20 @@ The password crosses the pipe, which is no worse than today, where it is used in
   - **Epochs:** lock during an unlock's KDF (the secrets must not come back), auto-lock during a node write.
   - **Deadlines and limits:** a deadline while queued, during the KDF, at commit and while replying; throttle reservation under concurrent guesses.
   - **Crashes:** killed at every commit point of every mutation and node write, each followed by reconciliation and roll-forward.
-  - **Lifetime lock:** two processes on one directory; `hold-lock` held across a delete while a core tries to start; a network-filesystem refusal; EOF mid-frame; parent death before and after the handshake; no `core.hello` within 10 s.
-  - **Reconciliation:** a lost reply for every mutation, including create and delete, then `vault.reconcile` in each state.
+  - **Lifetime lock:**
+    - two processes on one directory, and through a symlink alias;
+    - `hold-lock` held across a delete and recreation of the identity directory while a core tries to start;
+    - `recover` after a journal left at each install rename;
+    - a network-filesystem refusal;
+    - EOF mid-frame;
+    - parent death before and after the handshake;
+    - no `core.hello` within 10 s.
+  - **Control path:** lock and shutdown still work with all 64 slots and a burst of status and cancel messages in flight.
+  - **Reconciliation:**
+    - a lost reply for every mutation, including create and delete, then `vault.reconcile` in each state;
+    - an acknowledged lock between commit and the lost reply, after which the vault stays locked;
+    - a directory `fsync` failure after rename or unlink, reported as success with `durable: false`;
+    - recovery unavailable, then the pending-recovery record is completed after restart.
   - **Node journal:** crashes after each install rename and before and after journal removal; then `nodes.op_status`.
   - **Input:** a 1,025-byte password vault still unlocks; lone surrogates; passwords with quotes and backslashes; the throttle and the core generation survive malformed renderer input.
 - **freedom-browser:**
