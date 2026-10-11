@@ -17,6 +17,9 @@ pub enum Error {
     /// SLIP-10 Ed25519 derivation supports hardened indices only.
     #[error("Ed25519 derivation requires hardened indices")]
     NonHardenedEd25519,
+    /// The random number generator failed.
+    #[error("random number generator failed")]
+    Randomness,
     /// BIP-32 derivation failed (an invalid child key; probability ~2^-127).
     #[error("BIP-32 derivation failed")]
     Derivation,

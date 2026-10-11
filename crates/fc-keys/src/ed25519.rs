@@ -3,7 +3,8 @@
 
 use std::fmt;
 
-use hmac::{Hmac, Mac};
+use hmac::digest::FixedOutput;
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha512;
 use zeroize::Zeroizing;
 
@@ -49,8 +50,10 @@ fn hmac(key: &[u8], parts: &[&[u8]]) -> Result<Zeroizing<[u8; 64]>, Error> {
     for part in parts {
         mac.update(part);
     }
+    let mut output = Zeroizing::new(hmac::digest::Output::<HmacSha512>::default());
+    FixedOutput::finalize_into(mac, &mut output);
     let mut out = Zeroizing::new([0u8; 64]);
-    out.copy_from_slice(&mac.finalize().into_bytes());
+    out.copy_from_slice(output.as_slice());
     Ok(out)
 }
 

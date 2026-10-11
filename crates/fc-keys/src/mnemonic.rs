@@ -13,7 +13,7 @@ use std::fmt;
 use std::sync::OnceLock;
 
 use pbkdf2::pbkdf2_hmac;
-use rand_core::CryptoRngCore;
+use rand_core::TryCryptoRng;
 use sha2::{Digest, Sha256, Sha512};
 use unicode_normalization::UnicodeNormalization;
 use zeroize::Zeroizing;
@@ -65,7 +65,7 @@ pub struct Seed(Zeroizing<[u8; 64]>);
 impl Mnemonic {
     /// Parses `input` with the rules of `@scure/bip39`'s `validateMnemonic`.
     pub fn parse(input: &str) -> Result<Self, Error> {
-        let normalized: Zeroizing<String> = Zeroizing::new(input.nfkd().collect());
+        let normalized = nfkd(input);
         decode_entropy(&normalized)?;
         Ok(Mnemonic {
             phrase: Zeroizing::new(input.to_owned()),
@@ -83,13 +83,16 @@ impl Mnemonic {
     }
 
     /// Generates a new mnemonic from `rng`, like `createMnemonic(strength)`.
-    pub fn generate(rng: &mut impl CryptoRngCore, words: WordCount) -> Self {
+    pub fn generate<R: TryCryptoRng + ?Sized>(
+        rng: &mut R,
+        words: WordCount,
+    ) -> Result<Self, Error> {
         let mut entropy = Zeroizing::new([0u8; 32]);
         let entropy = &mut entropy[..words.entropy_len()];
-        rng.fill_bytes(entropy);
-        Mnemonic {
+        rng.try_fill_bytes(entropy).map_err(|_| Error::Randomness)?;
+        Ok(Mnemonic {
             phrase: encode_entropy(entropy),
-        }
+        })
     }
 
     /// The phrase exactly as given (or as generated). Only for storing in
@@ -104,9 +107,8 @@ impl Mnemonic {
     }
 
     fn to_seed_with_passphrase(&self, passphrase: &str) -> Seed {
-        let normalized: Zeroizing<String> = Zeroizing::new(self.phrase.nfkd().collect());
-        let salt: Zeroizing<String> =
-            Zeroizing::new(format!("mnemonic{passphrase}").nfkd().collect());
+        let normalized = nfkd(&self.phrase);
+        let salt = nfkd(&format!("mnemonic{passphrase}"));
         let mut seed = Zeroizing::new([0u8; 64]);
         pbkdf2_hmac::<Sha512>(
             normalized.as_bytes(),
@@ -118,6 +120,15 @@ impl Mnemonic {
     }
 }
 
+/// NFKD into a `Zeroizing<String>` allocated at its exact final size, so no
+/// reallocation leaves an unwiped copy of a prefix behind.
+fn nfkd(input: &str) -> Zeroizing<String> {
+    let len = input.nfkd().map(char::len_utf8).sum();
+    let mut out = Zeroizing::new(String::with_capacity(len));
+    out.extend(input.nfkd());
+    out
+}
+
 /// Same result as `@scure/bip39`'s `validateMnemonic(input, english)`.
 pub fn is_valid_mnemonic(input: &str) -> bool {
     Mnemonic::parse(input).is_ok()
@@ -125,7 +136,7 @@ pub fn is_valid_mnemonic(input: &str) -> bool {
 
 /// Encodes entropy whose length is a multiple of 4 bytes as words.
 fn encode_entropy(entropy: &[u8]) -> Zeroizing<String> {
-    let checksum = Sha256::digest(entropy);
+    let checksum = Zeroizing::new(Sha256::digest(entropy));
     let entropy_bits = entropy.len() * 8;
     let total_bits = entropy_bits + entropy_bits / 32;
     let bit = |i: usize| -> u16 {
@@ -137,6 +148,8 @@ fn encode_entropy(entropy: &[u8]) -> Zeroizing<String> {
         u16::from((byte >> (7 - (i % 8))) & 1)
     };
     let words = wordlist();
+    // 11 bytes per word exceed the longest English word (8) plus a space, so
+    // the string never reallocates.
     let mut phrase = Zeroizing::new(String::with_capacity(total_bits));
     for word_index in 0..total_bits / 11 {
         let mut index: u16 = 0;
@@ -175,7 +188,7 @@ fn decode_entropy(normalized: &str) -> Result<Zeroizing<Vec<u8>>, Error> {
             entropy[i / 8] |= 1 << (7 - (i % 8));
         }
     }
-    let checksum = Sha256::digest(entropy.as_slice());
+    let checksum = Zeroizing::new(Sha256::digest(entropy.as_slice()));
     for i in 0..checksum_bits {
         let expected = (checksum[i / 8] >> (7 - (i % 8))) & 1 == 1;
         if bits[entropy_bits + i] != expected {
@@ -262,23 +275,89 @@ mod tests {
         );
     }
 
+    /// A deterministic RNG for tests; `fail` makes every call error.
+    struct TestRng {
+        next: u8,
+        fail: bool,
+    }
+
+    #[derive(Debug)]
+    struct TestRngError;
+
+    impl fmt::Display for TestRngError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("test rng failure")
+        }
+    }
+
+    impl std::error::Error for TestRngError {}
+
+    impl rand_core::TryRng for TestRng {
+        type Error = TestRngError;
+
+        fn try_next_u32(&mut self) -> Result<u32, TestRngError> {
+            let mut bytes = [0u8; 4];
+            self.try_fill_bytes(&mut bytes)?;
+            Ok(u32::from_le_bytes(bytes))
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, TestRngError> {
+            let mut bytes = [0u8; 8];
+            self.try_fill_bytes(&mut bytes)?;
+            Ok(u64::from_le_bytes(bytes))
+        }
+
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), TestRngError> {
+            if self.fail {
+                return Err(TestRngError);
+            }
+            for byte in dst {
+                *byte = self.next;
+                self.next = self.next.wrapping_add(1);
+            }
+            Ok(())
+        }
+    }
+
+    impl rand_core::TryCryptoRng for TestRng {}
+
     #[test]
     fn generate_uses_requested_length() {
-        let mut rng = rand_core::OsRng;
+        let mut rng = TestRng {
+            next: 0,
+            fail: false,
+        };
+        for (words, count) in [
+            (WordCount::W12, 12),
+            (WordCount::W15, 15),
+            (WordCount::W18, 18),
+            (WordCount::W21, 21),
+            (WordCount::W24, 24),
+        ] {
+            let mnemonic = Mnemonic::generate(&mut rng, words).unwrap();
+            assert_eq!(mnemonic.phrase().split(' ').count(), count);
+            assert!(is_valid_mnemonic(mnemonic.phrase()));
+        }
+    }
+
+    #[test]
+    fn generate_reports_rng_failure() {
+        let mut rng = TestRng {
+            next: 0,
+            fail: true,
+        };
         assert_eq!(
-            Mnemonic::generate(&mut rng, WordCount::W12)
-                .phrase()
-                .split(' ')
-                .count(),
-            12
+            Mnemonic::generate(&mut rng, WordCount::W24).unwrap_err(),
+            Error::Randomness
         );
-        assert_eq!(
-            Mnemonic::generate(&mut rng, WordCount::W24)
-                .phrase()
-                .split(' ')
-                .count(),
-            24
-        );
+    }
+
+    #[test]
+    fn nfkd_never_reallocates() {
+        for input in [ABANDON_12, "ａｂｏｕｔ", "abandon\u{3000}about", "e\u{301}"] {
+            let out = nfkd(input);
+            assert_eq!(out.capacity(), out.len(), "{input:?}");
+        }
     }
 
     #[test]

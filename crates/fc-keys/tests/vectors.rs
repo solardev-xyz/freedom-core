@@ -67,21 +67,17 @@ fn keys_json() {
             "{id} seed"
         );
 
-        for (expected, index) in vector["userWallets"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .zip(INDICES)
-        {
+        // `zip` stops at the shorter side, so pin the counts first; otherwise a
+        // truncated vector file would pass silently.
+        let user_wallets = vector["userWallets"].as_array().unwrap();
+        let publishers = vector["publisherKeys"].as_array().unwrap();
+        assert_eq!(user_wallets.len(), INDICES.len(), "{id}: user wallet count");
+        assert_eq!(publishers.len(), INDICES.len(), "{id}: publisher count");
+        for (expected, index) in user_wallets.iter().zip(INDICES) {
             check_secp(expected, &derive_user_wallet(&seed, index).unwrap());
             assert_eq!(expected["accountIndex"], index, "{id} account {index}");
         }
-        for (expected, index) in vector["publisherKeys"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .zip(INDICES)
-        {
+        for (expected, index) in publishers.iter().zip(INDICES) {
             check_secp(expected, &derive_publisher(&seed, index).unwrap());
             assert_eq!(expected["originIndex"], index, "{id} origin {index}");
         }

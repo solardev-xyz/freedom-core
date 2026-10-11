@@ -1,5 +1,11 @@
 //! BIP-32 derivation paths in the `m/44'/60'/0'/0/0` notation that
-//! freedom-browser uses. Only `'` marks a hardened segment, as in ethers.
+//! freedom-browser's registered paths use. Only `'` marks a hardened
+//! segment, as in ethers.
+//!
+//! This is deliberately a subset, not a general parser. It rejects forms
+//! that ethers or micro-key-producer also accept: relative paths without
+//! `m/`, `M`, and `m'`. Freedom never builds those, and every path the core
+//! derives comes from `freedom.rs`.
 
 use std::fmt;
 use std::str::FromStr;

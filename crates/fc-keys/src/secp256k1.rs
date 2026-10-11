@@ -2,14 +2,23 @@
 //! `HDNodeWallet.fromMnemonic(…, path)`.
 //!
 //! BIP-32 is implemented here on `k256` rather than taken from a crate, so
-//! every intermediate private key and chain code is zeroized.
+//! every intermediate value it owns (HMAC outputs, scalars, chain codes, key
+//! bytes) is wiped. HMAC and SHA-512 internals are wiped by their `zeroize`
+//! features.
+//!
+//! One deliberate deviation from BIP-32, for parity with ethers 6: when
+//! `IL >= n`, BIP-32 says to skip to the next index, but ethers adds `IL`
+//! and reduces modulo `n`. We do the same, so Freedom's keys stay identical
+//! (the case has probability ~2^-127). A zero child key is still an error,
+//! as in ethers.
 
 use std::fmt;
 
-use hmac::{Hmac, Mac};
-use k256::elliptic_curve::PrimeField;
-use k256::elliptic_curve::sec1::ToEncodedPoint;
-use k256::{NonZeroScalar, Scalar, SecretKey};
+use hmac::digest::FixedOutput;
+use hmac::{Hmac, KeyInit, Mac};
+use k256::elliptic_curve::ops::Reduce;
+use k256::elliptic_curve::sec1::ToSec1Point;
+use k256::{FieldBytes, NonZeroScalar, Scalar, SecretKey};
 use sha2::Sha512;
 use sha3::{Digest, Keccak256};
 use zeroize::Zeroizing;
@@ -46,28 +55,42 @@ fn derive_from_seed_bytes(seed: &[u8], path: &DerivationPath) -> Result<Secp256k
     })
 }
 
-/// BIP-32 `CKDpriv`.
+/// BIP-32 `CKDpriv`, with ethers' modular handling of `IL >= n`.
 fn derive_child(
     parent: &SecretKey,
     chain_code: &[u8; 32],
     child: ChildIndex,
 ) -> Result<(SecretKey, Zeroizing<[u8; 32]>), Error> {
     let i = if child.is_hardened() {
-        let parent_bytes: Zeroizing<[u8; 32]> = Zeroizing::new(parent.to_bytes().into());
+        let parent_bytes = Zeroizing::new(parent.to_bytes());
         hmac(
             chain_code,
             &[&[0u8], parent_bytes.as_slice(), &child.to_be_bytes()],
         )?
     } else {
-        let public = parent.public_key().to_encoded_point(true);
+        let public = parent.public_key().to_sec1_point(true);
         hmac(chain_code, &[public.as_bytes(), &child.to_be_bytes()])?
     };
-    let tweak = scalar_from(&i[..32])?;
-    let sum = tweak + parent.to_nonzero_scalar().as_ref();
-    let child_key = Option::<NonZeroScalar>::from(NonZeroScalar::new(sum))
-        .map(SecretKey::from)
+    child_from_i(parent, &i)
+}
+
+/// The child key and chain code from the HMAC output `I = IL || IR`.
+fn child_from_i(
+    parent: &SecretKey,
+    i: &[u8; 64],
+) -> Result<(SecretKey, Zeroizing<[u8; 32]>), Error> {
+    let mut il = Zeroizing::new(FieldBytes::default());
+    il.copy_from_slice(&i[..32]);
+    let tweak = Zeroizing::new(<Scalar as Reduce<FieldBytes>>::reduce(&il));
+    let parent_scalar = Zeroizing::new(*parent.to_nonzero_scalar());
+    let sum = Zeroizing::new(*tweak + *parent_scalar);
+    let child = Option::<NonZeroScalar>::from(NonZeroScalar::new(*sum))
+        .map(|nonzero| {
+            let nonzero = Zeroizing::new(nonzero);
+            SecretKey::from(&*nonzero)
+        })
         .ok_or(Error::Derivation)?;
-    Ok((child_key, chain_code_from(&i)))
+    Ok((child, chain_code_from(i)))
 }
 
 fn hmac(key: &[u8], parts: &[&[u8]]) -> Result<Zeroizing<[u8; 64]>, Error> {
@@ -75,16 +98,11 @@ fn hmac(key: &[u8], parts: &[&[u8]]) -> Result<Zeroizing<[u8; 64]>, Error> {
     for part in parts {
         mac.update(part);
     }
+    let mut output = Zeroizing::new(hmac::digest::Output::<HmacSha512>::default());
+    FixedOutput::finalize_into(mac, &mut output);
     let mut out = Zeroizing::new([0u8; 64]);
-    out.copy_from_slice(&mac.finalize().into_bytes());
+    out.copy_from_slice(output.as_slice());
     Ok(out)
-}
-
-/// `parse256(IL)`, rejecting values `>= n` as BIP-32 requires.
-fn scalar_from(bytes: &[u8]) -> Result<Scalar, Error> {
-    let mut repr = k256::FieldBytes::default();
-    repr.copy_from_slice(bytes);
-    Option::<Scalar>::from(Scalar::from_repr(repr)).ok_or(Error::Derivation)
 }
 
 fn secret_from(bytes: &[u8]) -> Result<SecretKey, Error> {
@@ -104,7 +122,7 @@ impl Secp256k1Key {
 
     /// SEC1 compressed public key (33 bytes), as ethers' `publicKey`.
     pub fn public_key(&self) -> [u8; 33] {
-        let point = self.key.verifying_key().as_affine().to_encoded_point(true);
+        let point = self.key.verifying_key().as_affine().to_sec1_point(true);
         let mut out = [0u8; 33];
         out.copy_from_slice(point.as_bytes());
         out
@@ -112,7 +130,7 @@ impl Secp256k1Key {
 
     /// SEC1 uncompressed public key (65 bytes, `0x04` prefix).
     pub fn public_key_uncompressed(&self) -> [u8; 65] {
-        let point = self.key.verifying_key().as_affine().to_encoded_point(false);
+        let point = self.key.verifying_key().as_affine().to_sec1_point(false);
         let mut out = [0u8; 65];
         out.copy_from_slice(point.as_bytes());
         out
@@ -134,7 +152,10 @@ impl Secp256k1Key {
     /// The raw 32-byte private key. Only for the temporary `compat.*`
     /// exports, the user-requested export, and keystore encoding.
     pub fn to_secret_bytes(&self) -> Zeroizing<[u8; 32]> {
-        Zeroizing::new(self.key.to_bytes().into())
+        let bytes = Zeroizing::new(self.key.to_bytes());
+        let mut out = Zeroizing::new([0u8; 32]);
+        out.copy_from_slice(bytes.as_slice());
+        out
     }
 }
 
@@ -327,6 +348,47 @@ mod tests {
             );
             assert_eq!(hex::encode(key.public_key()), public, "{path}");
         }
+    }
+
+    /// `IL` edge cases, matching ethers 6 (confirmed by Codex's injected-HMAC
+    /// probe on PR #3): `IL >= n` is reduced modulo `n`, and a zero child is
+    /// an error.
+    #[test]
+    fn child_il_edge_cases() {
+        const N: [u8; 32] = [
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xfe, 0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b, 0xbf, 0xd2, 0x5e, 0x8c,
+            0xd0, 0x36, 0x41, 0x41,
+        ];
+        let parent = secret_from(
+            &hex::decode("e8f32e723decf4051aefac8e2c93c9c5b214313817cdb01a1494b917c8436b35")
+                .unwrap(),
+        )
+        .unwrap();
+        let parent_scalar = *parent.to_nonzero_scalar();
+        let with_il = |il: [u8; 32]| {
+            let mut i = [0u8; 64];
+            i[..32].copy_from_slice(&il);
+            i[32..].copy_from_slice(&[7u8; 32]);
+            child_from_i(&parent, &i)
+        };
+        let scalar_of = |key: &SecretKey| *key.to_nonzero_scalar();
+
+        let (child, chain_code) = with_il([0u8; 32]).unwrap();
+        assert_eq!(scalar_of(&child), parent_scalar);
+        assert_eq!(*chain_code, [7u8; 32]);
+
+        assert_eq!(scalar_of(&with_il(N).unwrap().0), parent_scalar);
+
+        let mut n_plus_one = N;
+        n_plus_one[31] += 1;
+        assert_eq!(
+            scalar_of(&with_il(n_plus_one).unwrap().0),
+            parent_scalar + Scalar::ONE
+        );
+
+        let negated: [u8; 32] = (-parent_scalar).to_bytes().into();
+        assert_eq!(with_il(negated).unwrap_err(), Error::Derivation);
     }
 
     #[test]
