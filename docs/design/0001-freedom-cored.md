@@ -1,6 +1,6 @@
 # 0001: `freedom-cored`, the desktop core process
 
-**Status:** draft, revision 4. It incorporates Codex's three reviews on PR #1. **Scope:** Phase 1 of [freedom-browser#644](https://github.com/solardev-xyz/freedom-browser/issues/644), plus the protocol contract that Phases 2–5 extend.
+**Status:** draft, revision 5. It incorporates Codex's four reviews on PR #1. **Scope:** Phase 1 of [freedom-browser#644](https://github.com/solardev-xyz/freedom-browser/issues/644), plus the protocol contract that Phases 2–5 extend.
 
 ## Summary
 
@@ -86,7 +86,7 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
 
 ### Lifetime lock
 
-- **Where the lock lives:** in a stable, app-level directory that is never deleted. Main passes `--lock-dir`, which is `<profile catalog root>/locks`. The lock file is `<lock-dir>/<sha256(canonical identity dir)>.lock`.
+- **Where the lock lives:** in a stable directory that is never deleted, and that every Freedom build and profile catalog of the OS user shares: `<OS app-data dir>/Freedom/locks`, which main passes as `--lock-dir`. The same identity directory therefore gets the same gate, whichever catalog, release or dev checkout opens it. The lock file is `<lock-dir>/<sha256(canonical identity dir)>.lock`.
   - The canonical path resolves symlinks, so aliases of one identity directory share one lock.
   - Deleting, moving or recreating the identity directory can't affect a lock that lives outside it.
   - Bind mounts that give one directory several paths aren't covered, and are documented as unsupported.
@@ -107,7 +107,7 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   - **`recover --data-dir … --lock-dir …`** takes the gate, rolls forward any node-identity journal (see [Multi-file writes](#multi-file-writes)), prints `recovered` (or `corrupt` with details), then exits.
 - **The JS vault writer** (`FREEDOM_CORE=0` in dev builds, or a hotfix that reverts to the JS vault) can't hold an OS lock itself, because Node has no `flock`. So:
   - **It runs `recover` at startup,** before it starts any node or writes any identity file. A journal that a core left behind is therefore always completed first. Such builds keep shipping the binary for this purpose.
-  - **Running the JS writer and a core on the same identity directory at the same time is unsupported.** Production never does it: packaged builds have no backend switch, and one profile process runs one backend. The only way to get there is a dev setup that shares `FREEDOM_IDENTITY_DATA` across backends, which is documented as unsupported.
+  - **Running the JS writer and a core on the same identity directory at the same time is an unsupported configuration,** not something the design can rule out. Packaged builds have no backend switch, and one profile process runs one backend. But alternate roots (`--profile-dir`, `FREEDOM_IDENTITY_DATA`) and different release versions can still bring the two together. Release notes and the profile docs state the limitation.
 
 ### Shutdown, crashes and parent death
 
@@ -228,7 +228,8 @@ A reply can still go missing (core crash, hang watchdog), so every mutation can 
 - **If the core can't be restarted:**
   - **The caller waits.** Main keeps retrying the restart for up to 60 s.
   - **After that,** main reports `core_unavailable` and keeps a pending-recovery record in memory: the operation and its parameters, wiped once used. No other vault mutation is accepted until it has been reconciled. When the core is back, main reconciles first and runs the metadata continuation itself, by writing `vault-meta.json`.
-  - **Quick Setup:** a renderer that has meanwhile given up never stores the random password. So a vault with `userKnowsPassword: false` and no quick-unlock credential counts as an abandoned Quick Setup, and onboarding offers to start over with `vault.import { overwrite: true }`. Its phrase was never shown, and the identity can't have been funded.
+  - **Quick Setup:** while the pending record exists, main finishes the operation itself. It reconciles, writes `vault-meta.json`, and keeps the random password so that onboarding can still enable quick unlock when the renderer comes back.
+  - **Nothing destructive is ever inferred from metadata or a missing credential.** A Quick Setup vault without its credential may be funded, because users can remove the credential deliberately (`quick-unlock.js:295`). If the pending record is lost too, when main itself dies, the vault stays exactly as it is, as in today's JS. Onboarding shows the normal "vault exists" paths: unlock, or restore with the recovery phrase. Overwriting a vault always remains an explicit user decision.
 - **No accidental rewrites:** the core never rewrites the vault file except through create, import, change_password and delete. Startup, status, unlock and verify read it and never write it, so quick unlock's content fingerprint survives. Tightening the file's mode to `0600` changes metadata, not content.
 - **`vault.reconcile` doesn't count toward throttling.** It verifies a password main itself sent in the operation it is reconciling.
 
@@ -267,8 +268,9 @@ This covers node identities. **Bee:** `keys/swarm.key` plus `config.yaml`. **Rad
   - if neither exists, the operation reports `node_identity_corrupt`, which needs a fresh write while unlocked; main shows that as a node error.
 
   Then do step 4. Staged files without a journal are deleted.
-- **Reconciliation:** `nodes.op_status { op_id }` returns `committed`, `not_committed` or `corrupt` from the done list and the journal. A consistent node directory alone doesn't count, because it could still hold the old identity.
-- **Ordering with the shell:** main stops the node before calling `nodes.write_identity` and starts it only after success or a `committed` reconciliation, as it does today. Ant's own config rewrite at start (`ant-manager.js:815`) therefore always happens after the write.
+- **Post-commit failures are not "success" here.** A node write reports `installed` only when step 4 has completed. If an install rename or its directory flush fails after the journal commit, the core keeps the journal and replies `pending_recovery`. Main then keeps that node stopped and retries `recover` with backoff. `durable: false` exists only for the single-file vault rename, where the file is already in place.
+- **Reconciliation:** `nodes.op_status { op_id }` returns `installed`, `pending_recovery`, `not_committed` or `corrupt` from the done list and the journal. A consistent node directory alone doesn't count, because it could still hold the old identity. Main starts a node only on `installed`.
+- **Ordering with the shell:** main stops the node before calling `nodes.write_identity` and starts it only after an `installed` result or reconciliation, as it does today. Ant's own config rewrite at start (`ant-manager.js:815`) therefore always happens after the write.
 - **Bee's keystore password** still goes into `config.yaml` (K-3, Phase 5). The journal guarantees that the keystore and the password always match.
 
 ## Parity contract
@@ -325,7 +327,7 @@ Main's proxy has to reproduce each JS handler: argument checks and defaults, the
 | `keys.addresses` | `{ accounts?: [u32], publishers?: [u32] }` → `{ user_wallets, bee_wallet, publishers, radicle: { public_key, did, node_id } }` | public data only; needs an unlocked vault |
 | `keys.radicle_did` | `{ public_key }` → `{ did }` | public conversion; works while locked (`readRadicleDid`, `identity-manager.js:381`) |
 | `nodes.write_identity` | `{ op_id, node: "bee", data_dir, api_port, p2p_port }` or `{ op_id, node: "radicle", home, alias }` → `{ address }` or `{ did, node_id }` | [multi-file protocol](#multi-file-writes). Bee generates a fresh keystore password and writes `config.yaml` exactly as `createBeeConfig` does, with main's per-profile ports |
-| `nodes.op_status` | `{ op_id }` → `{ status: "committed" \| "not_committed" \| "corrupt" }` | reconciliation after a lost reply |
+| `nodes.op_status` | `{ op_id }` → `{ status: "installed" \| "pending_recovery" \| "not_committed" \| "corrupt" }` | reconciliation after a lost reply |
 | `vault.reconcile` | see [Reconciliation](#reconciliation) | after a lost mutation reply |
 | `compat.private_key` | `{ account }` → `{ private_key }` | temporary; see Migration |
 | `compat.bee_wallet_key` | → `{ private_key }` | temporary |
