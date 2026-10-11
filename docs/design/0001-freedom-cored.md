@@ -184,7 +184,7 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
 - **Lock is control traffic.** `vault.lock`, the auto-lock timer and `core.shutdown` run on the control path. They never wait behind KDF work or a write. Their acknowledgement means the epoch is revoked and the resident secrets are wiped.
 - **Secret-bearing work is tied to its epoch.** Derivations, `compat.*` and node writes are admitted against the current epoch. A worker result from a revoked epoch is wiped, never installed, and returns `vault_locked`. In particular, an unlock whose KDF finishes after a lock does not bring the secrets back.
 - **Revocation versus commit:**
-  - **Before its commit point,** revocation stops secret-bearing work. Results are wiped, nothing is installed, and the reply is `vault_locked`.
+  - **Before its commit point,** revocation stops vault work. Every lock (manual, auto, delete, shutdown), even while already locked, revokes all admitted vault work that hasn't reached its commit point, queued or running and of any kind: nothing admitted before a lock acknowledgement runs after it. Results are wiped, nothing is installed, and the reply is `vault_locked`.
   - **After its commit point** (the vault rename, or the node journal being written), a transaction finishes with the material it already holds. It wipes that material, reinstalls nothing, and reports its committed public result.
   - **Replies already being serialized,** such as a `compat.private_key` reply, keep the copy they took. Lock stops new use; it can't recall bytes already handed out.
 - **Mutations** (create, import, change_password, delete, node writes) are serialized through one vault task.
@@ -205,7 +205,13 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   - A deadline is a total budget on a monotonic clock, starting when the core admits the request (queue time included). Defaults: 30 s for KDF methods, 5 s for everything else.
   - **The core enforces deadlines and always replies.** Main doesn't settle requests on its own timer. It runs only a hang watchdog: core deadline + 15 s. If the watchdog fires, main treats the core as hung, kills it, restarts it and [reconciles](#reconciliation).
 - **Before the commit point,** a deadline or `cancel` stops the operation and returns `deadline` or `cancelled`. Throttle attempts are reserved before a KDF starts, so concurrent guesses can't all slip past the check.
-- **After the commit point** (the vault rename or unlink, or the journal write of a multi-file operation), the operation runs to completion and **always reports success**, even past the deadline. A failure after the commit point, such as a directory `fsync` error, doesn't turn into an error reply. It is reported as success with `durable: false`, and logged. So every error reply means "not committed", and only a missing reply needs reconciliation.
+- **The commit point** is the worker's atomic claim immediately before the vault rename or unlink, or before the journal write of a multi-file operation. The loop and the worker race on one atomic: either the loop abandons the job first (cancel, deadline or revocation), and the job writes nothing, or the worker claims the commit first, and from then on cancel, deadline and revocation no longer apply.
+- **After the commit point,** the reply is the real outcome of the rename or unlink, even past the deadline:
+  - **If it happened,** the reply is success. A later failure, such as a directory `fsync` error, doesn't turn into an error reply. It is reported as success with `durable: false`, and logged.
+  - **If the rename or unlink itself failed,** nothing changed, and the reply is that error.
+
+  So every error reply means "not committed", and only a missing reply needs reconciliation.
+- **Shutdown** revokes everything before its commit point. Work past its commit point finishes and sends its reply before the process exits, within a bounded wait. Main's hang watchdog and reconciliation cover anything slower.
 - **Read-only operations** can be cancelled at any time.
 
 ### Reconciliation

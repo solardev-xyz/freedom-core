@@ -5,6 +5,8 @@
 //! - `FREEDOM_CORED_TEST_JOB_DELAY_MS` stalls each vault job before it does
 //!   anything (so before its commit point).
 //! - `FREEDOM_CORED_TEST_KDF_DEADLINE_MS` replaces the 30 s KDF deadline.
+//! - `FREEDOM_CORED_TEST_COMMIT_DELAY_MS` stalls a job right after it claims
+//!   its commit point, before the rename or unlink.
 
 use std::time::Duration;
 
@@ -28,6 +30,13 @@ pub fn job_delay() {
 }
 
 #[cfg(debug_assertions)]
+pub fn commit_delay() {
+    if let Some(ms) = millis("FREEDOM_CORED_TEST_COMMIT_DELAY_MS") {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+}
+
+#[cfg(debug_assertions)]
 pub fn kdf_deadline(default: Duration) -> Duration {
     millis("FREEDOM_CORED_TEST_KDF_DEADLINE_MS").map_or(default, Duration::from_millis)
 }
@@ -37,6 +46,9 @@ pub fn snapshot_delay() {}
 
 #[cfg(not(debug_assertions))]
 pub fn job_delay() {}
+
+#[cfg(not(debug_assertions))]
+pub fn commit_delay() {}
 
 #[cfg(not(debug_assertions))]
 pub fn kdf_deadline(default: Duration) -> Duration {

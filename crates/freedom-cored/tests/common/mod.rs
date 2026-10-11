@@ -193,6 +193,16 @@ impl Core {
         }
     }
 
+    /// The process's user + system CPU time, in clock ticks.
+    #[cfg(target_os = "linux")]
+    pub fn cpu_ticks(&self) -> u64 {
+        let stat = std::fs::read_to_string(format!("/proc/{}/stat", self.child.id())).unwrap();
+        // Fields after the command name (which is in parentheses).
+        let rest = &stat[stat.rfind(')').unwrap() + 2..];
+        let fields: Vec<&str> = rest.split(' ').collect();
+        fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap()
+    }
+
     /// The events set aside so far.
     pub fn events(&mut self) -> Vec<Value> {
         std::mem::take(&mut self.events)

@@ -25,6 +25,10 @@ use crate::{gate, hardening, log};
 
 /// How long the writer may take to flush on exit.
 const EXIT_DRAIN: Duration = Duration::from_secs(2);
+/// How long exiting waits for a vault job past its commit point to finish
+/// and reply. A commit is a rename or unlink plus a directory flush; main's
+/// hang watchdog and reconciliation cover anything slower.
+const COMMIT_DRAIN: Duration = Duration::from_secs(5);
 
 pub struct Options {
     pub data_dir: PathBuf,
@@ -214,11 +218,30 @@ pub fn run(options: &Options) -> Exit {
             Err(RecvTimeoutError::Disconnected) => break Exit::Ok,
         }
     };
-    // Wipe the vault, then let the writer flush what's queued (e.g. the
-    // shutdown reply), but never wait on a peer that stopped reading:
-    // exiting releases the gate.
+    // Wipe the vault and revoke pre-commit work. Work past its commit point
+    // finishes and replies before exit (bounded). Then let the writer flush
+    // what's queued, but never wait on a peer that stopped reading: exiting
+    // releases the gate.
     let outs = core.vault.shutdown();
     let _ = core.dispatch(outs);
+    let until = Instant::now() + COMMIT_DRAIN;
+    while core.vault.committing() {
+        let Some(left) = until.checked_duration_since(Instant::now()) else {
+            log::error(
+                "a committed vault job did not finish before exit",
+                serde_json::json!({}),
+            );
+            break;
+        };
+        match events.recv_timeout(left) {
+            Ok(Event::JobDone(job, finished)) => {
+                let outs = core.vault.job_done(job, finished);
+                let _ = core.dispatch(outs);
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
     drop(core);
     let _ = writer.done.recv_timeout(EXIT_DRAIN);
     drop(gate);

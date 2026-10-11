@@ -11,17 +11,22 @@
 //!   with the real outcome when the KDF actually ends, even if the request
 //!   was already answered.
 //! - **Commit point:** each job shares a [`JobControl`] with the loop. The
-//!   worker claims the commit point right before the rename or unlink; until
-//!   then the loop can abandon the job and answer at once (`cancelled`,
-//!   `deadline`, `vault_locked`). An abandoned job writes nothing and its
-//!   late result is discarded. A job that claimed its commit always reports
-//!   success. Each request gets exactly one terminal reply.
-//! - **Locks** (manual, auto, delete, shutdown) revoke all admitted work that
-//!   would install or return secrets (unlock, create, import, the exports),
-//!   queued or running: nothing admitted before a lock acknowledgement runs
-//!   after it. Unlock also installs only with a ticket taken at its start.
+//!   commit point is the worker's atomic claim immediately before the rename
+//!   or unlink. Until then the loop can abandon the job and answer at once
+//!   (`cancelled`, `deadline`, `vault_locked`); an abandoned job writes
+//!   nothing and its late result is discarded. After the claim, cancel,
+//!   deadline and locks no longer apply: the reply is the real outcome of
+//!   the rename or unlink (success, or an error if it failed and nothing
+//!   changed). Each request gets exactly one terminal reply.
+//! - **Locks** (manual, auto, delete, shutdown) revoke all admitted vault
+//!   work that hasn't reached its commit point, queued or running: nothing
+//!   admitted before a lock acknowledgement runs after it. Unlock also
+//!   installs only with a ticket taken at its start.
 //! - **Deadlines** (30 s from admission) are enforced by the loop's wakeup,
 //!   for queued and running work alike, independently of the worker.
+//! - **The file snapshot** follows the core's own commits (the fingerprint
+//!   of the bytes written, or none after a delete); the worker never re-reads
+//!   the file after a job.
 //!
 //! Error codes come with the exact JS message for the method, so main can
 //! pass them through (design 0001's parity table).
@@ -160,10 +165,15 @@ pub struct Addresses {
 /// after every job, so the loop never touches storage.
 pub type FileSnapshot = Result<Option<String>, OpError>;
 
-/// A finished worker job: its output and the refreshed file snapshot.
-pub struct Finished {
-    output: JobOutput,
-    file: FileSnapshot,
+/// A finished worker job.
+pub struct Finished(JobOutput);
+
+/// A committed change: whether its directory flush succeeded, and the vault
+/// file's fingerprint afterwards (`None` after a delete).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Commit {
+    done: Done,
+    file: Option<String>,
 }
 
 /// What a worker job produced.
@@ -174,19 +184,31 @@ pub enum JobOutput {
     /// removed).
     Checked {
         result: Result<(), OpError>,
-        commit: Option<Done>,
+        commit: Option<Commit>,
     },
     /// create and import: the new vault was written (`commit`), and is ready
     /// to install. `phrase` is returned for create's backup display.
     Written {
         result: Result<(Prepared, Addresses, Option<Mnemonic>), OpError>,
-        commit: Option<Done>,
+        commit: Option<Commit>,
     },
     /// change_password: written (`commit`) or not.
     Changed {
         result: Result<(), OpError>,
-        commit: Option<Done>,
+        commit: Option<Commit>,
     },
+}
+
+impl JobOutput {
+    /// The vault file after a committed change, if this job made one.
+    fn committed_file(&self) -> Option<Option<String>> {
+        match self {
+            JobOutput::Checked { commit, .. }
+            | JobOutput::Written { commit, .. }
+            | JobOutput::Changed { commit, .. } => commit.as_ref().map(|c| c.file.clone()),
+            JobOutput::Unlocked(_) => None,
+        }
+    }
 }
 
 enum Kind {
@@ -224,19 +246,6 @@ enum Kind {
 impl Kind {
     fn throttled(&self) -> bool {
         !matches!(self, Kind::Create { .. } | Kind::Import { .. })
-    }
-
-    /// Work a lock revokes: it would install or return secrets. Verify,
-    /// change_password and delete are legal while locked and do neither.
-    fn revoked_by_lock(&self) -> bool {
-        matches!(
-            self,
-            Kind::Unlock { .. }
-                | Kind::Create { .. }
-                | Kind::Import { .. }
-                | Kind::ExportMnemonic { .. }
-                | Kind::ExportPrivateKey { .. }
-        )
     }
 }
 
@@ -283,6 +292,12 @@ impl JobControl {
             .is_ok()
     }
 
+    /// Whether the worker claimed the commit point (deadlines and revocation
+    /// no longer apply).
+    fn committed(&self) -> bool {
+        self.0.load(Ordering::Acquire) == JOB_COMMITTED
+    }
+
     /// Worker: whether to stop early (skip the KDF).
     fn abandoned(&self) -> bool {
         self.0.load(Ordering::Acquire) == JOB_ABANDONED
@@ -309,7 +324,6 @@ struct Running {
     ticket: Ticket,
     deadline: Instant,
     control: Arc<JobControl>,
-    revocable: bool,
     /// The request already got its terminal reply (abandoned); the job's
     /// result will only settle the throttle.
     answered: bool,
@@ -625,32 +639,32 @@ impl Vault {
         let auto_lock = self.state.auto_lock_deadline().map(|deadline| {
             Instant::now() + Duration::from_millis(deadline.saturating_sub(self.now_ms()))
         });
+        // A committed job's deadline no longer applies.
         let running = self
             .running
             .as_ref()
-            .filter(|r| !r.answered)
+            .filter(|r| !r.answered && !r.control.committed())
             .map(|r| r.deadline);
         // The queue is in admission order, so its front expires first.
         let queued = self.queue.front().map(|p| p.deadline);
         [auto_lock, running, queued].into_iter().flatten().min()
     }
 
-    /// Locks for shutdown (wipes everything) and abandons all work that
-    /// hasn't committed, with a reply.
+    /// Locks for shutdown: wipes everything and revokes all work that
+    /// hasn't committed, with a reply. Committed work may still be running
+    /// ([`Vault::committing`]); the loop waits for its reply.
     pub fn shutdown(&mut self) -> Vec<Out> {
         let mut out = Vec::new();
         self.lock_now(LockReason::Shutdown, &mut out);
-        for pending in std::mem::take(&mut self.queue) {
-            self.reply_error(&mut out, pending.id, cancelled());
-        }
-        if let Some(running) = &mut self.running
-            && !running.answered
-            && running.control.abandon()
-        {
-            running.answered = true;
-            out.push(Out::Send(error_payload(running.request, &cancelled())));
-        }
         out
+    }
+
+    /// Whether a job past its commit point is still running (its reply is
+    /// still to come).
+    pub fn committing(&self) -> bool {
+        self.running
+            .as_ref()
+            .is_some_and(|r| !r.answered && r.control.committed())
     }
 
     fn lock_now(&mut self, reason: LockReason, out: &mut Vec<Out>) {
@@ -661,26 +675,20 @@ impl Vault {
         self.revoke(out);
     }
 
-    /// Revokes admitted work that would install or return secrets: queued
-    /// requests are dropped (their secrets wiped) and the running one is
-    /// abandoned unless it committed. Each gets `vault_locked`.
+    /// Revokes all admitted vault work that hasn't reached its commit
+    /// point: the running job is abandoned unless it committed, and queued
+    /// requests are dropped (their secrets wiped). Each gets `vault_locked`,
+    /// in admission order.
     fn revoke(&mut self, out: &mut Vec<Out>) {
-        let mut kept = VecDeque::with_capacity(self.queue.len());
-        for pending in std::mem::take(&mut self.queue) {
-            if pending.kind.revoked_by_lock() {
-                self.reply_error(out, pending.id, locked());
-            } else {
-                kept.push_back(pending);
-            }
-        }
-        self.queue = kept;
         if let Some(running) = &mut self.running
-            && running.revocable
             && !running.answered
             && running.control.abandon()
         {
             running.answered = true;
             out.push(Out::Send(error_payload(running.request, &locked())));
+        }
+        for pending in std::mem::take(&mut self.queue) {
+            self.reply_error(out, pending.id, locked());
         }
     }
 
@@ -878,7 +886,6 @@ impl Vault {
             };
             let job_id = self.next_job;
             self.next_job += 1;
-            let revocable = pending.kind.revoked_by_lock();
             let control = JobControl::new();
             let (kind, job) = self.job_for(pending.kind, Arc::clone(&control));
             self.running = Some(Running {
@@ -889,7 +896,6 @@ impl Vault {
                 ticket: self.state.ticket(),
                 deadline: pending.deadline,
                 control,
-                revocable,
                 answered: false,
             });
             out.push(Out::Job(job_id, job));
@@ -950,21 +956,18 @@ impl Vault {
             ),
         };
         let dir = self.dir.clone();
-        let job: Job = Box::new(move || {
-            let output = run(&dir, &control);
-            Finished {
-                output,
-                file: snapshot(&dir),
-            }
-        });
+        let job: Job = Box::new(move || Finished(run(&dir, &control)));
         (kind, job)
     }
 
     /// A worker job finished.
     pub fn job_done(&mut self, job: u64, finished: Finished) -> Vec<Out> {
         let mut out = Vec::new();
-        self.file = finished.file;
-        let output = finished.output;
+        let output = finished.0;
+        // The snapshot follows our own commits.
+        if let Some(file) = output.committed_file() {
+            self.file = Ok(file);
+        }
         let Some(mut running) = self.running.take_if(|r| r.job == job) else {
             return out;
         };
@@ -1042,7 +1045,7 @@ impl Vault {
                     Err(error) => Err(error.body(false)),
                     Ok(()) => Ok(json_result(
                         request,
-                        &durability(serde_json::json!({}), commit),
+                        &durability(serde_json::json!({}), commit.as_ref()),
                     )),
                 };
                 (throttle, reply)
@@ -1062,14 +1065,17 @@ impl Vault {
                                 &serde_json::json!({ "epoch": epoch.get() }),
                             )));
                         }
-                        let durable = commit != Some(Done::NotDurable);
+                        let durable = !commit.as_ref().is_some_and(|c| c.done == Done::NotDurable);
                         match (kind, phrase) {
                             (RunningKind::Create, Some(phrase)) => {
                                 create_reply(request, &addresses, &phrase, durable)
                             }
                             _ => Ok(json_result(
                                 request,
-                                &durability(serde_json::json!({ "addresses": addresses }), commit),
+                                &durability(
+                                    serde_json::json!({ "addresses": addresses }),
+                                    commit.as_ref(),
+                                ),
                             )),
                         }
                     }
@@ -1097,7 +1103,7 @@ impl Vault {
         &mut self,
         kind: &RunningKind,
         request: u64,
-        commit: Option<Done>,
+        commit: Option<Commit>,
         out: &mut Vec<Out>,
     ) -> Result<Option<Zeroizing<Vec<u8>>>, ErrorBody> {
         match kind {
@@ -1106,7 +1112,7 @@ impl Vault {
                 self.lock_now(LockReason::Delete, out);
                 Ok(json_result(
                     request,
-                    &durability(serde_json::json!({}), commit),
+                    &durability(serde_json::json!({}), commit.as_ref()),
                 ))
             }
             RunningKind::ExportMnemonic => {
@@ -1151,8 +1157,8 @@ fn create_reply(
 
 /// Adds `"durable": false` to a committed result whose directory flush
 /// failed (design 0001: committed changes are never reported as errors).
-fn durability(mut result: serde_json::Value, commit: Option<Done>) -> serde_json::Value {
-    if commit == Some(Done::NotDurable)
+fn durability(mut result: serde_json::Value, commit: Option<&Commit>) -> serde_json::Value {
+    if commit.is_some_and(|c| c.done == Done::NotDurable)
         && let Some(object) = result.as_object_mut()
     {
         object.insert("durable".into(), serde_json::Value::Bool(false));
@@ -1393,6 +1399,16 @@ fn job_verify(dir: &Path, password: &SecretBytes, control: &JobControl) -> Resul
     format::verify_password(&contents, password.as_bytes()).map_err(OpError::from_vault)
 }
 
+/// The worker's commit claim, right before the rename or unlink. After it,
+/// the job can no longer be abandoned.
+fn claim(control: &JobControl) -> bool {
+    let claimed = control.commit();
+    if claimed {
+        crate::testhooks::commit_delay();
+    }
+    claimed
+}
+
 fn job_delete(dir: &Path, password: &SecretBytes, control: &JobControl) -> JobOutput {
     let not_committed = |error| JobOutput::Checked {
         result: Err(error),
@@ -1404,10 +1420,10 @@ fn job_delete(dir: &Path, password: &SecretBytes, control: &JobControl) -> JobOu
     if let Err(error) = open(dir, password) {
         return not_committed(error);
     }
-    match fsx::remove(&dir.join(VAULT_FILE), || control.commit()) {
+    match fsx::remove(&dir.join(VAULT_FILE), || claim(control)) {
         Ok(Some(done)) => JobOutput::Checked {
             result: Ok(()),
-            commit: Some(done),
+            commit: Some(Commit { done, file: None }),
         },
         Ok(None) => not_committed(OpError::Abandoned),
         Err(e) => not_committed(storage(&e)),
@@ -1421,7 +1437,7 @@ fn write_vault(
     mnemonic: &Mnemonic,
     password: &[u8],
     control: &JobControl,
-) -> Result<Done, OpError> {
+) -> Result<Commit, OpError> {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -1445,8 +1461,12 @@ fn write_vault(
                 Err("staged vault decrypts to a different mnemonic".into())
             }
         },
-        || control.commit(),
+        || claim(control),
     )
+    .map(|done| Commit {
+        done,
+        file: Some(sha256_hex(contents.as_bytes())),
+    })
     .map_err(|e| match e {
         fsx::WriteError::Io(e) => storage(&e),
         fsx::WriteError::Abandoned => OpError::Abandoned,
@@ -1488,9 +1508,9 @@ fn job_change(
         };
     }
     match write_vault(dir, &opened.mnemonic, new.as_bytes(), control) {
-        Ok(done) => JobOutput::Changed {
+        Ok(commit) => JobOutput::Changed {
             result: Ok(()),
-            commit: Some(done),
+            commit: Some(commit),
         },
         Err(error) => JobOutput::Changed {
             result: Err(error),
@@ -1547,11 +1567,11 @@ type NewVault = (Prepared, Addresses, Option<Mnemonic>);
 
 /// Create and import do every fallible step before the write, so nothing
 /// can fail once the vault is committed.
-fn written(result: Result<(NewVault, Done), OpError>) -> JobOutput {
+fn written(result: Result<(NewVault, Commit), OpError>) -> JobOutput {
     match result {
-        Ok((value, done)) => JobOutput::Written {
+        Ok((value, commit)) => JobOutput::Written {
             result: Ok(value),
-            commit: Some(done),
+            commit: Some(commit),
         },
         Err(error) => JobOutput::Written {
             result: Err(error),

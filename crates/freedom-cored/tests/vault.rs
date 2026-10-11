@@ -500,7 +500,7 @@ fn cancel_stops_mutations_before_their_commit() {
 }
 
 #[test]
-fn a_lock_revokes_queued_unlocks_and_imports() {
+fn a_lock_revokes_all_pre_commit_work() {
     let (_root, data, mut core) = imported(&[SLOW_JOBS]);
     core.call(3, "vault.lock", json!({}));
     assert_eq!(core.event()["data"]["reason"], "manual");
@@ -518,11 +518,11 @@ fn a_lock_revokes_queued_unlocks_and_imports() {
     ]
     .concat();
     core.send_raw(&burst);
-    assert_eq!(core.response(5)["error"]["code"], "vault_locked");
-    assert_eq!(core.response(6)["error"]["code"], "vault_locked");
+    // Everything admitted before the lock is revoked, in admission order.
+    for id in 4..7 {
+        assert_eq!(core.response(id)["error"]["code"], "vault_locked", "{id}");
+    }
     assert_eq!(core.response(7)["result"], json!({}));
-    // Verify isn't revoked by a lock, and nothing unlocks after the lock.
-    assert_eq!(core.response(4)["result"], json!({}));
     let status = core.call(8, "vault.status", json!({}));
     assert_eq!(status["result"]["unlocked"], false, "{status}");
     assert_eq!(std::fs::read(data.join(VAULT)).unwrap(), before);
@@ -756,4 +756,84 @@ fn wire_fields_follow_design_0001() {
         .map(String::as_str)
         .collect();
     assert_eq!(fields, ["private_key_hex"]);
+}
+
+// ---- The commit point (PR #9 confirmation pass) ----
+
+/// Each job stalls right after claiming its commit point, before the rename
+/// or unlink.
+const SLOW_COMMIT: (&str, &str) = ("FREEDOM_CORED_TEST_COMMIT_DELAY_MS", "1000");
+
+#[test]
+fn past_the_commit_point_the_reply_is_the_real_outcome() {
+    // A cancel and a deadline arriving after the claim don't apply: the
+    // delete happens and replies success, exactly once.
+    let env = [SLOW_COMMIT, ("FREEDOM_CORED_TEST_KDF_DEADLINE_MS", "3000")];
+    let (_root, data, mut core) = imported(&env);
+    let delete = request(
+        3,
+        "vault.delete",
+        json!({ "password_b64": b64("testpass1") }),
+    );
+    core.send_raw(&frame(&delete));
+    // Let the KDF finish and the claim happen (well inside the 1 s stall).
+    std::thread::sleep(Duration::from_millis(1500));
+    core.send_raw(&cancel(3));
+    let reply = core.response(3);
+    assert_eq!(reply["result"], json!({}), "{reply}");
+    assert!(!data.join(VAULT).exists());
+    // The snapshot follows the commit, and nothing else replies to 3.
+    assert_eq!(
+        core.call(4, "vault.status", json!({}))["result"]["exists"],
+        false
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_committed_job_past_its_deadline_does_not_spin_the_loop() {
+    let env = [
+        ("FREEDOM_CORED_TEST_COMMIT_DELAY_MS", "2500"),
+        ("FREEDOM_CORED_TEST_KDF_DEADLINE_MS", "1500"),
+    ];
+    let (_root, data, locks) = dirs();
+    let mut core = spawn_env("serve", &data, &locks, &[], &env);
+    core.hello();
+    let create = request(
+        2,
+        "vault.create",
+        json!({ "password_b64": b64("testpass1"), "words": 12 }),
+    );
+    core.send_raw(&frame(&create));
+    // The create claims its commit within ~1 s; its deadline passes at 1.5 s
+    // while the rename is still stalled. Measure CPU across that window.
+    std::thread::sleep(Duration::from_millis(1700));
+    let before = core.cpu_ticks();
+    std::thread::sleep(Duration::from_millis(500));
+    let spent = core.cpu_ticks() - before;
+    assert!(spent < 20, "the loop spun: {spent} ticks in 0.5 s");
+    let reply = core.response(2);
+    assert!(reply["result"]["mnemonic_b64"].is_string(), "{reply}");
+}
+
+#[test]
+fn shutdown_waits_for_committed_work_and_sends_its_reply() {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn_env("serve", &data, &locks, &[], &[SLOW_COMMIT]);
+    core.hello();
+    let create = request(
+        2,
+        "vault.create",
+        json!({ "password_b64": b64("testpass1"), "words": 12 }),
+    );
+    core.send_raw(&frame(&create));
+    std::thread::sleep(Duration::from_millis(1200));
+    core.send_raw(&frame(&request(3, "core.shutdown", json!({}))));
+    // The shutdown is acknowledged, and the committed create still delivers
+    // its phrase before the process exits.
+    assert_eq!(core.response(3)["result"], json!({}));
+    let reply = core.response(2);
+    assert!(reply["result"]["mnemonic_b64"].is_string(), "{reply}");
+    assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
+    assert!(data.join(VAULT).exists());
 }
