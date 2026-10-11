@@ -1,6 +1,6 @@
 # 0001: `freedom-cored`, the desktop core process
 
-**Status:** draft, revision 2. It incorporates Codex's review on PR #1. **Scope:** Phase 1 of [freedom-browser#644](https://github.com/solardev-xyz/freedom-browser/issues/644), plus the protocol contract that Phases 2–5 extend.
+**Status:** draft, revision 3. It incorporates both of Codex's reviews on PR #1. **Scope:** Phase 1 of [freedom-browser#644](https://github.com/solardev-xyz/freedom-browser/issues/644), plus the protocol contract that Phases 2–5 extend.
 
 ## Summary
 
@@ -24,11 +24,11 @@
   - **K-3 (partly):** node key files become `0600`.
   - **The JS password-change timer bug** (see the [parity table](#parity-contract)).
 
-**Needs your OK:**
-1. The temporary `compat.*` key exports ([Migration](#migration-in-freedom-browser)).
-2. Touch ID quick unlock stays in the shell until Phase 5 ([Quick unlock](#quick-unlock)).
-3. Packaged builds get no runtime switch back to the JS vault; rollback is a hotfix release ([Rollback](#rollback)).
-4. The two intentional behavior changes in the [parity table](#parity-contract).
+**Decisions** (accepted by the user, 2026-10-11):
+- the temporary `compat.*` key exports ([Migration](#migration-in-freedom-browser));
+- Touch ID quick unlock stays in the shell until Phase 5 ([Quick unlock](#quick-unlock));
+- packaged builds get no runtime switch back to the JS vault ([Rollback](#rollback));
+- the intentional behavior changes in the [parity table](#parity-contract).
 
 ## Goals and non-goals
 
@@ -56,7 +56,7 @@ Stage 1 trusts Electron main: it holds the pipe, fills in the caller context, an
 |---|---|---|
 | Compromised renderer reaching the master secret | Main's sender checks (E-1) | The same checks. The mnemonic is no longer resident in main; it passes through main only during onboarding display and user-requested exports |
 | Main bugs keeping keys (K-1 class) | Derived keys cached in main's heap until an explicit lock | **Core:** one lock state with revocation epochs. **Main:** holds a borrowed key only for the duration of one operation (Phase 1), then never (Phase 2). Copies already in JS strings and ethers objects can't be wiped, and Phase 1 only stops keeping them |
-| Torn or exposed secret files (K-2, K-3) | `writeFileSync` with umask permissions | Durable atomic writes. **Unix:** mode `0600`. **Windows:** files inherit the per-user `%APPDATA%` ACL; an explicit owner-only DACL is a follow-up |
+| Torn or exposed secret files (K-2, K-3) | `writeFileSync` with umask permissions | Durable atomic writes. **Unix:** mode `0600`; existing files are tightened in place on adoption. **Windows:** files in the default profile root inherit the per-user `%APPDATA%` ACL. Alternate roots (`--profile-dir`, `FREEDOM_IDENTITY_DATA`) get no such guarantee, and an explicit owner-only DACL is a follow-up |
 | Password guessing through `identity:unlock` (K-4) | Unthrottled | Throttled in the core. Renderer-supplied input can't crash the core, so a compromised renderer can't reset the counter |
 | Another same-user process reading key memory | Main: a large, unhardened process | **macOS:** the hardened runtime blocks `task_for_pid`. **Linux:** `PR_SET_DUMPABLE=0`. **Windows:** no change |
 
@@ -69,7 +69,7 @@ Stage 1 trusts Electron main: it holds the pipe, fills in the caller context, an
 ## Process model
 
 ```
-Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <identityDir>
+Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <identityDir> --parent-pid <main's pid>
      stdin  ──frames──▶
      stdout ◀──frames──
      stderr ◀──JSON log lines── (forwarded to main's log)
@@ -81,19 +81,27 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   - The environment is cleared except for `PATH`, `HOME`/`USERPROFILE`, `LANG` and `RUST_LOG`.
   - stdin and stdout are pipes; stderr is a pipe read line by line.
   - Main spawns the core at startup and serves no `identity:*` request until the handshake has succeeded.
-- **Handshake:** `core.hello` must complete within 10 s of spawn, or main kills the core and treats it as a startup failure.
+- **Handshake:** `core.hello` must complete within 10 s of spawn. Both sides enforce this. Main kills the core and treats it as a startup failure. The core exits by itself if no `core.hello` has arrived 10 s after start.
+- **Startup recovery:** before answering `core.hello`, the core finishes any interrupted node-identity journal (see [Multi-file writes](#multi-file-writes)). Main starts no node before the handshake has succeeded.
 
 ### Lifetime lock
 
-- **The lock itself:**
+- **The lock:**
   - The core opens `<identityDir>/freedom-cored.lock` for read and write, creating it if needed, never truncating it, and with close-on-exec, which is Rust's default.
   - It then takes `File::try_lock`, which is `flock` on Unix and `LockFileEx` on Windows.
-- **Possible outcomes:**
-  - **Contention:** retry for 5 s (Windows can release the lock a little after process exit), then exit 75 (`lock_held`).
-  - **Any other error,** such as an unsupported filesystem or I/O failure: exit 74 (`storage`). The core fails closed and never runs without the lock.
-- **The lock file is never renamed, unlinked or recreated while the profile exists.** On Unix, a lock protects an inode, not a path. So everything that removes or moves an identity directory must first prove no core holds that lock: profile delete and reset (`profile-catalog.js`) and data migrations. They call `freedom-cored probe-lock --data-dir <dir>`, which tries the lock once and exits 0 if the lock was free, or 75 if it is held.
-- **Scope of the guarantee:** mutual exclusion between cores on local filesystems (APFS, ext4/btrfs/xfs, NTFS). Identity directories on network filesystems aren't supported, and the core refuses them when locking reports `Unsupported`.
-- **Dev-only shared directories:** two profiles that share an identity directory through `FREEDOM_IDENTITY_DATA` now fail cleanly instead of racing. The second core gets `lock_held`.
+- **Outcomes:**
+  - **Contention:** retry for 5 s (Windows can release a lock a little after process exit), then exit 75 (`lock_held`).
+  - **Any other locking error:** exit 74 (`storage`). The core never runs without the lock.
+- **Storage qualification,** independent of whether locking succeeds. `flock` can succeed on network filesystems without excluding other hosts, so before locking, the core checks the filesystem of the identity directory:
+  - **Linux:** `statfs` magic numbers for NFS, SMB/CIFS, AFS, Ceph, 9p and FUSE network filesystems (sshfs, rclone).
+  - **macOS:** `f_fstypename` in `nfs`, `smbfs`, `afpfs`, `webdav`, `ftp`.
+  - **Windows:** `GetDriveTypeW` returning `DRIVE_REMOTE`.
+
+  A known network type means exit 74 with `storage { kind: "network_filesystem" }`. Unknown local types are accepted. The guarantee is therefore exclusion between cores on local storage, not detection of every exotic setup.
+- **One guard for every writer: `freedom-cored hold-lock --data-dir <dir>`.** It acquires the lock under the same rules, prints `locked`, and holds the lock until its stdin closes. These must use it:
+  - **Destructive operations:** profile delete and reset (`profile-catalog.js`) and data migrations. They start `hold-lock`, wait for `locked`, change the filesystem, then close stdin. No core can start in between, because the lock stays on the inode for the whole operation. Path aliases of one directory share an inode, so they're covered too.
+  - **The JS backend in dev builds** (`FREEDOM_CORE=0`) holds a `hold-lock` for the identity directory for the process lifetime. The same goes for any hotfix that reverts to the JS vault: it keeps shipping the binary for this purpose. So the JS vault and a core can never write the same directory at the same time.
+- **The lock file is never renamed, unlinked or recreated** while anything might hold it. Only an operation that itself holds `hold-lock` may remove the directory.
 
 ### Shutdown, crashes and parent death
 
@@ -105,8 +113,8 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   After 3 s, main kills the core. Killing is safe because every write follows [Writes and durability](#writes-and-durability).
 - **Parent death:**
   - The core's I/O task, which is independent of vault work, exits on stdin EOF. EOF in the middle of a frame counts as EOF.
-  - **Unix backstop:** the core records `getppid()` at start and exits if it changes, checked every 2 s. A PID is never compared against itself, so PID reuse can't fool it.
-  - **Windows:** relies on EOF.
+  - **Unix backstop:** main passes its PID as `--parent-pid`. At start the core exits if `getppid()` differs, which means main has already died. On Linux it then sets `PR_SET_PDEATHSIG` and re-checks `getppid()` to close the race. After that it polls `getppid()` every 2 s.
+  - **Windows:** relies on EOF. libuv creates main's end of the pipe non-inheritable, so no other process can hold stdin open.
 - **Crash handling in main:**
   - Pending requests are settled by the [reconciliation rules](#reconciliation), not blanket-rejected.
   - Main treats the vault as locked and restarts the core after 0.5 s, 2 s, then 10 s.
@@ -125,7 +133,7 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   - **Kind `0x01`:** one JSON message, at most 1 MiB.
   - **Kinds `0x02`–`0x0F`:** reserved for Phase 4 streams.
 - **Writer:** each side has one serialized frame writer with a bounded queue. Control messages (`response`, `event`, `cancel`, `core.shutdown`) have reserved capacity, so bulk traffic can't starve them.
-- **Protocol errors** are an unknown kind, an oversized frame, invalid JSON, a response that has both or neither of `result` and `error`, or a response to an unknown or already-settled ID. They mean a bug in main or the core: the receiver logs it and closes the connection.
+- **Protocol errors** are an unknown kind, an oversized frame, invalid JSON, a response that has both or neither of `result` and `error`, or an unsolicited or duplicate response. They mean a bug in main or the core: the receiver logs it and closes the connection.
 - **Renderer input never causes a protocol error.** Main validates sizes and argument bounds before sending (see [Input validation](#input-validation)).
 - **Phase 4:** streams add stream IDs, open/data/end/error frames, per-stream and global credit, and an aggregate memory bound. Phase 4 negotiates them as protocol version 2. This doc doesn't claim they can be added without a version bump.
 
@@ -144,9 +152,9 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   - Positive integers below 2^53, so JS can represent them exactly. One counter per sender, never reused within a connection.
   - A side only receives responses to its own requests, so the two ID spaces can't collide.
   - Main binds its pending-request map, timers and event handlers to the child's generation, a counter local to main. A late callback from a retired child is ignored.
-- **Exactly one terminal response per request:** a result, or an error such as `cancelled` or `deadline`. Late or duplicate responses are protocol errors.
+- **Exactly one terminal response per request:** a result, or an error such as `cancelled` or `deadline`. The core owns deadlines (see below). Main keeps every pending entry, even after its own caller has gone away, until that terminal response arrives. So a slow reply is never a protocol error; only an unsolicited or a second response is.
 - **Handshake:**
-  - The first message must be main's `core.hello`: `{ protocol: 1, shell_version, auto_lock_ms }`.
+  - The first message must be main's `core.hello`: `{ protocol: 1, shell_version, auto_lock_ms }`. Main sends `auto_lock_ms = 900000` (15 minutes), as `vault.js` does today.
   - The core replies `{ protocol: 1, core_version, capabilities }`, or with `protocol_mismatch`.
   - Main and core ship pinned together, so a mismatch is a packaging bug, and main fails loudly.
 - **Caller context:** main fills it in and never takes it from the renderer. Kinds use shell-neutral names, so a Chromium browser process can fill them in later.
@@ -169,30 +177,45 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
 - **Epochs:** the vault state machine has an **epoch** counter. Unlock moves it to a new epoch. Lock, auto-lock, delete and shutdown **revoke** it immediately.
 - **Lock is control traffic.** `vault.lock`, the auto-lock timer and `core.shutdown` run on the control path. They never wait behind KDF work or a write. Their acknowledgement means the epoch is revoked and the resident secrets are wiped.
 - **Secret-bearing work is tied to its epoch.** Derivations, `compat.*` and node writes are admitted against the current epoch. A worker result from a revoked epoch is wiped, never installed, and returns `vault_locked`. In particular, an unlock whose KDF finishes after a lock does not bring the secrets back.
-- **Work that already started** keeps the copy it took (for example, a `compat.private_key` reply being serialized). That's the documented limit: lock stops new use, it can't recall bytes already handed out.
+- **Revocation versus commit:**
+  - **Before its commit point,** revocation stops secret-bearing work. Results are wiped, nothing is installed, and the reply is `vault_locked`.
+  - **After its commit point** (the vault rename, or the node journal being written), a transaction finishes with the material it already holds. It wipes that material, reinstalls nothing, and reports its committed public result.
+  - **Replies already being serialized,** such as a `compat.private_key` reply, keep the copy they took. Lock stops new use; it can't recall bytes already handed out.
 - **Mutations** (create, import, change_password, delete, node writes) are serialized through one vault task.
 - **Limits:**
-  - At most 64 admitted requests (`busy` beyond that).
+  - At most 64 admitted requests; beyond that, `busy`.
+  - **Exempt from the cap:** `vault.lock`, `core.shutdown`, `cancel` and `vault.status` have their own reserve of 8, so lock and shutdown always get in.
   - At most 2 concurrent KDF jobs.
   - A slot is held until the underlying work actually finishes, not when its caller gives up.
 
 ### Deadlines, cancellation and commit
 
-- **Deadlines:** a request's deadline is a total budget on a monotonic clock, starting when the request is admitted (queue time included). Defaults: 30 s for KDF methods, 5 s for everything else.
+- **Deadlines:**
+  - A deadline is a total budget on a monotonic clock, starting when the core admits the request (queue time included). Defaults: 30 s for KDF methods, 5 s for everything else.
+  - **The core enforces deadlines and always replies.** Main doesn't settle requests on its own timer. It runs only a hang watchdog: core deadline + 15 s. If the watchdog fires, main treats the core as hung, kills it, restarts it and [reconciles](#reconciliation).
 - **Before the commit point,** a deadline or `cancel` stops the operation and returns `deadline` or `cancelled`. Throttle attempts are reserved before a KDF starts, so concurrent guesses can't all slip past the check.
 - **After the commit point,** the rename of the vault file or the intent record of a multi-file write, the operation always runs to completion and reports its real outcome, even past the deadline.
 - **Read-only operations** can be cancelled at any time.
 
 ### Reconciliation
 
-Responses can still go missing if the core crashes, so every mutation is reconcilable:
+A reply can still go missing (core crash, hang watchdog), so every mutation can be reconciled. Main runs vault mutations one at a time, which means the state it records before a mutation belongs to exactly that operation.
 
-- `vault.status` returns `{ exists, unlocked, epoch, fingerprint }`, where `fingerprint` is the SHA-256 of the vault file's bytes. Quick unlock already binds its credential to this hash.
-- **Before a mutation,** main records the current fingerprint (or "no vault"). If the request ends in anything other than success (crash, deadline, `internal`), main calls `vault.status` on the restarted core, then:
-  - **Fingerprint unchanged:** report the original error.
-  - **Fingerprint changed:** call `vault.verify_password` with the password the mutation used. If it decrypts, the mutation committed, and main reports success: for create, also `vault.export_mnemonic` so the generated phrase can still be shown; for import, the addresses. If it doesn't decrypt, report `internal` and log both fingerprints. That can only mean another writer, which the lifetime lock rules out.
-- **Quick Setup** is covered: the renderer's import call can't get an error back for a vault that was actually written, so it always goes on to store the random password.
-- **No accidental rewrites:** the core never rewrites the vault file except through create, import, change_password and delete. Startup, status, unlock and verify read it and never write it, so the quick-unlock binding survives.
+- **Before a mutation,** main records `vault.status` (`exists`, `fingerprint`, where the fingerprint is the SHA-256 of the vault file). If the mutation ends in anything but a reply (crash or hang), main restarts the core and calls **`vault.reconcile { op, fingerprint_before, password_b64, mnemonic_b64? }`**. The core checks the operation's actual effect:
+
+  | `op` | committed when | then the core |
+  |---|---|---|
+  | `create` | a vault exists now, it didn't before, and it decrypts with the password | unlocks (as create does) and returns `{ mnemonic, addresses }` |
+  | `import` | the fingerprint changed and the vault decrypts with the password to the requested mnemonic | unlocks (as import does) and returns `{ addresses }` |
+  | `change_password` | the fingerprint changed and the vault decrypts with the **new** password | returns `{}`; the vault stays locked after the restart |
+  | `delete` | a vault existed and is now absent | returns `{}` |
+
+  Otherwise `vault.reconcile` returns `not_committed`, and main reports the original error.
+- **A committed result goes back to the original caller as a success.** `identity-manager.js` continues its normal success path: it writes `vault-meta.json`, and in Quick Setup the renderer stores the random password. So a core-only failure can no longer turn a written vault into a reported failure.
+- **A crash of main itself** between the core's commit and main's metadata write is the same window JS has today (vault file written, then metadata). It isn't new and isn't addressed here.
+- **If the core can't be restarted,** main reports `core_unavailable`. Retrying the same operation reconciles first.
+- **No accidental rewrites:** the core never rewrites the vault file except through create, import, change_password and delete. Startup, status, unlock and verify read it and never write it, so quick unlock's content fingerprint survives. Tightening the file's mode to `0600` changes metadata, not content.
+- **`vault.reconcile` doesn't count toward throttling.** It verifies a password main itself sent in the operation it is reconciling.
 
 ## Writes and durability
 
@@ -207,19 +230,31 @@ Responses can still go missing if the core crashes, so every mutation is reconci
 
 - **Guarantee:** the vault survives a process crash on every OS, and power loss on local Unix filesystems.
 - **Windows:** `MoveFileExW` with `REPLACE_EXISTING | WRITE_THROUGH` is best-effort under power loss.
-- **Existing files:** permissions are tightened the first time the core rewrites a file. The core never rewrites a file just to change its mode, because quick unlock's fingerprint must stay stable.
+- **Existing files:** at adoption (the first core start on a profile), the core tightens existing secret files to `0600` in place with `chmod`, which doesn't change the content. It first checks that each is a regular file, not a symlink, owned by the current user. This covers the vault, the Bee keystore and config, and the Radicle keys.
+- **Delete:** unlink, then `fsync` the directory before replying. A delete commits at the unlink.
 
-**Multi-file** (Bee: `keys/swarm.key` plus `config.yaml`; Radicle: private key, public key and config):
+### Multi-file writes
 
-1. Stage every file as `<name>.freedom-new`, flushed.
-2. Write `<dir>/.freedom-identity-intent.json` atomically. It records the node, the staged files and the key's address or DID. This is the commit point.
-3. Rename each staged file into place, then `fsync` the directory.
-4. Delete the intent record.
+This covers node identities. **Bee:** `keys/swarm.key` plus `config.yaml`. **Radicle:** private key, public key and config. Node directories can be outside the profile, so the journal lives in the identity directory, where startup recovery always finds it.
 
-- **Recovery:** at startup, or before any node write, the core rolls a leftover intent record forward. This is idempotent; the staged files already hold everything.
-- **Torn state:** a staged set without an intent record is deleted.
-- **Main restarts a node only** after `nodes.write_identity` has returned success, or after a reconciling `nodes.identity_status` says the files are consistent.
-- **Bee's keystore password** still goes into `config.yaml` (K-3, Phase 5). The intent protocol guarantees that the keystore and the password always match.
+1. **Stage.** For each target, write `<target>.freedom-new` (exclusive create, `0600`, fsync) and compute its SHA-256.
+2. **Commit.** Write `<identityDir>/node-identity-journal.json` atomically and durably. It holds `{ op_id, node, files: [{ target, staged, sha256 }] }`, with absolute paths.
+3. **Install.** For each file:
+   - if the target already has the journaled SHA-256, it's done;
+   - otherwise rename the staged file over it.
+
+   Then `fsync` every affected directory.
+4. **Finish.** Add `op_id` to `<identityDir>/node-identity-done.json` (the last 32 operations, written atomically), then delete the journal and `fsync`.
+
+- **Recovery** runs at startup before `core.hello` is answered, and before any node write. For a leftover journal, repeat step 3 for each file:
+  - a target with the right digest is done;
+  - otherwise a staged file with the right digest is renamed into place;
+  - if neither exists, the operation reports `node_identity_corrupt`, which needs a fresh write while unlocked; main shows that as a node error.
+
+  Then do step 4. Staged files without a journal are deleted.
+- **Reconciliation:** `nodes.op_status { op_id }` returns `committed`, `not_committed` or `corrupt` from the done list and the journal. A consistent node directory alone doesn't count, because it could still hold the old identity.
+- **Ordering with the shell:** main stops the node before calling `nodes.write_identity` and starts it only after success or a `committed` reconciliation, as it does today. Ant's own config rewrite at start (`ant-manager.js:815`) therefore always happens after the write.
+- **Bee's keystore password** still goes into `config.yaml` (K-3, Phase 5). The journal guarantees that the keystore and the password always match.
 
 ## Parity contract
 
@@ -239,13 +274,21 @@ Main's proxy has to reproduce each JS handler: argument checks and defaults, the
 | `vault.export_private_key { password, account }` | main: "Password is required to export private key" → main's device and record guards ("This account has no exportable private key — the key never leaves its device") → `no_vault` "No vault found" → `throttled` → `incorrect_password` → `vault_locked` | unchanged | — |
 
 ⚠ **Intentional changes, need your OK:**
-1. **The password-change timer.** JS `changePassword` calls `unlockVault(…, 0)` (`vault.js:204`). After a password change, the vault is therefore unlocked **with no auto-lock timer**, even if it was locked before, and main's derived-key cache stays empty. The core leaves the lock state and timer as they were.
+1. **Lock state after a password change.** JS `changePassword` verifies by calling `unlockVault(dataDir, current, 0)` (`vault.js:204`), and timer 0 starts no timer. What that does depends on the state before:
+   - **Locked before:** JS ends **unlocked with no auto-lock timer**, while main's derived-key cache stays empty, so `get-status` disagrees with `vault.js`. The same happens when the new password is then rejected as too short. The core stays locked.
+   - **Unlocked before:** JS stays unlocked and the existing timer keeps running. The core does the same.
 2. **The lock event.** `vault.locked` is a new internal event. Main uses it to update its own state. The renderer keeps polling `identity:get-status` as it does today, so there is no new renderer event in Phase 1.
 
 **Other parity rules:**
 - **Mnemonic acceptance is exactly `@scure/bip39`'s.** It normalizes to NFKD, splits on single spaces, uses the case-sensitive English list and checks the checksum. The phrase is stored exactly as given.
-- **`keys.generate_mnemonic`** takes `words: 12 | 24`. Main maps the JS `strength` argument (128 → 12, 256 → 24), with 256 as the default, as in `derivation.js:40`.
-- **Vault passwords are raw UTF-8,** with no normalization, so NFC and NFD forms are different passwords.
+- **`keys.generate_mnemonic`** takes `words: 12 | 15 | 18 | 21 | 24`. Main maps the JS `strength` argument (128, 160, 192, 224, 256), with 256 as the default, as in `derivation.js:40`. Any other strength gets the JS error locally.
+- **Vault passwords are raw UTF-8,** with no normalization, so NFC and NFD forms are different passwords. Main produces the bytes with `Buffer.from(password, 'utf8')`, which is what passworder does, so a lone surrogate becomes U+FFFD exactly as today. The 8-character minimum is checked on the UTF-16 length in main and again in the core; replacing a lone surrogate with U+FFFD leaves that length unchanged.
+- **Throttling** (new, K-4):
+  - One counter is shared by failed `unlock`, `verify_password`, `change_password` (the current password), `delete` and both exports.
+  - The first 5 failures are free. After that, each attempt has to wait 2^(n−5) s since the last failure, capped at 5 min, and gets `throttled` with `retry_after_ms`.
+  - A success resets the counter.
+  - An attempt is reserved before its KDF starts. A cancelled or revoked attempt still counts if its KDF ran.
+  - The counter lives in memory. Renderer input can't crash the core, so only main can reset it, and main is trusted.
 - **Vault reading accepts both KDF settings:** `keyMetadata` with any iteration count, and a missing `keyMetadata`, which means the legacy 10,000 iterations.
 - **Vault writing reproduces the JS envelope** (`{ version: 1, encrypted, createdAt }`, 2-space JSON, no trailing newline) with 900,000 iterations. `vectors/fixtures/vaults.json` is the reference in both directions.
 - **Behavior that stays in main** for the vault and keys:
@@ -260,34 +303,41 @@ Main's proxy has to reproduce each JS handler: argument checks and defaults, the
 |---|---|---|
 | `core.hello`, `core.shutdown` | see above | not reachable from any renderer channel |
 | `vault.status` | → `{ exists, unlocked, epoch, fingerprint }` | |
-| `keys.generate_mnemonic`, `keys.validate_mnemonic` | see parity table | |
-| `vault.create`, `vault.import`, `vault.unlock`, `vault.lock`, `vault.verify_password`, `vault.change_password`, `vault.delete` | see parity table | create, import and unlock return `addresses` |
+| `keys.generate_mnemonic`, `keys.validate_mnemonic` | see parity table | generate returns `{ mnemonic }` |
+| `vault.create`, `vault.import`, `vault.unlock`, `vault.lock`, `vault.verify_password`, `vault.change_password`, `vault.delete` | see parity table | create returns `{ mnemonic, addresses }`; import and unlock return `{ addresses }` |
 | `vault.touch` | → `{}` | restarts the auto-lock timer if unlocked |
 | `vault.export_mnemonic`, `vault.export_private_key` | see parity table | permanent, user-requested backup exports |
 | `keys.addresses` | `{ accounts?: [u32], publishers?: [u32] }` → `{ user_wallets, bee_wallet, publishers, radicle: { public_key, did, node_id } }` | public data only; needs an unlocked vault |
 | `keys.radicle_did` | `{ public_key }` → `{ did }` | public conversion; works while locked (`readRadicleDid`, `identity-manager.js:381`) |
-| `nodes.write_identity` | `{ node: "bee" \| "radicle", dir, alias? }` → `{ address \| did }` | multi-file protocol; Bee generates a fresh keystore password, as today |
-| `nodes.identity_status` | `{ node, dir }` → `{ consistent, address \| did }` | recovery check after a lost reply |
+| `nodes.write_identity` | `{ op_id, node: "bee", data_dir, api_port, p2p_port }` or `{ op_id, node: "radicle", home, alias }` → `{ address }` or `{ did, node_id }` | [multi-file protocol](#multi-file-writes). Bee generates a fresh keystore password and writes `config.yaml` exactly as `createBeeConfig` does, with main's per-profile ports |
+| `nodes.op_status` | `{ op_id }` → `{ status: "committed" \| "not_committed" \| "corrupt" }` | reconciliation after a lost reply |
+| `vault.reconcile` | see [Reconciliation](#reconciliation) | after a lost mutation reply |
 | `compat.private_key` | `{ account }` → `{ private_key }` | temporary; see Migration |
 | `compat.bee_wallet_key` | → `{ private_key }` | temporary |
 | `compat.publisher_key` | `{ origin_index }` → `{ private_key }` | temporary |
 
 **Events from the core:** `vault.locked { reason: "manual" | "auto" | "delete" | "shutdown", epoch }` and `vault.unlocked { epoch }`.
 
-### Input validation
+### Input validation and secret fields
 
-Main validates every renderer-supplied argument before it dispatches anything:
+- **Secret fields travel as base64** of their UTF-8 bytes: `password_b64`, `new_password_b64`, `mnemonic_b64`, and on the way back `mnemonic_b64` and `private_key_hex`.
+  - Base64 and hex contain no JSON escapes, so the core's decoder borrows them straight from the frame buffer. serde_json makes no scratch copy, and the core decodes them into `Zeroizing` buffers.
+  - Main builds the bytes exactly as the JS does today:
+    - **passwords:** `Buffer.from(p, 'utf8')`;
+    - **mnemonics:** rejected locally with "Invalid mnemonic" when `!isWellFormed()`, as `@scure/bip39` rejects them.
+- **Main validates every renderer-supplied argument before dispatch:**
 
-| Argument | Limit |
-|---|---|
-| Passwords | ≤ 1,024 UTF-8 bytes |
-| Mnemonics | ≤ 1,024 bytes |
-| Aliases | ≤ 64 bytes |
-| Indices | integers in `[0, 2^31)` |
+  | Argument | Rule |
+  |---|---|
+  | Non-secret strings | must be well-formed |
+  | Indices | integers in `[0, 2^31)` |
+  | Aliases | ≤ 64 bytes |
+  | Secret fields | ≤ 256 KiB each |
 
-- **Out-of-range input** gets the existing JS error string locally and never reaches the core.
-- **Defense in depth:** the core applies the same limits and answers `invalid_argument`. A field over its limit is never a protocol error.
-- **Renderer access:** `core.hello`, `core.shutdown`, `cancel` and `compat.*` aren't reachable from any renderer channel. Only main-internal adapters call them.
+  - **Out-of-range input** gets the JS error string locally and never reaches the core.
+  - **The 256 KiB limit** is a deliberate transport limit. JS has no ceiling, but no UI or generated password comes near it. A test keeps a vault with a 1,025-byte password unlockable.
+- **Defense in depth:** the core applies the same rules and answers `invalid_argument`. A malformed field is never a protocol error, so renderer input can't crash the core.
+- **Renderer access:** `core.hello`, `core.shutdown`, `cancel`, `vault.reconcile`, `nodes.op_status` and `compat.*` aren't reachable from any renderer channel. Only main-internal code calls them.
 
 ## Migration in freedom-browser
 
@@ -352,8 +402,8 @@ The password crosses the pipe, which is no worse than today, where it is used in
 |---|---|---|
 | `fc-keys` | logic | BIP-39 (`@scure/bip39` rules), BIP-32 on `k256` (every intermediate secret zeroized), SLIP-10 Ed25519, the path registry. Encoders: EIP-55, Web3 keystore v3 (scrypt; password NFKC, as ethers does), OpenSSH v1 with an injectable check integer, did:key. The IPFS encoder is kept for the vectors only. |
 | `fc-vault` | logic | The passworder v6 format (PBKDF2-SHA-256, iterations from `keyMetadata` or the legacy 10,000; AES-256-GCM, 16-byte IV, 32-byte salt), the vault envelope, the lock state machine with epochs, the throttle policy. Everything is a pure function of (state, event, now), returning the bytes to write. |
-| `fc-protocol` | logic | Message types, error codes, the method table, a sans-I/O frame codec, schema generation, secret-aware field types. |
-| `freedom-cored` | binary | Stdio transport and writer, control path, vault task, KDF pool, timers, durable writes, the multi-file protocol, the lifetime lock, logging, process hardening, and the `probe-lock` subcommand. |
+| `fc-protocol` | logic | Message types, error codes, the method table, a sans-I/O frame codec, schema generation, base64/hex secret field types decoding into `Zeroizing`. |
+| `freedom-cored` | binary | Stdio transport and writer, control path, vault task, KDF pool, timers, durable writes, the node journal, the lifetime lock with storage qualification, logging, process hardening, and the `hold-lock` subcommand. |
 
 ## Secrets in memory
 
@@ -361,9 +411,14 @@ The password crosses the pipe, which is no worse than today, where it is used in
   - Inside the core, the mnemonic, seed, private keys, passwords and derived AES keys live only in `Zeroizing` or `secrecy` types.
   - Those types implement no `Debug`, `Display`, `Serialize` or `Clone`.
 - **Wire boundary:**
-  - Secret fields are decoded straight into `Zeroizing<String>` by a custom deserializer, never through `serde_json::Value`.
+  - Secret fields are base64 or hex (see [Input validation](#input-validation-and-secret-fields)), so the JSON decoder never copies them into its scratch buffer.
+  - They are decoded into `Zeroizing` buffers, never through `serde_json::Value`.
   - Raw frame buffers and response buffers are wiped once decoded or written.
-  - The only outgoing secrets are the export and `compat` results, serialized by one audited function.
+  - **Outgoing secrets go through one audited serializer that writes into a `Zeroizing` buffer:**
+    - `keys.generate_mnemonic`;
+    - `vault.create` and `vault.reconcile` for `create` (the onboarding phrase);
+    - `vault.export_*`;
+    - `compat.*`.
 - **Logging:** log lines carry the method name, request ID, duration and error code. They never include a request or response body, and the core has no body-bearing diagnostics.
 - **Process hardening:**
   - **Linux:** `PR_SET_DUMPABLE=0`.
@@ -397,7 +452,10 @@ The password crosses the pipe, which is no worse than today, where it is used in
   - **Epochs:** lock during an unlock's KDF (the secrets must not come back), auto-lock during a node write.
   - **Deadlines and limits:** a deadline while queued, during the KDF, at commit and while replying; throttle reservation under concurrent guesses.
   - **Crashes:** killed at every commit point of every mutation and node write, each followed by reconciliation and roll-forward.
-  - **Lifetime lock:** two processes on one directory, `probe-lock`, an unsupported filesystem, EOF mid-frame, parent death.
+  - **Lifetime lock:** two processes on one directory; `hold-lock` held across a delete while a core tries to start; a network-filesystem refusal; EOF mid-frame; parent death before and after the handshake; no `core.hello` within 10 s.
+  - **Reconciliation:** a lost reply for every mutation, including create and delete, then `vault.reconcile` in each state.
+  - **Node journal:** crashes after each install rename and before and after journal removal; then `nodes.op_status`.
+  - **Input:** a 1,025-byte password vault still unlocks; lone surrogates; passwords with quotes and backslashes; the throttle and the core generation survive malformed renderer input.
 - **freedom-browser:**
   - Jest tests for the client against a fake core, including generations, late responses and reconciliation;
   - the proxy contract test against `protocol/schema.json`;
@@ -410,4 +468,4 @@ The password crosses the pipe, which is no worse than today, where it is used in
 
 1. **Hardware-wallet, phone and Safe accounts:** their records stay in `vault-meta.json`, owned by JS until Phase 5, and they keep working while the vault is locked. Is that acceptable? I think so.
 2. **Should `keys.generate_mnemonic` keep the phrase in the core** and hand back a handle? The phrase would then reach the renderer only for display, but it changes the onboarding IPC shapes. Proposed: not in Phase 1.
-3. **Windows:** code signing, and an owner-only DACL for secret files. Tracked in #644's decisions.
+3. **Windows:** code signing, and an owner-only DACL for secret files, which also matters for alternate profile roots. Tracked in #644's decisions.
