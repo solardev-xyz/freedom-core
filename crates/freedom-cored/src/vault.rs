@@ -271,9 +271,9 @@ struct PasswordParams<'a> {
 #[derive(Deserialize)]
 struct ChangeParams<'a> {
     #[serde(borrow)]
-    current_b64: &'a RawValue,
+    password_b64: &'a RawValue,
     #[serde(borrow)]
-    new_b64: &'a RawValue,
+    new_password_b64: &'a RawValue,
 }
 
 #[derive(Deserialize)]
@@ -469,25 +469,21 @@ impl Vault {
                     .state
                     .user_wallet(p.account)
                     .map_err(locked_or_internal)?;
-                secret_result(id, "private_key_b64", key.to_secret_bytes().as_slice())
+                private_key_result(id, key.to_secret_bytes().as_slice())
             }),
             "compat.bee_wallet_key" => self
                 .state
                 .freedom_keys()
                 .map_err(locked_or_internal)
                 .and_then(|keys| {
-                    secret_result(
-                        id,
-                        "private_key_b64",
-                        keys.bee_wallet.to_secret_bytes().as_slice(),
-                    )
+                    private_key_result(id, keys.bee_wallet.to_secret_bytes().as_slice())
                 }),
             "compat.publisher_key" => params::<OriginParams>(raw).and_then(|p| {
                 let key = self
                     .state
                     .publisher(p.origin_index)
                     .map_err(locked_or_internal)?;
-                secret_result(id, "private_key_b64", key.to_secret_bytes().as_slice())
+                private_key_result(id, key.to_secret_bytes().as_slice())
             }),
             _ => match self.enqueue(id, method, raw) {
                 Ok(()) => {
@@ -656,8 +652,8 @@ impl Vault {
             "vault.change_password" => {
                 let p = params::<ChangeParams>(raw)?;
                 Kind::ChangePassword {
-                    current: secret(p.current_b64)?,
-                    new: secret(p.new_b64)?,
+                    current: secret(p.password_b64)?,
+                    new: secret(p.new_password_b64)?,
                 }
             }
             "vault.create" => {
@@ -1002,7 +998,7 @@ impl Vault {
                     .state
                     .user_wallet(*account)
                     .map_err(locked_or_internal)?;
-                secret_result(request, "private_key_b64", key.to_secret_bytes().as_slice())
+                private_key_result(request, key.to_secret_bytes().as_slice())
             }
             _ => Err(internal()),
         }
@@ -1096,6 +1092,16 @@ fn secret_result(
 ) -> Result<Option<Zeroizing<Vec<u8>>>, ErrorBody> {
     SecretResponse::new(id)
         .secret(field, secret)
+        .finish()
+        .map(Some)
+        .map_err(|_| internal())
+}
+
+/// A private key as `private_key_hex` (`0x` + hex, like ethers'
+/// `wallet.privateKey`; design 0001, "Secret fields").
+fn private_key_result(id: u64, key: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>, ErrorBody> {
+    SecretResponse::new(id)
+        .secret_hex("private_key_hex", key)
         .finish()
         .map(Some)
         .map_err(|_| internal())

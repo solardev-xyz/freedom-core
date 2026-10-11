@@ -115,19 +115,15 @@ fn create_lock_unlock_export_change_delete() {
     let forbidden = core.call(10, "compat.private_key", json!({ "account": 0 }));
     assert_eq!(forbidden["error"]["code"], "forbidden");
     let key = core.call_shell(11, "compat.private_key", json!({ "account": 0 }));
-    assert_eq!(
-        STANDARD
-            .decode(key["result"]["private_key_b64"].as_str().unwrap())
-            .unwrap()
-            .len(),
-        32
-    );
+    let hex = key["result"]["private_key_hex"].as_str().unwrap();
+    assert_eq!(hex.len(), 66);
+    assert!(hex.starts_with("0x") && hex[2..].bytes().all(|b| b"0123456789abcdef".contains(&b)));
 
     // Change password: the lock state is unchanged (stays unlocked).
     let changed = core.call(
         12,
         "vault.change_password",
-        json!({ "current_b64": b64("testpass1"), "new_b64": b64("testpass2") }),
+        json!({ "password_b64": b64("testpass1"), "new_password_b64": b64("testpass2") }),
     );
     assert_eq!(changed["result"], json!({}));
     assert_eq!(
@@ -255,6 +251,16 @@ fn import_and_parity_errors() {
         core.call(10, "keys.generate_mnemonic", json!({ "words": 13 }))["error"]["code"],
         "invalid_argument"
     );
+    // The well-known key of that address, in ethers' format.
+    const KEY: &str = "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727";
+    let compat = core.call_shell(11, "compat.private_key", json!({ "account": 0 }));
+    assert_eq!(compat["result"]["private_key_hex"], KEY);
+    let exported = core.call(
+        12,
+        "vault.export_private_key",
+        json!({ "password_b64": b64("testpass9"), "account": 0 }),
+    );
+    assert_eq!(exported["result"]["private_key_hex"], KEY);
 }
 
 #[test]

@@ -89,14 +89,41 @@ fn decode_token(token: &str) -> Result<SecretBytes, &'static str> {
 }
 
 /// Builds a response frame payload that carries secrets:
-/// `{"type":"response","id":…,"result":{"<public…>","<secret>":"<base64>"}}`.
+/// `{"type":"response","id":…,"result":{"<public…>","<secret>":"<base64>"}}`
+/// (or `"0x<hex>"` for [`SecretResponse::secret_hex`]).
 ///
 /// This is the one audited path that writes secrets (AGENTS.md rule 3): the
 /// onboarding phrase, the backup exports and the temporary `compat.*` keys.
 pub struct SecretResponse<'a> {
     id: u64,
     public: Vec<(&'static str, String)>,
-    secrets: Vec<(&'static str, &'a [u8])>,
+    secrets: Vec<(&'static str, &'a [u8], Encoding)>,
+}
+
+/// A secret field's bytes and how they are encoded.
+type SecretField<'s> = (&'s [u8], Encoding);
+
+#[derive(Clone, Copy)]
+enum Encoding {
+    Base64,
+    /// `0x` and lowercase hex, as ethers formats private keys.
+    Hex,
+}
+
+impl Encoding {
+    fn len(self, bytes: usize) -> usize {
+        match self {
+            Encoding::Base64 => bytes.div_ceil(3) * 4,
+            Encoding::Hex => 2 + 2 * bytes,
+        }
+    }
+}
+
+/// A hex digit without a table lookup indexed by secret data.
+fn hex_digit(nibble: u8) -> u8 {
+    // 0xFF when nibble > 9, else 0.
+    let letter = ((9i16 - i16::from(nibble)) >> 8) as u8;
+    b'0' + nibble + (letter & (b'a' - b'0' - 10))
 }
 
 impl fmt::Debug for SecretResponse<'_> {
@@ -129,7 +156,14 @@ impl<'a> SecretResponse<'a> {
 
     /// Adds a secret field, base64-encoded into the output.
     pub fn secret(mut self, name: &'static str, bytes: &'a [u8]) -> Self {
-        self.secrets.push((name, bytes));
+        self.secrets.push((name, bytes, Encoding::Base64));
+        self
+    }
+
+    /// Adds a secret field as `0x` and lowercase hex (private keys, in the
+    /// form ethers' `wallet.privateKey` has).
+    pub fn secret_hex(mut self, name: &'static str, bytes: &'a [u8]) -> Self {
+        self.secrets.push((name, bytes, Encoding::Hex));
         self
     }
 
@@ -137,18 +171,21 @@ impl<'a> SecretResponse<'a> {
     pub fn finish(self) -> Result<Zeroizing<Vec<u8>>, crate::message::IdError> {
         crate::message::check_id(self.id)?;
         let head = format!(r#"{{"type":"response","id":{},"result":{{"#, self.id);
-        let mut fields: Vec<(String, Option<&[u8]>)> = Vec::new();
+        let mut fields: Vec<(String, Option<SecretField<'_>>)> = Vec::new();
         for (name, json) in &self.public {
             fields.push((format!(r#""{}":{}"#, field_name(name), json), None));
         }
-        for (name, bytes) in &self.secrets {
-            fields.push((format!(r#""{}":""#, field_name(name)), Some(*bytes)));
+        for (name, bytes, encoding) in &self.secrets {
+            fields.push((
+                format!(r#""{}":""#, field_name(name)),
+                Some((*bytes, *encoding)),
+            ));
         }
         let mut capacity = head.len() + 2; // "}}"
         for (index, (prefix, secret)) in fields.iter().enumerate() {
             capacity += prefix.len() + usize::from(index > 0);
-            if let Some(bytes) = secret {
-                capacity += bytes.len().div_ceil(3) * 4 + 1; // base64 + closing quote
+            if let Some((bytes, encoding)) = secret {
+                capacity += encoding.len(bytes.len()) + 1; // encoded + closing quote
             }
         }
         let mut out = Zeroizing::new(Vec::with_capacity(capacity));
@@ -158,12 +195,24 @@ impl<'a> SecretResponse<'a> {
                 out.push(b',');
             }
             out.extend_from_slice(prefix.as_bytes());
-            if let Some(bytes) = secret {
-                let start = out.len();
-                out.resize(start + bytes.len().div_ceil(3) * 4, 0);
-                // The slot is exactly the encoded length, so this can't fail.
-                let written = STANDARD.encode_slice(bytes, &mut out[start..]).unwrap_or(0);
-                out.truncate(start + written);
+            if let Some((bytes, encoding)) = secret {
+                match encoding {
+                    Encoding::Base64 => {
+                        let start = out.len();
+                        out.resize(start + encoding.len(bytes.len()), 0);
+                        // The slot is exactly the encoded length, so this
+                        // can't fail.
+                        let written = STANDARD.encode_slice(bytes, &mut out[start..]).unwrap_or(0);
+                        out.truncate(start + written);
+                    }
+                    Encoding::Hex => {
+                        out.extend_from_slice(b"0x");
+                        for byte in bytes.iter() {
+                            out.push(hex_digit(byte >> 4));
+                            out.push(hex_digit(byte & 0x0f));
+                        }
+                    }
+                }
                 out.push(b'"');
             }
         }
@@ -225,6 +274,24 @@ mod tests {
         let too_long = STANDARD.encode(vec![1u8; MAX_SECRET_BYTES + 1]);
         let json = format!(r#"{{"password_b64":"{too_long}"}}"#);
         assert!(password(json.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn hex_secrets_match_ethers_format() {
+        let key: Vec<u8> = (0u8..=255).step_by(9).collect();
+        let out = SecretResponse::new(7)
+            .public("account", &0)
+            .unwrap()
+            .secret_hex("private_key_hex", &key)
+            .finish()
+            .unwrap();
+        assert_eq!(out.capacity(), out.len(), "exactly sized");
+        let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let expected: String = key.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(value["result"]["private_key_hex"], format!("0x{expected}"));
+        for nibble in 0..16u8 {
+            assert_eq!(hex_digit(nibble), b"0123456789abcdef"[usize::from(nibble)]);
+        }
     }
 
     #[test]
