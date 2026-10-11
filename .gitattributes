@@ -1,0 +1,3 @@
+# LF everywhere: the BIP-39 wordlist is checked by its SHA-256, and vectors
+# are compared byte for byte.
+* text=auto eol=lf
