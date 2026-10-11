@@ -224,24 +224,54 @@ mod imp {
 #[cfg(windows)]
 mod imp {
     use std::os::windows::ffi::OsStrExt;
-    use std::path::Path;
+    use std::path::{Component, Path, Prefix};
 
     use super::Qualification;
 
-    /// After `canonicalize`, paths on network shares, including mapped
-    /// network drive letters, are UNC paths (`\\?\UNC\server\share`), because
-    /// Windows resolves them to their final network path. Compared as wide
-    /// characters, so non-UTF-8 paths are covered too.
+    // GetDriveTypeW results.
+    const DRIVE_UNKNOWN: u32 = 0;
+    const DRIVE_NO_ROOT_DIR: u32 = 1;
+    const DRIVE_REMOTE: u32 = 4;
+
+    /// UNC paths are network shares. Drive letters and volume paths are
+    /// asked about with `GetDriveTypeW`: `DRIVE_REMOTE` (a mapped network
+    /// drive) is refused, and an answer of unknown or no root fails closed.
     pub fn qualify(dir: &Path) -> Qualification {
-        let wide: Vec<u16> = dir.as_os_str().encode_wide().collect();
-        let unc: Vec<u16> = r"\\?\UNC\".encode_utf16().collect();
-        let verbatim: Vec<u16> = r"\\?\".encode_utf16().collect();
-        let double: Vec<u16> = r"\\".encode_utf16().collect();
-        if wide.starts_with(&unc) || (wide.starts_with(&double) && !wide.starts_with(&verbatim)) {
-            Qualification::Network("unc".into())
-        } else {
-            Qualification::Local
+        let Some(Component::Prefix(prefix)) = dir.components().next() else {
+            return Qualification::Unknown("path without a drive or volume".into());
+        };
+        let root: Vec<u16> = match prefix.kind() {
+            Prefix::UNC(..) | Prefix::VerbatimUNC(..) => {
+                return Qualification::Network("unc".into());
+            }
+            Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+                [u16::from(letter), u16::from(b':'), u16::from(b'\\'), 0].to_vec()
+            }
+            _ => prefix
+                .as_os_str()
+                .encode_wide()
+                .chain([u16::from(b'\\'), 0])
+                .collect(),
+        };
+        match drive_type(&root) {
+            DRIVE_REMOTE => Qualification::Network("mapped network drive".into()),
+            DRIVE_UNKNOWN | DRIVE_NO_ROOT_DIR => {
+                Qualification::Unknown("drive type unknown".into())
+            }
+            _ => Qualification::Local,
         }
+    }
+
+    /// `GetDriveTypeW` on a NUL-terminated root path.
+    #[allow(unsafe_code)]
+    fn drive_type(root: &[u16]) -> u32 {
+        if root.last() != Some(&0) {
+            return DRIVE_UNKNOWN;
+        }
+        // SAFETY: `root` is a valid, NUL-terminated UTF-16 string that lives
+        // for the whole call; GetDriveTypeW only reads it and keeps no
+        // reference.
+        unsafe { windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(root.as_ptr()) }
     }
 }
 

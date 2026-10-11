@@ -197,33 +197,33 @@ fn hello_status_shutdown() {
             .unwrap()
             .contains(&json!("vault.status"))
     );
-
     let status = core.call(2, "vault.status", json!({}));
     assert_eq!(
         status["result"],
         json!({ "exists": false, "unlocked": false, "epoch": null, "fingerprint": null })
     );
+    assert_eq!(
+        core.call(3, "core.shutdown", json!({}))["result"],
+        json!({})
+    );
+    assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
 
+    // An existing vault: its fingerprint, and the bytes stay untouched.
     let vault = br#"{"version": 1}"#;
     std::fs::write(data.join("identity-vault.json"), vault).unwrap();
-    let status = core.call(3, "vault.status", json!({}));
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    let status = core.call(2, "vault.status", json!({}));
     assert_eq!(status["result"]["exists"], true);
     let expected: String = Sha256::digest(vault)
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
     assert_eq!(status["result"]["fingerprint"], expected);
-    // Reading never rewrites the vault (quick unlock binds to its bytes).
     assert_eq!(
         std::fs::read(data.join("identity-vault.json")).unwrap(),
         vault
     );
-
-    assert_eq!(
-        core.call(4, "core.shutdown", json!({}))["result"],
-        json!({})
-    );
-    assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
 }
 
 #[test]
@@ -251,9 +251,9 @@ fn errors_are_typed() {
 #[test]
 fn status_refuses_non_regular_vault_files_without_blocking() {
     let (_root, data, locks) = dirs();
+    std::fs::create_dir_all(data.join("identity-vault.json")).unwrap();
     let mut core = spawn("serve", &data, &locks, &[]);
     core.hello();
-    std::fs::create_dir_all(data.join("identity-vault.json")).unwrap();
     let status = core.call(2, "vault.status", json!({}));
     assert_eq!(status["error"]["code"], "storage");
     assert_eq!(status["error"]["data"]["kind"], "not_regular");
@@ -267,15 +267,18 @@ fn status_refuses_non_regular_vault_files_without_blocking() {
 
 #[cfg(unix)]
 #[test]
-fn a_fifo_vault_does_not_stall_the_loop() {
+fn a_fifo_vault_does_not_stall_the_core() {
+    // Status is a startup snapshot: a FIFO in place of the vault is refused
+    // at startup without blocking, and the loop stays responsive.
     let (_root, data, locks) = dirs();
-    let mut core = spawn("serve", &data, &locks, &[]);
-    core.hello();
+    std::fs::create_dir_all(&data).unwrap();
     let status = Command::new("mkfifo")
         .arg(data.join("identity-vault.json"))
         .status()
         .unwrap();
     assert!(status.success());
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
     assert_eq!(
         core.call(2, "vault.status", json!({}))["error"]["data"]["kind"],
         "not_regular"
@@ -373,22 +376,34 @@ fn a_burst_beyond_the_decoder_budget_is_fully_served() {
     assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
 }
 
+/// Kills and reaps a bare child on every exit path.
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 #[test]
 fn a_peer_that_stops_reading_makes_the_core_exit() {
     // Replies pile up past the pipe and the bounded queue: the core exits
     // instead of buffering without limit, and releases its gate.
     let (_root, data, locks) = dirs();
-    let mut core = Command::new(BIN)
-        .args(["serve", "--data-dir"])
-        .arg(&data)
-        .arg("--lock-dir")
-        .arg(&locks)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut stdin = core.stdin.take().unwrap();
+    let mut core = KillOnDrop(
+        Command::new(BIN)
+            .args(["serve", "--data-dir"])
+            .arg(&data)
+            .arg("--lock-dir")
+            .arg(&locks)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let mut stdin = core.0.stdin.take().unwrap();
     let hello = frame(&request(
         1,
         "core.hello",
@@ -404,7 +419,7 @@ fn a_peer_that_stops_reading_makes_the_core_exit() {
     });
     let deadline = Instant::now() + Duration::from_secs(20);
     let code = loop {
-        if let Some(status) = core.try_wait().unwrap() {
+        if let Some(status) = core.0.try_wait().unwrap() {
             break status.code();
         }
         assert!(Instant::now() < deadline, "core kept buffering");

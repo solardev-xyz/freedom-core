@@ -18,9 +18,13 @@ const QUEUE: usize = 1024;
 static SINK: Mutex<Option<SyncSender<Vec<u8>>>> = Mutex::new(None);
 static DONE: Mutex<Option<Receiver<()>>> = Mutex::new(None);
 static DROPPED: AtomicU64 = AtomicU64::new(0);
+/// Set once `init` has run. After that, a missing writer thread means lines
+/// are dropped, never written blocking.
+static INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Starts the writer thread. Before this, lines are written directly.
 pub fn init() {
+    INITIALIZED.store(true, Ordering::Relaxed);
     let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(QUEUE);
     let (done_tx, done_rx) = mpsc::channel();
     let spawned = std::thread::Builder::new()
@@ -77,6 +81,9 @@ fn write(level: &str, message: &str, mut fields: serde_json::Value) {
             if sink.try_send(line).is_err() {
                 DROPPED.fetch_add(1, Ordering::Relaxed);
             }
+        }
+        None if INITIALIZED.load(Ordering::Relaxed) => {
+            DROPPED.fetch_add(1, Ordering::Relaxed);
         }
         None => {
             let _ = std::io::stderr().lock().write_all(&line);

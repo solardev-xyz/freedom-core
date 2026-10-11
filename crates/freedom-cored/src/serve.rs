@@ -92,8 +92,12 @@ pub fn run(options: &Options) -> Exit {
         return Exit::Internal;
     }
 
+    // The status snapshot is taken here, before serving: the gate makes this
+    // process the only writer, so it never needs re-reading on the loop
+    // (where slow storage would delay shutdown and EOF).
+    let snapshot = vault_status(&gate.identity_dir);
     let mut core = Core {
-        data_dir: gate.identity_dir.clone(),
+        snapshot,
         out: writer.queue,
         hello_done: false,
         last_request_id: 0,
@@ -180,7 +184,7 @@ enum Flow {
 }
 
 struct Core {
-    data_dir: PathBuf,
+    snapshot: Result<StatusResult, &'static str>,
     out: mpsc::SyncSender<Zeroizing<Vec<u8>>>,
     hello_done: bool,
     last_request_id: u64,
@@ -320,8 +324,8 @@ impl Core {
                 Flow::Continue => Flow::Exit(Exit::Ok),
                 exit => exit,
             },
-            "vault.status" => match vault_status(&self.data_dir) {
-                Ok(status) => self.result(id, &status),
+            "vault.status" => match &self.snapshot {
+                Ok(status) => self.result(id, status),
                 Err(kind) => self.error(
                     id,
                     ErrorBody::new(ErrorCode::Storage, "Storage error")
@@ -407,10 +411,10 @@ impl Core {
     }
 }
 
-/// `vault.status` without the lock state (the skeleton has no vault yet):
-/// whether the vault file exists and its SHA-256, which quick unlock binds
-/// to. Only a regular file of bounded size is read, so a FIFO or a huge file
-/// can't stall the loop. Reading never writes.
+/// The `vault.status` snapshot, read once at startup (the skeleton has no
+/// vault writes yet): whether the vault file exists and its SHA-256, which
+/// quick unlock binds to. Only a regular file of bounded size is read, so a
+/// FIFO or a huge file is refused. Reading never writes.
 fn vault_status(data_dir: &Path) -> Result<StatusResult, &'static str> {
     let path = data_dir.join(VAULT_FILE);
     let metadata = match std::fs::symlink_metadata(&path) {
