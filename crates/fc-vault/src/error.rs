@@ -14,6 +14,10 @@ pub enum Error {
     /// The vault decrypted, but the phrase inside isn't a valid mnemonic.
     #[error("Decrypted data is not a valid mnemonic")]
     InvalidDecryptedMnemonic,
+    /// The caller passed parameters this crate refuses (iteration count,
+    /// time range).
+    #[error("invalid parameters: {0}")]
+    InvalidParams(&'static str),
     /// The random number generator failed.
     #[error("random number generator failed")]
     Randomness,
