@@ -13,7 +13,7 @@ dependencies. It does not implement derivation, encryption or identity encoding.
 | `keys.json` | Six mnemonic seeds; user and publisher keys at indices 0, 1, 2, 1000 and 2147483647; Bee, Radicle and IPFS keys; exact index errors and special JS inputs for every mnemonic. |
 | `mnemonic-validation.json` | Valid 12/15/18/21/24-word phrases, checksum/word/type/case/spacing/Unicode failures, accepted compatibility forms, seeds and wallet 0 for accepted inputs. |
 | `identity-formats.json` | Deterministic IPFS private-key protobuf/base64 and PeerID; Radicle DID, node ID and public SSH file with default `FreedomBrowser` comment and custom `vector-alias`; `didFromPublicKey`. |
-| `fixtures/vaults.json` | Exact vault file contents from real `importVault`, including timestamps and the embedded encrypted JSON string. Five password/mnemonic cases, parsed payloads, successful unlocks, and exact failing files/passwords/outcomes. |
+| `fixtures/vaults.json` | Exact vault file contents from real `importVault`, including timestamps and the embedded encrypted JSON string. Five password/mnemonic cases, parsed payloads, successful unlocks, exact failing files/passwords/outcomes, plus one explicitly synthetic positive legacy vault. |
 | `fixtures/bee-keystores.json` | Two actual `createBeeKeystore` outputs, passwords, expected keys/addresses, parsed JSON, KDF parameters and the Unicode password normalization check. |
 | `fixtures/radicle-openssh.json` | Twelve actual `createRadicleIdentity` results (six mnemonics, two comments), extracted check integers and padding; checked by parsing and replaying the same check integer through the reference JS. |
 | `generator/generate.js` | Plain CommonJS generator and verifier. |
@@ -63,8 +63,20 @@ existing fixtures; it never silently replaces their salts, IVs, timestamps,
 keystore UUIDs or OpenSSH check integers. `check` recomputes deterministic files
 and compares bytes, decrypts all vaults and Bee keystores, recomputes all negative
 vault outcomes, and parses/replays every OpenSSH file. Any mismatch exits nonzero.
-Generated temporary vault files stay under ignored `vectors/.scratch/`; no files
-are deleted. Those files also contain only public test material.
+Generated temporary vault files and integration-test copies use
+`fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'))`, outside the
+repository tree. Existing ignored `vectors/.scratch/` directories are retained;
+no files are deleted. All temporary files contain only public test material.
+
+`legacyFixtures` contains one **synthetic** positive legacy vault. Freedom never
+wrote such vaults, but its reader must accept them. The generator encrypts
+`{ mnemonic }` with the real passworder at 10000 PBKDF2 iterations, removes
+`keyMetadata`, and wraps that payload in an envelope produced by real
+`importVault`. Both passworder decryption and real `vault.unlockVault` must
+succeed through the metadata-free legacy fallback. Its random bytes are frozen
+like every other fixture. `generate` can add this fixture to the original file
+once, after asserting all original fixtures are byte-identical; `check` requires
+the positive case and verifies it on every run.
 
 **Never edit vectors by hand.** Change the generator if coverage must expand,
 generate outputs from the pinned JS, and review the resulting diff. Never change

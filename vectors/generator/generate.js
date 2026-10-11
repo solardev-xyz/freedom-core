@@ -4,6 +4,7 @@
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { createRequire } = require('node:module');
@@ -186,10 +187,8 @@ function buildIdentities({ meta, derivation: d, formats: f }) {
 }
 
 function scratchDirectory() {
-  // Keep all writes in the assigned worktree. No cleanup/deletion is performed.
-  const root = path.join(OUTPUT, '.scratch');
-  fs.mkdirSync(root, { recursive: true });
-  return fs.mkdtempSync(path.join(root, 'reference-'));
+  // Existing repo-local scratch directories are deliberately left untouched.
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
 }
 
 async function unlockOutcome(vault, directory, fileContents, password) {
@@ -223,7 +222,53 @@ function mutateVault(fileContents, mutation) {
   return JSON.stringify(outer, null, 2); // The vault itself has no trailing newline.
 }
 
-async function buildVaults(reference, existing) {
+async function buildLegacyVaults(reference, existing, mode, directory) {
+  const { vault, passworder } = reference;
+  const config = { id: 'synthetic-legacy-10000-12', mnemonicId: 'abandon-12', password: 'testpass' };
+  const mnemonic = mnemonicFor(config.mnemonicId);
+  const parameters = { algorithm: 'PBKDF2', params: { iterations: 10000 } };
+  assert.ok(!existing || existing.legacyFixtures || mode === 'generate', 'Missing positive legacy vault fixture');
+  let fileContents;
+  if (existing?.legacyFixtures) {
+    assert.equal(existing.legacyFixtures.length, 1);
+    fileContents = existing.legacyFixtures[0].fileContents;
+  } else {
+    // Use the app to create the real envelope, then replace only its encrypted
+    // payload with passworder's legacy format. Freedom never wrote this format.
+    const caseDirectory = path.join(directory, config.id);
+    await vault.importVault(caseDirectory, config.password, mnemonic);
+    const envelope = JSON.parse(fs.readFileSync(vault.getVaultPath(caseDirectory), 'utf8'));
+    const encrypted = await passworder.encrypt(config.password, { mnemonic }, undefined, undefined, parameters);
+    const payload = JSON.parse(encrypted);
+    assert.deepEqual(payload.keyMetadata, parameters);
+    delete payload.keyMetadata;
+    envelope.encrypted = JSON.stringify(payload);
+    fileContents = JSON.stringify(envelope, null, 2);
+  }
+  const envelope = JSON.parse(fileContents);
+  assert.equal(fileContents, JSON.stringify(envelope, null, 2));
+  assert.deepEqual(Object.keys(envelope), ['version', 'encrypted', 'createdAt']);
+  assert.equal(envelope.version, 1);
+  assert.equal(new Date(envelope.createdAt).toISOString(), envelope.createdAt);
+  const payload = JSON.parse(envelope.encrypted);
+  assert.deepEqual(Object.keys(payload), ['data', 'iv', 'salt']);
+  for (const field of ['data', 'iv', 'salt']) {
+    assert.equal(Buffer.from(payload[field], 'base64').toString('base64'), payload[field]);
+  }
+  assert.equal(Buffer.from(payload.iv, 'base64').length, 16);
+  assert.equal(Buffer.from(payload.salt, 'base64').length, 32);
+  assert.equal(Buffer.from(payload.data, 'base64').length, Buffer.byteLength(JSON.stringify({ mnemonic })) + 16);
+  assert.deepEqual(await passworder.decrypt(config.password, envelope.encrypted), { mnemonic });
+  const outcome = await unlockOutcome(vault, directory, fileContents, config.password);
+  assert.deepEqual(outcome, { status: 'success', mnemonic });
+  const wrongPasswordOutcome = await unlockOutcome(vault, directory, fileContents, config.password + '-wrong');
+  assert.equal(wrongPasswordOutcome.status, 'error');
+  return [{ ...config, synthetic: true,
+    provenance: 'Freedom never wrote these vaults. Real passworder.encrypt at 10000 PBKDF2 iterations, with keyMetadata removed, inside a real importVault envelope; the reader must accept the legacy fallback.',
+    mnemonic, encryptionParameters: parameters, fileContents, payload, outcome, wrongPasswordOutcome }];
+}
+
+async function buildVaults(reference, existing, mode) {
   const { meta, vault, passworder } = reference;
   const directory = scratchDirectory();
   const fixtures = [];
@@ -298,6 +343,7 @@ async function buildVaults(reference, existing) {
       passwordMinimum: '8 JavaScript UTF-16 code units; four supplementary-plane characters suffice',
     },
     fixtures, passwordValidation,
+    legacyFixtures: await buildLegacyVaults(reference, existing, mode, directory),
   };
 }
 
@@ -442,8 +488,16 @@ async function main() {
     const previous = exists ? fs.readFileSync(destination, 'utf8') : null;
     const existing = exists ? JSON.parse(previous) : null;
     if (existing) assert.deepEqual(existing.meta, reference.meta, `Reference metadata mismatch: ${filename}`);
-    const contents = await builder(reference, existing);
-    if (exists) assert.equal(previous, json(contents), `Fixture validation mismatch: ${filename}`);
+    const contents = await builder(reference, existing, mode);
+    // The requested legacy coverage extends this file once, without changing
+    // any existing random fixture bytes. Later generation preserves all of it.
+    const addLegacy = exists && mode === 'generate' && filename === 'fixtures/vaults.json' && !existing.legacyFixtures;
+    if (addLegacy) {
+      const originalContents = { ...contents };
+      delete originalContents.legacyFixtures;
+      assert.equal(previous, json(originalContents), `Existing fixture changed: ${filename}`);
+      fs.writeFileSync(destination, json(contents));
+    } else if (exists) assert.equal(previous, json(contents), `Fixture validation mismatch: ${filename}`);
     else {
       fs.mkdirSync(path.dirname(destination), { recursive: true });
       fs.writeFileSync(destination, json(contents));

@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const test = require('node:test');
@@ -13,9 +14,7 @@ const FILES = ['keys.json', 'mnemonic-validation.json', 'identity-formats.json',
   'generator/generate.js'];
 
 function corruptedCheck(filename, corrupt) {
-  const scratch = path.join(SOURCE, '.scratch');
-  fs.mkdirSync(scratch, { recursive: true });
-  const copy = fs.mkdtempSync(path.join(scratch, 'check-test-'));
+  const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
   for (const file of FILES) {
     const destination = path.join(copy, file);
     fs.mkdirSync(path.dirname(destination), { recursive: true });
@@ -61,6 +60,26 @@ test('check decrypts Bee fixtures and rejects a damaged ciphertext', () => {
     contents.fixtures[0].keystore = JSON.stringify(keystore);
   });
   assert.match(stderr, /incorrect password/i);
+});
+
+test('check requires the positive legacy fallback fixture', () => {
+  const stderr = corruptedCheck('fixtures/vaults.json', (contents) => {
+    delete contents.legacyFixtures;
+  });
+  assert.match(stderr, /Missing positive legacy vault fixture/);
+});
+
+test('check decrypts the positive legacy fallback fixture', () => {
+  const stderr = corruptedCheck('fixtures/vaults.json', (contents) => {
+    const vault = JSON.parse(contents.legacyFixtures[0].fileContents);
+    const payload = JSON.parse(vault.encrypted);
+    const data = Buffer.from(payload.data, 'base64');
+    data[data.length - 1] ^= 1;
+    payload.data = data.toString('base64');
+    vault.encrypted = JSON.stringify(payload);
+    contents.legacyFixtures[0].fileContents = JSON.stringify(vault, null, 2);
+  });
+  assert.match(stderr, /Incorrect password/);
 });
 
 test('check parses OpenSSH and rejects unequal check integers', () => {

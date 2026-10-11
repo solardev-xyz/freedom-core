@@ -724,5 +724,40 @@
         "message": "Password must be at least 8 characters"
       }
     }
+  ],
+  "legacyFixtures": [
+    {
+      "id": "synthetic-legacy-10000-12",
+      "mnemonicId": "abandon-12",
+      "password": "testpass",
+      "synthetic": true,
+      "provenance": "Freedom never wrote these vaults. Real passworder.encrypt at 10000 PBKDF2 iterations, with keyMetadata removed, inside a real importVault envelope; the reader must accept the legacy fallback.",
+      "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "encryptionParameters": {
+        "algorithm": "PBKDF2",
+        "params": {
+          "iterations": 10000
+        }
+      },
+      "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"wWWgjU4YEFk3ENeS8MYO2Bjaq/Z7tV19ziO8vqcS3Rg+JKw7o4jRc7acLknre/MwKFrwnsxRSa6rvr2srrIQn4R2gkxCUYfxL/qqUJRZ6C4xTosDC5PIqD7AiknI/Rfw0PsUjUgwUrZIuRvIMgQYIKACSB0zj/o08bNenw==\\\",\\\"iv\\\":\\\"HTV29g9Gy6j6KelPuyBKZQ==\\\",\\\"salt\\\":\\\"aoyfKCe59njyl3IBuzYopO3eIlMBslBjIaqOuHKJddw=\\\"}\",\n  \"createdAt\": \"2026-10-11T20:04:29.207Z\"\n}",
+      "payload": {
+        "data": "wWWgjU4YEFk3ENeS8MYO2Bjaq/Z7tV19ziO8vqcS3Rg+JKw7o4jRc7acLknre/MwKFrwnsxRSa6rvr2srrIQn4R2gkxCUYfxL/qqUJRZ6C4xTosDC5PIqD7AiknI/Rfw0PsUjUgwUrZIuRvIMgQYIKACSB0zj/o08bNenw==",
+        "iv": "HTV29g9Gy6j6KelPuyBKZQ==",
+        "salt": "aoyfKCe59njyl3IBuzYopO3eIlMBslBjIaqOuHKJddw="
+      },
+      "outcome": {
+        "status": "success",
+        "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+      },
+      "wrongPasswordOutcome": {
+        "status": "error",
+        "name": "Error",
+        "message": "Incorrect password",
+        "cause": {
+          "name": "Error",
+          "message": "Incorrect password"
+        }
+      }
+    }
   ]
 }
