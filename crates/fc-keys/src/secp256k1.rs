@@ -120,11 +120,7 @@ impl Secp256k1Key {
     }
 
     pub fn address(&self) -> Address {
-        let uncompressed = self.public_key_uncompressed();
-        let hash = Keccak256::digest(&uncompressed[1..]);
-        let mut address = [0u8; 20];
-        address.copy_from_slice(&hash[12..]);
-        Address(address)
+        address_of(&self.key)
     }
 
     /// The signing key, for signing inside the core.
@@ -140,6 +136,15 @@ impl Secp256k1Key {
         out.copy_from_slice(bytes.as_slice());
         out
     }
+}
+
+/// The Ethereum address of a secp256k1 key.
+pub(crate) fn address_of(key: &k256::ecdsa::SigningKey) -> Address {
+    let point = key.verifying_key().as_affine().to_sec1_point(false);
+    let hash = Keccak256::digest(&point.as_bytes()[1..]);
+    let mut address = [0u8; 20];
+    address.copy_from_slice(&hash[12..]);
+    Address(address)
 }
 
 impl fmt::Debug for Secp256k1Key {
