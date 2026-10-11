@@ -205,6 +205,34 @@ fn malformed_input_closes_the_connection() {
 }
 
 #[test]
+fn a_burst_beyond_the_decoder_budget_is_fully_served() {
+    // 200 requests in one write: more than the decoder holds at once, so the
+    // reader must keep feeding it after popping (backpressure, no drops).
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    let mut burst = Vec::new();
+    for id in 2..202u64 {
+        let payload = serde_json::to_vec(
+            &json!({ "type": "request", "id": id, "method": "vault.status",
+            "params": {}, "context": { "caller": "chrome" } }),
+        )
+        .unwrap();
+        burst.extend_from_slice(&u32::try_from(payload.len() + 1).unwrap().to_be_bytes());
+        burst.push(1);
+        burst.extend_from_slice(&payload);
+    }
+    core.send_raw(&burst);
+    for id in 2..202u64 {
+        let reply = core.recv();
+        assert_eq!(reply["id"], id);
+        assert_eq!(reply["result"]["exists"], false);
+    }
+    core.close_stdin();
+    assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
+}
+
+#[test]
 fn eof_exits_cleanly() {
     let (_root, data, locks) = dirs();
     let mut core = spawn("serve", &data, &locks, &[]);

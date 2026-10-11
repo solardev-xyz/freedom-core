@@ -34,13 +34,22 @@ pub fn spawn_reader(events: Sender<Event>) -> std::io::Result<std::thread::JoinH
                         return;
                     }
                 };
-                if let Err(e) = decoder.push(&buffer[..read]) {
-                    let _ = events.send(Event::ProtocolError(e.to_string()));
-                    return;
-                }
-                while let Some(frame) = decoder.pop() {
-                    if events.send(Event::Frame(frame)).is_err() {
-                        return;
+                // The decoder takes input up to its budget; hand its frames on,
+                // then feed it the rest.
+                let mut rest = &buffer[..read];
+                while !rest.is_empty() {
+                    let consumed = match decoder.push(rest) {
+                        Ok(consumed) => consumed,
+                        Err(e) => {
+                            let _ = events.send(Event::ProtocolError(e.to_string()));
+                            return;
+                        }
+                    };
+                    rest = &rest[consumed..];
+                    while let Some(frame) = decoder.pop() {
+                        if events.send(Event::Frame(frame)).is_err() {
+                            return;
+                        }
                     }
                 }
             }

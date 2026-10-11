@@ -203,7 +203,7 @@ impl Core {
                     );
                     return Flow::Exit(Exit::Protocol);
                 }
-                self.handle_request(id, method, params.map(|p| p.get()), &context)
+                self.handle_request(id, &method, params.map(|p| p.get()), &context)
             }
             // Nothing long-running exists yet, so there is nothing to cancel.
             Message::Cancel { .. } => Flow::Continue,
