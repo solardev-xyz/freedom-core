@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 
 use crate::exit::Exit;
 use crate::transport::{self, Credits};
-use crate::vault::{FileSnapshot, Finished, Out, Vault};
+use crate::vault::{FileSnapshot, Finished, NodeRecovery, Out, Vault};
 use crate::worker::Worker;
 use crate::{gate, hardening, log};
 
@@ -52,7 +52,7 @@ pub enum Event {
     ThreadDied(&'static str),
     ParentGone,
     /// The startup read of the vault file finished.
-    Snapshot(FileSnapshot),
+    Snapshot(FileSnapshot, NodeRecovery),
     /// A vault worker job finished.
     JobDone(u64, Finished),
 }
@@ -74,6 +74,8 @@ const CAPABILITIES: &[&str] = &[
     "vault.create",
     "vault.import",
     "vault.reconcile",
+    "nodes.write_identity",
+    "nodes.op_status",
     "keys.generate_mnemonic",
     "keys.validate_mnemonic",
     "keys.addresses",
@@ -129,6 +131,7 @@ pub fn run(options: &Options) -> Exit {
 
     let mut core = Core {
         snapshot_ready: false,
+        node_recovery: None,
         pending_hello: None,
         out: writer.queue,
         hello_done: false,
@@ -200,8 +203,9 @@ pub fn run(options: &Options) -> Exit {
                 log::info("parent exited", serde_json::json!({}));
                 break Exit::Ok;
             }
-            Ok(Event::Snapshot(snapshot)) => {
+            Ok(Event::Snapshot(snapshot, recovery)) => {
                 core.vault.set_snapshot(snapshot);
+                core.node_recovery = recovery;
                 core.snapshot_ready = true;
                 if let Some(id) = core.pending_hello.take()
                     && let Flow::Exit(exit) = core.hello_reply(id)
@@ -256,9 +260,8 @@ fn spawn_snapshot(identity_dir: PathBuf, events: Sender<Event>) -> bool {
         .name("snapshot".into())
         .spawn(move || {
             crate::testhooks::snapshot_delay();
-            let _ = events.send(Event::Snapshot(crate::vault::startup_snapshot(
-                &identity_dir,
-            )));
+            let (snapshot, recovery) = crate::vault::startup_snapshot(&identity_dir);
+            let _ = events.send(Event::Snapshot(snapshot, recovery));
         })
         .is_ok()
 }
@@ -287,6 +290,8 @@ enum Flow {
 struct Core {
     /// Whether the startup snapshot has arrived.
     snapshot_ready: bool,
+    /// Startup's node identity recovery outcome, for core.hello.
+    node_recovery: NodeRecovery,
     /// A valid core.hello received before the snapshot was ready.
     pending_hello: Option<u64>,
     out: mpsc::SyncSender<Zeroizing<Vec<u8>>>,
@@ -305,10 +310,14 @@ struct HelloParams {
 }
 
 #[derive(Serialize)]
-struct HelloResult {
+struct HelloResult<'a> {
     protocol: u32,
     core_version: &'static str,
     capabilities: &'static [&'static str],
+    /// A node identity write that startup recovery couldn't finish
+    /// (`pending_recovery`) or found broken (`corrupt`); `null` otherwise.
+    /// Main keeps that node stopped.
+    node_recovery: &'a NodeRecovery,
 }
 
 /// A method name that is safe to log: known names only.
@@ -478,6 +487,7 @@ impl Core {
                 protocol: fc_protocol::PROTOCOL_VERSION,
                 core_version: env!("CARGO_PKG_VERSION"),
                 capabilities: CAPABILITIES,
+                node_recovery: &self.node_recovery,
             },
         )
     }
