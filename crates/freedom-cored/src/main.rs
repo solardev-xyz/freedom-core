@@ -14,6 +14,7 @@ mod log;
 mod rng;
 mod serve;
 mod storage;
+mod testhooks;
 mod transport;
 mod vault;
 mod worker;

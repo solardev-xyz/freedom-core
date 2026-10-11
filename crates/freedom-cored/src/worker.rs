@@ -23,6 +23,7 @@ impl Worker {
             .spawn(move || {
                 let _notice = crate::transport::DeathNotice::new(events.clone(), "vault");
                 for (id, job) in queue {
+                    crate::testhooks::job_delay();
                     let output = job();
                     if events.send(Event::JobDone(id, output)).is_err() {
                         return;

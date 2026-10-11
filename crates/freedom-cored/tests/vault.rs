@@ -7,7 +7,7 @@
 mod common;
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -320,9 +320,10 @@ fn a_lock_revokes_an_unlock_in_flight() {
     ]
     .concat();
     core.send_raw(&burst);
-    assert_eq!(core.response(5)["result"], json!({}));
+    // The lock answers the revoked unlock at once, then itself.
     let unlock = core.response(4);
     assert_eq!(unlock["error"]["code"], "vault_locked", "{unlock}");
+    assert_eq!(core.response(5)["result"], json!({}));
     assert_eq!(
         core.call(6, "vault.status", json!({}))["result"]["unlocked"],
         false
@@ -421,4 +422,338 @@ fn two_queued_creates_never_overwrite() {
         .map(|b| format!("{b:02x}"))
         .collect();
     assert_eq!(status["result"]["fingerprint"], expected);
+}
+
+// ---- Review regressions (PR #9): commit gating, revocation, deadlines ----
+
+const VAULT: &str = "identity-vault.json";
+/// Every vault job stalls this long before doing anything (pre-commit).
+const SLOW_JOBS: (&str, &str) = ("FREEDOM_CORED_TEST_JOB_DELAY_MS", "800");
+
+/// A core with `env` hooks and the abandon...about wallet imported under
+/// "testpass1" (unlocked). The next free request ID is 3.
+fn imported(env: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf, Core) {
+    let (root, data, locks) = dirs();
+    let mut core = spawn_env("serve", &data, &locks, &[], env);
+    core.hello();
+    let imported = core.call(
+        2,
+        "vault.import",
+        json!({ "password_b64": b64("testpass1"), "mnemonic_b64": b64(ABANDON) }),
+    );
+    assert!(imported["result"].is_object(), "{imported}");
+    assert_eq!(core.event()["event"], "vault.unlocked");
+    (root, data, core)
+}
+
+fn cancel(id: u64) -> Vec<u8> {
+    frame(&json!({ "type": "cancel", "id": id }))
+}
+
+#[test]
+fn cancel_stops_mutations_before_their_commit() {
+    let mutations = [
+        ("vault.delete", json!({ "password_b64": b64("testpass1") })),
+        (
+            "vault.change_password",
+            json!({ "password_b64": b64("testpass1"), "new_password_b64": b64("testpass2") }),
+        ),
+        (
+            "vault.import",
+            json!({ "password_b64": b64("testpass9"), "mnemonic_b64": b64(ABANDON), "overwrite": true }),
+        ),
+    ];
+    for (method, params) in mutations {
+        let (_root, data, mut core) = imported(&[SLOW_JOBS]);
+        let before = std::fs::read(data.join(VAULT)).unwrap();
+        core.send_raw(&[frame(&request(3, method, params)), cancel(3)].concat());
+        let reply = core.response(3);
+        assert_eq!(reply["error"]["code"], "cancelled", "{method}: {reply}");
+        // Queued behind the abandoned job: proves it finished without writing.
+        let verify = core.call(
+            4,
+            "vault.verify_password",
+            json!({ "password_b64": b64("testpass1") }),
+        );
+        assert_eq!(verify["result"], json!({}), "{method}: {verify}");
+        assert_eq!(std::fs::read(data.join(VAULT)).unwrap(), before, "{method}");
+    }
+
+    // A cancelled create writes no vault.
+    let (_root, data, locks) = dirs();
+    let mut core = spawn_env("serve", &data, &locks, &[], &[SLOW_JOBS]);
+    core.hello();
+    let create = request(
+        2,
+        "vault.create",
+        json!({ "password_b64": b64("testpass1"), "words": 12 }),
+    );
+    core.send_raw(&[frame(&create), cancel(2)].concat());
+    assert_eq!(core.response(2)["error"]["code"], "cancelled");
+    let verify = core.call(
+        3,
+        "vault.verify_password",
+        json!({ "password_b64": b64("testpass1") }),
+    );
+    assert_eq!(verify["error"]["code"], "no_vault", "{verify}");
+    assert!(!data.join(VAULT).exists());
+}
+
+#[test]
+fn a_lock_revokes_queued_unlocks_and_imports() {
+    let (_root, data, mut core) = imported(&[SLOW_JOBS]);
+    core.call(3, "vault.lock", json!({}));
+    assert_eq!(core.event()["data"]["reason"], "manual");
+    let before = std::fs::read(data.join(VAULT)).unwrap();
+    // A slow verify runs; an unlock and an overwriting import wait behind it.
+    let burst = [
+        frame(&request(4, "vault.verify_password", json!({ "password_b64": b64("testpass1") }))),
+        frame(&request(5, "vault.unlock", json!({ "password_b64": b64("testpass1") }))),
+        frame(&request(
+            6,
+            "vault.import",
+            json!({ "password_b64": b64("testpass1"), "mnemonic_b64": b64(ABANDON), "overwrite": true }),
+        )),
+        frame(&request(7, "vault.lock", json!({}))),
+    ]
+    .concat();
+    core.send_raw(&burst);
+    assert_eq!(core.response(5)["error"]["code"], "vault_locked");
+    assert_eq!(core.response(6)["error"]["code"], "vault_locked");
+    assert_eq!(core.response(7)["result"], json!({}));
+    // Verify isn't revoked by a lock, and nothing unlocks after the lock.
+    assert_eq!(core.response(4)["result"], json!({}));
+    let status = core.call(8, "vault.status", json!({}));
+    assert_eq!(status["result"]["unlocked"], false, "{status}");
+    assert_eq!(std::fs::read(data.join(VAULT)).unwrap(), before);
+}
+
+#[test]
+fn deadlines_answer_stalled_work_once_and_stop_its_commit() {
+    let env = [
+        ("FREEDOM_CORED_TEST_JOB_DELAY_MS", "1500"),
+        ("FREEDOM_CORED_TEST_KDF_DEADLINE_MS", "400"),
+    ];
+    let (_root, data, locks) = dirs();
+    let mut core = spawn_env("serve", &data, &locks, &[], &env);
+    core.hello();
+    let started = Instant::now();
+    let burst = [
+        frame(&request(
+            2,
+            "vault.create",
+            json!({ "password_b64": b64("testpass1"), "words": 12 }),
+        )),
+        frame(&request(
+            3,
+            "vault.verify_password",
+            json!({ "password_b64": b64("testpass1") }),
+        )),
+    ]
+    .concat();
+    core.send_raw(&burst);
+    // Running and queued work both time out on the loop's own wakeup, long
+    // before the stalled worker returns.
+    assert_eq!(core.response(2)["error"]["code"], "deadline");
+    assert_eq!(core.response(3)["error"]["code"], "deadline");
+    assert!(
+        started.elapsed() < Duration::from_millis(1200),
+        "{:?}",
+        started.elapsed()
+    );
+    // The loop stays live, and the stalled create never commits.
+    assert_eq!(
+        core.call(4, "vault.status", json!({}))["result"]["exists"],
+        false
+    );
+    std::thread::sleep(Duration::from_millis(2500));
+    assert!(!data.join(VAULT).exists());
+    // No second reply for 2 or 3: the next response is this one.
+    assert_eq!(
+        core.call(5, "vault.status", json!({}))["result"]["exists"],
+        false
+    );
+}
+
+#[test]
+fn auto_lock_is_not_postponed_by_a_busy_queue() {
+    // 1,500 requests deriving 64 addresses each take far longer than the
+    // 150 ms auto-lock, so the lock must land while the queue is busy, and
+    // the secret lookup queued at the end must find the vault locked.
+    let (_root, data, locks) = dirs();
+    let mut core = spawn_env("serve", &data, &locks, &[], &[]);
+    core.hello_with(150);
+    core.call(
+        2,
+        "vault.import",
+        json!({ "password_b64": b64("testpass1"), "mnemonic_b64": b64(ABANDON) }),
+    );
+    let accounts: Vec<u32> = (0..64).collect();
+    let mut burst = Vec::new();
+    for id in 3..1503 {
+        burst.extend(frame(&request(
+            id,
+            "keys.addresses",
+            json!({ "accounts": accounts }),
+        )));
+    }
+    burst.extend(frame(&shell_request(
+        1503,
+        "compat.private_key",
+        json!({ "account": 0 }),
+    )));
+    core.send_raw(&burst);
+    let compat = core.until_response(1503);
+    assert_eq!(compat["error"]["code"], "vault_locked", "{compat}");
+    let events = core.events();
+    assert!(
+        events.iter().any(|e| e["data"]["reason"] == "auto"),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn malformed_public_keys_never_crash_the_core() {
+    let (_root, _data, mut core) = imported(&[]);
+    for id in 3..6 {
+        let wrong = core.call(
+            id,
+            "vault.verify_password",
+            json!({ "password_b64": b64("wrong-password") }),
+        );
+        assert_eq!(wrong["error"]["code"], "incorrect_password");
+    }
+    // A 64-byte string with a multi-byte character at every position.
+    let mut id = 6;
+    for k in 0..=61 {
+        let key = format!("{}€{}", "0".repeat(k), "0".repeat(61 - k));
+        assert_eq!(key.len(), 64);
+        let reply = core.call(id, "keys.radicle_did", json!({ "public_key": key }));
+        assert_eq!(reply["error"]["code"], "invalid_argument", "{k}: {reply}");
+        id += 1;
+    }
+    let did = core.call(
+        id,
+        "keys.radicle_did",
+        json!({ "public_key": "0x".to_owned() + &"ab".repeat(32) }),
+    );
+    assert!(
+        did["result"]["did"]
+            .as_str()
+            .unwrap()
+            .starts_with("did:key:z6Mk")
+    );
+    // The process and its throttle counter survived: 3 + 2 failures, then
+    // the next attempt is throttled.
+    for next in [id + 1, id + 2] {
+        let wrong = core.call(
+            next,
+            "vault.verify_password",
+            json!({ "password_b64": b64("wrong-password") }),
+        );
+        assert_eq!(wrong["error"]["code"], "incorrect_password");
+    }
+    let throttled = core.call(
+        id + 3,
+        "vault.verify_password",
+        json!({ "password_b64": b64("testpass1") }),
+    );
+    assert_eq!(throttled["error"]["code"], "throttled", "{throttled}");
+}
+
+#[test]
+fn verify_and_exports_check_passwords_like_js() {
+    // JS verifyPassword only decrypts: a version-2 envelope still verifies,
+    // while unlock refuses it.
+    let fixtures: Value = serde_json::from_str(
+        &std::fs::read_to_string(vectors().join("fixtures/vaults.json")).unwrap(),
+    )
+    .unwrap();
+    let fixture = &fixtures["fixtures"][0];
+    let contents =
+        fixture["fileContents"]
+            .as_str()
+            .unwrap()
+            .replacen("\"version\": 1", "\"version\": 2", 1);
+    let (_root, data, locks) = dirs();
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join(VAULT), contents).unwrap();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    let password = b64(fixture["password"].as_str().unwrap());
+    assert_eq!(
+        core.call(
+            2,
+            "vault.verify_password",
+            json!({ "password_b64": password })
+        )["result"],
+        json!({})
+    );
+    let unlock = core.call(3, "vault.unlock", json!({ "password_b64": password }));
+    assert_eq!(unlock["error"]["code"], "unsupported_vault_version");
+    assert_eq!(unlock["error"]["message"], "Unsupported vault version: 2");
+    // Exports: password first, then the lock state.
+    let export = core.call(
+        4,
+        "vault.export_mnemonic",
+        json!({ "password_b64": password }),
+    );
+    assert_eq!(export["error"]["code"], "vault_locked", "{export}");
+}
+
+#[test]
+fn wire_fields_follow_design_0001() {
+    let (_root, _data, mut core) = imported(&[]);
+    let addresses = core.call(
+        3,
+        "keys.addresses",
+        json!({ "accounts": [0], "publishers": [0] }),
+    );
+    let result = &addresses["result"];
+    let keys: Vec<&str> = result
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        ["bee_wallet", "publishers", "radicle", "user_wallets"]
+    );
+    let radicle: Vec<&str> = result["radicle"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(radicle, ["did", "node_id", "public_key"]);
+    let public_key = result["radicle"]["public_key"].as_str().unwrap();
+    let did = core.call(4, "keys.radicle_did", json!({ "public_key": public_key }));
+    assert_eq!(did["result"]["did"], result["radicle"]["did"]);
+    let status = core.call(5, "vault.status", json!({}));
+    let fields: Vec<&str> = status["result"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(fields, ["epoch", "exists", "fingerprint", "unlocked"]);
+    let changed = core.call(
+        6,
+        "vault.change_password",
+        json!({ "password_b64": b64("testpass1"), "new_password_b64": b64("testpass2") }),
+    );
+    assert_eq!(changed["result"], json!({}));
+    let key = core.call(
+        7,
+        "vault.export_private_key",
+        json!({ "password_b64": b64("testpass2"), "account": 0 }),
+    );
+    let fields: Vec<&str> = key["result"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(fields, ["private_key_hex"]);
 }

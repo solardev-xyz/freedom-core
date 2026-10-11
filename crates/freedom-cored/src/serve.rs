@@ -149,7 +149,16 @@ pub fn run(options: &Options) -> Exit {
         } else {
             hello_deadline.saturating_duration_since(Instant::now())
         };
-        match events.recv_timeout(timeout) {
+        let received = events.recv_timeout(timeout);
+        // Whatever arrived, first apply what is due (auto-lock, deadlines):
+        // a busy queue must not postpone either.
+        if core.hello_done {
+            let outs = core.vault.tick();
+            if let Flow::Exit(exit) = core.dispatch(outs) {
+                break exit;
+            }
+        }
+        match received {
             Ok(Event::Frame(frame)) => {
                 let flow = core.handle_frame(&frame);
                 drop(frame);
@@ -201,12 +210,7 @@ pub fn run(options: &Options) -> Exit {
                     break exit;
                 }
             }
-            Err(RecvTimeoutError::Timeout) => {
-                let outs = core.vault.tick();
-                if let Flow::Exit(exit) = core.dispatch(outs) {
-                    break exit;
-                }
-            }
+            Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break Exit::Ok,
         }
     };
@@ -227,28 +231,13 @@ fn spawn_snapshot(identity_dir: PathBuf, events: Sender<Event>) -> bool {
     std::thread::Builder::new()
         .name("snapshot".into())
         .spawn(move || {
-            test_delay();
+            crate::testhooks::snapshot_delay();
             let _ = events.send(Event::Snapshot(crate::vault::startup_snapshot(
                 &identity_dir,
             )));
         })
         .is_ok()
 }
-
-/// Debug builds only: `FREEDOM_CORED_TEST_SNAPSHOT_DELAY_MS` stalls the
-/// snapshot read, to test that slow storage can't hold up the loop.
-#[cfg(debug_assertions)]
-fn test_delay() {
-    if let Some(ms) = std::env::var("FREEDOM_CORED_TEST_SNAPSHOT_DELAY_MS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-    {
-        std::thread::sleep(Duration::from_millis(ms));
-    }
-}
-
-#[cfg(not(debug_assertions))]
-fn test_delay() {}
 
 /// Starts the parent watcher. False if the thread can't be created.
 fn spawn_parent_watch(parent_pid: Option<u32>, events: Sender<Event>) -> bool {

@@ -8,17 +8,28 @@
 //!   unlock, verify, change_password, delete, create, import and both
 //!   exports. That covers the 900k-round PBKDF2 and the durable write.
 //! - **Throttle:** an attempt is reserved when its job starts and settled
-//!   with the real outcome when it ends.
-//! - **Unlock:** takes a ticket at start, so a lock that arrives while it is
-//!   deriving revokes it (`fc_vault::state`).
-//! - **Commit point:** a mutation that has committed (the rename or unlink)
-//!   always reports success; anything else can be cancelled or time out.
+//!   with the real outcome when the KDF actually ends, even if the request
+//!   was already answered.
+//! - **Commit point:** each job shares a [`JobControl`] with the loop. The
+//!   worker claims the commit point right before the rename or unlink; until
+//!   then the loop can abandon the job and answer at once (`cancelled`,
+//!   `deadline`, `vault_locked`). An abandoned job writes nothing and its
+//!   late result is discarded. A job that claimed its commit always reports
+//!   success. Each request gets exactly one terminal reply.
+//! - **Locks** (manual, auto, delete, shutdown) revoke all admitted work that
+//!   would install or return secrets (unlock, create, import, the exports),
+//!   queued or running: nothing admitted before a lock acknowledgement runs
+//!   after it. Unlock also installs only with a ticket taken at its start.
+//! - **Deadlines** (30 s from admission) are enforced by the loop's wakeup,
+//!   for queued and running work alike, independently of the worker.
 //!
 //! Error codes come with the exact JS message for the method, so main can
 //! pass them through (design 0001's parity table).
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fc_keys::freedom;
@@ -81,6 +92,9 @@ pub enum OpError {
         import: bool,
     },
     Storage(&'static str),
+    /// The loop abandoned the job before its commit point (it already
+    /// answered the request).
+    Abandoned,
     Internal,
 }
 
@@ -120,7 +134,9 @@ impl OpError {
             }
             OpError::Storage(kind) => ErrorBody::new(ErrorCode::Storage, "Storage error")
                 .with_data(serde_json::json!({ "kind": kind })),
-            OpError::Internal => ErrorBody::new(ErrorCode::Internal, "Internal error"),
+            OpError::Abandoned | OpError::Internal => {
+                ErrorBody::new(ErrorCode::Internal, "Internal error")
+            }
         }
     }
 
@@ -210,13 +226,16 @@ impl Kind {
         !matches!(self, Kind::Create { .. } | Kind::Import { .. })
     }
 
-    fn mutates(&self) -> bool {
+    /// Work a lock revokes: it would install or return secrets. Verify,
+    /// change_password and delete are legal while locked and do neither.
+    fn revoked_by_lock(&self) -> bool {
         matches!(
             self,
-            Kind::ChangePassword { .. }
-                | Kind::Delete { .. }
+            Kind::Unlock { .. }
                 | Kind::Create { .. }
                 | Kind::Import { .. }
+                | Kind::ExportMnemonic { .. }
+                | Kind::ExportPrivateKey { .. }
         )
     }
 }
@@ -224,7 +243,50 @@ impl Kind {
 struct Pending {
     id: u64,
     kind: Kind,
-    admitted: Instant,
+    deadline: Instant,
+}
+
+/// Shared by the loop and the worker for one job: who wins the race between
+/// abandoning it and committing it.
+pub struct JobControl(AtomicU8);
+
+const JOB_RUNNING: u8 = 0;
+const JOB_ABANDONED: u8 = 1;
+const JOB_COMMITTED: u8 = 2;
+
+impl JobControl {
+    fn new() -> Arc<Self> {
+        Arc::new(JobControl(AtomicU8::new(JOB_RUNNING)))
+    }
+
+    /// Loop: stops the job unless it already committed. True if stopped.
+    fn abandon(&self) -> bool {
+        self.0
+            .compare_exchange(
+                JOB_RUNNING,
+                JOB_ABANDONED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// Worker: claims the commit point. False if the job was abandoned.
+    fn commit(&self) -> bool {
+        self.0
+            .compare_exchange(
+                JOB_RUNNING,
+                JOB_COMMITTED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// Worker: whether to stop early (skip the KDF).
+    fn abandoned(&self) -> bool {
+        self.0.load(Ordering::Acquire) == JOB_ABANDONED
+    }
 }
 
 /// What the loop must remember about the running job.
@@ -243,11 +305,14 @@ struct Running {
     job: u64,
     request: u64,
     kind: RunningKind,
-    mutates: bool,
     attempt: Option<Attempt>,
     ticket: Ticket,
     deadline: Instant,
-    cancelled: bool,
+    control: Arc<JobControl>,
+    revocable: bool,
+    /// The request already got its terminal reply (abandoned); the job's
+    /// result will only settle the throttle.
+    answered: bool,
 }
 
 pub struct Vault {
@@ -260,6 +325,7 @@ pub struct Vault {
     queue: VecDeque<Pending>,
     running: Option<Running>,
     next_job: u64,
+    kdf_deadline: Duration,
 }
 
 #[derive(Deserialize)]
@@ -334,7 +400,7 @@ struct OriginParams {
 
 #[derive(Deserialize)]
 struct PublicKeyParams {
-    public_key_hex: String,
+    public_key: String,
 }
 
 #[derive(Serialize)]
@@ -384,6 +450,7 @@ impl Vault {
             queue: VecDeque::new(),
             running: None,
             next_job: 1,
+            kdf_deadline: crate::testhooks::kdf_deadline(KDF_DEADLINE),
         }
     }
 
@@ -462,7 +529,7 @@ impl Vault {
             }),
             "keys.addresses" => self.addresses(id, raw),
             "keys.radicle_did" => {
-                params::<PublicKeyParams>(raw).and_then(|p| radicle_did(id, &p.public_key_hex))
+                params::<PublicKeyParams>(raw).and_then(|p| radicle_did(id, &p.public_key))
             }
             "compat.private_key" => params::<AccountParams>(raw).and_then(|p| {
                 let key = self
@@ -504,51 +571,116 @@ impl Vault {
         out
     }
 
-    /// Cancels a queued request, or marks the running one.
+    /// Cancels a queued request, or abandons the running one if it hasn't
+    /// committed. A committed one replies with its success.
     pub fn cancel(&mut self, id: u64) -> Vec<Out> {
         let mut out = Vec::new();
         if let Some(position) = self.queue.iter().position(|p| p.id == id) {
             self.queue.remove(position);
-            self.reply_error(
-                &mut out,
-                id,
-                ErrorBody::new(ErrorCode::Cancelled, "Cancelled"),
-            );
+            self.reply_error(&mut out, id, cancelled());
         } else if let Some(running) = &mut self.running
             && running.request == id
+            && !running.answered
+            && running.control.abandon()
         {
-            running.cancelled = true;
+            running.answered = true;
+            out.push(Out::Send(error_payload(id, &cancelled())));
         }
         out
     }
 
-    /// Applies the auto-lock if due.
+    /// Applies what is due: the auto-lock (which revokes), then the
+    /// deadlines of queued and running work. The loop calls this before it
+    /// handles each event, so a busy queue can't postpone either.
     pub fn tick(&mut self) -> Vec<Out> {
         let mut out = Vec::new();
         let now = self.now_ms();
         if let Some(locked) = self.state.tick(now) {
             out.push(Out::Send(locked_event(locked)));
+            self.revoke(&mut out);
+        }
+        // In admission order: the running job, then the queue.
+        let instant = Instant::now();
+        if let Some(running) = &mut self.running
+            && !running.answered
+            && instant >= running.deadline
+            && running.control.abandon()
+        {
+            running.answered = true;
+            out.push(Out::Send(error_payload(
+                running.request,
+                &deadline_exceeded(),
+            )));
+        }
+        while self.queue.front().is_some_and(|p| instant >= p.deadline) {
+            if let Some(pending) = self.queue.pop_front() {
+                self.reply_error(&mut out, pending.id, deadline_exceeded());
+            }
         }
         out
     }
 
-    /// When the loop must wake for the auto-lock.
+    /// When the loop must wake: the auto-lock, or the earliest deadline.
     pub fn next_wakeup(&self) -> Option<Instant> {
-        let deadline = self.state.auto_lock_deadline()?;
-        let now = self.now_ms();
-        Some(Instant::now() + Duration::from_millis(deadline.saturating_sub(now)))
+        let auto_lock = self.state.auto_lock_deadline().map(|deadline| {
+            Instant::now() + Duration::from_millis(deadline.saturating_sub(self.now_ms()))
+        });
+        let running = self
+            .running
+            .as_ref()
+            .filter(|r| !r.answered)
+            .map(|r| r.deadline);
+        // The queue is in admission order, so its front expires first.
+        let queued = self.queue.front().map(|p| p.deadline);
+        [auto_lock, running, queued].into_iter().flatten().min()
     }
 
-    /// Locks for shutdown (wipes everything).
+    /// Locks for shutdown (wipes everything) and abandons all work that
+    /// hasn't committed, with a reply.
     pub fn shutdown(&mut self) -> Vec<Out> {
         let mut out = Vec::new();
         self.lock_now(LockReason::Shutdown, &mut out);
+        for pending in std::mem::take(&mut self.queue) {
+            self.reply_error(&mut out, pending.id, cancelled());
+        }
+        if let Some(running) = &mut self.running
+            && !running.answered
+            && running.control.abandon()
+        {
+            running.answered = true;
+            out.push(Out::Send(error_payload(running.request, &cancelled())));
+        }
         out
     }
 
     fn lock_now(&mut self, reason: LockReason, out: &mut Vec<Out>) {
         if let Some(locked) = self.state.lock(reason) {
             out.push(Out::Send(locked_event(locked)));
+        }
+        // Every lock request revokes, even while already locked.
+        self.revoke(out);
+    }
+
+    /// Revokes admitted work that would install or return secrets: queued
+    /// requests are dropped (their secrets wiped) and the running one is
+    /// abandoned unless it committed. Each gets `vault_locked`.
+    fn revoke(&mut self, out: &mut Vec<Out>) {
+        let mut kept = VecDeque::with_capacity(self.queue.len());
+        for pending in std::mem::take(&mut self.queue) {
+            if pending.kind.revoked_by_lock() {
+                self.reply_error(out, pending.id, locked());
+            } else {
+                kept.push_back(pending);
+            }
+        }
+        self.queue = kept;
+        if let Some(running) = &mut self.running
+            && running.revocable
+            && !running.answered
+            && running.control.abandon()
+        {
+            running.answered = true;
+            out.push(Out::Send(error_payload(running.request, &locked())));
         }
     }
 
@@ -619,7 +751,7 @@ impl Vault {
                 "bee_wallet": bee_wallet,
                 "publishers": publishers,
                 "radicle": {
-                    "public_key_hex": hex(&radicle),
+                    "public_key": hex(&radicle),
                     "did": multiformats::did_key(&radicle),
                     "node_id": multiformats::radicle_node_id(&radicle),
                 },
@@ -699,7 +831,7 @@ impl Vault {
         self.queue.push_back(Pending {
             id,
             kind,
-            admitted: Instant::now(),
+            deadline: Instant::now() + self.kdf_deadline,
         });
         Ok(())
     }
@@ -718,13 +850,8 @@ impl Vault {
             let Some(pending) = self.queue.pop_front() else {
                 return;
             };
-            let deadline = pending.admitted + KDF_DEADLINE;
-            if Instant::now() >= deadline {
-                self.reply_error(
-                    out,
-                    pending.id,
-                    ErrorBody::new(ErrorCode::Deadline, "Deadline exceeded"),
-                );
+            if Instant::now() >= pending.deadline {
+                self.reply_error(out, pending.id, deadline_exceeded());
                 continue;
             }
             let attempt = if pending.kind.throttled() {
@@ -751,61 +878,65 @@ impl Vault {
             };
             let job_id = self.next_job;
             self.next_job += 1;
-            let mutates = pending.kind.mutates();
-            let (kind, job) = self.job_for(pending.kind);
+            let revocable = pending.kind.revoked_by_lock();
+            let control = JobControl::new();
+            let (kind, job) = self.job_for(pending.kind, Arc::clone(&control));
             self.running = Some(Running {
                 job: job_id,
                 request: pending.id,
                 kind,
-                mutates,
                 attempt,
                 ticket: self.state.ticket(),
-                deadline,
-                cancelled: false,
+                deadline: pending.deadline,
+                control,
+                revocable,
+                answered: false,
             });
             out.push(Out::Job(job_id, job));
         }
     }
 
-    fn job_for(&self, kind: Kind) -> (RunningKind, Job) {
-        type Run = Box<dyn FnOnce(&Path) -> JobOutput + Send>;
+    fn job_for(&self, kind: Kind, control: Arc<JobControl>) -> (RunningKind, Job) {
+        type Run = Box<dyn FnOnce(&Path, &JobControl) -> JobOutput + Send>;
         let (kind, run): (RunningKind, Run) = match kind {
             Kind::Unlock { password } => (
                 RunningKind::Unlock,
-                Box::new(move |dir| JobOutput::Unlocked(job_unlock(dir, &password))),
+                Box::new(move |dir, control| {
+                    JobOutput::Unlocked(job_unlock(dir, &password, control))
+                }),
             ),
             Kind::Verify { password } => (
                 RunningKind::Verify,
-                Box::new(move |dir| JobOutput::Checked {
-                    result: job_verify(dir, &password),
+                Box::new(move |dir, control| JobOutput::Checked {
+                    result: job_verify(dir, &password, control),
                     commit: None,
                 }),
             ),
             Kind::ExportMnemonic { password } => (
                 RunningKind::ExportMnemonic,
-                Box::new(move |dir| JobOutput::Checked {
-                    result: job_verify(dir, &password),
+                Box::new(move |dir, control| JobOutput::Checked {
+                    result: job_verify(dir, &password, control),
                     commit: None,
                 }),
             ),
             Kind::ExportPrivateKey { password, account } => (
                 RunningKind::ExportPrivateKey(account),
-                Box::new(move |dir| JobOutput::Checked {
-                    result: job_verify(dir, &password),
+                Box::new(move |dir, control| JobOutput::Checked {
+                    result: job_verify(dir, &password, control),
                     commit: None,
                 }),
             ),
             Kind::Delete { password } => (
                 RunningKind::Delete,
-                Box::new(move |dir| job_delete(dir, &password)),
+                Box::new(move |dir, control| job_delete(dir, &password, control)),
             ),
             Kind::ChangePassword { current, new } => (
                 RunningKind::ChangePassword,
-                Box::new(move |dir| job_change(dir, &current, &new)),
+                Box::new(move |dir, control| job_change(dir, &current, &new, control)),
             ),
             Kind::Create { password, words } => (
                 RunningKind::Create,
-                Box::new(move |dir| job_create(dir, &password, words)),
+                Box::new(move |dir, control| job_create(dir, &password, words, control)),
             ),
             Kind::Import {
                 password,
@@ -813,12 +944,14 @@ impl Vault {
                 overwrite,
             } => (
                 RunningKind::Import,
-                Box::new(move |dir| job_import(dir, &password, mnemonic, overwrite)),
+                Box::new(move |dir, control| {
+                    job_import(dir, &password, mnemonic, overwrite, control)
+                }),
             ),
         };
         let dir = self.dir.clone();
         let job: Job = Box::new(move || {
-            let output = run(&dir);
+            let output = run(&dir, &control);
             Finished {
                 output,
                 file: snapshot(&dir),
@@ -832,26 +965,26 @@ impl Vault {
         let mut out = Vec::new();
         self.file = finished.file;
         let output = finished.output;
-        let Some(running) = self.running.take_if(|r| r.job == job) else {
+        let Some(mut running) = self.running.take_if(|r| r.job == job) else {
             return out;
         };
         let now = self.now_ms();
-        let late = Instant::now() >= running.deadline;
         let request = running.request;
-        // Pre-commit work that was cancelled or ran out of time reports so;
-        // committed mutations always report their real (successful) outcome.
-        let abandoned = |committed: bool| -> Option<ErrorBody> {
-            if committed {
-                return None;
+        // A result after the deadline is abandoned, unless it committed.
+        if !running.answered && Instant::now() >= running.deadline && running.control.abandon() {
+            running.answered = true;
+            self.reply_error(&mut out, request, deadline_exceeded());
+        }
+        if running.answered {
+            // Already answered: only the throttle learns the real outcome.
+            if let Some(attempt) = running.attempt {
+                self.throttle
+                    .settle(attempt, throttle_outcome(&output), now);
             }
-            if running.cancelled {
-                Some(ErrorBody::new(ErrorCode::Cancelled, "Cancelled"))
-            } else if late {
-                Some(ErrorBody::new(ErrorCode::Deadline, "Deadline exceeded"))
-            } else {
-                None
-            }
-        };
+            drop(output);
+            self.start_next(&mut out);
+            return out;
+        }
         let short = matches!(
             running.kind,
             RunningKind::Verify | RunningKind::ExportMnemonic | RunningKind::ExportPrivateKey(_)
@@ -864,9 +997,6 @@ impl Vault {
                 };
                 let reply = match result {
                     Err(error) => Err(error.body(false)),
-                    Ok(_) if abandoned(false).is_some() => {
-                        Err(abandoned(false).unwrap_or_else(internal))
-                    }
                     Ok((prepared, addresses)) => {
                         match self
                             .state
@@ -884,7 +1014,7 @@ impl Vault {
                             }
                             // Design 0001: a result from a revoked epoch is
                             // wiped, never installed, and returns vault_locked.
-                            Err(_) => Err(ErrorBody::new(ErrorCode::VaultLocked, MSG_LOCKED)),
+                            Err(_) => Err(locked()),
                         }
                     }
                 };
@@ -897,10 +1027,7 @@ impl Vault {
                 };
                 let reply = match result {
                     Err(error) => Err(error.body(short)),
-                    Ok(()) => match abandoned(commit.is_some()) {
-                        Some(error) => Err(error),
-                        None => self.after_check(kind, request, commit, &mut out),
-                    },
+                    Ok(()) => self.after_check(kind, request, commit, &mut out),
                 };
                 (throttle, reply)
             }
@@ -913,13 +1040,10 @@ impl Vault {
                 };
                 let reply = match result {
                     Err(error) => Err(error.body(false)),
-                    Ok(()) => match abandoned(commit.is_some()) {
-                        Some(error) => Err(error),
-                        None => Ok(json_result(
-                            request,
-                            &durability(serde_json::json!({}), commit),
-                        )),
-                    },
+                    Ok(()) => Ok(json_result(
+                        request,
+                        &durability(serde_json::json!({}), commit),
+                    )),
                 };
                 (throttle, reply)
             }
@@ -963,7 +1087,6 @@ impl Vault {
             Ok(None) => out.push(Out::Send(error_payload(request, &internal()))),
             Err(error) => self.reply_error(&mut out, request, error),
         }
-        let _ = running.mutates;
         self.start_next(&mut out);
         out
     }
@@ -987,10 +1110,7 @@ impl Vault {
                 ))
             }
             RunningKind::ExportMnemonic => {
-                let mnemonic = self
-                    .state
-                    .mnemonic()
-                    .map_err(|_| ErrorBody::new(ErrorCode::VaultLocked, MSG_LOCKED))?;
+                let mnemonic = self.state.mnemonic().map_err(|_| locked())?;
                 secret_result(request, "mnemonic_b64", mnemonic.phrase().as_bytes())
             }
             RunningKind::ExportPrivateKey(account) => {
@@ -1040,6 +1160,35 @@ fn durability(mut result: serde_json::Value, commit: Option<Done>) -> serde_json
     result
 }
 
+/// The throttle outcome of a job, whether or not its request was answered.
+fn throttle_outcome(output: &JobOutput) -> Outcome {
+    let result = match output {
+        JobOutput::Unlocked(result) => result.as_ref().map(|_| ()),
+        JobOutput::Checked { result, .. } | JobOutput::Changed { result, .. } => {
+            result.as_ref().map(|_| ())
+        }
+        JobOutput::Written { .. } => return Outcome::NotTried,
+    };
+    match result {
+        Ok(_) => Outcome::Success,
+        // A weak new password still proved the current one.
+        Err(OpError::Weak) => Outcome::Success,
+        Err(error) => error.throttle_outcome(),
+    }
+}
+
+fn cancelled() -> ErrorBody {
+    ErrorBody::new(ErrorCode::Cancelled, "Cancelled")
+}
+
+fn deadline_exceeded() -> ErrorBody {
+    ErrorBody::new(ErrorCode::Deadline, "Deadline exceeded")
+}
+
+fn locked() -> ErrorBody {
+    ErrorBody::new(ErrorCode::VaultLocked, MSG_LOCKED)
+}
+
 fn internal() -> ErrorBody {
     ErrorBody::new(ErrorCode::Internal, "Internal error")
 }
@@ -1063,15 +1212,27 @@ fn check_strength(password: &SecretBytes) -> Result<(), ErrorBody> {
     }
 }
 
-fn radicle_did(id: u64, public_key_hex: &str) -> Result<Option<Zeroizing<Vec<u8>>>, ErrorBody> {
+/// `keys.radicle_did { public_key }`: the 32-byte Ed25519 key as hex, with
+/// or without `0x`. Parsed as bytes, so no input can split a character.
+fn radicle_did(id: u64, public_key: &str) -> Result<Option<Zeroizing<Vec<u8>>>, ErrorBody> {
     let invalid = || ErrorBody::new(ErrorCode::InvalidArgument, "Invalid public key");
-    let hex = public_key_hex.strip_prefix("0x").unwrap_or(public_key_hex);
-    if hex.len() != 64 {
+    let digits = public_key.as_bytes();
+    let digits = digits.strip_prefix(b"0x").unwrap_or(digits);
+    if digits.len() != 64 {
         return Err(invalid());
     }
+    let nibble = |digit: u8| {
+        char::from(digit)
+            .to_digit(16)
+            .and_then(|d| u8::try_from(d).ok())
+    };
     let mut key = [0u8; 32];
-    for (i, byte) in key.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).map_err(|_| invalid())?;
+    let (pairs, _) = digits.as_chunks::<2>();
+    for (byte, &[high, low]) in key.iter_mut().zip(pairs) {
+        let (Some(high), Some(low)) = (nibble(high), nibble(low)) else {
+            return Err(invalid());
+        };
+        *byte = high << 4 | low;
     }
     Ok(json_result(
         id,
@@ -1209,38 +1370,58 @@ fn addresses_of(prepared_from: &Mnemonic) -> Result<Addresses, OpError> {
     })
 }
 
-fn job_unlock(dir: &Path, password: &SecretBytes) -> Result<(Prepared, Addresses), OpError> {
+fn job_unlock(
+    dir: &Path,
+    password: &SecretBytes,
+    control: &JobControl,
+) -> Result<(Prepared, Addresses), OpError> {
+    if control.abandoned() {
+        return Err(OpError::Abandoned);
+    }
     let opened = open(dir, password)?;
     let addresses = addresses_of(&opened.mnemonic)?;
     Ok((Prepared::new(opened.mnemonic), addresses))
 }
 
-fn job_verify(dir: &Path, password: &SecretBytes) -> Result<(), OpError> {
-    open(dir, password).map(|_| ())
+/// verify and the exports' password check: JS `vault.verifyPassword`, which
+/// only decrypts (no version or mnemonic checks).
+fn job_verify(dir: &Path, password: &SecretBytes, control: &JobControl) -> Result<(), OpError> {
+    if control.abandoned() {
+        return Err(OpError::Abandoned);
+    }
+    let contents = read_vault(dir)?.ok_or(OpError::NoVault)?;
+    format::verify_password(&contents, password.as_bytes()).map_err(OpError::from_vault)
 }
 
-fn job_delete(dir: &Path, password: &SecretBytes) -> JobOutput {
-    if let Err(error) = open(dir, password) {
-        return JobOutput::Checked {
-            result: Err(error),
-            commit: None,
-        };
+fn job_delete(dir: &Path, password: &SecretBytes, control: &JobControl) -> JobOutput {
+    let not_committed = |error| JobOutput::Checked {
+        result: Err(error),
+        commit: None,
+    };
+    if control.abandoned() {
+        return not_committed(OpError::Abandoned);
     }
-    match fsx::remove(&dir.join(VAULT_FILE)) {
-        Ok(done) => JobOutput::Checked {
+    if let Err(error) = open(dir, password) {
+        return not_committed(error);
+    }
+    match fsx::remove(&dir.join(VAULT_FILE), || control.commit()) {
+        Ok(Some(done)) => JobOutput::Checked {
             result: Ok(()),
             commit: Some(done),
         },
-        Err(e) => JobOutput::Checked {
-            result: Err(storage(&e)),
-            commit: None,
-        },
+        Ok(None) => not_committed(OpError::Abandoned),
+        Err(e) => not_committed(storage(&e)),
     }
 }
 
 /// Seals `mnemonic` under `password` and writes it durably, after checking
 /// that the staged file decrypts to the same mnemonic.
-fn write_vault(dir: &Path, mnemonic: &Mnemonic, password: &[u8]) -> Result<Done, OpError> {
+fn write_vault(
+    dir: &Path,
+    mnemonic: &Mnemonic,
+    password: &[u8],
+    control: &JobControl,
+) -> Result<Done, OpError> {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -1252,17 +1433,23 @@ fn write_vault(dir: &Path, mnemonic: &Mnemonic, password: &[u8]) -> Result<Done,
     std::fs::create_dir_all(dir).map_err(|e| storage(&e))?;
     let expected = mnemonic.phrase().to_owned();
     let expected = Zeroizing::new(expected);
-    fsx::replace(&dir.join(VAULT_FILE), contents.as_bytes(), |staged| {
-        let staged = std::fs::read_to_string(staged).map_err(|e| e.kind().to_string())?;
-        let opened = format::open(&staged, password).map_err(|e| e.to_string())?;
-        if opened.mnemonic.phrase() == expected.as_str() {
-            Ok(())
-        } else {
-            Err("staged vault decrypts to a different mnemonic".into())
-        }
-    })
+    fsx::replace(
+        &dir.join(VAULT_FILE),
+        contents.as_bytes(),
+        |staged| {
+            let staged = std::fs::read_to_string(staged).map_err(|e| e.kind().to_string())?;
+            let opened = format::open(&staged, password).map_err(|e| e.to_string())?;
+            if opened.mnemonic.phrase() == expected.as_str() {
+                Ok(())
+            } else {
+                Err("staged vault decrypts to a different mnemonic".into())
+            }
+        },
+        || control.commit(),
+    )
     .map_err(|e| match e {
         fsx::WriteError::Io(e) => storage(&e),
+        fsx::WriteError::Abandoned => OpError::Abandoned,
         fsx::WriteError::Check(reason) => {
             crate::log::error(
                 "the staged vault failed its check",
@@ -1273,7 +1460,18 @@ fn write_vault(dir: &Path, mnemonic: &Mnemonic, password: &[u8]) -> Result<Done,
     })
 }
 
-fn job_change(dir: &Path, current: &SecretBytes, new: &SecretBytes) -> JobOutput {
+fn job_change(
+    dir: &Path,
+    current: &SecretBytes,
+    new: &SecretBytes,
+    control: &JobControl,
+) -> JobOutput {
+    if control.abandoned() {
+        return JobOutput::Changed {
+            result: Err(OpError::Abandoned),
+            commit: None,
+        };
+    }
     let opened = match open(dir, current) {
         Ok(opened) => opened,
         Err(error) => {
@@ -1289,7 +1487,7 @@ fn job_change(dir: &Path, current: &SecretBytes, new: &SecretBytes) -> JobOutput
             commit: None,
         };
     }
-    match write_vault(dir, &opened.mnemonic, new.as_bytes()) {
+    match write_vault(dir, &opened.mnemonic, new.as_bytes(), control) {
         Ok(done) => JobOutput::Changed {
             result: Ok(()),
             commit: Some(done),
@@ -1301,8 +1499,16 @@ fn job_change(dir: &Path, current: &SecretBytes, new: &SecretBytes) -> JobOutput
     }
 }
 
-fn job_create(dir: &Path, password: &SecretBytes, words: WordCount) -> JobOutput {
+fn job_create(
+    dir: &Path,
+    password: &SecretBytes,
+    words: WordCount,
+    control: &JobControl,
+) -> JobOutput {
     written((|| {
+        if control.abandoned() {
+            return Err(OpError::Abandoned);
+        }
         // Checked again here: another create or import may have run since
         // admission.
         if read_vault(dir)?.is_some() {
@@ -1311,7 +1517,7 @@ fn job_create(dir: &Path, password: &SecretBytes, words: WordCount) -> JobOutput
         let mnemonic = Mnemonic::generate(&mut OsRng, words).map_err(|_| OpError::Internal)?;
         let phrase = Mnemonic::parse(mnemonic.phrase()).map_err(|_| OpError::Internal)?;
         let addresses = addresses_of(&mnemonic)?;
-        let done = write_vault(dir, &mnemonic, password.as_bytes())?;
+        let done = write_vault(dir, &mnemonic, password.as_bytes(), control)?;
         Ok(((Prepared::new(mnemonic), addresses, Some(phrase)), done))
     })())
 }
@@ -1321,13 +1527,17 @@ fn job_import(
     password: &SecretBytes,
     mnemonic: Mnemonic,
     overwrite: bool,
+    control: &JobControl,
 ) -> JobOutput {
     written((|| {
+        if control.abandoned() {
+            return Err(OpError::Abandoned);
+        }
         if !overwrite && read_vault(dir)?.is_some() {
             return Err(OpError::Exists { import: true });
         }
         let addresses = addresses_of(&mnemonic)?;
-        let done = write_vault(dir, &mnemonic, password.as_bytes())?;
+        let done = write_vault(dir, &mnemonic, password.as_bytes(), control)?;
         Ok(((Prepared::new(mnemonic), addresses, None), done))
     })())
 }

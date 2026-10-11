@@ -7,8 +7,11 @@
 //! 3. Run the caller's check against the temp file (for the vault: decrypt it
 //!    and compare the mnemonic). If the check fails, the temp file is
 //!    removed and the target is untouched.
-//! 4. Rename it over the target.
-//! 5. On Unix, `fsync` the directory.
+//! 4. Ask the caller's commit gate. It answers false when the operation was
+//!    abandoned (cancelled, revoked or out of time) before this point; the
+//!    temp file is then removed and the target is untouched.
+//! 5. Rename it over the target.
+//! 6. On Unix, `fsync` the directory.
 //!
 //! Errors from every flush are reported, never ignored. A failure before the
 //! rename is an error and leaves the target untouched. Once the rename (or
@@ -24,12 +27,13 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// Why a write failed. `Check` means the staged file didn't verify; the
-/// target is untouched in that case.
+/// Why a write failed. In every case the target is untouched: `Check` means
+/// the staged file didn't verify, `Abandoned` that the commit gate refused.
 #[derive(Debug)]
 pub enum WriteError {
     Io(std::io::Error),
     Check(String),
+    Abandoned,
 }
 
 /// A change that has taken effect. `NotDurable`: the directory flush after
@@ -49,11 +53,12 @@ impl From<std::io::Error> for WriteError {
 }
 
 /// Atomically and durably replaces `target` with `contents`, after `check`
-/// accepts the staged file.
+/// accepts the staged file and `commit` allows the rename.
 pub fn replace(
     target: &Path,
     contents: &[u8],
     check: impl FnOnce(&Path) -> Result<(), String>,
+    commit: impl FnOnce() -> bool,
 ) -> Result<Done, WriteError> {
     let dir = target
         .parent()
@@ -64,6 +69,9 @@ pub fn replace(
         temp.sync_all()?;
         drop(temp);
         check(&temp_path).map_err(WriteError::Check)?;
+        if !commit() {
+            return Err(WriteError::Abandoned);
+        }
         std::fs::rename(&temp_path, target)?;
         Ok(())
     })();
@@ -74,18 +82,22 @@ pub fn replace(
     Ok(flushed(sync_dir(dir)))
 }
 
-/// Removes `target` durably: unlink, then `fsync` the directory. A missing
-/// file is not an error.
-pub fn remove(target: &Path) -> std::io::Result<Done> {
+/// Removes `target` durably, if `commit` allows it: unlink, then `fsync` the
+/// directory. A missing file is not an error. `Ok(None)`: the gate refused,
+/// and the file is untouched.
+pub fn remove(target: &Path, commit: impl FnOnce() -> bool) -> std::io::Result<Option<Done>> {
+    if !commit() {
+        return Ok(None);
+    }
     match std::fs::remove_file(target) {
         Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Done::Durable),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Some(Done::Durable)),
         Err(e) => return Err(e),
     }
-    Ok(match target.parent() {
+    Ok(Some(match target.parent() {
         Some(dir) => flushed(sync_dir(dir)),
         None => Done::Durable,
-    })
+    }))
 }
 
 /// The outcome of the directory flush after a commit; a failure is logged.
@@ -181,10 +193,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("identity-vault.json");
         std::fs::write(&target, b"old").unwrap();
-        let done = replace(&target, b"new", |staged| {
-            assert_eq!(std::fs::read(staged).unwrap(), b"new");
-            Ok(())
-        })
+        let done = replace(
+            &target,
+            b"new",
+            |staged| {
+                assert_eq!(std::fs::read(staged).unwrap(), b"new");
+                Ok(())
+            },
+            || true,
+        )
         .unwrap();
         assert_eq!(done, Done::Durable);
         assert_eq!(std::fs::read(&target).unwrap(), b"new");
@@ -204,10 +221,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("identity-vault.json");
         std::fs::write(&target, b"old").unwrap();
-        let result = replace(&target, b"broken", |_| Err("does not decrypt".into()));
+        let result = replace(
+            &target,
+            b"broken",
+            |_| Err("does not decrypt".into()),
+            || true,
+        );
         assert!(matches!(result, Err(WriteError::Check(_))));
         assert_eq!(std::fs::read(&target).unwrap(), b"old");
         assert!(temp_files(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_refused_commit_leaves_the_target_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("identity-vault.json");
+        std::fs::write(&target, b"old").unwrap();
+        let result = replace(&target, b"new", |_| Ok(()), || false);
+        assert!(matches!(result, Err(WriteError::Abandoned)));
+        assert_eq!(std::fs::read(&target).unwrap(), b"old");
+        assert!(temp_files(dir.path()).is_empty());
+        assert_eq!(remove(&target, || false).unwrap(), None);
+        assert!(target.exists());
     }
 
     #[test]
@@ -215,9 +250,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("identity-vault.json");
         std::fs::write(&target, b"x").unwrap();
-        assert_eq!(remove(&target).unwrap(), Done::Durable);
+        assert_eq!(remove(&target, || true).unwrap(), Some(Done::Durable));
         assert!(!target.exists());
-        assert_eq!(remove(&target).unwrap(), Done::Durable);
+        assert_eq!(remove(&target, || true).unwrap(), Some(Done::Durable));
     }
 
     #[cfg(unix)]

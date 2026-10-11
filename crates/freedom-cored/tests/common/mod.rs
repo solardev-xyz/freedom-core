@@ -123,6 +123,11 @@ pub fn request(id: u64, method: &str, params: Value) -> Value {
     json!({ "type": "request", "id": id, "method": method, "params": params, "context": { "caller": "chrome" } })
 }
 
+/// A request from main itself (caller `shell`), e.g. compat.*.
+pub fn shell_request(id: u64, method: &str, params: Value) -> Value {
+    json!({ "type": "request", "id": id, "method": method, "params": params, "context": { "caller": "shell" } })
+}
+
 impl Core {
     pub fn send(&mut self, message: &Value) {
         self.send_raw(&frame(message));
@@ -157,7 +162,7 @@ impl Core {
 
     /// Calls with caller `shell` (main-internal methods such as compat.*).
     pub fn call_shell(&mut self, id: u64, method: &str, params: Value) -> Value {
-        self.send(&json!({ "type": "request", "id": id, "method": method, "params": params, "context": { "caller": "shell" } }));
+        self.send(&shell_request(id, method, params));
         self.response(id)
     }
 
@@ -173,6 +178,24 @@ impl Core {
             assert_eq!(message["id"], id);
             return message;
         }
+    }
+
+    /// Reads until the response to `id`, setting events aside and skipping
+    /// other responses.
+    pub fn until_response(&mut self, id: u64) -> Value {
+        loop {
+            let message = self.recv();
+            if message["type"] == "event" {
+                self.events.push(message);
+            } else if message["id"] == id {
+                return message;
+            }
+        }
+    }
+
+    /// The events set aside so far.
+    pub fn events(&mut self) -> Vec<Value> {
+        std::mem::take(&mut self.events)
     }
 
     /// Waits for the next event (already seen ones first).
