@@ -10,4 +10,23 @@ repository.workspace = true
 [lints]
 workspace = true
 
+# RustCrypto's digest-0.10 generation (k256 0.13), matching alloy 2.x and
+# freedom-mobile-ffi. Move to the 0.11 generation together with alloy.
+# BIP-32 is implemented in src/secp256k1.rs so every intermediate secret is
+# zeroized.
 [dependencies]
+ed25519-dalek = { version = "2.2", default-features = false, features = ["zeroize"] }
+hmac = "0.12"
+k256 = { version = "0.13.4", default-features = false, features = ["ecdsa"] }
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+rand_core = "0.6"
+sha2 = "0.10"
+sha3 = "0.10"
+thiserror = "2"
+unicode-normalization = "0.1.25"
+zeroize = "1.8"
+
+[dev-dependencies]
+hex = "0.4"
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde_json = "1"
