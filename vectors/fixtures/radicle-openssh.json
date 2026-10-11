@@ -1,0 +1,169 @@
+{
+  "meta": {
+    "freedomBrowserCommit": "fb540328162839e68150fe2c5e517edb86734d1c",
+    "packages": {
+      "ethers": "6.17.0",
+      "@scure/bip39": "2.4.0",
+      "@scure/base": "1.2.6",
+      "micro-key-producer": "0.10.2",
+      "@metamask/browser-passworder": "6.0.0"
+    },
+    "nodeVersion": "v24.15.0",
+    "generator": "vectors/generator/generate.js"
+  },
+  "structure": {
+    "cipher": "none",
+    "kdf": "none",
+    "checkInteger": "random 4-byte unsigned big-endian integer, repeated twice",
+    "privateKeyLayout": "32-byte private seed || 32-byte public key",
+    "padding": "bytes 01, 02, ... up to an 8-byte boundary; a full 8 bytes when already aligned",
+    "pemLineWidth": 70,
+    "trailingNewline": true
+  },
+  "fixtures": [
+    {
+      "mnemonicId": "abandon-12",
+      "comment": "FreedomBrowser",
+      "checkIntegerHex": "d3890d10",
+      "paddingHex": "01020304050607",
+      "identity": {
+        "privateKeyFile": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACAfvBnR44b5lpxeeSXXHOWzMrOZ7mMrF/R0OjJIgj4kiwAAAJjTiQ0Q04kN\nEAAAAAtzc2gtZWQyNTUxOQAAACAfvBnR44b5lpxeeSXXHOWzMrOZ7mMrF/R0OjJIgj4kiw\nAAAECyYuYvxqVY/QRcpo3XAA4woTX2eLwIFpNeE+vmqX4UvR+8GdHjhvmWnF55Jdcc5bMy\ns5nuYysX9HQ6MkiCPiSLAAAADkZyZWVkb21Ccm93c2VyAQIDBAUGBw==\n-----END OPENSSH PRIVATE KEY-----\n",
+        "publicKeyFile": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB+8GdHjhvmWnF55Jdcc5bMys5nuYysX9HQ6MkiCPiSL FreedomBrowser\n",
+        "did": "did:key:z6Mkgb93MjdiDEUrHVCY2X4EfaSwzoFCorViqqPnjoQX8gAn",
+        "nodeId": "z6Mkgb93MjdiDEUrHVCY2X4EfaSwzoFCorViqqPnjoQX8gAn"
+      }
+    },
+    {
+      "mnemonicId": "abandon-12",
+      "comment": "vector-alias",
+      "checkIntegerHex": "8a552638",
+      "paddingHex": "01",
+      "identity": {
+        "privateKeyFile": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACAfvBnR44b5lpxeeSXXHOWzMrOZ7mMrF/R0OjJIgj4kiwAAAJCKVSY4ilUm\nOAAAAAtzc2gtZWQyNTUxOQAAACAfvBnR44b5lpxeeSXXHOWzMrOZ7mMrF/R0OjJIgj4kiw\nAAAECyYuYvxqVY/QRcpo3XAA4woTX2eLwIFpNeE+vmqX4UvR+8GdHjhvmWnF55Jdcc5bMy\ns5nuYysX9HQ6MkiCPiSLAAAADHZlY3Rvci1hbGlhcwE=\n-----END OPENSSH PRIVATE KEY-----\n",
+        "publicKeyFile": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB+8GdHjhvmWnF55Jdcc5bMys5nuYysX9HQ6MkiCPiSL vector-alias\n",
+        "did": "did:key:z6Mkgb93MjdiDEUrHVCY2X4EfaSwzoFCorViqqPnjoQX8gAn",
+        "nodeId": "z6Mkgb93MjdiDEUrHVCY2X4EfaSwzoFCorViqqPnjoQX8gAn"
+      }
+    },
+    {
+      "mnemonicId": "abandon-24",
+      "comment": "FreedomBrowser",
+      "checkIntegerHex": "0b4ca632",
+      "paddingHex": "01020304050607",
+      "identity": {
+        "privateKeyFile": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACD6IIaIqsKrR2gZG+2gaVo5rOVV8Nc1kDZl5e+1oJDjTAAAAJgLTKYyC0ym\nMgAAAAtzc2gtZWQyNTUxOQAAACD6IIaIqsKrR2gZG+2gaVo5rOVV8Nc1kDZl5e+1oJDjTA\nAAAEAUz9gXaIOaygNht5WPOnqPcfj6+cKOZ+rYSj4dj4rHYfoghoiqwqtHaBkb7aBpWjms\n5VXw1zWQNmXl77WgkONMAAAADkZyZWVkb21Ccm93c2VyAQIDBAUGBw==\n-----END OPENSSH PRIVATE KEY-----\n",
+        "publicKeyFile": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPoghoiqwqtHaBkb7aBpWjms5VXw1zWQNmXl77WgkONM FreedomBrowser\n",
+        "did": "did:key:z6MkwHejd1BmzHvuKyDrXzRd37FVyTYew2PWAisppvLTEBRm",
+        "nodeId": "z6MkwHejd1BmzHvuKyDrXzRd37FVyTYew2PWAisppvLTEBRm"
+      }
+    },
+    {
+      "mnemonicId": "abandon-24",
+      "comment": "vector-alias",
+      "checkIntegerHex": "19f325f7",
+      "paddingHex": "01",
+      "identity": {
+        "privateKeyFile": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACD6IIaIqsKrR2gZG+2gaVo5rOVV8Nc1kDZl5e+1oJDjTAAAAJAZ8yX3GfMl\n9wAAAAtzc2gtZWQyNTUxOQAAACD6IIaIqsKrR2gZG+2gaVo5rOVV8Nc1kDZl5e+1oJDjTA\nAAAEAUz9gXaIOaygNht5WPOnqPcfj6+cKOZ+rYSj4dj4rHYfoghoiqwqtHaBkb7aBpWjms\n5VXw1zWQNmXl77WgkONMAAAADHZlY3Rvci1hbGlhcwE=\n-----END OPENSSH PRIVATE KEY-----\n",
+        "publicKeyFile": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPoghoiqwqtHaBkb7aBpWjms5VXw1zWQNmXl77WgkONM vector-alias\n",
+        "did": "did:key:z6MkwHejd1BmzHvuKyDrXzRd37FVyTYew2PWAisppvLTEBRm",
+        "nodeId": "z6MkwHejd1BmzHvuKyDrXzRd37FVyTYew2PWAisppvLTEBRm"
+      }
+    },
+    {
+      "mnemonicId": "legal-12",
+      "comment": "FreedomBrowser",
+      "checkIntegerHex": "e6ca1e6a",
+      "paddingHex": "01020304050607",
+      "identity": {
+        "privateKeyFile": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACAASr0vA91Vm1d1Px9Wc8T3HvevKwzwUXjokZggcoIRvQAAAJjmyh5q5soe\nagAAAAtzc2gtZWQyNTUxOQAAACAASr0vA91Vm1d1Px9Wc8T3HvevKwzwUXjokZggcoIRvQ\nAAAEBM3hhL9/jIeAQ2eKO2CfdzgCC6VvtYyT/jd/qXDajPEQBKvS8D3VWbV3U/H1ZzxPce\n968rDPBReOiRmCByghG9AAAADkZyZWVkb21Ccm93c2VyAQIDBAUGBw==\n-----END OPENSSH PRIVATE KEY-----\n",
+        "publicKeyFile": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIABKvS8D3VWbV3U/H1ZzxPce968rDPBReOiRmCByghG9 FreedomBrowser\n",
+        "did": "did:key:z6MkeUQ9N8WURkVFFn8jrdrmTQBWjLdrqwBsNUjtFVFTuEZi",
+        "nodeId": "z6MkeUQ9N8WURkVFFn8jrdrmTQBWjLdrqwBsNUjtFVFTuEZi"
+      }
+    },
+    {
+      "mnemonicId": "legal-12",
+      "comment": "vector-alias",
+      "checkIntegerHex": "091b77e1",
+      "paddingHex": "01",
+      "identity": {
+        "privateKeyFile": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACAASr0vA91Vm1d1Px9Wc8T3HvevKwzwUXjokZggcoIRvQAAAJAJG3fhCRt3\n4QAAAAtzc2gtZWQyNTUxOQAAACAASr0vA91Vm1d1Px9Wc8T3HvevKwzwUXjokZggcoIRvQ\nAAAEBM3hhL9/jIeAQ2eKO2CfdzgCC6VvtYyT/jd/qXDajPEQBKvS8D3VWbV3U/H1ZzxPce\n968rDPBReOiRmCByghG9AAAADHZlY3Rvci1hbGlhcwE=\n-----END OPENSSH PRIVATE KEY-----\n",
+        "publicKeyFile": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIABKvS8D3VWbV3U/H1ZzxPce968rDPBReOiRmCByghG9 vector-alias\n",
+        "did": "did:key:z6MkeUQ9N8WURkVFFn8jrdrmTQBWjLdrqwBsNUjtFVFTuEZi",
+        "nodeId": "z6MkeUQ9N8WURkVFFn8jrdrmTQBWjLdrqwBsNUjtFVFTuEZi"
+      }
+    },
+    {
+      "mnemonicId": "zoo-12",
+      "comment": "FreedomBrowser",
+      "checkIntegerHex": "6500d23e",
+      "paddingHex": "01020304050607",
+      "identity": {
+        "privateKeyFile": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACB92rJ4n7v4JagiLj585epaVnJd2k9PzZUTHpcVlK0lwgAAAJhlANI+ZQDS\nPgAAAAtzc2gtZWQyNTUxOQAAACB92rJ4n7v4JagiLj585epaVnJd2k9PzZUTHpcVlK0lwg\nAAAEAt6GQBIiv19vrmorXVjrlcCc1SWOLmSNv3XFVos4mMm33asnifu/glqCIuPnzl6lpW\ncl3aT0/NlRMelxWUrSXCAAAADkZyZWVkb21Ccm93c2VyAQIDBAUGBw==\n-----END OPENSSH PRIVATE KEY-----\n",
+        "publicKeyFile": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH3asnifu/glqCIuPnzl6lpWcl3aT0/NlRMelxWUrSXC FreedomBrowser\n",
+        "did": "did:key:z6MknvYRaWTAcVFEA9BkyiC9vCByAgbf88P5xZP34e3r8iuF",
+        "nodeId": "z6MknvYRaWTAcVFEA9BkyiC9vCByAgbf88P5xZP34e3r8iuF"
+      }
+    },
+    {
+      "mnemonicId": "zoo-12",
+      "comment": "vector-alias",
+      "checkIntegerHex": "f162ffff",
+      "paddingHex": "01",
+      "identity": {
+        "privateKeyFile": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACB92rJ4n7v4JagiLj585epaVnJd2k9PzZUTHpcVlK0lwgAAAJDxYv//8WL/\n/wAAAAtzc2gtZWQyNTUxOQAAACB92rJ4n7v4JagiLj585epaVnJd2k9PzZUTHpcVlK0lwg\nAAAEAt6GQBIiv19vrmorXVjrlcCc1SWOLmSNv3XFVos4mMm33asnifu/glqCIuPnzl6lpW\ncl3aT0/NlRMelxWUrSXCAAAADHZlY3Rvci1hbGlhcwE=\n-----END OPENSSH PRIVATE KEY-----\n",
+        "publicKeyFile": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH3asnifu/glqCIuPnzl6lpWcl3aT0/NlRMelxWUrSXC vector-alias\n",
+        "did": "did:key:z6MknvYRaWTAcVFEA9BkyiC9vCByAgbf88P5xZP34e3r8iuF",
+        "nodeId": "z6MknvYRaWTAcVFEA9BkyiC9vCByAgbf88P5xZP34e3r8iuF"
+      }
+    },
+    {
+      "mnemonicId": "fresh-128",
+      "comment": "FreedomBrowser",
+      "checkIntegerHex": "ed6364b9",
+      "paddingHex": "01020304050607",
+      "identity": {
+        "privateKeyFile": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACBpcZE//ZlXPt5gX1V37BqyjyzXEsoa/AAT4UXVW3vZuQAAAJjtY2S57WNk\nuQAAAAtzc2gtZWQyNTUxOQAAACBpcZE//ZlXPt5gX1V37BqyjyzXEsoa/AAT4UXVW3vZuQ\nAAAEAg7uUKRB5V+EBpO3jSnwtu4x0lwSR/U7Mg7EaTfNLJJWlxkT/9mVc+3mBfVXfsGrKP\nLNcSyhr8ABPhRdVbe9m5AAAADkZyZWVkb21Ccm93c2VyAQIDBAUGBw==\n-----END OPENSSH PRIVATE KEY-----\n",
+        "publicKeyFile": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGlxkT/9mVc+3mBfVXfsGrKPLNcSyhr8ABPhRdVbe9m5 FreedomBrowser\n",
+        "did": "did:key:z6MkmYsHxxcYs9F2gwH9tZYW4UvBf5oFtxZ4bUxjYU5WXvPA",
+        "nodeId": "z6MkmYsHxxcYs9F2gwH9tZYW4UvBf5oFtxZ4bUxjYU5WXvPA"
+      }
+    },
+    {
+      "mnemonicId": "fresh-128",
+      "comment": "vector-alias",
+      "checkIntegerHex": "c7779e13",
+      "paddingHex": "01",
+      "identity": {
+        "privateKeyFile": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACBpcZE//ZlXPt5gX1V37BqyjyzXEsoa/AAT4UXVW3vZuQAAAJDHd54Tx3ee\nEwAAAAtzc2gtZWQyNTUxOQAAACBpcZE//ZlXPt5gX1V37BqyjyzXEsoa/AAT4UXVW3vZuQ\nAAAEAg7uUKRB5V+EBpO3jSnwtu4x0lwSR/U7Mg7EaTfNLJJWlxkT/9mVc+3mBfVXfsGrKP\nLNcSyhr8ABPhRdVbe9m5AAAADHZlY3Rvci1hbGlhcwE=\n-----END OPENSSH PRIVATE KEY-----\n",
+        "publicKeyFile": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGlxkT/9mVc+3mBfVXfsGrKPLNcSyhr8ABPhRdVbe9m5 vector-alias\n",
+        "did": "did:key:z6MkmYsHxxcYs9F2gwH9tZYW4UvBf5oFtxZ4bUxjYU5WXvPA",
+        "nodeId": "z6MkmYsHxxcYs9F2gwH9tZYW4UvBf5oFtxZ4bUxjYU5WXvPA"
+      }
+    },
+    {
+      "mnemonicId": "fresh-256",
+      "comment": "FreedomBrowser",
+      "checkIntegerHex": "c288bfaa",
+      "paddingHex": "01020304050607",
+      "identity": {
+        "privateKeyFile": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACCSMITIr/vSUNjSx/p7WzYDi4QJeAUcF0jEkWSCGOwzlAAAAJjCiL+qwoi/\nqgAAAAtzc2gtZWQyNTUxOQAAACCSMITIr/vSUNjSx/p7WzYDi4QJeAUcF0jEkWSCGOwzlA\nAAAEBI1GMc6m+cAIVVbMKHnbgzfAADPfi+64QOcvSZeeftrZIwhMiv+9JQ2NLH+ntbNgOL\nhAl4BRwXSMSRZIIY7DOUAAAADkZyZWVkb21Ccm93c2VyAQIDBAUGBw==\n-----END OPENSSH PRIVATE KEY-----\n",
+        "publicKeyFile": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJIwhMiv+9JQ2NLH+ntbNgOLhAl4BRwXSMSRZIIY7DOU FreedomBrowser\n",
+        "did": "did:key:z6MkpHvUmNrRummmZhCZMPLEsrrYfKfesiUMq5HsDuLZ8ALB",
+        "nodeId": "z6MkpHvUmNrRummmZhCZMPLEsrrYfKfesiUMq5HsDuLZ8ALB"
+      }
+    },
+    {
+      "mnemonicId": "fresh-256",
+      "comment": "vector-alias",
+      "checkIntegerHex": "ee5483a1",
+      "paddingHex": "01",
+      "identity": {
+        "privateKeyFile": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACCSMITIr/vSUNjSx/p7WzYDi4QJeAUcF0jEkWSCGOwzlAAAAJDuVIOh7lSD\noQAAAAtzc2gtZWQyNTUxOQAAACCSMITIr/vSUNjSx/p7WzYDi4QJeAUcF0jEkWSCGOwzlA\nAAAEBI1GMc6m+cAIVVbMKHnbgzfAADPfi+64QOcvSZeeftrZIwhMiv+9JQ2NLH+ntbNgOL\nhAl4BRwXSMSRZIIY7DOUAAAADHZlY3Rvci1hbGlhcwE=\n-----END OPENSSH PRIVATE KEY-----\n",
+        "publicKeyFile": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJIwhMiv+9JQ2NLH+ntbNgOLhAl4BRwXSMSRZIIY7DOU vector-alias\n",
+        "did": "did:key:z6MkpHvUmNrRummmZhCZMPLEsrrYfKfesiUMq5HsDuLZ8ALB",
+        "nodeId": "z6MkpHvUmNrRummmZhCZMPLEsrrYfKfesiUMq5HsDuLZ8ALB"
+      }
+    }
+  ]
+}

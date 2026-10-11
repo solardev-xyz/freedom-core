@@ -1,0 +1,1736 @@
+{
+  "meta": {
+    "freedomBrowserCommit": "fb540328162839e68150fe2c5e517edb86734d1c",
+    "packages": {
+      "ethers": "6.17.0",
+      "@scure/bip39": "2.4.0",
+      "@scure/base": "1.2.6",
+      "micro-key-producer": "0.10.2",
+      "@metamask/browser-passworder": "6.0.0"
+    },
+    "nodeVersion": "v24.15.0",
+    "generator": "vectors/generator/generate.js"
+  },
+  "encodings": {
+    "seed": "64-byte lowercase hex, no 0x",
+    "secp256k1PrivateKey": "32-byte lowercase hex with 0x",
+    "secp256k1PublicKey": "33-byte compressed SEC1 lowercase hex with 0x",
+    "address": "EIP-55 checksummed hex with 0x",
+    "ed25519PrivateKey": "32-byte Uint8Array returned by JS, serialized as lowercase hex without 0x",
+    "ed25519PublicKey": "32-byte raw Uint8Array returned by JS, serialized as lowercase hex without 0x"
+  },
+  "vectors": [
+    {
+      "id": "abandon-12",
+      "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "seed": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
+      "userWallets": [
+        {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "publicKey": "0x0237b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+          "path": "m/44'/60'/0'/0/0",
+          "accountIndex": 0
+        },
+        {
+          "privateKey": "0x318470c858f622e48a80120a1fc3c8460d67a7bf31b3273a6d27d4c013f2f8d3",
+          "publicKey": "0x038ccc8186e5933e845afd096cc6d3f2fdb25fbe4db4864b944619afa8e4e8bd5e",
+          "address": "0x78839F6054d7ed13918bAe0473BA31b1Ca9D7265",
+          "path": "m/44'/60'/1'/0/0",
+          "accountIndex": 1
+        },
+        {
+          "privateKey": "0x4b9aad43cd664b970876f6cf635fe1526819234dec28c4219fc4300a0312de8c",
+          "publicKey": "0x03b6d02fac880da63c44e13605e1ba8413e0e7eb93b5bc164af4f7798c775550fa",
+          "address": "0x07B5FdfEB4E11826D233403Fe8Db0611CCF4c231",
+          "path": "m/44'/60'/2'/0/0",
+          "accountIndex": 2
+        },
+        {
+          "privateKey": "0x2ccee57fb51dcf3e5f970fb4d7e67489803d3d664a4db826e82e8e9722078ccf",
+          "publicKey": "0x03620a7e8106e3d058f8fd2645aea934beff1593c9ba76d30346d81f5f9b658fd7",
+          "address": "0xC7993dcC44a2904eA320F9529DACbF0e0E96C911",
+          "path": "m/44'/60'/1000'/0/0",
+          "accountIndex": 1000
+        },
+        {
+          "privateKey": "0xd76126ef2b31279357dec5008a05da4308da61546dffa1cb75ce633bae940252",
+          "publicKey": "0x03df990d1aaa28747028fca874ffa86c0e2da38c67e5df330ada1462a885c19957",
+          "address": "0x12DcC9F4feEa216Da086A8afaFCDd4438Bf7E751",
+          "path": "m/44'/60'/2147483647'/0/0",
+          "accountIndex": 2147483647
+        }
+      ],
+      "beeWallet": {
+        "privateKey": "0x9a983cb3d832fbde5ab49d692b7a8bf5b5d232479c99333d0fc8e1d21f1b55b6",
+        "publicKey": "0x039fd0991d0222b4e1339c1a1a5b5f6d9f6a96672a3247b638ee6156d9ea877a2f",
+        "address": "0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0",
+        "path": "m/44'/60'/0'/0/1"
+      },
+      "publisherKeys": [
+        {
+          "privateKey": "0xdf966bcf0abf71a56bb1230058c13ce73a0e127f093ff77594de6a964ea521ad",
+          "publicKey": "0x024c4b61dbfccb71a33552305e499764f1e2602c50acbbcf4cbe76c560e6fdd883",
+          "address": "0xA274614c1D3425568Fd100B30322287c86085220",
+          "path": "m/44'/73406'/0'/0/0",
+          "originIndex": 0
+        },
+        {
+          "privateKey": "0x5e272147094036eff6973d92a305be21cd0125866c2c1def8cb4cbdf1b836e37",
+          "publicKey": "0x03c22c83fb49ab0ad897aa0c74e51311c95a3d1e1b27b2dedd7f42a7d2538c3a9e",
+          "address": "0xd2e7208e8026bf96945d56CBCae2f509cC6e4748",
+          "path": "m/44'/73406'/1'/0/0",
+          "originIndex": 1
+        },
+        {
+          "privateKey": "0x9b5ed1d3a8d3b326a242c801464cdc4a38381cec911ecf1f77d05691746ad246",
+          "publicKey": "0x023263e186e68d31581a2ac1bec6ca730ba9b9e6b4a194dd78798a36271d0a4a0b",
+          "address": "0xc8d636d590B7883EC1772659937FfA453CABAdf1",
+          "path": "m/44'/73406'/2'/0/0",
+          "originIndex": 2
+        },
+        {
+          "privateKey": "0x01912ba9cfd4be9edfd2559a9f157f7a9e3f10b51f6f081c04b80ce63d19ef4a",
+          "publicKey": "0x02db64203a20bd2f557b4a3dc86993fcfa263741c10965f91e9c0a5a8fb17bb7c3",
+          "address": "0xD9F49fBdC22B8022B3732aF856AE5D25D1051637",
+          "path": "m/44'/73406'/1000'/0/0",
+          "originIndex": 1000
+        },
+        {
+          "privateKey": "0xf956f78cb812c824f3bfdae04dfd16813fad5dd54e2ed103a00c108ccb929d6b",
+          "publicKey": "0x02dc280b844d579c91e945c0960a707380c477f6ad701a59e449a620b9b9e18e4f",
+          "address": "0x8C0B78068F053FcE274F20cF960cc86154e123E3",
+          "path": "m/44'/73406'/2147483647'/0/0",
+          "originIndex": 2147483647
+        }
+      ],
+      "radicleKey": {
+        "path": "m/44'/73404'/0'/0'/0'",
+        "privateKey": "b262e62fc6a558fd045ca68dd7000e30a135f678bc0816935e13ebe6a97e14bd",
+        "publicKey": "1fbc19d1e386f9969c5e7925d71ce5b332b399ee632b17f4743a3248823e248b"
+      },
+      "ipfsKey": {
+        "path": "m/44'/73405'/0'/0'/0'",
+        "privateKey": "6d7c32198dff963096b93296acb383c9b4f2bd85a4e52c123bfee1e5cd00c749",
+        "publicKey": "91237ad5959a25e025487deebe7bbae444e5ac2dfcd6fd10442d43dd87ef5647"
+      }
+    },
+    {
+      "id": "abandon-24",
+      "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art",
+      "seed": "408b285c123836004f4b8842c89324c1f01382450c0d439af345ba7fc49acf705489c6fc77dbd4e3dc1dd8cc6bc9f043db8ada1e243c4a0eafb290d399480840",
+      "userWallets": [
+        {
+          "privateKey": "0x1053fae1b3ac64f178bcc21026fd06a3f4544ec2f35338b001f02d1d8efa3d5f",
+          "publicKey": "0x02dc286c821c7490afbe20a79d13123b9f41f3d7ef21e4a9caacd22f5983b28eca",
+          "address": "0xF278cF59F82eDcf871d630F28EcC8056f25C1cdb",
+          "path": "m/44'/60'/0'/0/0",
+          "accountIndex": 0
+        },
+        {
+          "privateKey": "0xb4538ac1ed7b1a256f87e483ca9e4eff66ca499b9101cb52cdd01ba360057bcc",
+          "publicKey": "0x0252d8805ae48c4d887bce2e16a5876b91e2b6aac11ef7c04e9540668ca8afa1f1",
+          "address": "0x94142B4f665316D3304C3a595ec83aC9C8046598",
+          "path": "m/44'/60'/1'/0/0",
+          "accountIndex": 1
+        },
+        {
+          "privateKey": "0x53ed84b13587c2ae5982a3964289e6424e2df6295c22f6377ae42e8e91649c49",
+          "publicKey": "0x029afff67f864ff8e2296085595be65cdb5df7bb0d9296632b7bf2544377c49158",
+          "address": "0xe93E76dFCc3Bb3A6A3A36Bcd9df68cb7C0AD46AA",
+          "path": "m/44'/60'/2'/0/0",
+          "accountIndex": 2
+        },
+        {
+          "privateKey": "0x83e896ea7204eaceb1e69479dacd6e796bf6325c15b1b590008965952864d163",
+          "publicKey": "0x027cabad0230f1ee215c2ac748b3cc11229b9158c5b4135c48cbe8d066b42994f2",
+          "address": "0x9F4a6807875f2052C8d1755F3C3C955bb17cE6c7",
+          "path": "m/44'/60'/1000'/0/0",
+          "accountIndex": 1000
+        },
+        {
+          "privateKey": "0x9bd413e0f2f3ca60f425d3fb2b4c1191cd648a7f541d8bbd1e4ae24e4f910887",
+          "publicKey": "0x024b2bccaa9cef93da63e34ac27892cc86e05c3de0eaf349c2a17c044eed3beae1",
+          "address": "0xED76A11599ee4a7ca89b9b3c12b48c4f33240ae9",
+          "path": "m/44'/60'/2147483647'/0/0",
+          "accountIndex": 2147483647
+        }
+      ],
+      "beeWallet": {
+        "privateKey": "0x0855b75d03a8830e390b5483d81694c9c7121d971e092145cf8b9c6fa3a5b373",
+        "publicKey": "0x03efd4cb0d8102293499b4f79d73d8343faa44d0e3fc14537872b437c8ec527a0c",
+        "address": "0xf785bD075874b8423D3583728a981399f31e95aA",
+        "path": "m/44'/60'/0'/0/1"
+      },
+      "publisherKeys": [
+        {
+          "privateKey": "0x90c7a44c27ba61593d00ad9378c4df63501d9882e2571a64c47839e71612035d",
+          "publicKey": "0x0380fc1a3aa6767d38b10c6ff993e25cda314616dfc40925e807ec61268db1b716",
+          "address": "0x22ebdbC445Ea91Dd71d4E227bF027d51DA72f0Db",
+          "path": "m/44'/73406'/0'/0/0",
+          "originIndex": 0
+        },
+        {
+          "privateKey": "0x629fb6c1f47cc5a83f3bf44b390043daca3c0da5e4ac4b38b3e6c051b095bf61",
+          "publicKey": "0x03cd2c15112240bcb42435d790a3260c5811af6288201bda3404b606adf83ed9b8",
+          "address": "0xddBFA9da5E8cf122127C4C5Bc76832AF3eaaa204",
+          "path": "m/44'/73406'/1'/0/0",
+          "originIndex": 1
+        },
+        {
+          "privateKey": "0xb9cf6885c26d58313deba55233c4c26041bbb66af594a3dccb33f52f03f52c88",
+          "publicKey": "0x03315b60f743364893ded43d154d2bd4ec569df8e63277e952953799cedbeb1ed4",
+          "address": "0x2c56F5118a5aa16Afa48b35789Ec467b9bb3Af5e",
+          "path": "m/44'/73406'/2'/0/0",
+          "originIndex": 2
+        },
+        {
+          "privateKey": "0xd3c7583a0f86bc852fe25f2e064289763f48ae1752a609ec269532edca151282",
+          "publicKey": "0x02bd22e01ec9e1a76cceec75ddededddc0a34b98388da5d1a49fce54484275edf7",
+          "address": "0x391D75F35d4e61B8b0D118e14fabF1e9E6c7Bf44",
+          "path": "m/44'/73406'/1000'/0/0",
+          "originIndex": 1000
+        },
+        {
+          "privateKey": "0x2cc3476294c249feda9eac027f99298ddb7e0d5c3eea9f93d8662d439d63a5a0",
+          "publicKey": "0x02b71f0e2affc032118bfc759584c34b644055c47c55c3eb75f04768beca14e9ff",
+          "address": "0x24e6656Fd806990A6759fD470AEa65c8De46c446",
+          "path": "m/44'/73406'/2147483647'/0/0",
+          "originIndex": 2147483647
+        }
+      ],
+      "radicleKey": {
+        "path": "m/44'/73404'/0'/0'/0'",
+        "privateKey": "14cfd81768839aca0361b7958f3a7a8f71f8faf9c28e67ead84a3e1d8f8ac761",
+        "publicKey": "fa208688aac2ab4768191beda0695a39ace555f0d735903665e5efb5a090e34c"
+      },
+      "ipfsKey": {
+        "path": "m/44'/73405'/0'/0'/0'",
+        "privateKey": "4212f8cf43eaa7070644e7b50a7e0d6ad7d02d8318890cb38d39935f66ba721a",
+        "publicKey": "f7120786aaf4255b760002c2051de31306dc4f73bca521fa842df307908c0f13"
+      }
+    },
+    {
+      "id": "legal-12",
+      "mnemonic": "legal winner thank year wave sausage worth useful legal winner thank yellow",
+      "seed": "878386efb78845b3355bd15ea4d39ef97d179cb712b77d5c12b6be415fffeffe5f377ba02bf3f8544ab800b955e51fbff09828f682052a20faa6addbbddfb096",
+      "userWallets": [
+        {
+          "privateKey": "0x33fa40f84e854b941c2b0436dd4a256e1df1cb41b9c1c0ccc8446408c19b8bf9",
+          "publicKey": "0x03a70d1ef368ad99e90d509496e9888ee7404e4f4d360376bf521d769cf0c4de46",
+          "address": "0x58A57ed9d8d624cBD12e2C467D34787555bB1b25",
+          "path": "m/44'/60'/0'/0/0",
+          "accountIndex": 0
+        },
+        {
+          "privateKey": "0x27a90cf98885ff2b32a953b3e3d07f5bd62009d3fbd816053daa30245f2429a4",
+          "publicKey": "0x022f2c59992e1c4e6299fcd6f161e7ae7e8c48639a43df5a5a83f5fd9a8f62563a",
+          "address": "0x44f649fc8Dc77694E6ABEF1aA966983Dd6ED7C64",
+          "path": "m/44'/60'/1'/0/0",
+          "accountIndex": 1
+        },
+        {
+          "privateKey": "0x8a21980307837f1377998a0c4f8507229c0d2d0ecbd085bd3b8d6288246f9dc9",
+          "publicKey": "0x02f37be44583d37cd9713e34297e14e48527340f33b1b78b029553e6f676a5d7e2",
+          "address": "0x35dbDb98d7e85585E516554836550fb570653C55",
+          "path": "m/44'/60'/2'/0/0",
+          "accountIndex": 2
+        },
+        {
+          "privateKey": "0x2b0b80fdc935556776a2b083a0e99a7b00aa95df770c647ba645f2cbf5760a5d",
+          "publicKey": "0x02b63d45e8ac338be7b92c9061707e10528892ad87955b9cd4316fb10ed0677440",
+          "address": "0xc3A8Bf6074E51ac25053F920a3F5A9bA85Bff299",
+          "path": "m/44'/60'/1000'/0/0",
+          "accountIndex": 1000
+        },
+        {
+          "privateKey": "0xa5ffeef31b6bf714d93d86c3d43e9841e8975c6ec08241fbc040564e278505e3",
+          "publicKey": "0x026e316c49b7f51ef33b0e0ba803458a0f0251906580d745bcddd2c143e27c34d8",
+          "address": "0xF7F3c21d4198A35f1873c2c72BbE9F2D02F6d0e5",
+          "path": "m/44'/60'/2147483647'/0/0",
+          "accountIndex": 2147483647
+        }
+      ],
+      "beeWallet": {
+        "privateKey": "0x5e4f6a62c67d2b8735d3cda66e37854d7a80f59aab639c3a4bed7e2c7432a4e4",
+        "publicKey": "0x025063f04f89890d9fcc6a794e72f064cd98a38a75a52150689abd5292d0d388fb",
+        "address": "0x0D3eB21b6b21833A4939Cfff4810E9AE0758e12C",
+        "path": "m/44'/60'/0'/0/1"
+      },
+      "publisherKeys": [
+        {
+          "privateKey": "0xc96257ae1c48efef9b92b701d7b4820c3d2d8ea6312c04dadb12bc3fb97cbae8",
+          "publicKey": "0x03c6a5a390133626459648c08197ba1489214482ed1b529d875df3b9fcb8c742f5",
+          "address": "0xbEDdF8cedac973F59FDb7c9E330E1573A6D03023",
+          "path": "m/44'/73406'/0'/0/0",
+          "originIndex": 0
+        },
+        {
+          "privateKey": "0xfb65fbf467bcde82ff97de8aadbf3804d8ed32b9cf9233914fe693abf10fdac9",
+          "publicKey": "0x0295025c1eeb8e7d58fa7d246f27d68650be5f7aee56fb6e9b5cff6b1720344b57",
+          "address": "0xB2DB8fE84B32e88fA702802aB6b32C33D1867d70",
+          "path": "m/44'/73406'/1'/0/0",
+          "originIndex": 1
+        },
+        {
+          "privateKey": "0x517d85675906208032b25542a6661baed42674db8ee9a10364a01210af391ad2",
+          "publicKey": "0x03a1be615956afb1c56a4e55130adc905a60ef3a02507be37052d7dfe73fd30721",
+          "address": "0x51938967959b44666cF38FE6D9D1f15576028b4D",
+          "path": "m/44'/73406'/2'/0/0",
+          "originIndex": 2
+        },
+        {
+          "privateKey": "0xe81579eef2d91f0f787942c55fb1578d0a77c9e5055d7c1ffb5781e0d54da1b7",
+          "publicKey": "0x030c686a15f4953023889349ddb4375dd35f382a582c8ed1dfb480cd55a0361de7",
+          "address": "0x4fa2528125D0AFC2fb42ECdB5A216Ebc93e0fA12",
+          "path": "m/44'/73406'/1000'/0/0",
+          "originIndex": 1000
+        },
+        {
+          "privateKey": "0x4c3ee96dc7d22767264b1ff1bde608e8c451e0515c1614ab6347e620e819d9e9",
+          "publicKey": "0x03b90761af4f53c7fd863b586b745d9fb5af2c77494144adac7cf21804ca120727",
+          "address": "0x734Ba59e537b75b7A2f54e777662ea74751F9a01",
+          "path": "m/44'/73406'/2147483647'/0/0",
+          "originIndex": 2147483647
+        }
+      ],
+      "radicleKey": {
+        "path": "m/44'/73404'/0'/0'/0'",
+        "privateKey": "4cde184bf7f8c878043678a3b609f7738020ba56fb58c93fe377fa970da8cf11",
+        "publicKey": "004abd2f03dd559b57753f1f5673c4f71ef7af2b0cf05178e8919820728211bd"
+      },
+      "ipfsKey": {
+        "path": "m/44'/73405'/0'/0'/0'",
+        "privateKey": "7ffbf8bfe319b78bc06fb0f448048304f35989ec90eae75621ffcb2d716b60a0",
+        "publicKey": "bcda9ec8c3fad474552a32bed72adfe26cbd7a9bac8ca78ee22a43760b63dc3f"
+      }
+    },
+    {
+      "id": "zoo-12",
+      "mnemonic": "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong",
+      "seed": "b6a6d8921942dd9806607ebc2750416b289adea669198769f2e15ed926c3aa92bf88ece232317b4ea463e84b0fcd3b53577812ee449ccc448eb45e6f544e25b6",
+      "userWallets": [
+        {
+          "privateKey": "0x7af65ba4dd53f23495dcb04995e96f47c243217fc279f10795871b725cd009ae",
+          "publicKey": "0x0338f04e283c453f6c5c28f5291f12540ae5e27c2fd1a863f2596d8fbd99d24fde",
+          "address": "0xfc2077CA7F403cBECA41B1B0F62D91B5EA631B5E",
+          "path": "m/44'/60'/0'/0/0",
+          "accountIndex": 0
+        },
+        {
+          "privateKey": "0x4e98a12d5507d7b4fd2239ea1dc0408e955c0e2d8092bd7ca680a4b1e25e1888",
+          "publicKey": "0x02119826418d539aafb3a327c8f27b3ff326b5c36f0dbfcbf9ad0a03afbd20dc7a",
+          "address": "0x9176A747BA67C1d7F80AaDC930180b4183AfB5c4",
+          "path": "m/44'/60'/1'/0/0",
+          "accountIndex": 1
+        },
+        {
+          "privateKey": "0xc180978e4971f16d916baccc292257a9528d9419b1640a4c8801baa8e256223c",
+          "publicKey": "0x0387d4f1d1cc1a34fd997d99005e36105a6e8d2d760a98621254f848186d62a482",
+          "address": "0x32A8b066c5dbD37147766491A32A612d313fda25",
+          "path": "m/44'/60'/2'/0/0",
+          "accountIndex": 2
+        },
+        {
+          "privateKey": "0xd821c812f12a118df75be7ee48bc5d300b5a4f099bc7ea9785e012c4cc08bd77",
+          "publicKey": "0x03ba2736e67aaf73b37f93100ace9046b41bdfe3f9c2e28c66d6c3617bfd2d9df4",
+          "address": "0x816B7B671D7F84642c2d08D670Dd0143B6820208",
+          "path": "m/44'/60'/1000'/0/0",
+          "accountIndex": 1000
+        },
+        {
+          "privateKey": "0xc45474f965b1522963e6f5a65898635f22dd2e90fecd9c06ece7afd0b673305d",
+          "publicKey": "0x0277fd8d34657aa00f225a7c3792d09b258de9a2f9905b8da57e900643c31ce949",
+          "address": "0xbD5f0afcAA257af0EfE83F6bf2109C4e88Dd585e",
+          "path": "m/44'/60'/2147483647'/0/0",
+          "accountIndex": 2147483647
+        }
+      ],
+      "beeWallet": {
+        "privateKey": "0x1f33ca39bfd53f79a1591afca2ac83018fa074e9ad29175589bd55b3542bba57",
+        "publicKey": "0x02bc22f00c704b1d75909bec151491599de2ba518b8c816d42f195d4fdc5bdc579",
+        "address": "0xd1a7451beB6FE0326b4B78e3909310880B781d66",
+        "path": "m/44'/60'/0'/0/1"
+      },
+      "publisherKeys": [
+        {
+          "privateKey": "0x45fa6ba69182aeecfaf5ccbe50f8d94750e6d1acab39422db0ba34af8182f7b8",
+          "publicKey": "0x03b2a74b838599c4fa8bb43d1e3540751c8864e4c8c432a453676e406567a2b878",
+          "address": "0x24aADf2984E163bB6924cBA0a3e6628AC6f766D1",
+          "path": "m/44'/73406'/0'/0/0",
+          "originIndex": 0
+        },
+        {
+          "privateKey": "0xeb3619b5e09dbd4500bb6773a45f4af7bb473daac29e9d7ed2d9cda462cef59f",
+          "publicKey": "0x0285901172d1eee8e77187d0ca3550a1068c6ee02263a4ba50f442655b9382543d",
+          "address": "0x79170aF24cFba835a7AD634835496BAA0E76D901",
+          "path": "m/44'/73406'/1'/0/0",
+          "originIndex": 1
+        },
+        {
+          "privateKey": "0x91e16b69463088ad8f9efb19bce526c6236b1a45d12e640cb1c083c19271b975",
+          "publicKey": "0x024e4802f14ab601c11466c92e3c041782bd70b314b40ef23952b523e9a7a3355d",
+          "address": "0xAF9a82e5414b8A3a39629176895bfcE7c2cD0cFD",
+          "path": "m/44'/73406'/2'/0/0",
+          "originIndex": 2
+        },
+        {
+          "privateKey": "0xe8a95d5bc47d4a5e1d0c9603cb3d1443dd3a88bbb7c0dcb1bcb5138d00815d7a",
+          "publicKey": "0x031dd17f00feaf91ea675902b113abe744f24bd766968dd0b774e23f135778a013",
+          "address": "0xd19ad5FFcd68d9249e796631a4408606569EB9e7",
+          "path": "m/44'/73406'/1000'/0/0",
+          "originIndex": 1000
+        },
+        {
+          "privateKey": "0x251529420846c21b96e994138c21e2326f8d4880da2d1ff4b76a11800662f56d",
+          "publicKey": "0x03f30564eafe8cc4e296da339728d69df0a438c3be8e8e64de360cc958032d908b",
+          "address": "0xB2953db6fFAE6fc9538Ff52434642C57572BEDA5",
+          "path": "m/44'/73406'/2147483647'/0/0",
+          "originIndex": 2147483647
+        }
+      ],
+      "radicleKey": {
+        "path": "m/44'/73404'/0'/0'/0'",
+        "privateKey": "2de86401222bf5f6fae6a2b5d58eb95c09cd5258e2e648dbf75c5568b3898c9b",
+        "publicKey": "7ddab2789fbbf825a8222e3e7ce5ea5a56725dda4f4fcd95131e971594ad25c2"
+      },
+      "ipfsKey": {
+        "path": "m/44'/73405'/0'/0'/0'",
+        "privateKey": "9ca05edad4a410f609be69843120ae254e52f5a880b4873ee0bb87f9181d0a1b",
+        "publicKey": "11f26479dd564f355c78a4015af3578bd3e77fbbe02bb0ae9a3682e3206385f2"
+      }
+    },
+    {
+      "id": "fresh-128",
+      "mnemonic": "move slight police dish goddess wonder slender skate siege rookie faith laundry",
+      "seed": "3a316e129d5783fda8188fb0a1d5db9f9c509f94ce635854c5fac617ac398ac06ee00f0eb819172ff9a4e6aea5597f207826123b02589c39e012a1996f7b8695",
+      "userWallets": [
+        {
+          "privateKey": "0xc22aff639a9fc5e9731e82fb61f8a4626a760d69559429305093e0c1e1a4b7a2",
+          "publicKey": "0x03d8b82c42b7f56b732610cfdfd71b9f0892766367e100391d40981bb0ab07fc30",
+          "address": "0x9DC0c8b524E2e8FBF14459674902db4d58b129eE",
+          "path": "m/44'/60'/0'/0/0",
+          "accountIndex": 0
+        },
+        {
+          "privateKey": "0x642886f048fce554b4e036fe141483b75d58dc6ad68a4d66f657b9526eab6717",
+          "publicKey": "0x02b7222bf2a2789749109cd92aadaf6a24ee229eeccc140288889c7c430d3eb0a8",
+          "address": "0x9e151c3dB36b04A9377FB6D36E012cD807971bA3",
+          "path": "m/44'/60'/1'/0/0",
+          "accountIndex": 1
+        },
+        {
+          "privateKey": "0x523eea29c2b69409627d2f887a1a2ee07d98bb746e9194ea8d36d079e13efde1",
+          "publicKey": "0x02ddad0fe0bedff390e7bf5bb90ef7e7698f685471a97017386ae6f5596f5f3d37",
+          "address": "0xCd59EBb5077587277025b362B1f21001df7A4E10",
+          "path": "m/44'/60'/2'/0/0",
+          "accountIndex": 2
+        },
+        {
+          "privateKey": "0xd3f4957dd0e2648475b4bab1da946e25f7bb0c400804efb6cc5c26cd8b48ea1a",
+          "publicKey": "0x027a5d5f2fea86aceccb7ee2b8d147a2ead2629a8ed1c2a3f3625b647e860312e6",
+          "address": "0x9CC8ADA0bedbEBa0F80d9B7aEec34cd3ddeA46Dd",
+          "path": "m/44'/60'/1000'/0/0",
+          "accountIndex": 1000
+        },
+        {
+          "privateKey": "0x3e3d935d79e4b993f84e8ba20a58bed80d599b20b439cdb54acc552a4403b2a4",
+          "publicKey": "0x02da1ec30127a5e671bfd9b4cc08c8dbdca626168d12403a1d61640187cc76a34a",
+          "address": "0x586D9393411Cd9DE98fAE038A1AE35D0A7781987",
+          "path": "m/44'/60'/2147483647'/0/0",
+          "accountIndex": 2147483647
+        }
+      ],
+      "beeWallet": {
+        "privateKey": "0xbee7585b5ea65897113ab81a1e3011a9a7a845fa2d9d012f853585d0aa6500bb",
+        "publicKey": "0x037ec903a980bba7fb7893b1c59ba9f52941d8270665da1a7ee588e4ffc848226c",
+        "address": "0x58915F83a3df72D11545bcFEa308B1A4F22b932b",
+        "path": "m/44'/60'/0'/0/1"
+      },
+      "publisherKeys": [
+        {
+          "privateKey": "0xac09bff9732212f80cff933adfbbbcb7473b81a551ad06b179b1ed7551922c95",
+          "publicKey": "0x030ad122eca4962bd6c8e157f42e38337384a74a7aa896528b3cd6261cafab9a0e",
+          "address": "0x01ffAE8874413E001756544C7a6ad237e9C82cF9",
+          "path": "m/44'/73406'/0'/0/0",
+          "originIndex": 0
+        },
+        {
+          "privateKey": "0x4ca4d65584f4fbfe03437478e80379a1cf8e4333931365b53b987471655b7e9b",
+          "publicKey": "0x02c001dc7a9b8de8d79c0199d9dd4bca0829fcdb89f6d45b746b9c19d9f9496963",
+          "address": "0xb25fd5E715424F02F30E2eE25a6dDE31D3920f50",
+          "path": "m/44'/73406'/1'/0/0",
+          "originIndex": 1
+        },
+        {
+          "privateKey": "0x91bf77316e4cca5be5b5238a4cf3040790503250707676806b6efd9553f390df",
+          "publicKey": "0x03927f651417f2c86d631b0f544c1f1783aef9c38b5907a94b36ac7a1b239d83fd",
+          "address": "0x7fA6F788287Fd8546470971863fd90Aef7BB4e7b",
+          "path": "m/44'/73406'/2'/0/0",
+          "originIndex": 2
+        },
+        {
+          "privateKey": "0x4b44c4f3bb9eb11fd13b0bc2e4a52ead1ffb2854d38d4548782e6586914a2322",
+          "publicKey": "0x022ab02324f1a024bfcc3377083c0892bfc6111aa590a551b57ff40515636c2867",
+          "address": "0x5a2bd7f5269B8f061FEbfe6194e903027b683F21",
+          "path": "m/44'/73406'/1000'/0/0",
+          "originIndex": 1000
+        },
+        {
+          "privateKey": "0x368f6d4d56b9abcbdbf5f393787a1068b80cd0c828facdab11f8c2489a047390",
+          "publicKey": "0x028e7bf0ba8fc248e3f6b4a890f98e0a60ec1c244c4610189cf13026db653298e3",
+          "address": "0xa8da20f4d59fFe2BF057ce0849Ad02dd0198100b",
+          "path": "m/44'/73406'/2147483647'/0/0",
+          "originIndex": 2147483647
+        }
+      ],
+      "radicleKey": {
+        "path": "m/44'/73404'/0'/0'/0'",
+        "privateKey": "20eee50a441e55f840693b78d29f0b6ee31d25c1247f53b320ec46937cd2c925",
+        "publicKey": "6971913ffd99573ede605f5577ec1ab28f2cd712ca1afc0013e145d55b7bd9b9"
+      },
+      "ipfsKey": {
+        "path": "m/44'/73405'/0'/0'/0'",
+        "privateKey": "373f3f0540a1f40d7021f6d299ffa3f682ebed022336c3ccdfcfaaf9c96043fe",
+        "publicKey": "46b3cead2af67ad9ea147e0f539f04b59ac1a9987f66a15cba88f25869ba11d4"
+      }
+    },
+    {
+      "id": "fresh-256",
+      "mnemonic": "debate leisure left spoon alley double transfer segment region actual nest timber home garage easily tone thing bread anger boring belt trend eager vivid",
+      "seed": "41a6f0d5b9ac30b864ced8879a89d5b777c2991a4568283507110e591307da118819580b52a76e75d4e1fb87f9604476df6dca6ab5f91c26fb4f549de569f2f0",
+      "userWallets": [
+        {
+          "privateKey": "0x82be87eb2806a004c5f590cd82c52f267884890eac55d47c1d1987aa122b4f43",
+          "publicKey": "0x03ca3eea87fc8ffeced1579332fb0985f2ff963ed4ffa4e84d8b07d9d039f0f824",
+          "address": "0x969b6EC254b327EfAf77b1f5A4B13c1943E5a9be",
+          "path": "m/44'/60'/0'/0/0",
+          "accountIndex": 0
+        },
+        {
+          "privateKey": "0xfff38b9be437fcbf208f6944a003a2218d16ab1e662a0c9ac1233e8573e705ba",
+          "publicKey": "0x02e9ee0c420e56cc75682300abd368337e4193006e21b50df594a5f2cc9ae234d5",
+          "address": "0x332Ca71B60ecec131C7F47CB1a2CAF233AdCd4f8",
+          "path": "m/44'/60'/1'/0/0",
+          "accountIndex": 1
+        },
+        {
+          "privateKey": "0xc8f94b3dbec48e936a01d2fb83b541004b22f074559f59fa0465e246ead68405",
+          "publicKey": "0x02b9a4922ca9c32405c4c75fc03e951ab0f30c4d49ff9c2bec61c74cc0573425c4",
+          "address": "0x190B70b7f94d57d622B51d74438f68dEB53514B2",
+          "path": "m/44'/60'/2'/0/0",
+          "accountIndex": 2
+        },
+        {
+          "privateKey": "0xbbdc61c255db402c17dd76442d2196012763e08dec796fabdc1729505029a2e9",
+          "publicKey": "0x021501592e36f2e2788fb946996fa4f7d9097c5746a41f40a0067431f55502b3fd",
+          "address": "0x0eb2983B7732E88630c999f3807e37D7a85F7Af7",
+          "path": "m/44'/60'/1000'/0/0",
+          "accountIndex": 1000
+        },
+        {
+          "privateKey": "0x55e07ff3107dfa2dad4a3b63b9f441ffb3deed6c3c80f3b44a4fe9c4c2b93f71",
+          "publicKey": "0x02b9f1a7ba933ad6c78ce706a5b456a716b2cc794c58b42d248044fd9ed7b816e2",
+          "address": "0x5A5D3Be0d6A4D42F7A1422eAD25b12eF833f8814",
+          "path": "m/44'/60'/2147483647'/0/0",
+          "accountIndex": 2147483647
+        }
+      ],
+      "beeWallet": {
+        "privateKey": "0x69aebe8ff1fd9d1fbaaa9c24b63a37cf6bfebd35100beb860fb6594a0a23aa5b",
+        "publicKey": "0x032aec19c88b79bfd33c5d18feea884a918ec06bcb617bb1514df45f3f3929c26f",
+        "address": "0x8e97b33b7A08A64885fE6B614aEc869C46eD5aD8",
+        "path": "m/44'/60'/0'/0/1"
+      },
+      "publisherKeys": [
+        {
+          "privateKey": "0x2d87f37b16a4c8e6979e61a9335cb5b885f78d6724537927fb82cb9e067e0028",
+          "publicKey": "0x03051d3ce0c8b459969d2dc361da9de1d6d25e780075a498ffaa2c624d7579ca7b",
+          "address": "0xC57c073776f8206Fafe5cc380462730942bba9f4",
+          "path": "m/44'/73406'/0'/0/0",
+          "originIndex": 0
+        },
+        {
+          "privateKey": "0x6d01efc0928d09cff5c28df5b4abe6238bcaddbf69fe78fad4dabf1941602b29",
+          "publicKey": "0x031b7675be8ab1b68005b6de44dd4fa6e7912b04784820ca268090777034535da4",
+          "address": "0xEcCf452d8EA0A8A80E85A6f2AE920bC483Ef82cb",
+          "path": "m/44'/73406'/1'/0/0",
+          "originIndex": 1
+        },
+        {
+          "privateKey": "0xc60f9457f79ebcb1b13a68bb521af341cf557a7f0622a23f717327ce2853f371",
+          "publicKey": "0x02ac3e03387e5b513f96b93a9a417196b04f65070f27288797f7856212ab41fd2e",
+          "address": "0xe3489a351c325C0EB85a5864B1A46F860fB18EA6",
+          "path": "m/44'/73406'/2'/0/0",
+          "originIndex": 2
+        },
+        {
+          "privateKey": "0xa9e84d5ca5cdb9e2d9b0a1d2f5156b86caebd253ff27bd10bcfb7c05912d2b81",
+          "publicKey": "0x03075364b7d7b0102c7e5f186dd66d31105e2abb27bbc51ea249d3ba83c99dd248",
+          "address": "0x01F9C1fBB263048314cC9Ff451f7Bfa221d5E6A1",
+          "path": "m/44'/73406'/1000'/0/0",
+          "originIndex": 1000
+        },
+        {
+          "privateKey": "0xa795caf1976105fb313db20684b4422a19859968a91b971beb967bff9396b805",
+          "publicKey": "0x03579bc363a5543365518ea92a538bf66755be50090b91edb18c3dddb50175dd2c",
+          "address": "0x38850Aab20f4C46B5589CD69EBDEB5F2B374DeA5",
+          "path": "m/44'/73406'/2147483647'/0/0",
+          "originIndex": 2147483647
+        }
+      ],
+      "radicleKey": {
+        "path": "m/44'/73404'/0'/0'/0'",
+        "privateKey": "48d4631cea6f9c0085556cc2879db8337c00033df8beeb840e72f49979e7edad",
+        "publicKey": "923084c8affbd250d8d2c7fa7b5b36038b840978051c1748c491648218ec3394"
+      },
+      "ipfsKey": {
+        "path": "m/44'/73405'/0'/0'/0'",
+        "privateKey": "3513bc25fe2c453ef409729204281faeaadbdbd88aab5cf9cf482512d7afe3d9",
+        "publicKey": "76fae6cb1ddbf63821e791931aa68f12d24bfcd40b3e3df2e927db01cc98956d"
+      }
+    }
+  ],
+  "edgeCases": [
+    {
+      "mnemonicId": "abandon-12",
+      "cases": [
+        {
+          "id": "max-plus-one",
+          "input": {
+            "type": "number",
+            "value": 2147483648
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "TypeError",
+            "message": "invalid path index (argument=\"path[2]\", value=\"2147483648'\", code=INVALID_ARGUMENT, version=6.17.0)"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "TypeError",
+            "message": "invalid path index (argument=\"path[2]\", value=\"2147483648'\", code=INVALID_ARGUMENT, version=6.17.0)"
+          }
+        },
+        {
+          "id": "negative",
+          "input": {
+            "type": "number",
+            "value": -1
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "negative-fraction",
+          "input": {
+            "type": "number",
+            "value": -0.5
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "fraction",
+          "input": {
+            "type": "number",
+            "value": 1.5
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "numeric-string",
+          "input": {
+            "type": "string",
+            "value": "1"
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "null",
+          "input": {
+            "type": "object",
+            "value": null
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "undefined",
+          "input": {
+            "type": "undefined",
+            "value": "undefined"
+          },
+          "userWallet": {
+            "status": "success",
+            "value": {
+              "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+              "publicKey": "0x0237b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299",
+              "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+              "path": "m/44'/60'/0'/0/0",
+              "accountIndex": 0
+            }
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "nan",
+          "input": {
+            "type": "number",
+            "value": "NaN"
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "infinity",
+          "input": {
+            "type": "number",
+            "value": "Infinity"
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "negative-zero",
+          "input": {
+            "type": "number",
+            "value": "-0"
+          },
+          "userWallet": {
+            "status": "success",
+            "value": {
+              "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+              "publicKey": "0x0237b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299",
+              "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+              "path": "m/44'/60'/0'/0/0",
+              "accountIndex": 0
+            }
+          },
+          "publisherKey": {
+            "status": "success",
+            "value": {
+              "privateKey": "0xdf966bcf0abf71a56bb1230058c13ce73a0e127f093ff77594de6a964ea521ad",
+              "publicKey": "0x024c4b61dbfccb71a33552305e499764f1e2602c50acbbcf4cbe76c560e6fdd883",
+              "address": "0xA274614c1D3425568Fd100B30322287c86085220",
+              "path": "m/44'/73406'/0'/0/0",
+              "originIndex": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "mnemonicId": "abandon-24",
+      "cases": [
+        {
+          "id": "max-plus-one",
+          "input": {
+            "type": "number",
+            "value": 2147483648
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "TypeError",
+            "message": "invalid path index (argument=\"path[2]\", value=\"2147483648'\", code=INVALID_ARGUMENT, version=6.17.0)"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "TypeError",
+            "message": "invalid path index (argument=\"path[2]\", value=\"2147483648'\", code=INVALID_ARGUMENT, version=6.17.0)"
+          }
+        },
+        {
+          "id": "negative",
+          "input": {
+            "type": "number",
+            "value": -1
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "negative-fraction",
+          "input": {
+            "type": "number",
+            "value": -0.5
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "fraction",
+          "input": {
+            "type": "number",
+            "value": 1.5
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "numeric-string",
+          "input": {
+            "type": "string",
+            "value": "1"
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "null",
+          "input": {
+            "type": "object",
+            "value": null
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "undefined",
+          "input": {
+            "type": "undefined",
+            "value": "undefined"
+          },
+          "userWallet": {
+            "status": "success",
+            "value": {
+              "privateKey": "0x1053fae1b3ac64f178bcc21026fd06a3f4544ec2f35338b001f02d1d8efa3d5f",
+              "publicKey": "0x02dc286c821c7490afbe20a79d13123b9f41f3d7ef21e4a9caacd22f5983b28eca",
+              "address": "0xF278cF59F82eDcf871d630F28EcC8056f25C1cdb",
+              "path": "m/44'/60'/0'/0/0",
+              "accountIndex": 0
+            }
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "nan",
+          "input": {
+            "type": "number",
+            "value": "NaN"
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "infinity",
+          "input": {
+            "type": "number",
+            "value": "Infinity"
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "negative-zero",
+          "input": {
+            "type": "number",
+            "value": "-0"
+          },
+          "userWallet": {
+            "status": "success",
+            "value": {
+              "privateKey": "0x1053fae1b3ac64f178bcc21026fd06a3f4544ec2f35338b001f02d1d8efa3d5f",
+              "publicKey": "0x02dc286c821c7490afbe20a79d13123b9f41f3d7ef21e4a9caacd22f5983b28eca",
+              "address": "0xF278cF59F82eDcf871d630F28EcC8056f25C1cdb",
+              "path": "m/44'/60'/0'/0/0",
+              "accountIndex": 0
+            }
+          },
+          "publisherKey": {
+            "status": "success",
+            "value": {
+              "privateKey": "0x90c7a44c27ba61593d00ad9378c4df63501d9882e2571a64c47839e71612035d",
+              "publicKey": "0x0380fc1a3aa6767d38b10c6ff993e25cda314616dfc40925e807ec61268db1b716",
+              "address": "0x22ebdbC445Ea91Dd71d4E227bF027d51DA72f0Db",
+              "path": "m/44'/73406'/0'/0/0",
+              "originIndex": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "mnemonicId": "legal-12",
+      "cases": [
+        {
+          "id": "max-plus-one",
+          "input": {
+            "type": "number",
+            "value": 2147483648
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "TypeError",
+            "message": "invalid path index (argument=\"path[2]\", value=\"2147483648'\", code=INVALID_ARGUMENT, version=6.17.0)"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "TypeError",
+            "message": "invalid path index (argument=\"path[2]\", value=\"2147483648'\", code=INVALID_ARGUMENT, version=6.17.0)"
+          }
+        },
+        {
+          "id": "negative",
+          "input": {
+            "type": "number",
+            "value": -1
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "negative-fraction",
+          "input": {
+            "type": "number",
+            "value": -0.5
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "fraction",
+          "input": {
+            "type": "number",
+            "value": 1.5
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "numeric-string",
+          "input": {
+            "type": "string",
+            "value": "1"
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "null",
+          "input": {
+            "type": "object",
+            "value": null
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "undefined",
+          "input": {
+            "type": "undefined",
+            "value": "undefined"
+          },
+          "userWallet": {
+            "status": "success",
+            "value": {
+              "privateKey": "0x33fa40f84e854b941c2b0436dd4a256e1df1cb41b9c1c0ccc8446408c19b8bf9",
+              "publicKey": "0x03a70d1ef368ad99e90d509496e9888ee7404e4f4d360376bf521d769cf0c4de46",
+              "address": "0x58A57ed9d8d624cBD12e2C467D34787555bB1b25",
+              "path": "m/44'/60'/0'/0/0",
+              "accountIndex": 0
+            }
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "nan",
+          "input": {
+            "type": "number",
+            "value": "NaN"
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "infinity",
+          "input": {
+            "type": "number",
+            "value": "Infinity"
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "negative-zero",
+          "input": {
+            "type": "number",
+            "value": "-0"
+          },
+          "userWallet": {
+            "status": "success",
+            "value": {
+              "privateKey": "0x33fa40f84e854b941c2b0436dd4a256e1df1cb41b9c1c0ccc8446408c19b8bf9",
+              "publicKey": "0x03a70d1ef368ad99e90d509496e9888ee7404e4f4d360376bf521d769cf0c4de46",
+              "address": "0x58A57ed9d8d624cBD12e2C467D34787555bB1b25",
+              "path": "m/44'/60'/0'/0/0",
+              "accountIndex": 0
+            }
+          },
+          "publisherKey": {
+            "status": "success",
+            "value": {
+              "privateKey": "0xc96257ae1c48efef9b92b701d7b4820c3d2d8ea6312c04dadb12bc3fb97cbae8",
+              "publicKey": "0x03c6a5a390133626459648c08197ba1489214482ed1b529d875df3b9fcb8c742f5",
+              "address": "0xbEDdF8cedac973F59FDb7c9E330E1573A6D03023",
+              "path": "m/44'/73406'/0'/0/0",
+              "originIndex": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "mnemonicId": "zoo-12",
+      "cases": [
+        {
+          "id": "max-plus-one",
+          "input": {
+            "type": "number",
+            "value": 2147483648
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "TypeError",
+            "message": "invalid path index (argument=\"path[2]\", value=\"2147483648'\", code=INVALID_ARGUMENT, version=6.17.0)"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "TypeError",
+            "message": "invalid path index (argument=\"path[2]\", value=\"2147483648'\", code=INVALID_ARGUMENT, version=6.17.0)"
+          }
+        },
+        {
+          "id": "negative",
+          "input": {
+            "type": "number",
+            "value": -1
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "negative-fraction",
+          "input": {
+            "type": "number",
+            "value": -0.5
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "fraction",
+          "input": {
+            "type": "number",
+            "value": 1.5
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "numeric-string",
+          "input": {
+            "type": "string",
+            "value": "1"
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "null",
+          "input": {
+            "type": "object",
+            "value": null
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "undefined",
+          "input": {
+            "type": "undefined",
+            "value": "undefined"
+          },
+          "userWallet": {
+            "status": "success",
+            "value": {
+              "privateKey": "0x7af65ba4dd53f23495dcb04995e96f47c243217fc279f10795871b725cd009ae",
+              "publicKey": "0x0338f04e283c453f6c5c28f5291f12540ae5e27c2fd1a863f2596d8fbd99d24fde",
+              "address": "0xfc2077CA7F403cBECA41B1B0F62D91B5EA631B5E",
+              "path": "m/44'/60'/0'/0/0",
+              "accountIndex": 0
+            }
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "nan",
+          "input": {
+            "type": "number",
+            "value": "NaN"
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "infinity",
+          "input": {
+            "type": "number",
+            "value": "Infinity"
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "negative-zero",
+          "input": {
+            "type": "number",
+            "value": "-0"
+          },
+          "userWallet": {
+            "status": "success",
+            "value": {
+              "privateKey": "0x7af65ba4dd53f23495dcb04995e96f47c243217fc279f10795871b725cd009ae",
+              "publicKey": "0x0338f04e283c453f6c5c28f5291f12540ae5e27c2fd1a863f2596d8fbd99d24fde",
+              "address": "0xfc2077CA7F403cBECA41B1B0F62D91B5EA631B5E",
+              "path": "m/44'/60'/0'/0/0",
+              "accountIndex": 0
+            }
+          },
+          "publisherKey": {
+            "status": "success",
+            "value": {
+              "privateKey": "0x45fa6ba69182aeecfaf5ccbe50f8d94750e6d1acab39422db0ba34af8182f7b8",
+              "publicKey": "0x03b2a74b838599c4fa8bb43d1e3540751c8864e4c8c432a453676e406567a2b878",
+              "address": "0x24aADf2984E163bB6924cBA0a3e6628AC6f766D1",
+              "path": "m/44'/73406'/0'/0/0",
+              "originIndex": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "mnemonicId": "fresh-128",
+      "cases": [
+        {
+          "id": "max-plus-one",
+          "input": {
+            "type": "number",
+            "value": 2147483648
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "TypeError",
+            "message": "invalid path index (argument=\"path[2]\", value=\"2147483648'\", code=INVALID_ARGUMENT, version=6.17.0)"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "TypeError",
+            "message": "invalid path index (argument=\"path[2]\", value=\"2147483648'\", code=INVALID_ARGUMENT, version=6.17.0)"
+          }
+        },
+        {
+          "id": "negative",
+          "input": {
+            "type": "number",
+            "value": -1
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "negative-fraction",
+          "input": {
+            "type": "number",
+            "value": -0.5
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "fraction",
+          "input": {
+            "type": "number",
+            "value": 1.5
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "numeric-string",
+          "input": {
+            "type": "string",
+            "value": "1"
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "null",
+          "input": {
+            "type": "object",
+            "value": null
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "undefined",
+          "input": {
+            "type": "undefined",
+            "value": "undefined"
+          },
+          "userWallet": {
+            "status": "success",
+            "value": {
+              "privateKey": "0xc22aff639a9fc5e9731e82fb61f8a4626a760d69559429305093e0c1e1a4b7a2",
+              "publicKey": "0x03d8b82c42b7f56b732610cfdfd71b9f0892766367e100391d40981bb0ab07fc30",
+              "address": "0x9DC0c8b524E2e8FBF14459674902db4d58b129eE",
+              "path": "m/44'/60'/0'/0/0",
+              "accountIndex": 0
+            }
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "nan",
+          "input": {
+            "type": "number",
+            "value": "NaN"
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "infinity",
+          "input": {
+            "type": "number",
+            "value": "Infinity"
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "negative-zero",
+          "input": {
+            "type": "number",
+            "value": "-0"
+          },
+          "userWallet": {
+            "status": "success",
+            "value": {
+              "privateKey": "0xc22aff639a9fc5e9731e82fb61f8a4626a760d69559429305093e0c1e1a4b7a2",
+              "publicKey": "0x03d8b82c42b7f56b732610cfdfd71b9f0892766367e100391d40981bb0ab07fc30",
+              "address": "0x9DC0c8b524E2e8FBF14459674902db4d58b129eE",
+              "path": "m/44'/60'/0'/0/0",
+              "accountIndex": 0
+            }
+          },
+          "publisherKey": {
+            "status": "success",
+            "value": {
+              "privateKey": "0xac09bff9732212f80cff933adfbbbcb7473b81a551ad06b179b1ed7551922c95",
+              "publicKey": "0x030ad122eca4962bd6c8e157f42e38337384a74a7aa896528b3cd6261cafab9a0e",
+              "address": "0x01ffAE8874413E001756544C7a6ad237e9C82cF9",
+              "path": "m/44'/73406'/0'/0/0",
+              "originIndex": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "mnemonicId": "fresh-256",
+      "cases": [
+        {
+          "id": "max-plus-one",
+          "input": {
+            "type": "number",
+            "value": 2147483648
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "TypeError",
+            "message": "invalid path index (argument=\"path[2]\", value=\"2147483648'\", code=INVALID_ARGUMENT, version=6.17.0)"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "TypeError",
+            "message": "invalid path index (argument=\"path[2]\", value=\"2147483648'\", code=INVALID_ARGUMENT, version=6.17.0)"
+          }
+        },
+        {
+          "id": "negative",
+          "input": {
+            "type": "number",
+            "value": -1
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "negative-fraction",
+          "input": {
+            "type": "number",
+            "value": -0.5
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "fraction",
+          "input": {
+            "type": "number",
+            "value": 1.5
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "numeric-string",
+          "input": {
+            "type": "string",
+            "value": "1"
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "null",
+          "input": {
+            "type": "object",
+            "value": null
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "undefined",
+          "input": {
+            "type": "undefined",
+            "value": "undefined"
+          },
+          "userWallet": {
+            "status": "success",
+            "value": {
+              "privateKey": "0x82be87eb2806a004c5f590cd82c52f267884890eac55d47c1d1987aa122b4f43",
+              "publicKey": "0x03ca3eea87fc8ffeced1579332fb0985f2ff963ed4ffa4e84d8b07d9d039f0f824",
+              "address": "0x969b6EC254b327EfAf77b1f5A4B13c1943E5a9be",
+              "path": "m/44'/60'/0'/0/0",
+              "accountIndex": 0
+            }
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "nan",
+          "input": {
+            "type": "number",
+            "value": "NaN"
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "infinity",
+          "input": {
+            "type": "number",
+            "value": "Infinity"
+          },
+          "userWallet": {
+            "status": "error",
+            "name": "Error",
+            "message": "Account index must be a non-negative integer"
+          },
+          "publisherKey": {
+            "status": "error",
+            "name": "Error",
+            "message": "Origin index must be a non-negative integer"
+          }
+        },
+        {
+          "id": "negative-zero",
+          "input": {
+            "type": "number",
+            "value": "-0"
+          },
+          "userWallet": {
+            "status": "success",
+            "value": {
+              "privateKey": "0x82be87eb2806a004c5f590cd82c52f267884890eac55d47c1d1987aa122b4f43",
+              "publicKey": "0x03ca3eea87fc8ffeced1579332fb0985f2ff963ed4ffa4e84d8b07d9d039f0f824",
+              "address": "0x969b6EC254b327EfAf77b1f5A4B13c1943E5a9be",
+              "path": "m/44'/60'/0'/0/0",
+              "accountIndex": 0
+            }
+          },
+          "publisherKey": {
+            "status": "success",
+            "value": {
+              "privateKey": "0x2d87f37b16a4c8e6979e61a9335cb5b885f78d6724537927fb82cb9e067e0028",
+              "publicKey": "0x03051d3ce0c8b459969d2dc361da9de1d6d25e780075a498ffaa2c624d7579ca7b",
+              "address": "0xC57c073776f8206Fafe5cc380462730942bba9f4",
+              "path": "m/44'/73406'/0'/0/0",
+              "originIndex": 0
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

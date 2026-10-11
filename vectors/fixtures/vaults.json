@@ -1,0 +1,728 @@
+{
+  "meta": {
+    "freedomBrowserCommit": "fb540328162839e68150fe2c5e517edb86734d1c",
+    "packages": {
+      "ethers": "6.17.0",
+      "@scure/bip39": "2.4.0",
+      "@scure/base": "1.2.6",
+      "micro-key-producer": "0.10.2",
+      "@metamask/browser-passworder": "6.0.0"
+    },
+    "nodeVersion": "v24.15.0",
+    "generator": "vectors/generator/generate.js"
+  },
+  "structure": {
+    "file": "identity-vault.json: 2-space JSON without a trailing newline; version=1, encrypted=JSON string, createdAt=ISO UTC timestamp",
+    "plaintext": "UTF-8 bytes of JSON.stringify({ mnemonic })",
+    "encryptedFieldsInOrder": [
+      "data",
+      "iv",
+      "keyMetadata",
+      "salt"
+    ],
+    "encoding": "data, iv and salt are standard padded base64",
+    "kdf": {
+      "algorithm": "PBKDF2",
+      "hash": "SHA-256",
+      "iterations": 900000,
+      "saltBytes": 32,
+      "derivedKeyBits": 256,
+      "passwordEncoding": "UTF-8, no Unicode normalization",
+      "iterationsWhenMetadataMissing": 10000
+    },
+    "cipher": {
+      "algorithm": "AES-GCM",
+      "keyBits": 256,
+      "ivBytes": 16,
+      "tagBits": 128,
+      "dataLayout": "ciphertext || 16-byte authentication tag",
+      "additionalAuthenticatedData": null
+    },
+    "passwordMinimum": "8 JavaScript UTF-16 code units; four supplementary-plane characters suffice"
+  },
+  "fixtures": [
+    {
+      "id": "ascii-min-12",
+      "mnemonicId": "abandon-12",
+      "password": "testpass",
+      "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "passwordUtf16Length": 8,
+      "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"oUEiZK7vXoYYZz1MS7xeRWFw81gX0smVWt6vEdj31bqd+PQPB7TqZmAlmovvi1w5ybWWGgQqXgKHPHVaqtCy/9m1Ewn+G5V2x0R4sjmyZxsbc00NO3pub+LTKL2ICLBeYs+Siu9CVmD+wLZaufv1SgTtJ5PeDsfcjjs6/A==\\\",\\\"iv\\\":\\\"8q3Bk1uqs1lhd/ffntzp6Q==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"M1sQxsHr8aAyF708gnKdRWkLhO/5i4WWRF7/Jn7HrOo=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:25.891Z\"\n}",
+      "payload": {
+        "data": "oUEiZK7vXoYYZz1MS7xeRWFw81gX0smVWt6vEdj31bqd+PQPB7TqZmAlmovvi1w5ybWWGgQqXgKHPHVaqtCy/9m1Ewn+G5V2x0R4sjmyZxsbc00NO3pub+LTKL2ICLBeYs+Siu9CVmD+wLZaufv1SgTtJ5PeDsfcjjs6/A==",
+        "iv": "8q3Bk1uqs1lhd/ffntzp6Q==",
+        "keyMetadata": {
+          "algorithm": "PBKDF2",
+          "params": {
+            "iterations": 900000
+          }
+        },
+        "salt": "M1sQxsHr8aAyF708gnKdRWkLhO/5i4WWRF7/Jn7HrOo="
+      },
+      "outcome": {
+        "status": "success",
+        "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+      },
+      "negativeCases": [
+        {
+          "id": "wrong-password",
+          "password": "testpass-wrong",
+          "mutation": null,
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"oUEiZK7vXoYYZz1MS7xeRWFw81gX0smVWt6vEdj31bqd+PQPB7TqZmAlmovvi1w5ybWWGgQqXgKHPHVaqtCy/9m1Ewn+G5V2x0R4sjmyZxsbc00NO3pub+LTKL2ICLBeYs+Siu9CVmD+wLZaufv1SgTtJ5PeDsfcjjs6/A==\\\",\\\"iv\\\":\\\"8q3Bk1uqs1lhd/ffntzp6Q==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"M1sQxsHr8aAyF708gnKdRWkLhO/5i4WWRF7/Jn7HrOo=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:25.891Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "data-first-byte-flipped",
+          "password": "testpass",
+          "mutation": {
+            "field": "data",
+            "operation": "xor-first-byte-with-1"
+          },
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"oEEiZK7vXoYYZz1MS7xeRWFw81gX0smVWt6vEdj31bqd+PQPB7TqZmAlmovvi1w5ybWWGgQqXgKHPHVaqtCy/9m1Ewn+G5V2x0R4sjmyZxsbc00NO3pub+LTKL2ICLBeYs+Siu9CVmD+wLZaufv1SgTtJ5PeDsfcjjs6/A==\\\",\\\"iv\\\":\\\"8q3Bk1uqs1lhd/ffntzp6Q==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"M1sQxsHr8aAyF708gnKdRWkLhO/5i4WWRF7/Jn7HrOo=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:25.891Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "iv-first-byte-flipped",
+          "password": "testpass",
+          "mutation": {
+            "field": "iv",
+            "operation": "xor-first-byte-with-1"
+          },
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"oUEiZK7vXoYYZz1MS7xeRWFw81gX0smVWt6vEdj31bqd+PQPB7TqZmAlmovvi1w5ybWWGgQqXgKHPHVaqtCy/9m1Ewn+G5V2x0R4sjmyZxsbc00NO3pub+LTKL2ICLBeYs+Siu9CVmD+wLZaufv1SgTtJ5PeDsfcjjs6/A==\\\",\\\"iv\\\":\\\"863Bk1uqs1lhd/ffntzp6Q==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"M1sQxsHr8aAyF708gnKdRWkLhO/5i4WWRF7/Jn7HrOo=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:25.891Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "salt-first-byte-flipped",
+          "password": "testpass",
+          "mutation": {
+            "field": "salt",
+            "operation": "xor-first-byte-with-1"
+          },
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"oUEiZK7vXoYYZz1MS7xeRWFw81gX0smVWt6vEdj31bqd+PQPB7TqZmAlmovvi1w5ybWWGgQqXgKHPHVaqtCy/9m1Ewn+G5V2x0R4sjmyZxsbc00NO3pub+LTKL2ICLBeYs+Siu9CVmD+wLZaufv1SgTtJ5PeDsfcjjs6/A==\\\",\\\"iv\\\":\\\"8q3Bk1uqs1lhd/ffntzp6Q==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"MlsQxsHr8aAyF708gnKdRWkLhO/5i4WWRF7/Jn7HrOo=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:25.891Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "iterations-changed",
+          "password": "testpass",
+          "mutation": {
+            "field": "iterations",
+            "operation": "add-1"
+          },
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"oUEiZK7vXoYYZz1MS7xeRWFw81gX0smVWt6vEdj31bqd+PQPB7TqZmAlmovvi1w5ybWWGgQqXgKHPHVaqtCy/9m1Ewn+G5V2x0R4sjmyZxsbc00NO3pub+LTKL2ICLBeYs+Siu9CVmD+wLZaufv1SgTtJ5PeDsfcjjs6/A==\\\",\\\"iv\\\":\\\"8q3Bk1uqs1lhd/ffntzp6Q==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900001}},\\\"salt\\\":\\\"M1sQxsHr8aAyF708gnKdRWkLhO/5i4WWRF7/Jn7HrOo=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:25.891Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "metadata-removed",
+          "password": "testpass",
+          "mutation": {
+            "field": "keyMetadata",
+            "operation": "remove"
+          },
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"oUEiZK7vXoYYZz1MS7xeRWFw81gX0smVWt6vEdj31bqd+PQPB7TqZmAlmovvi1w5ybWWGgQqXgKHPHVaqtCy/9m1Ewn+G5V2x0R4sjmyZxsbc00NO3pub+LTKL2ICLBeYs+Siu9CVmD+wLZaufv1SgTtJ5PeDsfcjjs6/A==\\\",\\\"iv\\\":\\\"8q3Bk1uqs1lhd/ffntzp6Q==\\\",\\\"salt\\\":\\\"M1sQxsHr8aAyF708gnKdRWkLhO/5i4WWRF7/Jn7HrOo=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:25.891Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "ascii-min-24",
+      "mnemonicId": "abandon-24",
+      "password": "testpass",
+      "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art",
+      "passwordUtf16Length": 8,
+      "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"P/IcuW98vwxfOcSSbZPWNMmNXGDhNPdrwJXwD/LTGb++Ihc8ivw1/HdRGIb3uoMYLjCFgEnz7e3L50AaCR+mUbTQaWcngfpnghwgxrn77JhP+SIYvJsJyjMg2KLtXaVHQXVFms7Tk53FXbmoCklsQ9x3+lt+anjgty5gcxCcHg48drnqEw0OhkOVBn20vmpSlFrTDHkIFtdc0T2Pnl557Y63HoD9J1jPiq39qbx3EGGOeI7X7pLmLf3yIK6fE9DhSx6giunbHciORLalaYemih8qNvQ8QG2Datg=\\\",\\\"iv\\\":\\\"Vj6+9a6kda/755pNCtzLhg==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"v4Bc71RNgTXztw80nZ8CFjTWKCpaV3SrqD7U6e+lhus=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:26.964Z\"\n}",
+      "payload": {
+        "data": "P/IcuW98vwxfOcSSbZPWNMmNXGDhNPdrwJXwD/LTGb++Ihc8ivw1/HdRGIb3uoMYLjCFgEnz7e3L50AaCR+mUbTQaWcngfpnghwgxrn77JhP+SIYvJsJyjMg2KLtXaVHQXVFms7Tk53FXbmoCklsQ9x3+lt+anjgty5gcxCcHg48drnqEw0OhkOVBn20vmpSlFrTDHkIFtdc0T2Pnl557Y63HoD9J1jPiq39qbx3EGGOeI7X7pLmLf3yIK6fE9DhSx6giunbHciORLalaYemih8qNvQ8QG2Datg=",
+        "iv": "Vj6+9a6kda/755pNCtzLhg==",
+        "keyMetadata": {
+          "algorithm": "PBKDF2",
+          "params": {
+            "iterations": 900000
+          }
+        },
+        "salt": "v4Bc71RNgTXztw80nZ8CFjTWKCpaV3SrqD7U6e+lhus="
+      },
+      "outcome": {
+        "status": "success",
+        "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art"
+      },
+      "negativeCases": [
+        {
+          "id": "wrong-password",
+          "password": "testpass-wrong",
+          "mutation": null,
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"P/IcuW98vwxfOcSSbZPWNMmNXGDhNPdrwJXwD/LTGb++Ihc8ivw1/HdRGIb3uoMYLjCFgEnz7e3L50AaCR+mUbTQaWcngfpnghwgxrn77JhP+SIYvJsJyjMg2KLtXaVHQXVFms7Tk53FXbmoCklsQ9x3+lt+anjgty5gcxCcHg48drnqEw0OhkOVBn20vmpSlFrTDHkIFtdc0T2Pnl557Y63HoD9J1jPiq39qbx3EGGOeI7X7pLmLf3yIK6fE9DhSx6giunbHciORLalaYemih8qNvQ8QG2Datg=\\\",\\\"iv\\\":\\\"Vj6+9a6kda/755pNCtzLhg==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"v4Bc71RNgTXztw80nZ8CFjTWKCpaV3SrqD7U6e+lhus=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:26.964Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "data-first-byte-flipped",
+          "password": "testpass",
+          "mutation": {
+            "field": "data",
+            "operation": "xor-first-byte-with-1"
+          },
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"PvIcuW98vwxfOcSSbZPWNMmNXGDhNPdrwJXwD/LTGb++Ihc8ivw1/HdRGIb3uoMYLjCFgEnz7e3L50AaCR+mUbTQaWcngfpnghwgxrn77JhP+SIYvJsJyjMg2KLtXaVHQXVFms7Tk53FXbmoCklsQ9x3+lt+anjgty5gcxCcHg48drnqEw0OhkOVBn20vmpSlFrTDHkIFtdc0T2Pnl557Y63HoD9J1jPiq39qbx3EGGOeI7X7pLmLf3yIK6fE9DhSx6giunbHciORLalaYemih8qNvQ8QG2Datg=\\\",\\\"iv\\\":\\\"Vj6+9a6kda/755pNCtzLhg==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"v4Bc71RNgTXztw80nZ8CFjTWKCpaV3SrqD7U6e+lhus=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:26.964Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "iv-first-byte-flipped",
+          "password": "testpass",
+          "mutation": {
+            "field": "iv",
+            "operation": "xor-first-byte-with-1"
+          },
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"P/IcuW98vwxfOcSSbZPWNMmNXGDhNPdrwJXwD/LTGb++Ihc8ivw1/HdRGIb3uoMYLjCFgEnz7e3L50AaCR+mUbTQaWcngfpnghwgxrn77JhP+SIYvJsJyjMg2KLtXaVHQXVFms7Tk53FXbmoCklsQ9x3+lt+anjgty5gcxCcHg48drnqEw0OhkOVBn20vmpSlFrTDHkIFtdc0T2Pnl557Y63HoD9J1jPiq39qbx3EGGOeI7X7pLmLf3yIK6fE9DhSx6giunbHciORLalaYemih8qNvQ8QG2Datg=\\\",\\\"iv\\\":\\\"Vz6+9a6kda/755pNCtzLhg==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"v4Bc71RNgTXztw80nZ8CFjTWKCpaV3SrqD7U6e+lhus=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:26.964Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "salt-first-byte-flipped",
+          "password": "testpass",
+          "mutation": {
+            "field": "salt",
+            "operation": "xor-first-byte-with-1"
+          },
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"P/IcuW98vwxfOcSSbZPWNMmNXGDhNPdrwJXwD/LTGb++Ihc8ivw1/HdRGIb3uoMYLjCFgEnz7e3L50AaCR+mUbTQaWcngfpnghwgxrn77JhP+SIYvJsJyjMg2KLtXaVHQXVFms7Tk53FXbmoCklsQ9x3+lt+anjgty5gcxCcHg48drnqEw0OhkOVBn20vmpSlFrTDHkIFtdc0T2Pnl557Y63HoD9J1jPiq39qbx3EGGOeI7X7pLmLf3yIK6fE9DhSx6giunbHciORLalaYemih8qNvQ8QG2Datg=\\\",\\\"iv\\\":\\\"Vj6+9a6kda/755pNCtzLhg==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"voBc71RNgTXztw80nZ8CFjTWKCpaV3SrqD7U6e+lhus=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:26.964Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "iterations-changed",
+          "password": "testpass",
+          "mutation": {
+            "field": "iterations",
+            "operation": "add-1"
+          },
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"P/IcuW98vwxfOcSSbZPWNMmNXGDhNPdrwJXwD/LTGb++Ihc8ivw1/HdRGIb3uoMYLjCFgEnz7e3L50AaCR+mUbTQaWcngfpnghwgxrn77JhP+SIYvJsJyjMg2KLtXaVHQXVFms7Tk53FXbmoCklsQ9x3+lt+anjgty5gcxCcHg48drnqEw0OhkOVBn20vmpSlFrTDHkIFtdc0T2Pnl557Y63HoD9J1jPiq39qbx3EGGOeI7X7pLmLf3yIK6fE9DhSx6giunbHciORLalaYemih8qNvQ8QG2Datg=\\\",\\\"iv\\\":\\\"Vj6+9a6kda/755pNCtzLhg==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900001}},\\\"salt\\\":\\\"v4Bc71RNgTXztw80nZ8CFjTWKCpaV3SrqD7U6e+lhus=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:26.964Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "metadata-removed",
+          "password": "testpass",
+          "mutation": {
+            "field": "keyMetadata",
+            "operation": "remove"
+          },
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"P/IcuW98vwxfOcSSbZPWNMmNXGDhNPdrwJXwD/LTGb++Ihc8ivw1/HdRGIb3uoMYLjCFgEnz7e3L50AaCR+mUbTQaWcngfpnghwgxrn77JhP+SIYvJsJyjMg2KLtXaVHQXVFms7Tk53FXbmoCklsQ9x3+lt+anjgty5gcxCcHg48drnqEw0OhkOVBn20vmpSlFrTDHkIFtdc0T2Pnl557Y63HoD9J1jPiq39qbx3EGGOeI7X7pLmLf3yIK6fE9DhSx6giunbHciORLalaYemih8qNvQ8QG2Datg=\\\",\\\"iv\\\":\\\"Vj6+9a6kda/755pNCtzLhg==\\\",\\\"salt\\\":\\\"v4Bc71RNgTXztw80nZ8CFjTWKCpaV3SrqD7U6e+lhus=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:26.964Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "long-24",
+      "mnemonicId": "fresh-256",
+      "password": "Freedom public test password: long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-",
+      "mnemonic": "debate leisure left spoon alley double transfer segment region actual nest timber home garage easily tone thing bread anger boring belt trend eager vivid",
+      "passwordUtf16Length": 198,
+      "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"GSc5v9n9Jjbn2Atlrs51VpiH+vNOJNysRnmU/6YBbDavaCNj9CH9Fe0ojeBQXZW72sGhf9rafudc05Rd/zEi/q6NSqWwOymF9Gyz2dSxmKkLcNa3Od2DR2qbCoUWAaIg/ED7dMaJGv1QMIBAQFebiioeHzNIz4DQBIlAgkwFRHf7npSME0vD8RnjSwFrv/EP0ka1W5K8MPWKNwDTRkiZ+tI5qyV6A0n3yB20eqBn4MrHu/mY4faIcw==\\\",\\\"iv\\\":\\\"cDFYzf96BgiSLp6wJlWUmw==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"iJqVfyaZSwpAYSLDGi9qPsBEo/HvcIsgOpn8q20VFI4=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:28.089Z\"\n}",
+      "payload": {
+        "data": "GSc5v9n9Jjbn2Atlrs51VpiH+vNOJNysRnmU/6YBbDavaCNj9CH9Fe0ojeBQXZW72sGhf9rafudc05Rd/zEi/q6NSqWwOymF9Gyz2dSxmKkLcNa3Od2DR2qbCoUWAaIg/ED7dMaJGv1QMIBAQFebiioeHzNIz4DQBIlAgkwFRHf7npSME0vD8RnjSwFrv/EP0ka1W5K8MPWKNwDTRkiZ+tI5qyV6A0n3yB20eqBn4MrHu/mY4faIcw==",
+        "iv": "cDFYzf96BgiSLp6wJlWUmw==",
+        "keyMetadata": {
+          "algorithm": "PBKDF2",
+          "params": {
+            "iterations": 900000
+          }
+        },
+        "salt": "iJqVfyaZSwpAYSLDGi9qPsBEo/HvcIsgOpn8q20VFI4="
+      },
+      "outcome": {
+        "status": "success",
+        "mnemonic": "debate leisure left spoon alley double transfer segment region actual nest timber home garage easily tone thing bread anger boring belt trend eager vivid"
+      },
+      "negativeCases": [
+        {
+          "id": "wrong-password",
+          "password": "Freedom public test password: long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password--wrong",
+          "mutation": null,
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"GSc5v9n9Jjbn2Atlrs51VpiH+vNOJNysRnmU/6YBbDavaCNj9CH9Fe0ojeBQXZW72sGhf9rafudc05Rd/zEi/q6NSqWwOymF9Gyz2dSxmKkLcNa3Od2DR2qbCoUWAaIg/ED7dMaJGv1QMIBAQFebiioeHzNIz4DQBIlAgkwFRHf7npSME0vD8RnjSwFrv/EP0ka1W5K8MPWKNwDTRkiZ+tI5qyV6A0n3yB20eqBn4MrHu/mY4faIcw==\\\",\\\"iv\\\":\\\"cDFYzf96BgiSLp6wJlWUmw==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"iJqVfyaZSwpAYSLDGi9qPsBEo/HvcIsgOpn8q20VFI4=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:28.089Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "data-first-byte-flipped",
+          "password": "Freedom public test password: long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-",
+          "mutation": {
+            "field": "data",
+            "operation": "xor-first-byte-with-1"
+          },
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"GCc5v9n9Jjbn2Atlrs51VpiH+vNOJNysRnmU/6YBbDavaCNj9CH9Fe0ojeBQXZW72sGhf9rafudc05Rd/zEi/q6NSqWwOymF9Gyz2dSxmKkLcNa3Od2DR2qbCoUWAaIg/ED7dMaJGv1QMIBAQFebiioeHzNIz4DQBIlAgkwFRHf7npSME0vD8RnjSwFrv/EP0ka1W5K8MPWKNwDTRkiZ+tI5qyV6A0n3yB20eqBn4MrHu/mY4faIcw==\\\",\\\"iv\\\":\\\"cDFYzf96BgiSLp6wJlWUmw==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"iJqVfyaZSwpAYSLDGi9qPsBEo/HvcIsgOpn8q20VFI4=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:28.089Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "iv-first-byte-flipped",
+          "password": "Freedom public test password: long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-",
+          "mutation": {
+            "field": "iv",
+            "operation": "xor-first-byte-with-1"
+          },
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"GSc5v9n9Jjbn2Atlrs51VpiH+vNOJNysRnmU/6YBbDavaCNj9CH9Fe0ojeBQXZW72sGhf9rafudc05Rd/zEi/q6NSqWwOymF9Gyz2dSxmKkLcNa3Od2DR2qbCoUWAaIg/ED7dMaJGv1QMIBAQFebiioeHzNIz4DQBIlAgkwFRHf7npSME0vD8RnjSwFrv/EP0ka1W5K8MPWKNwDTRkiZ+tI5qyV6A0n3yB20eqBn4MrHu/mY4faIcw==\\\",\\\"iv\\\":\\\"cTFYzf96BgiSLp6wJlWUmw==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"iJqVfyaZSwpAYSLDGi9qPsBEo/HvcIsgOpn8q20VFI4=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:28.089Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "salt-first-byte-flipped",
+          "password": "Freedom public test password: long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-",
+          "mutation": {
+            "field": "salt",
+            "operation": "xor-first-byte-with-1"
+          },
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"GSc5v9n9Jjbn2Atlrs51VpiH+vNOJNysRnmU/6YBbDavaCNj9CH9Fe0ojeBQXZW72sGhf9rafudc05Rd/zEi/q6NSqWwOymF9Gyz2dSxmKkLcNa3Od2DR2qbCoUWAaIg/ED7dMaJGv1QMIBAQFebiioeHzNIz4DQBIlAgkwFRHf7npSME0vD8RnjSwFrv/EP0ka1W5K8MPWKNwDTRkiZ+tI5qyV6A0n3yB20eqBn4MrHu/mY4faIcw==\\\",\\\"iv\\\":\\\"cDFYzf96BgiSLp6wJlWUmw==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"iZqVfyaZSwpAYSLDGi9qPsBEo/HvcIsgOpn8q20VFI4=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:28.089Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "iterations-changed",
+          "password": "Freedom public test password: long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-",
+          "mutation": {
+            "field": "iterations",
+            "operation": "add-1"
+          },
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"GSc5v9n9Jjbn2Atlrs51VpiH+vNOJNysRnmU/6YBbDavaCNj9CH9Fe0ojeBQXZW72sGhf9rafudc05Rd/zEi/q6NSqWwOymF9Gyz2dSxmKkLcNa3Od2DR2qbCoUWAaIg/ED7dMaJGv1QMIBAQFebiioeHzNIz4DQBIlAgkwFRHf7npSME0vD8RnjSwFrv/EP0ka1W5K8MPWKNwDTRkiZ+tI5qyV6A0n3yB20eqBn4MrHu/mY4faIcw==\\\",\\\"iv\\\":\\\"cDFYzf96BgiSLp6wJlWUmw==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900001}},\\\"salt\\\":\\\"iJqVfyaZSwpAYSLDGi9qPsBEo/HvcIsgOpn8q20VFI4=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:28.089Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "metadata-removed",
+          "password": "Freedom public test password: long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-long-password-",
+          "mutation": {
+            "field": "keyMetadata",
+            "operation": "remove"
+          },
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"GSc5v9n9Jjbn2Atlrs51VpiH+vNOJNysRnmU/6YBbDavaCNj9CH9Fe0ojeBQXZW72sGhf9rafudc05Rd/zEi/q6NSqWwOymF9Gyz2dSxmKkLcNa3Od2DR2qbCoUWAaIg/ED7dMaJGv1QMIBAQFebiioeHzNIz4DQBIlAgkwFRHf7npSME0vD8RnjSwFrv/EP0ka1W5K8MPWKNwDTRkiZ+tI5qyV6A0n3yB20eqBn4MrHu/mY4faIcw==\\\",\\\"iv\\\":\\\"cDFYzf96BgiSLp6wJlWUmw==\\\",\\\"salt\\\":\\\"iJqVfyaZSwpAYSLDGi9qPsBEo/HvcIsgOpn8q20VFI4=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:28.089Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "unicode-nfc-12",
+      "mnemonicId": "legal-12",
+      "password": "Café-🔐-password",
+      "mnemonic": "legal winner thank year wave sausage worth useful legal winner thank yellow",
+      "passwordUtf16Length": 16,
+      "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"lZlrZISCpWhDPt1Hg8myjqEiOkCIVBTZkjxMvaoRpX6cgVXp41cHosKBTJdgGwbF3g4UjIBawyntqsu8GsHZztpkyrXXLxO4NMn36wS7sq9VwYQIUQErzlKjG7V40M+UW3+VI2D3ULUPcA==\\\",\\\"iv\\\":\\\"YqDhEm9cdaAFgrg6oopnrw==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"dr+EKj8V2CIDvebfxrTHselAtkV7+EYR0F59ZivJb9g=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:29.140Z\"\n}",
+      "payload": {
+        "data": "lZlrZISCpWhDPt1Hg8myjqEiOkCIVBTZkjxMvaoRpX6cgVXp41cHosKBTJdgGwbF3g4UjIBawyntqsu8GsHZztpkyrXXLxO4NMn36wS7sq9VwYQIUQErzlKjG7V40M+UW3+VI2D3ULUPcA==",
+        "iv": "YqDhEm9cdaAFgrg6oopnrw==",
+        "keyMetadata": {
+          "algorithm": "PBKDF2",
+          "params": {
+            "iterations": 900000
+          }
+        },
+        "salt": "dr+EKj8V2CIDvebfxrTHselAtkV7+EYR0F59ZivJb9g="
+      },
+      "outcome": {
+        "status": "success",
+        "mnemonic": "legal winner thank year wave sausage worth useful legal winner thank yellow"
+      },
+      "negativeCases": [
+        {
+          "id": "wrong-password",
+          "password": "Café-🔐-password-wrong",
+          "mutation": null,
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"lZlrZISCpWhDPt1Hg8myjqEiOkCIVBTZkjxMvaoRpX6cgVXp41cHosKBTJdgGwbF3g4UjIBawyntqsu8GsHZztpkyrXXLxO4NMn36wS7sq9VwYQIUQErzlKjG7V40M+UW3+VI2D3ULUPcA==\\\",\\\"iv\\\":\\\"YqDhEm9cdaAFgrg6oopnrw==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"dr+EKj8V2CIDvebfxrTHselAtkV7+EYR0F59ZivJb9g=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:29.140Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "password-nfd",
+          "password": "Café-🔐-password",
+          "mutation": null,
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"lZlrZISCpWhDPt1Hg8myjqEiOkCIVBTZkjxMvaoRpX6cgVXp41cHosKBTJdgGwbF3g4UjIBawyntqsu8GsHZztpkyrXXLxO4NMn36wS7sq9VwYQIUQErzlKjG7V40M+UW3+VI2D3ULUPcA==\\\",\\\"iv\\\":\\\"YqDhEm9cdaAFgrg6oopnrw==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"dr+EKj8V2CIDvebfxrTHselAtkV7+EYR0F59ZivJb9g=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:29.140Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "data-first-byte-flipped",
+          "password": "Café-🔐-password",
+          "mutation": {
+            "field": "data",
+            "operation": "xor-first-byte-with-1"
+          },
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"lJlrZISCpWhDPt1Hg8myjqEiOkCIVBTZkjxMvaoRpX6cgVXp41cHosKBTJdgGwbF3g4UjIBawyntqsu8GsHZztpkyrXXLxO4NMn36wS7sq9VwYQIUQErzlKjG7V40M+UW3+VI2D3ULUPcA==\\\",\\\"iv\\\":\\\"YqDhEm9cdaAFgrg6oopnrw==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"dr+EKj8V2CIDvebfxrTHselAtkV7+EYR0F59ZivJb9g=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:29.140Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "iv-first-byte-flipped",
+          "password": "Café-🔐-password",
+          "mutation": {
+            "field": "iv",
+            "operation": "xor-first-byte-with-1"
+          },
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"lZlrZISCpWhDPt1Hg8myjqEiOkCIVBTZkjxMvaoRpX6cgVXp41cHosKBTJdgGwbF3g4UjIBawyntqsu8GsHZztpkyrXXLxO4NMn36wS7sq9VwYQIUQErzlKjG7V40M+UW3+VI2D3ULUPcA==\\\",\\\"iv\\\":\\\"Y6DhEm9cdaAFgrg6oopnrw==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"dr+EKj8V2CIDvebfxrTHselAtkV7+EYR0F59ZivJb9g=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:29.140Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "salt-first-byte-flipped",
+          "password": "Café-🔐-password",
+          "mutation": {
+            "field": "salt",
+            "operation": "xor-first-byte-with-1"
+          },
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"lZlrZISCpWhDPt1Hg8myjqEiOkCIVBTZkjxMvaoRpX6cgVXp41cHosKBTJdgGwbF3g4UjIBawyntqsu8GsHZztpkyrXXLxO4NMn36wS7sq9VwYQIUQErzlKjG7V40M+UW3+VI2D3ULUPcA==\\\",\\\"iv\\\":\\\"YqDhEm9cdaAFgrg6oopnrw==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"d7+EKj8V2CIDvebfxrTHselAtkV7+EYR0F59ZivJb9g=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:29.140Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "iterations-changed",
+          "password": "Café-🔐-password",
+          "mutation": {
+            "field": "iterations",
+            "operation": "add-1"
+          },
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"lZlrZISCpWhDPt1Hg8myjqEiOkCIVBTZkjxMvaoRpX6cgVXp41cHosKBTJdgGwbF3g4UjIBawyntqsu8GsHZztpkyrXXLxO4NMn36wS7sq9VwYQIUQErzlKjG7V40M+UW3+VI2D3ULUPcA==\\\",\\\"iv\\\":\\\"YqDhEm9cdaAFgrg6oopnrw==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900001}},\\\"salt\\\":\\\"dr+EKj8V2CIDvebfxrTHselAtkV7+EYR0F59ZivJb9g=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:29.140Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "metadata-removed",
+          "password": "Café-🔐-password",
+          "mutation": {
+            "field": "keyMetadata",
+            "operation": "remove"
+          },
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"lZlrZISCpWhDPt1Hg8myjqEiOkCIVBTZkjxMvaoRpX6cgVXp41cHosKBTJdgGwbF3g4UjIBawyntqsu8GsHZztpkyrXXLxO4NMn36wS7sq9VwYQIUQErzlKjG7V40M+UW3+VI2D3ULUPcA==\\\",\\\"iv\\\":\\\"YqDhEm9cdaAFgrg6oopnrw==\\\",\\\"salt\\\":\\\"dr+EKj8V2CIDvebfxrTHselAtkV7+EYR0F59ZivJb9g=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:29.140Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "utf16-min-12",
+      "mnemonicId": "zoo-12",
+      "password": "🔐🔐🔐🔐",
+      "mnemonic": "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong",
+      "passwordUtf16Length": 8,
+      "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"vCGrwWtrwNelhZi5geUdZ3kw21f9rgUF6OPukKDXpk+zqHppHpRfUYsNreNC94O0vRC/Yx4dM+/j35YVIZDVaN8QK85VmffkoajCp7rpVy4=\\\",\\\"iv\\\":\\\"6zHADzszF5iOw9jECE/aWg==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"97UCzHYW3RlJp2+Zfi7gzCpS98xS4qYDsWhAQke6HuY=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:30.320Z\"\n}",
+      "payload": {
+        "data": "vCGrwWtrwNelhZi5geUdZ3kw21f9rgUF6OPukKDXpk+zqHppHpRfUYsNreNC94O0vRC/Yx4dM+/j35YVIZDVaN8QK85VmffkoajCp7rpVy4=",
+        "iv": "6zHADzszF5iOw9jECE/aWg==",
+        "keyMetadata": {
+          "algorithm": "PBKDF2",
+          "params": {
+            "iterations": 900000
+          }
+        },
+        "salt": "97UCzHYW3RlJp2+Zfi7gzCpS98xS4qYDsWhAQke6HuY="
+      },
+      "outcome": {
+        "status": "success",
+        "mnemonic": "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong"
+      },
+      "negativeCases": [
+        {
+          "id": "wrong-password",
+          "password": "🔐🔐🔐🔐-wrong",
+          "mutation": null,
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"vCGrwWtrwNelhZi5geUdZ3kw21f9rgUF6OPukKDXpk+zqHppHpRfUYsNreNC94O0vRC/Yx4dM+/j35YVIZDVaN8QK85VmffkoajCp7rpVy4=\\\",\\\"iv\\\":\\\"6zHADzszF5iOw9jECE/aWg==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"97UCzHYW3RlJp2+Zfi7gzCpS98xS4qYDsWhAQke6HuY=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:30.320Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "data-first-byte-flipped",
+          "password": "🔐🔐🔐🔐",
+          "mutation": {
+            "field": "data",
+            "operation": "xor-first-byte-with-1"
+          },
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"vSGrwWtrwNelhZi5geUdZ3kw21f9rgUF6OPukKDXpk+zqHppHpRfUYsNreNC94O0vRC/Yx4dM+/j35YVIZDVaN8QK85VmffkoajCp7rpVy4=\\\",\\\"iv\\\":\\\"6zHADzszF5iOw9jECE/aWg==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"97UCzHYW3RlJp2+Zfi7gzCpS98xS4qYDsWhAQke6HuY=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:30.320Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "iv-first-byte-flipped",
+          "password": "🔐🔐🔐🔐",
+          "mutation": {
+            "field": "iv",
+            "operation": "xor-first-byte-with-1"
+          },
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"vCGrwWtrwNelhZi5geUdZ3kw21f9rgUF6OPukKDXpk+zqHppHpRfUYsNreNC94O0vRC/Yx4dM+/j35YVIZDVaN8QK85VmffkoajCp7rpVy4=\\\",\\\"iv\\\":\\\"6jHADzszF5iOw9jECE/aWg==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"97UCzHYW3RlJp2+Zfi7gzCpS98xS4qYDsWhAQke6HuY=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:30.320Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "salt-first-byte-flipped",
+          "password": "🔐🔐🔐🔐",
+          "mutation": {
+            "field": "salt",
+            "operation": "xor-first-byte-with-1"
+          },
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"vCGrwWtrwNelhZi5geUdZ3kw21f9rgUF6OPukKDXpk+zqHppHpRfUYsNreNC94O0vRC/Yx4dM+/j35YVIZDVaN8QK85VmffkoajCp7rpVy4=\\\",\\\"iv\\\":\\\"6zHADzszF5iOw9jECE/aWg==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900000}},\\\"salt\\\":\\\"9rUCzHYW3RlJp2+Zfi7gzCpS98xS4qYDsWhAQke6HuY=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:30.320Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "iterations-changed",
+          "password": "🔐🔐🔐🔐",
+          "mutation": {
+            "field": "iterations",
+            "operation": "add-1"
+          },
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"vCGrwWtrwNelhZi5geUdZ3kw21f9rgUF6OPukKDXpk+zqHppHpRfUYsNreNC94O0vRC/Yx4dM+/j35YVIZDVaN8QK85VmffkoajCp7rpVy4=\\\",\\\"iv\\\":\\\"6zHADzszF5iOw9jECE/aWg==\\\",\\\"keyMetadata\\\":{\\\"algorithm\\\":\\\"PBKDF2\\\",\\\"params\\\":{\\\"iterations\\\":900001}},\\\"salt\\\":\\\"97UCzHYW3RlJp2+Zfi7gzCpS98xS4qYDsWhAQke6HuY=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:30.320Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        },
+        {
+          "id": "metadata-removed",
+          "password": "🔐🔐🔐🔐",
+          "mutation": {
+            "field": "keyMetadata",
+            "operation": "remove"
+          },
+          "fileContents": "{\n  \"version\": 1,\n  \"encrypted\": \"{\\\"data\\\":\\\"vCGrwWtrwNelhZi5geUdZ3kw21f9rgUF6OPukKDXpk+zqHppHpRfUYsNreNC94O0vRC/Yx4dM+/j35YVIZDVaN8QK85VmffkoajCp7rpVy4=\\\",\\\"iv\\\":\\\"6zHADzszF5iOw9jECE/aWg==\\\",\\\"salt\\\":\\\"97UCzHYW3RlJp2+Zfi7gzCpS98xS4qYDsWhAQke6HuY=\\\"}\",\n  \"createdAt\": \"2026-10-11T19:42:30.320Z\"\n}",
+          "outcome": {
+            "status": "error",
+            "name": "Error",
+            "message": "Incorrect password",
+            "cause": {
+              "name": "Error",
+              "message": "Incorrect password"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "passwordValidation": [
+    {
+      "password": "",
+      "outcome": {
+        "status": "error",
+        "name": "Error",
+        "message": "Password must be at least 8 characters"
+      }
+    },
+    {
+      "password": "1234567",
+      "outcome": {
+        "status": "error",
+        "name": "Error",
+        "message": "Password must be at least 8 characters"
+      }
+    }
+  ]
+}

@@ -1,0 +1,440 @@
+{
+  "meta": {
+    "freedomBrowserCommit": "fb540328162839e68150fe2c5e517edb86734d1c",
+    "packages": {
+      "ethers": "6.17.0",
+      "@scure/bip39": "2.4.0",
+      "@scure/base": "1.2.6",
+      "micro-key-producer": "0.10.2",
+      "@metamask/browser-passworder": "6.0.0"
+    },
+    "nodeVersion": "v24.15.0",
+    "generator": "vectors/generator/generate.js"
+  },
+  "vectors": [
+    {
+      "id": "valid-12-words",
+      "input": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "valid": true,
+      "getSeed": {
+        "status": "success",
+        "value": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4"
+      },
+      "userWallet0": {
+        "status": "success",
+        "value": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "publicKey": "0x0237b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+          "path": "m/44'/60'/0'/0/0",
+          "accountIndex": 0
+        }
+      }
+    },
+    {
+      "id": "valid-15-words",
+      "input": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon address",
+      "valid": true,
+      "getSeed": {
+        "status": "success",
+        "value": "6e9360e8d511f85adcda7bf6078207f0b2d12933845953bc766041cb71ac3bf644ffadd57caac244066657e8ebe01efa0e394d1afa7331379a3c1aebd68f6645"
+      },
+      "userWallet0": {
+        "status": "success",
+        "value": {
+          "privateKey": "0x89fe6cf31a686f718017d664b08f75a51b706edc85edd6c67b1d2b56da628964",
+          "publicKey": "0x03b97a74f99714cee37725e040bc33355264f452db219e4640720546d00276fdfe",
+          "address": "0x54bE88525B024a20229Fe7f6F62DC0884e4aAA0a",
+          "path": "m/44'/60'/0'/0/0",
+          "accountIndex": 0
+        }
+      }
+    },
+    {
+      "id": "valid-18-words",
+      "input": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon agent",
+      "valid": true,
+      "getSeed": {
+        "status": "success",
+        "value": "4975bb3d1faf5308c86a30893ee903a976296609db223fd717e227da5a813a34dc1428b71c84a787fc51f3b9f9dc28e9459f48c08bd9578e9d1b170f2d7ea506"
+      },
+      "userWallet0": {
+        "status": "success",
+        "value": {
+          "privateKey": "0x7baa95e968e65395b2b4cc341885bcfbc0d820571af180c65cc9c5019551c669",
+          "publicKey": "0x02741ab2fa95801e53254cdbdd6afe93b51df630d8627acaa40b16e139471f2e6c",
+          "address": "0x197A1bEE163923815Ba58EaD0F14B3Fcd8C5926d",
+          "path": "m/44'/60'/0'/0/0",
+          "accountIndex": 0
+        }
+      }
+    },
+    {
+      "id": "valid-21-words",
+      "input": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon admit",
+      "valid": true,
+      "getSeed": {
+        "status": "success",
+        "value": "277fe8691c965d8a47439d1ff771d9bad603575b8e8d8cee6cb907a1359992c22ab736b36859f9edcfd33bfef94e0d21ad295ff81194652c6e87bd68289b3522"
+      },
+      "userWallet0": {
+        "status": "success",
+        "value": {
+          "privateKey": "0x01a17b608fed85bf7a3ce6ffc0f8f9edd862bda09d1395eb0335edb336d9acae",
+          "publicKey": "0x02756c490337fb4e200338ad948c08c52b466d70604cc3f20b50cd5335013156c1",
+          "address": "0x15cc2210a0AFbb1A2d80Dd3D585aA94eBa6c10E0",
+          "path": "m/44'/60'/0'/0/0",
+          "accountIndex": 0
+        }
+      }
+    },
+    {
+      "id": "valid-24-words",
+      "input": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art",
+      "valid": true,
+      "getSeed": {
+        "status": "success",
+        "value": "408b285c123836004f4b8842c89324c1f01382450c0d439af345ba7fc49acf705489c6fc77dbd4e3dc1dd8cc6bc9f043db8ada1e243c4a0eafb290d399480840"
+      },
+      "userWallet0": {
+        "status": "success",
+        "value": {
+          "privateKey": "0x1053fae1b3ac64f178bcc21026fd06a3f4544ec2f35338b001f02d1d8efa3d5f",
+          "publicKey": "0x02dc286c821c7490afbe20a79d13123b9f41f3d7ef21e4a9caacd22f5983b28eca",
+          "address": "0xF278cF59F82eDcf871d630F28EcC8056f25C1cdb",
+          "path": "m/44'/60'/0'/0/0",
+          "accountIndex": 0
+        }
+      }
+    },
+    {
+      "id": "legal-12",
+      "input": "legal winner thank year wave sausage worth useful legal winner thank yellow",
+      "valid": true,
+      "getSeed": {
+        "status": "success",
+        "value": "878386efb78845b3355bd15ea4d39ef97d179cb712b77d5c12b6be415fffeffe5f377ba02bf3f8544ab800b955e51fbff09828f682052a20faa6addbbddfb096"
+      },
+      "userWallet0": {
+        "status": "success",
+        "value": {
+          "privateKey": "0x33fa40f84e854b941c2b0436dd4a256e1df1cb41b9c1c0ccc8446408c19b8bf9",
+          "publicKey": "0x03a70d1ef368ad99e90d509496e9888ee7404e4f4d360376bf521d769cf0c4de46",
+          "address": "0x58A57ed9d8d624cBD12e2C467D34787555bB1b25",
+          "path": "m/44'/60'/0'/0/0",
+          "accountIndex": 0
+        }
+      }
+    },
+    {
+      "id": "zoo-12",
+      "input": "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong",
+      "valid": true,
+      "getSeed": {
+        "status": "success",
+        "value": "b6a6d8921942dd9806607ebc2750416b289adea669198769f2e15ed926c3aa92bf88ece232317b4ea463e84b0fcd3b53577812ee449ccc448eb45e6f544e25b6"
+      },
+      "userWallet0": {
+        "status": "success",
+        "value": {
+          "privateKey": "0x7af65ba4dd53f23495dcb04995e96f47c243217fc279f10795871b725cd009ae",
+          "publicKey": "0x0338f04e283c453f6c5c28f5291f12540ae5e27c2fd1a863f2596d8fbd99d24fde",
+          "address": "0xfc2077CA7F403cBECA41B1B0F62D91B5EA631B5E",
+          "path": "m/44'/60'/0'/0/0",
+          "accountIndex": 0
+        }
+      }
+    },
+    {
+      "id": "bad-checksum",
+      "input": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon",
+      "valid": false,
+      "getSeed": {
+        "status": "error",
+        "name": "Error",
+        "message": "Invalid mnemonic"
+      }
+    },
+    {
+      "id": "11-words",
+      "input": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon",
+      "valid": false,
+      "getSeed": {
+        "status": "error",
+        "name": "Error",
+        "message": "Invalid mnemonic"
+      }
+    },
+    {
+      "id": "13-words",
+      "input": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "valid": false,
+      "getSeed": {
+        "status": "error",
+        "name": "Error",
+        "message": "Invalid mnemonic"
+      }
+    },
+    {
+      "id": "unknown-word",
+      "input": "notaword abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "valid": false,
+      "getSeed": {
+        "status": "error",
+        "name": "Error",
+        "message": "Invalid mnemonic"
+      }
+    },
+    {
+      "id": "other-language-word",
+      "input": "abaisser abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "valid": false,
+      "getSeed": {
+        "status": "error",
+        "name": "Error",
+        "message": "Invalid mnemonic"
+      }
+    },
+    {
+      "id": "uppercase",
+      "input": "ABANDON ABANDON ABANDON ABANDON ABANDON ABANDON ABANDON ABANDON ABANDON ABANDON ABANDON ABOUT",
+      "valid": false,
+      "getSeed": {
+        "status": "error",
+        "name": "Error",
+        "message": "Invalid mnemonic"
+      }
+    },
+    {
+      "id": "mixed-case",
+      "input": "Abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "valid": false,
+      "getSeed": {
+        "status": "error",
+        "name": "Error",
+        "message": "Invalid mnemonic"
+      }
+    },
+    {
+      "id": "leading-space",
+      "input": " abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "valid": false,
+      "getSeed": {
+        "status": "error",
+        "name": "Error",
+        "message": "Invalid mnemonic"
+      }
+    },
+    {
+      "id": "trailing-space",
+      "input": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about ",
+      "valid": false,
+      "getSeed": {
+        "status": "error",
+        "name": "Error",
+        "message": "Invalid mnemonic"
+      }
+    },
+    {
+      "id": "double-space",
+      "input": "abandon  abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "valid": false,
+      "getSeed": {
+        "status": "error",
+        "name": "Error",
+        "message": "Invalid mnemonic"
+      }
+    },
+    {
+      "id": "tab",
+      "input": "abandon\tabandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "valid": false,
+      "getSeed": {
+        "status": "error",
+        "name": "Error",
+        "message": "Invalid mnemonic"
+      }
+    },
+    {
+      "id": "newline",
+      "input": "abandon\nabandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "valid": false,
+      "getSeed": {
+        "status": "error",
+        "name": "Error",
+        "message": "Invalid mnemonic"
+      }
+    },
+    {
+      "id": "empty",
+      "input": "",
+      "valid": false,
+      "getSeed": {
+        "status": "error",
+        "name": "Error",
+        "message": "Invalid mnemonic"
+      }
+    },
+    {
+      "id": "non-string-null",
+      "input": null,
+      "valid": false,
+      "getSeed": {
+        "status": "error",
+        "name": "Error",
+        "message": "Invalid mnemonic"
+      }
+    },
+    {
+      "id": "non-string-number",
+      "input": 123,
+      "valid": false,
+      "getSeed": {
+        "status": "error",
+        "name": "Error",
+        "message": "Invalid mnemonic"
+      }
+    },
+    {
+      "id": "non-string-array",
+      "input": [
+        "abandon",
+        "abandon",
+        "abandon",
+        "abandon",
+        "abandon",
+        "abandon",
+        "abandon",
+        "abandon",
+        "abandon",
+        "abandon",
+        "abandon",
+        "about"
+      ],
+      "valid": false,
+      "getSeed": {
+        "status": "error",
+        "name": "Error",
+        "message": "Invalid mnemonic"
+      }
+    },
+    {
+      "id": "non-string-object",
+      "input": {
+        "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+      },
+      "valid": false,
+      "getSeed": {
+        "status": "error",
+        "name": "Error",
+        "message": "Invalid mnemonic"
+      }
+    },
+    {
+      "id": "accent-nfc",
+      "input": "ábandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "valid": false,
+      "getSeed": {
+        "status": "error",
+        "name": "Error",
+        "message": "Invalid mnemonic"
+      }
+    },
+    {
+      "id": "accent-nfkd",
+      "input": "ábandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "valid": false,
+      "getSeed": {
+        "status": "error",
+        "name": "Error",
+        "message": "Invalid mnemonic"
+      }
+    },
+    {
+      "id": "fullwidth-nfc",
+      "input": "ａｂａｎｄｏｎ ａｂａｎｄｏｎ ａｂａｎｄｏｎ ａｂａｎｄｏｎ ａｂａｎｄｏｎ ａｂａｎｄｏｎ ａｂａｎｄｏｎ ａｂａｎｄｏｎ ａｂａｎｄｏｎ ａｂａｎｄｏｎ ａｂａｎｄｏｎ ａｂｏｕｔ",
+      "valid": true,
+      "getSeed": {
+        "status": "success",
+        "value": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4"
+      },
+      "userWallet0": {
+        "status": "success",
+        "value": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "publicKey": "0x0237b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+          "path": "m/44'/60'/0'/0/0",
+          "accountIndex": 0
+        }
+      }
+    },
+    {
+      "id": "fullwidth-nfkd",
+      "input": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "valid": true,
+      "getSeed": {
+        "status": "success",
+        "value": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4"
+      },
+      "userWallet0": {
+        "status": "success",
+        "value": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "publicKey": "0x0237b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+          "path": "m/44'/60'/0'/0/0",
+          "accountIndex": 0
+        }
+      }
+    },
+    {
+      "id": "ideographic-spaces",
+      "input": "abandon　abandon　abandon　abandon　abandon　abandon　abandon　abandon　abandon　abandon　abandon　about",
+      "valid": true,
+      "getSeed": {
+        "status": "success",
+        "value": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4"
+      },
+      "userWallet0": {
+        "status": "success",
+        "value": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "publicKey": "0x0237b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+          "path": "m/44'/60'/0'/0/0",
+          "accountIndex": 0
+        }
+      }
+    },
+    {
+      "id": "nonbreaking-spaces",
+      "input": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "valid": true,
+      "getSeed": {
+        "status": "success",
+        "value": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4"
+      },
+      "userWallet0": {
+        "status": "success",
+        "value": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "publicKey": "0x0237b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+          "path": "m/44'/60'/0'/0/0",
+          "accountIndex": 0
+        }
+      }
+    },
+    {
+      "id": "unpaired-surrogate",
+      "input": "\ud800bandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "valid": false,
+      "getSeed": {
+        "status": "error",
+        "name": "Error",
+        "message": "Invalid mnemonic"
+      }
+    }
+  ]
+}
