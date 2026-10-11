@@ -7,10 +7,20 @@
 //! module is the same pair of algorithms with those buffers in `Zeroizing`.
 //! The SHA-2 states wipe themselves through sha2's `zeroize` feature. Tests
 //! compare against both crates.
+//!
+//! **Where wiping stops.** Every heap allocation and every buffer this crate
+//! owns is wiped. Stack temporaries inside dependency functions are not, for
+//! example digest's `full_res` in fixed-output finalization, or the SHA-2
+//! message schedule in the compression function, which also holds
+//! key-derived words. No wrapper can reach those. The process-level measures
+//! in design 0001 (separate core process, non-dumpable, hardened runtime)
+//! address that residue, not per-function scrubbing.
 
 use sha2::Digest;
 use sha2::digest::Output;
 use sha2::digest::block_api::BlockSizeUser;
+use std::num::NonZeroU32;
+
 use zeroize::Zeroizing;
 
 /// The largest SHA-2 block (SHA-512).
@@ -81,25 +91,29 @@ pub(crate) fn hmac_sha512(key: &[u8], parts: &[&[u8]]) -> Zeroizing<[u8; 64]> {
     out
 }
 
-/// PBKDF2 with HMAC over `D`, filling `out`.
-pub fn pbkdf2<D: Digest + BlockSizeUser + Clone>(
+/// PBKDF2 with HMAC over `D`, producing `N` bytes. `rounds` can't be zero,
+/// and `N` is bounded at compile time, so RFC 8018's limits hold by
+/// construction.
+pub fn pbkdf2<D: Digest + BlockSizeUser + Clone, const N: usize>(
     password: &[u8],
     salt: &[u8],
-    rounds: u32,
-    out: &mut [u8],
-) {
+    rounds: NonZeroU32,
+) -> Zeroizing<[u8; N]> {
+    const { assert!(N <= 1 << 16, "PBKDF2 output is bounded to 64 KiB") };
+    let mut out = Zeroizing::new([0u8; N]);
     let prf = Hmac::<D>::new(password);
     let mut u = Zeroizing::new(Output::<D>::default());
     let mut t = Zeroizing::new(Output::<D>::default());
     for (index, chunk) in out.chunks_mut(u.len()).enumerate() {
-        // Block indices start at 1; `out` is never long enough to overflow.
+        // Block indices start at 1. N is at most 64 KiB, so there are at
+        // most 2048 blocks and the conversion can't fail.
         let block_index = u32::try_from(index + 1).unwrap_or(u32::MAX);
         let mut mac = prf.clone();
         mac.update(salt);
         mac.update(&block_index.to_be_bytes());
         mac.finalize_into(&mut u);
         t.copy_from_slice(&u);
-        for _ in 1..rounds {
+        for _ in 1..rounds.get() {
             let mut mac = prf.clone();
             mac.update(&u);
             mac.finalize_into(&mut u);
@@ -109,6 +123,7 @@ pub fn pbkdf2<D: Digest + BlockSizeUser + Clone>(
         }
         chunk.copy_from_slice(&t[..chunk.len()]);
     }
+    out
 }
 
 #[cfg(test)]
@@ -177,21 +192,26 @@ mod tests {
 
     #[test]
     fn pbkdf2_matches_the_pbkdf2_crate() {
-        for (seed, (rounds, out_len)) in
-            [(1u32, 32usize), (2, 64), (3, 100), (1000, 32), (2048, 64)]
-                .into_iter()
-                .enumerate()
-        {
+        fn check<const N: usize>(seed: usize, rounds: u32) {
             let password = bytes(seed as u64, 5 + seed * 30);
             let salt = bytes(500 + seed as u64, 8 + seed * 4);
-            let mut a = vec![0u8; out_len];
-            let mut b = vec![0u8; out_len];
-            pbkdf2::<Sha512>(&password, &salt, rounds, &mut a);
-            pbkdf2::pbkdf2_hmac::<Sha512>(&password, &salt, rounds, &mut b);
-            assert_eq!(a, b, "sha512 rounds={rounds} len={out_len}");
-            pbkdf2::<Sha256>(&password, &salt, rounds, &mut a);
-            pbkdf2::pbkdf2_hmac::<Sha256>(&password, &salt, rounds, &mut b);
-            assert_eq!(a, b, "sha256 rounds={rounds} len={out_len}");
+            let nonzero = NonZeroU32::new(rounds).unwrap();
+            let mut reference = vec![0u8; N];
+            pbkdf2::pbkdf2_hmac::<Sha512>(&password, &salt, rounds, &mut reference);
+            assert_eq!(
+                pbkdf2::<Sha512, N>(&password, &salt, nonzero).as_slice(),
+                reference
+            );
+            pbkdf2::pbkdf2_hmac::<Sha256>(&password, &salt, rounds, &mut reference);
+            assert_eq!(
+                pbkdf2::<Sha256, N>(&password, &salt, nonzero).as_slice(),
+                reference
+            );
         }
+        check::<32>(0, 1);
+        check::<64>(1, 2);
+        check::<100>(2, 3);
+        check::<32>(3, 1000);
+        check::<64>(4, 2048);
     }
 }

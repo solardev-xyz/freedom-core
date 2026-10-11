@@ -21,7 +21,7 @@ use crate::Error;
 
 const ENGLISH: &str = include_str!("wordlist/english.txt");
 const VALID_WORD_COUNTS: [usize; 5] = [12, 15, 18, 21, 24];
-const SEED_ROUNDS: u32 = 2048;
+const SEED_ROUNDS: std::num::NonZeroU32 = std::num::NonZeroU32::new(2048).unwrap();
 
 fn wordlist() -> &'static [&'static str] {
     static WORDS: OnceLock<Vec<&'static str>> = OnceLock::new();
@@ -108,14 +108,11 @@ impl Mnemonic {
     fn to_seed_with_passphrase(&self, passphrase: &str) -> Seed {
         let normalized = nfkd(&self.phrase);
         let salt = nfkd(&format!("mnemonic{passphrase}"));
-        let mut seed = Zeroizing::new([0u8; 64]);
-        crate::kdf::pbkdf2::<Sha512>(
+        Seed(crate::kdf::pbkdf2::<Sha512, 64>(
             normalized.as_bytes(),
             salt.as_bytes(),
             SEED_ROUNDS,
-            seed.as_mut(),
-        );
-        Seed(seed)
+        ))
     }
 }
 
