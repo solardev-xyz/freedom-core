@@ -5,6 +5,11 @@
 //! complete frames. Each payload lands in its own exactly sized `Zeroizing`
 //! buffer, so a frame that carried a password is wiped when it's dropped and
 //! no shared buffer keeps stale bytes in its spare capacity.
+//!
+//! The decoder holds at most [`MAX_READY_FRAMES`] complete frames and
+//! [`MAX_READY_BYTES`] of their payloads. `push` stops consuming input at
+//! that budget and says how much it consumed. The caller pops frames, then
+//! pushes the rest: backpressure, not an error.
 
 use std::collections::VecDeque;
 
@@ -16,6 +21,10 @@ pub const MAX_PAYLOAD: usize = 1 << 20;
 pub const KIND_JSON: u8 = 0x01;
 /// Kinds `0x02..=0x0F` are reserved for Phase 4 streams (protocol v2).
 pub const RESERVED_KINDS: std::ops::RangeInclusive<u8> = 0x02..=0x0F;
+/// The most complete frames the decoder holds before `push` stops.
+pub const MAX_READY_FRAMES: usize = 64;
+/// The most payload bytes complete frames may hold before `push` stops.
+pub const MAX_READY_BYTES: usize = 2 * MAX_PAYLOAD;
 
 /// A malformed stream. The receiver logs it and closes the connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -65,10 +74,16 @@ enum State {
     },
 }
 
+const EMPTY_HEADER: State = State::Header {
+    bytes: [0; 5],
+    filled: 0,
+};
+
 /// Turns a byte stream into frames.
 pub struct Decoder {
     state: State,
     ready: VecDeque<Frame>,
+    ready_bytes: usize,
     failed: Option<FrameError>,
 }
 
@@ -81,28 +96,33 @@ impl Default for Decoder {
 impl Decoder {
     pub fn new() -> Self {
         Decoder {
-            state: State::Header {
-                bytes: [0; 5],
-                filled: 0,
-            },
+            state: EMPTY_HEADER,
             ready: VecDeque::new(),
+            ready_bytes: 0,
             failed: None,
         }
     }
 
-    /// Consumes `input`. After the first error the decoder stays failed: the
-    /// stream can't be resynchronized.
-    pub fn push(&mut self, mut input: &[u8]) -> Result<(), FrameError> {
+    /// Consumes as much of `input` as the budget allows and returns how many
+    /// bytes it took. If that's less than `input.len()`, pop frames and push
+    /// the rest. After the first error the decoder stays failed, and frames it
+    /// still held are dropped (and wiped): the stream can't be trusted.
+    pub fn push(&mut self, input: &[u8]) -> Result<usize, FrameError> {
         if let Some(error) = self.failed {
             return Err(error);
         }
-        while !input.is_empty() {
+        let mut consumed = 0;
+        while consumed < input.len() {
+            if self.ready.len() >= MAX_READY_FRAMES || self.ready_bytes >= MAX_READY_BYTES {
+                break;
+            }
+            let rest = &input[consumed..];
             match &mut self.state {
                 State::Header { bytes, filled } => {
-                    let take = (5 - *filled).min(input.len());
-                    bytes[*filled..*filled + take].copy_from_slice(&input[..take]);
+                    let take = (5 - *filled).min(rest.len());
+                    bytes[*filled..*filled + take].copy_from_slice(&rest[..take]);
                     *filled += take;
-                    input = &input[take..];
+                    consumed += take;
                     if *filled == 5 {
                         let len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
                         let kind = bytes[4];
@@ -125,19 +145,21 @@ impl Decoder {
                 State::Payload {
                     payload, needed, ..
                 } => {
-                    let take = (*needed - payload.len()).min(input.len());
-                    payload.extend_from_slice(&input[..take]);
-                    input = &input[take..];
+                    let take = (*needed - payload.len()).min(rest.len());
+                    payload.extend_from_slice(&rest[..take]);
+                    consumed += take;
                     self.finish_if_complete();
                 }
             }
         }
-        Ok(())
+        Ok(consumed)
     }
 
     /// The next complete frame, if any.
     pub fn pop(&mut self) -> Option<Frame> {
-        self.ready.pop_front()
+        let frame = self.ready.pop_front()?;
+        self.ready_bytes -= frame.payload.len();
+        Some(frame)
     }
 
     /// True between frames; false if EOF now would cut a frame short.
@@ -151,14 +173,9 @@ impl Decoder {
         } = &self.state
             && payload.len() == *needed
         {
-            let done = std::mem::replace(
-                &mut self.state,
-                State::Header {
-                    bytes: [0; 5],
-                    filled: 0,
-                },
-            );
+            let done = std::mem::replace(&mut self.state, EMPTY_HEADER);
             if let State::Payload { kind, payload, .. } = done {
+                self.ready_bytes += payload.len();
                 self.ready.push_back(Frame { kind, payload });
             }
         }
@@ -166,6 +183,9 @@ impl Decoder {
 
     fn fail(&mut self, error: FrameError) -> FrameError {
         self.failed = Some(error);
+        self.ready.clear();
+        self.ready_bytes = 0;
+        self.state = EMPTY_HEADER;
         error
     }
 }
@@ -174,15 +194,19 @@ impl Decoder {
 mod tests {
     use super::*;
 
+    /// Feeds `input` in `chunk`-sized pieces, popping whenever push stops.
     fn frames(input: &[u8], chunk: usize) -> Vec<Vec<u8>> {
         let mut decoder = Decoder::new();
-        for piece in input.chunks(chunk) {
-            decoder.push(piece).unwrap();
+        let mut out = Vec::new();
+        for mut piece in input.chunks(chunk) {
+            while !piece.is_empty() {
+                let consumed = decoder.push(piece).unwrap();
+                piece = &piece[consumed..];
+                out.extend(std::iter::from_fn(|| decoder.pop()).map(|f| f.payload.to_vec()));
+            }
         }
         assert!(decoder.is_at_boundary());
-        std::iter::from_fn(|| decoder.pop())
-            .map(|f| f.payload.to_vec())
-            .collect()
+        out
     }
 
     #[test]
@@ -200,6 +224,39 @@ mod tests {
         for chunk in [1, 2, 5, 7, 4096, stream.len()] {
             assert_eq!(frames(&stream, chunk), messages, "chunk {chunk}");
         }
+    }
+
+    #[test]
+    fn budget_applies_backpressure() {
+        // 200 empty frames in one chunk: push stops at the frame budget.
+        let mut stream = Vec::new();
+        for _ in 0..200 {
+            encode_json(b"", &mut stream).unwrap();
+        }
+        let mut d = Decoder::new();
+        let consumed = d.push(&stream).unwrap();
+        assert!(consumed < stream.len());
+        assert_eq!(std::iter::from_fn(|| d.pop()).count(), MAX_READY_FRAMES);
+        assert_eq!(frames(&stream, stream.len()).len(), 200);
+
+        // Three maximum-size frames: the byte budget stops after two.
+        let mut stream = Vec::new();
+        for _ in 0..3 {
+            encode_json(&vec![b'x'; MAX_PAYLOAD], &mut stream).unwrap();
+        }
+        let mut d = Decoder::new();
+        assert_eq!(d.push(&stream).unwrap(), 2 * (MAX_PAYLOAD + 5));
+        assert_eq!(frames(&stream, 1 << 16).len(), 3);
+    }
+
+    #[test]
+    fn failure_drops_held_frames() {
+        let mut stream = Vec::new();
+        encode_json(b"{}", &mut stream).unwrap();
+        stream.extend_from_slice(&[0, 0, 0, 1, 0x02]);
+        let mut d = Decoder::new();
+        assert!(d.push(&stream).is_err());
+        assert!(d.pop().is_none(), "frames before the bad one are dropped");
     }
 
     #[test]

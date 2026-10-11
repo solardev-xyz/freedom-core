@@ -9,7 +9,10 @@
 //!
 //! Decoding borrows `params`, `result` and `data` as raw JSON from the frame,
 //! so each method parses its own typed parameters, secret fields included,
-//! straight from the frame buffer.
+//! straight from the frame buffer. `Debug` never prints a body.
+
+use std::borrow::Cow;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -20,11 +23,28 @@ use crate::error::ErrorBody;
 /// exactly.
 pub const MAX_ID: u64 = (1 << 53) - 1;
 
+/// An ID outside `1..=MAX_ID`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("id {0} is zero or above 2^53 - 1")]
+pub struct IdError(pub u64);
+
+/// Checks that `id` is a valid message ID.
+pub fn check_id(id: u64) -> Result<u64, IdError> {
+    if id == 0 || id > MAX_ID {
+        return Err(IdError(id));
+    }
+    Ok(id)
+}
+
 /// Who caused a request. Main fills this in, never the renderer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Context {
     pub caller: CallerKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "page_object"
+    )]
     pub page: Option<PageContext>,
 }
 
@@ -67,11 +87,10 @@ pub struct PageContext {
 }
 
 /// A decoded message, borrowing its raw JSON parts from the frame.
-#[derive(Debug)]
 pub enum Message<'a> {
     Request {
         id: u64,
-        method: &'a str,
+        method: Cow<'a, str>,
         params: Option<&'a RawValue>,
         context: Context,
     },
@@ -80,12 +99,42 @@ pub enum Message<'a> {
         outcome: Result<&'a RawValue, ErrorBody>,
     },
     Event {
-        event: &'a str,
+        event: Cow<'a, str>,
         data: Option<&'a RawValue>,
     },
     Cancel {
         id: u64,
     },
+}
+
+/// Bodies (params, results, event data, error text) can carry secrets, so
+/// `Debug` shows only the kind, ID, method or event name, and error code.
+impl fmt::Debug for Message<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Message::Request {
+                id,
+                method,
+                context,
+                ..
+            } => f
+                .debug_struct("Request")
+                .field("id", id)
+                .field("method", method)
+                .field("caller", &context.caller)
+                .finish_non_exhaustive(),
+            Message::Response { id, outcome } => f
+                .debug_struct("Response")
+                .field("id", id)
+                .field("error_code", &outcome.as_ref().err().map(|e| e.code))
+                .finish_non_exhaustive(),
+            Message::Event { event, .. } => f
+                .debug_struct("Event")
+                .field("event", event)
+                .finish_non_exhaustive(),
+            Message::Cancel { id } => f.debug_struct("Cancel").field("id", id).finish(),
+        }
+    }
 }
 
 /// Why a frame isn't a valid message. Always a protocol error.
@@ -97,8 +146,8 @@ pub enum MessageError {
     UnknownType(String),
     #[error("missing field {0}")]
     Missing(&'static str),
-    #[error("id {0} is zero or above 2^53 - 1")]
-    BadId(u64),
+    #[error(transparent)]
+    BadId(#[from] IdError),
     #[error("a response needs exactly one of result and error")]
     ResultAndError,
 }
@@ -106,45 +155,75 @@ pub enum MessageError {
 #[derive(Deserialize)]
 struct Envelope<'a> {
     #[serde(rename = "type", borrow)]
-    kind: &'a str,
+    kind: Cow<'a, str>,
     id: Option<u64>,
-    #[serde(borrow)]
-    method: Option<&'a str>,
-    #[serde(borrow)]
+    #[serde(default, borrow)]
+    method: Option<Cow<'a, str>>,
+    #[serde(default, borrow, deserialize_with = "present")]
     params: Option<&'a RawValue>,
-    context: Option<Context>,
-    #[serde(borrow)]
+    #[serde(default, borrow, deserialize_with = "present")]
+    context: Option<&'a RawValue>,
+    #[serde(default, borrow, deserialize_with = "present")]
     result: Option<&'a RawValue>,
-    error: Option<ErrorBody>,
-    #[serde(borrow)]
-    event: Option<&'a str>,
-    #[serde(borrow)]
+    #[serde(default, borrow, deserialize_with = "present")]
+    error: Option<&'a RawValue>,
+    #[serde(default, borrow)]
+    event: Option<Cow<'a, str>>,
+    #[serde(default, borrow, deserialize_with = "present")]
     data: Option<&'a RawValue>,
+}
+
+/// A present field stays `Some`, even when its value is `null`.
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<&'de RawValue>, D::Error> {
+    <&'de RawValue>::deserialize(d).map(Some)
+}
+
+fn page_object<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<PageContext>, D::Error> {
+    let raw = <Option<&'de RawValue>>::deserialize(d)?;
+    raw.map(|raw| object(raw).map_err(serde::de::Error::custom))
+        .transpose()
+}
+
+/// Parses `raw` as `T`, requiring a JSON object: serde's derived structs
+/// would otherwise also accept arrays.
+fn object<'a, T: Deserialize<'a>>(raw: &'a RawValue) -> Result<T, String> {
+    if !raw.get().trim_start().starts_with('{') {
+        return Err("expected a JSON object".into());
+    }
+    serde_json::from_str(raw.get()).map_err(|e| e.to_string())
 }
 
 impl<'a> Message<'a> {
     /// Decodes one JSON frame payload.
     pub fn decode(payload: &'a [u8]) -> Result<Self, MessageError> {
+        let root =
+            std::str::from_utf8(payload).map_err(|e| MessageError::Malformed(e.to_string()))?;
+        if !root.trim_start().starts_with('{') {
+            return Err(MessageError::Malformed(
+                "a message must be a JSON object".into(),
+            ));
+        }
         let envelope: Envelope<'a> =
-            serde_json::from_slice(payload).map_err(|e| MessageError::Malformed(e.to_string()))?;
+            serde_json::from_str(root).map_err(|e| MessageError::Malformed(e.to_string()))?;
         let id = |id: Option<u64>| -> Result<u64, MessageError> {
-            let id = id.ok_or(MessageError::Missing("id"))?;
-            if id == 0 || id > MAX_ID {
-                return Err(MessageError::BadId(id));
-            }
-            Ok(id)
+            Ok(check_id(id.ok_or(MessageError::Missing("id"))?)?)
         };
-        match envelope.kind {
-            "request" => Ok(Message::Request {
-                id: id(envelope.id)?,
-                method: envelope.method.ok_or(MessageError::Missing("method"))?,
-                params: envelope.params,
-                context: envelope.context.ok_or(MessageError::Missing("context"))?,
-            }),
+        match envelope.kind.as_ref() {
+            "request" => {
+                let context = envelope.context.ok_or(MessageError::Missing("context"))?;
+                Ok(Message::Request {
+                    id: id(envelope.id)?,
+                    method: envelope.method.ok_or(MessageError::Missing("method"))?,
+                    params: envelope.params,
+                    context: object(context).map_err(MessageError::Malformed)?,
+                })
+            }
             "response" => {
                 let outcome = match (envelope.result, envelope.error) {
                     (Some(result), None) => Ok(result),
-                    (None, Some(error)) => Err(error),
+                    (None, Some(error)) => {
+                        Err(object::<ErrorBody>(error).map_err(MessageError::Malformed)?)
+                    }
                     _ => return Err(MessageError::ResultAndError),
                 };
                 Ok(Message::Response {
@@ -164,7 +243,11 @@ impl<'a> Message<'a> {
     }
 }
 
-/// Writes a request envelope.
+fn id_error(error: IdError) -> serde_json::Error {
+    <serde_json::Error as serde::ser::Error>::custom(error)
+}
+
+/// Writes a request envelope. Bodies passed here must not hold secrets.
 pub fn write_request<W: std::io::Write, P: Serialize>(
     out: W,
     id: u64,
@@ -181,6 +264,7 @@ pub fn write_request<W: std::io::Write, P: Serialize>(
         params: &'a P,
         context: &'a Context,
     }
+    let id = check_id(id).map_err(id_error)?;
     serde_json::to_writer(
         out,
         &Request {
@@ -193,7 +277,8 @@ pub fn write_request<W: std::io::Write, P: Serialize>(
     )
 }
 
-/// Writes a successful response envelope.
+/// Writes a successful response envelope without secrets; responses that
+/// carry secrets go through [`crate::secret::SecretResponse`].
 pub fn write_result<W: std::io::Write, R: Serialize>(
     out: W,
     id: u64,
@@ -206,6 +291,7 @@ pub fn write_result<W: std::io::Write, R: Serialize>(
         id: u64,
         result: &'a R,
     }
+    let id = check_id(id).map_err(id_error)?;
     serde_json::to_writer(
         out,
         &Response {
@@ -229,6 +315,7 @@ pub fn write_error<W: std::io::Write>(
         id: u64,
         error: &'a ErrorBody,
     }
+    let id = check_id(id).map_err(id_error)?;
     serde_json::to_writer(
         out,
         &Response {
@@ -239,7 +326,7 @@ pub fn write_error<W: std::io::Write>(
     )
 }
 
-/// Writes an event envelope.
+/// Writes an event envelope. Event data must not hold secrets.
 pub fn write_event<W: std::io::Write, D: Serialize>(
     out: W,
     event: &str,
@@ -277,7 +364,7 @@ mod tests {
                 params,
                 context,
             } => {
-                assert_eq!((id, method), (7, "vault.unlock"));
+                assert_eq!((id, method.as_ref()), (7, "vault.unlock"));
                 assert_eq!(params.unwrap().get(), r#"{"password_b64":"eA=="}"#);
                 assert_eq!(context, Context::chrome());
             }
@@ -297,10 +384,7 @@ mod tests {
         assert!(matches!(
             Message::decode(br#"{"type":"event","event":"vault.locked","data":{"reason":"auto"}}"#)
                 .unwrap(),
-            Message::Event {
-                event: "vault.locked",
-                ..
-            }
+            Message::Event { .. }
         ));
         assert!(matches!(
             Message::decode(br#"{"type":"cancel","id":3}"#).unwrap(),
@@ -309,24 +393,38 @@ mod tests {
     }
 
     #[test]
+    fn result_and_error_presence() {
+        // A present null is still a result, and counts as present.
+        assert!(matches!(
+            Message::decode(br#"{"type":"response","id":1,"result":null}"#).unwrap(),
+            Message::Response { outcome: Ok(_), .. }
+        ));
+        for input in [
+            &br#"{"type":"response","id":1,"result":{},"error":null}"#[..],
+            br#"{"type":"response","id":1,"result":null,"error":{"code":"busy","message":"b"}}"#,
+            br#"{"type":"response","id":1}"#,
+        ] {
+            assert_eq!(
+                Message::decode(input).unwrap_err(),
+                MessageError::ResultAndError
+            );
+        }
+        // The unit result the writer produces round-trips.
+        let mut out = Vec::new();
+        write_result(&mut out, 1, &()).unwrap();
+        assert!(Message::decode(&out).is_ok());
+    }
+
+    #[test]
     fn rejects_malformed_envelopes() {
         for (input, expected) in [
             (
-                &br#"{"type":"response","id":1,"result":{},"error":{"code":"busy","message":""}}"#
-                    [..],
-                MessageError::ResultAndError,
-            ),
-            (
-                br#"{"type":"response","id":1}"#,
-                MessageError::ResultAndError,
-            ),
-            (
-                br#"{"type":"request","id":0,"method":"m","context":{"caller":"chrome"}}"#,
-                MessageError::BadId(0),
+                &br#"{"type":"request","id":0,"method":"m","context":{"caller":"chrome"}}"#[..],
+                MessageError::BadId(IdError(0)),
             ),
             (
                 br#"{"type":"cancel","id":9007199254740992}"#,
-                MessageError::BadId(9_007_199_254_740_992),
+                MessageError::BadId(IdError(9_007_199_254_740_992)),
             ),
             (
                 br#"{"type":"request","id":1,"context":{"caller":"chrome"}}"#,
@@ -348,24 +446,57 @@ mod tests {
                 String::from_utf8_lossy(input)
             );
         }
-        assert!(matches!(
-            Message::decode(b"{"),
-            Err(MessageError::Malformed(_))
-        ));
-        assert!(matches!(
-            Message::decode(
-                br#"{"type":"request","id":1,"method":"m","context":{"caller":"robot"}}"#
-            ),
-            Err(MessageError::Malformed(_))
-        ));
+        for input in [
+            &b"{"[..],
+            br#"{"type":"request","id":1,"method":"m","context":{"caller":"robot"}}"#,
+            // Arrays where objects belong (PR #7 review, finding 8).
+            br#"["cancel",1,null,null,null,null,null,null,null]"#,
+            br#"{"type":"request","id":1,"method":"m","context":["chrome",null]}"#,
+            br#"{"type":"request","id":1,"method":"m","context":{"caller":"page","page":["o","t",1,1]}}"#,
+            br#"{"type":"response","id":1,"error":["busy","b"]}"#,
+        ] {
+            assert!(matches!(Message::decode(input), Err(MessageError::Malformed(_))), "{}", String::from_utf8_lossy(input));
+        }
     }
 
     #[test]
-    fn writers_round_trip() {
+    fn escaped_names_decode_like_plain_ones() {
+        // "cancel" with its c escaped, built at runtime (backslash u0063).
+        let json = format!(r#"{{"type":"{}ancel","id":3}}"#, "BSu0063").replace("BS", "\\");
+        assert!(matches!(
+            Message::decode(json.as_bytes()).unwrap(),
+            Message::Cancel { id: 3 }
+        ));
+        let json = format!(r#"{{"type":"request","id":1,"method":"vault.{}nlock","context":{{"caller":"chrome"}}}}"#, "BSu0075")
+            .replace("BS", "\\");
+        match Message::decode(json.as_bytes()).unwrap() {
+            Message::Request { method, .. } => assert_eq!(method, "vault.unlock"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn debug_never_prints_bodies() {
+        let request = br#"{"type":"request","id":7,"method":"vault.unlock","params":{"password_b64":"cGFzc3dvcmQ="},"context":{"caller":"chrome"}}"#;
+        let debug = format!("{:?}", Message::decode(request).unwrap());
+        assert!(!debug.contains("cGFzc3dvcmQ="), "{debug}");
+        let response = br#"{"type":"response","id":7,"result":{"mnemonic_b64":"YWJhbmRvbg=="}}"#;
+        let debug = format!("{:?}", Message::decode(response).unwrap());
+        assert!(!debug.contains("YWJhbmRvbg=="), "{debug}");
+        let error =
+            br#"{"type":"response","id":7,"error":{"code":"internal","message":"secret detail"}}"#;
+        assert!(!format!("{:?}", Message::decode(error).unwrap()).contains("secret detail"));
+    }
+
+    #[test]
+    fn writers_check_ids_and_round_trip() {
         let mut out = Vec::new();
+        assert!(write_request(&mut out, 0, "m", &(), &Context::shell()).is_err());
+        assert!(write_result(&mut out, MAX_ID + 1, &()).is_err());
+        assert!(out.is_empty(), "nothing written for an invalid id");
         write_request(
             &mut out,
-            5,
+            MAX_ID,
             "vault.status",
             &serde_json::json!({}),
             &Context::shell(),
@@ -373,11 +504,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             Message::decode(&out).unwrap(),
-            Message::Request {
-                id: 5,
-                method: "vault.status",
-                ..
-            }
+            Message::Request { id: MAX_ID, .. }
         ));
         out.clear();
         write_error(
@@ -399,10 +526,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             Message::decode(&out).unwrap(),
-            Message::Event {
-                event: "vault.locked",
-                ..
-            }
+            Message::Event { .. }
         ));
     }
 }

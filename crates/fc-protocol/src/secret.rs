@@ -1,15 +1,27 @@
 //! Secret fields on the wire (design 0001, "Input validation and secret
-//! fields"). Secrets travel as base64 (or hex) strings, which contain no JSON
-//! escapes, so serde_json hands them over as slices of the frame buffer and
-//! never copies them into its scratch buffer. They're decoded straight into
-//! exactly sized `Zeroizing` buffers.
+//! fields").
+//!
+//! **Incoming:** a secret field is a JSON string of standard base64. It is
+//! deserialized as a borrowed **raw token** (`&RawValue`), so serde_json
+//! never unescapes it into its scratch buffer. The token must be a plain
+//! quoted string with no backslash, and it's decoded from the frame buffer
+//! straight into a `Zeroizing` buffer. Deserializers other than serde_json's
+//! borrowed slice/str parser can't produce a borrowed raw token, so they fail
+//! instead of taking a copying path.
+//!
+//! **Outgoing:** there is no `Serialize` for secrets at all. Responses that
+//! carry secrets are assembled by [`SecretResponse`]: it computes the exact
+//! size first, allocates one `Zeroizing` buffer, and base64-encodes the
+//! secret directly into it. There's no intermediate string, no chunk buffer,
+//! and no reallocation.
 
 use std::fmt;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use serde::de::{self, Deserializer, Visitor};
-use serde::{Deserialize, Serialize, Serializer};
+use serde::de::{self, Deserializer};
+use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
 /// The largest decoded secret field: 256 KiB (design 0001).
@@ -41,67 +53,125 @@ impl fmt::Debug for SecretBytes {
 
 impl<'de> Deserialize<'de> for SecretBytes {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct Base64Visitor;
-
-        impl<'de> Visitor<'de> for Base64Visitor {
-            type Value = SecretBytes;
-
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("a base64 string without escapes")
-            }
-
-            fn visit_borrowed_str<E: de::Error>(self, value: &'de str) -> Result<SecretBytes, E> {
-                decode(value).map_err(E::custom)
-            }
-
-            // An escaped string would arrive here, through serde_json's
-            // scratch buffer. Base64 never needs escapes, so refuse it.
-            fn visit_str<E: de::Error>(self, _value: &str) -> Result<SecretBytes, E> {
-                Err(E::custom("secret fields must be unescaped base64"))
-            }
-        }
-
-        deserializer.deserialize_str(Base64Visitor)
+        let raw: &'de RawValue = Deserialize::deserialize(deserializer)?;
+        decode_token(raw.get()).map_err(de::Error::custom)
     }
 }
 
-fn decode(value: &str) -> Result<SecretBytes, &'static str> {
+/// Decodes a raw JSON token that must be `"<base64>"` with no escapes.
+fn decode_token(token: &str) -> Result<SecretBytes, &'static str> {
+    let inner = token
+        .strip_prefix('"')
+        .and_then(|t| t.strip_suffix('"'))
+        .ok_or("secret fields must be base64 strings")?;
+    if inner.contains('\\') {
+        return Err("secret fields must be unescaped base64");
+    }
     // Padded base64 of MAX_SECRET_BYTES is this long; anything longer can't
     // decode to an allowed size.
-    if value.len() > MAX_SECRET_BYTES.div_ceil(3) * 4 {
+    if inner.len() > MAX_SECRET_BYTES.div_ceil(3) * 4 {
         return Err("secret field too long");
     }
-    let estimate = value.len() / 4 * 3 + 3;
-    let mut buffer = Zeroizing::new(vec![0u8; estimate]);
+    let mut buffer = Zeroizing::new(vec![0u8; inner.len() / 4 * 3 + 3]);
     let len = STANDARD
-        .decode_slice(value, buffer.as_mut_slice())
+        .decode_slice(inner, buffer.as_mut_slice())
         .map_err(|_| "secret field is not valid base64")?;
-    buffer.truncate(len);
     if len > MAX_SECRET_BYTES {
         return Err("secret field too long");
     }
+    buffer.truncate(len);
     Ok(SecretBytes(buffer))
 }
 
-/// Secret bytes to send as a base64 string field. Serializing streams the
-/// base64 into the serializer's writer without an intermediate `String`, so
-/// the only copy is the caller's `Zeroizing` output buffer.
+/// Builds a response frame payload that carries secrets:
+/// `{"type":"response","id":…,"result":{"<public…>","<secret>":"<base64>"}}`.
 ///
-/// This is the one audited `Serialize` for secrets that AGENTS.md rule 3
-/// allows. It is used only for the design's outgoing secrets: the onboarding
-/// phrase, the backup exports and the temporary `compat.*` keys.
-pub struct SecretOut<'a>(pub &'a [u8]);
+/// This is the one audited path that writes secrets (AGENTS.md rule 3): the
+/// onboarding phrase, the backup exports and the temporary `compat.*` keys.
+pub struct SecretResponse<'a> {
+    id: u64,
+    public: Vec<(&'static str, String)>,
+    secrets: Vec<(&'static str, &'a [u8])>,
+}
 
-impl Serialize for SecretOut<'_> {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_str(&base64::display::Base64Display::new(self.0, &STANDARD))
+impl fmt::Debug for SecretResponse<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecretResponse")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
     }
 }
 
-impl fmt::Debug for SecretOut<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("SecretOut(<redacted>)")
+impl<'a> SecretResponse<'a> {
+    pub fn new(id: u64) -> Self {
+        SecretResponse {
+            id,
+            public: Vec::new(),
+            secrets: Vec::new(),
+        }
     }
+
+    /// Adds a public field. Its JSON is built separately; it holds no
+    /// secrets.
+    pub fn public<T: Serialize>(
+        mut self,
+        name: &'static str,
+        value: &T,
+    ) -> serde_json::Result<Self> {
+        self.public.push((name, serde_json::to_string(value)?));
+        Ok(self)
+    }
+
+    /// Adds a secret field, base64-encoded into the output.
+    pub fn secret(mut self, name: &'static str, bytes: &'a [u8]) -> Self {
+        self.secrets.push((name, bytes));
+        self
+    }
+
+    /// The JSON payload, in one exactly sized `Zeroizing` buffer.
+    pub fn finish(self) -> Result<Zeroizing<Vec<u8>>, crate::message::IdError> {
+        crate::message::check_id(self.id)?;
+        let head = format!(r#"{{"type":"response","id":{},"result":{{"#, self.id);
+        let mut fields: Vec<(String, Option<&[u8]>)> = Vec::new();
+        for (name, json) in &self.public {
+            fields.push((format!(r#""{}":{}"#, field_name(name), json), None));
+        }
+        for (name, bytes) in &self.secrets {
+            fields.push((format!(r#""{}":""#, field_name(name)), Some(*bytes)));
+        }
+        let mut capacity = head.len() + 2; // "}}"
+        for (index, (prefix, secret)) in fields.iter().enumerate() {
+            capacity += prefix.len() + usize::from(index > 0);
+            if let Some(bytes) = secret {
+                capacity += bytes.len().div_ceil(3) * 4 + 1; // base64 + closing quote
+            }
+        }
+        let mut out = Zeroizing::new(Vec::with_capacity(capacity));
+        out.extend_from_slice(head.as_bytes());
+        for (index, (prefix, secret)) in fields.iter().enumerate() {
+            if index > 0 {
+                out.push(b',');
+            }
+            out.extend_from_slice(prefix.as_bytes());
+            if let Some(bytes) = secret {
+                let start = out.len();
+                out.resize(start + bytes.len().div_ceil(3) * 4, 0);
+                // The slot is exactly the encoded length, so this can't fail.
+                let written = STANDARD.encode_slice(bytes, &mut out[start..]).unwrap_or(0);
+                out.truncate(start + written);
+                out.push(b'"');
+            }
+        }
+        out.extend_from_slice(b"}}");
+        debug_assert_eq!(out.capacity(), capacity, "no reallocation");
+        Ok(out)
+    }
+}
+
+/// Field names are fixed identifiers chosen in code, never caller input.
+fn field_name(name: &'static str) -> &'static str {
+    debug_assert!(name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'));
+    name
 }
 
 #[cfg(test)]
@@ -126,13 +196,24 @@ mod tests {
 
     #[test]
     fn refuses_escaped_and_invalid_input() {
-        // An escaped "c" (backslash u0063) would go through the scratch buffer.
+        // An escaped "c" (backslash u0063) must be refused before any
+        // unescaping: the raw token contains a backslash.
         let mut escaped = br#"{"password_b64":"XGFzc3dvcmQ="}"#.to_vec();
         let at = escaped.iter().position(|b| *b == b'X').unwrap();
         escaped.splice(at..=at, [0x5c, b'u', b'0', b'0', b'6', b'3']);
         assert!(serde_json::from_slice::<Params>(&escaped).is_err());
         assert!(serde_json::from_slice::<Params>(br#"{"password_b64":"not base64!"}"#).is_err());
         assert!(serde_json::from_slice::<Params>(br#"{"password_b64":12}"#).is_err());
+    }
+
+    #[test]
+    fn copying_deserializers_are_refused() {
+        // from_reader and Value detours can't yield a borrowed raw token.
+        let json = br#"{"password_b64":"cGFzc3dvcmQ="}"#;
+        assert!(serde_json::from_reader::<_, Params>(&json[..]).is_err());
+        let value: serde_json::Value = serde_json::from_slice(json).unwrap();
+        assert!(Params::deserialize(&value).is_err());
+        assert!(serde_json::from_value::<Params>(value).is_err());
     }
 
     #[test]
@@ -153,19 +234,32 @@ mod tests {
     }
 
     #[test]
-    fn serializes_without_intermediate_string() {
-        #[derive(Serialize)]
-        struct Out<'a> {
-            mnemonic_b64: SecretOut<'a>,
-        }
-        let mut buffer = Zeroizing::new(Vec::with_capacity(64));
-        serde_json::to_writer(
-            &mut *buffer,
-            &Out {
-                mnemonic_b64: SecretOut(b"abandon"),
-            },
-        )
-        .unwrap();
-        assert_eq!(buffer.as_slice(), br#"{"mnemonic_b64":"YWJhbmRvbg=="}"#);
+    fn secret_response_is_exact_and_valid() {
+        let long = vec![0xabu8; 4000];
+        let payload = SecretResponse::new(7)
+            .public("addresses", &serde_json::json!({ "user_wallet": "0xabc" }))
+            .unwrap()
+            .secret("mnemonic_b64", b"abandon")
+            .secret("blob_b64", &long)
+            .finish()
+            .unwrap();
+        assert_eq!(payload.capacity(), payload.len(), "allocated once, exactly");
+        let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(value["type"], "response");
+        assert_eq!(value["id"], 7);
+        assert_eq!(value["result"]["addresses"]["user_wallet"], "0xabc");
+        assert_eq!(value["result"]["mnemonic_b64"], "YWJhbmRvbg==");
+        assert_eq!(
+            STANDARD
+                .decode(value["result"]["blob_b64"].as_str().unwrap())
+                .unwrap(),
+            long
+        );
+        assert!(SecretResponse::new(0).finish().is_err());
+        let empty = SecretResponse::new(1).finish().unwrap();
+        assert_eq!(
+            empty.as_slice(),
+            br#"{"type":"response","id":1,"result":{}}"#
+        );
     }
 }
