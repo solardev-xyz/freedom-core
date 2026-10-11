@@ -73,6 +73,7 @@ const CAPABILITIES: &[&str] = &[
     "vault.export_private_key",
     "vault.create",
     "vault.import",
+    "vault.reconcile",
     "keys.generate_mnemonic",
     "keys.validate_mnemonic",
     "keys.addresses",
