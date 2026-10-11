@@ -151,8 +151,13 @@ struct ScryptParams {
     dklen: usize,
 }
 
-/// Decrypts a scrypt / AES-128-CTR v3 keystore, as written by ethers or by
-/// [`encrypt`]. The password is NFKC-normalized first.
+/// Decrypts a scrypt / AES-128-CTR v3 keystore, as written by ethers'
+/// `Wallet.encrypt` or by [`encrypt`]. The password is NFKC-normalized first.
+///
+/// Deliberately strict: it reads the canonical form these two writers produce
+/// (exact field names, numeric parameters, lowercase `kdf`), not every
+/// variant ethers' lenient reader accepts. Freedom only ever reads keystores
+/// it wrote itself.
 pub fn decrypt(json: &str, password: &str) -> Result<DecryptedKey, Error> {
     let keystore: Keystore =
         serde_json::from_str(json).map_err(|_| Error::InvalidKeystore("malformed JSON"))?;
@@ -217,13 +222,22 @@ fn derive(
     r: u32,
     p: u32,
 ) -> Result<Zeroizing<[u8; DKLEN]>, Error> {
-    let password: Zeroizing<String> = Zeroizing::new(password.nfkc().collect());
+    let password = nfkc(password);
     let params = scrypt::Params::new(log_n, r, p)
         .map_err(|_| Error::InvalidKeystore("invalid scrypt parameters"))?;
     let mut derived = Zeroizing::new([0u8; DKLEN]);
     scrypt::scrypt(password.as_bytes(), salt, &params, derived.as_mut_slice())
         .map_err(|_| Error::InvalidKeystore("invalid scrypt parameters"))?;
     Ok(derived)
+}
+
+/// NFKC into a `Zeroizing<String>` allocated at its exact final size, so no
+/// reallocation leaves an unwiped prefix of the password behind.
+fn nfkc(input: &str) -> Zeroizing<String> {
+    let len = input.nfkc().map(char::len_utf8).sum();
+    let mut out = Zeroizing::new(String::with_capacity(len));
+    out.extend(input.nfkc());
+    out
 }
 
 fn apply_ctr(derived: &[u8; DKLEN], iv: &[u8; 16], data: &mut [u8]) {
@@ -291,6 +305,14 @@ fn unhex(s: &str) -> Result<Vec<u8>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nfkc_never_reallocates() {
+        for input in ["testpass", "ｔｅｓｔｐａｓｓ", "Cafe\u{301}-\u{1f510}", ""] {
+            let out = nfkc(input);
+            assert_eq!(out.capacity(), out.len(), "{input:?}");
+        }
+    }
 
     #[test]
     fn uuid_bits() {
