@@ -18,6 +18,12 @@ pub enum Error {
     /// time range).
     #[error("invalid parameters: {0}")]
     InvalidParams(&'static str),
+    /// The operation needs an unlocked vault (`VAULT_LOCKED_MESSAGE`).
+    #[error("Vault is locked")]
+    Locked,
+    /// Key derivation failed.
+    #[error("key derivation: {0}")]
+    Keys(fc_keys::Error),
     /// The random number generator failed.
     #[error("random number generator failed")]
     Randomness,
