@@ -330,13 +330,14 @@ fn derive_key(
     salt: &[u8],
     iterations: u32,
 ) -> Result<Zeroizing<aes_gcm::Key<Aes256Gcm16>>, Error> {
-    if iterations == 0 || iterations > MAX_ITERATIONS {
-        return Err(Error::InvalidParams("iteration count out of range"));
-    }
-    let mut key = Zeroizing::new(aes_gcm::Key::<Aes256Gcm16>::default());
+    let rounds = std::num::NonZeroU32::new(iterations)
+        .filter(|rounds| rounds.get() <= MAX_ITERATIONS)
+        .ok_or(Error::InvalidParams("iteration count out of range"))?;
     // fc-keys' PBKDF2 wipes its key pads and round buffers; the pbkdf2
     // crate doesn't.
-    fc_keys::kdf::pbkdf2::<Sha256>(password, salt, iterations, key.as_mut_slice());
+    let derived = fc_keys::kdf::pbkdf2::<Sha256, 32>(password, salt, rounds);
+    let mut key = Zeroizing::new(aes_gcm::Key::<Aes256Gcm16>::default());
+    key.copy_from_slice(derived.as_slice());
     Ok(key)
 }
 
