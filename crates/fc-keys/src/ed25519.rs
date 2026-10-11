@@ -3,14 +3,9 @@
 
 use std::fmt;
 
-use hmac::digest::FixedOutput;
-use hmac::{Hmac, KeyInit, Mac};
-use sha2::Sha512;
 use zeroize::Zeroizing;
 
 use crate::{DerivationPath, Error, Seed};
-
-type HmacSha512 = Hmac<Sha512>;
 
 /// A derived Ed25519 key. Zeroizes on drop and never prints its secret.
 pub struct Ed25519Key {
@@ -25,15 +20,15 @@ pub fn derive_ed25519(seed: &Seed, path: &DerivationPath) -> Result<Ed25519Key, 
 }
 
 fn derive_from_seed_bytes(seed: &[u8], path: &DerivationPath) -> Result<Ed25519Key, Error> {
-    let (mut key, mut chain_code) = split(hmac(b"ed25519 seed", &[seed])?);
+    let (mut key, mut chain_code) = split(crate::kdf::hmac_sha512(b"ed25519 seed", &[seed]));
     for child in path.children() {
         if !child.is_hardened() {
             return Err(Error::NonHardenedEd25519);
         }
-        (key, chain_code) = split(hmac(
+        (key, chain_code) = split(crate::kdf::hmac_sha512(
             chain_code.as_slice(),
             &[&[0u8], key.as_slice(), &child.to_be_bytes()],
-        )?);
+        ));
     }
     let public = ed25519_dalek::SigningKey::from_bytes(&key)
         .verifying_key()
@@ -43,18 +38,6 @@ fn derive_from_seed_bytes(seed: &[u8], path: &DerivationPath) -> Result<Ed25519K
         public,
         path: path.clone(),
     })
-}
-
-fn hmac(key: &[u8], parts: &[&[u8]]) -> Result<Zeroizing<[u8; 64]>, Error> {
-    let mut mac = HmacSha512::new_from_slice(key).map_err(|_| Error::Derivation)?;
-    for part in parts {
-        mac.update(part);
-    }
-    let mut output = Zeroizing::new(hmac::digest::Output::<HmacSha512>::default());
-    FixedOutput::finalize_into(mac, &mut output);
-    let mut out = Zeroizing::new([0u8; 64]);
-    out.copy_from_slice(output.as_slice());
-    Ok(out)
 }
 
 fn split(i: Zeroizing<[u8; 64]>) -> (Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>) {

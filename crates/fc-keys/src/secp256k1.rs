@@ -14,18 +14,13 @@
 
 use std::fmt;
 
-use hmac::digest::FixedOutput;
-use hmac::{Hmac, KeyInit, Mac};
 use k256::elliptic_curve::ops::Reduce;
 use k256::elliptic_curve::sec1::ToSec1Point;
 use k256::{FieldBytes, NonZeroScalar, Scalar, SecretKey};
-use sha2::Sha512;
 use sha3::{Digest, Keccak256};
 use zeroize::Zeroizing;
 
 use crate::{ChildIndex, DerivationPath, Error, Seed};
-
-type HmacSha512 = Hmac<Sha512>;
 
 /// A derived secp256k1 key. Zeroizes on drop and never prints its secret.
 pub struct Secp256k1Key {
@@ -43,7 +38,7 @@ pub fn derive_secp256k1(seed: &Seed, path: &DerivationPath) -> Result<Secp256k1K
 }
 
 fn derive_from_seed_bytes(seed: &[u8], path: &DerivationPath) -> Result<Secp256k1Key, Error> {
-    let i = hmac(b"Bitcoin seed", &[seed])?;
+    let i = crate::kdf::hmac_sha512(b"Bitcoin seed", &[seed]);
     let mut key = secret_from(&i[..32])?;
     let mut chain_code = chain_code_from(&i);
     for child in path.children() {
@@ -63,13 +58,13 @@ fn derive_child(
 ) -> Result<(SecretKey, Zeroizing<[u8; 32]>), Error> {
     let i = if child.is_hardened() {
         let parent_bytes = Zeroizing::new(parent.to_bytes());
-        hmac(
+        crate::kdf::hmac_sha512(
             chain_code,
             &[&[0u8], parent_bytes.as_slice(), &child.to_be_bytes()],
-        )?
+        )
     } else {
         let public = parent.public_key().to_sec1_point(true);
-        hmac(chain_code, &[public.as_bytes(), &child.to_be_bytes()])?
+        crate::kdf::hmac_sha512(chain_code, &[public.as_bytes(), &child.to_be_bytes()])
     };
     child_from_i(parent, &i)
 }
@@ -82,8 +77,8 @@ fn child_from_i(
     let mut il = Zeroizing::new(FieldBytes::default());
     il.copy_from_slice(&i[..32]);
     let tweak = Zeroizing::new(<Scalar as Reduce<FieldBytes>>::reduce(&il));
-    let parent_scalar = Zeroizing::new(*parent.to_nonzero_scalar());
-    let sum = Zeroizing::new(*tweak + *parent_scalar);
+    let parent_scalar = Zeroizing::new(parent.to_nonzero_scalar());
+    let sum = Zeroizing::new(*tweak + **parent_scalar);
     let child = Option::<NonZeroScalar>::from(NonZeroScalar::new(*sum))
         .map(|nonzero| {
             let nonzero = Zeroizing::new(nonzero);
@@ -91,18 +86,6 @@ fn child_from_i(
         })
         .ok_or(Error::Derivation)?;
     Ok((child, chain_code_from(i)))
-}
-
-fn hmac(key: &[u8], parts: &[&[u8]]) -> Result<Zeroizing<[u8; 64]>, Error> {
-    let mut mac = HmacSha512::new_from_slice(key).map_err(|_| Error::Derivation)?;
-    for part in parts {
-        mac.update(part);
-    }
-    let mut output = Zeroizing::new(hmac::digest::Output::<HmacSha512>::default());
-    FixedOutput::finalize_into(mac, &mut output);
-    let mut out = Zeroizing::new([0u8; 64]);
-    out.copy_from_slice(output.as_slice());
-    Ok(out)
 }
 
 fn secret_from(bytes: &[u8]) -> Result<SecretKey, Error> {

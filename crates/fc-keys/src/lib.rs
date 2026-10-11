@@ -10,6 +10,7 @@
 mod ed25519;
 mod error;
 pub mod freedom;
+pub mod kdf;
 mod mnemonic;
 mod path;
 mod secp256k1;

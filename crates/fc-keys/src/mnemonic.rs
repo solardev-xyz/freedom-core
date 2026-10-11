@@ -12,7 +12,6 @@
 use std::fmt;
 use std::sync::OnceLock;
 
-use pbkdf2::pbkdf2_hmac;
 use rand_core::TryCryptoRng;
 use sha2::{Digest, Sha256, Sha512};
 use unicode_normalization::UnicodeNormalization;
@@ -110,7 +109,7 @@ impl Mnemonic {
         let normalized = nfkd(&self.phrase);
         let salt = nfkd(&format!("mnemonic{passphrase}"));
         let mut seed = Zeroizing::new([0u8; 64]);
-        pbkdf2_hmac::<Sha512>(
+        crate::kdf::pbkdf2::<Sha512>(
             normalized.as_bytes(),
             salt.as_bytes(),
             SEED_ROUNDS,

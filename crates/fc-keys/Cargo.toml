@@ -10,15 +10,14 @@ repository.workspace = true
 [lints]
 workspace = true
 
-# RustCrypto's digest-0.11 generation: hmac, sha2 and digest have `zeroize`
-# features there, so HMAC key pads and hash states are wiped. BIP-32 is
-# implemented in src/secp256k1.rs so every intermediate value it owns is
-# wiped too.
+# RustCrypto's digest-0.11 generation: sha2 and digest have `zeroize`
+# features there, so hash states are wiped. HMAC and PBKDF2 are implemented
+# in src/kdf.rs (the hmac and pbkdf2 crates leave key pads and round
+# buffers unwiped), and BIP-32 in src/secp256k1.rs, so every intermediate
+# value is wiped too.
 [dependencies]
 ed25519-dalek = { version = "3.0", default-features = false, features = ["zeroize"] }
-hmac = { version = "0.13", features = ["zeroize"] }
 k256 = { version = "0.14", default-features = false, features = ["arithmetic", "ecdsa"] }
-pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
 rand_core = "0.10"
 sha2 = { version = "0.11", default-features = false, features = ["zeroize"] }
 sha3 = "0.12"
@@ -28,4 +27,7 @@ zeroize = "1.8"
 
 [dev-dependencies]
 hex = "0.4"
+# Reference implementations for kdf.rs's differential tests.
+hmac = "0.13"
+pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
 serde_json = "1"
