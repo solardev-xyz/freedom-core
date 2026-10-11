@@ -1,13 +1,18 @@
 //! Secret fields on the wire (design 0001, "Input validation and secret
 //! fields").
 //!
-//! **Incoming:** a secret field is a JSON string of standard base64. It is
-//! deserialized as a borrowed **raw token** (`&RawValue`), so serde_json
-//! never unescapes it into its scratch buffer. The token must be a plain
-//! quoted string with no backslash, and it's decoded from the frame buffer
-//! straight into a `Zeroizing` buffer. Deserializers other than serde_json's
-//! borrowed slice/str parser can't produce a borrowed raw token, so they fail
-//! instead of taking a copying path.
+//! **Incoming:** a secret field is a JSON string of standard base64. Method
+//! parameter structs declare it as a borrowed **raw token**
+//! (`#[serde(borrow)] field: &'a RawValue`) and parse their parameters only
+//! from the frame's own bytes (a slice). The token is converted with
+//! [`SecretBytes::from_raw`]: it must be a plain quoted string with no
+//! backslash, and it's decoded from the frame buffer straight into a
+//! `Zeroizing` buffer.
+//!
+//! `SecretBytes` deliberately has no `Deserialize` implementation. With a
+//! generic one, a reader-backed parse (`serde_json::from_reader`) would
+//! buffer the raw token into an unwiped `Vec` before any check could refuse
+//! it.
 //!
 //! **Outgoing:** there is no `Serialize` for secrets at all. Responses that
 //! carry secrets are assembled by [`SecretResponse`]: it computes the exact
@@ -19,8 +24,7 @@ use std::fmt;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use serde::de::{self, Deserializer};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
@@ -51,10 +55,11 @@ impl fmt::Debug for SecretBytes {
     }
 }
 
-impl<'de> Deserialize<'de> for SecretBytes {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw: &'de RawValue = Deserialize::deserialize(deserializer)?;
-        decode_token(raw.get()).map_err(de::Error::custom)
+impl SecretBytes {
+    /// Decodes a borrowed raw JSON token, which must be `"<base64>"` with no
+    /// escapes, into a `Zeroizing` buffer.
+    pub fn from_raw(raw: &RawValue) -> Result<Self, &'static str> {
+        decode_token(raw.get())
     }
 }
 
@@ -178,42 +183,35 @@ fn field_name(name: &'static str) -> &'static str {
 mod tests {
     use super::*;
 
-    #[derive(Deserialize)]
-    struct Params {
-        password_b64: SecretBytes,
+    #[derive(serde::Deserialize)]
+    struct Params<'a> {
+        #[serde(borrow)]
+        password_b64: &'a RawValue,
+    }
+
+    fn password(json: &[u8]) -> Result<SecretBytes, String> {
+        let params: Params<'_> = serde_json::from_slice(json).map_err(|e| e.to_string())?;
+        SecretBytes::from_raw(params.password_b64).map_err(str::to_owned)
     }
 
     #[test]
     fn decodes_borrowed_base64() {
-        let params: Params = serde_json::from_slice(br#"{"password_b64":"cGFzc3dvcmQ="}"#).unwrap();
-        assert_eq!(params.password_b64.as_bytes(), b"password");
-        assert_eq!(params.password_b64.as_str().unwrap(), "password");
-        assert_eq!(
-            format!("{:?}", params.password_b64),
-            "SecretBytes(<redacted>)"
-        );
+        let secret = password(br#"{"password_b64":"cGFzc3dvcmQ="}"#).unwrap();
+        assert_eq!(secret.as_bytes(), b"password");
+        assert_eq!(secret.as_str().unwrap(), "password");
+        assert_eq!(format!("{secret:?}"), "SecretBytes(<redacted>)");
     }
 
     #[test]
     fn refuses_escaped_and_invalid_input() {
-        // An escaped "c" (backslash u0063) must be refused before any
-        // unescaping: the raw token contains a backslash.
+        // An escaped "c" (backslash u0063) is refused from the raw token,
+        // before anything unescapes it.
         let mut escaped = br#"{"password_b64":"XGFzc3dvcmQ="}"#.to_vec();
         let at = escaped.iter().position(|b| *b == b'X').unwrap();
         escaped.splice(at..=at, [0x5c, b'u', b'0', b'0', b'6', b'3']);
-        assert!(serde_json::from_slice::<Params>(&escaped).is_err());
-        assert!(serde_json::from_slice::<Params>(br#"{"password_b64":"not base64!"}"#).is_err());
-        assert!(serde_json::from_slice::<Params>(br#"{"password_b64":12}"#).is_err());
-    }
-
-    #[test]
-    fn copying_deserializers_are_refused() {
-        // from_reader and Value detours can't yield a borrowed raw token.
-        let json = br#"{"password_b64":"cGFzc3dvcmQ="}"#;
-        assert!(serde_json::from_reader::<_, Params>(&json[..]).is_err());
-        let value: serde_json::Value = serde_json::from_slice(json).unwrap();
-        assert!(Params::deserialize(&value).is_err());
-        assert!(serde_json::from_value::<Params>(value).is_err());
+        assert!(password(&escaped).is_err());
+        assert!(password(br#"{"password_b64":"not base64!"}"#).is_err());
+        assert!(password(br#"{"password_b64":12}"#).is_err());
     }
 
     #[test]
@@ -221,16 +219,12 @@ mod tests {
         let ok = STANDARD.encode(vec![1u8; MAX_SECRET_BYTES]);
         let json = format!(r#"{{"password_b64":"{ok}"}}"#);
         assert_eq!(
-            serde_json::from_str::<Params>(&json)
-                .unwrap()
-                .password_b64
-                .as_bytes()
-                .len(),
+            password(json.as_bytes()).unwrap().as_bytes().len(),
             MAX_SECRET_BYTES
         );
         let too_long = STANDARD.encode(vec![1u8; MAX_SECRET_BYTES + 1]);
         let json = format!(r#"{{"password_b64":"{too_long}"}}"#);
-        assert!(serde_json::from_str::<Params>(&json).is_err());
+        assert!(password(json.as_bytes()).is_err());
     }
 
     #[test]

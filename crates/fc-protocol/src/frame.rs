@@ -6,10 +6,12 @@
 //! buffer, so a frame that carried a password is wiped when it's dropped and
 //! no shared buffer keeps stale bytes in its spare capacity.
 //!
-//! The decoder holds at most [`MAX_READY_FRAMES`] complete frames and
-//! [`MAX_READY_BYTES`] of their payloads. `push` stops consuming input at
-//! that budget and says how much it consumed. The caller pops frames, then
-//! pushes the rest: backpressure, not an error.
+//! The decoder holds at most [`MAX_READY_FRAMES`] complete frames. Once the
+//! payloads it holds reach [`MAX_READY_BYTES`], it stops taking input; the
+//! frame that crosses the threshold is still completed, so it holds less
+//! than `MAX_READY_BYTES + MAX_PAYLOAD` bytes (3 MiB). `push` says how much
+//! input it consumed. The caller pops frames, then pushes the rest:
+//! backpressure, not an error.
 
 use std::collections::VecDeque;
 
@@ -23,7 +25,8 @@ pub const KIND_JSON: u8 = 0x01;
 pub const RESERVED_KINDS: std::ops::RangeInclusive<u8> = 0x02..=0x0F;
 /// The most complete frames the decoder holds before `push` stops.
 pub const MAX_READY_FRAMES: usize = 64;
-/// The most payload bytes complete frames may hold before `push` stops.
+/// Payload bytes held in complete frames at which `push` stops taking input
+/// (a threshold: the frame that crosses it is still completed).
 pub const MAX_READY_BYTES: usize = 2 * MAX_PAYLOAD;
 
 /// A malformed stream. The receiver logs it and closes the connection.
