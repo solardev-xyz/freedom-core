@@ -271,29 +271,9 @@ pub fn write(
     let _ = fsx::remove(&identity_dir.join(STAGING), || true);
 
     // 3 and 4. After the commit, a failure leaves the journal for recovery.
-    let result = install(&journal).and_then(|corrupt| {
-        let status = if corrupt {
-            OpStatus::Corrupt
-        } else {
-            OpStatus::Installed
-        };
-        finish(identity_dir, &journal.op_id, status).map(|()| status)
-    });
-    Ok(match result {
-        Ok(OpStatus::Installed) => {
-            // This node's identity is whole again.
-            if let Err(e) = mark_unresolved(identity_dir, &[node], false) {
-                crate::log::warn(
-                    "could not clear the node's unresolved mark",
-                    serde_json::json!({ "error": e.kind().to_string() }),
-                );
-            }
-            Outcome::Installed
-        }
-        Ok(_) => {
-            let _ = mark_unresolved(identity_dir, &[node], true);
-            Outcome::Corrupt
-        }
+    Ok(match conclude(identity_dir, &journal) {
+        Ok(OpStatus::Installed) => Outcome::Installed,
+        Ok(_) => Outcome::Corrupt,
         Err(e) => {
             crate::log::error(
                 "node identity install did not finish after commit",
@@ -341,14 +321,7 @@ pub fn recover(identity_dir: &Path) -> std::io::Result<Recovered> {
     // before any member is installed from it.
     File::open(&path)?.sync_all()?;
     sync_dir(identity_dir)?;
-    let corrupt = install(&journal)?;
-    let status = if corrupt {
-        mark_unresolved(identity_dir, &[journal.node.as_str()], true)?;
-        OpStatus::Corrupt
-    } else {
-        OpStatus::Installed
-    };
-    finish(identity_dir, &journal.op_id, status)?;
+    let status = conclude(identity_dir, &journal)?;
     let _ = fsx::remove(&identity_dir.join(STAGING), || true);
     Ok(Recovered::Finished {
         op_id: journal.op_id,
@@ -518,6 +491,22 @@ fn install(journal: &Journal) -> std::io::Result<bool> {
         sync_dir(dir)?;
     }
     Ok(corrupt)
+}
+
+/// Steps 3 and 4, in the order that keeps every crash recoverable: install,
+/// then update the node's health durably (marked unresolved if corrupt,
+/// cleared if installed), then record the outcome and remove the journal.
+/// Any failure keeps the journal, so recovery repeats the whole sequence.
+fn conclude(identity_dir: &Path, journal: &Journal) -> std::io::Result<OpStatus> {
+    let corrupt = install(journal)?;
+    mark_unresolved(identity_dir, &[journal.node.as_str()], corrupt)?;
+    let status = if corrupt {
+        OpStatus::Corrupt
+    } else {
+        OpStatus::Installed
+    };
+    finish(identity_dir, &journal.op_id, status)?;
+    Ok(status)
 }
 
 /// Step 4: record the outcome durably, then remove the journal. If the
@@ -855,6 +844,24 @@ mod tests {
         );
         assert_eq!(op_status(&identity, "op-1").unwrap(), OpStatus::Installed);
         assert!(unresolved(&identity).unwrap().is_empty());
+    }
+
+    #[test]
+    fn recovering_a_repair_clears_its_node() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (identity, root) = (tmp.path().join("identity"), tmp.path().join("bee"));
+        made(&identity);
+        mark_unresolved(&identity, &NODES, true).unwrap();
+        // A repair of Bee committed, then the process died before install.
+        committed_journal(&identity, &root, "op-repair", b"k", b"c");
+        assert!(matches!(
+            recover(&identity).unwrap(),
+            Recovered::Finished {
+                status: OpStatus::Installed,
+                ..
+            }
+        ));
+        assert_eq!(unresolved(&identity).unwrap(), ["radicle"]);
     }
 
     #[test]

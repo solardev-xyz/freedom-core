@@ -438,6 +438,21 @@ fn an_unfinishable_recovery_is_reported_and_blocks_new_writes() {
     core.close_stdin();
     assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
 
+    // Radicle also known broken: the report covers both nodes.
+    std::fs::write(
+        data.join("node-identity-unresolved.json"),
+        r#"{"nodes":["radicle"]}"#,
+    )
+    .unwrap();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    assert_eq!(
+        core.hello()["result"]["node_recovery"],
+        json!({ "status": "pending_recovery" })
+    );
+    core.close_stdin();
+    assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
+    std::fs::remove_file(data.join("node-identity-unresolved.json")).unwrap();
+
     // Once the obstacle is gone, the next start finishes it.
     std::fs::remove_dir_all(node.join("config.yaml")).unwrap();
     let mut core = spawn("serve", &data, &locks, &[]);

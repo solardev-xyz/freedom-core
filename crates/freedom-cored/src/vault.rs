@@ -1664,6 +1664,9 @@ pub fn startup_snapshot(dir: &Path) -> (FileSnapshot, NodeRecovery) {
 pub type NodeRecovery = Option<serde_json::Value>;
 
 fn startup_recovery(dir: &Path) -> NodeRecovery {
+    // Every affected node, and whether any is pending (rather than corrupt).
+    let mut affected: Vec<String> = Vec::new();
+    let mut pending = None;
     match journal::recover(dir) {
         Ok(outcome) => {
             if outcome != journal::Recovered::Nothing {
@@ -1678,23 +1681,44 @@ fn startup_recovery(dir: &Path) -> NodeRecovery {
                 "node identity recovery failed",
                 serde_json::json!({ "error": e.kind().to_string() }),
             );
-            let mut report = serde_json::json!({ "status": "pending_recovery" });
-            if let Some((op_id, node)) = journal::pending(dir) {
-                report["op_id"] = op_id.into();
-                report["node"] = node.into();
+            match journal::pending(dir) {
+                Some((op_id, node)) => {
+                    affected.push(node);
+                    pending = Some(op_id);
+                }
+                // The outstanding journal's node is unknown: every node.
+                None => {
+                    affected.extend(["bee".to_owned(), "radicle".to_owned()]);
+                    pending = Some(String::new());
+                }
             }
-            return Some(report);
         }
     }
     // Nodes known to be broken stay reported on every start, until a write
-    // installs them again.
+    // installs them again; unreadable means every node.
     match journal::unresolved(dir) {
-        Ok(nodes) if nodes.is_empty() => None,
-        Ok(nodes) if nodes.len() == 1 => {
-            Some(serde_json::json!({ "status": "corrupt", "node": nodes[0] }))
+        Ok(nodes) => affected.extend(nodes),
+        Err(_) => affected.extend(["bee".to_owned(), "radicle".to_owned()]),
+    }
+    affected.sort();
+    affected.dedup();
+    let status = if pending.is_some() {
+        "pending_recovery"
+    } else {
+        "corrupt"
+    };
+    match affected.as_slice() {
+        [] => None,
+        // One node: name it (and the pending op, if that's what it is).
+        [node] => {
+            let mut report = serde_json::json!({ "status": status, "node": node });
+            if let Some(op_id) = pending.filter(|id| !id.is_empty()) {
+                report["op_id"] = op_id.into();
+            }
+            Some(report)
         }
-        // Several, or unreadable: every node.
-        _ => Some(serde_json::json!({ "status": "corrupt" })),
+        // Several: a report without a node covers every node.
+        _ => Some(serde_json::json!({ "status": status })),
     }
 }
 
