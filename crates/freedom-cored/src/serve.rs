@@ -50,6 +50,8 @@ pub enum Event {
     WriterFailed,
     ThreadDied(&'static str),
     ParentGone,
+    /// The startup read of the vault file finished.
+    Snapshot(Result<StatusResult, &'static str>),
 }
 
 /// The methods this build implements, in `core.hello`'s capabilities. Only
@@ -85,19 +87,21 @@ pub fn run(options: &Options) -> Exit {
         Ok(writer) => writer,
         Err(_) => return Exit::Internal,
     };
+    // The status snapshot is read once, on its own thread: the gate makes
+    // this process the only writer, so it never needs re-reading, and slow
+    // storage can't hold up the loop (deadline, EOF, parent exit). core.hello
+    // is answered once the snapshot is ready.
     if transport::spawn_reader(events_tx.clone(), Arc::clone(&credits)).is_err()
+        || !spawn_snapshot(gate.identity_dir.clone(), events_tx.clone())
         || !spawn_parent_watch(options.parent_pid, events_tx)
     {
         log::error("cannot start a thread", serde_json::json!({}));
         return Exit::Internal;
     }
 
-    // The status snapshot is taken here, before serving: the gate makes this
-    // process the only writer, so it never needs re-reading on the loop
-    // (where slow storage would delay shutdown and EOF).
-    let snapshot = vault_status(&gate.identity_dir);
     let mut core = Core {
-        snapshot,
+        snapshot: None,
+        pending_hello: None,
         out: writer.queue,
         hello_done: false,
         last_request_id: 0,
@@ -150,6 +154,14 @@ pub fn run(options: &Options) -> Exit {
                 log::info("parent exited", serde_json::json!({}));
                 break Exit::Ok;
             }
+            Ok(Event::Snapshot(snapshot)) => {
+                core.snapshot = Some(snapshot);
+                if let Some(id) = core.pending_hello.take()
+                    && let Flow::Exit(exit) = core.hello_reply(id)
+                {
+                    break exit;
+                }
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break Exit::Ok,
         }
@@ -161,6 +173,33 @@ pub fn run(options: &Options) -> Exit {
     drop(gate);
     exit
 }
+
+/// Reads the status snapshot on its own thread. False if the thread can't be
+/// created. If the read never finishes, the hello deadline ends the process.
+fn spawn_snapshot(identity_dir: PathBuf, events: Sender<Event>) -> bool {
+    std::thread::Builder::new()
+        .name("snapshot".into())
+        .spawn(move || {
+            test_delay();
+            let _ = events.send(Event::Snapshot(vault_status(&identity_dir)));
+        })
+        .is_ok()
+}
+
+/// Debug builds only: `FREEDOM_CORED_TEST_SNAPSHOT_DELAY_MS` stalls the
+/// snapshot read, to test that slow storage can't hold up the loop.
+#[cfg(debug_assertions)]
+fn test_delay() {
+    if let Some(ms) = std::env::var("FREEDOM_CORED_TEST_SNAPSHOT_DELAY_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn test_delay() {}
 
 /// Starts the parent watcher. False if the thread can't be created.
 fn spawn_parent_watch(parent_pid: Option<u32>, events: Sender<Event>) -> bool {
@@ -184,7 +223,10 @@ enum Flow {
 }
 
 struct Core {
-    snapshot: Result<StatusResult, &'static str>,
+    /// `None` until the startup read finishes.
+    snapshot: Option<Result<StatusResult, &'static str>>,
+    /// A valid core.hello received before the snapshot was ready.
+    pending_hello: Option<u64>,
     out: mpsc::SyncSender<Zeroizing<Vec<u8>>>,
     hello_done: bool,
     last_request_id: u64,
@@ -207,7 +249,7 @@ struct HelloResult {
 }
 
 #[derive(Serialize)]
-struct StatusResult {
+pub struct StatusResult {
     exists: bool,
     unlocked: bool,
     epoch: Option<u64>,
@@ -324,7 +366,7 @@ impl Core {
                 Flow::Continue => Flow::Exit(Exit::Ok),
                 exit => exit,
             },
-            "vault.status" => match &self.snapshot {
+            "vault.status" => match self.snapshot.as_ref().unwrap_or(&Err("other")) {
                 Ok(status) => self.result(id, status),
                 Err(kind) => self.error(
                     id,
@@ -361,12 +403,20 @@ impl Core {
             );
             return Flow::Exit(Exit::Protocol);
         }
-        if self.hello_done {
+        if self.hello_done || self.pending_hello.is_some() {
             return self.error(
                 id,
                 ErrorBody::new(ErrorCode::InvalidArgument, "core.hello was already sent"),
             );
         }
+        if self.snapshot.is_none() {
+            self.pending_hello = Some(id);
+            return Flow::Continue;
+        }
+        self.hello_reply(id)
+    }
+
+    fn hello_reply(&mut self, id: u64) -> Flow {
         self.hello_done = true;
         self.result(
             id,

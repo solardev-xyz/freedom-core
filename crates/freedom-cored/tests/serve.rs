@@ -38,7 +38,18 @@ impl Drop for Core {
 }
 
 fn spawn(command: &str, data: &Path, locks: &Path, extra: &[&str]) -> Core {
+    spawn_env(command, data, locks, extra, &[])
+}
+
+fn spawn_env(
+    command: &str,
+    data: &Path,
+    locks: &Path,
+    extra: &[&str],
+    env: &[(&str, &str)],
+) -> Core {
     let mut child = Command::new(BIN)
+        .envs(env.iter().copied())
         .arg(command)
         .arg("--data-dir")
         .arg(data)
@@ -547,4 +558,55 @@ fn usage_errors() {
         .status()
         .unwrap();
     assert_eq!(status.code(), Some(64));
+}
+
+const SLOW_SNAPSHOT: (&str, &str) = ("FREEDOM_CORED_TEST_SNAPSHOT_DELAY_MS", "30000");
+
+#[test]
+fn slow_storage_at_startup_does_not_block_eof() {
+    let (_root, data, locks) = dirs();
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("identity-vault.json"), b"{}").unwrap();
+    let mut core = spawn_env("serve", &data, &locks, &[], &[SLOW_SNAPSHOT]);
+    std::thread::sleep(Duration::from_millis(300));
+    core.close_stdin();
+    assert_eq!(core.exit_code(Duration::from_secs(3)), 0);
+}
+
+#[test]
+fn slow_storage_at_startup_is_bounded_by_the_hello_deadline() {
+    let (_root, data, locks) = dirs();
+    let started = Instant::now();
+    let mut core = spawn_env(
+        "serve",
+        &data,
+        &locks,
+        &["--hello-timeout-ms", "1000"],
+        &[SLOW_SNAPSHOT],
+    );
+    core.send(&request(
+        1,
+        "core.hello",
+        json!({ "protocol": 1, "shell_version": "test", "auto_lock_ms": 900000 }),
+    ));
+    assert_eq!(core.exit_code(Duration::from_secs(5)), 76);
+    assert!(started.elapsed() < Duration::from_secs(4));
+}
+
+#[test]
+fn hello_waits_for_the_snapshot() {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn_env(
+        "serve",
+        &data,
+        &locks,
+        &[],
+        &[("FREEDOM_CORED_TEST_SNAPSHOT_DELAY_MS", "500")],
+    );
+    let hello = core.hello();
+    assert_eq!(hello["result"]["protocol"], 1);
+    assert_eq!(
+        core.call(2, "vault.status", json!({}))["result"]["exists"],
+        false
+    );
 }
