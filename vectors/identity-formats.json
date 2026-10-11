@@ -1,0 +1,148 @@
+{
+  "meta": {
+    "freedomBrowserCommit": "fb540328162839e68150fe2c5e517edb86734d1c",
+    "packages": {
+      "ethers": "6.17.0",
+      "@scure/bip39": "2.4.0",
+      "@scure/base": "1.2.6",
+      "micro-key-producer": "0.10.2",
+      "@metamask/browser-passworder": "6.0.0"
+    },
+    "nodeVersion": "v24.15.0",
+    "generator": "vectors/generator/generate.js"
+  },
+  "vectors": [
+    {
+      "mnemonicId": "abandon-12",
+      "ipfs": {
+        "privKey": "CAESQG18MhmN/5Ywlrkylqyzg8m08r2FpOUsEjv+4eXNAMdJkSN61ZWaJeAlSH3uvnu65ETlrC381v0QRC1D3YfvVkc=",
+        "peerId": "12D3KooWKavfSLKnBEoUdrcsZKHE2tCWxrPkND6psrNRyL8DgtYW"
+      },
+      "radicle": [
+        {
+          "comment": "FreedomBrowser",
+          "did": "did:key:z6Mkgb93MjdiDEUrHVCY2X4EfaSwzoFCorViqqPnjoQX8gAn",
+          "nodeId": "z6Mkgb93MjdiDEUrHVCY2X4EfaSwzoFCorViqqPnjoQX8gAn",
+          "publicKeyFile": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB+8GdHjhvmWnF55Jdcc5bMys5nuYysX9HQ6MkiCPiSL FreedomBrowser\n"
+        },
+        {
+          "comment": "vector-alias",
+          "did": "did:key:z6Mkgb93MjdiDEUrHVCY2X4EfaSwzoFCorViqqPnjoQX8gAn",
+          "nodeId": "z6Mkgb93MjdiDEUrHVCY2X4EfaSwzoFCorViqqPnjoQX8gAn",
+          "publicKeyFile": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB+8GdHjhvmWnF55Jdcc5bMys5nuYysX9HQ6MkiCPiSL vector-alias\n"
+        }
+      ],
+      "didFromPublicKey": "did:key:z6Mkgb93MjdiDEUrHVCY2X4EfaSwzoFCorViqqPnjoQX8gAn"
+    },
+    {
+      "mnemonicId": "abandon-24",
+      "ipfs": {
+        "privKey": "CAESQEIS+M9D6qcHBkTntQp+DWrX0C2DGIkMs405k19munIa9xIHhqr0JVt2AALCBR3jEwbcT3O8pSH6hC3zB5CMDxM=",
+        "peerId": "12D3KooWSSppFRXRiW23YYh5zC8ZqSR2C3UgL2oJqhM5PjsAmxPk"
+      },
+      "radicle": [
+        {
+          "comment": "FreedomBrowser",
+          "did": "did:key:z6MkwHejd1BmzHvuKyDrXzRd37FVyTYew2PWAisppvLTEBRm",
+          "nodeId": "z6MkwHejd1BmzHvuKyDrXzRd37FVyTYew2PWAisppvLTEBRm",
+          "publicKeyFile": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPoghoiqwqtHaBkb7aBpWjms5VXw1zWQNmXl77WgkONM FreedomBrowser\n"
+        },
+        {
+          "comment": "vector-alias",
+          "did": "did:key:z6MkwHejd1BmzHvuKyDrXzRd37FVyTYew2PWAisppvLTEBRm",
+          "nodeId": "z6MkwHejd1BmzHvuKyDrXzRd37FVyTYew2PWAisppvLTEBRm",
+          "publicKeyFile": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPoghoiqwqtHaBkb7aBpWjms5VXw1zWQNmXl77WgkONM vector-alias\n"
+        }
+      ],
+      "didFromPublicKey": "did:key:z6MkwHejd1BmzHvuKyDrXzRd37FVyTYew2PWAisppvLTEBRm"
+    },
+    {
+      "mnemonicId": "legal-12",
+      "ipfs": {
+        "privKey": "CAESQH/7+L/jGbeLwG+w9EgEgwTzWYnskOrnViH/yy1xa2CgvNqeyMP61HRVKjK+1yrf4my9epusjKeO4ipDdgtj3D8=",
+        "peerId": "12D3KooWNXaAWoQzdJrPkf2BtM48fPXV3CXuEaDfcSpd9Wpejiut"
+      },
+      "radicle": [
+        {
+          "comment": "FreedomBrowser",
+          "did": "did:key:z6MkeUQ9N8WURkVFFn8jrdrmTQBWjLdrqwBsNUjtFVFTuEZi",
+          "nodeId": "z6MkeUQ9N8WURkVFFn8jrdrmTQBWjLdrqwBsNUjtFVFTuEZi",
+          "publicKeyFile": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIABKvS8D3VWbV3U/H1ZzxPce968rDPBReOiRmCByghG9 FreedomBrowser\n"
+        },
+        {
+          "comment": "vector-alias",
+          "did": "did:key:z6MkeUQ9N8WURkVFFn8jrdrmTQBWjLdrqwBsNUjtFVFTuEZi",
+          "nodeId": "z6MkeUQ9N8WURkVFFn8jrdrmTQBWjLdrqwBsNUjtFVFTuEZi",
+          "publicKeyFile": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIABKvS8D3VWbV3U/H1ZzxPce968rDPBReOiRmCByghG9 vector-alias\n"
+        }
+      ],
+      "didFromPublicKey": "did:key:z6MkeUQ9N8WURkVFFn8jrdrmTQBWjLdrqwBsNUjtFVFTuEZi"
+    },
+    {
+      "mnemonicId": "zoo-12",
+      "ipfs": {
+        "privKey": "CAESQJygXtrUpBD2Cb5phDEgriVOUvWogLSHPuC7h/kYHQobEfJked1WTzVceKQBWvNXi9Pnf7vgK7CumjaC4yBjhfI=",
+        "peerId": "12D3KooWB2RUNoQxxX6gvKQXoiGJGNYM3ssHAsrA8NR95bA1oFS1"
+      },
+      "radicle": [
+        {
+          "comment": "FreedomBrowser",
+          "did": "did:key:z6MknvYRaWTAcVFEA9BkyiC9vCByAgbf88P5xZP34e3r8iuF",
+          "nodeId": "z6MknvYRaWTAcVFEA9BkyiC9vCByAgbf88P5xZP34e3r8iuF",
+          "publicKeyFile": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH3asnifu/glqCIuPnzl6lpWcl3aT0/NlRMelxWUrSXC FreedomBrowser\n"
+        },
+        {
+          "comment": "vector-alias",
+          "did": "did:key:z6MknvYRaWTAcVFEA9BkyiC9vCByAgbf88P5xZP34e3r8iuF",
+          "nodeId": "z6MknvYRaWTAcVFEA9BkyiC9vCByAgbf88P5xZP34e3r8iuF",
+          "publicKeyFile": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH3asnifu/glqCIuPnzl6lpWcl3aT0/NlRMelxWUrSXC vector-alias\n"
+        }
+      ],
+      "didFromPublicKey": "did:key:z6MknvYRaWTAcVFEA9BkyiC9vCByAgbf88P5xZP34e3r8iuF"
+    },
+    {
+      "mnemonicId": "fresh-128",
+      "ipfs": {
+        "privKey": "CAESQDc/PwVAofQNcCH20pn/o/aC6+0CIzbDzN/PqvnJYEP+RrPOrSr2etnqFH4PU58EtZrBqZh/ZqFcuojyWGm6EdQ=",
+        "peerId": "12D3KooWEaMjJY8NWaSZHwyAu5J6miGCmupvaKEygcMv5tT9WCUb"
+      },
+      "radicle": [
+        {
+          "comment": "FreedomBrowser",
+          "did": "did:key:z6MkmYsHxxcYs9F2gwH9tZYW4UvBf5oFtxZ4bUxjYU5WXvPA",
+          "nodeId": "z6MkmYsHxxcYs9F2gwH9tZYW4UvBf5oFtxZ4bUxjYU5WXvPA",
+          "publicKeyFile": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGlxkT/9mVc+3mBfVXfsGrKPLNcSyhr8ABPhRdVbe9m5 FreedomBrowser\n"
+        },
+        {
+          "comment": "vector-alias",
+          "did": "did:key:z6MkmYsHxxcYs9F2gwH9tZYW4UvBf5oFtxZ4bUxjYU5WXvPA",
+          "nodeId": "z6MkmYsHxxcYs9F2gwH9tZYW4UvBf5oFtxZ4bUxjYU5WXvPA",
+          "publicKeyFile": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGlxkT/9mVc+3mBfVXfsGrKPLNcSyhr8ABPhRdVbe9m5 vector-alias\n"
+        }
+      ],
+      "didFromPublicKey": "did:key:z6MkmYsHxxcYs9F2gwH9tZYW4UvBf5oFtxZ4bUxjYU5WXvPA"
+    },
+    {
+      "mnemonicId": "fresh-256",
+      "ipfs": {
+        "privKey": "CAESQDUTvCX+LEU+9AlykgQoH66q29vYiqtc+c9IJRLXr+PZdvrmyx3b9jgh55GTGqaPEtJL/NQLPj3y6SfbAcyYlW0=",
+        "peerId": "12D3KooWHppB9S6xN85GzRZaUDGLZ6QPi1CzSPfQ9J1Mrv2K7dgQ"
+      },
+      "radicle": [
+        {
+          "comment": "FreedomBrowser",
+          "did": "did:key:z6MkpHvUmNrRummmZhCZMPLEsrrYfKfesiUMq5HsDuLZ8ALB",
+          "nodeId": "z6MkpHvUmNrRummmZhCZMPLEsrrYfKfesiUMq5HsDuLZ8ALB",
+          "publicKeyFile": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJIwhMiv+9JQ2NLH+ntbNgOLhAl4BRwXSMSRZIIY7DOU FreedomBrowser\n"
+        },
+        {
+          "comment": "vector-alias",
+          "did": "did:key:z6MkpHvUmNrRummmZhCZMPLEsrrYfKfesiUMq5HsDuLZ8ALB",
+          "nodeId": "z6MkpHvUmNrRummmZhCZMPLEsrrYfKfesiUMq5HsDuLZ8ALB",
+          "publicKeyFile": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJIwhMiv+9JQ2NLH+ntbNgOLhAl4BRwXSMSRZIIY7DOU vector-alias\n"
+        }
+      ],
+      "didFromPublicKey": "did:key:z6MkpHvUmNrRummmZhCZMPLEsrrYfKfesiUMq5HsDuLZ8ALB"
+    }
+  ]
+}
