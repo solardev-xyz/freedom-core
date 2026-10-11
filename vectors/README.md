@@ -124,6 +124,10 @@ Compatibility findings to preserve:
   units**, not Unicode code points or UTF-8 bytes. Four `🔐` characters pass the
   eight-unit minimum; seven ASCII characters fail with
   `Password must be at least 8 characters`.
+- `importVault` writes directly to the final filename with `fs.writeFileSync`
+  and supplies no mode. The initial imported fixtures had mode `0644` under
+  this machine's `0022` umask. The byte fixtures record file contents; the Rust
+  repository's separate atomic-write/`0600` rules still apply to storage.
 - IPFS stores an Ed25519 private seed plus public key (64 bytes) in protobuf
   `08 01 12 40 || private || public`, encoded as base64. Its PeerID is an
   **identity multihash**, inlining `08 01 12 20 || public` rather than hashing
