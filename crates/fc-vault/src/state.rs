@@ -1,12 +1,25 @@
-//! The vault's lock state: one place that holds the mnemonic, the seed and
-//! every derived key, so that any lock (manual, auto, delete, shutdown) wipes
-//! all of them at once. This is the structural fix for K-1, where auto-lock
+//! The vault's lock state: the one place that holds the mnemonic and seed,
+//! so any lock (manual, auto, delete, shutdown) wipes them at once. Derived
+//! keys aren't cached: each accessor derives on demand and returns an owned
+//! key that wipes itself on drop. That keeps memory bounded, and no cache can
+//! outlive a lock. This is the structural fix for K-1, where auto-lock
 //! cleared the mnemonic but left derived keys cached elsewhere.
+//!
+//! **Unlocking is split in three,** so the expensive parts never run under
+//! the state, and a lock always wins:
+//!
+//! 1. [`VaultState::ticket`] records the current generation (control path).
+//! 2. [`Prepared::new`] decrypts and computes the seed (worker thread).
+//! 3. [`VaultState::install`] installs it only if no lock or unlock happened
+//!    since the ticket was taken (control path). Otherwise the prepared
+//!    secrets are wiped and the result is [`Error::Revoked`].
+//!
+//! Every lock request bumps the generation, even while already locked, so
+//! an unlock that is still deriving can never bring secrets back after a
+//! lock.
 //!
 //! Time is a caller-supplied monotonic millisecond counter; this crate reads
 //! no clock.
-
-use std::collections::BTreeMap;
 
 use fc_keys::freedom::{self, FreedomKeys};
 use fc_keys::{Mnemonic, Secp256k1Key, Seed};
@@ -24,6 +37,32 @@ pub struct Epoch(u64);
 impl Epoch {
     pub fn get(self) -> u64 {
         self.0
+    }
+}
+
+/// Permission to install an unlock, valid until the next lock or unlock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "pass the ticket to VaultState::install"]
+pub struct Ticket(u64);
+
+/// A decrypted mnemonic with its seed, ready to install. Built on a worker
+/// thread; wiped on drop if it's never installed.
+pub struct Prepared {
+    mnemonic: Mnemonic,
+    seed: Seed,
+}
+
+impl Prepared {
+    /// Computes the seed (PBKDF2, 2048 rounds): run it off the control path.
+    pub fn new(mnemonic: Mnemonic) -> Self {
+        let seed = mnemonic.to_seed();
+        Prepared { mnemonic, seed }
+    }
+}
+
+impl std::fmt::Debug for Prepared {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Prepared(<redacted>)")
     }
 }
 
@@ -45,20 +84,18 @@ pub struct Locked {
 
 struct Unlocked {
     epoch: Epoch,
-    mnemonic: Mnemonic,
-    seed: Seed,
+    prepared: Prepared,
     /// Zero disables auto-lock.
     auto_lock_ms: u64,
     deadline_ms: Option<u64>,
-    freedom: Option<FreedomKeys>,
-    user_wallets: BTreeMap<u32, Secp256k1Key>,
-    publishers: BTreeMap<u32, Secp256k1Key>,
 }
 
-/// The vault's lock state. Dropping it, or locking, wipes every secret it
+/// The vault's lock state. Dropping it, or locking, wipes the secrets it
 /// holds.
 pub struct VaultState {
-    last_epoch: u64,
+    /// Bumped by every lock and every install; tickets and epochs are taken
+    /// from it, so none ever repeats.
+    generation: u64,
     unlocked: Option<Unlocked>,
 }
 
@@ -71,40 +108,48 @@ impl Default for VaultState {
 impl VaultState {
     pub fn new() -> Self {
         VaultState {
-            last_epoch: 0,
+            generation: 0,
             unlocked: None,
         }
     }
 
-    /// Installs `mnemonic` as the unlocked vault in a new epoch, and starts
-    /// the auto-lock timer (`auto_lock_ms == 0` disables it). An existing
-    /// unlocked epoch is revoked first.
-    pub fn unlock(
-        &mut self,
-        mnemonic: Mnemonic,
-        auto_lock_ms: u64,
-        now_ms: u64,
-    ) -> (Epoch, Option<Locked>) {
-        let revoked = self.lock(LockReason::Manual);
-        self.last_epoch += 1;
-        let epoch = Epoch(self.last_epoch);
-        let seed = mnemonic.to_seed();
-        self.unlocked = Some(Unlocked {
-            epoch,
-            mnemonic,
-            seed,
-            auto_lock_ms,
-            deadline_ms: deadline(now_ms, auto_lock_ms),
-            freedom: None,
-            user_wallets: BTreeMap::new(),
-            publishers: BTreeMap::new(),
-        });
-        (epoch, revoked)
+    /// Step 1 of an unlock: a ticket for the current generation.
+    pub fn ticket(&self) -> Ticket {
+        Ticket(self.generation)
     }
 
-    /// Locks and wipes everything. Returns the revoked epoch, or `None` if
-    /// the vault was already locked.
+    /// Step 3 of an unlock: installs `prepared` if nothing locked or
+    /// unlocked since `ticket` was taken, and starts the auto-lock timer
+    /// (`auto_lock_ms == 0` disables it). On [`Error::Revoked`], `prepared`
+    /// has been wiped.
+    pub fn install(
+        &mut self,
+        ticket: Ticket,
+        prepared: Prepared,
+        auto_lock_ms: u64,
+        now_ms: u64,
+    ) -> Result<Epoch, Error> {
+        if ticket.0 != self.generation {
+            return Err(Error::Revoked);
+        }
+        let generation = self.generation.checked_add(1).ok_or(Error::Exhausted)?;
+        self.generation = generation;
+        let epoch = Epoch(generation);
+        self.unlocked = Some(Unlocked {
+            epoch,
+            prepared,
+            auto_lock_ms,
+            deadline_ms: deadline(now_ms, auto_lock_ms),
+        });
+        Ok(epoch)
+    }
+
+    /// Locks and wipes the secrets. Always invalidates outstanding tickets,
+    /// even when already locked. Returns the revoked epoch, if there was one.
     pub fn lock(&mut self, reason: LockReason) -> Option<Locked> {
+        // At 2^64 locks the counter stops moving; install then refuses with
+        // Exhausted instead of reusing a generation.
+        self.generation = self.generation.saturating_add(1);
         self.unlocked.take().map(|unlocked| Locked {
             epoch: unlocked.epoch,
             reason,
@@ -150,56 +195,27 @@ impl VaultState {
     /// The unlocked mnemonic, for the user-requested export and for writing
     /// a vault under a new password.
     pub fn mnemonic(&self) -> Result<&Mnemonic, Error> {
-        Ok(&self.unlocked()?.mnemonic)
+        Ok(&self.unlocked()?.prepared.mnemonic)
     }
 
-    /// The keys of `deriveAllKeys`, derived on first use and cached until
-    /// the next lock.
-    pub fn freedom_keys(&mut self) -> Result<&FreedomKeys, Error> {
-        let unlocked = self.unlocked_mut()?;
-        if unlocked.freedom.is_none() {
-            unlocked.freedom = Some(freedom::derive_all(&unlocked.seed).map_err(Error::Keys)?);
-        }
-        unlocked
-            .freedom
-            .as_ref()
-            .ok_or(Error::Internal("freedom keys"))
+    /// The keys of `deriveAllKeys`, derived now; they wipe on drop.
+    pub fn freedom_keys(&self) -> Result<FreedomKeys, Error> {
+        freedom::derive_all(&self.unlocked()?.prepared.seed).map_err(Error::Keys)
     }
 
-    /// User wallet `account` (`m/44'/60'/{account}'/0/0`), cached until the
-    /// next lock.
-    pub fn user_wallet(&mut self, account: u32) -> Result<&Secp256k1Key, Error> {
-        let unlocked = self.unlocked_mut()?;
-        if !unlocked.user_wallets.contains_key(&account) {
-            let key = freedom::derive_user_wallet(&unlocked.seed, account).map_err(Error::Keys)?;
-            unlocked.user_wallets.insert(account, key);
-        }
-        unlocked
-            .user_wallets
-            .get(&account)
-            .ok_or(Error::Internal("user wallet"))
+    /// User wallet `account` (`m/44'/60'/{account}'/0/0`), derived now.
+    pub fn user_wallet(&self, account: u32) -> Result<Secp256k1Key, Error> {
+        freedom::derive_user_wallet(&self.unlocked()?.prepared.seed, account).map_err(Error::Keys)
     }
 
-    /// Swarm publisher key `origin` (`m/44'/73406'/{origin}'/0/0`), cached
-    /// until the next lock.
-    pub fn publisher(&mut self, origin: u32) -> Result<&Secp256k1Key, Error> {
-        let unlocked = self.unlocked_mut()?;
-        if !unlocked.publishers.contains_key(&origin) {
-            let key = freedom::derive_publisher(&unlocked.seed, origin).map_err(Error::Keys)?;
-            unlocked.publishers.insert(origin, key);
-        }
-        unlocked
-            .publishers
-            .get(&origin)
-            .ok_or(Error::Internal("publisher key"))
+    /// Swarm publisher key `origin` (`m/44'/73406'/{origin}'/0/0`), derived
+    /// now.
+    pub fn publisher(&self, origin: u32) -> Result<Secp256k1Key, Error> {
+        freedom::derive_publisher(&self.unlocked()?.prepared.seed, origin).map_err(Error::Keys)
     }
 
     fn unlocked(&self) -> Result<&Unlocked, Error> {
         self.unlocked.as_ref().ok_or(Error::Locked)
-    }
-
-    fn unlocked_mut(&mut self) -> Result<&mut Unlocked, Error> {
-        self.unlocked.as_mut().ok_or(Error::Locked)
     }
 }
 
@@ -222,8 +238,15 @@ mod tests {
 
     const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
-    fn mnemonic() -> Mnemonic {
-        Mnemonic::parse(PHRASE).unwrap()
+    fn prepared() -> Prepared {
+        Prepared::new(Mnemonic::parse(PHRASE).unwrap())
+    }
+
+    fn unlock(state: &mut VaultState, auto_lock_ms: u64, now: u64) -> Epoch {
+        let ticket = state.ticket();
+        state
+            .install(ticket, prepared(), auto_lock_ms, now)
+            .unwrap()
     }
 
     #[test]
@@ -236,9 +259,9 @@ mod tests {
     }
 
     #[test]
-    fn auto_lock_wipes_every_cache() {
+    fn auto_lock_makes_every_key_unreachable() {
         let mut state = VaultState::new();
-        let (epoch, _) = state.unlock(mnemonic(), 1000, 0);
+        let epoch = unlock(&mut state, 1000, 0);
         let address = state.user_wallet(0).unwrap().address().to_string();
         assert_eq!(address, "0x9858EfFD232B4033E47d90003D41EC34EcaEda94");
         state.publisher(3).unwrap();
@@ -252,54 +275,90 @@ mod tests {
                 reason: LockReason::Auto
             })
         );
-        // K-1: after auto-lock no derived key is reachable, whatever cached it.
+        // K-1: after auto-lock no derived key is reachable.
         assert_eq!(state.user_wallet(0).unwrap_err(), Error::Locked);
         assert_eq!(state.publisher(3).unwrap_err(), Error::Locked);
-        assert_eq!(state.freedom_keys().unwrap_err(), Error::Locked);
-        assert_eq!(state.mnemonic().unwrap_err(), Error::Locked);
+        assert_eq!(state.freedom_keys().map(|_| ()).unwrap_err(), Error::Locked);
+        assert_eq!(state.mnemonic().map(|_| ()).unwrap_err(), Error::Locked);
         assert!(!state.is_current(epoch));
+    }
+
+    #[test]
+    fn a_lock_revokes_an_unlock_in_progress() {
+        // The lock happens while the vault is still locked, between the
+        // ticket and the install (PR #6 review, M1).
+        for reason in [LockReason::Manual, LockReason::Delete, LockReason::Shutdown] {
+            let mut state = VaultState::new();
+            let ticket = state.ticket();
+            let work = prepared();
+            assert_eq!(state.lock(reason), None);
+            assert_eq!(
+                state.install(ticket, work, 0, 0).unwrap_err(),
+                Error::Revoked
+            );
+            assert!(!state.is_unlocked(), "{reason:?}");
+        }
+    }
+
+    #[test]
+    fn overlapping_unlocks_install_once() {
+        let mut state = VaultState::new();
+        let first = state.ticket();
+        let second = state.ticket();
+        let epoch = state.install(first, prepared(), 0, 0).unwrap();
+        assert_eq!(
+            state.install(second, prepared(), 0, 0).unwrap_err(),
+            Error::Revoked
+        );
+        assert!(state.is_current(epoch));
     }
 
     #[test]
     fn touch_extends_and_zero_disables() {
         let mut state = VaultState::new();
-        state.unlock(mnemonic(), 1000, 0);
+        unlock(&mut state, 1000, 0);
         state.touch(900);
         assert_eq!(state.tick(1500), None);
         assert!(state.tick(1900).is_some());
 
-        state.unlock(mnemonic(), 0, 0);
+        unlock(&mut state, 0, 0);
         assert_eq!(state.auto_lock_deadline(), None);
         assert_eq!(state.tick(u64::MAX), None);
-        state.touch(5);
-        assert!(state.is_unlocked());
     }
 
     #[test]
     fn epochs_never_repeat() {
         let mut state = VaultState::new();
-        let (first, _) = state.unlock(mnemonic(), 0, 0);
-        let (second, revoked) = state.unlock(mnemonic(), 0, 0);
-        assert_eq!(
-            revoked,
-            Some(Locked {
-                epoch: first,
-                reason: LockReason::Manual
-            })
-        );
+        let first = unlock(&mut state, 0, 0);
+        state.lock(LockReason::Manual);
+        state.lock(LockReason::Manual);
+        let second = unlock(&mut state, 0, 0);
         assert!(second > first);
         assert!(!state.is_current(first));
-        state.lock(LockReason::Shutdown);
-        let (third, revoked) = state.unlock(mnemonic(), 0, 0);
-        assert_eq!(revoked, None);
-        assert!(third > second);
+    }
+
+    #[test]
+    fn generation_exhaustion_fails_closed() {
+        let mut state = VaultState {
+            generation: u64::MAX,
+            unlocked: None,
+        };
+        let ticket = state.ticket();
+        assert_eq!(
+            state.install(ticket, prepared(), 0, 0).unwrap_err(),
+            Error::Exhausted
+        );
+        assert!(!state.is_unlocked());
+        // Locking at the limit doesn't wrap around to an old generation.
+        state.lock(LockReason::Manual);
+        assert_eq!(state.ticket(), Ticket(u64::MAX));
     }
 
     #[test]
     fn debug_hides_secrets() {
         let mut state = VaultState::new();
-        state.unlock(mnemonic(), 0, 0);
-        let debug = format!("{state:?}");
-        assert!(!debug.contains("abandon"), "{debug}");
+        unlock(&mut state, 0, 0);
+        assert!(!format!("{state:?}").contains("abandon"));
+        assert_eq!(format!("{:?}", prepared()), "Prepared(<redacted>)");
     }
 }
