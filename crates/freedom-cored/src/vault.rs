@@ -1,0 +1,1345 @@
+//! The vault and key methods (design 0001: "Phase 1 API", "Parity
+//! contract", "Concurrency, epochs and revocation", "Deadlines, cancellation
+//! and commit").
+//!
+//! - **Inline methods** run on the event loop and never wait: `vault.lock`,
+//!   `vault.touch`, `vault.status`, `keys.*`, `compat.*`.
+//! - **KDF methods** go through one serialized queue to the worker thread:
+//!   unlock, verify, change_password, delete, create, import and both
+//!   exports. That covers the 900k-round PBKDF2 and the durable write.
+//! - **Throttle:** an attempt is reserved when its job starts and settled
+//!   with the real outcome when it ends.
+//! - **Unlock:** takes a ticket at start, so a lock that arrives while it is
+//!   deriving revokes it (`fc_vault::state`).
+//! - **Commit point:** a mutation that has committed (the rename or unlink)
+//!   always reports success; anything else can be cancelled or time out.
+//!
+//! Error codes come with the exact JS message for the method, so main can
+//! pass them through (design 0001's parity table).
+
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use fc_keys::freedom;
+use fc_keys::{Mnemonic, WordCount, multiformats};
+use fc_protocol::error::{ErrorBody, ErrorCode};
+use fc_protocol::message::{self, CallerKind};
+use fc_protocol::secret::{SecretBytes, SecretResponse};
+use fc_vault::format::{self, SealParams};
+use fc_vault::state::{LockReason, Locked, Prepared, Ticket, VaultState};
+use fc_vault::throttle::{Attempt, Outcome, Throttle};
+use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
+use zeroize::Zeroizing;
+
+use crate::fsx::{self, Done};
+use crate::rng::OsRng;
+use crate::worker::Job;
+
+/// The vault file inside the identity directory.
+pub const VAULT_FILE: &str = "identity-vault.json";
+/// The largest vault file read. Real vaults are about 1 KB.
+const MAX_VAULT_BYTES: u64 = 1 << 20;
+/// Total budget for a KDF method, from admission (design 0001).
+const KDF_DEADLINE: Duration = Duration::from_secs(30);
+/// Queued KDF requests before `busy`.
+const MAX_QUEUED: usize = 32;
+/// Most indices per `keys.addresses` request.
+const MAX_INDICES: usize = 64;
+
+const MSG_NO_VAULT: &str = "No vault found. Create one first.";
+const MSG_NO_VAULT_SHORT: &str = "No vault found";
+const MSG_INCORRECT: &str = "Incorrect password";
+const MSG_LOCKED: &str = "Vault is locked";
+const MSG_WEAK: &str = "Password must be at least 8 characters";
+const MSG_INVALID_MNEMONIC: &str = "Invalid mnemonic";
+const MSG_EXISTS_CREATE: &str = "Vault already exists. Use importVault to replace.";
+const MSG_EXISTS_IMPORT: &str = "Vault already exists. Set overwrite=true to replace.";
+const MSG_DECRYPTED_INVALID: &str = "Decrypted data is not a valid mnemonic";
+
+/// What the vault asks the event loop to do.
+pub enum Out {
+    /// A JSON payload to frame and send (a response or an event).
+    Send(Zeroizing<Vec<u8>>),
+    /// A job for the worker, with its ID.
+    Job(u64, Job),
+}
+
+/// Why a vault operation failed. Mapped to a code and the method's JS
+/// message by [`OpError::body`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpError {
+    NoVault,
+    Unsupported(String),
+    Corrupt,
+    Incorrect,
+    DecryptedInvalid,
+    Weak,
+    /// create, or import without overwrite, found a vault at job time.
+    Exists {
+        import: bool,
+    },
+    Storage(&'static str),
+    Internal,
+}
+
+impl OpError {
+    fn from_vault(error: fc_vault::Error) -> Self {
+        match error {
+            fc_vault::Error::IncorrectPassword => OpError::Incorrect,
+            fc_vault::Error::UnsupportedVersion(v) => OpError::Unsupported(v),
+            fc_vault::Error::Corrupt(_) => OpError::Corrupt,
+            fc_vault::Error::InvalidDecryptedMnemonic => OpError::DecryptedInvalid,
+            _ => OpError::Internal,
+        }
+    }
+
+    /// `short_no_vault`: verify and the exports say "No vault found".
+    fn body(&self, short_no_vault: bool) -> ErrorBody {
+        match self {
+            OpError::NoVault if short_no_vault => {
+                ErrorBody::new(ErrorCode::NoVault, MSG_NO_VAULT_SHORT)
+            }
+            OpError::NoVault => ErrorBody::new(ErrorCode::NoVault, MSG_NO_VAULT),
+            OpError::Unsupported(version) => ErrorBody::new(
+                ErrorCode::UnsupportedVaultVersion,
+                format!("Unsupported vault version: {version}"),
+            ),
+            OpError::Corrupt => ErrorBody::new(ErrorCode::CorruptVault, "Corrupt vault file"),
+            OpError::Incorrect => ErrorBody::new(ErrorCode::IncorrectPassword, MSG_INCORRECT),
+            OpError::DecryptedInvalid => {
+                ErrorBody::new(ErrorCode::CorruptVault, MSG_DECRYPTED_INVALID)
+            }
+            OpError::Weak => ErrorBody::new(ErrorCode::WeakPassword, MSG_WEAK),
+            OpError::Exists { import: false } => {
+                ErrorBody::new(ErrorCode::VaultExists, MSG_EXISTS_CREATE)
+            }
+            OpError::Exists { import: true } => {
+                ErrorBody::new(ErrorCode::VaultExists, MSG_EXISTS_IMPORT)
+            }
+            OpError::Storage(kind) => ErrorBody::new(ErrorCode::Storage, "Storage error")
+                .with_data(serde_json::json!({ "kind": kind })),
+            OpError::Internal => ErrorBody::new(ErrorCode::Internal, "Internal error"),
+        }
+    }
+
+    fn throttle_outcome(&self) -> Outcome {
+        match self {
+            OpError::Incorrect => Outcome::Failure,
+            _ => Outcome::NotTried,
+        }
+    }
+}
+
+/// Public addresses, returned by create, import and unlock.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Addresses {
+    pub user_wallet: String,
+    pub bee_wallet: String,
+}
+
+/// The vault file as last seen: its SHA-256 if it exists. Read once at
+/// startup on its own thread ([`startup_snapshot`]) and again by the worker
+/// after every job, so the loop never touches storage.
+pub type FileSnapshot = Result<Option<String>, OpError>;
+
+/// A finished worker job: its output and the refreshed file snapshot.
+pub struct Finished {
+    output: JobOutput,
+    file: FileSnapshot,
+}
+
+/// What a worker job produced.
+pub enum JobOutput {
+    /// unlock: the prepared secrets and public addresses.
+    Unlocked(Result<(Prepared, Addresses), OpError>),
+    /// verify, the export password checks, delete (`commit` = file
+    /// removed).
+    Checked {
+        result: Result<(), OpError>,
+        commit: Option<Done>,
+    },
+    /// create and import: the new vault was written (`commit`), and is ready
+    /// to install. `phrase` is returned for create's backup display.
+    Written {
+        result: Result<(Prepared, Addresses, Option<Mnemonic>), OpError>,
+        commit: Option<Done>,
+    },
+    /// change_password: written (`commit`) or not.
+    Changed {
+        result: Result<(), OpError>,
+        commit: Option<Done>,
+    },
+}
+
+enum Kind {
+    Unlock {
+        password: SecretBytes,
+    },
+    Verify {
+        password: SecretBytes,
+    },
+    ChangePassword {
+        current: SecretBytes,
+        new: SecretBytes,
+    },
+    Delete {
+        password: SecretBytes,
+    },
+    ExportMnemonic {
+        password: SecretBytes,
+    },
+    ExportPrivateKey {
+        password: SecretBytes,
+        account: u32,
+    },
+    Create {
+        password: SecretBytes,
+        words: WordCount,
+    },
+    Import {
+        password: SecretBytes,
+        mnemonic: Mnemonic,
+        overwrite: bool,
+    },
+}
+
+impl Kind {
+    fn throttled(&self) -> bool {
+        !matches!(self, Kind::Create { .. } | Kind::Import { .. })
+    }
+
+    fn mutates(&self) -> bool {
+        matches!(
+            self,
+            Kind::ChangePassword { .. }
+                | Kind::Delete { .. }
+                | Kind::Create { .. }
+                | Kind::Import { .. }
+        )
+    }
+}
+
+struct Pending {
+    id: u64,
+    kind: Kind,
+    admitted: Instant,
+}
+
+/// What the loop must remember about the running job.
+enum RunningKind {
+    Unlock,
+    Verify,
+    ChangePassword,
+    Delete,
+    ExportMnemonic,
+    ExportPrivateKey(u32),
+    Create,
+    Import,
+}
+
+struct Running {
+    job: u64,
+    request: u64,
+    kind: RunningKind,
+    mutates: bool,
+    attempt: Option<Attempt>,
+    ticket: Ticket,
+    deadline: Instant,
+    cancelled: bool,
+}
+
+pub struct Vault {
+    dir: PathBuf,
+    file: FileSnapshot,
+    state: VaultState,
+    throttle: Throttle,
+    auto_lock_ms: u64,
+    epoch_zero: Instant,
+    queue: VecDeque<Pending>,
+    running: Option<Running>,
+    next_job: u64,
+}
+
+#[derive(Deserialize)]
+struct PasswordParams<'a> {
+    #[serde(borrow)]
+    password_b64: &'a RawValue,
+}
+
+#[derive(Deserialize)]
+struct ChangeParams<'a> {
+    #[serde(borrow)]
+    current_b64: &'a RawValue,
+    #[serde(borrow)]
+    new_b64: &'a RawValue,
+}
+
+#[derive(Deserialize)]
+struct ExportKeyParams<'a> {
+    #[serde(borrow)]
+    password_b64: &'a RawValue,
+    account: u32,
+}
+
+#[derive(Deserialize)]
+struct CreateParams<'a> {
+    #[serde(borrow)]
+    password_b64: &'a RawValue,
+    words: u8,
+    #[allow(dead_code)]
+    #[serde(default)]
+    user_knows_password: bool,
+}
+
+#[derive(Deserialize)]
+struct ImportParams<'a> {
+    #[serde(borrow)]
+    password_b64: &'a RawValue,
+    #[serde(borrow)]
+    mnemonic_b64: &'a RawValue,
+    #[serde(default)]
+    overwrite: bool,
+}
+
+#[derive(Deserialize)]
+struct WordsParams {
+    words: u8,
+}
+
+#[derive(Deserialize)]
+struct MnemonicParams<'a> {
+    #[serde(borrow)]
+    mnemonic_b64: &'a RawValue,
+}
+
+#[derive(Deserialize)]
+struct AddressesParams {
+    #[serde(default)]
+    accounts: Vec<u32>,
+    #[serde(default)]
+    publishers: Vec<u32>,
+}
+
+#[derive(Deserialize)]
+struct AccountParams {
+    account: u32,
+}
+
+#[derive(Deserialize)]
+struct OriginParams {
+    origin_index: u32,
+}
+
+#[derive(Deserialize)]
+struct PublicKeyParams {
+    public_key_hex: String,
+}
+
+#[derive(Serialize)]
+struct Status {
+    exists: bool,
+    unlocked: bool,
+    epoch: Option<u64>,
+    fingerprint: Option<String>,
+}
+
+fn word_count(words: u8) -> Option<WordCount> {
+    match words {
+        12 => Some(WordCount::W12),
+        15 => Some(WordCount::W15),
+        18 => Some(WordCount::W18),
+        21 => Some(WordCount::W21),
+        24 => Some(WordCount::W24),
+        _ => None,
+    }
+}
+
+/// A secret field from its borrowed raw token (fc-protocol's only secret
+/// decoding path).
+fn secret(raw: &RawValue) -> Result<SecretBytes, ErrorBody> {
+    SecretBytes::from_raw(raw)
+        .map_err(|_| ErrorBody::new(ErrorCode::InvalidArgument, "Invalid parameters"))
+}
+
+/// Parses method params from the frame's slice; a missing params object
+/// counts as `{}`.
+fn params<'a, T: Deserialize<'a>>(raw: Option<&'a str>) -> Result<T, ErrorBody> {
+    serde_json::from_str(raw.unwrap_or("{}"))
+        .map_err(|_| ErrorBody::new(ErrorCode::InvalidArgument, "Invalid parameters"))
+}
+
+impl Vault {
+    pub fn new(dir: PathBuf, auto_lock_ms: u64) -> Self {
+        Vault {
+            // Replaced by the startup snapshot before core.hello is answered,
+            // and no vault request is accepted before that.
+            file: Err(OpError::Storage("not_ready")),
+            dir,
+            state: VaultState::new(),
+            throttle: Throttle::new(),
+            auto_lock_ms,
+            epoch_zero: Instant::now(),
+            queue: VecDeque::new(),
+            running: None,
+            next_job: 1,
+        }
+    }
+
+    /// Installs the startup snapshot.
+    pub fn set_snapshot(&mut self, file: FileSnapshot) {
+        self.file = file;
+    }
+
+    pub fn set_auto_lock_ms(&mut self, auto_lock_ms: u64) {
+        self.auto_lock_ms = auto_lock_ms;
+    }
+
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.epoch_zero.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// Whether this module handles `method`.
+    pub fn handles(method: &str) -> bool {
+        matches!(
+            method,
+            "vault.status"
+                | "vault.lock"
+                | "vault.touch"
+                | "vault.unlock"
+                | "vault.verify_password"
+                | "vault.change_password"
+                | "vault.delete"
+                | "vault.export_mnemonic"
+                | "vault.export_private_key"
+                | "vault.create"
+                | "vault.import"
+                | "keys.generate_mnemonic"
+                | "keys.validate_mnemonic"
+                | "keys.addresses"
+                | "keys.radicle_did"
+                | "compat.private_key"
+                | "compat.bee_wallet_key"
+                | "compat.publisher_key"
+        )
+    }
+
+    /// Handles a request. Inline methods reply at once; KDF methods are
+    /// queued and reply when their job finishes.
+    pub fn request(
+        &mut self,
+        id: u64,
+        method: &str,
+        raw: Option<&str>,
+        caller: CallerKind,
+    ) -> Vec<Out> {
+        let mut out = Vec::new();
+        if method.starts_with("compat.") && caller != CallerKind::Shell {
+            self.reply_error(
+                &mut out,
+                id,
+                ErrorBody::new(ErrorCode::Forbidden, "main-internal only"),
+            );
+            return out;
+        }
+        let result = match method {
+            "vault.status" => self.status(id),
+            "vault.lock" => {
+                self.lock_now(LockReason::Manual, &mut out);
+                Ok(json_result(id, &serde_json::json!({})))
+            }
+            "vault.touch" => {
+                let now = self.now_ms();
+                self.state.touch(now);
+                Ok(json_result(id, &serde_json::json!({})))
+            }
+            "keys.generate_mnemonic" => self.generate(id, raw),
+            "keys.validate_mnemonic" => params::<MnemonicParams>(raw).and_then(|p| {
+                let mnemonic = secret(p.mnemonic_b64)?;
+                let valid = mnemonic.as_str().is_ok_and(fc_keys::is_valid_mnemonic);
+                Ok(json_result(id, &serde_json::json!({ "valid": valid })))
+            }),
+            "keys.addresses" => self.addresses(id, raw),
+            "keys.radicle_did" => {
+                params::<PublicKeyParams>(raw).and_then(|p| radicle_did(id, &p.public_key_hex))
+            }
+            "compat.private_key" => params::<AccountParams>(raw).and_then(|p| {
+                let key = self
+                    .state
+                    .user_wallet(p.account)
+                    .map_err(locked_or_internal)?;
+                secret_result(id, "private_key_b64", key.to_secret_bytes().as_slice())
+            }),
+            "compat.bee_wallet_key" => self
+                .state
+                .freedom_keys()
+                .map_err(locked_or_internal)
+                .and_then(|keys| {
+                    secret_result(
+                        id,
+                        "private_key_b64",
+                        keys.bee_wallet.to_secret_bytes().as_slice(),
+                    )
+                }),
+            "compat.publisher_key" => params::<OriginParams>(raw).and_then(|p| {
+                let key = self
+                    .state
+                    .publisher(p.origin_index)
+                    .map_err(locked_or_internal)?;
+                secret_result(id, "private_key_b64", key.to_secret_bytes().as_slice())
+            }),
+            _ => match self.enqueue(id, method, raw) {
+                Ok(()) => {
+                    self.start_next(&mut out);
+                    return out;
+                }
+                Err(error) => Err(error),
+            },
+        };
+        match result {
+            Ok(Some(payload)) => out.push(Out::Send(payload)),
+            Ok(None) => out.push(Out::Send(error_payload(
+                id,
+                &ErrorBody::new(ErrorCode::Internal, "Internal error"),
+            ))),
+            Err(error) => self.reply_error(&mut out, id, error),
+        }
+        out
+    }
+
+    /// Cancels a queued request, or marks the running one.
+    pub fn cancel(&mut self, id: u64) -> Vec<Out> {
+        let mut out = Vec::new();
+        if let Some(position) = self.queue.iter().position(|p| p.id == id) {
+            self.queue.remove(position);
+            self.reply_error(
+                &mut out,
+                id,
+                ErrorBody::new(ErrorCode::Cancelled, "Cancelled"),
+            );
+        } else if let Some(running) = &mut self.running
+            && running.request == id
+        {
+            running.cancelled = true;
+        }
+        out
+    }
+
+    /// Applies the auto-lock if due.
+    pub fn tick(&mut self) -> Vec<Out> {
+        let mut out = Vec::new();
+        let now = self.now_ms();
+        if let Some(locked) = self.state.tick(now) {
+            out.push(Out::Send(locked_event(locked)));
+        }
+        out
+    }
+
+    /// When the loop must wake for the auto-lock.
+    pub fn next_wakeup(&self) -> Option<Instant> {
+        let deadline = self.state.auto_lock_deadline()?;
+        let now = self.now_ms();
+        Some(Instant::now() + Duration::from_millis(deadline.saturating_sub(now)))
+    }
+
+    /// Locks for shutdown (wipes everything).
+    pub fn shutdown(&mut self) -> Vec<Out> {
+        let mut out = Vec::new();
+        self.lock_now(LockReason::Shutdown, &mut out);
+        out
+    }
+
+    fn lock_now(&mut self, reason: LockReason, out: &mut Vec<Out>) {
+        if let Some(locked) = self.state.lock(reason) {
+            out.push(Out::Send(locked_event(locked)));
+        }
+    }
+
+    fn status(&self, id: u64) -> Result<Option<Zeroizing<Vec<u8>>>, ErrorBody> {
+        let fingerprint = self.file.as_ref().map_err(|e| e.body(false))?.clone();
+        let exists = fingerprint.is_some();
+        Ok(json_result(
+            id,
+            &Status {
+                exists,
+                unlocked: self.state.is_unlocked(),
+                epoch: self.state.epoch().map(|e| e.get()),
+                fingerprint,
+            },
+        ))
+    }
+
+    fn generate(
+        &mut self,
+        id: u64,
+        raw: Option<&str>,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, ErrorBody> {
+        let p = params::<WordsParams>(raw)?;
+        let words = word_count(p.words)
+            .ok_or_else(|| ErrorBody::new(ErrorCode::InvalidArgument, "Invalid word count"))?;
+        let mnemonic = Mnemonic::generate(&mut OsRng, words)
+            .map_err(|_| ErrorBody::new(ErrorCode::Internal, "Internal error"))?;
+        secret_result(id, "mnemonic_b64", mnemonic.phrase().as_bytes())
+    }
+
+    fn addresses(
+        &mut self,
+        id: u64,
+        raw: Option<&str>,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, ErrorBody> {
+        let p = params::<AddressesParams>(raw)?;
+        if p.accounts.len() > MAX_INDICES || p.publishers.len() > MAX_INDICES {
+            return Err(ErrorBody::new(
+                ErrorCode::InvalidArgument,
+                "Too many indices",
+            ));
+        }
+        let keys = self.state.freedom_keys().map_err(locked_or_internal)?;
+        let radicle = keys.radicle.public_key();
+        let bee_wallet = keys.bee_wallet.address().to_string();
+        drop(keys);
+        let mut user_wallets = Vec::with_capacity(p.accounts.len());
+        for account in p.accounts {
+            let key = self
+                .state
+                .user_wallet(account)
+                .map_err(locked_or_internal)?;
+            user_wallets.push(
+                serde_json::json!({ "account": account, "address": key.address().to_string() }),
+            );
+        }
+        let mut publishers = Vec::with_capacity(p.publishers.len());
+        for origin in p.publishers {
+            let key = self.state.publisher(origin).map_err(locked_or_internal)?;
+            publishers.push(
+                serde_json::json!({ "origin_index": origin, "address": key.address().to_string() }),
+            );
+        }
+        Ok(json_result(
+            id,
+            &serde_json::json!({
+                "user_wallets": user_wallets,
+                "bee_wallet": bee_wallet,
+                "publishers": publishers,
+                "radicle": {
+                    "public_key_hex": hex(&radicle),
+                    "did": multiformats::did_key(&radicle),
+                    "node_id": multiformats::radicle_node_id(&radicle),
+                },
+            }),
+        ))
+    }
+
+    /// Validates a KDF request's parameters and pre-checks, then queues it.
+    fn enqueue(&mut self, id: u64, method: &str, raw: Option<&str>) -> Result<(), ErrorBody> {
+        let kind = match method {
+            "vault.unlock" => Kind::Unlock {
+                password: secret(params::<PasswordParams>(raw)?.password_b64)?,
+            },
+            "vault.verify_password" => Kind::Verify {
+                password: secret(params::<PasswordParams>(raw)?.password_b64)?,
+            },
+            "vault.delete" => Kind::Delete {
+                password: secret(params::<PasswordParams>(raw)?.password_b64)?,
+            },
+            "vault.export_mnemonic" => Kind::ExportMnemonic {
+                password: secret(params::<PasswordParams>(raw)?.password_b64)?,
+            },
+            "vault.export_private_key" => {
+                let p = params::<ExportKeyParams>(raw)?;
+                Kind::ExportPrivateKey {
+                    password: secret(p.password_b64)?,
+                    account: p.account,
+                }
+            }
+            "vault.change_password" => {
+                let p = params::<ChangeParams>(raw)?;
+                Kind::ChangePassword {
+                    current: secret(p.current_b64)?,
+                    new: secret(p.new_b64)?,
+                }
+            }
+            "vault.create" => {
+                let p = params::<CreateParams>(raw)?;
+                let words = word_count(p.words).ok_or_else(|| {
+                    ErrorBody::new(ErrorCode::InvalidArgument, "Invalid word count")
+                })?;
+                // JS order: exists, then password strength.
+                if self.vault_exists()? {
+                    return Err(ErrorBody::new(ErrorCode::VaultExists, MSG_EXISTS_CREATE));
+                }
+                let password = secret(p.password_b64)?;
+                check_strength(&password)?;
+                Kind::Create { password, words }
+            }
+            "vault.import" => {
+                let p = params::<ImportParams>(raw)?;
+                // JS order: mnemonic, exists, then password strength.
+                let phrase = secret(p.mnemonic_b64)?;
+                let mnemonic = phrase
+                    .as_str()
+                    .ok()
+                    .and_then(|m| Mnemonic::parse(m).ok())
+                    .ok_or_else(|| {
+                        ErrorBody::new(ErrorCode::InvalidMnemonic, MSG_INVALID_MNEMONIC)
+                    })?;
+                if self.vault_exists()? && !p.overwrite {
+                    return Err(ErrorBody::new(ErrorCode::VaultExists, MSG_EXISTS_IMPORT));
+                }
+                let password = secret(p.password_b64)?;
+                check_strength(&password)?;
+                Kind::Import {
+                    password,
+                    mnemonic,
+                    overwrite: p.overwrite,
+                }
+            }
+            _ => return Err(ErrorBody::new(ErrorCode::UnknownMethod, "Unknown method")),
+        };
+        if self.queue.len() >= MAX_QUEUED {
+            return Err(ErrorBody::new(ErrorCode::Busy, "Busy"));
+        }
+        self.queue.push_back(Pending {
+            id,
+            kind,
+            admitted: Instant::now(),
+        });
+        Ok(())
+    }
+
+    /// Admission check from the snapshot; the job checks again at run time.
+    fn vault_exists(&self) -> Result<bool, ErrorBody> {
+        self.file
+            .as_ref()
+            .map(Option::is_some)
+            .map_err(|e| e.body(false))
+    }
+
+    /// Starts the next queued job if none is running.
+    fn start_next(&mut self, out: &mut Vec<Out>) {
+        while self.running.is_none() {
+            let Some(pending) = self.queue.pop_front() else {
+                return;
+            };
+            let deadline = pending.admitted + KDF_DEADLINE;
+            if Instant::now() >= deadline {
+                self.reply_error(
+                    out,
+                    pending.id,
+                    ErrorBody::new(ErrorCode::Deadline, "Deadline exceeded"),
+                );
+                continue;
+            }
+            let attempt = if pending.kind.throttled() {
+                match self.throttle.reserve(self.now_ms()) {
+                    Ok(attempt) => Some(attempt),
+                    Err(throttled) => {
+                        let seconds = throttled.retry_after_ms.div_ceil(1000);
+                        self.reply_error(
+                            out,
+                            pending.id,
+                            ErrorBody::new(
+                                ErrorCode::Throttled,
+                                format!("Too many attempts. Try again in {seconds} seconds."),
+                            )
+                            .with_data(
+                                serde_json::json!({ "retry_after_ms": throttled.retry_after_ms }),
+                            ),
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            let job_id = self.next_job;
+            self.next_job += 1;
+            let mutates = pending.kind.mutates();
+            let (kind, job) = self.job_for(pending.kind);
+            self.running = Some(Running {
+                job: job_id,
+                request: pending.id,
+                kind,
+                mutates,
+                attempt,
+                ticket: self.state.ticket(),
+                deadline,
+                cancelled: false,
+            });
+            out.push(Out::Job(job_id, job));
+        }
+    }
+
+    fn job_for(&self, kind: Kind) -> (RunningKind, Job) {
+        type Run = Box<dyn FnOnce(&Path) -> JobOutput + Send>;
+        let (kind, run): (RunningKind, Run) = match kind {
+            Kind::Unlock { password } => (
+                RunningKind::Unlock,
+                Box::new(move |dir| JobOutput::Unlocked(job_unlock(dir, &password))),
+            ),
+            Kind::Verify { password } => (
+                RunningKind::Verify,
+                Box::new(move |dir| JobOutput::Checked {
+                    result: job_verify(dir, &password),
+                    commit: None,
+                }),
+            ),
+            Kind::ExportMnemonic { password } => (
+                RunningKind::ExportMnemonic,
+                Box::new(move |dir| JobOutput::Checked {
+                    result: job_verify(dir, &password),
+                    commit: None,
+                }),
+            ),
+            Kind::ExportPrivateKey { password, account } => (
+                RunningKind::ExportPrivateKey(account),
+                Box::new(move |dir| JobOutput::Checked {
+                    result: job_verify(dir, &password),
+                    commit: None,
+                }),
+            ),
+            Kind::Delete { password } => (
+                RunningKind::Delete,
+                Box::new(move |dir| job_delete(dir, &password)),
+            ),
+            Kind::ChangePassword { current, new } => (
+                RunningKind::ChangePassword,
+                Box::new(move |dir| job_change(dir, &current, &new)),
+            ),
+            Kind::Create { password, words } => (
+                RunningKind::Create,
+                Box::new(move |dir| job_create(dir, &password, words)),
+            ),
+            Kind::Import {
+                password,
+                mnemonic,
+                overwrite,
+            } => (
+                RunningKind::Import,
+                Box::new(move |dir| job_import(dir, &password, mnemonic, overwrite)),
+            ),
+        };
+        let dir = self.dir.clone();
+        let job: Job = Box::new(move || {
+            let output = run(&dir);
+            Finished {
+                output,
+                file: snapshot(&dir),
+            }
+        });
+        (kind, job)
+    }
+
+    /// A worker job finished.
+    pub fn job_done(&mut self, job: u64, finished: Finished) -> Vec<Out> {
+        let mut out = Vec::new();
+        self.file = finished.file;
+        let output = finished.output;
+        let Some(running) = self.running.take_if(|r| r.job == job) else {
+            return out;
+        };
+        let now = self.now_ms();
+        let late = Instant::now() >= running.deadline;
+        let request = running.request;
+        // Pre-commit work that was cancelled or ran out of time reports so;
+        // committed mutations always report their real (successful) outcome.
+        let abandoned = |committed: bool| -> Option<ErrorBody> {
+            if committed {
+                return None;
+            }
+            if running.cancelled {
+                Some(ErrorBody::new(ErrorCode::Cancelled, "Cancelled"))
+            } else if late {
+                Some(ErrorBody::new(ErrorCode::Deadline, "Deadline exceeded"))
+            } else {
+                None
+            }
+        };
+        let short = matches!(
+            running.kind,
+            RunningKind::Verify | RunningKind::ExportMnemonic | RunningKind::ExportPrivateKey(_)
+        );
+        let outcome = match (&running.kind, output) {
+            (RunningKind::Unlock, JobOutput::Unlocked(result)) => {
+                let throttle = match &result {
+                    Ok(_) => Outcome::Success,
+                    Err(e) => e.throttle_outcome(),
+                };
+                let reply = match result {
+                    Err(error) => Err(error.body(false)),
+                    Ok(_) if abandoned(false).is_some() => {
+                        Err(abandoned(false).unwrap_or_else(internal))
+                    }
+                    Ok((prepared, addresses)) => {
+                        match self
+                            .state
+                            .install(running.ticket, prepared, self.auto_lock_ms, now)
+                        {
+                            Ok(epoch) => {
+                                out.push(Out::Send(event_payload(
+                                    "vault.unlocked",
+                                    &serde_json::json!({ "epoch": epoch.get() }),
+                                )));
+                                Ok(json_result(
+                                    request,
+                                    &serde_json::json!({ "addresses": addresses }),
+                                ))
+                            }
+                            // Design 0001: a result from a revoked epoch is
+                            // wiped, never installed, and returns vault_locked.
+                            Err(_) => Err(ErrorBody::new(ErrorCode::VaultLocked, MSG_LOCKED)),
+                        }
+                    }
+                };
+                (throttle, reply)
+            }
+            (kind, JobOutput::Checked { result, commit }) => {
+                let throttle = match &result {
+                    Ok(()) => Outcome::Success,
+                    Err(e) => e.throttle_outcome(),
+                };
+                let reply = match result {
+                    Err(error) => Err(error.body(short)),
+                    Ok(()) => match abandoned(commit.is_some()) {
+                        Some(error) => Err(error),
+                        None => self.after_check(kind, request, commit, &mut out),
+                    },
+                };
+                (throttle, reply)
+            }
+            (RunningKind::ChangePassword, JobOutput::Changed { result, commit }) => {
+                let throttle = match &result {
+                    Ok(()) => Outcome::Success,
+                    // A weak new password still proved the current one.
+                    Err(OpError::Weak) => Outcome::Success,
+                    Err(e) => e.throttle_outcome(),
+                };
+                let reply = match result {
+                    Err(error) => Err(error.body(false)),
+                    Ok(()) => match abandoned(commit.is_some()) {
+                        Some(error) => Err(error),
+                        None => Ok(json_result(
+                            request,
+                            &durability(serde_json::json!({}), commit),
+                        )),
+                    },
+                };
+                (throttle, reply)
+            }
+            (kind, JobOutput::Written { result, commit }) => {
+                let reply = match result {
+                    Err(error) => Err(error.body(false)),
+                    Ok((prepared, addresses, phrase)) => {
+                        // Create and import unlock, as in JS, unless a lock
+                        // happened meanwhile; the vault is written either way.
+                        if let Ok(epoch) =
+                            self.state
+                                .install(running.ticket, prepared, self.auto_lock_ms, now)
+                        {
+                            out.push(Out::Send(event_payload(
+                                "vault.unlocked",
+                                &serde_json::json!({ "epoch": epoch.get() }),
+                            )));
+                        }
+                        let durable = commit != Some(Done::NotDurable);
+                        match (kind, phrase) {
+                            (RunningKind::Create, Some(phrase)) => {
+                                create_reply(request, &addresses, &phrase, durable)
+                            }
+                            _ => Ok(json_result(
+                                request,
+                                &durability(serde_json::json!({ "addresses": addresses }), commit),
+                            )),
+                        }
+                    }
+                };
+                (Outcome::NotTried, reply)
+            }
+            _ => (Outcome::NotTried, Err(internal())),
+        };
+        let (throttle, reply) = outcome;
+        if let Some(attempt) = running.attempt {
+            self.throttle.settle(attempt, throttle, now);
+        }
+        match reply {
+            Ok(Some(payload)) => out.push(Out::Send(payload)),
+            Ok(None) => out.push(Out::Send(error_payload(request, &internal()))),
+            Err(error) => self.reply_error(&mut out, request, error),
+        }
+        let _ = running.mutates;
+        self.start_next(&mut out);
+        out
+    }
+
+    /// The second half of verify, delete and the exports, after the password
+    /// checked out.
+    fn after_check(
+        &mut self,
+        kind: &RunningKind,
+        request: u64,
+        commit: Option<Done>,
+        out: &mut Vec<Out>,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, ErrorBody> {
+        match kind {
+            RunningKind::Verify => Ok(json_result(request, &serde_json::json!({}))),
+            RunningKind::Delete => {
+                self.lock_now(LockReason::Delete, out);
+                Ok(json_result(
+                    request,
+                    &durability(serde_json::json!({}), commit),
+                ))
+            }
+            RunningKind::ExportMnemonic => {
+                let mnemonic = self
+                    .state
+                    .mnemonic()
+                    .map_err(|_| ErrorBody::new(ErrorCode::VaultLocked, MSG_LOCKED))?;
+                secret_result(request, "mnemonic_b64", mnemonic.phrase().as_bytes())
+            }
+            RunningKind::ExportPrivateKey(account) => {
+                let key = self
+                    .state
+                    .user_wallet(*account)
+                    .map_err(locked_or_internal)?;
+                secret_result(request, "private_key_b64", key.to_secret_bytes().as_slice())
+            }
+            _ => Err(internal()),
+        }
+    }
+
+    fn reply_error(&self, out: &mut Vec<Out>, id: u64, error: ErrorBody) {
+        out.push(Out::Send(error_payload(id, &error)));
+    }
+}
+
+/// create's reply: the addresses, and the phrase for backup display.
+fn create_reply(
+    request: u64,
+    addresses: &Addresses,
+    phrase: &Mnemonic,
+    durable: bool,
+) -> Result<Option<Zeroizing<Vec<u8>>>, ErrorBody> {
+    let mut response = SecretResponse::new(request)
+        .public("addresses", addresses)
+        .map_err(|_| internal())?;
+    if !durable {
+        response = response.public("durable", &false).map_err(|_| internal())?;
+    }
+    response
+        .secret("mnemonic_b64", phrase.phrase().as_bytes())
+        .finish()
+        .map(Some)
+        .map_err(|_| internal())
+}
+
+/// Adds `"durable": false` to a committed result whose directory flush
+/// failed (design 0001: committed changes are never reported as errors).
+fn durability(mut result: serde_json::Value, commit: Option<Done>) -> serde_json::Value {
+    if commit == Some(Done::NotDurable)
+        && let Some(object) = result.as_object_mut()
+    {
+        object.insert("durable".into(), serde_json::Value::Bool(false));
+    }
+    result
+}
+
+fn internal() -> ErrorBody {
+    ErrorBody::new(ErrorCode::Internal, "Internal error")
+}
+
+fn locked_or_internal(error: fc_vault::Error) -> ErrorBody {
+    match error {
+        fc_vault::Error::Locked => ErrorBody::new(ErrorCode::VaultLocked, MSG_LOCKED),
+        fc_vault::Error::Keys(fc_keys::Error::IndexOutOfRange(_)) => {
+            ErrorBody::new(ErrorCode::InvalidArgument, "Index out of range")
+        }
+        _ => internal(),
+    }
+}
+
+fn check_strength(password: &SecretBytes) -> Result<(), ErrorBody> {
+    let strong = password.as_str().is_ok_and(format::is_strong_enough);
+    if strong {
+        Ok(())
+    } else {
+        Err(ErrorBody::new(ErrorCode::WeakPassword, MSG_WEAK))
+    }
+}
+
+fn radicle_did(id: u64, public_key_hex: &str) -> Result<Option<Zeroizing<Vec<u8>>>, ErrorBody> {
+    let invalid = || ErrorBody::new(ErrorCode::InvalidArgument, "Invalid public key");
+    let hex = public_key_hex.strip_prefix("0x").unwrap_or(public_key_hex);
+    if hex.len() != 64 {
+        return Err(invalid());
+    }
+    let mut key = [0u8; 32];
+    for (i, byte) in key.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).map_err(|_| invalid())?;
+    }
+    Ok(json_result(
+        id,
+        &serde_json::json!({ "did": multiformats::did_key(&key) }),
+    ))
+}
+
+fn json_result<R: Serialize>(id: u64, result: &R) -> Option<Zeroizing<Vec<u8>>> {
+    let mut payload = Zeroizing::new(Vec::with_capacity(512));
+    message::write_result(&mut *payload, id, result).ok()?;
+    Some(payload)
+}
+
+fn secret_result(
+    id: u64,
+    field: &'static str,
+    secret: &[u8],
+) -> Result<Option<Zeroizing<Vec<u8>>>, ErrorBody> {
+    SecretResponse::new(id)
+        .secret(field, secret)
+        .finish()
+        .map(Some)
+        .map_err(|_| internal())
+}
+
+fn error_payload(id: u64, error: &ErrorBody) -> Zeroizing<Vec<u8>> {
+    let mut payload = Zeroizing::new(Vec::with_capacity(256));
+    let _ = message::write_error(&mut *payload, id, error);
+    payload
+}
+
+fn event_payload<D: Serialize>(event: &str, data: &D) -> Zeroizing<Vec<u8>> {
+    let mut payload = Zeroizing::new(Vec::with_capacity(128));
+    let _ = message::write_event(&mut *payload, event, data);
+    payload
+}
+
+fn locked_event(locked: Locked) -> Zeroizing<Vec<u8>> {
+    let reason = match locked.reason {
+        LockReason::Manual => "manual",
+        LockReason::Auto => "auto",
+        LockReason::Delete => "delete",
+        LockReason::Shutdown => "shutdown",
+    };
+    event_payload(
+        "vault.locked",
+        &serde_json::json!({ "reason": reason, "epoch": locked.epoch.get() }),
+    )
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex(&Sha256::digest(bytes))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+/// Startup work that touches storage, run off the event loop: adoption
+/// tightens an existing vault file to 0600 in place (metadata only; quick
+/// unlock's content fingerprint is unaffected), then the file is snapshot.
+pub fn startup_snapshot(dir: &Path) -> FileSnapshot {
+    match fsx::tighten(&dir.join(VAULT_FILE)) {
+        Ok(true) => crate::log::info("tightened the vault file to 0600", serde_json::json!({})),
+        Ok(false) => {}
+        Err(e) => crate::log::warn(
+            "could not tighten the vault file",
+            serde_json::json!({ "error": e.kind().to_string() }),
+        ),
+    }
+    snapshot(dir)
+}
+
+/// The vault file's SHA-256 (quick unlock binds to it), or `None` if
+/// missing. Never called on the event loop.
+fn snapshot(dir: &Path) -> FileSnapshot {
+    read_vault(dir).map(|contents| contents.map(|c| sha256_hex(c.as_bytes())))
+}
+
+/// Reads the vault file: `None` if missing. Only a regular file of bounded
+/// size is read, so a FIFO or a huge file can't stall anything.
+fn read_vault(dir: &Path) -> Result<Option<String>, OpError> {
+    let path = dir.join(VAULT_FILE);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(storage(&e)),
+    };
+    if !metadata.is_file() {
+        return Err(OpError::Storage("not_regular"));
+    }
+    if metadata.len() > MAX_VAULT_BYTES {
+        return Err(OpError::Storage("too_large"));
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Err(OpError::Corrupt),
+        Err(e) => Err(storage(&e)),
+    }
+}
+
+fn storage(error: &std::io::Error) -> OpError {
+    match error.kind() {
+        std::io::ErrorKind::PermissionDenied => OpError::Storage("permission"),
+        std::io::ErrorKind::StorageFull => OpError::Storage("no_space"),
+        _ => OpError::Storage("other"),
+    }
+}
+
+fn open(dir: &Path, password: &SecretBytes) -> Result<format::Opened, OpError> {
+    let contents = read_vault(dir)?.ok_or(OpError::NoVault)?;
+    format::open(&contents, password.as_bytes()).map_err(OpError::from_vault)
+}
+
+fn addresses_of(prepared_from: &Mnemonic) -> Result<Addresses, OpError> {
+    let keys = freedom::derive_all(&prepared_from.to_seed()).map_err(|_| OpError::Internal)?;
+    Ok(Addresses {
+        user_wallet: keys.user_wallet.address().to_string(),
+        bee_wallet: keys.bee_wallet.address().to_string(),
+    })
+}
+
+fn job_unlock(dir: &Path, password: &SecretBytes) -> Result<(Prepared, Addresses), OpError> {
+    let opened = open(dir, password)?;
+    let addresses = addresses_of(&opened.mnemonic)?;
+    Ok((Prepared::new(opened.mnemonic), addresses))
+}
+
+fn job_verify(dir: &Path, password: &SecretBytes) -> Result<(), OpError> {
+    open(dir, password).map(|_| ())
+}
+
+fn job_delete(dir: &Path, password: &SecretBytes) -> JobOutput {
+    if let Err(error) = open(dir, password) {
+        return JobOutput::Checked {
+            result: Err(error),
+            commit: None,
+        };
+    }
+    match fsx::remove(&dir.join(VAULT_FILE)) {
+        Ok(done) => JobOutput::Checked {
+            result: Ok(()),
+            commit: Some(done),
+        },
+        Err(e) => JobOutput::Checked {
+            result: Err(storage(&e)),
+            commit: None,
+        },
+    }
+}
+
+/// Seals `mnemonic` under `password` and writes it durably, after checking
+/// that the staged file decrypts to the same mnemonic.
+fn write_vault(dir: &Path, mnemonic: &Mnemonic, password: &[u8]) -> Result<Done, OpError> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let created_at =
+        format::iso_timestamp(u64::try_from(millis).unwrap_or(0)).map_err(|_| OpError::Internal)?;
+    let params = SealParams::random(&mut OsRng, created_at).map_err(|_| OpError::Internal)?;
+    let contents = format::seal(mnemonic, password, &params).map_err(|_| OpError::Internal)?;
+    std::fs::create_dir_all(dir).map_err(|e| storage(&e))?;
+    let expected = mnemonic.phrase().to_owned();
+    let expected = Zeroizing::new(expected);
+    fsx::replace(&dir.join(VAULT_FILE), contents.as_bytes(), |staged| {
+        let staged = std::fs::read_to_string(staged).map_err(|e| e.kind().to_string())?;
+        let opened = format::open(&staged, password).map_err(|e| e.to_string())?;
+        if opened.mnemonic.phrase() == expected.as_str() {
+            Ok(())
+        } else {
+            Err("staged vault decrypts to a different mnemonic".into())
+        }
+    })
+    .map_err(|e| match e {
+        fsx::WriteError::Io(e) => storage(&e),
+        fsx::WriteError::Check(reason) => {
+            crate::log::error(
+                "the staged vault failed its check",
+                serde_json::json!({ "reason": reason }),
+            );
+            OpError::Internal
+        }
+    })
+}
+
+fn job_change(dir: &Path, current: &SecretBytes, new: &SecretBytes) -> JobOutput {
+    let opened = match open(dir, current) {
+        Ok(opened) => opened,
+        Err(error) => {
+            return JobOutput::Changed {
+                result: Err(error),
+                commit: None,
+            };
+        }
+    };
+    if !new.as_str().is_ok_and(format::is_strong_enough) {
+        return JobOutput::Changed {
+            result: Err(OpError::Weak),
+            commit: None,
+        };
+    }
+    match write_vault(dir, &opened.mnemonic, new.as_bytes()) {
+        Ok(done) => JobOutput::Changed {
+            result: Ok(()),
+            commit: Some(done),
+        },
+        Err(error) => JobOutput::Changed {
+            result: Err(error),
+            commit: None,
+        },
+    }
+}
+
+fn job_create(dir: &Path, password: &SecretBytes, words: WordCount) -> JobOutput {
+    written((|| {
+        // Checked again here: another create or import may have run since
+        // admission.
+        if read_vault(dir)?.is_some() {
+            return Err(OpError::Exists { import: false });
+        }
+        let mnemonic = Mnemonic::generate(&mut OsRng, words).map_err(|_| OpError::Internal)?;
+        let phrase = Mnemonic::parse(mnemonic.phrase()).map_err(|_| OpError::Internal)?;
+        let addresses = addresses_of(&mnemonic)?;
+        let done = write_vault(dir, &mnemonic, password.as_bytes())?;
+        Ok(((Prepared::new(mnemonic), addresses, Some(phrase)), done))
+    })())
+}
+
+fn job_import(
+    dir: &Path,
+    password: &SecretBytes,
+    mnemonic: Mnemonic,
+    overwrite: bool,
+) -> JobOutput {
+    written((|| {
+        if !overwrite && read_vault(dir)?.is_some() {
+            return Err(OpError::Exists { import: true });
+        }
+        let addresses = addresses_of(&mnemonic)?;
+        let done = write_vault(dir, &mnemonic, password.as_bytes())?;
+        Ok(((Prepared::new(mnemonic), addresses, None), done))
+    })())
+}
+
+/// A written vault's secrets, its addresses, and create's phrase.
+type NewVault = (Prepared, Addresses, Option<Mnemonic>);
+
+/// Create and import do every fallible step before the write, so nothing
+/// can fail once the vault is committed.
+fn written(result: Result<(NewVault, Done), OpError>) -> JobOutput {
+    match result {
+        Ok((value, done)) => JobOutput::Written {
+            result: Ok(value),
+            commit: Some(done),
+        },
+        Err(error) => JobOutput::Written {
+            result: Err(error),
+            commit: None,
+        },
+    }
+}

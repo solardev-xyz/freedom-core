@@ -29,3 +29,11 @@ print_stderr = "warn"
 # stay unoptimized for debugging.
 [profile.dev.package."*"]
 opt-level = 3
+
+# The crypto crates themselves too: the vault KDF (900k PBKDF2 rounds) runs
+# in fc-keys and would take seconds per call unoptimized.
+[profile.dev.package.fc-keys]
+opt-level = 3
+
+[profile.dev.package.fc-vault]
+opt-level = 3

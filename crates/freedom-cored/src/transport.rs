@@ -56,9 +56,15 @@ impl Credits {
 }
 
 /// Reports a thread that ends by panicking.
-struct DeathNotice {
+pub struct DeathNotice {
     events: Sender<Event>,
     name: &'static str,
+}
+
+impl DeathNotice {
+    pub fn new(events: Sender<Event>, name: &'static str) -> Self {
+        DeathNotice { events, name }
+    }
 }
 
 impl Drop for DeathNotice {
