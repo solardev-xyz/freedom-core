@@ -10,7 +10,9 @@ mod exit;
 mod fsx;
 mod gate;
 mod hardening;
+mod journal;
 mod log;
+mod nodes;
 mod rng;
 mod serve;
 mod storage;
@@ -135,9 +137,25 @@ fn recover(data_dir: &std::path::Path, lock_dir: &std::path::Path) -> Exit {
             return Exit::from(&e);
         }
     };
+    // Roll any interrupted node identity write forward (design 0001,
+    // "Multi-file writes"). JS-backend builds run this at startup.
+    let line = match journal::recover(data_dir) {
+        Ok(journal::Recovered::Finished {
+            op_id,
+            status: journal::OpStatus::Corrupt,
+        }) => format!("corrupt {op_id}\n"),
+        Ok(_) => "recovered\n".to_owned(),
+        Err(e) => {
+            log::error(
+                "node identity recovery failed",
+                serde_json::json!({ "error": e.kind().to_string() }),
+            );
+            return Exit::Storage;
+        }
+    };
     let mut stdout = std::io::stdout().lock();
     if stdout
-        .write_all(b"recovered\n")
+        .write_all(line.as_bytes())
         .and_then(|()| stdout.flush())
         .is_err()
     {

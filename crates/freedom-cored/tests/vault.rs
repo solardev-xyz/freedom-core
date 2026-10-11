@@ -710,33 +710,36 @@ fn wire_fields_follow_design_0001() {
         json!({ "accounts": [0], "publishers": [0] }),
     );
     let result = &addresses["result"];
-    let keys: Vec<&str> = result
+    let mut keys: Vec<&str> = result
         .as_object()
         .unwrap()
         .keys()
         .map(String::as_str)
         .collect();
+    keys.sort_unstable();
     assert_eq!(
         keys,
         ["bee_wallet", "publishers", "radicle", "user_wallets"]
     );
-    let radicle: Vec<&str> = result["radicle"]
+    let mut radicle: Vec<&str> = result["radicle"]
         .as_object()
         .unwrap()
         .keys()
         .map(String::as_str)
         .collect();
+    radicle.sort_unstable();
     assert_eq!(radicle, ["did", "node_id", "public_key"]);
     let public_key = result["radicle"]["public_key"].as_str().unwrap();
     let did = core.call(4, "keys.radicle_did", json!({ "public_key": public_key }));
     assert_eq!(did["result"]["did"], result["radicle"]["did"]);
     let status = core.call(5, "vault.status", json!({}));
-    let fields: Vec<&str> = status["result"]
+    let mut fields: Vec<&str> = status["result"]
         .as_object()
         .unwrap()
         .keys()
         .map(String::as_str)
         .collect();
+    fields.sort_unstable();
     assert_eq!(fields, ["epoch", "exists", "fingerprint", "unlocked"]);
     let changed = core.call(
         6,
@@ -749,12 +752,13 @@ fn wire_fields_follow_design_0001() {
         "vault.export_private_key",
         json!({ "password_b64": b64("testpass2"), "account": 0 }),
     );
-    let fields: Vec<&str> = key["result"]
+    let mut fields: Vec<&str> = key["result"]
         .as_object()
         .unwrap()
         .keys()
         .map(String::as_str)
         .collect();
+    fields.sort_unstable();
     assert_eq!(fields, ["private_key_hex"]);
 }
 

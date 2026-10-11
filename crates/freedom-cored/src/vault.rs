@@ -37,7 +37,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use fc_keys::freedom;
+use fc_keys::freedom::{self, FreedomKeys};
 use fc_keys::{Mnemonic, WordCount, multiformats};
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::message::{self, CallerKind};
@@ -50,6 +50,8 @@ use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
 use crate::fsx::{self, Done};
+use crate::journal;
+use crate::nodes::{self, NodeSpec};
 use crate::rng::OsRng;
 use crate::worker::Job;
 
@@ -200,6 +202,10 @@ pub enum JobOutput {
     },
     /// reconcile: `None` when the operation didn't commit.
     Reconciled(Result<Option<Reconciled>, OpError>),
+    /// nodes.write_identity: the journal outcome and the public identity.
+    NodeWritten(Result<(journal::Outcome, serde_json::Map<String, serde_json::Value>), OpError>),
+    /// nodes.op_status.
+    OpStatus(Result<journal::OpStatus, OpError>),
 }
 
 /// What `vault.reconcile` found for a committed create or import.
@@ -229,8 +235,12 @@ impl JobOutput {
             JobOutput::Checked { commit, .. }
             | JobOutput::Written { commit, .. }
             | JobOutput::Changed { commit, .. } => commit.as_ref().map(|c| c.file.clone()),
-            // Read-only: unlock and reconcile change no file.
-            JobOutput::Unlocked(_) | JobOutput::Reconciled(_) => None,
+            // Unlock and reconcile are read-only; node writes don't touch the
+            // vault file.
+            JobOutput::Unlocked(_)
+            | JobOutput::Reconciled(_)
+            | JobOutput::NodeWritten(_)
+            | JobOutput::OpStatus(_) => None,
         }
     }
 }
@@ -274,6 +284,16 @@ enum Kind {
         mnemonic: Option<Mnemonic>,
         install: bool,
     },
+    NodeWrite {
+        op_id: String,
+        spec: NodeSpec,
+        /// Taken from the unlocked state when the job starts, never while
+        /// queued.
+        keys: Option<Box<FreedomKeys>>,
+    },
+    OpStatus {
+        op_id: String,
+    },
 }
 
 impl Kind {
@@ -281,7 +301,11 @@ impl Kind {
     fn throttled(&self) -> bool {
         !matches!(
             self,
-            Kind::Create { .. } | Kind::Import { .. } | Kind::Reconcile { .. }
+            Kind::Create { .. }
+                | Kind::Import { .. }
+                | Kind::Reconcile { .. }
+                | Kind::NodeWrite { .. }
+                | Kind::OpStatus { .. }
         )
     }
 }
@@ -352,6 +376,8 @@ enum RunningKind {
     Create,
     Import,
     Reconcile { install: bool },
+    NodeWrite,
+    OpStatus,
 }
 
 struct Running {
@@ -434,6 +460,52 @@ struct ReconcileParams<'a> {
     mnemonic_b64: Option<&'a RawValue>,
     #[serde(default)]
     install: bool,
+}
+
+#[derive(Deserialize)]
+struct NodeWriteParams {
+    op_id: String,
+    node: String,
+    data_dir: Option<String>,
+    api_port: Option<u16>,
+    p2p_port: Option<u16>,
+    home: Option<String>,
+    alias: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OpStatusParams {
+    op_id: String,
+}
+
+/// Operation IDs come from main: 1 to 64 of `[A-Za-z0-9._-]`.
+fn valid_op_id(op_id: &str) -> bool {
+    (1..=64).contains(&op_id.len())
+        && op_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+fn node_spec(p: NodeWriteParams) -> Option<NodeSpec> {
+    let absolute = |dir: Option<String>| dir.map(PathBuf::from).filter(|path| path.is_absolute());
+    match p.node.as_str() {
+        "bee" => Some(NodeSpec::Bee {
+            data_dir: absolute(p.data_dir)?,
+            api_port: p.api_port.filter(|&port| port > 0)?,
+            p2p_port: p.p2p_port.filter(|&port| port > 0)?,
+        }),
+        "radicle" => {
+            // The alias goes into the key comment and the .pub line.
+            let alias = p.alias.filter(|a| {
+                (1..=64).contains(&a.chars().count()) && !a.chars().any(char::is_control)
+            })?;
+            Some(NodeSpec::Radicle {
+                home: absolute(p.home)?,
+                alias,
+            })
+        }
+        _ => None,
+    }
 }
 
 #[derive(Deserialize)]
@@ -550,6 +622,8 @@ impl Vault {
                 | "vault.create"
                 | "vault.import"
                 | "vault.reconcile"
+                | "nodes.write_identity"
+                | "nodes.op_status"
                 | "keys.generate_mnemonic"
                 | "keys.validate_mnemonic"
                 | "keys.addresses"
@@ -571,7 +645,9 @@ impl Vault {
     ) -> Vec<Out> {
         let mut out = Vec::new();
         // compat.* and vault.reconcile are main-internal (design 0001).
-        let internal_only = method.starts_with("compat.") || method == "vault.reconcile";
+        let internal_only = method.starts_with("compat.")
+            || method == "vault.reconcile"
+            || method == "nodes.op_status";
         if internal_only && caller != CallerKind::Shell {
             self.reply_error(
                 &mut out,
@@ -916,6 +992,34 @@ impl Vault {
                     install: p.install,
                 }
             }
+            "nodes.write_identity" => {
+                let invalid = || ErrorBody::new(ErrorCode::InvalidArgument, "Invalid parameters");
+                let p = params::<NodeWriteParams>(raw)?;
+                if !valid_op_id(&p.op_id) {
+                    return Err(invalid());
+                }
+                let op_id = p.op_id.clone();
+                let spec = node_spec(p).ok_or_else(invalid)?;
+                // Admitted against the current epoch (design 0001).
+                if !self.state.is_unlocked() {
+                    return Err(locked());
+                }
+                Kind::NodeWrite {
+                    op_id,
+                    spec,
+                    keys: None,
+                }
+            }
+            "nodes.op_status" => {
+                let p = params::<OpStatusParams>(raw)?;
+                if !valid_op_id(&p.op_id) {
+                    return Err(ErrorBody::new(
+                        ErrorCode::InvalidArgument,
+                        "Invalid parameters",
+                    ));
+                }
+                Kind::OpStatus { op_id: p.op_id }
+            }
             _ => return Err(ErrorBody::new(ErrorCode::UnknownMethod, "Unknown method")),
         };
         if self.queue.len() >= MAX_QUEUED {
@@ -943,9 +1047,19 @@ impl Vault {
             let Some(pending) = self.queue.pop_front() else {
                 return;
             };
+            let mut pending = pending;
             if Instant::now() >= pending.deadline {
                 self.reply_error(out, pending.id, deadline_exceeded());
                 continue;
+            }
+            if let Kind::NodeWrite { keys, .. } = &mut pending.kind {
+                match self.state.freedom_keys() {
+                    Ok(derived) => *keys = Some(Box::new(derived)),
+                    Err(_) => {
+                        self.reply_error(out, pending.id, locked());
+                        continue;
+                    }
+                }
             }
             let attempt = if pending.kind.throttled() {
                 match self.throttle.reserve(self.now_ms()) {
@@ -1057,6 +1171,22 @@ impl Vault {
                         install,
                         control,
                     ))
+                }),
+            ),
+            Kind::NodeWrite { op_id, spec, keys } => (
+                RunningKind::NodeWrite,
+                Box::new(move |dir, control| {
+                    JobOutput::NodeWritten(job_node_write(dir, &op_id, &spec, keys, control))
+                }),
+            ),
+            Kind::OpStatus { op_id } => (
+                RunningKind::OpStatus,
+                Box::new(move |dir, control| {
+                    JobOutput::OpStatus(if control.abandoned() {
+                        Err(OpError::Abandoned)
+                    } else {
+                        journal::op_status(dir, &op_id).map_err(|e| storage(&e))
+                    })
                 }),
             ),
         };
@@ -1187,6 +1317,30 @@ impl Vault {
                 };
                 (Outcome::NotTried, reply)
             }
+            (RunningKind::NodeWrite, JobOutput::NodeWritten(result)) => {
+                let reply = match result {
+                    Err(error) => Err(error.body(false)),
+                    Ok((outcome, mut public)) => {
+                        let status = match outcome {
+                            journal::Outcome::Installed => "installed",
+                            journal::Outcome::PendingRecovery => "pending_recovery",
+                            // Abandoned jobs were already answered.
+                            journal::Outcome::Abandoned => {
+                                return self.internal_reply(out, request);
+                            }
+                        };
+                        public.insert("status".into(), serde_json::Value::String(status.into()));
+                        Ok(json_result(request, &public))
+                    }
+                };
+                (Outcome::NotTried, reply)
+            }
+            (RunningKind::OpStatus, JobOutput::OpStatus(result)) => {
+                let reply = result
+                    .map(|status| json_result(request, &serde_json::json!({ "status": status })))
+                    .map_err(|e| e.body(false));
+                (Outcome::NotTried, reply)
+            }
             (RunningKind::Reconcile { install }, JobOutput::Reconciled(result)) => {
                 let reply = match result {
                     Err(error) => Err(error.body(false)),
@@ -1259,6 +1413,14 @@ impl Vault {
             }
             _ => Err(internal()),
         }
+    }
+
+    /// An internal error for a request that shouldn't have reached here;
+    /// keeps the worker slot moving.
+    fn internal_reply(&mut self, mut out: Vec<Out>, request: u64) -> Vec<Out> {
+        self.reply_error(&mut out, request, internal());
+        self.start_next(&mut out);
+        out
     }
 
     fn reply_error(&self, out: &mut Vec<Out>, id: u64, error: ErrorBody) {
@@ -1339,7 +1501,10 @@ fn throttle_outcome(output: &JobOutput) -> Outcome {
         JobOutput::Checked { result, .. } | JobOutput::Changed { result, .. } => {
             result.as_ref().map(|_| ())
         }
-        JobOutput::Written { .. } | JobOutput::Reconciled(_) => return Outcome::NotTried,
+        JobOutput::Written { .. }
+        | JobOutput::Reconciled(_)
+        | JobOutput::NodeWritten(_)
+        | JobOutput::OpStatus(_) => return Outcome::NotTried,
     };
     match result {
         Ok(_) => Outcome::Success,
@@ -1482,6 +1647,19 @@ fn hex(bytes: &[u8]) -> String {
 /// tightens an existing vault file to 0600 in place (metadata only; quick
 /// unlock's content fingerprint is unaffected), then the file is snapshot.
 pub fn startup_snapshot(dir: &Path) -> FileSnapshot {
+    // Finish an interrupted node identity write before anything else
+    // (design 0001: before core.hello is answered and before any node write).
+    match journal::recover(dir) {
+        Ok(journal::Recovered::Nothing) => {}
+        Ok(journal::Recovered::Finished { status, .. }) => crate::log::info(
+            "finished an interrupted node identity write",
+            serde_json::json!({ "status": status }),
+        ),
+        Err(e) => crate::log::error(
+            "node identity recovery failed",
+            serde_json::json!({ "error": e.kind().to_string() }),
+        ),
+    }
     match fsx::tighten(&dir.join(VAULT_FILE)) {
         Ok(true) => crate::log::info("tightened the vault file to 0600", serde_json::json!({})),
         Ok(false) => {}
@@ -1795,6 +1973,41 @@ fn job_reconcile(
             }))
         }
     }
+}
+
+/// `nodes.write_identity`: builds the node's files from keys taken at job
+/// start, then commits them through the journal. The commit point is the
+/// journal write; after it, the reply is `installed` or `pending_recovery`.
+fn job_node_write(
+    identity_dir: &Path,
+    op_id: &str,
+    spec: &NodeSpec,
+    keys: Option<Box<FreedomKeys>>,
+    control: &JobControl,
+) -> Result<(journal::Outcome, serde_json::Map<String, serde_json::Value>), OpError> {
+    if control.abandoned() {
+        return Err(OpError::Abandoned);
+    }
+    let keys = keys.ok_or(OpError::Internal)?;
+    let built = nodes::build(spec, &keys, &mut OsRng).map_err(|e| match e {
+        nodes::BuildError::Io(e) => storage(&e),
+        nodes::BuildError::Keys | nodes::BuildError::Path => OpError::Internal,
+    })?;
+    drop(keys);
+    let files: Vec<journal::FileSpec<'_>> = built
+        .files
+        .iter()
+        .map(|(target, contents)| journal::FileSpec {
+            target: target.clone(),
+            contents: contents.as_slice(),
+        })
+        .collect();
+    let outcome = journal::write(identity_dir, op_id, spec.name(), &files, || claim(control))
+        .map_err(|e| storage(&e))?;
+    if outcome == journal::Outcome::Abandoned {
+        return Err(OpError::Abandoned);
+    }
+    Ok((outcome, built.public))
 }
 
 /// Create and import do every fallible step before the write, so nothing
