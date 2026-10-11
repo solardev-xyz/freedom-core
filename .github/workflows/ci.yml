@@ -87,3 +87,4 @@ jobs:
         run: |
           cargo fetch --locked
           python3 scripts/third-party-notices.py --check
+          python3 -m unittest discover -s scripts -p 'test_*.py'

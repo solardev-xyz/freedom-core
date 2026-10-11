@@ -1,5 +1,5 @@
 # Same toolchain as freedom-mobile-ffi, which will link these crates on mobile.
 [toolchain]
 channel = "1.99"
-components = ["rustfmt", "clippy"]
+components = ["rustfmt", "clippy", "rust-src"]
 profile = "minimal"

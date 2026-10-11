@@ -107,14 +107,20 @@ jobs:
         run: |
           name="freedom-cored-${TAG}-${{ matrix.asset }}"
           mkdir -p dist
-          # The binary, plus the notices of the crates it statically links.
+          # The binary, plus the notices of the code it statically links:
+          # THIRD-PARTY-NOTICES, and the Rust project's notice file for the
+          # standard library, from the toolchain that built it.
+          sysroot="$(rustc --print sysroot)"
+          if command -v cygpath >/dev/null; then sysroot="$(cygpath -u "$sysroot")"; fi
+          cp "$sysroot/share/doc/rust/COPYRIGHT-library.html" THIRD-PARTY-NOTICES-rust-std.html
+          notices="THIRD-PARTY-NOTICES THIRD-PARTY-NOTICES-rust-std.html"
           if [[ "${{ matrix.target }}" == *windows* ]]; then
             archive="$name.zip"
             (cd target/${{ matrix.target }}/release && 7z a -tzip "$GITHUB_WORKSPACE/dist/$archive" freedom-cored.exe >/dev/null)
-            7z a -tzip "dist/$archive" THIRD-PARTY-NOTICES >/dev/null
+            7z a -tzip "dist/$archive" $notices >/dev/null
           else
             archive="$name.tar.gz"
-            tar -czf "dist/$archive" -C target/${{ matrix.target }}/release freedom-cored -C "$GITHUB_WORKSPACE" THIRD-PARTY-NOTICES
+            tar -czf "dist/$archive" -C target/${{ matrix.target }}/release freedom-cored -C "$GITHUB_WORKSPACE" $notices
           fi
           (cd dist && (sha256sum "$archive" 2>/dev/null || shasum -a 256 "$archive") > "$archive.sha256")
           cat "dist/$archive.sha256"
