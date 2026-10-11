@@ -161,8 +161,9 @@ pub struct Addresses {
 }
 
 /// The vault file as last seen: its SHA-256 if it exists. Read once at
-/// startup on its own thread ([`startup_snapshot`]) and again by the worker
-/// after every job, so the loop never touches storage.
+/// startup on its own thread ([`startup_snapshot`]); after that it follows
+/// the core's own successful commits (the fingerprint of the bytes written,
+/// none after a delete), so the loop never touches storage.
 pub type FileSnapshot = Result<Option<String>, OpError>;
 
 /// A finished worker job.
