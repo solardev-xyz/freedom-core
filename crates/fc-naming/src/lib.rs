@@ -12,6 +12,7 @@ mod ens;
 mod error;
 pub mod jsjson;
 mod normalize;
+pub mod session;
 pub mod tezos;
 pub mod ur;
 
