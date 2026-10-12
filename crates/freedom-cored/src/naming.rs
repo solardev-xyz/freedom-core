@@ -195,7 +195,13 @@ fn run(rx: &Receiver<Mail>, out: Sender<Out>, allowance: Arc<Allowance>) -> Stop
                 .and_then(|()| naming.handle(message))
                 .and_then(|()| naming.flush()),
             Err(RecvTimeoutError::Timeout) => Ok(()),
-            Err(RecvTimeoutError::Disconnected) => Err(Stop::Gone),
+            // The event loop has gone (shutdown or EOF): the replies and
+            // cancels still waiting go to the writer, which the loop gives
+            // its bounded drain. Queued requests are dropped unsent.
+            Err(RecvTimeoutError::Disconnected) => {
+                naming.drain();
+                Err(Stop::Gone)
+            }
         };
         if let Err(stop) = flow {
             return stop;
@@ -402,8 +408,28 @@ impl Naming {
         Ok(())
     }
 
-    /// Sends the machine's requests, cancels and replies.
+    /// Sends the machine's requests, cancels and replies. A request that
+    /// completes here (expired, or too large to send) settles at the next
+    /// poll, so this polls and goes round again.
     fn flush(&mut self) -> Flow {
+        loop {
+            self.effects()?;
+            let settled = self.dispatch()?;
+            for reply in self.machine.take_replies() {
+                let Some((&id, _)) = self.callers.iter().find(|(_, c)| **c == reply.caller) else {
+                    continue;
+                };
+                self.callers.remove(&id);
+                self.reply(id, &reply)?;
+            }
+            if !settled {
+                return Ok(());
+            }
+            self.machine.poll();
+        }
+    }
+
+    fn effects(&mut self) -> Flow {
         for Emitted {
             effect,
             generations,
@@ -415,7 +441,7 @@ impl Naming {
                     id: io, request, ..
                 } => self.queued.push_back((io, request, generations, deadline)),
                 Effect::Cancel { id: io, .. } => {
-                    // Still waiting for a slot: never sent.
+                    // Not yet sent: it never is.
                     if let Some(at) = self.queued.iter().position(|(q, ..)| *q == io) {
                         self.queued.remove(at);
                         continue;
@@ -431,41 +457,58 @@ impl Naming {
                 }
             }
         }
-        // A request holds its slot until main's terminal reply, even after
-        // the machine cancelled it. Requests also wait while frames wait
-        // for the writer, so they back up here, in order.
-        while self.outgoing.len() < self.max_outstanding
-            && self.outbox.is_empty()
-            && let Some((io, request, generations, deadline)) = self.queued.pop_front()
-        {
+        Ok(())
+    }
+
+    /// Sends queued requests, first in, first out, while a slot is free,
+    /// no other frame waits, and the writer has room. A request leaves the
+    /// queue only when it is sent or settled here, so until then a cancel
+    /// removes it, and its deadline is what is left when it goes. True when
+    /// one settled here.
+    fn dispatch(&mut self) -> Result<bool, Stop> {
+        let mut settled = false;
+        while self.outgoing.len() < self.max_outstanding && self.outbox.is_empty() {
+            let Some((io, request, generations, deadline)) = self.queued.front() else {
+                break;
+            };
+            let io = *io;
             // Its session has ended by now: it completes here, unsent.
             let left = deadline.saturating_sub(self.machine.now());
             if left == 0 {
+                self.queued.pop_front();
                 self.machine
                     .complete(io, Answer::Failed(Transport::Timeout));
+                settled = true;
                 continue;
             }
             let id = self.next_id;
-            self.next_id += 1;
-            let (method, kind, params) = shell_request(&request, generations, left);
+            let (method, kind, params) = shell_request(request, *generations, left);
             let mut payload = Zeroizing::new(Vec::with_capacity(256));
             if message::write_request(&mut *payload, id, method, &params, &Context::shell())
                 .is_err()
             {
                 return Err(Stop::Protocol("unwritable_request"));
             }
-            self.outgoing.insert(id, Outgoing { io: Some(io), kind });
-            self.by_io.insert(io, id);
-            self.send(&payload)?;
-        }
-        for reply in self.machine.take_replies() {
-            let Some((&id, _)) = self.callers.iter().find(|(_, c)| **c == reply.caller) else {
+            // Over 0001's frame: never sent, it completes as too large
+            // (design 0004, Requests the core makes).
+            let Some(frame) = transport::frame(&payload) else {
+                self.queued.pop_front();
+                self.machine.complete(io, too_large(kind));
+                settled = true;
                 continue;
             };
-            self.callers.remove(&id);
-            self.reply(id, &reply)?;
+            let Some(hold) = self.allowance.take(frame.len()) else {
+                break;
+            };
+            self.queued.pop_front();
+            self.next_id += 1;
+            self.outgoing.insert(id, Outgoing { io: Some(io), kind });
+            self.by_io.insert(io, id);
+            self.out
+                .send(Out { frame, hold })
+                .map_err(|_| Stop::Writer)?;
         }
-        Ok(())
+        Ok(settled)
     }
 
     /// A resolution reply (design 0004, Replies).
@@ -525,15 +568,24 @@ impl Naming {
         self.send(&payload)
     }
 
-    /// Queues a frame behind any that wait for the writer.
+    /// Queues a reply or a cancel behind any that wait for the writer.
     fn send(&mut self, payload: &[u8]) -> Flow {
         let frame = transport::frame(payload).ok_or(Stop::Protocol("oversized_message"))?;
         self.outbox.push_back(frame);
         self.pump()
     }
 
-    /// Hands waiting frames to the writer while naming's allowance has room;
-    /// the rest wait for [`In::Drained`].
+    /// Hands every waiting frame to the writer, past the allowance: at
+    /// shutdown, where the writer's drain is bounded by time instead.
+    fn drain(&mut self) {
+        for frame in self.outbox.drain(..) {
+            let hold = self.allowance.force(frame.len());
+            let _ = self.out.send(Out { frame, hold });
+        }
+    }
+
+    /// Hands waiting frames (replies and cancels) to the writer while
+    /// naming's allowance has room; the rest wait for [`In::Drained`].
     fn pump(&mut self) -> Flow {
         while let Some(frame) = self.outbox.front() {
             let Some(hold) = self.allowance.take(frame.len()) else {
@@ -547,6 +599,15 @@ impl Naming {
                 .map_err(|_| Stop::Writer)?;
         }
         Ok(())
+    }
+}
+
+/// The answer for a request too large to send.
+fn too_large(kind: Kind) -> Answer {
+    match kind {
+        Kind::Verified => Answer::Verified(Verified::Failure("too_large".into())),
+        Kind::Prefetch => Answer::Done,
+        Kind::Rpc | Kind::Gateway | Kind::Tezos => Answer::Failed(Transport::TooLarge),
     }
 }
 
@@ -971,9 +1032,21 @@ mod tests {
     }
 
     fn naming(max_outstanding: usize, writer_bytes: usize) -> (Naming, mpsc::Receiver<Out>) {
+        naming_with(max_outstanding, writer_bytes, Bounds::default())
+    }
+
+    fn naming_with(
+        max_outstanding: usize,
+        writer_bytes: usize,
+        bounds: Bounds,
+    ) -> (Naming, mpsc::Receiver<Out>) {
         let (tx, rx) = mpsc::channel();
+        let config = Config {
+            bounds,
+            ..empty_config()
+        };
         let naming = Naming {
-            machine: Machine::new(0, empty_config(), Box::new(OsRandom)),
+            machine: Machine::new(0, config, Box::new(OsRandom)),
             out: tx,
             allowance: Allowance::new(usize::MAX, writer_bytes),
             outbox: VecDeque::new(),
@@ -1078,6 +1151,74 @@ mod tests {
             assert_eq!(shell(&written(&rx)).len(), 1);
         }
         assert!(naming.outbox.is_empty() && naming.queued.is_empty());
+    }
+
+    #[test]
+    fn a_request_too_large_to_send_completes_here() {
+        let (mut naming, rx) = naming(256, usize::MAX);
+        let myotis = SNAPSHOT
+            .replace(r#""order":["quorum"]"#, r#""order":["myotis"]"#)
+            .replace(r#""myotis_enabled":false"#, r#""myotis_enabled":true"#);
+        assert!(naming.request(1, "naming.configure", Some(&myotis)).is_ok());
+        let ready = r#"{"ready":true,"enabled":true}"#;
+        assert!(
+            naming
+                .request(2, "naming.availability", Some(ready))
+                .is_ok()
+        );
+        // Its verified operation carries a name of a whole frame (main's
+        // own request can come within bytes of one).
+        let name = format!("{}.eth", "a".repeat(1 << 20));
+        let params = serde_json::json!({ "name": name }).to_string();
+        assert!(
+            naming
+                .request(3, "naming.resolve_content", Some(&params))
+                .is_ok()
+        );
+        assert!(naming.advance(0).is_ok());
+        assert!(naming.flush().is_ok());
+        // Never sent; the lookup fails, and its reply fits a frame.
+        let frames = written(&rx);
+        assert!(!frames.iter().any(|f| f["method"] == "shell.verified"));
+        let reply = frames.iter().find(|f| f["id"] == 3).unwrap();
+        assert_eq!(reply["error"]["code"], "resolution_failed");
+        assert!(naming.outgoing.is_empty());
+    }
+
+    #[test]
+    fn a_request_cancelled_while_waiting_for_room_is_never_sent() {
+        let bounds = Bounds {
+            deadline_ms: 100,
+            ..Bounds::default()
+        };
+        // Room for one frame at a time; the configure reply takes it.
+        let (mut naming, rx) = naming_with(256, 1, bounds);
+        assert!(
+            naming
+                .request(1, "naming.configure", Some(SNAPSHOT))
+                .is_ok()
+        );
+        assert!(
+            naming
+                .request(
+                    2,
+                    "naming.resolve_content",
+                    Some(r#"{"name":"vitalik.eth"}"#)
+                )
+                .is_ok()
+        );
+        assert!(naming.advance(0).is_ok());
+        assert_eq!(naming.queued.len(), 4);
+        // The session's deadline cancels its probes while they wait.
+        assert!(naming.advance(150).is_ok());
+        assert!(naming.queued.is_empty());
+        // Room again: only the deadline reply goes, no probe and no cancel.
+        written(&rx);
+        assert!(naming.handle(In::Drained).is_ok());
+        assert!(naming.flush().is_ok());
+        let frames = written(&rx);
+        assert!(frames.iter().all(|f| f["type"] == "response"), "{frames:?}");
+        assert!(naming.outgoing.is_empty());
     }
 
     #[test]

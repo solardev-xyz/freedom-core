@@ -272,3 +272,72 @@ fn an_error_that_echoes_a_huge_name_still_fits_a_frame() {
     assert_eq!(reply["error"]["data"]["message"], "result too large");
     assert!(core.call(3, "vault.status", json!({}))["result"].is_object());
 }
+
+#[test]
+fn replies_waiting_for_the_writer_survive_shutdown() {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    // Main stalls while 16 lookups fail at once, each reply carrying a
+    // 600 KB name: more than naming's 8 MiB share, so some wait in the
+    // naming thread when shutdown comes.
+    core.pause_reading();
+    for i in 0..16u64 {
+        let name = format!("{}{i}.eth", "a".repeat(600_000));
+        core.send(&request(
+            10 + i,
+            "naming.resolve_content",
+            json!({ "name": name, "private": false }),
+        ));
+    }
+    // Long names take a while to normalize: let it finish them all.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    core.send(&request(100, "core.shutdown", json!({})));
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    core.resume_reading();
+    let (mut replies, mut shutdown) = (0, false);
+    while !(shutdown && replies == 16) {
+        let message = core.recv();
+        match message["id"].as_u64() {
+            Some(100) => shutdown = true,
+            Some(10..26) => replies += 1,
+            _ => panic!("unexpected {message}"),
+        }
+    }
+    assert_eq!(core.exit_code(std::time::Duration::from_secs(5)), 0);
+}
+
+#[test]
+fn a_verified_request_too_large_to_send_settles_in_the_core() {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    let mut myotis = snapshot();
+    myotis["policy"]["order"] = json!(["myotis"]);
+    myotis["myotis_enabled"] = json!(true);
+    core.call(2, "naming.configure", myotis);
+    core.call(
+        3,
+        "naming.availability",
+        json!({ "ready": true, "enabled": true }),
+    );
+    // The largest lookup main can send: its verified operation, in a
+    // longer envelope, can't fit a frame.
+    let empty = request(
+        4,
+        "naming.resolve_content",
+        json!({ "name": "", "private": false }),
+    );
+    let room = (1 << 20) - empty.to_string().len() - ".eth".len();
+    let name = format!("{}.eth", "a".repeat(room));
+    let lookup = request(
+        4,
+        "naming.resolve_content",
+        json!({ "name": name, "private": false }),
+    );
+    assert_eq!(lookup.to_string().len(), 1 << 20);
+    core.send(&lookup);
+    let reply = core.until_response(4);
+    assert_eq!(reply["error"]["code"], "resolution_failed", "{reply}");
+    assert!(core.call(5, "vault.status", json!({}))["result"].is_object());
+}

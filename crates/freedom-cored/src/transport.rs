@@ -130,6 +130,19 @@ impl Allowance {
         })
     }
 
+    /// Room for a frame however full the share is: for the shutdown drain,
+    /// which time bounds instead.
+    pub fn force(self: &Arc<Self>, len: usize) -> Hold {
+        if let Ok(mut held) = self.held.lock() {
+            held.0 += 1;
+            held.1 += len;
+        }
+        Hold {
+            allowance: Arc::clone(self),
+            len,
+        }
+    }
+
     fn release(&self, len: usize) {
         if let Ok(mut held) = self.held.lock() {
             held.0 = held.0.saturating_sub(1);
