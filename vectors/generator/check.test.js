@@ -9,9 +9,9 @@ const test = require('node:test');
 
 const SOURCE = path.resolve(__dirname, '..');
 const REFERENCE = process.env.FREEDOM_BROWSER_CHECKOUT || '/root/herdr/freedom-browser';
-const FILES = ['keys.json', 'mnemonic-validation.json', 'identity-formats.json', 'signing.json', 'naming.json',
+const FILES = ['keys.json', 'mnemonic-validation.json', 'identity-formats.json', 'signing.json', 'naming.json', 'naming-replay.json',
   'fixtures/vaults.json', 'fixtures/bee-keystores.json', 'fixtures/radicle-openssh.json',
-  'generator/generate.js', 'generator/signing.js', 'generator/naming.js'];
+  'generator/generate.js', 'generator/signing.js', 'generator/naming.js', 'generator/naming-replay.js'];
 
 function corruptedCheck(filename, corrupt) {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
@@ -114,4 +114,112 @@ test('check parses OpenSSH and rejects unequal check integers', () => {
   });
   assert.match(stderr, /AssertionError/);
   assert.match(stderr, /parseOpenSSH/);
+});
+
+test('check rejects a changed replay request', () => {
+  const stderr = corruptedCheck('naming-replay.json', (contents) => {
+    contents.scenarios[0].io[0].params = ['0x1'];
+  });
+  assert.match(stderr, /Byte mismatch: naming-replay.json/);
+});
+
+// The replay runs in this process: it must not see or leave global state.
+const replay = require('./naming-replay');
+
+function referenceEthers() {
+  return require('node:module').createRequire(path.join(REFERENCE, 'package.json'))('ethers').ethers;
+}
+
+function globalsSnapshot(ethers) {
+  return {
+    random: Math.random,
+    date: Date,
+    setTimeout,
+    load: require('node:module')._load,
+    getUrl: new ethers.FetchRequest('https://snapshot.invalid').getUrlFunc,
+    env: { ETH_RPC: process.env.ETH_RPC, TEZOS_RPC: process.env.TEZOS_RPC },
+  };
+}
+
+function definition(ethers, id) {
+  return replay.scenarioDefinitions(ethers).find((scenario) => scenario.id === id);
+}
+
+test('replay ignores the ambient resolver environment', async () => {
+  const ethers = referenceEthers();
+  const FakeTimers = replay.loadFakeTimers(REFERENCE);
+  const clean = await replay.runScenario(REFERENCE, ethers, FakeTimers, definition(ethers, 'quorum-agree'));
+  process.env.ETH_RPC = 'https://ambient.rpc.example';
+  process.env.TEZOS_RPC = 'https://ambient.tez.example';
+  try {
+    assert.deepEqual(await replay.runScenario(REFERENCE, ethers, FakeTimers, definition(ethers, 'quorum-agree')), clean);
+    assert.equal(process.env.ETH_RPC, 'https://ambient.rpc.example');
+    assert.equal(process.env.TEZOS_RPC, 'https://ambient.tez.example');
+  } finally {
+    delete process.env.ETH_RPC;
+    delete process.env.TEZOS_RPC;
+  }
+});
+
+test('replay leaves its input unchanged and repeats exactly', async () => {
+  const ethers = referenceEthers();
+  const FakeTimers = replay.loadFakeTimers(REFERENCE);
+  const scenario = definition(ethers, 'ccip-slow-gateway-then-another-name');
+  const before = structuredClone(scenario);
+  const first = await replay.runScenario(REFERENCE, ethers, FakeTimers, scenario);
+  assert.deepEqual(scenario, before);
+  assert.deepEqual(await replay.runScenario(REFERENCE, ethers, FakeTimers, scenario), first);
+});
+
+test('replay restores every global, also when setup fails', async () => {
+  const ethers = referenceEthers();
+  const FakeTimers = replay.loadFakeTimers(REFERENCE);
+  const before = globalsSnapshot(ethers);
+  await replay.runScenario(REFERENCE, ethers, FakeTimers, definition(ethers, 'quorum-agree'));
+  assert.deepEqual(globalsSnapshot(ethers), before);
+  await assert.rejects(replay.runScenario(path.join(os.tmpdir(), 'no-such-checkout'), ethers, FakeTimers, definition(ethers, 'quorum-agree')), /ENOENT/);
+  assert.deepEqual(globalsSnapshot(ethers), before);
+});
+
+test('replay fails loudly on unscripted I/O', async () => {
+  const ethers = referenceEthers();
+  const FakeTimers = replay.loadFakeTimers(REFERENCE);
+  const unscriptedCall = structuredClone(definition(ethers, 'quorum-agree'));
+  delete unscriptedCall.world.calls.resolve;
+  await assert.rejects(replay.runScenario(REFERENCE, ethers, FakeTimers, unscriptedCall), /unscripted I\/O: resolve:contenthash call to/);
+  const undeclaredGateway = structuredClone(definition(ethers, 'ccip-fast-gateway'));
+  delete undeclaredGateway.world.gateways;
+  await assert.rejects(replay.runScenario(REFERENCE, ethers, FakeTimers, undeclaredGateway), /undeclared gateway gw\.example/);
+});
+
+test('replay transport keeps ethers\' cancel and timeout semantics', async () => {
+  const ethers = referenceEthers();
+  const FakeTimers = replay.loadFakeTimers(REFERENCE);
+  const probe = (options, hosts = {}) => replay.runScenario(REFERENCE, ethers, FakeTimers, {
+    id: 'transport-probe',
+    world: { endpoints: ['https://a.rpc.example'], hosts: { 'a.rpc.example': { delay: 10, ...hosts } } },
+    steps: [{ call: { fn: '$fetch', args: ['https://a.rpc.example', options] } }],
+  });
+  const outcome = async (options, hosts) => {
+    const run = await probe(options, hosts);
+    const [result] = run.steps[0].results;
+    return { thrown: result.thrown ?? null, settled: result.settled, io: run.io[0] };
+  };
+  // A cancel at the reply's own instant wins, as checkSignal() does natively.
+  const sameInstant = await outcome({ cancelAt: 10 });
+  assert.match(sameInstant.thrown, /cancelled/);
+  assert.equal(sameInstant.io.outcome, 'answered');
+  assert.equal(sameInstant.io.rejected.code, 'CANCELLED');
+  // The inactivity timeout, either side of a 10 ms reply.
+  assert.match((await outcome({ timeout: 9 })).thrown, /request timeout/);
+  // Zero turns the timer off.
+  assert.equal((await outcome({ timeout: 0 })).thrown, null);
+  const inTime = await outcome({ timeout: 11 });
+  assert.equal(inTime.thrown, null);
+  assert.equal(inTime.io.rejected, undefined);
+  // A hang rejects at ethers' default 300 s and the exchange stays open.
+  const hang = await outcome({}, { hang: true });
+  assert.match(hang.thrown, /request timeout/);
+  assert.equal(hang.settled, 300_000);
+  assert.equal(hang.io.outcome, 'open');
 });
