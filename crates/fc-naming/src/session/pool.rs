@@ -74,6 +74,11 @@ impl Pool {
         self.quarantine.remove(endpoint);
     }
 
+    /// Drops a retired endpoint's state (deviation `endpoint-retention`).
+    pub fn forget(&mut self, endpoint: &str) {
+        self.quarantine.remove(endpoint);
+    }
+
     /// The shuffled order without quarantined endpoints
     /// (`getAvailableProviders`).
     pub fn available(

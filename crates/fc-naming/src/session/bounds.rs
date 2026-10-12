@@ -28,6 +28,9 @@ pub struct Bounds {
     pub deadline_ms: u64,
     /// Bytes each cache may hold (`cache-bytes`).
     pub cache_bytes: usize,
+    /// Retired endpoints (no longer configured) whose state is kept: their
+    /// quarantine, or their Tezos discovery (`endpoint-retention`).
+    pub retired_endpoints: usize,
     /// Output bytes (strings and bytes) one ABI decode with an array may
     /// produce (`decode-budget`): an `OffchainLookup`'s URLs, whose offsets
     /// can point many entries at one string. Every other decode the session
@@ -51,6 +54,7 @@ impl Default for Bounds {
             deadline_ms: 120_000,
             cache_bytes: 8 * 1024 * 1024,
             decode_bytes: crate::abi::MAX_DECODE_BYTES,
+            retired_endpoints: 64,
         }
     }
 }

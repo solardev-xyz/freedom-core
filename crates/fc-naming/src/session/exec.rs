@@ -28,8 +28,14 @@ pub type Ms = u64;
 /// What the machine asks of its driver.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect<Q> {
-    /// Perform `request`; answer with [`Rt::complete`] and `id`.
-    Request { id: u64, at: Ms, request: Q },
+    /// Perform `request`; answer with [`Rt::complete`] and `id`. `owner`
+    /// is the owner current when it was made ([`Rt::set_owner`]).
+    Request {
+        id: u64,
+        at: Ms,
+        owner: u64,
+        request: Q,
+    },
     /// The machine no longer waits for request `id`.
     Cancel { id: u64, at: Ms },
 }
@@ -57,6 +63,7 @@ struct Inner<Q, A> {
     timers: BTreeMap<(Ms, u64), Slot>,
     io: HashMap<u64, Option<A>>,
     effects: Vec<Effect<Q>>,
+    owner: u64,
 }
 
 /// The executor's shared state: the clock, timers and outstanding I/O.
@@ -83,6 +90,7 @@ impl<Q, A> Rt<Q, A> {
                 timers: BTreeMap::new(),
                 io: HashMap::new(),
                 effects: Vec::new(),
+                owner: 0,
             })),
         }
     }
@@ -110,6 +118,12 @@ impl<Q, A> Rt<Q, A> {
             id: None,
             done: false,
         }
+    }
+
+    /// Tags the requests made from now on with `owner` (0 for none): a
+    /// driver polling several roots tells their requests apart by it.
+    pub fn set_owner(&self, owner: u64) {
+        self.inner.borrow_mut().owner = owner;
     }
 
     /// The effects emitted since the last call, in order.
@@ -237,9 +251,14 @@ impl<Q: Unpin, A> Future for Io<Q, A> {
                 let id = inner.next_id;
                 inner.next_id += 1;
                 inner.io.insert(id, None);
-                let at = inner.now;
+                let (at, owner) = (inner.now, inner.owner);
                 if let Some(request) = this.request.take() {
-                    inner.effects.push(Effect::Request { id, at, request });
+                    inner.effects.push(Effect::Request {
+                        id,
+                        at,
+                        owner,
+                        request,
+                    });
                 }
                 this.id = Some(id);
                 Poll::Pending
@@ -466,11 +485,13 @@ mod tests {
                 Effect::Request {
                     id: 1,
                     at: 0,
+                    owner: 0,
                     request: "a"
                 },
                 Effect::Request {
                     id: 2,
                     at: 0,
+                    owner: 0,
                     request: "b"
                 },
             ]

@@ -8,7 +8,7 @@ use fc_naming::jsjson::{self, JsValue};
 use fc_naming::session::bounds::Bounds;
 use fc_naming::session::ens::{Answer, Config, Direct, Request, Verified, VerifiedOp};
 use fc_naming::session::exec::{Effect, Fired};
-use fc_naming::session::machine::{Machine, Reply};
+use fc_naming::session::machine::{Emitted, Machine, Reply};
 use fc_naming::session::random::Mulberry32;
 use fc_naming::session::rpc::Transport;
 
@@ -166,6 +166,9 @@ fn bounds(world: &JsValue) -> Bounds {
     if let Some(n) = get("callersPerSession") {
         bounds.callers_per_session = n;
     }
+    if let Some(n) = get("retiredEndpoints") {
+        bounds.retired_endpoints = n;
+    }
     if let Some(n) = get("deadlineMs") {
         bounds.deadline_ms = n as u64;
     }
@@ -320,7 +323,7 @@ impl Driver {
             if let Some((_, collected)) = waiting.as_mut() {
                 collected.extend(replies);
             }
-            for effect in machine.take_effects() {
+            for Emitted { effect, .. } in machine.take_effects() {
                 if let Effect::Cancel { id, at } = effect {
                     if let Some(exchange) =
                         self.exchanges.iter_mut().find(|e| e.request == Some(id))
@@ -330,7 +333,10 @@ impl Driver {
                     }
                     continue;
                 }
-                if let Effect::Request { id, at, request } = effect {
+                if let Effect::Request {
+                    id, at, request, ..
+                } = effect
+                {
                     let Some(index) = self.match_exchange(&request, at) else {
                         self.mismatches
                             .push(format!("unmatched request at {at}: {request:?}"));
@@ -374,7 +380,50 @@ impl Driver {
         }
     }
 
+    /// Main's `FetchRequest` loop (design 0004, Replay): one `shell.rpc`
+    /// consumes its exchange's redirects (301, 302, 307, 308: to the
+    /// location's host, at once) and 429 retries (to the same host, after
+    /// the back-off), and its answer is the last one's.
+    fn final_exchange(&mut self, index: usize) -> usize {
+        let mut current = index;
+        loop {
+            let e = self.exchanges[current].entry.clone();
+            if str_of(e.get("kind")) != "rpc" {
+                return current;
+            }
+            let answer = e.get("answer");
+            let status = num(answer.and_then(|a| a.get("status")));
+            let host = match status {
+                301 | 302 | 307 | 308 => host_of(str_of(answer.and_then(|a| a.get("location")))),
+                429 => str_of(e.get("host")).to_owned(),
+                _ => return current,
+            };
+            let end = num(e.get("end"));
+            // Only this FetchRequest's own exchanges: chains can meet at one
+            // host (vectors record each chain's identity).
+            let next = self.exchanges.iter().position(|x| {
+                let n = &x.entry;
+                !x.used
+                    && str_of(n.get("kind")) == "rpc"
+                    && n.get("chain") == e.get("chain")
+                    && str_of(n.get("host")) == host
+                    && n.get("method") == e.get("method")
+                    && n.get("params") == e.get("params")
+                    && num(n.get("t")) >= end
+            });
+            match next {
+                Some(next) => {
+                    self.exchanges[next].used = true;
+                    current = next;
+                }
+                // ethers' last attempt: its answer stands.
+                None => return current,
+            }
+        }
+    }
+
     fn schedule_answer(&mut self, machine: &Machine, index: usize, id: u64) {
+        let index = self.final_exchange(index);
         let entry = self.exchanges[index].entry.clone();
         let Some(answer) = entry.get("answer") else {
             return;
@@ -505,7 +554,7 @@ fn verified_matches(op: &VerifiedOp, e: &JsValue) -> bool {
 
 fn replay(scenario: &JsValue) -> Result<Vec<String>, String> {
     let id = str_of(scenario.get("id"));
-    let world = scenario.get("world").cloned().unwrap_or(JsValue::Null);
+    let mut world = scenario.get("world").cloned().unwrap_or(JsValue::Null);
     #[allow(clippy::cast_possible_truncation)]
     let seed = num(scenario.get("seed")) as u32;
     let system = str_of(scenario.get("system"));
@@ -553,6 +602,21 @@ fn replay(scenario: &JsValue) -> Result<Vec<String>, String> {
         // Time passes before the step, with everything due on the way.
         let until = machine.now() + num(step.get("after"));
         driver.drive(&mut machine, until, None);
+        // A changed world is main's new configuration snapshot, sent before
+        // the step's lookups (`Object.assign` of its top-level keys).
+        if let (Some(JsValue::Object(changes)), JsValue::Object(members)) =
+            (step.get("world"), &world)
+        {
+            let mut members = members.clone();
+            for (key, value) in changes {
+                match members.iter_mut().find(|(k, _)| k == key) {
+                    Some(member) => member.1 = value.clone(),
+                    None => members.push((key.clone(), value.clone())),
+                }
+            }
+            world = JsValue::Object(members);
+            machine.configure(config(&world, system), false);
+        }
         let start = machine.now();
         for event in step
             .get("events")
@@ -614,6 +678,8 @@ fn replay(scenario: &JsValue) -> Result<Vec<String>, String> {
                             JsValue::Bool(true),
                         )])),
                         settled: machine.now(),
+                        generations: machine.generations(),
+                        attempts: 0,
                     });
                 }
                 other => return Err(format!("{id}: `{other}` isn't supported yet")),
