@@ -105,7 +105,7 @@ Main implements these. Each carries its generations and a `deadline_ms`. The cor
 
 - **Request bodies** travel as text: JSON-RPC and gateway bodies are ASCII JSON.
 - **Response bodies** travel as base64, so the core sees exactly the bytes main received.
-- **The serialized message must fit:** the core serializes each request before sending it. One that exceeds 0001's 1 MiB frame is never sent and completes locally as `too_large` (see [Bounds](#bounds)).
+- **The message must fit:** before sending a request, the core measures its payload strings (a JSON-RPC body, a gateway URL and POST body) as serialized JSON strings, plus a 4 KiB reserve for the envelope (method, IDs, generations, deadline). A request over 0001's 1 MiB frame by that measure is never sent and completes locally as `too_large` (see [Bounds](#bounds)). The reserve is conservative: the envelope never needs it all.
 - **Gateway flags:** `redirect: 'error'` at the fetch level, `credentials: 'omit'`, `useSessionCookies: false`, `cache: 'no-store'`, `bypassCustomProtocolHandlers: true`, and `Accept: application/json`. Every gateway request in the vectors records them.
 
 ### Verified operations
@@ -482,11 +482,11 @@ No error carries a URL or a server's text.
 
 ## Bounds
 
-**Messages and bodies.** Every message fits 0001's 1 MiB frame. The core enforces it by serializing first, so the measure is the complete message:
+**Messages and bodies.** Every message fits 0001's 1 MiB frame. For a request the core measures its payload strings, serialized, plus a 4 KiB envelope reserve; for a reply, the serialized result:
 
 | What | Bound | Exhausted |
 |---|---|---|
-| any core → main request (a JSON-RPC body, a gateway URL or POST body) | the serialized message ≤ 1 MiB | completes locally as `too_large`: a gateway fails and the next URL is tried; a callback fails its leg as `CCIP_GATEWAY_FAILED`. Today these were sent (deviation `request-size`) |
+| any core → main request (a JSON-RPC body, a gateway URL or POST body) | its payload strings serialized, plus 4 KiB, ≤ 1 MiB | completes locally as `too_large`: a gateway fails and the next URL is tried; a callback fails its leg as `CCIP_GATEWAY_FAILED`. Today these were sent (deviation `request-size`) |
 | any answer body (RPC, Tezos, gateway) | 720 KiB, which is 960 KiB in base64 | `too_large`: a provider failure for RPC, a failed Tezos endpoint, or the next gateway (deviation `response-caps`) |
 | a resolution reply | 960 KiB serialized | `resolution_failed: result too large`, never cached (deviation `reply-size`) |
 
@@ -552,6 +552,7 @@ Each deviation gets a boundary vector in the implementation PR, generated from t
 | `monotonic-time` | TTLs, quarantine and deadlines on `Date.now()` | the monotonic clock; Tezos expiry still compares wall time | none unless the wall clock jumps |
 | `error-text` | ethers' full message, which embeds node text and request data | the class's short message, sanitized | same branches; [agreement](#errors-agreement-and-text) unchanged |
 | `classification` | rules 3, 6 and 9 of [Classification](#classification), and text matched in composed messages | the core's rules | a malformed answer quarantines; a revert never does |
+| `null-block-hash` | a block whose hash is `null` (ethers' formatter accepts one, for pending blocks) anchors with no hash: the legs call at `latest`, where CCIP-Read takes ethers' built-in path | the hash fetch fails, as for a missing block | that endpoint is out of the hash vote and quarantined; the single-source anchor fails, so `direct` is unavailable |
 | `node-failures` | node errors can agree into a verified not-found (`node-errors-agree`) | freedom-browser#656's rule | until the reference pin includes it |
 | `transport` | Node's HTTP stack | the session's network stack | `.onion` endpoints work under Tor, and a missing route fails closed (`refused`) |
 | `rpc-redirects` | hops followed without checks | each hop checked against the endpoint policy and the onion gate | a refused hop is a provider failure |

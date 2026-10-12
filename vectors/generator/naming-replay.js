@@ -202,13 +202,13 @@ const PARSE_RFC3339 = `function __parseRfc3339(text) {
   if (fields.length !== 3) return Number.NaN;
   const [h, mi, sec] = fields.map((field) => digits(field, 2));
   if (h === null || mi === null || sec === null) return Number.NaN;
-  if (h > 24 || mi > 59 || sec > 59 || (h === 24 && (mi > 0 || sec > 0))) return Number.NaN;
   let millis = 0;
   if (dot >= 0) {
     const fraction = clock.slice(dot + 1);
     if (!/^[0-9]+$/.test(fraction)) return Number.NaN;
     millis = Number((fraction + '000').slice(0, 3));
   }
+  if (h > 24 || mi > 59 || sec > 59 || (h === 24 && (mi > 0 || sec > 0 || millis > 0))) return Number.NaN;
   ms += (h * 3600 + mi * 60 + sec) * 1000 + millis;
   return ms - offset;
 }`;
@@ -372,6 +372,20 @@ function __admit(session) {
   'overall-deadline': (b) => ({
     text: `A session ends ${b.deadlineMs} ms after it starts: its callers get deadline, its outstanding I/O is cancelled, and it makes no more. The reference's abandoned work can't be stopped, only cut off from I/O, so the patch holds only for one step with one call (enforced); that nothing is cached is the core's own test.`,
     harness: ['overall-deadline'],
+  }),
+  'null-block-hash': () => ({
+    text: 'A null block hash fails like a missing block: out of the hash vote (and quarantined), and the single-source anchor fails.',
+    source: {
+      'ens-resolver.js': {
+        edits: [
+          ['    if (!block) throw new Error(`block ${blockNumber} not available`);\n    return block.hash;',
+            '    if (!block || block.hash == null) throw new Error(`block ${blockNumber} not available`);\n    return block.hash;'],
+          ['    if (!block) throw new Error(`block ${targetNumber} not available`);\n    return { number: targetNumber, hash: block.hash };',
+            '    if (!block || block.hash == null) throw new Error(`block ${targetNumber} not available`);\n    return { number: targetNumber, hash: block.hash };'],
+        ],
+        append: [],
+      },
+    },
   }),
   'prefetch-set': (b) => ({
     text: `A prefetch is kept after agreed_data in a set of ${b.prefetches}; past that the oldest is aborted.`,
@@ -564,8 +578,8 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
   };
 
   // JSON-RPC endpoints, behind ethers' FetchRequest transport.
-  const block = (n, fork) => ({
-    number: ethers.toQuantity(n), hash: ethers.id(`${fork ? 'fork' : 'block'}${n}`), parentHash: ethers.id(`parent${n}`),
+  const block = (n, fork, nullHash) => ({
+    number: ethers.toQuantity(n), hash: nullHash ? null : ethers.id(`${fork ? 'fork' : 'block'}${n}`), parentHash: ethers.id(`parent${n}`),
     timestamp: '0x1', nonce: '0x0000000000000000', difficulty: '0x0', gasLimit: '0x1', gasUsed: '0x0',
     miner: '0x' + '00'.repeat(20), extraData: '0x', baseFeePerGas: '0x1', transactions: [],
   });
@@ -584,7 +598,7 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
         const tag = r.params[0];
         const n = tag === 'finalized' ? (p.finalized ?? (p.head ?? HEAD) - 64) : Number(tag);
         if (!Number.isSafeInteger(n)) return unscripted(`block ${tag} at ${host}`);
-        return { result: block(n, p.fork) };
+        return { result: block(n, p.fork, p.nullHash) };
       }
       case 'eth_call': {
         const { to, data } = r.params[0];
@@ -840,7 +854,7 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
   const tezosNode = (host, p, method, route) => {
     if (p.fail) return json(500, { error: 'down' });
     const level = p.level ?? TEZ_HEAD;
-    if (route === '/chains/main/chain_id') return json(200, p.chain ?? 'NetXdQprcVkpaWU');
+    if (route === '/chains/main/chain_id') return p.chainFail ? json(500, { error: 'chain' }) : json(200, p.chain ?? 'NetXdQprcVkpaWU');
     if (route === '/chains/main/blocks/head/header') return json(200, p.pad ? { level, pad: 'x'.repeat(p.pad) } : { level });
     let m = route.match(/^\/chains\/main\/blocks\/(\d+)\/hash$/);
     if (m) return p.anchorFail ? json(500, { error: 'anchor' }) : json(200, `BL${p.fork ? 'fork' : 'main'}${m[1]}`);
@@ -875,7 +889,8 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       };
       if (init.signal?.aborted) return abort();
       init.signal?.addEventListener('abort', abort, { once: true });
-      if (p.hang) return;
+      // `headerHang`: the head header never answers.
+      if (p.hang || (p.headerHang && pathname === '/chains/main/blocks/head/header')) return;
       timer = setTimeout(async () => {
         if (item.outcome !== 'open') return;
         init.signal?.removeEventListener('abort', abort);
@@ -1398,6 +1413,22 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
       ]),
       id: 'deviation-admission-lifecycle-overlap',
     },
+    // One endpoint answers blocks with a null hash: the core counts it as a
+    // failed fetch (and quarantines it), so the second lookup's legs avoid it.
+    deviation('null-block-hash', base({ hosts: { 'c.rpc.example': { nullHash: true } } }), [
+      { call: content() },
+      { after: 31_000, call: content('alice.eth') },
+    ]),
+    {
+      // The direct method's own anchor: a null hash fails it.
+      ...deviation('null-block-hash', base({
+        network: { ...QUORUM_NETWORK, verification: { order: ['direct'], preferVerified: false } },
+        sources: [{ id: 'pub', coverage: { 1: ENDPOINTS[0] } }],
+        sourceList: [{ id: 'pub', builtin: true }],
+        hosts: { 'a.rpc.example': { nullHash: true } },
+      })),
+      id: 'deviation-null-block-hash-direct',
+    },
     // Every endpoint answers after a second; the session ends at 300 ms.
     deviation('overall-deadline', base({
       bounds: { deadlineMs: 300 },
@@ -1480,6 +1511,26 @@ function addressAndReverse(ethers, base, one) {
   const nftBytes = (bytes) => ({ data: coder.encode(['bytes'], [bytes]) });
   const address = (name, chainId) => ({ fn: 'resolveEnsAddress', args: chainId === undefined ? [name] : [name, chainId] });
   const reverse = { fn: 'resolveEnsReverse', args: [ACCOUNT] };
+  const revert = (data) => ({ rpc_error: { code: 3, message: 'execution reverted', data } });
+  const reverseLookup = (urls, extraData) => revert('0x556f1830' + coder.encode(
+    ['address', 'string[]', 'bytes', 'bytes4', 'bytes'], [UR, urls, '0x0102', '0xdeadbeef', extraData]).slice(2));
+  const GOOD_URL = Buffer.from('https://gw.example/{sender}/{data}.json').toString('hex');
+  const FAIL_URL = Buffer.from('https://gw-fail.example/{sender}/{data}.json').toString('hex');
+  // An OffchainLookup whose URLs are raw bytes (hex), so one can be
+  // invalid UTF-8.
+  const rawReverseLookup = (urls) => {
+    const word = (n) => n.toString(16).padStart(64, '0');
+    const pad = (hex) => hex + '0'.repeat((64 - (hex.length % 64)) % 64);
+    const strings = urls.map((hex) => word(hex.length / 2) + pad(hex));
+    let offset = urls.length * 32;
+    const offsets = strings.map((encoded) => { const at = offset; offset += encoded.length / 2; return word(at); });
+    const array = word(urls.length) + offsets.join('') + strings.join('');
+    const bytes = (hex) => word((hex.length - 2) / 2) + pad(hex.slice(2));
+    const callData = bytes('0x0102');
+    const at = 160 + array.length / 2;
+    const head = UR.slice(2).toLowerCase().padStart(64, '0') + word(160) + word(at) + 'deadbeef'.padEnd(64, '0') + word(at + callData.length / 2);
+    return revert('0x556f1830' + head + array + callData + bytes('0x09'));
+  };
   return [
     one('address-agree', base({ calls: { resolve: urAddress(ACCOUNT) } }), address('vitalik.eth')),
     one('address-multicoin-base', base({ calls: { resolve: urMulticoin(ACCOUNT) } }), address('vitalik.eth', 8453)),
@@ -1500,6 +1551,22 @@ function addressAndReverse(ethers, base, one) {
     one('reverse-mismatch', base({ calls: { reverse: { rpc_error: { code: 3, message: 'execution reverted', data: mismatch } } } }), reverse),
     one('reverse-ens-empty-then-wns', base({ calls: { reverse: urReverse(''), 'wns:reverse': nftString('alice.wei'), 'wns:addr': nftAddress(ACCOUNT), 'gns:reverse': nftString('') } }), reverse),
     one('reverse-ens-and-wns-empty-then-gns', base({ calls: { reverse: urReverse(''), 'wns:reverse': nftString(''), 'gns:reverse': nftString('bob.gwei'), 'gns:addr': nftAddress(ACCOUNT) } }), reverse),
+    // Reverse error outcomes agree on ethers' composed message (design
+    // 0004, Errors): callbacks with different data conflict, legacy
+    // envelopes differing only in info.error.data agree, and invalid URLs
+    // at different indexes conflict.
+    one('reverse-callbacks-differ', base({
+      calls: { callback: { rpc_error: { code: 3, message: 'execution reverted', data: '0xdeadbeef' } } },
+      hosts: Object.fromEntries(ENDPOINTS.map((url, i) => [new URL(url).host, { calls: { reverse: reverseLookup([`https://gw.example/{sender}/{data}.json`], `0x0${i}`) } }])),
+      gateways: { 'gw.example': { body: JSON.stringify({ data: '0xcafe' }) } },
+    }), reverse),
+    one('reverse-legacy-envelopes-agree', base({
+      hosts: Object.fromEntries(ENDPOINTS.map((url, i) => [new URL(url).host, { calls: { reverse: { rpc_error: { code: 3, message: 'execution reverted', data: { legacy: `envelope ${i}` } } } } }])),
+    }), reverse),
+    one('reverse-invalid-urls-at-different-indexes', base({
+      hosts: Object.fromEntries(ENDPOINTS.map((url, i) => [new URL(url).host, { calls: { reverse: rawReverseLookup(i % 2 === 0 ? ['ffff', GOOD_URL] : [FAIL_URL, 'ffff']) } }])),
+      gateways: { 'gw-fail.example': { status: 500 }, 'gw.example': { body: JSON.stringify({ data: '0xcafe' }) } },
+    }), reverse),
     one('reverse-wns-claim-fails-forward-then-gns-empty', base({ calls: { reverse: urReverse(''), 'wns:reverse': nftString('alice.wei'), 'wns:addr': nftAddress('0x' + 'cd'.repeat(20)), 'gns:reverse': nftString('') } }), reverse),
     one('gns-content', base({ calls: { 'gns:contenthash': nftBytes('0xe3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f') } }), content('bob.gwei')),
     one('wns-content', base({ calls: { 'wns:contenthash': nftBytes('0xe3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f') } }), content('alice.wei')),
@@ -1594,6 +1661,9 @@ function tezosScenarios() {
       { call: tez() },
       { after: 1000, world: { hosts: { 't1.tez.example': { recordFail: true } } }, call: tez('bob.tez') },
     ]),
+    // Promise.all: one node's chain id fails while its header hangs; the
+    // head fetch fails at once instead of waiting for the header.
+    one('tezos-head-chain-fails-header-hangs', base({ hosts: { 't1.tez.example': { chainFail: true, headerHang: true } } })),
     // Deviation vectors (see deviationScenarios): a past expiry in a
     // format only V8 reads, and a node whose answers outgrow the cap.
     { ...one('deviation-tezos-expiry', base({ expiry: 'Wed, 01 Jan 2020 00:00:00 GMT' })), deviation: 'tezos-expiry', patches: ['tezos-expiry'] },
