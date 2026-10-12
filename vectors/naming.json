@@ -324,6 +324,27 @@
         "dns_error": "label \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.eth\" exceeds 255 bytes (argument=\"name\", value=\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.eth\", code=INVALID_ARGUMENT, version=6.17.0)",
         "system": "ens"
       }
+    },
+    {
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.eth",
+      "js": {
+        "normalized": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.eth",
+        "namehash": "0x2ef7b265d2e5d81570f3c8d9cf2beba28124f105ea0d831cb698a2d8b5d10d02",
+        "dns_encoded": "0xc86161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161c86262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262c86363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363c86464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464d86565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565650365746800",
+        "dns_error": null,
+        "system": "ens"
+      }
+    },
+    {
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.eth",
+      "deviation": "name-length",
+      "js": {
+        "normalized": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.eth",
+        "namehash": "0x20afb8794ac8623d66abea247f957c36150b700ceb565e952420465a48d75429",
+        "dns_encoded": "0xc86161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161c86262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262c86363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363c86464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464d9656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565650365746800",
+        "dns_error": null,
+        "system": "ens"
+      }
     }
   ],
   "coin_types": [
@@ -673,16 +694,47 @@
         "string",
         "string"
       ],
-      "data": "0x000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000e00000000000000000000000000000000000000000000000000000000000000064787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878780000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000017900000000000000000000000000000000000000000000000000000000000000",
+      "data": "0x0000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000067368617265640000000000000000000000000000000000000000000000000000",
       "js": {
         "fields": [
           {
-            "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            "value": "shared"
           },
           {
-            "value": "y"
+            "value": "shared"
           }
         ]
+      }
+    },
+    {
+      "types": [
+        "string[]"
+      ],
+      "recipe": {
+        "aliased_strings": 2047,
+        "string_length": 65536
+      },
+      "js": {
+        "fields": [
+          {
+            "value": {
+              "count": 2047,
+              "first_length": 65536
+            }
+          }
+        ]
+      }
+    },
+    {
+      "types": [
+        "string[]"
+      ],
+      "recipe": {
+        "aliased_strings": 2048,
+        "string_length": 65536
+      },
+      "js": {
+        "error": "BUFFER_OVERRUN"
       }
     },
     {
@@ -1183,6 +1235,83 @@
         "result": "0x01"
       },
       {
+        "body": "{\"data\":\"0x01\",\"ignored\":1e400}",
+        "requests": [
+          {
+            "url": "https://gw.example/0x01",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "result": "0x01"
+      },
+      {
+        "body": "{\"x\":\"\\ud800\",\"data\":\"0x01\"}",
+        "requests": [
+          {
+            "url": "https://gw.example/0x01",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "result": "0x01"
+      },
+      {
+        "body": "{\"data\":\"0x01\",\"deep\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+        "requests": [
+          {
+            "url": "https://gw.example/0x01",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "result": "0x01"
+      },
+      {
+        "body": "{\"data\":\"0x01\",\"data\":5}",
+        "requests": [
+          {
+            "url": "https://gw.example/0x01",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "body": "{\"data\":\"0x01\"} ",
+        "requests": [
+          {
+            "url": "https://gw.example/0x01",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "result": "0x01"
+      },
+      {
+        "body": "{\"data\":\"0x01\",}",
+        "requests": [
+          {
+            "url": "https://gw.example/0x01",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "body": "{\"data\":\"\\u0030x01\"}",
+        "requests": [
+          {
+            "url": "https://gw.example/0x01",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "result": "0x01"
+      },
+      {
         "body_hex": "7b2278223a22ff222c2264617461223a2230783031227d",
         "requests": [
           {
@@ -1207,6 +1336,136 @@
       }
     ]
   },
+  "offchain_lookup": [
+    {
+      "id": "canonical",
+      "data": "0x556f1830000000000000000000000000eeeeeeee14d718c2b47d9923deab1335e144eeee00000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000120deadbeef00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000016000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001968747470733a2f2f67772e6578616d706c652f7b646174617d000000000000000000000000000000000000000000000000000000000000000000000000000002010200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010900000000000000000000000000000000000000000000000000000000000000",
+      "strict": {
+        "value": {
+          "sender": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+          "urls": [
+            "https://gw.example/{data}"
+          ],
+          "call_data": "0x0102",
+          "callback": "0xdeadbeef",
+          "extra_data": "0x09"
+        }
+      },
+      "builtin": {
+        "value": {
+          "sender": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+          "urls": [
+            "https://gw.example/{data}"
+          ],
+          "call_data": "0x0102",
+          "callback": "0xdeadbeef",
+          "extra_data": "0x09"
+        }
+      }
+    },
+    {
+      "id": "callback-padding",
+      "data": "0x556f1830000000000000000000000000eeeeeeee14d718c2b47d9923deab1335e144eeee00000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000120deadbeefff000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000016000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001968747470733a2f2f67772e6578616d706c652f7b646174617d000000000000000000000000000000000000000000000000000000000000000000000000000002010200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010900000000000000000000000000000000000000000000000000000000000000",
+      "strict": {
+        "value": {
+          "sender": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+          "urls": [
+            "https://gw.example/{data}"
+          ],
+          "call_data": "0x0102",
+          "callback": "0xdeadbeef",
+          "extra_data": "0x09"
+        }
+      },
+      "builtin": {
+        "error": "OFFCHAIN_FAULT"
+      }
+    },
+    {
+      "id": "trailing-bytes",
+      "data": "0x556f1830000000000000000000000000eeeeeeee14d718c2b47d9923deab1335e144eeee00000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000120deadbeef00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000016000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001968747470733a2f2f67772e6578616d706c652f7b646174617d000000000000000000000000000000000000000000000000000000000000000000000000000002010200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010900000000000000000000000000000000000000000000000000000000000000abababababababababababababababababababababababababababababababab",
+      "strict": {
+        "value": {
+          "sender": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+          "urls": [
+            "https://gw.example/{data}"
+          ],
+          "call_data": "0x0102",
+          "callback": "0xdeadbeef",
+          "extra_data": "0x09"
+        }
+      },
+      "builtin": {
+        "value": {
+          "sender": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+          "urls": [
+            "https://gw.example/{data}"
+          ],
+          "call_data": "0x0102",
+          "callback": "0xdeadbeef",
+          "extra_data": "0x09"
+        }
+      }
+    },
+    {
+      "id": "sender-high-bits",
+      "data": "0x556f1830010000000000000000000000eeeeeeee14d718c2b47d9923deab1335e144eeee00000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000120deadbeef00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000016000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001968747470733a2f2f67772e6578616d706c652f7b646174617d000000000000000000000000000000000000000000000000000000000000000000000000000002010200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010900000000000000000000000000000000000000000000000000000000000000",
+      "strict": {
+        "error": "deferred error during ABI decoding triggered accessing index 0"
+      },
+      "builtin": {
+        "error": "OFFCHAIN_FAULT"
+      }
+    },
+    {
+      "id": "urls-offset-out-of-range",
+      "data": "0x556f1830000000000000000000000000eeeeeeee14d718c2b47d9923deab1335e144eeee000000000000000000000000000000000000000000000000000000000000ffff0000000000000000000000000000000000000000000000000000000000000120deadbeef00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000016000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001968747470733a2f2f67772e6578616d706c652f7b646174617d000000000000000000000000000000000000000000000000000000000000000000000000000002010200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010900000000000000000000000000000000000000000000000000000000000000",
+      "strict": {
+        "error": "BUFFER_OVERRUN"
+      },
+      "builtin": {
+        "error": "OFFCHAIN_FAULT"
+      }
+    },
+    {
+      "id": "short",
+      "data": "0x556f1830000000000000000000000000eeeeeeee14d718c2b47d9923deab1335e144eeee00000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000120deadbeef",
+      "strict": {
+        "error": "BUFFER_OVERRUN"
+      },
+      "builtin": {
+        "error": "OFFCHAIN_FAULT"
+      }
+    },
+    {
+      "id": "two-urls",
+      "data": "0x556f1830000000000000000000000000eeeeeeee14d718c2b47d9923deab1335e144eeee00000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000180000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001a0000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000001168747470733a2f2f612e6578616d706c65000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001868747470733a2f2f622e6578616d706c652f7b646174617d000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "strict": {
+        "value": {
+          "sender": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+          "urls": [
+            "https://a.example",
+            "https://b.example/{data}"
+          ],
+          "call_data": "0x",
+          "callback": "0x00000000",
+          "extra_data": "0x"
+        }
+      },
+      "builtin": {
+        "value": {
+          "sender": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+          "urls": [
+            "https://a.example",
+            "https://b.example/{data}"
+          ],
+          "call_data": "0x",
+          "callback": "0x00000000",
+          "extra_data": "0x"
+        }
+      }
+    }
+  ],
   "tezos": {
     "script_expr": [
       {
@@ -1572,7 +1831,7 @@
       {
         "hex": "2268747470733a2f2f6578616d706c652e6f726722",
         "js": {
-          "value": "https://example.org"
+          "stringified": "\"https://example.org\""
         }
       },
       {
@@ -1596,21 +1855,68 @@
       {
         "hex": "33363030",
         "js": {
-          "value": 3600
+          "stringified": "3600"
         }
       },
       {
         "hex": "7b2261223a317d",
         "js": {
-          "value": {
-            "a": 1
-          }
+          "stringified": "{\"a\":1}"
         }
       },
       {
         "hex": "ff227822",
         "js": {
           "error": "Unexpected token '�', \"�\"x\"\" is not valid JSON"
+        }
+      },
+      {
+        "hex": "39303037313939323534373430393933",
+        "js": {
+          "stringified": "9007199254740992"
+        }
+      },
+      {
+        "hex": "3165343030",
+        "js": {
+          "stringified": "null"
+        }
+      },
+      {
+        "hex": "2d30",
+        "js": {
+          "stringified": "0"
+        }
+      },
+      {
+        "hex": "225c756438303022",
+        "deviation": "lone-surrogate",
+        "js": {
+          "stringified": "\"\\ud800\""
+        }
+      },
+      {
+        "hex": "7b2262223a312c2232223a302c2261223a332c2231223a342c223031223a352c2261223a367d",
+        "js": {
+          "stringified": "{\"1\":4,\"2\":0,\"b\":1,\"a\":6,\"01\":5}"
+        }
+      },
+      {
+        "hex": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d",
+        "js": {
+          "stringified": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+        }
+      },
+      {
+        "hex": "312e35652d37",
+        "js": {
+          "stringified": "1.5e-7"
+        }
+      },
+      {
+        "hex": "313233343536373839303132333435363830303030",
+        "js": {
+          "stringified": "123456789012345680000"
         }
       }
     ],
@@ -1710,6 +2016,841 @@
           "js": null
         }
       ]
-    }
+    },
+    "micheline": [
+      {
+        "type": {
+          "prim": "pair",
+          "args": [
+            {
+              "prim": "pair",
+              "args": [
+                {
+                  "prim": "pair",
+                  "args": [
+                    {
+                      "prim": "pair",
+                      "args": [
+                        {
+                          "prim": "pair",
+                          "args": [
+                            {
+                              "prim": "pair",
+                              "args": [
+                                {
+                                  "prim": "pair",
+                                  "args": [
+                                    {
+                                      "prim": "pair",
+                                      "args": [
+                                        {
+                                          "prim": "pair",
+                                          "args": [
+                                            {
+                                              "prim": "pair",
+                                              "args": [
+                                                {
+                                                  "prim": "pair",
+                                                  "args": [
+                                                    {
+                                                      "prim": "pair",
+                                                      "args": [
+                                                        {
+                                                          "prim": "pair",
+                                                          "args": [
+                                                            {
+                                                              "prim": "pair",
+                                                              "args": [
+                                                                {
+                                                                  "prim": "pair",
+                                                                  "args": [
+                                                                    {
+                                                                      "prim": "pair",
+                                                                      "args": [
+                                                                        {
+                                                                          "prim": "pair",
+                                                                          "args": [
+                                                                            {
+                                                                              "prim": "pair",
+                                                                              "args": [
+                                                                                {
+                                                                                  "prim": "pair",
+                                                                                  "args": [
+                                                                                    {
+                                                                                      "prim": "pair",
+                                                                                      "args": [
+                                                                                        {
+                                                                                          "prim": "pair",
+                                                                                          "args": [
+                                                                                            {
+                                                                                              "prim": "pair",
+                                                                                              "args": [
+                                                                                                {
+                                                                                                  "prim": "pair",
+                                                                                                  "args": [
+                                                                                                    {
+                                                                                                      "prim": "pair",
+                                                                                                      "args": [
+                                                                                                        {
+                                                                                                          "prim": "pair",
+                                                                                                          "args": [
+                                                                                                            {
+                                                                                                              "prim": "pair",
+                                                                                                              "args": [
+                                                                                                                {
+                                                                                                                  "prim": "pair",
+                                                                                                                  "args": [
+                                                                                                                    {
+                                                                                                                      "prim": "pair",
+                                                                                                                      "args": [
+                                                                                                                        {
+                                                                                                                          "prim": "pair",
+                                                                                                                          "args": [
+                                                                                                                            {
+                                                                                                                              "prim": "pair",
+                                                                                                                              "args": [
+                                                                                                                                {
+                                                                                                                                  "prim": "pair",
+                                                                                                                                  "args": [
+                                                                                                                                    {
+                                                                                                                                      "prim": "pair",
+                                                                                                                                      "args": [
+                                                                                                                                        {
+                                                                                                                                          "prim": "pair",
+                                                                                                                                          "args": [
+                                                                                                                                            {
+                                                                                                                                              "prim": "pair",
+                                                                                                                                              "args": [
+                                                                                                                                                {
+                                                                                                                                                  "prim": "pair",
+                                                                                                                                                  "args": [
+                                                                                                                                                    {
+                                                                                                                                                      "prim": "pair",
+                                                                                                                                                      "args": [
+                                                                                                                                                        {
+                                                                                                                                                          "prim": "pair",
+                                                                                                                                                          "args": [
+                                                                                                                                                            {
+                                                                                                                                                              "prim": "pair",
+                                                                                                                                                              "args": [
+                                                                                                                                                                {
+                                                                                                                                                                  "prim": "pair",
+                                                                                                                                                                  "args": [
+                                                                                                                                                                    {
+                                                                                                                                                                      "prim": "pair",
+                                                                                                                                                                      "args": [
+                                                                                                                                                                        {
+                                                                                                                                                                          "prim": "pair",
+                                                                                                                                                                          "args": [
+                                                                                                                                                                            {
+                                                                                                                                                                              "prim": "pair",
+                                                                                                                                                                              "args": [
+                                                                                                                                                                                {
+                                                                                                                                                                                  "prim": "pair",
+                                                                                                                                                                                  "args": [
+                                                                                                                                                                                    {
+                                                                                                                                                                                      "prim": "pair",
+                                                                                                                                                                                      "args": [
+                                                                                                                                                                                        {
+                                                                                                                                                                                          "prim": "pair",
+                                                                                                                                                                                          "args": [
+                                                                                                                                                                                            {
+                                                                                                                                                                                              "prim": "pair",
+                                                                                                                                                                                              "args": [
+                                                                                                                                                                                                {
+                                                                                                                                                                                                  "prim": "pair",
+                                                                                                                                                                                                  "args": [
+                                                                                                                                                                                                    {
+                                                                                                                                                                                                      "prim": "pair",
+                                                                                                                                                                                                      "args": [
+                                                                                                                                                                                                        {
+                                                                                                                                                                                                          "prim": "pair",
+                                                                                                                                                                                                          "args": [
+                                                                                                                                                                                                            {
+                                                                                                                                                                                                              "prim": "pair",
+                                                                                                                                                                                                              "args": [
+                                                                                                                                                                                                                {
+                                                                                                                                                                                                                  "prim": "pair",
+                                                                                                                                                                                                                  "args": [
+                                                                                                                                                                                                                    {
+                                                                                                                                                                                                                      "prim": "pair",
+                                                                                                                                                                                                                      "args": [
+                                                                                                                                                                                                                        {
+                                                                                                                                                                                                                          "prim": "pair",
+                                                                                                                                                                                                                          "args": [
+                                                                                                                                                                                                                            {
+                                                                                                                                                                                                                              "prim": "pair",
+                                                                                                                                                                                                                              "args": [
+                                                                                                                                                                                                                                {
+                                                                                                                                                                                                                                  "prim": "pair",
+                                                                                                                                                                                                                                  "args": [
+                                                                                                                                                                                                                                    {
+                                                                                                                                                                                                                                      "prim": "pair",
+                                                                                                                                                                                                                                      "args": [
+                                                                                                                                                                                                                                        {
+                                                                                                                                                                                                                                          "prim": "pair",
+                                                                                                                                                                                                                                          "args": [
+                                                                                                                                                                                                                                            {
+                                                                                                                                                                                                                                              "prim": "pair",
+                                                                                                                                                                                                                                              "args": [
+                                                                                                                                                                                                                                                {
+                                                                                                                                                                                                                                                  "prim": "pair",
+                                                                                                                                                                                                                                                  "args": [
+                                                                                                                                                                                                                                                    {
+                                                                                                                                                                                                                                                      "prim": "pair",
+                                                                                                                                                                                                                                                      "args": [
+                                                                                                                                                                                                                                                        {
+                                                                                                                                                                                                                                                          "prim": "pair",
+                                                                                                                                                                                                                                                          "args": [
+                                                                                                                                                                                                                                                            {
+                                                                                                                                                                                                                                                              "prim": "pair",
+                                                                                                                                                                                                                                                              "args": [
+                                                                                                                                                                                                                                                                {
+                                                                                                                                                                                                                                                                  "prim": "pair",
+                                                                                                                                                                                                                                                                  "args": [
+                                                                                                                                                                                                                                                                    {
+                                                                                                                                                                                                                                                                      "prim": "pair",
+                                                                                                                                                                                                                                                                      "args": [
+                                                                                                                                                                                                                                                                        {
+                                                                                                                                                                                                                                                                          "prim": "pair",
+                                                                                                                                                                                                                                                                          "args": [
+                                                                                                                                                                                                                                                                            {
+                                                                                                                                                                                                                                                                              "annots": [
+                                                                                                                                                                                                                                                                                "%records"
+                                                                                                                                                                                                                                                                              ]
+                                                                                                                                                                                                                                                                            }
+                                                                                                                                                                                                                                                                          ]
+                                                                                                                                                                                                                                                                        }
+                                                                                                                                                                                                                                                                      ]
+                                                                                                                                                                                                                                                                    }
+                                                                                                                                                                                                                                                                  ]
+                                                                                                                                                                                                                                                                }
+                                                                                                                                                                                                                                                              ]
+                                                                                                                                                                                                                                                            }
+                                                                                                                                                                                                                                                          ]
+                                                                                                                                                                                                                                                        }
+                                                                                                                                                                                                                                                      ]
+                                                                                                                                                                                                                                                    }
+                                                                                                                                                                                                                                                  ]
+                                                                                                                                                                                                                                                }
+                                                                                                                                                                                                                                              ]
+                                                                                                                                                                                                                                            }
+                                                                                                                                                                                                                                          ]
+                                                                                                                                                                                                                                        }
+                                                                                                                                                                                                                                      ]
+                                                                                                                                                                                                                                    }
+                                                                                                                                                                                                                                  ]
+                                                                                                                                                                                                                                }
+                                                                                                                                                                                                                              ]
+                                                                                                                                                                                                                            }
+                                                                                                                                                                                                                          ]
+                                                                                                                                                                                                                        }
+                                                                                                                                                                                                                      ]
+                                                                                                                                                                                                                    }
+                                                                                                                                                                                                                  ]
+                                                                                                                                                                                                                }
+                                                                                                                                                                                                              ]
+                                                                                                                                                                                                            }
+                                                                                                                                                                                                          ]
+                                                                                                                                                                                                        }
+                                                                                                                                                                                                      ]
+                                                                                                                                                                                                    }
+                                                                                                                                                                                                  ]
+                                                                                                                                                                                                }
+                                                                                                                                                                                              ]
+                                                                                                                                                                                            }
+                                                                                                                                                                                          ]
+                                                                                                                                                                                        }
+                                                                                                                                                                                      ]
+                                                                                                                                                                                    }
+                                                                                                                                                                                  ]
+                                                                                                                                                                                }
+                                                                                                                                                                              ]
+                                                                                                                                                                            }
+                                                                                                                                                                          ]
+                                                                                                                                                                        }
+                                                                                                                                                                      ]
+                                                                                                                                                                    }
+                                                                                                                                                                  ]
+                                                                                                                                                                }
+                                                                                                                                                              ]
+                                                                                                                                                            }
+                                                                                                                                                          ]
+                                                                                                                                                        }
+                                                                                                                                                      ]
+                                                                                                                                                    }
+                                                                                                                                                  ]
+                                                                                                                                                }
+                                                                                                                                              ]
+                                                                                                                                            }
+                                                                                                                                          ]
+                                                                                                                                        }
+                                                                                                                                      ]
+                                                                                                                                    }
+                                                                                                                                  ]
+                                                                                                                                }
+                                                                                                                              ]
+                                                                                                                            }
+                                                                                                                          ]
+                                                                                                                        }
+                                                                                                                      ]
+                                                                                                                    }
+                                                                                                                  ]
+                                                                                                                }
+                                                                                                              ]
+                                                                                                            }
+                                                                                                          ]
+                                                                                                        }
+                                                                                                      ]
+                                                                                                    }
+                                                                                                  ]
+                                                                                                }
+                                                                                              ]
+                                                                                            }
+                                                                                          ]
+                                                                                        }
+                                                                                      ]
+                                                                                    }
+                                                                                  ]
+                                                                                }
+                                                                              ]
+                                                                            }
+                                                                          ]
+                                                                        }
+                                                                      ]
+                                                                    }
+                                                                  ]
+                                                                }
+                                                              ]
+                                                            }
+                                                          ]
+                                                        }
+                                                      ]
+                                                    }
+                                                  ]
+                                                }
+                                              ]
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "value": {
+          "prim": "Pair",
+          "args": [
+            {
+              "prim": "Pair",
+              "args": [
+                {
+                  "prim": "Pair",
+                  "args": [
+                    {
+                      "prim": "Pair",
+                      "args": [
+                        {
+                          "prim": "Pair",
+                          "args": [
+                            {
+                              "prim": "Pair",
+                              "args": [
+                                {
+                                  "prim": "Pair",
+                                  "args": [
+                                    {
+                                      "prim": "Pair",
+                                      "args": [
+                                        {
+                                          "prim": "Pair",
+                                          "args": [
+                                            {
+                                              "prim": "Pair",
+                                              "args": [
+                                                {
+                                                  "prim": "Pair",
+                                                  "args": [
+                                                    {
+                                                      "prim": "Pair",
+                                                      "args": [
+                                                        {
+                                                          "prim": "Pair",
+                                                          "args": [
+                                                            {
+                                                              "prim": "Pair",
+                                                              "args": [
+                                                                {
+                                                                  "prim": "Pair",
+                                                                  "args": [
+                                                                    {
+                                                                      "prim": "Pair",
+                                                                      "args": [
+                                                                        {
+                                                                          "prim": "Pair",
+                                                                          "args": [
+                                                                            {
+                                                                              "prim": "Pair",
+                                                                              "args": [
+                                                                                {
+                                                                                  "prim": "Pair",
+                                                                                  "args": [
+                                                                                    {
+                                                                                      "prim": "Pair",
+                                                                                      "args": [
+                                                                                        {
+                                                                                          "prim": "Pair",
+                                                                                          "args": [
+                                                                                            {
+                                                                                              "prim": "Pair",
+                                                                                              "args": [
+                                                                                                {
+                                                                                                  "prim": "Pair",
+                                                                                                  "args": [
+                                                                                                    {
+                                                                                                      "prim": "Pair",
+                                                                                                      "args": [
+                                                                                                        {
+                                                                                                          "prim": "Pair",
+                                                                                                          "args": [
+                                                                                                            {
+                                                                                                              "prim": "Pair",
+                                                                                                              "args": [
+                                                                                                                {
+                                                                                                                  "prim": "Pair",
+                                                                                                                  "args": [
+                                                                                                                    {
+                                                                                                                      "prim": "Pair",
+                                                                                                                      "args": [
+                                                                                                                        {
+                                                                                                                          "prim": "Pair",
+                                                                                                                          "args": [
+                                                                                                                            {
+                                                                                                                              "prim": "Pair",
+                                                                                                                              "args": [
+                                                                                                                                {
+                                                                                                                                  "prim": "Pair",
+                                                                                                                                  "args": [
+                                                                                                                                    {
+                                                                                                                                      "prim": "Pair",
+                                                                                                                                      "args": [
+                                                                                                                                        {
+                                                                                                                                          "prim": "Pair",
+                                                                                                                                          "args": [
+                                                                                                                                            {
+                                                                                                                                              "prim": "Pair",
+                                                                                                                                              "args": [
+                                                                                                                                                {
+                                                                                                                                                  "prim": "Pair",
+                                                                                                                                                  "args": [
+                                                                                                                                                    {
+                                                                                                                                                      "prim": "Pair",
+                                                                                                                                                      "args": [
+                                                                                                                                                        {
+                                                                                                                                                          "prim": "Pair",
+                                                                                                                                                          "args": [
+                                                                                                                                                            {
+                                                                                                                                                              "prim": "Pair",
+                                                                                                                                                              "args": [
+                                                                                                                                                                {
+                                                                                                                                                                  "prim": "Pair",
+                                                                                                                                                                  "args": [
+                                                                                                                                                                    {
+                                                                                                                                                                      "prim": "Pair",
+                                                                                                                                                                      "args": [
+                                                                                                                                                                        {
+                                                                                                                                                                          "prim": "Pair",
+                                                                                                                                                                          "args": [
+                                                                                                                                                                            {
+                                                                                                                                                                              "prim": "Pair",
+                                                                                                                                                                              "args": [
+                                                                                                                                                                                {
+                                                                                                                                                                                  "prim": "Pair",
+                                                                                                                                                                                  "args": [
+                                                                                                                                                                                    {
+                                                                                                                                                                                      "prim": "Pair",
+                                                                                                                                                                                      "args": [
+                                                                                                                                                                                        {
+                                                                                                                                                                                          "prim": "Pair",
+                                                                                                                                                                                          "args": [
+                                                                                                                                                                                            {
+                                                                                                                                                                                              "prim": "Pair",
+                                                                                                                                                                                              "args": [
+                                                                                                                                                                                                {
+                                                                                                                                                                                                  "prim": "Pair",
+                                                                                                                                                                                                  "args": [
+                                                                                                                                                                                                    {
+                                                                                                                                                                                                      "prim": "Pair",
+                                                                                                                                                                                                      "args": [
+                                                                                                                                                                                                        {
+                                                                                                                                                                                                          "prim": "Pair",
+                                                                                                                                                                                                          "args": [
+                                                                                                                                                                                                            {
+                                                                                                                                                                                                              "prim": "Pair",
+                                                                                                                                                                                                              "args": [
+                                                                                                                                                                                                                {
+                                                                                                                                                                                                                  "prim": "Pair",
+                                                                                                                                                                                                                  "args": [
+                                                                                                                                                                                                                    {
+                                                                                                                                                                                                                      "prim": "Pair",
+                                                                                                                                                                                                                      "args": [
+                                                                                                                                                                                                                        {
+                                                                                                                                                                                                                          "prim": "Pair",
+                                                                                                                                                                                                                          "args": [
+                                                                                                                                                                                                                            {
+                                                                                                                                                                                                                              "prim": "Pair",
+                                                                                                                                                                                                                              "args": [
+                                                                                                                                                                                                                                {
+                                                                                                                                                                                                                                  "prim": "Pair",
+                                                                                                                                                                                                                                  "args": [
+                                                                                                                                                                                                                                    {
+                                                                                                                                                                                                                                      "prim": "Pair",
+                                                                                                                                                                                                                                      "args": [
+                                                                                                                                                                                                                                        {
+                                                                                                                                                                                                                                          "prim": "Pair",
+                                                                                                                                                                                                                                          "args": [
+                                                                                                                                                                                                                                            {
+                                                                                                                                                                                                                                              "prim": "Pair",
+                                                                                                                                                                                                                                              "args": [
+                                                                                                                                                                                                                                                {
+                                                                                                                                                                                                                                                  "prim": "Pair",
+                                                                                                                                                                                                                                                  "args": [
+                                                                                                                                                                                                                                                    {
+                                                                                                                                                                                                                                                      "prim": "Pair",
+                                                                                                                                                                                                                                                      "args": [
+                                                                                                                                                                                                                                                        {
+                                                                                                                                                                                                                                                          "prim": "Pair",
+                                                                                                                                                                                                                                                          "args": [
+                                                                                                                                                                                                                                                            {
+                                                                                                                                                                                                                                                              "prim": "Pair",
+                                                                                                                                                                                                                                                              "args": [
+                                                                                                                                                                                                                                                                {
+                                                                                                                                                                                                                                                                  "prim": "Pair",
+                                                                                                                                                                                                                                                                  "args": [
+                                                                                                                                                                                                                                                                    {
+                                                                                                                                                                                                                                                                      "prim": "Pair",
+                                                                                                                                                                                                                                                                      "args": [
+                                                                                                                                                                                                                                                                        {
+                                                                                                                                                                                                                                                                          "prim": "Pair",
+                                                                                                                                                                                                                                                                          "args": [
+                                                                                                                                                                                                                                                                            {
+                                                                                                                                                                                                                                                                              "int": "7"
+                                                                                                                                                                                                                                                                            }
+                                                                                                                                                                                                                                                                          ]
+                                                                                                                                                                                                                                                                        }
+                                                                                                                                                                                                                                                                      ]
+                                                                                                                                                                                                                                                                    }
+                                                                                                                                                                                                                                                                  ]
+                                                                                                                                                                                                                                                                }
+                                                                                                                                                                                                                                                              ]
+                                                                                                                                                                                                                                                            }
+                                                                                                                                                                                                                                                          ]
+                                                                                                                                                                                                                                                        }
+                                                                                                                                                                                                                                                      ]
+                                                                                                                                                                                                                                                    }
+                                                                                                                                                                                                                                                  ]
+                                                                                                                                                                                                                                                }
+                                                                                                                                                                                                                                              ]
+                                                                                                                                                                                                                                            }
+                                                                                                                                                                                                                                          ]
+                                                                                                                                                                                                                                        }
+                                                                                                                                                                                                                                      ]
+                                                                                                                                                                                                                                    }
+                                                                                                                                                                                                                                  ]
+                                                                                                                                                                                                                                }
+                                                                                                                                                                                                                              ]
+                                                                                                                                                                                                                            }
+                                                                                                                                                                                                                          ]
+                                                                                                                                                                                                                        }
+                                                                                                                                                                                                                      ]
+                                                                                                                                                                                                                    }
+                                                                                                                                                                                                                  ]
+                                                                                                                                                                                                                }
+                                                                                                                                                                                                              ]
+                                                                                                                                                                                                            }
+                                                                                                                                                                                                          ]
+                                                                                                                                                                                                        }
+                                                                                                                                                                                                      ]
+                                                                                                                                                                                                    }
+                                                                                                                                                                                                  ]
+                                                                                                                                                                                                }
+                                                                                                                                                                                              ]
+                                                                                                                                                                                            }
+                                                                                                                                                                                          ]
+                                                                                                                                                                                        }
+                                                                                                                                                                                      ]
+                                                                                                                                                                                    }
+                                                                                                                                                                                  ]
+                                                                                                                                                                                }
+                                                                                                                                                                              ]
+                                                                                                                                                                            }
+                                                                                                                                                                          ]
+                                                                                                                                                                        }
+                                                                                                                                                                      ]
+                                                                                                                                                                    }
+                                                                                                                                                                  ]
+                                                                                                                                                                }
+                                                                                                                                                              ]
+                                                                                                                                                            }
+                                                                                                                                                          ]
+                                                                                                                                                        }
+                                                                                                                                                      ]
+                                                                                                                                                    }
+                                                                                                                                                  ]
+                                                                                                                                                }
+                                                                                                                                              ]
+                                                                                                                                            }
+                                                                                                                                          ]
+                                                                                                                                        }
+                                                                                                                                      ]
+                                                                                                                                    }
+                                                                                                                                  ]
+                                                                                                                                }
+                                                                                                                              ]
+                                                                                                                            }
+                                                                                                                          ]
+                                                                                                                        }
+                                                                                                                      ]
+                                                                                                                    }
+                                                                                                                  ]
+                                                                                                                }
+                                                                                                              ]
+                                                                                                            }
+                                                                                                          ]
+                                                                                                        }
+                                                                                                      ]
+                                                                                                    }
+                                                                                                  ]
+                                                                                                }
+                                                                                              ]
+                                                                                            }
+                                                                                          ]
+                                                                                        }
+                                                                                      ]
+                                                                                    }
+                                                                                  ]
+                                                                                }
+                                                                              ]
+                                                                            }
+                                                                          ]
+                                                                        }
+                                                                      ]
+                                                                    }
+                                                                  ]
+                                                                }
+                                                              ]
+                                                            }
+                                                          ]
+                                                        }
+                                                      ]
+                                                    }
+                                                  ]
+                                                }
+                                              ]
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "annotation": "%records",
+        "js": {
+          "value": {
+            "type": {
+              "annots": [
+                "%records"
+              ]
+            },
+            "value": {
+              "int": "7"
+            }
+          }
+        }
+      },
+      {
+        "type": {
+          "prim": [
+            "PAIR"
+          ],
+          "args": [
+            {
+              "annots": [
+                "%a"
+              ]
+            },
+            {
+              "annots": [
+                "%b"
+              ]
+            }
+          ]
+        },
+        "value": {
+          "prim": "Pair",
+          "args": [
+            1,
+            2
+          ]
+        },
+        "annotation": "%b",
+        "js": {
+          "value": {
+            "type": {
+              "annots": [
+                "%b"
+              ]
+            },
+            "value": 2
+          }
+        }
+      },
+      {
+        "type": {
+          "prim": "pair",
+          "args": "x"
+        },
+        "value": 1,
+        "annotation": "%a",
+        "js": {
+          "error": "TypeError"
+        }
+      },
+      {
+        "type": {
+          "prim": "pair",
+          "args": [
+            {
+              "annots": [
+                "%a"
+              ]
+            }
+          ]
+        },
+        "value": {
+          "prim": "Pair",
+          "args": "xy"
+        },
+        "annotation": "%a",
+        "js": {
+          "error": "TypeError"
+        }
+      },
+      {
+        "type": 0,
+        "value": 1,
+        "annotation": "%a",
+        "js": {
+          "value": null
+        }
+      },
+      {
+        "type": {
+          "annots": [
+            "%a"
+          ]
+        },
+        "value": null,
+        "annotation": "%a",
+        "js": {
+          "value": null
+        }
+      }
+    ],
+    "scripts": [
+      {
+        "script": {
+          "code": [
+            {
+              "prim": "parameter"
+            },
+            {
+              "prim": "storage",
+              "args": [
+                {
+                  "prim": "nat"
+                }
+              ]
+            }
+          ]
+        },
+        "js": {
+          "value": {
+            "prim": "nat"
+          }
+        }
+      },
+      {
+        "script": {
+          "code": "x"
+        },
+        "js": {
+          "error": "TypeError"
+        }
+      },
+      {
+        "script": {
+          "code": null
+        },
+        "js": {
+          "value": null
+        }
+      },
+      {
+        "script": {},
+        "js": {
+          "value": null
+        }
+      },
+      {
+        "script": {
+          "code": [
+            {
+              "prim": "storage",
+              "args": "abc"
+            }
+          ]
+        },
+        "js": {
+          "value": "a"
+        }
+      },
+      {
+        "script": {
+          "code": [
+            {
+              "prim": "storage",
+              "args": []
+            }
+          ]
+        },
+        "js": {
+          "value": null
+        }
+      }
+    ]
   }
 }

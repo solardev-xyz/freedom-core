@@ -10,6 +10,7 @@ pub mod ccip;
 mod contenthash;
 mod ens;
 mod error;
+pub mod jsjson;
 mod normalize;
 pub mod tezos;
 pub mod ur;

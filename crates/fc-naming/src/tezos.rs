@@ -2,8 +2,8 @@
 //! `ScriptExpr` hashes of big-map keys, Micheline value walking, record
 //! metadata, and the published-website URI check.
 
+use crate::jsjson::{self, JsValue};
 use blake2::{Blake2b, Digest, digest::consts::U32};
-use serde_json::Value;
 use sha2::Sha256;
 use url::Url;
 
@@ -70,100 +70,136 @@ pub fn is_dweb_name_host(host: &str) -> bool {
         || (lower.ends_with(".tez") && lower.split('.').all(|label| !label.is_empty()))
 }
 
-fn annotation_matches(node: &Value, annotation: &str) -> bool {
+/// A Micheline walk JavaScript would abort with a `TypeError` (an `args`
+/// that isn't an array, a `code` that has no `find`). The caller fails the
+/// lookup, as the JS does when the error propagates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MichelineError;
+
+/// `obj?.[key]` on a JSON value: an object's property, a string's
+/// character, or nothing.
+fn index(value: &JsValue, key: &str) -> Option<JsValue> {
+    match value {
+        JsValue::Object(_) => value.get(key).cloned(),
+        JsValue::Array(items) => key
+            .parse::<usize>()
+            .ok()
+            .and_then(|i| items.get(i).cloned()),
+        JsValue::String(s) => {
+            // A string indexes by UTF-16 unit; only "0" is ever used here.
+            let i: usize = key.parse().ok()?;
+            let unit = *s.encode_utf16().collect::<Vec<_>>().get(i)?;
+            Some(JsValue::String(String::from_utf16_lossy(&[unit])))
+        }
+        _ => None,
+    }
+}
+
+fn annotation_matches(node: &JsValue, annotation: &str) -> bool {
     node.get("annots")
-        .and_then(Value::as_array)
+        .and_then(JsValue::as_array)
         .is_some_and(|annots| annots.iter().any(|a| a.as_str() == Some(annotation)))
 }
 
-/// `flattenPairLeaves`: the leaves of nested `pair`s (the prim compared
-/// case-insensitively), left to right.
-fn flatten_pair_leaves<'a>(node: &'a Value, out: &mut Vec<&'a Value>, depth: usize) {
-    let is_pair = node.is_object()
-        && node
-            .get("prim")
-            .map(js_string)
-            .is_some_and(|prim| prim.to_lowercase() == "pair");
-    if is_pair && depth < MAX_MICHELINE_DEPTH {
-        if let Some(args) = node.get("args").and_then(Value::as_array) {
-            for arg in args {
-                flatten_pair_leaves(arg, out, depth + 1);
-            }
-        }
-    } else {
-        out.push(node);
+/// `node && typeof node === 'object' && String(node.prim || '').toLowerCase() === 'pair'`.
+fn is_pair(node: &JsValue) -> bool {
+    if !matches!(node, JsValue::Object(_) | JsValue::Array(_)) {
+        return false;
     }
+    let prim = node
+        .get("prim")
+        .filter(|p| p.truthy())
+        .map(JsValue::js_string)
+        .unwrap_or_default();
+    prim.to_lowercase() == "pair"
 }
 
-/// Deeper Micheline than real storage ever has is treated as a leaf (design
-/// 0003, Limits).
-const MAX_MICHELINE_DEPTH: usize = 64;
-
-/// `String(x)` for the values a `prim` can hold.
-fn js_string(value: &Value) -> String {
-    match value {
-        Value::String(s) => s.clone(),
-        Value::Null => "null".into(),
-        other => other.to_string(),
+/// `flattenPairLeaves`: the leaves of nested pairs, left to right, walked
+/// iteratively (any depth). `(node.args || []).flatMap(…)` throws for an
+/// `args` that is truthy and not an array.
+fn flatten_pair_leaves(node: &JsValue) -> Result<Vec<JsValue>, MichelineError> {
+    let mut leaves = Vec::new();
+    let mut stack = vec![node.clone()];
+    while let Some(current) = stack.pop() {
+        if !is_pair(&current) {
+            leaves.push(current);
+            continue;
+        }
+        match current.get("args") {
+            Some(JsValue::Array(args)) => stack.extend(args.iter().rev().cloned()),
+            Some(args) if args.truthy() => return Err(MichelineError),
+            _ => {}
+        }
     }
+    Ok(leaves)
 }
 
 /// `findAnnotatedValue`: the value leaf at the position of the type leaf
 /// annotated `annotation`, with that type leaf.
-pub fn find_annotated_value<'a>(
-    type_node: &'a Value,
-    value_node: &'a Value,
+pub fn find_annotated_value(
+    type_node: Option<&JsValue>,
+    value_node: Option<&JsValue>,
     annotation: &str,
-) -> Option<(&'a Value, &'a Value)> {
-    if type_node.is_null() || value_node.is_null() {
-        return None;
+) -> Result<Option<(JsValue, JsValue)>, MichelineError> {
+    let (Some(type_node), Some(value_node)) = (type_node, value_node) else {
+        return Ok(None);
+    };
+    if !type_node.truthy() || matches!(value_node, JsValue::Null) {
+        return Ok(None);
     }
-    let mut type_leaves = Vec::new();
-    flatten_pair_leaves(type_node, &mut type_leaves, 0);
-    let mut value_leaves = Vec::new();
-    flatten_pair_leaves(value_node, &mut value_leaves, 0);
-    let index = type_leaves
+    let type_leaves = flatten_pair_leaves(type_node)?;
+    let value_leaves = flatten_pair_leaves(value_node)?;
+    let Some(i) = type_leaves
         .iter()
-        .position(|node| annotation_matches(node, annotation))?;
-    Some((type_leaves[index], *value_leaves.get(index)?))
+        .position(|node| annotation_matches(node, annotation))
+    else {
+        return Ok(None);
+    };
+    Ok(value_leaves
+        .get(i)
+        .map(|value| (type_leaves[i].clone(), value.clone())))
 }
 
-/// `storageTypeFromScript`: the `storage` declaration's type.
-pub fn storage_type_from_script(script: &Value) -> Option<&Value> {
-    script
-        .get("code")?
-        .as_array()?
+/// `storageTypeFromScript`: `script?.code?.find(e => e?.prim === 'storage')?.args?.[0] || null`.
+pub fn storage_type_from_script(script: &JsValue) -> Result<Option<JsValue>, MichelineError> {
+    let code = match script.get("code") {
+        None | Some(JsValue::Null) => return Ok(None),
+        Some(JsValue::Array(code)) => code,
+        Some(_) => return Err(MichelineError),
+    };
+    let Some(entry) = code
         .iter()
-        .find(|entry| entry.get("prim").and_then(Value::as_str) == Some("storage"))?
-        .get("args")?
-        .get(0)
+        .find(|e| e.get("prim").and_then(JsValue::as_str) == Some("storage"))
+    else {
+        return Ok(None);
+    };
+    Ok(entry
+        .get("args")
+        .and_then(|args| index(args, "0"))
+        .filter(JsValue::truthy))
 }
 
-/// `mapEntries`: a Micheline map of `Elt`s with string keys, as key →
-/// `bytes` hex (or none). A later duplicate key wins, as in a JS `Map`.
-pub fn map_entries(value: &Value) -> Vec<(String, Option<String>)> {
-    let mut out: Vec<(String, Option<String>)> = Vec::new();
-    for entry in value.as_array().into_iter().flatten() {
-        if entry.get("prim").and_then(Value::as_str) != Some("Elt") {
+/// `mapEntries`: a Micheline map's `Elt`s whose key has a `string`, as
+/// key → `bytes`. Only string keys can ever be looked up, so only those are
+/// kept; a later duplicate wins, as in a JS `Map`.
+pub fn map_entries(value: &JsValue) -> Vec<(String, Option<JsValue>)> {
+    let mut out: Vec<(String, Option<JsValue>)> = Vec::new();
+    for entry in value.as_array().unwrap_or(&[]) {
+        if entry.get("prim").and_then(JsValue::as_str) != Some("Elt") {
             continue;
         }
-        let args = entry.get("args");
-        let Some(key) = args
-            .and_then(|a| a.get(0))
-            .and_then(|k| k.get("string"))
-            .and_then(Value::as_str)
-        else {
+        let Some(args) = entry.get("args") else {
             continue;
         };
-        let bytes = args
-            .and_then(|a| a.get(1))
-            .and_then(|v| v.get("bytes"))
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        if let Some(slot) = out.iter_mut().find(|(k, _)| k == key) {
+        let Some(key) = index(args, "0").and_then(|k| k.get("string").cloned()) else {
+            continue;
+        };
+        let bytes = index(args, "1").and_then(|v| v.get("bytes").cloned());
+        let JsValue::String(key) = key else { continue };
+        if let Some(slot) = out.iter_mut().find(|(k, _)| *k == key) {
             slot.1 = bytes;
         } else {
-            out.push((key.to_owned(), bytes));
+            out.push((key, bytes));
         }
     }
     out
@@ -185,8 +221,8 @@ pub fn bytes_from_hex(value: &str) -> Option<Vec<u8>> {
 pub enum MetadataError {
     /// `Invalid Micheline bytes value`.
     Bytes,
-    /// The bytes aren't JSON. JavaScript's message is V8's own, which the
-    /// core can't reproduce (design 0003, Deviations).
+    /// The bytes aren't JSON, as `JSON.parse` judges it. The message after
+    /// the prefix is the core's, not V8's (design 0003, Codec deviations).
     Json(String),
 }
 
@@ -199,12 +235,15 @@ impl MetadataError {
     }
 }
 
-/// `decodeJsonBytes`: hex bytes as UTF-8 (invalid sequences replaced, as
-/// Node does), then JSON. `None` input is `bytesFromHex(undefined)`.
-pub fn decode_json_bytes(value: Option<&str>) -> Result<Value, MetadataError> {
-    let bytes = value.and_then(bytes_from_hex).ok_or(MetadataError::Bytes)?;
-    serde_json::from_str(&String::from_utf8_lossy(&bytes))
-        .map_err(|e| MetadataError::Json(e.to_string()))
+/// `decodeJsonBytes`: a hex string's bytes as UTF-8 (invalid sequences
+/// replaced, as Node does), then `JSON.parse`. Anything but a hex string
+/// is `bytesFromHex`'s error.
+pub fn decode_json_bytes(value: Option<&JsValue>) -> Result<JsValue, MetadataError> {
+    let bytes = value
+        .and_then(JsValue::as_str)
+        .and_then(bytes_from_hex)
+        .ok_or(MetadataError::Bytes)?;
+    jsjson::parse(&String::from_utf8_lossy(&bytes)).map_err(|e| MetadataError::Json(e.to_string()))
 }
 
 /// What a website record points at.
@@ -226,7 +265,7 @@ pub enum Published {
 
 /// `parsePublishedUri`. `raw` is the record's JSON value, which must be a
 /// string of at most 8,192 UTF-16 code units.
-pub fn parse_published_uri(raw: &Value, redirect: bool) -> Published {
+pub fn parse_published_uri(raw: &JsValue, redirect: bool) -> Published {
     let invalid = || Published::Unsupported("invalid website URI".into());
     let Some(raw) = raw.as_str() else {
         return invalid();
@@ -304,7 +343,10 @@ fn decode_uri_component(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+
+    fn js(text: &str) -> JsValue {
+        jsjson::parse(text).unwrap()
+    }
 
     #[test]
     fn script_expr_golden() {
@@ -334,48 +376,95 @@ mod tests {
 
     #[test]
     fn micheline_walks() {
-        let ty = json!({"prim": "pair", "args": [{"prim": "address", "annots": ["%contract"]}, {"prim": "PAIR", "args": [{"prim": "nat", "annots": ["%x"]}, {"prim": "big_map", "annots": ["%records"]}]}]});
-        let value = json!({"prim": "Pair", "args": [{"string": "KT1x"}, {"prim": "Pair", "args": [{"int": "1"}, {"int": "42"}]}]});
-        assert_eq!(
-            find_annotated_value(&ty, &value, "%contract").unwrap().1,
-            &json!({"string": "KT1x"})
+        let ty = js(
+            r#"{"prim":"pair","args":[{"prim":"address","annots":["%contract"]},{"prim":"PAIR","args":[{"prim":"nat","annots":["%x"]},{"prim":"big_map","annots":["%records"]}]}]}"#,
         );
-        assert_eq!(
-            find_annotated_value(&ty, &value, "%records").unwrap().1,
-            &json!({"int": "42"})
+        let value = js(
+            r#"{"prim":"Pair","args":[{"string":"KT1x"},{"prim":"Pair","args":[{"int":"1"},{"int":"42"}]}]}"#,
         );
-        assert!(find_annotated_value(&ty, &value, "%missing").is_none());
-        let script =
-            json!({"code": [{"prim": "parameter"}, {"prim": "storage", "args": [ty.clone()]}]});
-        assert_eq!(storage_type_from_script(&script), Some(&ty));
+        let found = |annotation| find_annotated_value(Some(&ty), Some(&value), annotation);
+        assert_eq!(
+            found("%contract").unwrap().unwrap().1,
+            js(r#"{"string":"KT1x"}"#)
+        );
+        assert_eq!(found("%records").unwrap().unwrap().1, js(r#"{"int":"42"}"#));
+        assert_eq!(found("%missing"), Ok(None));
+        let script = js(&format!(
+            r#"{{"code":[{{"prim":"parameter"}},{{"prim":"storage","args":[{}]}}]}}"#,
+            ty.stringify()
+        ));
+        assert_eq!(storage_type_from_script(&script), Ok(Some(ty.clone())));
+        // `code` without `find`, and `args` without `flatMap`: TypeErrors.
+        assert_eq!(
+            storage_type_from_script(&js(r#"{"code":"x"}"#)),
+            Err(MichelineError)
+        );
+        let bad_args = js(r#"{"prim":"pair","args":"x"}"#);
+        assert_eq!(
+            find_annotated_value(Some(&bad_args), Some(&js("1")), "%a"),
+            Err(MichelineError)
+        );
+        // A prim of ["PAIR"] is a pair: String(["PAIR"]) is "PAIR".
+        let odd = js(r#"{"prim":["PAIR"],"args":[{"annots":["%a"]},{"annots":["%b"]}]}"#);
+        let vals = js(r#"{"prim":"Pair","args":[1,2]}"#);
+        assert_eq!(
+            find_annotated_value(Some(&odd), Some(&vals), "%b")
+                .unwrap()
+                .unwrap()
+                .1,
+            js("2")
+        );
+    }
+
+    #[test]
+    fn micheline_depth_is_unbounded() {
+        let mut ty = String::from(r#"{"annots":["%records"]}"#);
+        let mut value = String::from(r#"{"int":"7"}"#);
+        for _ in 0..200 {
+            ty = format!(r#"{{"prim":"pair","args":[{ty}]}}"#);
+            value = format!(r#"{{"prim":"Pair","args":[{value}]}}"#);
+        }
+        let found = find_annotated_value(Some(&js(&ty)), Some(&js(&value)), "%records")
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.1, js(r#"{"int":"7"}"#));
     }
 
     #[test]
     fn record_maps_and_metadata() {
-        let url = hex::encode("\"https://example.org\"");
-        let map = json!([
-            {"prim": "Elt", "args": [{"string": "web:content_url"}, {"bytes": "00"}]},
-            {"prim": "Elt", "args": [{"string": "web:content_url"}, {"bytes": url}]},
-            {"prim": "Elt", "args": [{"int": "1"}, {"bytes": "00"}]},
-        ]);
+        let url = hex::encode(r#""https://example.org""#);
+        let map = js(&format!(
+            r#"[{{"prim":"Elt","args":[{{"string":"web:content_url"}},{{"bytes":"00"}}]}},{{"prim":"Elt","args":[{{"string":"web:content_url"}},{{"bytes":"{url}"}}]}},{{"prim":"Elt","args":[{{"int":"1"}},{{"bytes":"00"}}]}}]"#
+        ));
         let entries = map_entries(&map);
         assert_eq!(entries.len(), 1);
         assert_eq!(
-            decode_json_bytes(entries[0].1.as_deref()).unwrap(),
-            json!("https://example.org")
+            decode_json_bytes(entries[0].1.as_ref()).unwrap(),
+            js(r#""https://example.org""#)
         );
-        assert_eq!(decode_json_bytes(Some("0")), Err(MetadataError::Bytes));
+        assert_eq!(
+            decode_json_bytes(Some(&js(r#""0""#))),
+            Err(MetadataError::Bytes)
+        );
         assert_eq!(decode_json_bytes(None), Err(MetadataError::Bytes));
+        assert_eq!(decode_json_bytes(Some(&js("7"))), Err(MetadataError::Bytes));
         assert!(matches!(
-            decode_json_bytes(Some("7b")),
+            decode_json_bytes(Some(&js(r#""7b""#))),
             Err(MetadataError::Json(_))
         ));
+        // A big integer loses precision, as in JavaScript.
+        let big = JsValue::String(hex::encode("9007199254740993"));
+        assert_eq!(
+            decode_json_bytes(Some(&big)).unwrap(),
+            JsValue::Number(9007199254740992.0)
+        );
     }
 
     #[test]
     fn published_uris() {
+        let s = |text: &str| JsValue::String(text.into());
         assert_eq!(
-            parse_published_uri(&json!("https://Example.org/a"), true),
+            parse_published_uri(&s("https://Example.org/a"), true),
             Published::Web {
                 protocol: "https".into(),
                 uri: "https://example.org/a".into(),
@@ -383,11 +472,11 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_published_uri(&json!("ipfs://x"), true),
+            parse_published_uri(&s("ipfs://x"), true),
             Published::Unsupported("redirect URL must use HTTP(S)".into())
         );
         assert_eq!(
-            parse_published_uri(&json!("ipfs://bafyCID/a/b/"), false),
+            parse_published_uri(&s("ipfs://bafyCID/a/b/"), false),
             Published::Content {
                 protocol: "ipfs".into(),
                 uri: "ipfs://bafyCID/a/b/".into(),
@@ -414,19 +503,17 @@ mod tests {
             ("not a url", "invalid website URI"),
         ] {
             assert_eq!(
-                parse_published_uri(&json!(uri), false),
+                parse_published_uri(&s(uri), false),
                 Published::Unsupported(reason.into()),
                 "{uri}"
             );
         }
         assert_eq!(
-            parse_published_uri(&json!(42), false),
+            parse_published_uri(&js("42"), false),
             Published::Unsupported("invalid website URI".into())
         );
-        // A malformed escape: decodeURIComponent throws, so the raw host is
-        // checked, and `%zz%2Etez` is not a name.
         assert!(matches!(
-            parse_published_uri(&json!("ipns://%zz%2Etez/"), false),
+            parse_published_uri(&s("ipns://%zz%2Etez/"), false),
             Published::Content { .. }
         ));
     }

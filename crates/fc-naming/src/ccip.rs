@@ -62,12 +62,12 @@ pub fn gateway_request(
 
 /// The answer's `data`: `JSON.parse(body).data`, which must be `0x`, even
 /// length, hex. The body is decoded as UTF-8 the way Node does it, with
-/// invalid sequences replaced, so bad bytes elsewhere in the document don't
-/// change the outcome.
+/// invalid sequences replaced, and parsed as V8 parses JSON, so nothing
+/// elsewhere in the document changes the outcome.
 pub fn parse_gateway_response(body: &[u8]) -> Option<Vec<u8>> {
     let text = String::from_utf8_lossy(body);
-    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let data = json.as_object()?.get("data")?.as_str()?;
+    let json = crate::jsjson::parse(&text).ok()?;
+    let data = json.get("data")?.as_str()?;
     let hex = data.strip_prefix("0x")?;
     if hex.len() % 2 != 0 {
         return None;
@@ -142,6 +142,20 @@ mod tests {
         assert_eq!(
             parse_gateway_response(b"{\"x\":\"\xff\",\"data\":\"0x01\"}"),
             Some(vec![1])
+        );
+        // As V8: a huge number and a lone surrogate elsewhere are fine, and a
+        // repeated key takes its last value.
+        assert_eq!(
+            parse_gateway_response(br#"{"data":"0x01","ignored":1e400}"#),
+            Some(vec![1])
+        );
+        assert_eq!(
+            parse_gateway_response(br#"{"x":"\ud800","data":"0x01"}"#),
+            Some(vec![1])
+        );
+        assert_eq!(
+            parse_gateway_response(br#"{"data":"0x01","data":"0x02"}"#),
+            Some(vec![2])
         );
         for body in [
             &br#"{"data":"0x0"}"#[..],

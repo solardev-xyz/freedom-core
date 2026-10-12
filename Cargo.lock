@@ -371,6 +371,7 @@ dependencies = [
  "blake2",
  "ens-normalize",
  "hex",
+ "serde",
  "serde_json",
  "sha2",
  "sha3",

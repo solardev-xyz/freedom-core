@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use fc_naming::abi::{self, FieldError, Kind, Value as AbiValue};
 use fc_naming::ccip::{self, Method};
+use fc_naming::jsjson::{self, JsValue};
 use fc_naming::tezos::{self, Published};
 use fc_naming::ur::{self, NameSystem, ReverseOutcome, Revert};
 use fc_naming::{Error, coin_type, dns_encode, namehash, normalize_ens, parse_contenthash};
@@ -15,7 +16,10 @@ use serde_json::{Value, json};
 
 fn vectors() -> Value {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vectors/naming.json");
-    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    let text = std::fs::read_to_string(path).unwrap();
+    let mut deserializer = serde_json::Deserializer::from_str(&text);
+    deserializer.disable_recursion_limit();
+    serde::Deserialize::deserialize(&mut deserializer).unwrap()
 }
 
 fn hex0x(bytes: &[u8]) -> String {
@@ -26,6 +30,29 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
     hex::decode(text.strip_prefix("0x")?).ok()
 }
 
+/// A vector's JSON value, read as the core reads JSON.
+fn to_js(value: &Value) -> JsValue {
+    jsjson::parse(&value.to_string()).unwrap()
+}
+
+/// The generator's `aliasedStrings`: one string aliased by every item.
+fn aliased_strings(count: usize, length: usize) -> Vec<u8> {
+    let word = |n: usize| {
+        let mut w = [0u8; 32];
+        w[24..].copy_from_slice(&(n as u64).to_be_bytes());
+        w
+    };
+    let mut data = Vec::new();
+    data.extend_from_slice(&word(32));
+    data.extend_from_slice(&word(count));
+    for _ in 0..count {
+        data.extend_from_slice(&word(32 * count));
+    }
+    data.extend_from_slice(&word(length));
+    data.extend(std::iter::repeat_n(b'z', length));
+    data
+}
+
 #[test]
 fn names() {
     let v = vectors();
@@ -33,6 +60,14 @@ fn names() {
         let input = case["input"].as_str().unwrap();
         let js = &case["js"];
         let ours = normalize_ens(input);
+        if case["deviation"] == "name-length" {
+            assert_eq!(
+                ours,
+                Err(Error::NameTooLong(fc_naming::MAX_NAME_BYTES)),
+                "{input:?}"
+            );
+            continue;
+        }
         match js["stage"].as_str() {
             Some("empty") => assert_eq!(ours, Err(Error::EmptyName), "{input:?}"),
             Some("normalize") => {
@@ -129,6 +164,14 @@ fn same_field(ours: &Result<AbiValue, FieldError>, js: &Value) -> bool {
         (Ok(AbiValue::Bytes4(b)), Some(Value::String(s))) => &hex0x(b) == s,
         (Ok(AbiValue::Bytes(b)), Some(Value::String(s))) => &hex0x(b) == s,
         (Ok(AbiValue::String(t)), Some(Value::String(s))) => t == s,
+        (Ok(AbiValue::StringArray(items)), Some(Value::Object(summary))) => {
+            items.len() as u64 == summary["count"].as_u64().unwrap()
+                && items
+                    .first()
+                    .and_then(|i| i.as_ref().ok())
+                    .map(|s| s.len() as u64)
+                    == summary["first_length"].as_u64()
+        }
         (Ok(AbiValue::StringArray(items)), Some(Value::Array(js_items))) => {
             items.len() == js_items.len()
                 && items
@@ -153,7 +196,13 @@ fn abi_rules() {
             .iter()
             .map(|t| kind(t.as_str().unwrap()))
             .collect();
-        let data = unhex(case["data"].as_str().unwrap()).unwrap();
+        let data = match case.get("recipe") {
+            Some(r) => aliased_strings(
+                r["aliased_strings"].as_u64().unwrap() as usize,
+                r["string_length"].as_u64().unwrap() as usize,
+            ),
+            None => unhex(case["data"].as_str().unwrap()).unwrap(),
+        };
         let ours = abi::decode(&kinds, &data);
         match case["js"].get("fields") {
             None => assert!(
@@ -279,6 +328,27 @@ fn universal_resolver() {
 }
 
 #[test]
+fn offchain_lookups() {
+    let v = vectors();
+    for case in v["offchain_lookup"].as_array().unwrap() {
+        let data = unhex(case["data"].as_str().unwrap()).unwrap();
+        let ours = ur::decode_offchain_lookup(&data);
+        match case["strict"].get("value") {
+            None => assert!(ours.is_none(), "{}: the strict path refuses it", case["id"]),
+            Some(js) => {
+                let ours =
+                    ours.unwrap_or_else(|| panic!("{}: the strict path accepts it", case["id"]));
+                assert_eq!(hex0x(&ours.sender), js["sender"], "{}", case["id"]);
+                assert_eq!(json!(ours.urls), js["urls"], "{}", case["id"]);
+                assert_eq!(hex0x(&ours.call_data), js["call_data"], "{}", case["id"]);
+                assert_eq!(hex0x(&ours.callback), js["callback"], "{}", case["id"]);
+                assert_eq!(hex0x(&ours.extra_data), js["extra_data"], "{}", case["id"]);
+            }
+        }
+    }
+}
+
+#[test]
 fn ccip_gateways() {
     let v = vectors();
     let c = &v["ccip"];
@@ -340,7 +410,7 @@ fn tezos_codecs() {
     }
     for case in t["uris"].as_array().unwrap() {
         let redirect = case["redirect"].as_bool().unwrap();
-        let ours = match tezos::parse_published_uri(&case["raw"], redirect) {
+        let ours = match tezos::parse_published_uri(&to_js(&case["raw"]), redirect) {
             Published::Web {
                 protocol,
                 uri,
@@ -363,16 +433,37 @@ fn tezos_codecs() {
         assert_eq!(ours, case["js"], "{}", case["raw"]);
     }
     for case in t["maps"].as_array().unwrap() {
-        let ours: Vec<Value> = tezos::map_entries(&case["value"])
+        let ours: Vec<Value> = tezos::map_entries(&to_js(&case["value"]))
             .into_iter()
-            .map(|(k, b)| json!([k, b]))
+            .map(|(k, b)| {
+                let bytes: Value = b.map_or(Value::Null, |b| {
+                    serde_json::from_str(&b.stringify()).unwrap()
+                });
+                json!([k, bytes])
+            })
             .collect();
         assert_eq!(Value::Array(ours), case["js"], "{}", case["value"]);
     }
     for case in t["metadata"].as_array().unwrap() {
-        let ours = tezos::decode_json_bytes(case["hex"].as_str());
-        match case["js"].get("value") {
-            Some(value) => assert_eq!(&ours.unwrap(), value, "{}", case["hex"]),
+        let hex = case["hex"].as_str().map(|h| JsValue::String(h.to_owned()));
+        let ours = tezos::decode_json_bytes(hex.as_ref());
+        if case["deviation"] == "lone-surrogate" {
+            // JavaScript keeps the lone surrogate; the core holds U+FFFD.
+            assert_eq!(
+                ours.unwrap(),
+                JsValue::String("\u{FFFD}".into()),
+                "{}",
+                case["hex"]
+            );
+            continue;
+        }
+        match case["js"].get("stringified") {
+            Some(text) => assert_eq!(
+                ours.unwrap().stringify(),
+                text.as_str().unwrap(),
+                "{}",
+                case["hex"]
+            ),
             None => {
                 let error = ours.unwrap_err();
                 if case["js"]["error"] == "Invalid Micheline bytes value" {
@@ -384,11 +475,12 @@ fn tezos_codecs() {
     let annotated = &t["annotated"];
     for case in annotated["cases"].as_array().unwrap() {
         let ours = tezos::find_annotated_value(
-            &annotated["type"],
-            &annotated["value"],
+            Some(&to_js(&annotated["type"])),
+            Some(&to_js(&annotated["value"])),
             case["annotation"].as_str().unwrap(),
         )
-        .map(|(ty, value)| json!({ "type": ty, "value": value }));
+        .unwrap()
+        .map(|(ty, value)| to_value(&json_pair(&ty, &value)));
         assert_eq!(
             ours.unwrap_or(Value::Null),
             case["js"],
@@ -396,4 +488,41 @@ fn tezos_codecs() {
             case["annotation"]
         );
     }
+    for case in t["micheline"].as_array().unwrap() {
+        let ours = tezos::find_annotated_value(
+            Some(&to_js(&case["type"])),
+            Some(&to_js(&case["value"])),
+            case["annotation"].as_str().unwrap(),
+        );
+        match case["js"].get("value") {
+            None => assert!(ours.is_err(), "{}: a TypeError in JS", case["type"]),
+            Some(js) => {
+                let ours = ours
+                    .unwrap()
+                    .map(|(ty, value)| to_value(&json_pair(&ty, &value)));
+                assert_eq!(&ours.unwrap_or(Value::Null), js, "{}", case["type"]);
+            }
+        }
+    }
+    for case in t["scripts"].as_array().unwrap() {
+        let ours = tezos::storage_type_from_script(&to_js(&case["script"]));
+        match case["js"].get("value") {
+            None => assert!(ours.is_err(), "{}: a TypeError in JS", case["script"]),
+            Some(js) => {
+                let ours = ours.unwrap().map(|ty| to_value(&ty));
+                assert_eq!(&ours.unwrap_or(Value::Null), js, "{}", case["script"]);
+            }
+        }
+    }
+}
+
+fn json_pair(ty: &JsValue, value: &JsValue) -> JsValue {
+    JsValue::Object(vec![
+        ("type".into(), ty.clone()),
+        ("value".into(), value.clone()),
+    ])
+}
+
+fn to_value(value: &JsValue) -> Value {
+    serde_json::from_str(&value.stringify()).unwrap()
 }
