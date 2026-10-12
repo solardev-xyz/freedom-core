@@ -664,14 +664,25 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
   // that rejects TIMEOUT. Neither stops the HTTP exchange itself (ethers
   // passes its AbortSignal under an option Node ignores), so an entry's
   // outcome follows the exchange and `rejected` records the promise.
+  // One FetchRequest's exchanges (its redirects and 429 retries) share
+  // its cancel signal: `chain` numbers them by it, so a replay consumes a
+  // chain's own exchanges even when chains meet at one host.
+  const chains = new WeakMap();
+  let nextChain = 0;
+  const chainOf = (signal) => {
+    if (!signal) return ++nextChain;
+    if (!chains.has(signal)) chains.set(signal, ++nextChain);
+    return chains.get(signal);
+  };
   const rpcTransport = (req, signal) => {
     if (signal?.cancelled) return Promise.reject(ethers.makeError('request cancelled before sending', 'CANCELLED'));
     const host = hostOf(req.url);
     http += 1;
+    const chain = chainOf(signal);
     const body = JSON.parse(Buffer.from(req.body).toString());
     const batch = Array.isArray(body) ? body : [body];
     const entries = batch.map((r) => record({
-      kind: 'rpc', host, http, method: r.method, params: r.params,
+      kind: 'rpc', host, http, chain, method: r.method, params: r.params,
       ...(r.method === 'eth_call' ? { call: callKind(r.params[0].to, r.params[0].data) } : {}),
     }));
     if (entries.includes(null)) return new Promise(() => {});
@@ -1216,6 +1227,16 @@ function scenarioDefinitions(ethers) {
       hosts: {
         'a.rpc.example': { statuses: [302], location: 'https://r.rpc.example/' },
         'r.rpc.example': { statuses: [429] },
+      },
+    })),
+    // Two chains meet at one host: b's head redirects at 10 ms and a's at
+    // 30 ms, both to t, which answers b a 429, then a a 500, then b's
+    // retry. Each chain's answer is its own.
+    one('rpc-redirect-chains-share-a-host', base({
+      hosts: {
+        'a.rpc.example': { statuses: [302], location: 'https://t.rpc.example/', delay: 30 },
+        'b.rpc.example': { statuses: [302], location: 'https://t.rpc.example/' },
+        't.rpc.example': { statuses: [429, 500] },
       },
     })),
     {
