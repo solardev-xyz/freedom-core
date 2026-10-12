@@ -129,8 +129,11 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
   const hostOf = (url) => new URL(url).host;
   const plan = (host) => world.hosts?.[host] || {};
   const declared = (host) => (world.endpoints ?? []).some((url) => hostOf(url) === host);
+  // An exchange a verifier operation makes inside main's adapter is that
+  // operation's business: it carries the operation's id as `within`.
   const record = (entry) => {
-    const item = { id: io.length, step: stepIndex, t: now(), ...entry, end: null, outcome: 'open' };
+    const within = insideOperation.getStore()?.op;
+    const item = { id: io.length, step: stepIndex, t: now(), ...entry, ...(within === undefined ? {} : { within }), end: null, outcome: 'open' };
     io.push(item);
     return item;
   };
@@ -327,7 +330,7 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     const item = record({ kind: 'verified-op', host, op, params });
     const epoch = myotisEpoch;
     const lifecycleChanged = () => host === 'myotis' && (myotisEpoch !== epoch || !(myotis().ready ?? false));
-    return insideOperation.run(true, run).then(
+    return insideOperation.run({ op: item.id }, run).then(
       (value) => {
         item.answer = lifecycleChanged() ? { failure: 'lifecycle' } : toAnswer(value);
         close(item, 'answered');
@@ -366,7 +369,13 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     getStatus: () => ({ state: myotis().ready ? 'ready' : 'stopped', optimisticBlockNumber: myotis().block ?? null }),
     ethCall: ({ to, data }) => {
       const call = async () => {
+        const epoch = myotisEpoch;
         const answer = await verified('myotis', myotis(), to, data);
+        // myotisManager's verifiedRequest: a call that outlived its epoch
+        // or readiness throws.
+        if (myotisEpoch !== epoch || !(myotis().ready ?? false)) {
+          throw Object.assign(new Error('Myotis state changed while the request was running'), { code: 'MYOTIS_UNAVAILABLE' });
+        }
         if (answer.data) return { status: 'ok', resultHex: answer.data };
         if (answer.revert) return { status: 'revert', dataHex: answer.revert };
         return { status: 'error' };

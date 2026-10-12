@@ -12897,6 +12897,7 @@
             "latest"
           ],
           "call": "reverse",
+          "within": 0,
           "end": 10,
           "outcome": "answered",
           "answer": {
@@ -12938,6 +12939,7 @@
             "latest"
           ],
           "call": "wns:reverse",
+          "within": 2,
           "end": 20,
           "outcome": "answered",
           "answer": {
@@ -12979,6 +12981,7 @@
             "latest"
           ],
           "call": "wns:addr",
+          "within": 4,
           "end": 30,
           "outcome": "answered",
           "answer": {
@@ -13113,6 +13116,7 @@
             "latest"
           ],
           "call": "wns:contenthash",
+          "within": 0,
           "end": 10,
           "outcome": "answered",
           "answer": {
@@ -13245,6 +13249,7 @@
             "latest"
           ],
           "call": "wns:contenthash",
+          "within": 0,
           "end": 10,
           "outcome": "answered",
           "answer": {
@@ -13596,6 +13601,7 @@
             "latest"
           ],
           "call": "wns:contenthash",
+          "within": 0,
           "end": 10,
           "outcome": "answered",
           "answer": {
@@ -13950,6 +13956,7 @@
             "latest"
           ],
           "call": "resolve:addr",
+          "within": 0,
           "end": 10,
           "outcome": "answered",
           "answer": {
@@ -14219,6 +14226,7 @@
             "latest"
           ],
           "call": "resolve:addr",
+          "within": 14,
           "end": 80,
           "outcome": "answered",
           "answer": {
@@ -14318,7 +14326,7 @@
                   }
                 }
               },
-              "settled": 20
+              "settled": 80
             }
           ]
         }
@@ -14356,6 +14364,7 @@
             "latest"
           ],
           "call": "wns:contenthash",
+          "within": 0,
           "end": 10,
           "outcome": "answered",
           "answer": {
@@ -14380,7 +14389,226 @@
         {
           "id": 3,
           "step": 0,
-          "t": 10,
+          "t": 20,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 1,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 30,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 4,
+          "step": 0,
+          "t": 20,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 2,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 30,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 5,
+          "step": 0,
+          "t": 20,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 3,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 30,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 6,
+          "step": 0,
+          "t": 20,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 4,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 30,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 7,
+          "step": 0,
+          "t": 40,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 5,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 50,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 8,
+          "step": 0,
+          "t": 40,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 6,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 50,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 9,
+          "step": 0,
+          "t": 40,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 7,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 50,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 10,
+          "step": 0,
+          "t": 40,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 8,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 50,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 11,
+          "step": 0,
+          "t": 60,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 9,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x0000000000696760e15f265e828db644a0c242eb",
+              "data": "0xbc1c58d1ab8b935a479940b3bfb3690f7fa08a8ed1cfecc06dd69662d9b6f7cdcbdbed66"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "wns:contenthash",
+          "end": 70,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000\"}"
+          }
+        },
+        {
+          "id": 12,
+          "step": 0,
+          "t": 60,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 10,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x0000000000696760e15f265e828db644a0c242eb",
+              "data": "0xbc1c58d1ab8b935a479940b3bfb3690f7fa08a8ed1cfecc06dd69662d9b6f7cdcbdbed66"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "wns:contenthash",
+          "end": 70,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000\"}"
+          }
+        },
+        {
+          "id": 13,
+          "step": 0,
+          "t": 60,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 11,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x0000000000696760e15f265e828db644a0c242eb",
+              "data": "0xbc1c58d1ab8b935a479940b3bfb3690f7fa08a8ed1cfecc06dd69662d9b6f7cdcbdbed66"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "wns:contenthash",
+          "end": 70,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000\"}"
+          }
+        },
+        {
+          "id": 14,
+          "step": 0,
+          "t": 70,
+          "kind": "prefetch",
+          "host": null,
+          "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+          "end": null,
+          "outcome": "open"
+        },
+        {
+          "id": 15,
+          "step": 0,
+          "t": 70,
           "kind": "verified-op",
           "host": "myotis",
           "op": "call",
@@ -14388,7 +14616,7 @@
             "to": "0x0000000000696760E15f265e828DB644A0c242EB",
             "data": "0xbc1c58d1ab8b935a479940b3bfb3690f7fa08a8ed1cfecc06dd69662d9b6f7cdcbdbed66"
           },
-          "end": 20,
+          "end": 80,
           "outcome": "answered",
           "answer": {
             "result": {
@@ -14398,9 +14626,9 @@
           }
         },
         {
-          "id": 4,
+          "id": 16,
           "step": 0,
-          "t": 10,
+          "t": 70,
           "kind": "verified",
           "host": "myotis",
           "method": "eth_call",
@@ -14412,7 +14640,8 @@
             "latest"
           ],
           "call": "wns:contenthash",
-          "end": 20,
+          "within": 15,
+          "end": 80,
           "outcome": "answered",
           "answer": {
             "data": "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000"
@@ -14551,6 +14780,7 @@
             "latest"
           ],
           "call": "resolve:contenthash",
+          "within": 0,
           "end": 10,
           "outcome": "answered",
           "answer": {
@@ -15644,6 +15874,7 @@
             "latest"
           ],
           "call": "resolve:contenthash",
+          "within": 0,
           "end": 10,
           "outcome": "answered",
           "answer": {
@@ -15669,6 +15900,7 @@
             "cache": "no-store",
             "bypassCustomProtocolHandlers": true
           },
+          "within": 0,
           "end": 60,
           "outcome": "answered",
           "answer": {
@@ -15691,6 +15923,7 @@
             "latest"
           ],
           "call": "callback",
+          "within": 0,
           "end": 70,
           "outcome": "answered",
           "answer": {
@@ -15885,6 +16118,7 @@
             "latest"
           ],
           "call": "resolve:contenthash",
+          "within": 3,
           "end": 70,
           "outcome": "answered",
           "answer": {
@@ -16265,6 +16499,7 @@
             "latest"
           ],
           "call": "resolve:contenthash",
+          "within": 13,
           "end": 70,
           "outcome": "answered",
           "answer": {
