@@ -144,7 +144,7 @@ const TYPED_DATA = [
   { id: 'deviation-limit-types', deviation: 'limits', typed_data: { domain: { name: 'D' }, types: { M: Array.from({ length: 256 }, (_, i) => ({ name: `f${i}`, type: `T${i}` })), ...Object.fromEntries(Array.from({ length: 256 }, (_, i) => [`T${i}`, []])) }, message: Object.fromEntries(Array.from({ length: 256 }, (_, i) => [`f${i}`, {}])) } },
   { id: 'deviation-limit-fields-per-type', deviation: 'limits', typed_data: { domain: { name: 'D' }, types: { M: Array.from({ length: 257 }, (_, i) => ({ name: `f${i}`, type: 'bool' })) }, message: Object.fromEntries(Array.from({ length: 257 }, (_, i) => [`f${i}`, true])) } },
   { id: 'deviation-limit-dimensions', deviation: 'limits', typed_data: { domain: { name: 'D' }, types: ONE('uint8' + '[]'.repeat(33)), message: { v: [] } } },
-  { id: 'deviation-limit-depth', deviation: 'limits', typed_data: { domain: { name: 'D' }, types: ONE('uint8' + '[]'.repeat(32)), message: { v: JSON.parse('['.repeat(32) + ']'.repeat(32)) } } },
+  { id: 'deviation-limit-depth', deviation: 'limits', typed_data: { domain: { name: 'D' }, types: ONE('uint8' + '[]'.repeat(32)), message: { v: JSON.parse('['.repeat(32) + '1' + ']'.repeat(32)) } } },
   // Accepted by both: aliases, null domain fields, chain id 0, empty structs.
   { id: 'uint-int-aliases', typed_data: { domain: { name: 'Alias' }, types: { M: [{ name: 'a', type: 'uint' }, { name: 'b', type: 'int' }] }, message: { a: '7', b: '-7' } } },
   { id: 'domain-null-field-skipped', typed_data: { domain: { name: null, version: '1', chainId: 0 }, types: ONE('uint8'), message: { v: 1 } } },
