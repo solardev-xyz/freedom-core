@@ -15,6 +15,13 @@
 // world. Verifier adapters' whole operations are recorded too
 // (`verified-op`), next to the raw calls they make. Present-`undefined` keys are kept as
 // {"$undefined":true}.
+//
+// Deviation vectors (`deviation`, `patches`) run the reference patched in
+// memory to do what the core does at one of design 0004's bounds, so the
+// core reproduces them exactly like any other scenario. Each records its
+// patches (the edits themselves) and the unpatched reference's results
+// (`unpatched`); generation fails unless the patches change the results or
+// the I/O. `world.bounds` lowers a bound for both sides.
 
 const fs = require('node:fs');
 const Module = require('node:module');
@@ -48,6 +55,139 @@ function seeded(seed) {
 }
 
 /** JSON with present-undefined keys kept as markers. */
+// Design 0004's bounds, as the core applies them. A deviation vector may
+// lower one in `world.bounds` so that its boundary fits a small vector; the
+// core reads the same field.
+const BOUNDS = {
+  ccipUrls: 32,
+  answerBytes: 720 * 1024,
+  replyHex: 8192,
+  prefetches: 32,
+};
+
+// The core's RFC 3339 reading (deviation `tezos-expiry`), as
+// fc_naming::session::tezos::parse_rfc3339 implements it: a full date, or a
+// date-time with `T`, seconds, an optional fraction and `Z` or ±hh:mm.
+const PARSE_RFC3339 = `function __parseRfc3339(text) {
+  const digits = (part, length) => (part.length === length && /^[0-9]+$/.test(part) ? Number(part) : null);
+  const t = text.indexOf('T');
+  const date = (t < 0 ? text : text.slice(0, t)).split('-');
+  if (date.length !== 3) return Number.NaN;
+  const [year, month, day] = [digits(date[0], 4), digits(date[1], 2), digits(date[2], 2)];
+  if (year === null || month === null || day === null || month < 1 || month > 12) return Number.NaN;
+  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  const days = month === 2 ? (leap ? 29 : 28) : [4, 6, 9, 11].includes(month) ? 30 : 31;
+  if (day < 1 || day > days) return Number.NaN;
+  const y = month <= 2 ? year - 1 : year;
+  const era = Math.floor(y / 400);
+  const yoe = y - era * 400;
+  const doy = Math.floor((153 * ((month + 9) % 12) + 2) / 5) + day - 1;
+  const doe = yoe * 365 + Math.floor(yoe / 4) - Math.floor(yoe / 100) + doy;
+  let ms = (era * 146097 + doe - 719468) * 86400000;
+  if (t < 0) return ms;
+  const time = text.slice(t + 1);
+  let clock;
+  let offset = 0;
+  if (time.endsWith('Z')) {
+    clock = time.slice(0, -1);
+  } else {
+    const at = Math.max(time.lastIndexOf('+'), time.lastIndexOf('-'));
+    if (at < 0) return Number.NaN;
+    clock = time.slice(0, at);
+    const hm = time.slice(at + 1).split(':');
+    if (hm.length !== 2) return Number.NaN;
+    const [oh, om] = [digits(hm[0], 2), digits(hm[1], 2)];
+    if (oh === null || om === null || oh > 23 || om > 59) return Number.NaN;
+    offset = (time[at] === '-' ? -1 : 1) * (oh * 3600000 + om * 60000);
+  }
+  const dot = clock.indexOf('.');
+  const fields = (dot < 0 ? clock : clock.slice(0, dot)).split(':');
+  if (fields.length !== 3) return Number.NaN;
+  const [h, mi, sec] = fields.map((field) => digits(field, 2));
+  if (h === null || mi === null || sec === null) return Number.NaN;
+  if (h > 24 || mi > 59 || sec > 59 || (h === 24 && (mi > 0 || sec > 0))) return Number.NaN;
+  let millis = 0;
+  if (dot >= 0) {
+    const fraction = clock.slice(dot + 1);
+    if (!/^[0-9]+$/.test(fraction)) return Number.NaN;
+    millis = Number((fraction + '000').slice(0, 3));
+  }
+  ms += (h * 3600 + mi * 60 + sec) * 1000 + millis;
+  return ms - offset;
+}`;
+
+// Deviation patches (design 0004, Deviations): the reference changed in
+// memory to do what the core does at one of its bounds. A deviation
+// vector is the patched reference's trace, which the core reproduces
+// exactly; it records its patches, and the unpatched results it differs
+// from. `source` edits a module (each `find` must occur exactly once;
+// `append` adds helpers at the module's end, where function declarations
+// still hoist); `harness` patches main's side, played by this harness.
+const PATCHES = {
+  'ccip-urls': (b) => ({
+    text: `A quorum leg's CCIP-Read round tries the first ${b.ccipUrls} gateway URLs.`,
+    source: {
+      'ens-resolver.js': {
+        edits: [['response = await ccipReadFetch({ to: sender }, callData, urls, ccipSignal);',
+          `response = await ccipReadFetch({ to: sender }, callData, __firstUrls(urls, ${b.ccipUrls}), ccipSignal);`]],
+        append: ['function __firstUrls(urls, n) {\n  return { *[Symbol.iterator]() { for (let i = 0; i < Math.min(urls.length, n); i += 1) yield urls[i]; } };\n}'],
+      },
+    },
+  }),
+  'reply-shortening': (b) => ({
+    text: `Conflict groups' resolvedData and unsupported results' contentHash longer than ${b.replyHex} characters keep their first and last ${b.replyHex / 2}.`,
+    source: {
+      'ens-resolver.js': {
+        edits: [
+          ['groups.push({ resolvedData: bytes, urls', `groups.push({ resolvedData: __shortenHex(bytes, ${b.replyHex}), urls`],
+          ['contentHash: consensus.resolvedData,', `contentHash: __shortenHex(consensus.resolvedData, ${b.replyHex}),`],
+          ['contentHash: innerBytes,', `contentHash: __shortenHex(innerBytes, ${b.replyHex}),`],
+        ],
+        append: ['function __shortenHex(hex, max) {\n  return typeof hex === \'string\' && hex.length > max ? hex.slice(0, max / 2) + hex.slice(hex.length - max / 2) : hex;\n}'],
+      },
+    },
+  }),
+  'tezos-expiry': () => ({
+    text: 'Tezos expiries are read as RFC 3339; anything else is unreadable (NaN), as an unparsable date is today.',
+    source: {
+      'tezos-domains-resolver.js': {
+        edits: [
+          ['const expiresAt = expiry ? Date.parse(expiry) : Number.NaN;', 'const expiresAt = expiry ? __parseRfc3339(expiry) : Number.NaN;'],
+          ["const expiryMs = Date.parse(result.expiry || '');", "const expiryMs = __parseRfc3339(result.expiry || '');"],
+        ],
+        append: [PARSE_RFC3339],
+      },
+    },
+  }),
+  'response-caps': (b) => ({
+    text: `Answer bodies over ${b.answerBytes} bytes fail: an RPC answer as a network error (a provider failure), a gateway's as too large (the next gateway), a Tezos node's as over the size limit (a failed endpoint).`,
+    harness: ['rpc-answer-cap'],
+    source: {
+      'ens/ccip-fetch.js': { edits: [['const CCIP_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;', `const CCIP_MAX_RESPONSE_BYTES = ${b.answerBytes};`]], append: [] },
+      'tezos-domains-resolver.js': { edits: [['const MAX_RPC_RESPONSE_BYTES = 5 * 1024 * 1024;', `const MAX_RPC_RESPONSE_BYTES = ${b.answerBytes};`]], append: [] },
+    },
+  }),
+  'prefetch-set': (b) => ({
+    text: `A prefetch is kept after agreed_data in a set of ${b.prefetches}; past that the oldest is aborted.`,
+    source: {
+      'ens-resolver.js': {
+        edits: [["  if (outcome.kind !== 'agreed_data' && prefetchHandle) {\n    try { prefetchHandle.abort(); } catch { /* never propagate */ }\n  }\n",
+          `  if (outcome.kind !== 'agreed_data' && prefetchHandle) {\n    try { prefetchHandle.abort(); } catch { /* never propagate */ }\n  } else if (prefetchHandle && prefetchHandle !== NOOP_PREFETCH) __keepPrefetch(prefetchHandle, ${b.prefetches});\n`]],
+        append: ['var __kept = [];\nfunction __keepPrefetch(handle, n) {\n  __kept.push(handle);\n  while (__kept.length > n) __kept.shift().abort();\n}'],
+      },
+    },
+  }),
+};
+
+/** A scenario's patches, resolved against its bounds. */
+function patchesOf(scenario) {
+  const bounds = { ...BOUNDS, ...(scenario.world?.bounds ?? {}) };
+  return (scenario.patches ?? []).map((id) => {
+    if (!PATCHES[id]) throw new Error(`scenario ${scenario.id}: unknown patch ${id}`);
+    return { id, ...PATCHES[id](bounds) };
+  });
+}
+
 function describe(value) {
   return JSON.parse(JSON.stringify(value, (_k, v) => (v === undefined ? { $undefined: true } : v)));
 }
@@ -60,10 +200,35 @@ function describe(value) {
  * the hook and evicts every checkout module under src/, so no state
  * survives into the next scenario; a failed load restores before throwing.
  */
-function loadModule(checkout, stubs, file, wrappers = {}) {
+function loadModule(checkout, stubs, file, wrappers = {}, sources = {}) {
   const src = path.join(checkout, 'src');
   const main = path.join(src, 'main');
   const filename = path.join(main, file);
+  // `sources` maps module paths to a deviation's source patch (see
+  // PATCHES): each edit's text must occur exactly once.
+  const patchBy = new Map(Object.entries(sources).map(([rel, patch]) => [path.join(main, rel), patch]));
+  const sourceOf = (name) => {
+    let text = fs.readFileSync(name, 'utf8');
+    const patch = patchBy.get(name);
+    if (!patch) return text;
+    for (const [find, replace] of patch.edits) {
+      const count = text.split(find).length - 1;
+      if (count !== 1) throw new Error(`patch for ${path.relative(main, name)}: ${count} matches for ${JSON.stringify(find)}`);
+      text = text.replace(find, () => replace);
+    }
+    return patch.append.length > 0 ? `${text}\n${patch.append.join('\n')}\n` : text;
+  };
+  const compiled = (name, parent) => {
+    if (!Module._cache[name]) {
+      const mod = new Module(name, parent);
+      mod.filename = name;
+      mod.paths = Module._nodeModulePaths(path.dirname(name));
+      Module._cache[name] = mod;
+      mod._compile(sourceOf(name), name);
+      mod.loaded = true;
+    }
+    return Module._cache[name].exports;
+  };
   const byPath = new Map(Object.entries(stubs).map(([rel, stub]) => [path.join(main, `${rel}.js`), stub]));
   // `wrappers` maps module paths to functions of the real exports: the real
   // module loads, and its dependents get the wrapped exports.
@@ -87,22 +252,18 @@ function loadModule(checkout, stubs, file, wrappers = {}) {
         resolved = null;
       }
       if (resolved && byPath.has(resolved)) return byPath.get(resolved);
+      const load = () => (patchBy.has(resolved) ? compiled(resolved, parent) : originalLoad.call(this, request, parent, isMain));
       if (resolved && wrapBy.has(resolved)) {
-        if (!wrapped.has(resolved)) wrapped.set(resolved, wrapBy.get(resolved)(originalLoad.call(this, request, parent, isMain)));
+        if (!wrapped.has(resolved)) wrapped.set(resolved, wrapBy.get(resolved)(load()));
         return wrapped.get(resolved);
       }
+      if (resolved && patchBy.has(resolved)) return load();
     }
     return originalLoad.call(this, request, parent, isMain);
   };
   try {
     evict();
-    const mod = new Module(filename, null);
-    mod.filename = filename;
-    mod.paths = Module._nodeModulePaths(path.dirname(filename));
-    Module._cache[filename] = mod;
-    mod._compile(fs.readFileSync(filename, 'utf8'), filename);
-    mod.loaded = true;
-    return { exports: mod.exports, restore };
+    return { exports: compiled(filename, null), restore };
   } catch (err) {
     restore();
     throw err;
@@ -118,6 +279,17 @@ function loadModule(checkout, stubs, file, wrappers = {}) {
 async function runScenario(checkout, ethers, FakeTimers, scenario) {
   const system = scenario.system ?? 'ens';
   const world = structuredClone(scenario.world);
+  const bounds = { ...BOUNDS, ...(world.bounds ?? {}) };
+  const patches = patchesOf(scenario);
+  const harnessPatch = (name) => patches.some((patch) => patch.harness?.includes(name));
+  const sources = {};
+  for (const patch of patches) {
+    for (const [file, { edits, append }] of Object.entries(patch.source ?? {})) {
+      sources[file] ??= { edits: [], append: [] };
+      sources[file].edits.push(...edits);
+      sources[file].append.push(...append);
+    }
+  }
   const io = [];
   const violations = [];
   const listeners = [];
@@ -233,13 +405,21 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       setTimeout(() => {
         clearTimeout(inactivity);
         for (const item of entries) close(item, 'answered');
-        const out = answers.map(({ id, result, error }) => (error ? { jsonrpc: '2.0', id, error } : { jsonrpc: '2.0', id, result }));
+        // `pad` grows each answer by a member JSON-RPC readers ignore.
+        const padding = p.pad ? { pad: 'x'.repeat(p.pad) } : {};
+        const out = answers.map(({ id, result, error }) => (error ? { jsonrpc: '2.0', id, error, ...padding } : { jsonrpc: '2.0', id, result, ...padding }));
         const answer = p.status
           ? { status: p.status, body: 'unavailable' }
           : { status: 200, body: JSON.stringify(Array.isArray(body) ? out : out[0]) };
         for (const item of entries) item.answer = answer;
         if (signal?.cancelled) {
           fail('cancelled', 'CANCELLED');
+          return;
+        }
+        // Deviation `response-caps`: main delivers the body, and the core
+        // refuses it as a transport failure.
+        if (harnessPatch('rpc-answer-cap') && Buffer.byteLength(answer.body) > bounds.answerBytes) {
+          fail('response too large', 'NETWORK_ERROR');
           return;
         }
         if (settled) return;
@@ -428,7 +608,7 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     if (p.fail) return json(500, { error: 'down' });
     const level = p.level ?? TEZ_HEAD;
     if (route === '/chains/main/chain_id') return json(200, p.chain ?? 'NetXdQprcVkpaWU');
-    if (route === '/chains/main/blocks/head/header') return json(200, { level });
+    if (route === '/chains/main/blocks/head/header') return json(200, p.pad ? { level, pad: 'x'.repeat(p.pad) } : { level });
     let m = route.match(/^\/chains\/main\/blocks\/(\d+)\/hash$/);
     if (m) return p.anchorFail ? json(500, { error: 'anchor' }) : json(200, `BL${p.fork ? 'fork' : 'main'}${m[1]}`);
     m = route.match(/^\/chains\/main\/blocks\/[^/]+\/context\/(.*)$/);
@@ -567,8 +747,8 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     undo.push(() => clock.uninstall());
 
     const loaded = system === 'tezos'
-      ? loadModule(checkout, stubs, 'tezos-domains-resolver.js')
-      : loadModule(checkout, stubs, 'ens-resolver.js', wrappers);
+      ? loadModule(checkout, stubs, 'tezos-domains-resolver.js', {}, sources)
+      : loadModule(checkout, stubs, 'ens-resolver.js', wrappers, sources);
     undo.push(loaded.restore);
     // `$fetch` drives one FetchRequest through the RPC transport, with its
     // real cancel signal: self-tests use it for the transport's semantics.
@@ -599,7 +779,8 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     const limit = Date.now() + MAX_STEP_MS;
     while (clock.countTimers() > 0 && Date.now() < limit) await clock.nextAsync();
     if (violations.length > 0) throw new Error(`scenario ${scenario.id}: unscripted I/O: ${[...new Set(violations)].join('; ')}`);
-    return { id: scenario.id, system, seed: scenario.seed ?? 7, world: describe(scenario.world), steps, io: describe(io) };
+    const deviation = scenario.deviation ? { deviation: scenario.deviation, patches: describe(patches) } : {};
+    return { id: scenario.id, system, seed: scenario.seed ?? 7, ...deviation, world: describe(scenario.world), steps, io: describe(io) };
   } finally {
     for (const fn of undo.reverse()) fn();
   }
@@ -733,7 +914,57 @@ function scenarioDefinitions(ethers) {
     one('direct-builtin', base({ network: order(['direct']), sources: [{ id: 'pub', coverage: { 1: ENDPOINTS[0] } }], sourceList: [{ id: 'pub', builtin: true }] })),
     ...addressAndReverse(ethers, base, one),
     ...verifiedPaths(ethers, base, one, order, GOOD, lookup),
+    ...deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer),
     ...tezosScenarios(),
+  ];
+}
+
+/**
+ * Deviation vectors (design 0004, Deviations): the reference patched to do
+ * what the core does at a bound (see PATCHES). Bounds are lowered where the
+ * real one would take a large vector.
+ */
+function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
+  const deviation = (id, world, steps = [{ call: content() }]) => ({ id: `deviation-${id}`, deviation: id, patches: [id], world, steps });
+  // A long unsupported contenthash: 8,202 hex characters with its 0x.
+  const long = (byte) => contentAnswer('0x' + byte.repeat(4100));
+  const twoGateways = (first) => ({ resolve: lookupVia(['gw-big.example', 'gw.example']), callback: GOOD, ...first });
+  return [
+    // Three gateway URLs and a bound of two: the reference reaches the
+    // working third gateway, the core gives up after two.
+    deviation('ccip-urls', base({
+      bounds: { ccipUrls: 2 },
+      calls: { resolve: lookupVia(['gw-a.example', 'gw-b.example', 'gw.example']), callback: GOOD },
+      gateways: { 'gw-a.example': { status: 500 }, 'gw-b.example': { status: 500 }, 'gw.example': { body: JSON.stringify({ data: '0xcafe' }) } },
+    })),
+    deviation('reply-shortening', base({ calls: { resolve: long('ab'), callback: GOOD } })),
+    {
+      // Four different long answers: a conflict whose groups carry them.
+      ...deviation('reply-shortening', base({
+        hosts: Object.fromEntries(['ab', 'cd', 'ef', '12'].map((byte, i) => [new URL(ENDPOINTS[i]).host, { calls: { resolve: long(byte) } }])),
+      })),
+      id: 'deviation-reply-shortening-groups',
+    },
+    // An endpoint whose answers outgrow the cap fails as a provider.
+    deviation('response-caps', base({ bounds: { answerBytes: 4096 }, hosts: { 'd.rpc.example': { pad: 5000 } } }), [
+      { call: content() },
+      { after: 1000, call: content('alice.eth') },
+    ]),
+    {
+      // A gateway answer over the cap: the next gateway answers instead.
+      ...deviation('response-caps', base({
+        bounds: { answerBytes: 4096 },
+        calls: twoGateways({}),
+        gateways: { 'gw-big.example': { body: JSON.stringify({ data: '0xbeef', pad: 'x'.repeat(5000) }) }, 'gw.example': { body: JSON.stringify({ data: '0xcafe' }) } },
+      })),
+      id: 'deviation-response-caps-gateway',
+    },
+    // Two agreed lookups and a set of one: the second aborts the first's
+    // prefetch.
+    deviation('prefetch-set', base({ bounds: { prefetches: 1 } }), [
+      { call: content() },
+      { after: 1000, call: content('alice.eth') },
+    ]),
   ];
 }
 
@@ -913,6 +1144,10 @@ function tezosScenarios() {
       { call: tez() },
       { after: 1000, world: { hosts: { 't1.tez.example': { recordFail: true } } }, call: tez('bob.tez') },
     ]),
+    // Deviation vectors (see deviationScenarios): a past expiry in a
+    // format only V8 reads, and a node whose answers outgrow the cap.
+    { ...one('deviation-tezos-expiry', base({ expiry: 'Wed, 01 Jan 2020 00:00:00 GMT' })), deviation: 'tezos-expiry', patches: ['tezos-expiry'] },
+    { ...one('deviation-response-caps-tezos', base({ bounds: { answerBytes: 4096 }, hosts: { 't3.tez.example': { pad: 5000 } } })), deviation: 'response-caps', patches: ['response-caps'] },
   ];
 }
 
@@ -923,8 +1158,19 @@ function loadFakeTimers(checkout) {
 async function buildNamingReplay(checkout, ethers, meta) {
   const FakeTimers = loadFakeTimers(checkout);
   const out = [];
-  for (const scenario of scenarioDefinitions(ethers)) out.push(await runScenario(checkout, ethers, FakeTimers, scenario));
+  for (const scenario of scenarioDefinitions(ethers)) {
+    const run = await runScenario(checkout, ethers, FakeTimers, scenario);
+    if (scenario.deviation) {
+      // The deviation must show: the unpatched reference differs in its
+      // results or its I/O.
+      const plain = await runScenario(checkout, ethers, FakeTimers, { ...scenario, deviation: undefined, patches: [] });
+      const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+      if (same(plain.steps, run.steps) && same(plain.io, run.io)) throw new Error(`deviation vector ${scenario.id}: the patches change nothing`);
+      run.unpatched = plain.steps.map((step) => step.results);
+    }
+    out.push(run);
+  }
   return { meta, scenarios: out };
 }
 
-module.exports = { buildNamingReplay, runScenario, scenarioDefinitions, loadFakeTimers };
+module.exports = { buildNamingReplay, runScenario, scenarioDefinitions, loadFakeTimers, PATCHES };
