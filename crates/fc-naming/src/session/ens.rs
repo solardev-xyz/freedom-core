@@ -20,11 +20,10 @@ use crate::ur::{self, NameSystem};
 /// What the machine asks main to do.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Request {
+    /// One ethers `FetchRequest.send()` of `body`, run by main.
     Rpc {
         endpoint: Endpoint,
-        continuation: Option<String>,
         body: String,
-        attempt: u32,
     },
     Gateway {
         url: String,
@@ -38,12 +37,12 @@ pub enum Request {
 /// Main's answers.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Answer {
+    /// The final HTTP answer, and how many random values main's
+    /// `FetchRequest` drew for 429 back-off.
     Rpc {
         status: u16,
         body: Vec<u8>,
-        retry_after: Option<String>,
-        attempt: u32,
-        continuation: Option<String>,
+        draws: u32,
     },
     Gateway {
         status: u16,
@@ -238,47 +237,31 @@ impl Provider {
         }
     }
 
-    /// One request, through ethers' `FetchRequest` policy (design 0004,
-    /// Transport): 429 retries with the shared random stream, a
-    /// continuation after redirects, the shared 300 s expiry.
+    /// One request: one `FetchRequest.send()` in main (design 0004,
+    /// Transport). Its 429 back-off drew from the shared random stream in
+    /// the reference, so the core advances its own stream by as many.
     async fn send(&mut self, ctx: &Ctx, method: &Method) -> Result<JsValue, RpcError> {
         let id = self.next_id;
         self.next_id += 1;
-        let body = rpc::body(id, method);
-        let expires = ctx.now().saturating_add(300_000);
-        let mut attempt = 0u32;
-        let mut continuation = None;
-        loop {
-            if attempt >= rpc::MAX_ATTEMPTS {
-                return Err(RpcError::Http(429));
-            }
-            if ctx.now() > expires {
-                return Err(RpcError::Transport(Transport::Timeout));
-            }
-            let request = Request::Rpc {
-                endpoint: self.endpoint.clone(),
-                continuation: continuation.clone(),
-                body: body.clone(),
-                attempt,
-            };
-            match ctx.rt.request(request).await {
-                Answer::Rpc {
-                    status: 429,
-                    retry_after,
-                    attempt: at,
-                    continuation: next,
-                    ..
-                } => {
-                    let r = ctx.random.borrow_mut().next_f64();
-                    let delay = rpc::throttle_delay(at, retry_after.as_deref(), r);
-                    ctx.rt.sleep(delay).await;
-                    attempt = at + 1;
-                    continuation = next.or(continuation);
+        let request = Request::Rpc {
+            endpoint: self.endpoint.clone(),
+            body: rpc::body(id, method),
+        };
+        match ctx.rt.request(request).await {
+            Answer::Rpc {
+                status,
+                body,
+                draws,
+            } => {
+                let mut random = ctx.random.borrow_mut();
+                for _ in 0..draws {
+                    random.next_f64();
                 }
-                Answer::Rpc { status, body, .. } => return rpc::answer(id, method, status, &body),
-                Answer::Failed(transport) => return Err(RpcError::Transport(transport)),
-                _ => return Err(RpcError::Transport(Transport::Network)),
+                drop(random);
+                rpc::answer(id, method, status, &body)
             }
+            Answer::Failed(transport) => Err(RpcError::Transport(transport)),
+            _ => Err(RpcError::Transport(Transport::Network)),
         }
     }
 }

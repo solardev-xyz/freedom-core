@@ -1,7 +1,8 @@
 //! JSON-RPC over `shell.rpc`, the way the reference's ethers 6.17
 //! `JsonRpcProvider` and `Contract` see it (design 0004, Transport and
-//! Classification): request bodies, the `FetchRequest` 429 policy, and
-//! answers turned into results or ethers' error classes.
+//! Classification): request bodies, and answers turned into results or
+//! ethers' error classes. Main runs the `FetchRequest` itself: redirects,
+//! 429 back-off, expiry.
 
 use crate::jsjson::{self, JsValue};
 
@@ -88,39 +89,6 @@ pub enum Transport {
     TooLarge,
     Cancelled,
     StaleGeneration,
-}
-
-/// What `shell.rpc` delivered.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Delivered {
-    Http {
-        status: u16,
-        body: Vec<u8>,
-        retry_after: Option<String>,
-    },
-    Failed(Transport),
-}
-
-/// ethers' `FetchRequest` allows 12 attempts in all.
-pub const MAX_ATTEMPTS: u32 = 12;
-const SLOT_INTERVAL_MS: f64 = 250.0;
-
-/// After an HTTP 429 on attempt `attempt`, the delay before the next one:
-/// `250 × trunc(r × 2^attempt)`, or a positive integer `Retry-After` read
-/// as milliseconds. `r` is drawn either way, as ethers draws it.
-pub fn throttle_delay(attempt: u32, retry_after: Option<&str>, r: f64) -> u64 {
-    let scaled = (r * f64::from(1u32 << attempt.min(30))).trunc();
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let backoff = (SLOT_INTERVAL_MS * scaled) as u64;
-    match retry_after {
-        Some(value) if is_positive_integer(value) => value.parse().unwrap_or(backoff),
-        _ => backoff,
-    }
-}
-
-fn is_positive_integer(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    matches!(bytes.first(), Some(b'1'..=b'9')) && bytes.iter().all(u8::is_ascii_digit)
 }
 
 /// A node's JSON-RPC `error` member, as ethers keeps it in `info.error`.
@@ -550,14 +518,6 @@ mod tests {
         assert_eq!(n("   "), Some(0));
         assert_eq!(n("9007199254740992"), None);
         assert_eq!(get_number(&JsValue::Number(1.5)), None);
-    }
-
-    #[test]
-    fn the_throttle_delay_is_ethers() {
-        assert_eq!(throttle_delay(0, None, 0.99), 0);
-        assert_eq!(throttle_delay(3, None, 0.5), 1000);
-        assert_eq!(throttle_delay(3, Some("7"), 0.5), 7);
-        assert_eq!(throttle_delay(3, Some("07"), 0.5), 1000);
     }
 
     #[test]

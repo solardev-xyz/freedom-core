@@ -396,12 +396,11 @@ fn schedule_answer(
     let status = u16::try_from(num(answer.get("status"))).unwrap_or(0);
     let body = str_of(answer.get("body")).as_bytes().to_vec();
     let answer = match str_of(entry.get("kind")) {
+        // No scenario retries yet: one exchange, no back-off draws.
         "rpc" => Answer::Rpc {
             status,
             body,
-            retry_after: None,
-            attempt: 0,
-            continuation: None,
+            draws: 0,
         },
         "gateway" if answer.get("redirect").is_some() => Answer::Failed(Transport::Refused),
         "gateway" => Answer::Gateway { status, body },
