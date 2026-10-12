@@ -65,7 +65,9 @@ This design settles where each part goes:
   - for `bzz:`, `{ ant: "bundled" | "external" | "absent" }`;
   - for IPFS, `{ ipfs: "native" | "gateway" | "absent" }`.
 
-  The core picks timers and the content label from it. `absent` keeps today's order: the method, path and host checks come first, then an absent node is an immediate 503, before any name is resolved.
+  The core picks timers and the content label from it. `absent` keeps each scheme's order today:
+  - **For `bzz:`,** the method, path and host checks come first, then an absent Ant is an immediate 503, before any name is resolved.
+  - **For IPFS,** canonicalization and the name's result come first: a transport mismatch or missing contenthash is still a 404, and an unsupported codec a 415. Only a plan that would reach the node becomes the 503, as at today's dispatch.
 - **Binding:** main captures the backend instance when it admits the request and keeps it, retries included, so a settings change mid-request can't redirect the fetch.
 - **`private`** marks a private window's request. The core passes it to naming and never logs the URL.
 - **`attempts_used`** is naming's resubmission count (0004), sent again when main re-plans an overtaken plan.
@@ -233,7 +235,9 @@ These stay in main, because they depend on the bytes. Each is today's code.
   - each fetch owns its node handle, its sniff buffer (at most 4 KiB plus one upstream chunk) and its retry state, and frees them on every terminal path: done, error, cancel, or the session closing;
   - a plan is checked against the generations once more after any wait in main's queue, so a plan that waited is never used stale.
 - **Local failures map to HTTP:** `busy` → 503, `deadline` → 504, `too_large` → 414 or 431 as above, and a refused plan → 502.
-- **Readiness keeps today's order.** The method, path and host checks come first, so a POST is still a 405 and an encoded separator still a 400 with Ant absent. Then an absent node is an immediate 503, before any name is resolved (`backend: absent`).
+- **Readiness keeps each scheme's order** (`backend: absent`):
+  - **For `bzz:`,** the method, path and host checks come first, so a POST is still a 405 and an encoded separator in a `bzz:` path still a 400 with Ant absent. Then an absent Ant is an immediate 503, before any name is resolved.
+  - **For IPFS,** the name's result comes first, and only a plan bound for the node gets the 503.
 
 ### Other callers
 
