@@ -109,9 +109,15 @@ impl Transaction {
             _ => return Err(err("data: expected hex bytes")),
         };
         let fees = if tx_type == Some(0) {
-            // EIP-155's v = chain_id * 2 + 36 must fit.
-            if chain_id > U256::mask(254) {
-                return Err(err("chain_id: too large"));
+            // EIP-155's v = chain_id * 2 + 35 + parity must fit in 256 bits
+            // for either parity: chain_id <= 2^255 - 19. (ethers signs past
+            // that, with a v its own parser rejects.)
+            if chain_id
+                .checked_add(&chain_id)
+                .and_then(|double| double.checked_add(&U256::from_u64(36)))
+                .is_none()
+            {
+                return Err(err("chain_id: too large for EIP-155"));
             }
             Fees::Legacy {
                 gas_price: quantity(fields, "gas_price")?,

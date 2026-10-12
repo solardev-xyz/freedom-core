@@ -8,8 +8,10 @@
 //! - Quantity strings are `[-]digits` or `[-]0x hex` (see `parse_signed`).
 //! - Type and field names are identifiers, so `encodeType` strings can't be
 //!   made ambiguous by names containing `(`, `,` or spaces.
-//! - Limits: 256 types, 256 fields per type, nesting depth 32. ethers has
-//!   none, and its subtype walk is exponential on diamond-shaped types.
+//! - Limits: 256 types, 256 fields per type, 1024 fields in total, nesting
+//!   depth 32, 32 array dimensions per type, and 1 MiB of type-hash text.
+//!   ethers has none, and its subtype walk is exponential on diamond-shaped
+//!   types.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -19,7 +21,12 @@ use crate::{Error, U256, keccak256, parse_address, parse_bytes, parse_signed};
 
 const MAX_TYPES: usize = 256;
 const MAX_FIELDS: usize = 256;
+const MAX_TOTAL_FIELDS: usize = 1024;
 const MAX_DEPTH: usize = 32;
+const MAX_DIMENSIONS: usize = 32;
+/// `encodeType` text hashed across all type hashes: each struct's own text,
+/// counted once more for every struct whose type hash includes it.
+const MAX_TYPE_TEXT: usize = 1 << 20;
 /// The largest integer a JS number holds exactly.
 const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 const DOMAIN_FIELDS: [(&str, &str); 5] = [
@@ -157,11 +164,13 @@ impl Types {
         let mut fields = BTreeMap::new();
         let mut parents: BTreeMap<&str, usize> = object.keys().map(|k| (k.as_str(), 0)).collect();
         let mut links: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut total_fields = 0usize;
         for (name, list) in object {
             let list = list
                 .as_array()
                 .ok_or_else(|| err(format!("{name}: expected a field list")))?;
-            if list.len() > MAX_FIELDS {
+            total_fields += list.len();
+            if list.len() > MAX_FIELDS || total_fields > MAX_TOTAL_FIELDS {
                 return Err(err(format!("{name}: too many fields")));
             }
             let mut seen = BTreeSet::new();
@@ -182,6 +191,11 @@ impl Types {
                     return Err(err(format!("duplicate field {field_name:?} in {name:?}")));
                 }
                 let (raw_base, suffix, dims) = split_array(field_type);
+                if dims.len() > MAX_DIMENSIONS {
+                    return Err(err(format!(
+                        "{name}.{field_name}: too many array dimensions"
+                    )));
+                }
                 let base_text = match raw_base {
                     "int" if !object.contains_key("int") => "int256",
                     "uint" if !object.contains_key("uint") => "uint256",
@@ -239,6 +253,18 @@ impl Types {
                 .collect();
             format!("{name}({})", inner.join(","))
         };
+        // Bound the type-hash text before building it.
+        let own: BTreeMap<&str, usize> = descendants
+            .keys()
+            .map(|name| (name.as_str(), encode_type(name).len()))
+            .collect();
+        let mut total = 0usize;
+        for (name, subtypes) in &descendants {
+            total += own[name.as_str()] + subtypes.iter().map(|s| own[s.as_str()]).sum::<usize>();
+            if total > MAX_TYPE_TEXT {
+                return Err(err("types: too much type-hash text"));
+            }
+        }
         let mut full = BTreeMap::new();
         for (name, subtypes) in &descendants {
             // BTreeSet iterates in byte order: JS sort order for ASCII names.
@@ -538,6 +564,45 @@ mod tests {
         assert!(Types::parse(&types).is_ok());
         // Encoding it needs depth > 32.
         assert!(typed_data_hash(&json!({}), &types, &json!({})).is_err());
+    }
+
+    #[test]
+    fn worst_case_types_within_the_limits_are_fast() {
+        // 256 types in a chain, the 1024 fields spread over them, long
+        // names: every type hash includes all its descendants.
+        let mut types = Map::new();
+        let long = |prefix: &str, i: usize| format!("{prefix}{i:0>4}{}", "x".repeat(40));
+        for i in 0..256 {
+            let mut fields = Vec::new();
+            for j in 0..3 {
+                fields.push(json!({ "name": long("f", j), "type": "uint256" }));
+            }
+            if i < 255 {
+                fields.push(json!({ "name": "next", "type": long("T", i + 1) }));
+            }
+            types.insert(long("T", i), Value::Array(fields));
+        }
+        let started = std::time::Instant::now();
+        let result = typed_data_hash(&json!({}), &Value::Object(types), &json!({}));
+        // Rejected by the text budget or the depth limit, but quickly.
+        assert!(result.is_err());
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn limits() {
+        let field = |t: &str| json!([{ "name": "v", "type": t }]);
+        let dims = format!("uint8{}", "[]".repeat(33));
+        assert!(Types::parse(&json!({ "M": field(&dims) })).is_err());
+        assert!(Types::parse(&json!({ "M": field(&format!("uint8{}", "[]".repeat(32))) })).is_ok());
+        let many: Vec<Value> = (0..257)
+            .map(|i| json!({ "name": format!("f{i}"), "type": "uint8" }))
+            .collect();
+        assert!(Types::parse(&json!({ "M": many })).is_err());
     }
 
     #[test]
