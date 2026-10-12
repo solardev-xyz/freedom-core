@@ -422,7 +422,15 @@ impl Machine {
         let caller = self.next_caller;
         self.next_caller += 1;
         let settled = self.now();
-        let outcome = sized(outcome, &self.ctx.bounds());
+        let bounds = self.ctx.bounds();
+        let mut outcome = sized(outcome, &bounds);
+        // It is a copy like any reply: with no room for it in the total,
+        // `busy` instead, as for a session that can't start
+        // (`memory-budgets`).
+        let held = self.ctx.budget.borrow().held();
+        if held.saturating_add(reply_bytes(&outcome)) > bounds.total_bytes {
+            outcome = Err(Thrown::protocol("busy"));
+        }
         let generations = self.generations();
         self.replies.push(Reply {
             caller,

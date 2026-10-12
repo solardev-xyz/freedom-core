@@ -1229,3 +1229,39 @@ fn a_budget_failure_at_the_last_restart_cancels_the_sessions_prefetches() {
         assert!(world.cancelled_ids.contains(&id), "prefetch {id} survives");
     }
 }
+
+#[test]
+fn an_immediate_reply_needs_room_in_the_total_too() {
+    let mut world = World::new(config());
+    let first = world.machine.resolve_content("vitalik.eth");
+    world.run(10_000);
+    let size = reply_size(world.reply(first).outcome.as_ref().unwrap());
+    let total = Bounds::default().total_bytes;
+    // A cache hit with one byte too little room is busy, with its attempts.
+    world.machine.set_output_backlog(total - size + 1);
+    let short = world.machine.resolve_content("vitalik.eth");
+    world.run(10_000);
+    assert_eq!(protocol(world.reply(short)), Some("busy"));
+    assert_eq!(world.reply(short).attempts, 0);
+    world.machine.set_output_backlog(total - size);
+    let fits = world.machine.resolve_content("vitalik.eth");
+    world.run(10_000);
+    assert!(world.reply(fits).outcome.is_ok());
+    // Cache hits waiting together, before the driver takes any: those past
+    // the room are busy.
+    world.machine.set_output_backlog(total - 10 * size);
+    let hits: Vec<u64> = (0..20)
+        .map(|_| world.machine.resolve_content("vitalik.eth"))
+        .collect();
+    world.run(10_000);
+    let answered = hits
+        .iter()
+        .filter(|id| world.reply(**id).outcome.is_ok())
+        .count();
+    assert_eq!(answered, 10);
+    assert!(
+        hits[10..]
+            .iter()
+            .all(|id| protocol(world.reply(*id)) == Some("busy"))
+    );
+}
