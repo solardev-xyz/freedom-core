@@ -20134,10 +20134,13 @@
               "edits": [
                 [
                   ", ccipSignal);",
-                  ", ccipSignal, { maxResponseBytes: 4096 });"
+                  ", ccipSignal, __legDeps);"
                 ]
               ],
-              "append": []
+              "append": [
+                "var __legDeps = {};",
+                "__legDeps.maxResponseBytes = 4096;"
+              ]
             },
             "tezos-domains-resolver.js": {
               "edits": [
@@ -20677,10 +20680,13 @@
               "edits": [
                 [
                   ", ccipSignal);",
-                  ", ccipSignal, { maxResponseBytes: 4096 });"
+                  ", ccipSignal, __legDeps);"
                 ]
               ],
-              "append": []
+              "append": [
+                "var __legDeps = {};",
+                "__legDeps.maxResponseBytes = 4096;"
+              ]
             },
             "tezos-domains-resolver.js": {
               "edits": [
@@ -23930,28 +23936,34 @@
       "patches": [
         {
           "id": "request-size",
-          "text": "A gateway request or CCIP callback whose payload, serialized with a 4 KiB envelope, exceeds 8192 bytes is never sent: the gateway is skipped, and a callback fails its leg as CCIP_GATEWAY_FAILED.",
+          "text": "A quorum leg's gateway request or CCIP callback whose payload, serialized (UTF-8) with a 4 KiB envelope, exceeds 8192 bytes is never sent: the gateway is skipped, and a callback fails its leg as CCIP_GATEWAY_FAILED.",
           "source": {
             "ens/ccip-fetch.js": {
               "edits": [
                 [
                   "      const url = template.replaceAll('{sender}', sender).replaceAll('{data}', data);\n",
-                  "      const url = template.replaceAll('{sender}', sender).replaceAll('{data}', data);\n      if (!__fits([url, template.includes('{data}') ? '' : JSON.stringify({ sender, data })])) throw new Error('CCIP request too large');\n"
+                  "      const url = template.replaceAll('{sender}', sender).replaceAll('{data}', data);\n      if (deps.maxRequestBytes != null && !__fits([url, template.includes('{data}') ? '' : JSON.stringify({ sender, data })], deps.maxRequestBytes)) throw new Error('CCIP request too large');\n"
                 ]
               ],
               "append": [
-                "function __fits(parts) {\n  return parts.reduce((n, part) => n + JSON.stringify(part).length, 0) + 4096 <= 8192;\n}"
+                "function __fits(parts, limit) {\n  return parts.reduce((n, part) => n + Buffer.byteLength(JSON.stringify(part), 'utf8'), 0) + 4096 <= limit;\n}"
               ]
             },
             "ens-resolver.js": {
               "edits": [
                 [
+                  ", ccipSignal);",
+                  ", ccipSignal, __legDeps);"
+                ],
+                [
                   "        const raw = await provider.call({\n          to: sender,\n          data: callback + abi.encode(['bytes', 'bytes'], [response, extraData]).slice(2),\n",
-                  "        if (!__fits([callback + abi.encode(['bytes', 'bytes'], [response, extraData]).slice(2)])) {\n          throw Object.assign(new Error('CCIP gateways unavailable or returned invalid data'), { code: 'CCIP_GATEWAY_FAILED' });\n        }\n        const raw = await provider.call({\n          to: sender,\n          data: callback + abi.encode(['bytes', 'bytes'], [response, extraData]).slice(2),\n"
+                  "        if (!__fits([callback + abi.encode(['bytes', 'bytes'], [response, extraData]).slice(2)], 8192)) {\n          throw Object.assign(new Error('CCIP gateways unavailable or returned invalid data'), { code: 'CCIP_GATEWAY_FAILED' });\n        }\n        const raw = await provider.call({\n          to: sender,\n          data: callback + abi.encode(['bytes', 'bytes'], [response, extraData]).slice(2),\n"
                 ]
               ],
               "append": [
-                "function __fits(parts) {\n  return parts.reduce((n, part) => n + JSON.stringify(part).length, 0) + 4096 <= 8192;\n}"
+                "function __fits(parts, limit) {\n  return parts.reduce((n, part) => n + Buffer.byteLength(JSON.stringify(part), 'utf8'), 0) + 4096 <= limit;\n}",
+                "var __legDeps = {};",
+                "__legDeps.maxRequestBytes = 8192;"
               ]
             }
           }
@@ -24302,28 +24314,34 @@
       "patches": [
         {
           "id": "request-size",
-          "text": "A gateway request or CCIP callback whose payload, serialized with a 4 KiB envelope, exceeds 8192 bytes is never sent: the gateway is skipped, and a callback fails its leg as CCIP_GATEWAY_FAILED.",
+          "text": "A quorum leg's gateway request or CCIP callback whose payload, serialized (UTF-8) with a 4 KiB envelope, exceeds 8192 bytes is never sent: the gateway is skipped, and a callback fails its leg as CCIP_GATEWAY_FAILED.",
           "source": {
             "ens/ccip-fetch.js": {
               "edits": [
                 [
                   "      const url = template.replaceAll('{sender}', sender).replaceAll('{data}', data);\n",
-                  "      const url = template.replaceAll('{sender}', sender).replaceAll('{data}', data);\n      if (!__fits([url, template.includes('{data}') ? '' : JSON.stringify({ sender, data })])) throw new Error('CCIP request too large');\n"
+                  "      const url = template.replaceAll('{sender}', sender).replaceAll('{data}', data);\n      if (deps.maxRequestBytes != null && !__fits([url, template.includes('{data}') ? '' : JSON.stringify({ sender, data })], deps.maxRequestBytes)) throw new Error('CCIP request too large');\n"
                 ]
               ],
               "append": [
-                "function __fits(parts) {\n  return parts.reduce((n, part) => n + JSON.stringify(part).length, 0) + 4096 <= 8192;\n}"
+                "function __fits(parts, limit) {\n  return parts.reduce((n, part) => n + Buffer.byteLength(JSON.stringify(part), 'utf8'), 0) + 4096 <= limit;\n}"
               ]
             },
             "ens-resolver.js": {
               "edits": [
                 [
+                  ", ccipSignal);",
+                  ", ccipSignal, __legDeps);"
+                ],
+                [
                   "        const raw = await provider.call({\n          to: sender,\n          data: callback + abi.encode(['bytes', 'bytes'], [response, extraData]).slice(2),\n",
-                  "        if (!__fits([callback + abi.encode(['bytes', 'bytes'], [response, extraData]).slice(2)])) {\n          throw Object.assign(new Error('CCIP gateways unavailable or returned invalid data'), { code: 'CCIP_GATEWAY_FAILED' });\n        }\n        const raw = await provider.call({\n          to: sender,\n          data: callback + abi.encode(['bytes', 'bytes'], [response, extraData]).slice(2),\n"
+                  "        if (!__fits([callback + abi.encode(['bytes', 'bytes'], [response, extraData]).slice(2)], 8192)) {\n          throw Object.assign(new Error('CCIP gateways unavailable or returned invalid data'), { code: 'CCIP_GATEWAY_FAILED' });\n        }\n        const raw = await provider.call({\n          to: sender,\n          data: callback + abi.encode(['bytes', 'bytes'], [response, extraData]).slice(2),\n"
                 ]
               ],
               "append": [
-                "function __fits(parts) {\n  return parts.reduce((n, part) => n + JSON.stringify(part).length, 0) + 4096 <= 8192;\n}"
+                "function __fits(parts, limit) {\n  return parts.reduce((n, part) => n + Buffer.byteLength(JSON.stringify(part), 'utf8'), 0) + 4096 <= limit;\n}",
+                "var __legDeps = {};",
+                "__legDeps.maxRequestBytes = 8192;"
               ]
             }
           }
@@ -24775,7 +24793,7 @@
       "patches": [
         {
           "id": "reply-size",
-          "text": "A result over 4096 bytes, serialized, is never cached, and its callers get \"result too large\".",
+          "text": "A result over 4096 bytes, serialized (UTF-8, as the core holds it: endpoints as references), is never cached, and its callers get \"result too large\".",
           "harness": [
             "reply-size"
           ],
@@ -24784,10 +24802,12 @@
               "edits": [
                 [
                   "  cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n  capCache(cache);\n",
-                  "  if (JSON.stringify(result).length <= 4096) {\n    cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n    capCache(cache);\n  }\n"
+                  "  if (__coreSize(result) <= 4096) {\n    cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n    capCache(cache);\n  }\n"
                 ]
               ],
-              "append": []
+              "append": [
+                "function __toCore(value, urls) {\n  const hostOf = (url) => { try { return new URL(url).host; } catch { return url; } };\n  const byHost = new Map(urls.map((url) => [hostOf(url), url]));\n  const ref = (s) => (typeof s === 'string' && (byHost.has(s) || urls.includes(s)) ? { ref: byHost.get(s) ?? s } : s);\n  const walk = (v, key) => {\n    if (Array.isArray(v)) return ['agreed', 'dissented', 'queried', 'urls'].includes(key) ? v.map(ref) : v.map((x) => walk(x));\n    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, k === 'prover' ? ref(x) : walk(x, k)]));\n    return v;\n  };\n  return walk(value);\n}\nfunction __coreSize(value) {\n  const urls = [...registry.getEndpoints(1, 'rpc'), ...registry.getEndpoints(1, 'prover')];\n  return Buffer.byteLength(JSON.stringify(__toCore(value, urls)), 'utf8');\n}"
+              ]
             }
           }
         }
@@ -25220,7 +25240,7 @@
       "patches": [
         {
           "id": "cache-bytes",
-          "text": "Each result cache also holds at most 1280 bytes (key plus serialized result per entry), evicting as capCache does: expired entries first, then the oldest.",
+          "text": "Each result cache also holds at most 1280 bytes (UTF-8 key plus the result serialized as the core holds it), evicting as capCache does: expired entries first, then the oldest.",
           "source": {
             "ens-resolver.js": {
               "edits": [
@@ -25230,7 +25250,8 @@
                 ]
               ],
               "append": [
-                "function __capBytes(cache, limit) {\n  const size = (key, entry) => key.length + JSON.stringify(entry.result).length;\n  let bytes = 0;\n  for (const [key, entry] of cache) bytes += size(key, entry);\n  const now = Date.now();\n  for (const [key, entry] of cache) {\n    if (bytes <= limit) return;\n    if (entry.expiresAt <= now) {\n      cache.delete(key);\n      bytes -= size(key, entry);\n    }\n  }\n  for (const [key, entry] of cache) {\n    if (bytes <= limit) return;\n    cache.delete(key);\n    bytes -= size(key, entry);\n  }\n}"
+                "function __toCore(value, urls) {\n  const hostOf = (url) => { try { return new URL(url).host; } catch { return url; } };\n  const byHost = new Map(urls.map((url) => [hostOf(url), url]));\n  const ref = (s) => (typeof s === 'string' && (byHost.has(s) || urls.includes(s)) ? { ref: byHost.get(s) ?? s } : s);\n  const walk = (v, key) => {\n    if (Array.isArray(v)) return ['agreed', 'dissented', 'queried', 'urls'].includes(key) ? v.map(ref) : v.map((x) => walk(x));\n    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, k === 'prover' ? ref(x) : walk(x, k)]));\n    return v;\n  };\n  return walk(value);\n}\nfunction __coreSize(value) {\n  const urls = [...registry.getEndpoints(1, 'rpc'), ...registry.getEndpoints(1, 'prover')];\n  return Buffer.byteLength(JSON.stringify(__toCore(value, urls)), 'utf8');\n}",
+                "function __capBytes(cache, limit) {\n  const size = (key, entry) => Buffer.byteLength(key, 'utf8') + __coreSize(entry.result);\n  let bytes = 0;\n  for (const [key, entry] of cache) bytes += size(key, entry);\n  const now = Date.now();\n  for (const [key, entry] of cache) {\n    if (bytes <= limit) return;\n    if (entry.expiresAt <= now) {\n      cache.delete(key);\n      bytes -= size(key, entry);\n    }\n  }\n  for (const [key, entry] of cache) {\n    if (bytes <= limit) return;\n    cache.delete(key);\n    bytes -= size(key, entry);\n  }\n}"
               ]
             }
           }
@@ -26450,19 +26471,19 @@
                 ],
                 [
                   "    log.info(`[ens] ${label} joining in-flight resolution for ${nameForLog(normalized)}`);\n    return existing;\n",
-                  "    log.info(`[ens] ${label} joining in-flight resolution for ${nameForLog(normalized)}`);\n    if ((__admission.joined.get(dedupKey) ?? 0) >= 2) throw __busy();\n    return __admit(dedupKey, existing);\n"
+                  "    log.info(`[ens] ${label} joining in-flight resolution for ${nameForLog(normalized)}`);\n    if ((__admission.joined.get(existing) ?? 0) >= 2) throw __busy();\n    return __admit(existing);\n"
                 ],
                 [
                   "  let promise;\n  promise = resolveAcrossStableLifecycle(",
-                  "  if (inFlightResolves.size >= 1) throw __busy();\n  let promise;\n  promise = resolveAcrossStableLifecycle("
+                  "  if (__admission.sessions.size >= 1) throw __busy();\n  let promise;\n  promise = resolveAcrossStableLifecycle("
                 ],
                 [
                   "  inFlightResolves.set(dedupKey, promise);\n  return promise;\n",
-                  "  inFlightResolves.set(dedupKey, promise);\n  return __admit(dedupKey, promise);\n"
+                  "  inFlightResolves.set(dedupKey, promise);\n  __admission.sessions.add(promise);\n  const __end = () => __admission.sessions.delete(promise);\n  promise.then(__end, __end);\n  return __admit(promise);\n"
                 ]
               ],
               "append": [
-                "var __admission = { callers: 0, joined: new Map() };\nfunction __busy() {\n  return Object.assign(new Error('busy'), { protocol: 'busy' });\n}\nfunction __admit(key, promise) {\n  __admission.callers += 1;\n  __admission.joined.set(key, (__admission.joined.get(key) ?? 0) + 1);\n  const leave = () => {\n    __admission.callers -= 1;\n    __admission.joined.set(key, __admission.joined.get(key) - 1);\n  };\n  promise.then(leave, leave);\n  return promise;\n}"
+                "var __admission = { callers: 0, sessions: new Set(), joined: new Map() };\nfunction __busy() {\n  return Object.assign(new Error('busy'), { protocol: 'busy' });\n}\nfunction __admit(session) {\n  __admission.callers += 1;\n  __admission.joined.set(session, (__admission.joined.get(session) ?? 0) + 1);\n  const leave = () => {\n    __admission.callers -= 1;\n    __admission.joined.set(session, __admission.joined.get(session) - 1);\n  };\n  session.then(leave, leave);\n  return session;\n}"
               ]
             }
           }
@@ -26998,19 +27019,19 @@
                 ],
                 [
                   "    log.info(`[ens] ${label} joining in-flight resolution for ${nameForLog(normalized)}`);\n    return existing;\n",
-                  "    log.info(`[ens] ${label} joining in-flight resolution for ${nameForLog(normalized)}`);\n    if ((__admission.joined.get(dedupKey) ?? 0) >= 64) throw __busy();\n    return __admit(dedupKey, existing);\n"
+                  "    log.info(`[ens] ${label} joining in-flight resolution for ${nameForLog(normalized)}`);\n    if ((__admission.joined.get(existing) ?? 0) >= 64) throw __busy();\n    return __admit(existing);\n"
                 ],
                 [
                   "  let promise;\n  promise = resolveAcrossStableLifecycle(",
-                  "  if (inFlightResolves.size >= 32) throw __busy();\n  let promise;\n  promise = resolveAcrossStableLifecycle("
+                  "  if (__admission.sessions.size >= 32) throw __busy();\n  let promise;\n  promise = resolveAcrossStableLifecycle("
                 ],
                 [
                   "  inFlightResolves.set(dedupKey, promise);\n  return promise;\n",
-                  "  inFlightResolves.set(dedupKey, promise);\n  return __admit(dedupKey, promise);\n"
+                  "  inFlightResolves.set(dedupKey, promise);\n  __admission.sessions.add(promise);\n  const __end = () => __admission.sessions.delete(promise);\n  promise.then(__end, __end);\n  return __admit(promise);\n"
                 ]
               ],
               "append": [
-                "var __admission = { callers: 0, joined: new Map() };\nfunction __busy() {\n  return Object.assign(new Error('busy'), { protocol: 'busy' });\n}\nfunction __admit(key, promise) {\n  __admission.callers += 1;\n  __admission.joined.set(key, (__admission.joined.get(key) ?? 0) + 1);\n  const leave = () => {\n    __admission.callers -= 1;\n    __admission.joined.set(key, __admission.joined.get(key) - 1);\n  };\n  promise.then(leave, leave);\n  return promise;\n}"
+                "var __admission = { callers: 0, sessions: new Set(), joined: new Map() };\nfunction __busy() {\n  return Object.assign(new Error('busy'), { protocol: 'busy' });\n}\nfunction __admit(session) {\n  __admission.callers += 1;\n  __admission.joined.set(session, (__admission.joined.get(session) ?? 0) + 1);\n  const leave = () => {\n    __admission.callers -= 1;\n    __admission.joined.set(session, __admission.joined.get(session) - 1);\n  };\n  session.then(leave, leave);\n  return session;\n}"
               ]
             }
           }
@@ -27570,6 +27591,1006 @@
       ]
     },
     {
+      "id": "deviation-reply-size-unicode",
+      "system": "ens",
+      "seed": 7,
+      "deviation": "reply-size",
+      "patches": [
+        {
+          "id": "reply-size",
+          "text": "A result over 734 bytes, serialized (UTF-8, as the core holds it: endpoints as references), is never cached, and its callers get \"result too large\".",
+          "harness": [
+            "reply-size"
+          ],
+          "source": {
+            "ens-resolver.js": {
+              "edits": [
+                [
+                  "  cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n  capCache(cache);\n",
+                  "  if (__coreSize(result) <= 734) {\n    cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n    capCache(cache);\n  }\n"
+                ]
+              ],
+              "append": [
+                "function __toCore(value, urls) {\n  const hostOf = (url) => { try { return new URL(url).host; } catch { return url; } };\n  const byHost = new Map(urls.map((url) => [hostOf(url), url]));\n  const ref = (s) => (typeof s === 'string' && (byHost.has(s) || urls.includes(s)) ? { ref: byHost.get(s) ?? s } : s);\n  const walk = (v, key) => {\n    if (Array.isArray(v)) return ['agreed', 'dissented', 'queried', 'urls'].includes(key) ? v.map(ref) : v.map((x) => walk(x));\n    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, k === 'prover' ? ref(x) : walk(x, k)]));\n    return v;\n  };\n  return walk(value);\n}\nfunction __coreSize(value) {\n  const urls = [...registry.getEndpoints(1, 'rpc'), ...registry.getEndpoints(1, 'prover')];\n  return Buffer.byteLength(JSON.stringify(__toCore(value, urls)), 'utf8');\n}"
+              ]
+            }
+          }
+        }
+      ],
+      "world": {
+        "endpoints": [
+          "https://a.rpc.example",
+          "https://b.rpc.example",
+          "https://c.rpc.example",
+          "https://d.rpc.example"
+        ],
+        "network": {
+          "verification": {
+            "order": [
+              "quorum"
+            ],
+            "preferVerified": false
+          },
+          "quorum": {
+            "k": 3,
+            "m": 2,
+            "timeoutMs": 5000,
+            "anchor": "latest",
+            "anchorTtlMs": 30000
+          }
+        },
+        "calls": {
+          "resolve": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000"
+          },
+          "callback": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000"
+          }
+        },
+        "bounds": {
+          "replyBytes": 734
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "call": {
+            "fn": "resolveEnsContent",
+            "args": [
+              "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé.eth"
+            ]
+          },
+          "results": [
+            {
+              "thrown": "result too large",
+              "settled": 60
+            }
+          ]
+        },
+        {
+          "at": 1060,
+          "after": 1000,
+          "call": {
+            "fn": "resolveEnsContent",
+            "args": [
+              "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé.eth"
+            ]
+          },
+          "results": [
+            {
+              "thrown": "result too large",
+              "settled": 1080
+            }
+          ]
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 1,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 1,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 2,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 2,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 3,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 3,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 4,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 4,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 5,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 5,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 6,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 6,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 7,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 7,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 8,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 8,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 9,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b9230000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000014000000000000000000000000000000000000000000000000000000000000000cec8c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a903657468000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1171df5a42edea73f1b341d3f5d0743a6c827ca0d91551a77e54cb4aaa689a1ec00000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 60,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000\"}"
+          }
+        },
+        {
+          "id": 9,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 10,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b9230000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000014000000000000000000000000000000000000000000000000000000000000000cec8c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a903657468000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1171df5a42edea73f1b341d3f5d0743a6c827ca0d91551a77e54cb4aaa689a1ec00000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 60,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000\"}"
+          }
+        },
+        {
+          "id": 10,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 11,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b9230000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000014000000000000000000000000000000000000000000000000000000000000000cec8c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a903657468000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1171df5a42edea73f1b341d3f5d0743a6c827ca0d91551a77e54cb4aaa689a1ec00000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 60,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000\"}"
+          }
+        },
+        {
+          "id": 11,
+          "step": 0,
+          "t": 60,
+          "kind": "prefetch",
+          "host": null,
+          "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+          "end": null,
+          "outcome": "open"
+        },
+        {
+          "id": 12,
+          "step": 1,
+          "t": 1070,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 12,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b9230000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000014000000000000000000000000000000000000000000000000000000000000000cec8c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a903657468000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1171df5a42edea73f1b341d3f5d0743a6c827ca0d91551a77e54cb4aaa689a1ec00000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 1080,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000\"}"
+          }
+        },
+        {
+          "id": 13,
+          "step": 1,
+          "t": 1070,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 13,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b9230000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000014000000000000000000000000000000000000000000000000000000000000000cec8c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a903657468000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1171df5a42edea73f1b341d3f5d0743a6c827ca0d91551a77e54cb4aaa689a1ec00000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 1080,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000\"}"
+          }
+        },
+        {
+          "id": 14,
+          "step": 1,
+          "t": 1070,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 14,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b9230000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000014000000000000000000000000000000000000000000000000000000000000000cec8c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a903657468000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1171df5a42edea73f1b341d3f5d0743a6c827ca0d91551a77e54cb4aaa689a1ec00000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 1080,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000\"}"
+          }
+        },
+        {
+          "id": 15,
+          "step": 1,
+          "t": 1080,
+          "kind": "prefetch",
+          "host": null,
+          "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+          "end": null,
+          "outcome": "open"
+        }
+      ],
+      "unpatched": [
+        [
+          {
+            "value": {
+              "type": "ok",
+              "name": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé.eth",
+              "system": "ens",
+              "codec": "ipfs-ns",
+              "protocol": "ipfs",
+              "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+              "decoded": "QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+              "trust": {
+                "level": "verified",
+                "system": "ens",
+                "block": {
+                  "number": 19999992,
+                  "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+                },
+                "agreed": [
+                  "c.rpc.example",
+                  "b.rpc.example"
+                ],
+                "dissented": [],
+                "queried": [
+                  "c.rpc.example",
+                  "b.rpc.example",
+                  "d.rpc.example"
+                ],
+                "quorum": {
+                  "k": 3,
+                  "m": 2,
+                  "achieved": true
+                }
+              }
+            },
+            "settled": 60
+          }
+        ],
+        [
+          {
+            "value": {
+              "type": "ok",
+              "name": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé.eth",
+              "system": "ens",
+              "codec": "ipfs-ns",
+              "protocol": "ipfs",
+              "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+              "decoded": "QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+              "trust": {
+                "level": "verified",
+                "system": "ens",
+                "block": {
+                  "number": 19999992,
+                  "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+                },
+                "agreed": [
+                  "c.rpc.example",
+                  "b.rpc.example"
+                ],
+                "dissented": [],
+                "queried": [
+                  "c.rpc.example",
+                  "b.rpc.example",
+                  "d.rpc.example"
+                ],
+                "quorum": {
+                  "k": 3,
+                  "m": 2,
+                  "achieved": true
+                }
+              }
+            },
+            "settled": 1060
+          }
+        ]
+      ]
+    },
+    {
+      "id": "deviation-admission-lifecycle-overlap",
+      "system": "ens",
+      "seed": 7,
+      "deviation": "admission",
+      "patches": [
+        {
+          "id": "admission",
+          "text": "Admission: at most 1 running sessions, 256 waiting callers and 64 callers per session; a caller over a limit, a cache hit included, is answered busy at once.",
+          "source": {
+            "ens-resolver.js": {
+              "edits": [
+                [
+                  "  const key = chainCacheKey(normalized, chainId);\n  const cached = cache.get(key);\n",
+                  "  if (__admission.callers >= 256) throw __busy();\n  const key = chainCacheKey(normalized, chainId);\n  const cached = cache.get(key);\n"
+                ],
+                [
+                  "    log.info(`[ens] ${label} joining in-flight resolution for ${nameForLog(normalized)}`);\n    return existing;\n",
+                  "    log.info(`[ens] ${label} joining in-flight resolution for ${nameForLog(normalized)}`);\n    if ((__admission.joined.get(existing) ?? 0) >= 64) throw __busy();\n    return __admit(existing);\n"
+                ],
+                [
+                  "  let promise;\n  promise = resolveAcrossStableLifecycle(",
+                  "  if (__admission.sessions.size >= 1) throw __busy();\n  let promise;\n  promise = resolveAcrossStableLifecycle("
+                ],
+                [
+                  "  inFlightResolves.set(dedupKey, promise);\n  return promise;\n",
+                  "  inFlightResolves.set(dedupKey, promise);\n  __admission.sessions.add(promise);\n  const __end = () => __admission.sessions.delete(promise);\n  promise.then(__end, __end);\n  return __admit(promise);\n"
+                ]
+              ],
+              "append": [
+                "var __admission = { callers: 0, sessions: new Set(), joined: new Map() };\nfunction __busy() {\n  return Object.assign(new Error('busy'), { protocol: 'busy' });\n}\nfunction __admit(session) {\n  __admission.callers += 1;\n  __admission.joined.set(session, (__admission.joined.get(session) ?? 0) + 1);\n  const leave = () => {\n    __admission.callers -= 1;\n    __admission.joined.set(session, __admission.joined.get(session) - 1);\n  };\n  session.then(leave, leave);\n  return session;\n}"
+              ]
+            }
+          }
+        }
+      ],
+      "world": {
+        "endpoints": [
+          "https://a.rpc.example",
+          "https://b.rpc.example",
+          "https://c.rpc.example",
+          "https://d.rpc.example"
+        ],
+        "network": {
+          "verification": {
+            "order": [
+              "quorum"
+            ],
+            "preferVerified": false
+          },
+          "quorum": {
+            "k": 3,
+            "m": 2,
+            "timeoutMs": 5000,
+            "anchor": "latest",
+            "anchorTtlMs": 30000
+          }
+        },
+        "calls": {
+          "resolve": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000"
+          },
+          "callback": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000"
+          }
+        },
+        "bounds": {
+          "sessions": 1
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "resolveEnsContent",
+              "args": [
+                "vitalik.eth"
+              ]
+            },
+            {
+              "fn": "resolveEnsContent",
+              "args": [
+                "alice.eth"
+              ],
+              "at": 10
+            }
+          ],
+          "events": [
+            {
+              "at": 5,
+              "myotis": {
+                "ready": false
+              }
+            }
+          ],
+          "results": [
+            {
+              "value": {
+                "type": "ok",
+                "name": "vitalik.eth",
+                "system": "ens",
+                "codec": "ipfs-ns",
+                "protocol": "ipfs",
+                "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+                "decoded": "QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+                "trust": {
+                  "level": "verified",
+                  "system": "ens",
+                  "block": {
+                    "number": 19999992,
+                    "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+                  },
+                  "agreed": [
+                    "c.rpc.example",
+                    "b.rpc.example"
+                  ],
+                  "dissented": [],
+                  "queried": [
+                    "c.rpc.example",
+                    "b.rpc.example",
+                    "d.rpc.example"
+                  ],
+                  "quorum": {
+                    "k": 3,
+                    "m": 2,
+                    "achieved": true
+                  }
+                }
+              },
+              "settled": 80
+            },
+            {
+              "protocol": "busy",
+              "settled": 10
+            }
+          ]
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "t": 5,
+          "kind": "event",
+          "host": null,
+          "event": {
+            "at": 5,
+            "myotis": {
+              "ready": false
+            }
+          },
+          "end": 5,
+          "outcome": "fired"
+        },
+        {
+          "id": 1,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 1,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 2,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 2,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 3,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 3,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 4,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 4,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 5,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 5,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 6,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 6,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 7,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 7,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 8,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 8,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 9,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 9,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b92300000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000d07766974616c696b0365746800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1ee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a5347583500000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 60,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000\"}"
+          }
+        },
+        {
+          "id": 10,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 10,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b92300000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000d07766974616c696b0365746800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1ee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a5347583500000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 60,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000\"}"
+          }
+        },
+        {
+          "id": 11,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 11,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b92300000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000d07766974616c696b0365746800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1ee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a5347583500000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 60,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000\"}"
+          }
+        },
+        {
+          "id": 12,
+          "step": 0,
+          "t": 60,
+          "kind": "prefetch",
+          "host": null,
+          "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+          "end": null,
+          "outcome": "open"
+        },
+        {
+          "id": 13,
+          "step": 0,
+          "t": 70,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 12,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b92300000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000d07766974616c696b0365746800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1ee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a5347583500000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 80,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000\"}"
+          }
+        },
+        {
+          "id": 14,
+          "step": 0,
+          "t": 70,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 13,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b92300000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000d07766974616c696b0365746800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1ee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a5347583500000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 80,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000\"}"
+          }
+        },
+        {
+          "id": 15,
+          "step": 0,
+          "t": 70,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 14,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b92300000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000d07766974616c696b0365746800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1ee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a5347583500000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 80,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000\"}"
+          }
+        },
+        {
+          "id": 16,
+          "step": 0,
+          "t": 80,
+          "kind": "prefetch",
+          "host": null,
+          "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+          "end": null,
+          "outcome": "open"
+        }
+      ],
+      "unpatched": [
+        [
+          {
+            "value": {
+              "type": "ok",
+              "name": "vitalik.eth",
+              "system": "ens",
+              "codec": "ipfs-ns",
+              "protocol": "ipfs",
+              "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+              "decoded": "QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+              "trust": {
+                "level": "verified",
+                "system": "ens",
+                "block": {
+                  "number": 19999992,
+                  "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+                },
+                "agreed": [
+                  "c.rpc.example",
+                  "b.rpc.example"
+                ],
+                "dissented": [],
+                "queried": [
+                  "c.rpc.example",
+                  "b.rpc.example",
+                  "d.rpc.example"
+                ],
+                "quorum": {
+                  "k": 3,
+                  "m": 2,
+                  "achieved": true
+                }
+              }
+            },
+            "settled": 80
+          },
+          {
+            "value": {
+              "type": "ok",
+              "name": "alice.eth",
+              "system": "ens",
+              "codec": "ipfs-ns",
+              "protocol": "ipfs",
+              "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+              "decoded": "QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+              "trust": {
+                "level": "verified",
+                "system": "ens",
+                "block": {
+                  "number": 19999992,
+                  "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+                },
+                "agreed": [
+                  "c.rpc.example",
+                  "b.rpc.example"
+                ],
+                "dissented": [],
+                "queried": [
+                  "c.rpc.example",
+                  "b.rpc.example",
+                  "d.rpc.example"
+                ],
+                "quorum": {
+                  "k": 3,
+                  "m": 2,
+                  "achieved": true
+                }
+              }
+            },
+            "settled": 70
+          }
+        ]
+      ]
+    },
+    {
       "id": "deviation-overall-deadline",
       "system": "ens",
       "seed": 7,
@@ -27577,7 +28598,7 @@
       "patches": [
         {
           "id": "overall-deadline",
-          "text": "A session ends 300 ms after it starts: its callers get deadline, its outstanding I/O is cancelled, it makes no more, and nothing is cached. The vector has one session per step.",
+          "text": "A session ends 300 ms after it starts: its callers get deadline, its outstanding I/O is cancelled, and it makes no more. The reference's abandoned work can't be stopped, only cut off from I/O, so the patch holds only for one step with one call (enforced); that nothing is cached is the core's own test.",
           "harness": [
             "overall-deadline"
           ]
@@ -35426,10 +36447,13 @@
               "edits": [
                 [
                   ", ccipSignal);",
-                  ", ccipSignal, { maxResponseBytes: 4096 });"
+                  ", ccipSignal, __legDeps);"
                 ]
               ],
-              "append": []
+              "append": [
+                "var __legDeps = {};",
+                "__legDeps.maxResponseBytes = 4096;"
+              ]
             },
             "tezos-domains-resolver.js": {
               "edits": [

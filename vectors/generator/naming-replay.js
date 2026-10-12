@@ -76,9 +76,34 @@ const BOUNDS = {
 
 // The core's frame check (deviation `request-size`): a request's payload
 // strings, serialized, plus 4 KiB for its envelope, within the frame.
-const FITS = (limit) => `function __fits(parts) {
-  return parts.reduce((n, part) => n + JSON.stringify(part).length, 0) + 4096 <= ${limit};
+// Bytes, as the core measures UTF-8.
+const FITS = `function __fits(parts, limit) {
+  return parts.reduce((n, part) => n + Buffer.byteLength(JSON.stringify(part), 'utf8'), 0) + 4096 <= limit;
 }`;
+
+// A result as the core holds it, for measuring: where it names endpoints
+// (trust.agreed, dissented, queried, groups[].urls, Colibri's prover), the
+// core holds { ref: endpoint } in place of the host or URL main publishes.
+function __toCore(value, urls) {
+  const hostOf = (url) => { try { return new URL(url).host; } catch { return url; } };
+  const byHost = new Map(urls.map((url) => [hostOf(url), url]));
+  const ref = (s) => (typeof s === 'string' && (byHost.has(s) || urls.includes(s)) ? { ref: byHost.get(s) ?? s } : s);
+  const walk = (v, key) => {
+    if (Array.isArray(v)) return ['agreed', 'dissented', 'queried', 'urls'].includes(key) ? v.map(ref) : v.map((x) => walk(x));
+    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, k === 'prover' ? ref(x) : walk(x, k)]));
+    return v;
+  };
+  return walk(value);
+}
+
+// The serialized size of a result as the core measures it.
+const CORE_SIZE = `${__toCore.toString()}
+function __coreSize(value) {
+  const urls = [...registry.getEndpoints(1, 'rpc'), ...registry.getEndpoints(1, 'prover')];
+  return Buffer.byteLength(JSON.stringify(__toCore(value, urls)), 'utf8');
+}`;
+// The legs' CCIP deps, shared by the patches that bound it.
+const LEG_DEPS = 'var __legDeps = {};';
 
 // The core's RFC 3339 reading (deviation `tezos-expiry`), as
 // fc_naming::session::tezos::parse_rfc3339 implements it: a full date, or a
@@ -184,44 +209,49 @@ const PATCHES = {
         ],
         append: [],
       },
-      'ens-resolver.js': { edits: [[', ccipSignal);', `, ccipSignal, { maxResponseBytes: ${b.answerBytes} });`]], append: [] },
+      'ens-resolver.js': { edits: [[', ccipSignal);', ', ccipSignal, __legDeps);']], append: [LEG_DEPS, `__legDeps.maxResponseBytes = ${b.answerBytes};`] },
       'tezos-domains-resolver.js': { edits: [['const MAX_RPC_RESPONSE_BYTES = 5 * 1024 * 1024;', `const MAX_RPC_RESPONSE_BYTES = ${b.answerBytes};`]], append: [] },
     },
   }),
   'request-size': (b) => ({
-    text: `A gateway request or CCIP callback whose payload, serialized with a 4 KiB envelope, exceeds ${b.messageBytes} bytes is never sent: the gateway is skipped, and a callback fails its leg as CCIP_GATEWAY_FAILED.`,
+    text: `A quorum leg's gateway request or CCIP callback whose payload, serialized (UTF-8) with a 4 KiB envelope, exceeds ${b.messageBytes} bytes is never sent: the gateway is skipped, and a callback fails its leg as CCIP_GATEWAY_FAILED.`,
     source: {
       'ens/ccip-fetch.js': {
         edits: [["      const url = template.replaceAll('{sender}', sender).replaceAll('{data}', data);\n",
-          "      const url = template.replaceAll('{sender}', sender).replaceAll('{data}', data);\n      if (!__fits([url, template.includes('{data}') ? '' : JSON.stringify({ sender, data })])) throw new Error('CCIP request too large');\n"]],
-        append: [FITS(b.messageBytes)],
+          // Only where the legs pass a bound (deps): verifier adapters'
+          // own CCIP is main's, unchanged.
+          "      const url = template.replaceAll('{sender}', sender).replaceAll('{data}', data);\n      if (deps.maxRequestBytes != null && !__fits([url, template.includes('{data}') ? '' : JSON.stringify({ sender, data })], deps.maxRequestBytes)) throw new Error('CCIP request too large');\n"]],
+        append: [FITS],
       },
       'ens-resolver.js': {
-        edits: [["        const raw = await provider.call({\n          to: sender,\n          data: callback + abi.encode(['bytes', 'bytes'], [response, extraData]).slice(2),\n",
-          "        if (!__fits([callback + abi.encode(['bytes', 'bytes'], [response, extraData]).slice(2)])) {\n          throw Object.assign(new Error('CCIP gateways unavailable or returned invalid data'), { code: 'CCIP_GATEWAY_FAILED' });\n        }\n        const raw = await provider.call({\n          to: sender,\n          data: callback + abi.encode(['bytes', 'bytes'], [response, extraData]).slice(2),\n"]],
-        append: [FITS(b.messageBytes)],
+        edits: [
+          [', ccipSignal);', ', ccipSignal, __legDeps);'],
+          ["        const raw = await provider.call({\n          to: sender,\n          data: callback + abi.encode(['bytes', 'bytes'], [response, extraData]).slice(2),\n",
+            `        if (!__fits([callback + abi.encode(['bytes', 'bytes'], [response, extraData]).slice(2)], ${b.messageBytes})) {\n          throw Object.assign(new Error('CCIP gateways unavailable or returned invalid data'), { code: 'CCIP_GATEWAY_FAILED' });\n        }\n        const raw = await provider.call({\n          to: sender,\n          data: callback + abi.encode(['bytes', 'bytes'], [response, extraData]).slice(2),\n`],
+        ],
+        append: [FITS, LEG_DEPS, `__legDeps.maxRequestBytes = ${b.messageBytes};`],
       },
     },
   }),
   'reply-size': (b) => ({
-    text: `A result over ${b.replyBytes} bytes, serialized, is never cached, and its callers get "result too large".`,
+    text: `A result over ${b.replyBytes} bytes, serialized (UTF-8, as the core holds it: endpoints as references), is never cached, and its callers get "result too large".`,
     harness: ['reply-size'],
     source: {
       'ens-resolver.js': {
         edits: [['  cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n  capCache(cache);\n',
-          `  if (JSON.stringify(result).length <= ${b.replyBytes}) {\n    cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n    capCache(cache);\n  }\n`]],
-        append: [],
+          `  if (__coreSize(result) <= ${b.replyBytes}) {\n    cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n    capCache(cache);\n  }\n`]],
+        append: [CORE_SIZE],
       },
     },
   }),
   'cache-bytes': (b) => ({
-    text: `Each result cache also holds at most ${b.cacheBytes} bytes (key plus serialized result per entry), evicting as capCache does: expired entries first, then the oldest.`,
+    text: `Each result cache also holds at most ${b.cacheBytes} bytes (UTF-8 key plus the result serialized as the core holds it), evicting as capCache does: expired entries first, then the oldest.`,
     source: {
       'ens-resolver.js': {
         edits: [['  cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n  capCache(cache);\n',
           `  cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n  capCache(cache);\n  __capBytes(cache, ${b.cacheBytes});\n`]],
-        append: [`function __capBytes(cache, limit) {
-  const size = (key, entry) => key.length + JSON.stringify(entry.result).length;
+        append: [CORE_SIZE, `function __capBytes(cache, limit) {
+  const size = (key, entry) => Buffer.byteLength(key, 'utf8') + __coreSize(entry.result);
   let bytes = 0;
   for (const [key, entry] of cache) bytes += size(key, entry);
   const now = Date.now();
@@ -268,29 +298,31 @@ const PATCHES = {
           ['  const key = chainCacheKey(normalized, chainId);\n  const cached = cache.get(key);\n',
             `  if (__admission.callers >= ${b.callers}) throw __busy();\n  const key = chainCacheKey(normalized, chainId);\n  const cached = cache.get(key);\n`],
           ['    log.info(`[ens] ${label} joining in-flight resolution for ${nameForLog(normalized)}`);\n    return existing;\n',
-            `    log.info(\`[ens] \${label} joining in-flight resolution for \${nameForLog(normalized)}\`);\n    if ((__admission.joined.get(dedupKey) ?? 0) >= ${b.callersPerSession}) throw __busy();\n    return __admit(dedupKey, existing);\n`],
-          ['  let promise;\n  promise = resolveAcrossStableLifecycle(', `  if (inFlightResolves.size >= ${b.sessions}) throw __busy();\n  let promise;\n  promise = resolveAcrossStableLifecycle(`],
-          ['  inFlightResolves.set(dedupKey, promise);\n  return promise;\n', '  inFlightResolves.set(dedupKey, promise);\n  return __admit(dedupKey, promise);\n'],
+            `    log.info(\`[ens] \${label} joining in-flight resolution for \${nameForLog(normalized)}\`);\n    if ((__admission.joined.get(existing) ?? 0) >= ${b.callersPerSession}) throw __busy();\n    return __admit(existing);\n`],
+          ['  let promise;\n  promise = resolveAcrossStableLifecycle(', `  if (__admission.sessions.size >= ${b.sessions}) throw __busy();\n  let promise;\n  promise = resolveAcrossStableLifecycle(`],
+          ['  inFlightResolves.set(dedupKey, promise);\n  return promise;\n', '  inFlightResolves.set(dedupKey, promise);\n  __admission.sessions.add(promise);\n  const __end = () => __admission.sessions.delete(promise);\n  promise.then(__end, __end);\n  return __admit(promise);\n'],
         ],
-        append: [`var __admission = { callers: 0, joined: new Map() };
+        // Sessions and their callers by identity: a session the in-flight
+        // table retired (a lifecycle change) still runs, and counts.
+        append: [`var __admission = { callers: 0, sessions: new Set(), joined: new Map() };
 function __busy() {
   return Object.assign(new Error('busy'), { protocol: 'busy' });
 }
-function __admit(key, promise) {
+function __admit(session) {
   __admission.callers += 1;
-  __admission.joined.set(key, (__admission.joined.get(key) ?? 0) + 1);
+  __admission.joined.set(session, (__admission.joined.get(session) ?? 0) + 1);
   const leave = () => {
     __admission.callers -= 1;
-    __admission.joined.set(key, __admission.joined.get(key) - 1);
+    __admission.joined.set(session, __admission.joined.get(session) - 1);
   };
-  promise.then(leave, leave);
-  return promise;
+  session.then(leave, leave);
+  return session;
 }`],
       },
     },
   }),
   'overall-deadline': (b) => ({
-    text: `A session ends ${b.deadlineMs} ms after it starts: its callers get deadline, its outstanding I/O is cancelled, it makes no more, and nothing is cached. The vector has one session per step.`,
+    text: `A session ends ${b.deadlineMs} ms after it starts: its callers get deadline, its outstanding I/O is cancelled, and it makes no more. The reference's abandoned work can't be stopped, only cut off from I/O, so the patch holds only for one step with one call (enforced); that nothing is cached is the core's own test.`,
     harness: ['overall-deadline'],
   }),
   'prefetch-set': (b) => ({
@@ -415,12 +447,17 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
   const bounds = { ...BOUNDS, ...(world.bounds ?? {}) };
   const patches = patchesOf(scenario);
   const harnessPatch = (name) => patches.some((patch) => patch.harness?.includes(name));
+  if (harnessPatch('overall-deadline') && (scenario.steps.length !== 1 || (scenario.steps[0].calls ?? [null]).length !== 1)) {
+    throw new Error(`scenario ${scenario.id}: overall-deadline holds for one step with one call`);
+  }
   const sources = {};
   for (const patch of patches) {
     for (const [file, { edits, append }] of Object.entries(patch.source ?? {})) {
       sources[file] ??= { edits: [], append: [] };
-      sources[file].edits.push(...edits);
-      sources[file].append.push(...append);
+      // Patches may share an edit or a helper (the legs' deps): once each.
+      const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+      for (const edit of edits) if (!sources[file].edits.some((e) => same(e, edit))) sources[file].edits.push(edit);
+      for (const code of append) if (!sources[file].append.includes(code)) sources[file].append.push(code);
     }
   }
   // Every patch applies and compiles before the scenario runs: a module
@@ -927,7 +964,10 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     };
     // Deviation `reply-size`: a result too large to reply with.
     const replyLimit = (value) => {
-      if (harnessPatch('reply-size') && JSON.stringify(value).length > bounds.replyBytes) throw new Error('result too large');
+      if (harnessPatch('reply-size')) {
+        const urls = [...(world.endpoints ?? []), ...(world.colibri?.prover ? [world.colibri.prover] : [])];
+        if (Buffer.byteLength(JSON.stringify(__toCore(value, urls)), 'utf8') > bounds.replyBytes) throw new Error('result too large');
+      }
       return value;
     };
     // Deviation `overall-deadline`: the step's one session ends at its
@@ -952,7 +992,9 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       if (step.world) Object.assign(world, structuredClone(step.world));
       const at = now();
       for (const event of step.events ?? []) setTimeout(() => fire(event), event.at);
-      const results = await settleAll((step.calls ?? [step.call]).map(invoke));
+      // A call's `at` starts it that long into the step, as events do.
+      const start = (call) => (call.at ? new Promise((resolve) => setTimeout(resolve, call.at)).then(() => invoke(call)) : invoke(call));
+      const results = await settleAll((step.calls ?? [step.call]).map(start));
       steps.push(describe({ at, ...step, results }));
     }
     // Let stragglers finish, so a late answer nobody waits for is recorded
@@ -1250,6 +1292,27 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
       ]),
       id: 'deviation-admission-callers',
     },
+    {
+      // A name of 100 é: the result is 684 UTF-16 units but 784 bytes as
+      // the core serializes it, so a 734-byte bound refuses it.
+      ...deviation('reply-size', base({ bounds: { replyBytes: 734 } }), [
+        { call: content('é'.repeat(100) + '.eth') },
+        { after: 1000, call: content('é'.repeat(100) + '.eth') },
+      ]),
+      id: 'deviation-reply-size-unicode',
+    },
+    {
+      // One session at a time. A lifecycle change at 5 ms retires the first
+      // lookup's in-flight entry, but it still runs, so a second name at
+      // 10 ms is busy.
+      ...deviation('admission', base({ bounds: { sessions: 1 } }), [
+        {
+          calls: [content(), { ...content('alice.eth'), at: 10 }],
+          events: [{ at: 5, myotis: { ready: false } }],
+        },
+      ]),
+      id: 'deviation-admission-lifecycle-overlap',
+    },
     // Every endpoint answers after a second; the session ends at 300 ms.
     deviation('overall-deadline', base({
       bounds: { deadlineMs: 300 },
@@ -1475,4 +1538,4 @@ async function buildNamingReplay(checkout, ethers, meta) {
   return { meta, scenarios: out };
 }
 
-module.exports = { buildNamingReplay, runScenario, scenarioDefinitions, loadFakeTimers, PATCHES };
+module.exports = { buildNamingReplay, runScenario, scenarioDefinitions, loadFakeTimers, PATCHES, __toCore };

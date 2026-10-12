@@ -211,6 +211,33 @@ test('replay patches the reference per scenario, and loudly', async () => {
   assert.deepEqual(globalsSnapshot(ethers), before);
 });
 
+test('replay\'s request-size patch leaves verifier adapters\' CCIP alone', async () => {
+  const ethers = referenceEthers();
+  const FakeTimers = replay.loadFakeTimers(REFERENCE);
+  // Myotis' own CCIP with a 3,000-byte callData over an 8 KiB frame: the
+  // adapter's networking is main's, so the patch changes nothing.
+  const coder = ethers.AbiCoder.defaultAbiCoder();
+  const scenario = structuredClone(definition(ethers, 'myotis-ccip'));
+  scenario.world.bounds = { messageBytes: 8192 };
+  const UR = '0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe';
+  scenario.world.myotis.calls.resolve = { revert: '0x556f1830' + coder.encode(
+    ['address', 'string[]', 'bytes', 'bytes4', 'bytes'],
+    [UR, ['https://gw.example/{sender}/{data}.json'], '0x' + 'ab'.repeat(3000), '0xdeadbeef', '0x09']).slice(2) };
+  const plain = await replay.runScenario(REFERENCE, ethers, FakeTimers, scenario);
+  const patched = await replay.runScenario(REFERENCE, ethers, FakeTimers, { ...scenario, deviation: 'request-size', patches: ['request-size'] });
+  assert.ok(plain.io.some((item) => item.kind === 'gateway'), 'the adapter fetched its gateway');
+  assert.deepEqual(patched.steps, plain.steps);
+  assert.deepEqual(patched.io, plain.io);
+});
+
+test('replay\'s overall-deadline patch refuses what it can\'t model', async () => {
+  const ethers = referenceEthers();
+  const FakeTimers = replay.loadFakeTimers(REFERENCE);
+  const scenario = structuredClone(definition(ethers, 'deviation-overall-deadline'));
+  scenario.steps.push({ after: 1000, call: scenario.steps[0].call });
+  await assert.rejects(replay.runScenario(REFERENCE, ethers, FakeTimers, scenario), /one step with one call/);
+});
+
 test('replay\'s response-caps patch leaves verifier adapters\' CCIP alone', async () => {
   const ethers = referenceEthers();
   const FakeTimers = replay.loadFakeTimers(REFERENCE);
