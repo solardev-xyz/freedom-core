@@ -120,6 +120,7 @@ impl CallError {
                 | RpcError::Http(_)
                 | RpcError::NotJson
                 | RpcError::MissingResponse
+                | RpcError::MalformedError
                 | RpcError::BadResult => true,
                 RpcError::CallException {
                     node: Some(node), ..
@@ -148,6 +149,7 @@ impl CallError {
             CallError::Rpc(RpcError::Http(status)) => format!("server response {status}"),
             CallError::Rpc(RpcError::NotJson) => "response body is not valid JSON".into(),
             CallError::Rpc(RpcError::MissingResponse) => "missing response for request".into(),
+            CallError::Rpc(RpcError::MalformedError) => "invalid error response".into(),
             CallError::Rpc(RpcError::BadResult) => "invalid result".into(),
             CallError::Rpc(RpcError::Coalesce(_)) => "could not coalesce error".into(),
             CallError::Rpc(RpcError::CallException { data: None, .. }) => {
@@ -181,14 +183,11 @@ impl Failure {
     /// composed message is built from (design 0004, Errors).
     pub(crate) fn identity(&self) -> String {
         match &self.error {
-            CallError::Rpc(RpcError::CallException { data, .. }) => format!(
-                "CALL_EXCEPTION|{}|{}|{}|{}",
-                self.error.short_message(),
-                data.as_deref().map_or_else(|| "null".into(), rpc::hex),
-                rpc::hex(&self.to),
-                rpc::hex(&self.data)
-            ),
-            CallError::Invalid(identity) => format!("INVALID|{identity}"),
+            CallError::Rpc(RpcError::CallException { data, .. }) => {
+                crate::ethers::call_exception(data.as_deref(), &self.to, &self.data)
+            }
+            // ethers' own message, as the reference's error carries it.
+            CallError::Invalid(message) => message.clone(),
             other => other.short_message(),
         }
     }
@@ -261,14 +260,14 @@ pub(crate) async fn ur_call(
     ctx: &Ctx,
     provider: &mut Provider,
     call: Vec<u8>,
-    kinds: &[Kind],
+    (kinds, method, signature): (&[Kind], &str, &str),
     block: &str,
     used_gateway: &RefCell<bool>,
 ) -> Result<Vec<u8>, Failure> {
     let decoded = |result: &JsValue| -> Result<Vec<u8>, CallError> {
         let raw = rpc::call_result(result).map_err(CallError::Rpc)?;
         ur::decode_result(kinds, &raw)
-            .map_err(|_| CallError::Invalid(format!("result|{}", rpc::hex(&raw))))?;
+            .map_err(|_| CallError::Invalid(crate::ethers::bad_result(&raw, method, signature)))?;
         Ok(raw)
     };
     let fail = |error: CallError, to: [u8; 20], data: &[u8]| Failure {
@@ -292,9 +291,19 @@ pub(crate) async fn ur_call(
         if !source.to_ascii_lowercase().starts_with("0x556f1830") {
             return Err(fail(error, to, &data));
         }
-        let lookup = rpc::hex_string(&source)
-            .and_then(|bytes| ur::decode_offchain_lookup(&bytes))
-            .ok_or_else(|| fail(CallError::Invalid(format!("lookup|{source}")), to, &data))?;
+        // `abi.decode(…, '0x' + data.slice(10))`, with ethers' messages.
+        let lookup = match rpc::hex_string(&source) {
+            Some(bytes) => ur::decode_offchain_lookup_explained(&bytes)
+                .map_err(|message| fail(CallError::Invalid(message), to, &data))?,
+            None => {
+                let value = format!("0x{}", source.get(10..).unwrap_or(""));
+                return Err(fail(
+                    CallError::Invalid(crate::ethers::invalid_bytes_like(&value)),
+                    to,
+                    &data,
+                ));
+            }
+        };
         if lookup.sender != ur::UNIVERSAL_RESOLVER {
             return Err(fail(CallError::SenderMismatch, to, &data));
         }
@@ -326,11 +335,9 @@ pub(crate) async fn ccip_read_fetch(
     for (index, template) in lookup.urls.iter().enumerate() {
         // A URL that won't decode throws out of the loop where the JS
         // iteration reaches it.
-        let template = template.as_ref().map_err(|_| {
-            CallError::Invalid(format!(
-                "deferred error during ABI decoding triggered accessing index {index}"
-            ))
-        })?;
+        let template = template
+            .as_ref()
+            .map_err(|_| CallError::Invalid(crate::ethers::deferred(index)))?;
         let Some(request) =
             crate::ccip::gateway_request(template, &lookup.sender, &lookup.call_data)
         else {
@@ -415,7 +422,11 @@ pub(crate) async fn resolver_call(
                 ctx,
                 provider,
                 ur::encode_resolve(&dns, call_data),
-                &[Kind::Bytes, Kind::Address],
+                (
+                    &[Kind::Bytes, Kind::Address],
+                    "resolve",
+                    "resolve(bytes,bytes)",
+                ),
                 block,
                 used_gateway,
             )
@@ -441,7 +452,7 @@ pub(crate) async fn resolver_call(
                 ctx,
                 provider,
                 ur::encode_reverse(&address, coin_type),
-                &kinds,
+                (&kinds, "reverse", "reverse(bytes,uint256)"),
                 block,
                 used_gateway,
             )
@@ -457,9 +468,10 @@ pub(crate) async fn resolver_call(
                     Some(Ok(Value::String(_))) => {
                         Ok(ur::encode_reverse_outcome(ur::ReverseOutcome::NoRecord, ""))
                     }
+                    // `const [name] = …`: reading a failed field throws.
                     _ => Ok(ur::encode_reverse_outcome(
                         ur::ReverseOutcome::Error,
-                        "INVALID|deferred error during ABI decoding triggered accessing index 0",
+                        &crate::ethers::deferred(0),
                     )),
                 },
                 // `universalResolverReverseCall`'s catch, in its order.

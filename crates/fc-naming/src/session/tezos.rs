@@ -92,12 +92,12 @@ async fn fetch_head(ctx: &Ctx, endpoint: &str) -> Result<i64, Failed> {
     );
     let futures: Vec<super::exec::BoxFuture<'_, Result<JsValue, Failed>>> =
         vec![Box::pin(chain), Box::pin(header)];
-    let mut results = super::exec::all(futures).await.into_iter();
+    // `Promise.all`: the first rejection settles it, and the other request
+    // is abandoned (cancelled here).
+    let mut results = super::exec::try_all(futures).await?.into_iter();
     let (Some(chain), Some(header)) = (results.next(), results.next()) else {
         return Err(Failed);
     };
-    // `Promise.all`: the first rejection in input order wins.
-    let (chain, header) = (chain?, header?);
     if chain.as_str() != Some(MAINNET_CHAIN_ID) {
         return Err(Failed);
     }
@@ -455,9 +455,6 @@ pub(crate) fn parse_rfc3339(text: &str) -> f64 {
     ) else {
         return f64::NAN;
     };
-    if h > 24 || mi > 59 || sec > 59 || (h == 24 && (mi > 0 || sec > 0)) {
-        return f64::NAN;
-    }
     let mut millis = 0i64;
     if let Some(frac) = fraction.strip_prefix('.') {
         if frac.is_empty() || !frac.bytes().all(|b| b.is_ascii_digit()) {
@@ -465,6 +462,11 @@ pub(crate) fn parse_rfc3339(text: &str) -> f64 {
         }
         let first3: String = frac.chars().chain("000".chars()).take(3).collect();
         millis = first3.parse().unwrap_or(0);
+    }
+    // 24:00:00 is the end of the day only exactly (V8 reads
+    // 24:00:00.001 as NaN).
+    if h > 24 || mi > 59 || sec > 59 || (h == 24 && (mi > 0 || sec > 0 || millis > 0)) {
+        return f64::NAN;
     }
     ms += ((h * 3_600 + mi * 60 + sec) * 1_000 + millis) as f64;
     ms - offset_ms
@@ -879,5 +881,7 @@ mod tests {
         assert_eq!(parse_rfc3339("2020-01-01"), 1_577_836_800_000.0);
         assert!(parse_rfc3339("not a date").is_nan());
         assert!(parse_rfc3339("2020-02-30").is_nan());
+        assert_eq!(parse_rfc3339("2020-01-01T24:00:00Z"), 1_577_923_200_000.0);
+        assert!(parse_rfc3339("2020-01-01T24:00:00.001Z").is_nan());
     }
 }

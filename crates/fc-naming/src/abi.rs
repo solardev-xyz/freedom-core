@@ -13,6 +13,8 @@
 
 use std::cell::Cell;
 
+use crate::ethers;
+
 /// The whole decode failed (ethers' `BUFFER_OVERRUN`, or a top-level offset
 /// word above 2^53 - 1, which ethers reads outside its per-field guard).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,22 +64,31 @@ const MAX_INFLATION: usize = 1024;
 const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 
 /// Shared by a decode and all its sub-readers: ethers counts bytes read
-/// against the root data's length.
-struct Budget {
+/// against the root data's length, and its message names the root's data
+/// and offset.
+struct Budget<'a> {
     read: Cell<usize>,
     limit: usize,
+    root: &'a [u8],
+    root_offset: Cell<usize>,
 }
 
 struct Reader<'a> {
     data: &'a [u8],
     offset: usize,
-    budget: &'a Budget,
+    budget: &'a Budget<'a>,
+    /// The decode's own reader, whose offset the inflation message names.
+    root: bool,
 }
 
-/// `Overrun` aborts the decode; `Field` is caught per field by the tuple.
+/// How a read failed, each with ethers' message. `Overrun` (ethers'
+/// `BUFFER_OVERRUN`) aborts the decode; `Field` is caught per field by the
+/// tuple; `Overflow` is an index above 2^53 - 1, a field error inside a
+/// field's guard and the decode's failure outside one.
 enum Fail {
-    Overrun,
+    Overrun(String),
     Field(FieldError),
+    Overflow(String),
 }
 
 impl From<FieldError> for Fail {
@@ -94,25 +105,53 @@ impl<'a> Reader<'a> {
             data: &self.data[start..],
             offset: 0,
             budget: self.budget,
+            root: false,
         }
     }
 
     fn read_bytes(&mut self, length: usize) -> Result<&'a [u8], Fail> {
-        let aligned = length
-            .div_ceil(WORD)
-            .checked_mul(WORD)
-            .ok_or(Fail::Overrun)?;
-        let end = self.offset.checked_add(aligned).ok_or(Fail::Overrun)?;
-        if end > self.data.len() {
-            return Err(Fail::Overrun);
+        // In u128, as JavaScript's doubles hold these sums exactly.
+        let aligned = (length as u128).div_ceil(WORD as u128) * WORD as u128;
+        let end = self.offset as u128 + aligned;
+        if end > self.data.len() as u128 {
+            return Err(Fail::Overrun(ethers::make_error(
+                "data out-of-bounds",
+                "BUFFER_OVERRUN",
+                &[
+                    ("buffer", ethers::hex(self.data)),
+                    ("length", self.data.len().to_string()),
+                    ("offset", end.to_string()),
+                ],
+            )));
         }
         let read = self.budget.read.get().saturating_add(length);
         self.budget.read.set(read);
         if read > self.budget.limit {
-            return Err(Fail::Overrun);
+            return Err(Fail::Overrun(ethers::make_error(
+                &format!(
+                    "compressed ABI data exceeds inflation ratio of {MAX_INFLATION} ( see: https://github.com/ethers-io/ethers.js/issues/4537 )"
+                ),
+                "BUFFER_OVERRUN",
+                &[
+                    ("buffer", ethers::hex(self.budget.root)),
+                    ("offset", self.budget.root_offset.get().to_string()),
+                    ("length", length.to_string()),
+                    (
+                        "info",
+                        format!(
+                            "{{ \"bytesRead\": {read}, \"dataLength\": {} }}",
+                            self.budget.root.len()
+                        ),
+                    ),
+                ],
+            )));
         }
+        let end = self.offset + length.div_ceil(WORD) * WORD;
         let bytes = &self.data[self.offset..self.offset + length];
         self.offset = end;
+        if self.root {
+            self.budget.root_offset.set(end);
+        }
         Ok(bytes)
     }
 
@@ -126,16 +165,26 @@ impl<'a> Reader<'a> {
     /// `readIndex`: a word as a JavaScript safe integer.
     fn read_index(&mut self) -> Result<usize, Fail> {
         let word = self.read_word()?;
+        let overflow = || {
+            Fail::Overflow(ethers::make_error(
+                "overflow",
+                "INVALID_ARGUMENT",
+                &[
+                    ("argument", ethers::string("value")),
+                    ("value", ethers::u256_decimal(&word)),
+                ],
+            ))
+        };
         if word[..24].iter().any(|&b| b != 0) {
-            return Err(FieldError::Overflow.into());
+            return Err(overflow());
         }
         let mut low = [0u8; 8];
         low.copy_from_slice(&word[24..]);
         let value = u64::from_be_bytes(low);
         if value > MAX_SAFE_INTEGER {
-            return Err(FieldError::Overflow.into());
+            return Err(overflow());
         }
-        usize::try_from(value).map_err(|_| Fail::Overrun)
+        usize::try_from(value).map_err(|_| overflow())
     }
 
     fn read_dynamic_bytes(&mut self) -> Result<&'a [u8], Fail> {
@@ -166,8 +215,17 @@ impl<'a> Reader<'a> {
             Kind::StringArray => {
                 let count = self.read_index()?;
                 // ethers: each element needs at least a word.
-                if count.checked_mul(WORD).is_none_or(|n| n > self.data.len()) {
-                    return Err(Fail::Overrun);
+                let needed = count as u128 * WORD as u128;
+                if needed > self.data.len() as u128 {
+                    return Err(Fail::Overrun(ethers::make_error(
+                        "insufficient data length",
+                        "BUFFER_OVERRUN",
+                        &[
+                            ("buffer", ethers::hex(self.data)),
+                            ("offset", needed.to_string()),
+                            ("length", self.data.len().to_string()),
+                        ],
+                    )));
                 }
                 let items = self.unpack(&vec![Kind::String; count])?;
                 Value::StringArray(
@@ -202,7 +260,8 @@ impl<'a> Reader<'a> {
             fields.push(match result {
                 Ok(value) => Ok(value),
                 Err(Fail::Field(e)) => Err(e),
-                Err(Fail::Overrun) => return Err(Fail::Overrun),
+                Err(Fail::Overflow(_)) => Err(FieldError::Overflow),
+                Err(overrun @ Fail::Overrun(_)) => return Err(overrun),
             });
         }
         Ok(fields)
@@ -220,16 +279,28 @@ fn utf8(bytes: &[u8]) -> Result<String, FieldError> {
 
 /// `AbiCoder.defaultAbiCoder().decode(kinds, data)`.
 pub fn decode(kinds: &[Kind], data: &[u8]) -> Result<Vec<Field>, DecodeError> {
+    decode_explained(kinds, data).map_err(|_| DecodeError)
+}
+
+/// [`decode`], with ethers' message when the whole decode fails.
+pub fn decode_explained(kinds: &[Kind], data: &[u8]) -> Result<Vec<Field>, String> {
     let budget = Budget {
         read: Cell::new(0),
         limit: data.len().saturating_mul(MAX_INFLATION),
+        root: data,
+        root_offset: Cell::new(0),
     };
     let mut reader = Reader {
         data,
         offset: 0,
         budget: &budget,
+        root: true,
     };
-    reader.unpack(kinds).map_err(|_| DecodeError)
+    reader.unpack(kinds).map_err(|fail| match fail {
+        Fail::Overrun(message) | Fail::Overflow(message) => message,
+        // Field errors are caught inside the tuple.
+        Fail::Field(_) => String::new(),
+    })
 }
 
 /// Head-and-tail encoding of dynamic `bytes`/`string` and static words, for
@@ -267,6 +338,70 @@ pub fn word_from_address(address: &[u8; 20]) -> [u8; 32] {
     let mut word = [0u8; 32];
     word[12..].copy_from_slice(address);
     word
+}
+
+#[cfg(test)]
+mod explained {
+    use super::*;
+
+    const LOOKUP: [Kind; 5] = [
+        Kind::Address,
+        Kind::StringArray,
+        Kind::Bytes,
+        Kind::Bytes4,
+        Kind::Bytes,
+    ];
+
+    fn word(n: usize) -> Vec<u8> {
+        word_from_usize(n).to_vec()
+    }
+
+    /// Messages the pinned ethers produced for the same inputs.
+    #[test]
+    fn whole_decode_failures_carry_ethers_messages() {
+        assert_eq!(
+            decode_explained(&LOOKUP, &[0; 40]).err().as_deref(),
+            Some(&*format!(
+                "data out-of-bounds (buffer=0x{}, length=40, offset=64, code=BUFFER_OVERRUN, version=6.17.0)",
+                "00".repeat(40)
+            ))
+        );
+        let mut data = vec![0u8; 32];
+        data.extend([0xff; 32]);
+        data.extend([0u8; 96]);
+        assert_eq!(
+            decode_explained(&LOOKUP, &data).err().as_deref(),
+            Some(
+                "overflow (argument=\"value\", value=115792089237316195423570985008687907853269984665640564039457584007913129639935, code=INVALID_ARGUMENT, version=6.17.0)"
+            )
+        );
+        let mut data = word(32);
+        data.extend(word(1000));
+        assert_eq!(
+            decode_explained(&[Kind::StringArray], &data)
+                .err()
+                .as_deref(),
+            Some(
+                "insufficient data length (buffer=0x00000000000000000000000000000000000000000000000000000000000003e8, offset=32000, length=32, code=BUFFER_OVERRUN, version=6.17.0)"
+            )
+        );
+        // One 64 KiB string referenced 2,048 times: the root's data and
+        // offset, the failing read, and the totals.
+        let (n, len) = (2048, 65536);
+        let mut data = word(32);
+        data.extend(word(n));
+        for _ in 0..n {
+            data.extend(word(n * 32));
+        }
+        data.extend(word(len));
+        data.extend(vec![0x78; len]);
+        let message = decode_explained(&[Kind::StringArray], &data)
+            .err()
+            .unwrap_or_default();
+        assert!(message.starts_with("compressed ABI data exceeds inflation ratio of 1024 ( see: https://github.com/ethers-io/ethers.js/issues/4537 ) (buffer=0x0000"));
+        assert!(message.ends_with(", offset=32, length=65536, info={ \"bytesRead\": 134348864, \"dataLength\": 131168 }, code=BUFFER_OVERRUN, version=6.17.0)"));
+        assert_eq!(message.len(), 262_576);
+    }
 }
 
 #[cfg(test)]

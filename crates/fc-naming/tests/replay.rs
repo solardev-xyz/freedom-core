@@ -362,8 +362,14 @@ impl Driver {
                         && e.get("method") == sent.get("method")
                         && e.get("params") == sent.get("params")
                 }
-                Request::Gateway { url, .. } => {
-                    kind == "gateway" && str_of(e.get("url")) == url && num(e.get("t")) == at
+                // The method follows the body: a template without {data}
+                // POSTs { sender, data }.
+                Request::Gateway { url, body } => {
+                    kind == "gateway"
+                        && str_of(e.get("url")) == url
+                        && str_of(e.get("method")) == if body.is_some() { "POST" } else { "GET" }
+                        && e.get("body").and_then(JsValue::as_str) == body.as_deref()
+                        && num(e.get("t")) == at
                 }
                 Request::Prefetch { uri } => {
                     kind == "prefetch" && str_of(e.get("uri")) == uri && num(e.get("t")) == at
@@ -602,15 +608,26 @@ fn replay(scenario: &JsValue) -> Result<Vec<String>, String> {
         })
         .collect();
     driver.mismatches.extend(unused);
-    // Cancellations (design 0004, Replay): one the reference recorded must
-    // happen at the same time in the core, and a prefetch is cancelled only
-    // where the reference cancelled it. Any other exchange the core
-    // cancels is one it stopped waiting for (`abandoned-exchanges`).
+    // Cancellations (design 0004, Replay). A prefetch is cancelled exactly
+    // where the reference cancelled it. Any other exchange the reference
+    // cancelled, the core cancels by then: earlier only where it stopped
+    // waiting first, as when a Promise.all rejection abandons a sibling the
+    // reference left to its own timer (`abandoned-exchanges`). Exchanges the
+    // reference let finish may be cancelled for the same reason.
     for exchange in driver.exchanges.iter().filter(|e| e.used) {
         let e = &exchange.entry;
         let reference = (str_of(e.get("outcome")) == "cancelled").then(|| num(e.get("end")));
         let prefetch = str_of(e.get("kind")) == "prefetch";
-        if (reference.is_some() || prefetch) && reference != exchange.cancelled {
+        let ok = if prefetch {
+            reference == exchange.cancelled
+        } else {
+            match (reference, exchange.cancelled) {
+                (Some(by), Some(at)) => at <= by,
+                (Some(_), None) => false,
+                (None, _) => true,
+            }
+        };
+        if !ok {
             driver.mismatches.push(format!(
                 "{id}: cancelled at {:?} instead of {reference:?}: {}",
                 exchange.cancelled,
