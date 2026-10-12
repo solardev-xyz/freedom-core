@@ -164,7 +164,7 @@ Literal labels such as Myotis' `myotis-p2p` are plain strings and never substitu
 ```
 
 - **Main computes the inputs as today:**
-  - `rpc` is `getEffectiveRpcEndpoints()` (with `ETH_RPC` prepended, deduplicated case-insensitively);
+  - `rpc` is `getEffectiveRpcEndpoints()` (with `ETH_RPC` prepended, deduplicated case-insensitively), its first 64 in that order (deviation `rpc-endpoints`): the core refuses a longer list;
   - `direct` is `getDirectRpcCandidate(1)` (the first registry endpoint, ignoring `ETH_RPC`);
   - `policy` is `resolutionPolicy()` (including the legacy `primary` mapping);
   - `quorum` is the raw `network.quorum` values;
@@ -563,6 +563,7 @@ Each deviation gets a boundary vector in the implementation PR, generated from t
 | `verified-bounds` | no limit on concurrent adapter work | 8 operations per verifier | `{ failure: "unavailable" }`; the order continues |
 | `verified-reply-size` | any size | a verified reply over 1 MiB is `{ failure: "too_large" }` | a method error; the order continues |
 | `memory-budgets` | unbounded | 16 MiB per session, 64 MiB in all, 8 MiB of queued replies | `resolution_failed: budget` or `busy`; not cached |
+| `rpc-endpoints` | every effective endpoint is in the pool | the first 64, in effective order | the rest are never tried; today's builtin pool is far smaller, so only a user adding more sees it |
 | `endpoint-retention` | quarantine and discovery entries live for the process | 64 retired endpoints kept | an endpoint re-added after 64 others were retired has forgotten its quarantine |
 | `socket-failures` | a socket reset is semantic; other socket errors count when their message matches | every socket-level failure is a provider failure | the endpoint is quarantined |
 | `random-streams` | the 429 back-off and the shuffle draw from one `Math.random` | separate streams | later shuffles don't depend on earlier back-offs; vectors seed the back-off apart |
