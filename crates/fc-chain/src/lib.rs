@@ -11,6 +11,9 @@
 //!   [`safe_error_message`], [`request_failure_text`].
 //! - Myotis reads: the gates, the payload classification and the trust
 //!   block: [`myotis_operation`], [`myotis_answer`], [`myotis_trust`].
+//! - The Ant profile's error ranking and range caps:
+//!   [`rank_log_scan_error`], [`log_scan_range_cap`], with
+//!   [`log_query_span`] and the range refusal ([`log_range_refusal_text`]).
 //! - A broadcast's hash: [`transaction_hash`].
 //!
 //! Deviations, each pinned by vectors: `json-depth` (nesting deeper than
@@ -21,9 +24,11 @@
 //! The crate does no I/O.
 
 mod answer;
+mod ant;
 mod bigint;
 mod fee;
 mod js;
+mod logs;
 mod myotis;
 mod normalize;
 mod pattern;
@@ -34,9 +39,18 @@ mod txhash;
 pub use answer::{
     Answer, AnswerError, JSON_DEPTH_FAILURE, JSON_PARSE_FAILURE, NodeError, Outcome, decode_answer,
 };
+pub use ant::{
+    ANT_EXCLUDE_SOURCES, ANT_INCLUDE_SOURCES, ANT_LOG_SCAN_SHRINK_NEEDLES, ErrorRank,
+    LOG_SCAN_QUORUM_TIMEOUT_MS, ReceivedError, ant_shrinks_log_scan_on, log_scan_range_cap,
+    rank_log_scan_error,
+};
 pub use bigint::MAX_DECIMAL_BITS;
 pub use fee::{FeeQuote, fee_quote};
 pub use js::{JsError, JsString, is_js_whitespace};
+pub use logs::{
+    LOG_RANGE_CAP_TTL_MS, LOG_RANGE_REFUSAL_CODE, LOG_SCAN_COOLDOWN_MS, LOG_SCAN_QUORUM_ROUNDS,
+    LOG_TRUNCATION_MIN_SPAN, LOG_TRUNCATION_TAIL_BLOCKS, log_query_span, log_range_refusal_text,
+};
 pub use myotis::{
     MAX_MYOTIS_REFUSAL_MESSAGE, MYOTIS_BLOB_FIELDS, MYOTIS_NOT_READY, MYOTIS_PROOF, MyotisFailure,
     MyotisOperation, MyotisRefusal, MyotisVerdict, myotis_answer, myotis_operation, myotis_trust,

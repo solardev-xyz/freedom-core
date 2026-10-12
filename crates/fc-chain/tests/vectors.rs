@@ -6,10 +6,15 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use fc_chain::{
-    AnswerError, JSON_PARSE_FAILURE, JsString, MAX_DECIMAL_BITS, MAX_MYOTIS_REFUSAL_MESSAGE,
-    MYOTIS_BLOB_FIELDS, MYOTIS_NOT_READY, MyotisFailure, MyotisOperation, Outcome, SourceFailure,
-    StableDigest, TxHash, broadcast_failure_text, decode_answer, fee_quote, fee_quote_failure_text,
-    is_js_whitespace, myotis_answer, myotis_operation, myotis_trust, normalize_params,
+    ANT_EXCLUDE_SOURCES, ANT_INCLUDE_SOURCES, ANT_LOG_SCAN_SHRINK_NEEDLES, AnswerError, ErrorRank,
+    JSON_PARSE_FAILURE, JsString, LOG_RANGE_CAP_TTL_MS, LOG_RANGE_REFUSAL_CODE,
+    LOG_SCAN_COOLDOWN_MS, LOG_SCAN_QUORUM_ROUNDS, LOG_SCAN_QUORUM_TIMEOUT_MS,
+    LOG_TRUNCATION_MIN_SPAN, LOG_TRUNCATION_TAIL_BLOCKS, MAX_DECIMAL_BITS,
+    MAX_MYOTIS_REFUSAL_MESSAGE, MYOTIS_BLOB_FIELDS, MYOTIS_NOT_READY, MyotisFailure,
+    MyotisOperation, Outcome, ReceivedError, SourceFailure, StableDigest, TxHash,
+    ant_shrinks_log_scan_on, broadcast_failure_text, decode_answer, fee_quote,
+    fee_quote_failure_text, is_js_whitespace, log_range_refusal_text, log_scan_range_cap,
+    myotis_answer, myotis_operation, myotis_trust, normalize_params, rank_log_scan_error,
     request_failure_text, safe_error_message, stable_digest, stable_value, transaction_hash,
 };
 use fc_json::index::{Index, IndexError, KeyOrder};
@@ -532,4 +537,87 @@ fn myotis_reads() {
         assert_eq!(label, str_of(&case["js"], "trust_json"), "{case}");
     }
     assert!(trust.len() > 20);
+}
+
+fn received<'a>(case: &'a Json, message: &'a [u16]) -> ReceivedError<'a> {
+    ReceivedError {
+        name: str_of(case, "name"),
+        message,
+        code: opt_str(case, "code_json"),
+        timeout: case["failure_kind"] == "timeout",
+    }
+}
+
+#[test]
+fn ant_profile() {
+    let vectors = vectors();
+    let profile = &vectors["ant_profile"];
+    for (rank, value) in [
+        (ErrorRank::Endpoint, "ENDPOINT"),
+        (ErrorRank::Hint, "HINT"),
+        (ErrorRank::Timeout, "TIMEOUT"),
+        (ErrorRank::Request, "REQUEST"),
+    ] {
+        assert_eq!(profile["rank"][value].as_u64(), Some(rank as u64));
+    }
+    assert_eq!(strings(&profile["needles"]), ANT_LOG_SCAN_SHRINK_NEEDLES);
+    let options = &profile["router_options"];
+    assert_eq!(strings(&options["exclude_sources"]), ANT_EXCLUDE_SOURCES);
+    assert_eq!(strings(&options["include_sources"]), ANT_INCLUDE_SOURCES);
+    assert_eq!(
+        options["quorum_timeout_ms"].as_u64(),
+        Some(LOG_SCAN_QUORUM_TIMEOUT_MS)
+    );
+    let spans: Vec<Option<u64>> = profile["cap_spans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(Json::as_u64)
+        .collect();
+    let errors = profile["errors"].as_array().unwrap();
+    let mut ranks = [0; 4];
+    for case in errors {
+        let message = js_units(str_of(case, "message_json"));
+        let error = received(case, &message);
+        let js = &case["js"];
+        let rank = rank_log_scan_error(&error);
+        assert_eq!(Some(rank as u64), js["rank"].as_u64(), "{case}");
+        ranks[rank as usize] += 1;
+        assert_eq!(
+            ant_shrinks_log_scan_on(&message),
+            js["shrinks"] == true,
+            "{case}"
+        );
+        for (span, cap) in spans.iter().zip(js["caps"].as_array().unwrap()) {
+            assert_eq!(
+                log_scan_range_cap(&error, *span),
+                cap.as_u64(),
+                "{case} {span:?}"
+            );
+        }
+    }
+    assert!(ranks.iter().all(|&n| n > 10), "{ranks:?}");
+    for case in profile["range_refusals"].as_array().unwrap() {
+        let span = case["span"].as_u64().unwrap();
+        let error = &case["js"];
+        assert_eq!(str_of(error, "name"), "Error");
+        assert_eq!(
+            JsString::from(log_range_refusal_text(span).as_str()).to_json(),
+            str_of(error, "message_json")
+        );
+        assert_eq!(
+            opt_str(error, "code_json"),
+            Some(LOG_RANGE_REFUSAL_CODE.to_string().as_str())
+        );
+    }
+    let constants = &profile["log_constants"];
+    for (key, value) in [
+        ("LOG_RANGE_CAP_TTL_MS", LOG_RANGE_CAP_TTL_MS),
+        ("LOG_SCAN_COOLDOWN_MS", LOG_SCAN_COOLDOWN_MS),
+        ("LOG_SCAN_QUORUM_ROUNDS", u64::from(LOG_SCAN_QUORUM_ROUNDS)),
+        ("LOG_TRUNCATION_TAIL_BLOCKS", LOG_TRUNCATION_TAIL_BLOCKS),
+        ("LOG_TRUNCATION_MIN_SPAN", LOG_TRUNCATION_MIN_SPAN),
+    ] {
+        assert_eq!(constants[key].as_u64(), Some(value), "{key}");
+    }
 }

@@ -128,6 +128,102 @@ pub(crate) fn is_safe_integer(x: f64) -> bool {
     x.is_finite() && x.trunc() == x && x.abs() <= 9_007_199_254_740_991.0
 }
 
+/// `Number(text)` (StringToNumber): JavaScript's whitespace trimmed; empty
+/// is 0; `Infinity` with an optional sign; `0x`, `0o` and `0b` integers
+/// without a sign; otherwise a decimal literal, or `NaN`.
+pub(crate) fn string_to_number(text: &str) -> f64 {
+    let text = text.trim_matches(|c: char| u16::try_from(u32::from(c)).is_ok_and(is_js_whitespace));
+    match text {
+        "" => return 0.0,
+        "Infinity" | "+Infinity" => return f64::INFINITY,
+        "-Infinity" => return f64::NEG_INFINITY,
+        _ => {}
+    }
+    let bytes = text.as_bytes();
+    if let [b'0', prefix, digits @ ..] = bytes {
+        let radix = match prefix {
+            b'x' | b'X' => Some(4),
+            b'o' | b'O' => Some(3),
+            b'b' | b'B' => Some(1),
+            _ => None,
+        };
+        if let Some(bits) = radix {
+            return radix_to_number(digits, bits);
+        }
+    }
+    if decimal_literal(bytes) {
+        text.parse().unwrap_or(f64::NAN)
+    } else {
+        f64::NAN
+    }
+}
+
+/// `[+-]? (digits [. digits?] | . digits) ([eE] [+-]? digits)?`, all ASCII.
+fn decimal_literal(bytes: &[u8]) -> bool {
+    let digits = |s: &[u8]| s.iter().take_while(|b| b.is_ascii_digit()).count();
+    let mut rest = match bytes {
+        [b'+' | b'-', rest @ ..] => rest,
+        rest => rest,
+    };
+    let whole = digits(rest);
+    rest = rest.get(whole..).unwrap_or_default();
+    let mut fraction = 0;
+    if let [b'.', after @ ..] = rest {
+        fraction = digits(after);
+        rest = after.get(fraction..).unwrap_or_default();
+    }
+    if whole == 0 && fraction == 0 {
+        return false;
+    }
+    if let [b'e' | b'E', after @ ..] = rest {
+        let after = match after {
+            [b'+' | b'-', after @ ..] => after,
+            after => after,
+        };
+        let exponent = digits(after);
+        return exponent > 0 && exponent == after.len();
+    }
+    rest.is_empty()
+}
+
+/// The digits of a `0x`, `0o` or `0b` literal (`bits` per digit), rounded
+/// to the nearest double, ties to even; `NaN` when empty or invalid.
+fn radix_to_number(digits: &[u8], bits: u32) -> f64 {
+    let radix = 1u32 << bits;
+    let Some(values) = digits
+        .iter()
+        .map(|&b| char::from(b).to_digit(radix))
+        .collect::<Option<Vec<u32>>>()
+    else {
+        return f64::NAN;
+    };
+    if values.is_empty() {
+        return f64::NAN;
+    }
+    // The top 64 significant bits, with any lower 1 bits folded into the
+    // last one, round to 53 bits exactly as the whole value does.
+    let mut top: u64 = 0;
+    let mut width: u32 = 0;
+    let mut shift: i32 = 0;
+    let mut sticky = false;
+    for value in values.into_iter().skip_while(|&v| v == 0) {
+        for bit in (0..bits).rev() {
+            let one = (value >> bit) & 1 == 1;
+            if width < 64 {
+                top = (top << 1) | u64::from(one);
+                width += 1;
+            } else {
+                sticky |= one;
+                shift = shift.saturating_add(1);
+            }
+        }
+    }
+    if sticky {
+        top |= 1;
+    }
+    (top as f64) * 2f64.powi(shift)
+}
+
 /// `String.prototype.trim`.
 pub(crate) fn trim(units: &[u16]) -> &[u16] {
     let start = units

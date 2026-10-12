@@ -63,6 +63,19 @@ impl JsPattern {
         self.regex().is_some_and(|regex| regex.is_match(&text.0))
     }
 
+    /// `pattern.exec(text)`'s groups after the whole match: `None` where a
+    /// group took no part.
+    pub(crate) fn exec<'t>(&self, text: &'t MatchText) -> Option<Vec<Option<&'t str>>> {
+        let captures = self.regex()?.captures(&text.0)?;
+        Some(
+            captures
+                .iter()
+                .skip(1)
+                .map(|group| group.map(|m| m.as_str()))
+                .collect(),
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn compiles(&self) -> bool {
         self.regex().is_some()
@@ -85,6 +98,13 @@ impl MatchText {
                 .collect(),
         )
     }
+}
+
+/// `text.toLowerCase()`, with each lone surrogate as U+FFFD: no lowercase
+/// mapping turns either into ASCII, so ASCII needles are found as in the
+/// JavaScript string.
+pub(crate) fn lowercase(units: &[u16]) -> String {
+    String::from_utf16_lossy(units).to_lowercase()
 }
 
 /// A pattern is safe to run on [`MatchText`] when no `.` and no
@@ -133,6 +153,12 @@ mod tests {
         assert!(space.test(&text("TIME\u{2028}OUT")));
         assert!(!space.test(&text("time\u{85}out")));
         assert!(!space.test(&text("time\u{180E}out")));
+        let digits = JsPattern::new(r"of ([\d,]+)(k?) blocks?\b", "i");
+        assert_eq!(
+            digits.exec(&text("maximum of 10,000K blocks")),
+            Some(vec![Some("10,000"), Some("K")])
+        );
+        assert_eq!(digits.exec(&text("of \u{661}\u{662} blocks")), None);
         let word = JsPattern::new(r"\b429\b", "i");
         assert!(word.test(&text("HTTP 429")));
         assert!(!word.test(&text("x429")));
@@ -146,5 +172,13 @@ mod tests {
         assert!(safe_source(r"a[\w,.]+b\.c"));
         assert!(!safe_source(r"a.b"));
         assert!(!safe_source(r"[^a]"));
+    }
+
+    #[test]
+    fn lowercases() {
+        let lower = |s: &str| lowercase(&s.encode_utf16().collect::<Vec<_>>());
+        assert_eq!(lower("BLOC\u{212A} RANGE"), "block range");
+        assert_eq!(lower("L\u{130}MIT"), "li\u{307}mit");
+        assert_eq!(lowercase(&[0xD800, 0x41]), "\u{FFFD}a");
     }
 }
