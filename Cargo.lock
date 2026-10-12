@@ -329,6 +329,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
+name = "fc-chain"
+version = "0.3.0"
+dependencies = [
+ "fc-json",
+ "hex",
+ "serde_json",
+ "sha2",
+ "sha3",
+ "thiserror",
+]
+
+[[package]]
 name = "fc-evm"
 version = "0.3.0"
 dependencies = [
