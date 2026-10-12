@@ -250,7 +250,7 @@ The rules below restate the reference so a reviewer can check them against the c
 | direct | — | |
 | blockscout | everything but `eth_getLogs` | opt-in: the Ant profile only |
 
-- **Order:** the read order, with opt-in sources inserted before `quorum`, minus the request's exclusions and the sources that don't serve the method. An empty order fails with today's `No chain source left …` text, naming the exclusions.
+- **Order:** the read order, with opt-in sources inserted before `quorum`, minus the request's exclusions and the sources that don't serve the method. An empty order fails with today's `No chain source left …` text, naming the exclusions. With nothing excluded, that text ends in `null`, as today.
 
 ### Normalization
 
@@ -319,7 +319,7 @@ The router keeps parsed values; the core keeps **text**.
 | `not_running`, `not_ready`, `state_changed` (the adapter's own errors) | their fixed texts | no; it can become the last error, as today |
 | an unexpected payload, or `failure: "error"` | a plain error with a fixed text | no; it becomes the last error |
 
-- **Trust:** the block number is recorded only when it was the same before and after.
+- **Trust:** the block is recorded when the values before and after are strictly equal as JavaScript compares them (`===`), whatever their type. So `"5"`/`"5"` and `false`/`false` count, and so do 2^53+1 and 2^53. The vectors pin it.
 
 ### Colibri
 
@@ -352,7 +352,7 @@ The origin is browsing data: it stays in core memory, is never logged and dies w
   - `query exceeds max block range <n>` when no quorum can serve the span.
   - **State** is kept for configured endpoints plus the 64 most recently retired (deviation `state-retention`). Today it is never pruned.
 - **Blockscout pairing,** in the Ant profile, for xBZZ Transfer scans:
-  - the RPC half, then Blockscout's pages back from the newest (50 a page, at most 40 pages, 8 MiB a page);
+  - the RPC half, then Blockscout's pages back from the newest (50 a page, at most 40 pages). The reference caps a page at 8 Mi UTF-16 units, which can be more than 8 MiB of bytes; the core caps it at 8 MiB of bytes (deviation `blockscout-page-bytes`);
   - field-by-field agreement, then a quorum over the newest blocks;
   - today's cooldowns: the named rate limit clamped to 1–15 min, 5 min after a disagreement, 60 s after an abort, 30 min for a malformed pair.
   - **The Ant profile's error ranking and range-cap parsing** (`rankLogScanError`, `logScanRangeCap`) move into the core. They read errors as received, before any reply is built. The bridge keeps its localhost server, its reply rewriting and its receipt grace.
@@ -409,7 +409,12 @@ A node's error proves only that *these* bytes weren't admitted by *that* node *n
   - invalid sender, and invalid chain id;
   - oversized data, and transaction type not supported.
 
-  Vectors pin each client's wording: geth, Nethermind, Erigon, Besu and the large providers. `already known` is never a refusal, because it says the bytes exist. Anything unmatched is ambiguous.
+  The vectors (`broadcast_refusals` in `vectors/chain.json`) are the list:
+  - **Wordings:** each client's (geth, Nethermind, Erigon, reth, Besu and the large providers), with its source cited.
+  - **Codes:** the codes each client documents for each wording.
+  - **Matching:** case-sensitive, on `String(error.message)`.
+
+  `already known` is never a refusal, in any client's wording, because it says the bytes exist. Anything unmatched is ambiguous, geth's minimum-tip refusal (`transaction gas price below minimum`) among them. Under the wallet's rule a classification decides only what is shown ([Retrying an intent](#retrying-an-intent)).
 - **Myotis `rejected`** counts as a refusal; its reasons include a used nonce.
 - **Order doesn't matter.** A refusal after an ambiguous attempt stops the attempt loop, as Myotis's final verdict does today, but it can't erase that attempt: the outcome table looks at every attempt.
 
@@ -541,8 +546,9 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 | `rpc-id` | `id: Date.now()` | a per-request counter | none for nodes; vectors normalize ids |
 | `response-caps` | none | 18 MiB per answer | `too_large`, a source failure |
 | `request-size` | unbounded | one frame (1 MiB) per chain request | `too_large` |
-| `json-depth` | V8's parser, no fixed depth | 512 levels | a source failure |
-| `bigint-width` | `BigInt` of any decimal width, in time quadratic in its length | decimal input and gas prices wider than 4096 bits are refused: such a call-object quantity is left as sent, and such a gas price fails its source; fees computed from an accepted gas price can print one bit wider | no minutes-long conversions on the chain thread; hex, octal and binary stay exact |
+| `json-depth` | V8's parser, no fixed depth | 512 levels, in answers, Myotis payloads and Blockscout pages | a source failure; a deeper Blockscout page is `answer is not JSON` |
+| `bigint-width` | `BigInt` of any decimal width, in time quadratic in its length | decimal input, gas prices and Myotis numbers (balances, nonces, fees, estimates) wider than 4096 bits are refused: such a call-object quantity is left as sent, such a gas price fails its source, and such a Myotis number is a plain error; fees computed from an accepted gas price can print one bit wider | no minutes-long conversions on the chain thread; hex, octal and binary stay exact |
+| `blockscout-page-bytes` | a page capped at 8 Mi UTF-16 units | 8 MiB of bytes | a page with many multi-byte characters may fail as too large |
 | `overall-deadline` | none | 120 s | `deadline` |
 | `admission` | unbounded | 64 running, 256 waiting | `busy` |
 | `quorum-clamps` | `k ≥ 1`, `timeout ≥ 500`, unbounded above | also `k ≤ 9`, `timeout ≤ 60 s`, ≤ 64 endpoints | clamped |
