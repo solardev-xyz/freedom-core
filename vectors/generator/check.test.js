@@ -223,3 +223,20 @@ test('replay transport keeps ethers\' cancel and timeout semantics', async () =>
   assert.equal(hang.settled, 300_000);
   assert.equal(hang.io.outcome, 'open');
 });
+
+test('replay attributes every verifier raw call to its operation', () => {
+  const vectors = JSON.parse(fs.readFileSync(path.join(SOURCE, 'naming-replay.json'), 'utf8'));
+  for (const scenario of vectors.scenarios) {
+    const ops = new Map(scenario.io.filter((e) => e.kind === 'verified-op').map((e) => [e.id, e]));
+    for (const entry of scenario.io) {
+      if (entry.kind !== 'verified' && entry.within === undefined) continue;
+      const op = ops.get(entry.within);
+      assert.ok(op, `${scenario.id}: exchange ${entry.id} has no operation`);
+      assert.ok(entry.t >= op.t && (op.end === null || entry.t <= op.end), `${scenario.id}: exchange ${entry.id} outside operation ${op.id}`);
+      if (entry.kind === 'verified') assert.equal(entry.host, op.host, `${scenario.id}: exchange ${entry.id} attributed to another verifier`);
+    }
+  }
+  const concurrent = vectors.scenarios.find((s) => s.id === 'colibri-concurrent');
+  const owners = concurrent.io.filter((e) => e.kind === 'verified').map((e) => e.within);
+  assert.equal(new Set(owners).size, 2, 'each concurrent operation owns its raw call');
+});

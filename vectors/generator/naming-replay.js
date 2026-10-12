@@ -131,8 +131,8 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
   const declared = (host) => (world.endpoints ?? []).some((url) => hostOf(url) === host);
   // An exchange a verifier operation makes inside main's adapter is that
   // operation's business: it carries the operation's id as `within`.
-  const record = (entry) => {
-    const within = insideOperation.getStore()?.op;
+  const record = (entry, op = insideOperation.getStore()?.op) => {
+    const within = op;
     const item = { id: io.length, step: stepIndex, t: now(), ...entry, ...(within === undefined ? {} : { within }), end: null, outcome: 'open' };
     io.push(item);
     return item;
@@ -296,9 +296,9 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
 
   // Verifiers: { data } is proven return data, { revert } proven revert
   // data, { unavailable: true } a verifier that cannot answer.
-  const verified = (source, state, to, data) => {
+  const verified = (source, state, to, data, op) => {
     const kind = callKind(to, data);
-    const item = record({ kind: 'verified', host: source, method: 'eth_call', params: [{ to, data }, 'latest'], call: kind });
+    const item = record({ kind: 'verified', host: source, method: 'eth_call', params: [{ to, data }, 'latest'], call: kind }, op);
     const answer = pickAnswer([state.calls], kind);
     if (!answer) violations.push(`unscripted ${kind} call to ${source}`);
     return new Promise((resolve) => setTimeout(() => {
@@ -393,6 +393,8 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       ));
     },
   };
+  // Colibri requests queued by operations: { method, params, op }.
+  const colibriSends = [];
   const COLIBRI_HOST = {
     ensureWorker: async () => {},
     createClient: () => ({
@@ -403,7 +405,12 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
           violations.push(`Colibri ${method}`);
           throw new Error(`unscripted Colibri ${method}`);
         }
-        const answer = await verified('colibri', colibri(), params[0].to, params[0].data);
+        // ethers sends this from its provider's drain timer, which has lost
+        // the caller's context: the operation is the one that queued these
+        // exact params (see the BrowserProvider wrapper below).
+        const queued = colibriSends.findIndex((q) => q.method === method && q.params === JSON.stringify(params));
+        const op = queued >= 0 ? colibriSends.splice(queued, 1)[0].op : undefined;
+        const answer = await verified('colibri', colibri(), params[0].to, params[0].data, op);
         if (answer.data) return answer.data;
         if (answer.revert) throw Object.assign(new Error('execution reverted'), { code: 3, data: answer.revert });
         throw new Error('Colibri proof unavailable');
@@ -541,6 +548,15 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     const random = Math.random;
     undo.push(() => { Math.random = random; });
     Math.random = seeded(scenario.seed ?? 7);
+
+    // Colibri's BrowserProvider sends each request from a shared drain
+    // timer; note the operation each request was queued under.
+    const browserSend = ethers.BrowserProvider.prototype.send;
+    undo.push(() => { ethers.BrowserProvider.prototype.send = browserSend; });
+    ethers.BrowserProvider.prototype.send = function send(method, params) {
+      colibriSends.push({ method, params: JSON.stringify(params), op: insideOperation.getStore()?.op });
+      return browserSend.call(this, method, params);
+    };
 
     const previousGetUrl = new ethers.FetchRequest('https://snapshot.invalid').getUrlFunc;
     undo.push(() => ethers.FetchRequest.registerGetUrl(previousGetUrl));
@@ -731,6 +747,18 @@ function verifiedPaths(ethers, base, one, order, GOOD, lookup) {
     one('colibri-verified', base({ network: order(['colibri', 'quorum']), colibri: COLIBRI({ resolve: GOOD }) })),
     one('colibri-resolver-not-found', base({ network: order(['colibri', 'quorum']), colibri: COLIBRI({ resolve: { revert: notFound } }) })),
     one('colibri-unavailable-falls-to-quorum', base({ network: order(['colibri', 'quorum']), colibri: COLIBRI({ resolve: { unavailable: true } }) })),
+    // Colibri with ethers' built-in CCIP-Read, and two operations at once:
+    // every raw call belongs to its own operation.
+    one('colibri-ccip', base({
+      network: order(['colibri']),
+      colibri: COLIBRI({ resolve: { revert: lookup }, callback: GOOD }),
+      gateways: { 'gw.example': { delay: 50, body: JSON.stringify({ data: '0xcafe' }) } },
+    })),
+    {
+      id: 'colibri-concurrent',
+      world: base({ network: order(['colibri']), colibri: COLIBRI({ resolve: GOOD }) }),
+      steps: [{ calls: [content(), content('nick.eth')] }],
+    },
     one('myotis-ccip', base({
       network: order(['myotis', 'quorum']),
       myotis: { enabled: true, ready: true, calls: { resolve: { revert: lookup }, callback: GOOD } },
