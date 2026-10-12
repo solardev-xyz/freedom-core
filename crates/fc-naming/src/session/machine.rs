@@ -101,6 +101,21 @@ enum Attempt {
 /// Starts one attempt of a session's work.
 type Start = Rc<dyn Fn() -> Task<'static, Attempt>>;
 
+/// The generation that scopes a session (design 0004, Generations).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    Ens,
+    Tezos,
+}
+
+/// An effect, with the generations of the attempt that made it: a request
+/// carries them for main's fence; a cancel has the current ones.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Emitted {
+    pub effect: Effect<Request>,
+    pub generations: Generations,
+}
+
 struct Session {
     /// The in-flight key; empty once retired (nothing joins it).
     key: String,
@@ -116,6 +131,22 @@ struct Session {
     restart: Option<Start>,
     /// The name in "changed repeatedly" errors.
     subject: String,
+    scope: Scope,
+    /// Tags the current attempt's requests ([`Machine::take_effects`]).
+    owner: u64,
+}
+
+impl Session {
+    /// Whether its attempt still runs under its scope's current
+    /// generation. One that crossed a change is discarded: its reply
+    /// carries the generations it started under, and it writes no shared
+    /// state (caches, quarantine, the anchor, Tezos discovery).
+    fn current(&self, now: Generations) -> bool {
+        match self.scope {
+            Scope::Ens => self.generations.ens == now.ens,
+            Scope::Tezos => self.generations.tezos == now.tezos,
+        }
+    }
 }
 
 /// One caller's terminal reply.
@@ -141,6 +172,10 @@ pub struct Machine {
     /// Retired RPC and Tezos endpoints, oldest first (`endpoint-retention`).
     retired_rpc: std::collections::VecDeque<String>,
     retired_tezos: std::collections::VecDeque<String>,
+    /// The generations of each attempt that may still have untaken
+    /// requests, by owner.
+    origins: std::collections::BTreeMap<u64, Generations>,
+    next_owner: u64,
 }
 
 /// Deviation `endpoint-retention`: endpoints that left the configuration
@@ -210,7 +245,17 @@ impl Machine {
             tezos_generation: 0,
             retired_rpc: std::collections::VecDeque::new(),
             retired_tezos: std::collections::VecDeque::new(),
+            origins: std::collections::BTreeMap::new(),
+            next_owner: 1,
         }
+    }
+
+    /// A new attempt's owner, under `generations`.
+    fn owner(&mut self, generations: Generations) -> u64 {
+        let owner = self.next_owner;
+        self.next_owner += 1;
+        self.origins.insert(owner, generations);
+        owner
     }
 
     /// The current generations.
@@ -227,8 +272,8 @@ impl Machine {
     }
 
     /// A caller answered at once (a cache hit, an invalid input, busy):
-    /// it used no attempt.
-    fn reply(&mut self, outcome: Outcome) -> u64 {
+    /// it used no attempt, so it keeps the `attempts` it came with.
+    fn reply(&mut self, outcome: Outcome, attempts: u32) -> u64 {
         let caller = self.next_caller;
         self.next_caller += 1;
         let settled = self.now();
@@ -239,7 +284,7 @@ impl Machine {
             outcome,
             settled,
             generations,
-            attempts: 0,
+            attempts,
         });
         caller
     }
@@ -252,7 +297,7 @@ impl Machine {
         let ms = options.deadline_ms.unwrap_or(self.ctx.bounds().deadline_ms);
         Caller {
             id,
-            attempts: options.attempts_used + 1,
+            attempts: options.attempts_used.saturating_add(1),
             deadline: started(self.ctx.rt.sleep(ms)),
         }
     }
@@ -265,11 +310,13 @@ impl Machine {
         start: Start,
         restarts: bool,
         subject: String,
+        scope: Scope,
     ) -> u64 {
         let id = caller.id;
         let task = start();
         let deadline = started(self.ctx.rt.sleep(self.ctx.bounds().deadline_ms));
         let generations = self.generations();
+        let owner = self.owner(generations);
         self.sessions.push(Session {
             key,
             callers: vec![caller],
@@ -279,6 +326,8 @@ impl Machine {
             deadline,
             restart: restarts.then_some(start),
             subject,
+            scope,
+            owner,
         });
         id
     }
@@ -304,14 +353,22 @@ impl Machine {
         resolve: Resolve,
         options: CallOptions,
     ) -> u64 {
-        if let Some(busy) = self.admit_caller() {
+        let used = options.attempts_used;
+        // A caller whose allowance is spent fails as it would at a restart
+        // (design 0004, Generations: one budget).
+        if used >= MAX_LIFECYCLE_ATTEMPTS {
+            let message =
+                format!("Myotis availability changed repeatedly while resolving {subject}");
+            return self.reply(Err(Thrown::new(message)), used);
+        }
+        if let Some(busy) = self.admit_caller(used) {
             return busy;
         }
         if let Some(result) = self.cached(store, &key) {
-            return self.reply(Ok(result));
+            return self.reply(Ok(result), used);
         }
         let dedup = format!("{label}:{key}");
-        if let Some(busy) = self.admit(&dedup) {
+        if let Some(busy) = self.admit(&dedup, used) {
             return busy;
         }
         let caller = self.caller(options);
@@ -354,35 +411,36 @@ impl Machine {
                 Attempt::Crossed
             })
         });
-        self.start(dedup, caller, start, true, subject)
+        self.start(dedup, caller, start, true, subject, Scope::Ens)
     }
 
     /// Admission (design 0004): `Some(busy reply)` when joining or starting
     /// the session `dedup` would cross a limit.
-    fn admit(&mut self, dedup: &str) -> Option<u64> {
+    fn admit(&mut self, dedup: &str, attempts: u32) -> Option<u64> {
         let bounds = self.ctx.bounds();
         let full = match self.sessions.iter().find(|s| s.key == dedup) {
             Some(session) => session.callers.len() >= bounds.callers_per_session,
             // Starting one needs room for its first caller too.
             None => self.sessions.len() >= bounds.sessions || bounds.callers_per_session == 0,
         };
-        full.then(|| self.reply(Err(Thrown::protocol("busy"))))
+        full.then(|| self.reply(Err(Thrown::protocol("busy")), attempts))
     }
 
     /// Admission's caller limit, checked first: every caller counts, one
     /// answered from the cache included (design 0004, Admission).
-    fn admit_caller(&mut self) -> Option<u64> {
+    fn admit_caller(&mut self, attempts: u32) -> Option<u64> {
         let waiting: usize = self.sessions.iter().map(|s| s.callers.len()).sum();
-        (waiting >= self.ctx.bounds().callers).then(|| self.reply(Err(Thrown::protocol("busy"))))
+        (waiting >= self.ctx.bounds().callers)
+            .then(|| self.reply(Err(Thrown::protocol("busy")), attempts))
     }
 
     /// `trim()` and `fastNormalize`, or the caller's immediate error.
-    fn normalized(&mut self, name: &str) -> Result<String, u64> {
+    fn normalized(&mut self, name: &str, attempts: u32) -> Result<String, u64> {
         let trimmed = crate::js_trim(name);
         if trimmed.is_empty() {
-            return Err(self.reply(Err(Thrown::new("ENS name is empty"))));
+            return Err(self.reply(Err(Thrown::new("ENS name is empty")), attempts));
         }
-        ens::fast_normalize(trimmed).map_err(|error| self.reply(Err(error)))
+        ens::fast_normalize(trimmed).map_err(|error| self.reply(Err(error), attempts))
     }
 
     /// `resolveEnsContent(name)`: a caller id; its reply comes from
@@ -393,7 +451,7 @@ impl Machine {
 
     /// [`Machine::resolve_content`] for a caller with its own options.
     pub fn resolve_content_with(&mut self, name: &str, options: CallOptions) -> u64 {
-        let normalized = match self.normalized(name) {
+        let normalized = match self.normalized(name, options.attempts_used) {
             Ok(normalized) => normalized,
             Err(caller) => return caller,
         };
@@ -419,11 +477,11 @@ impl Machine {
     /// [`Machine::resolve_address`] for a caller with its own options.
     pub fn resolve_address_with(&mut self, name: &str, chain_id: f64, options: CallOptions) -> u64 {
         if let Err(error) = ens::coin_type(chain_id) {
-            return self.reply(Err(error));
+            return self.reply(Err(error), options.attempts_used);
         }
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let chain = chain_id as u64;
-        let normalized = match self.normalized(name) {
+        let normalized = match self.normalized(name, options.attempts_used) {
             Ok(normalized) => normalized,
             Err(caller) => return caller,
         };
@@ -467,14 +525,14 @@ impl Machine {
                     JsValue::String(format!("Invalid address: {address}")),
                 ),
             ]);
-            return self.reply(Ok(result));
+            return self.reply(Ok(result), options.attempts_used);
         }
         if let Err(error) = ens::coin_type(chain_id) {
-            return self.reply(Err(error));
+            return self.reply(Err(error), options.attempts_used);
         }
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let chain = chain_id as u64;
-        let normalized = match self.normalized(address) {
+        let normalized = match self.normalized(address, options.attempts_used) {
             Ok(normalized) => normalized,
             Err(caller) => return caller,
         };
@@ -499,12 +557,19 @@ impl Machine {
         self.shared.poll();
         let now = self.now();
         let bounds = self.ctx.bounds();
+        let current = self.generations();
         let mut i = 0;
         while i < self.sessions.len() {
             let generations = self.sessions[i].generations;
             // The attempt first: a result that arrives with a deadline wins,
-            // as the race it replaces let it.
-            if self.sessions[i].task.poll() {
+            // as the race it replaces let it. Its requests carry its owner,
+            // and a discarded attempt writes nothing shared.
+            self.ctx.rt.set_owner(self.sessions[i].owner);
+            self.ctx.writes.set(self.sessions[i].current(current));
+            let finished = self.sessions[i].task.poll();
+            self.ctx.rt.set_owner(0);
+            self.ctx.writes.set(true);
+            if finished {
                 match self.sessions[i].task.take() {
                     Some(Attempt::Done(outcome)) => {
                         let outcome = sized(outcome, &bounds);
@@ -600,11 +665,13 @@ impl Machine {
             return false;
         };
         session.task = start();
-        session.attempts += 1;
+        session.attempts = session.attempts.saturating_add(1);
         for caller in &mut session.callers {
-            caller.attempts += 1;
+            caller.attempts = caller.attempts.saturating_add(1);
         }
         session.generations = current;
+        let owner = self.owner(current);
+        self.sessions[i].owner = owner;
         true
     }
 
@@ -671,6 +738,15 @@ impl Machine {
         if tezos_changed {
             self.tezos_generation += 1;
         }
+        // Sessions of a scope that changed are discarded, so a lookup now
+        // starts afresh rather than joining one.
+        for session in &mut self.sessions {
+            match session.scope {
+                Scope::Ens if ens_changed => session.key.clear(),
+                Scope::Tezos if tezos_changed => session.key.clear(),
+                _ => {}
+            }
+        }
         if reset_providers {
             self.invalidate_providers();
         }
@@ -693,8 +769,32 @@ impl Machine {
         std::mem::take(&mut self.replies)
     }
 
-    pub fn take_effects(&self) -> Vec<Effect<Request>> {
-        self.ctx.rt.take_effects()
+    /// The effects since the last call, each with its attempt's
+    /// generations.
+    pub fn take_effects(&mut self) -> Vec<Emitted> {
+        let current = self.generations();
+        let emitted = self
+            .ctx
+            .rt
+            .take_effects()
+            .into_iter()
+            .map(|effect| {
+                let generations = match &effect {
+                    Effect::Request { owner, .. } => {
+                        self.origins.get(owner).copied().unwrap_or(current)
+                    }
+                    Effect::Cancel { .. } => current,
+                };
+                Emitted {
+                    effect,
+                    generations,
+                }
+            })
+            .collect();
+        // Only running attempts can make more requests.
+        let live: Vec<u64> = self.sessions.iter().map(|s| s.owner).collect();
+        self.origins.retain(|owner, _| live.contains(owner));
+        emitted
     }
 
     pub fn complete(&self, id: u64, answer: Answer) -> bool {
@@ -726,9 +826,9 @@ impl Machine {
     /// [`Machine::resolve_tezos`] for a caller with its own options.
     pub fn resolve_tezos_with(&mut self, name: &str, options: CallOptions) -> u64 {
         let Some(normalized) = super::tezos::normalize(name) else {
-            return self.reply(Ok(super::tezos::invalid()));
+            return self.reply(Ok(super::tezos::invalid()), options.attempts_used);
         };
-        if let Some(busy) = self.admit_caller() {
+        if let Some(busy) = self.admit_caller(options.attempts_used) {
             return busy;
         }
         let now = self.now();
@@ -740,13 +840,13 @@ impl Machine {
             .get(&normalized, now)
             .cloned();
         if let Some(result) = cached {
-            return self.reply(Ok(result));
+            return self.reply(Ok(result), options.attempts_used);
         }
         // The reference deletes a stale entry here, so a fresh one is
         // appended, not updated in place.
         self.ctx.tezos.results.borrow_mut().delete(&normalized);
         let dedup = format!("tezos:{normalized}");
-        if let Some(busy) = self.admit(&dedup) {
+        if let Some(busy) = self.admit(&dedup, options.attempts_used) {
             return busy;
         }
         let caller = self.caller(options);
@@ -763,7 +863,7 @@ impl Machine {
                 async move { Attempt::Done(super::tezos::resolve(&ctx, &ctx.tezos, &name).await) },
             )
         });
-        self.start(dedup, caller, start, false, subject)
+        self.start(dedup, caller, start, false, subject, Scope::Tezos)
     }
 
     /// `invalidateTezosDomain(name?)`: one result, or every result and
@@ -801,10 +901,17 @@ impl Machine {
         }
         // Tezos has its own in-flight table, which ENS events leave alone.
         for session in &mut self.sessions {
-            if !session.key.starts_with("tezos:") {
+            if session.scope == Scope::Ens {
                 session.key.clear();
             }
         }
+    }
+
+    /// Whether Myotis is enabled (`naming.availability`'s `enabled`), which
+    /// `tryMyotisPath` reads; it is live state, not a configuration change,
+    /// so no generation advances.
+    pub fn set_myotis_enabled(&mut self, enabled: bool) {
+        self.ctx.state.borrow_mut().config.myotis_enabled = enabled;
     }
 
     /// Myotis' readiness when the machine starts.
@@ -827,7 +934,7 @@ impl Machine {
         }
         // Tezos has its own in-flight table, which ENS events leave alone.
         for session in &mut self.sessions {
-            if !session.key.starts_with("tezos:") {
+            if session.scope == Scope::Ens {
                 session.key.clear();
             }
         }

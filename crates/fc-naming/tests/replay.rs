@@ -8,7 +8,7 @@ use fc_naming::jsjson::{self, JsValue};
 use fc_naming::session::bounds::Bounds;
 use fc_naming::session::ens::{Answer, Config, Direct, Request, Verified, VerifiedOp};
 use fc_naming::session::exec::{Effect, Fired};
-use fc_naming::session::machine::{Machine, Reply};
+use fc_naming::session::machine::{Emitted, Machine, Reply};
 use fc_naming::session::random::Mulberry32;
 use fc_naming::session::rpc::Transport;
 
@@ -323,7 +323,7 @@ impl Driver {
             if let Some((_, collected)) = waiting.as_mut() {
                 collected.extend(replies);
             }
-            for effect in machine.take_effects() {
+            for Emitted { effect, .. } in machine.take_effects() {
                 if let Effect::Cancel { id, at } = effect {
                     if let Some(exchange) =
                         self.exchanges.iter_mut().find(|e| e.request == Some(id))
@@ -333,7 +333,10 @@ impl Driver {
                     }
                     continue;
                 }
-                if let Effect::Request { id, at, request } = effect {
+                if let Effect::Request {
+                    id, at, request, ..
+                } = effect
+                {
                     let Some(index) = self.match_exchange(&request, at) else {
                         self.mismatches
                             .push(format!("unmatched request at {at}: {request:?}"));
@@ -396,10 +399,13 @@ impl Driver {
                 _ => return current,
             };
             let end = num(e.get("end"));
+            // Only this FetchRequest's own exchanges: chains can meet at one
+            // host (vectors record each chain's identity).
             let next = self.exchanges.iter().position(|x| {
                 let n = &x.entry;
                 !x.used
                     && str_of(n.get("kind")) == "rpc"
+                    && n.get("chain") == e.get("chain")
                     && str_of(n.get("host")) == host
                     && n.get("method") == e.get("method")
                     && n.get("params") == e.get("params")

@@ -176,12 +176,14 @@ pub(crate) async fn pinned_block(ctx: &Ctx) -> Result<Option<(i64, String)>, Thr
             ctx.mark_success(endpoint);
         }
         let hash = winner.0;
-        ctx.state.borrow_mut().anchor = Some(Anchor {
-            tag,
-            number: target,
-            hash: hash.clone(),
-            expires: ctx.now_f() + ttl,
-        });
+        if ctx.writes.get() {
+            ctx.state.borrow_mut().anchor = Some(Anchor {
+                tag,
+                number: target,
+                hash: hash.clone(),
+                expires: ctx.now_f() + ttl,
+            });
+        }
         return Ok(Some((target, hash)));
     }
     Err(Thrown::new(format!(

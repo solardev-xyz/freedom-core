@@ -238,14 +238,15 @@ async fn resolve_at_block(
     if let Some(discovery) = cached {
         match lookup(ctx, endpoint, block, name, &discovery).await {
             Ok(result) => return Ok(result),
-            Err(Failed) => state
+            Err(Failed) if ctx.writes.get() => state
                 .discovery
                 .borrow_mut()
                 .retain(|(e, _, _)| e != endpoint),
+            Err(Failed) => {}
         }
     }
     let discovery = discover(ctx, endpoint, block).await?;
-    {
+    if ctx.writes.get() {
         let mut cache = state.discovery.borrow_mut();
         cache.retain(|(e, _, _)| e != endpoint);
         cache.push((
@@ -852,7 +853,7 @@ pub(crate) async fn resolve(ctx: &Ctx, state: &TezosState, name: &str) -> Result
     // Cache lifetimes run on the monotonic clock; the expiry clamp reads
     // the wall clock (design 0004, monotonic-time).
     // Deviation `reply-size`: never cache what can't be replied.
-    if !ctx.bounds().reply_fits(result.stringify().len()) {
+    if !ctx.bounds().reply_fits(result.stringify().len()) || !ctx.writes.get() {
         return Ok(result);
     }
     let duration = cache_duration(&result, ctx.wall_now());
