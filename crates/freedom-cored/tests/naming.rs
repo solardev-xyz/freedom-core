@@ -422,3 +422,103 @@ fn configure_reports_every_generation() {
         json!({ "ens": 1, "tezos": 1, "lifecycle": 1 })
     );
 }
+
+/// Design 0003, decision 4: the core owns the result cache, so every
+/// cached subresource lookup is a round trip to it. This measures a page's
+/// worth of cache hits, alone and while the vault runs its password KDF.
+/// Run it on a release build:
+///   cargo test --release -p freedom-cored --test naming -- --ignored --nocapture fanout
+#[test]
+#[ignore = "a measurement, not a check"]
+// It reports what it measured.
+#[allow(clippy::print_stdout)]
+fn cached_fanout_under_vault_work() {
+    use std::time::{Duration, Instant};
+
+    const BURST: u64 = 50;
+    const ROUNDS: u64 = 20;
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    core.call(2, "naming.configure", snapshot());
+    let password = base64::engine::general_purpose::STANDARD.encode("fanout-password");
+    let created = core.call(
+        3,
+        "vault.create",
+        json!({ "password_b64": password, "words": 12 }),
+    );
+    assert!(created["result"].is_object(), "{created}");
+    // One lookup through main fills the cache.
+    core.send(&request(
+        4,
+        "naming.resolve_content",
+        json!({ "name": "vitalik.eth", "private": false }),
+    ));
+    let (reply, _) = serve_until(&mut core, 4, &recorded());
+    assert_eq!(reply["result"]["result"]["type"], "ok", "{reply}");
+
+    let mut next = 100;
+    // A burst of cache hits, with `kdfs` password checks sent just before:
+    // each hit's time from send to reply.
+    let mut burst = |core: &mut common::Core, kdfs: u64| -> (Vec<Duration>, Duration) {
+        let mut sent = BTreeMap::new();
+        let mut checks = Vec::new();
+        for _ in 0..kdfs {
+            next += 1;
+            core.send(&request(
+                next,
+                "vault.verify_password",
+                json!({ "password_b64": password }),
+            ));
+            checks.push((next, Instant::now()));
+        }
+        for _ in 0..BURST {
+            next += 1;
+            core.send(&request(
+                next,
+                "naming.resolve_content",
+                json!({ "name": "vitalik.eth", "private": false }),
+            ));
+            sent.insert(next, Instant::now());
+        }
+        let mut hits = Vec::new();
+        let mut kdf = Duration::ZERO;
+        while !sent.is_empty() || !checks.is_empty() {
+            let message = core.recv();
+            if message["type"] != "response" {
+                continue;
+            }
+            let id = message["id"].as_u64().unwrap();
+            if let Some(at) = sent.remove(&id) {
+                assert_eq!(message["result"]["attempts"], 0, "a cache hit: {message}");
+                hits.push(at.elapsed());
+            } else if let Some(i) = checks.iter().position(|(c, _)| *c == id) {
+                assert_eq!(message["result"], json!({}), "{message}");
+                kdf = kdf.max(checks.remove(i).1.elapsed());
+            }
+        }
+        (hits, kdf)
+    };
+    let quantile = |all: &mut Vec<Duration>, q: f64| {
+        all.sort();
+        let at = ((all.len() as f64 - 1.0) * q).round() as usize;
+        all[at]
+    };
+    for kdfs in [0, 1, 4, 16] {
+        let mut all = Vec::new();
+        let mut slowest_kdf = Duration::ZERO;
+        for _ in 0..ROUNDS {
+            let (hits, kdf) = burst(&mut core, kdfs);
+            all.extend(hits);
+            slowest_kdf = slowest_kdf.max(kdf);
+        }
+        println!(
+            "{BURST} cache hits x {ROUNDS} with {kdfs:>2} KDFs in flight: \
+             p50 {:?}, p99 {:?}, max {:?}; slowest KDF {:?}",
+            quantile(&mut all, 0.5),
+            quantile(&mut all, 0.99),
+            quantile(&mut all, 1.0),
+            slowest_kdf,
+        );
+    }
+}
