@@ -508,9 +508,9 @@ Measured valid answers sit well below the 720 KiB cap:
 **Memory.** What a session can come to hold is bounded by what it is charged for, conservatively, from the moment each part arrives or is made until the session ends. A session is charged for:
 - **its name and key:** 8 copies of its in-flight key, reserved at admission; a session that can't reserve them doesn't start;
 - **its requests:** their payload strings, as each is made; one whose charge crosses is never made;
-- **its answers:** each body at 32 bytes per byte, the most its parsed JSON can take (each value takes at least two bytes of input, and at most two 32-byte slots); a verifier's result likewise, by its serialized size;
+- **its answers:** each body at 32 bytes per byte, more than its parsed JSON can take. The parser shrinks each container and string to its length as it closes, so a value holds its 32-byte slot and its own allocation: at worst a nested array, 2 bytes of input a level, holds about 24 bytes a byte as allocated. A verifier's result is charged likewise, by its serialized size;
 - **its aliasing decodes' output** (an `OffchainLookup`'s URLs and data);
-- **its replies:** the serialized result or error message, once per caller.
+- **its replies:** the serialized result or error message, once per caller, including the replies a configuration change or a spent lifecycle allowance makes. A reply past the budget is `budget` instead. A session that spends its budget, on a reply or anything else, cancels the prefetches it handed off.
 
 Everything a session retains derives from those: copies of its name, values parsed from its answers, and decodes that can't alias, which never outgrow their input:
 
@@ -526,7 +526,7 @@ Everything a session retains derives from those: copies of its name, values pars
 | endpoint state (quarantine, discovery) for endpoints no longer configured | the 64 most recently retired | the oldest retired entries are dropped (deviation `endpoint-retention`); a re-added endpoint within that bound keeps its state |
 | surviving prefetches | 32 | the oldest is cancelled |
 
-**Lifetimes:** a session's charge is released when it ends, however it ends. Its replies then wait in naming's share of the writer (8 MiB) and the naming thread's own queue; past 16 MiB waiting in all, new lookups get `busy` (small replies, which main's 256 outstanding requests bound).
+**Lifetimes:** a session's charge is released when it ends, however it ends, but its replies stay counted in the total until they are written. The machine counts every reply it makes until the naming thread takes it. The naming thread then reports what waits in its share of the writer (8 MiB) and its own queue before every poll and every admission. Sessions so can't fill the room unwritten replies hold: with the total full, new sessions are `busy` and running ones end with `budget`, both small replies. Separately, past 16 MiB waiting, new lookups get `busy` at once.
 
 The 4 MiB decode budget caps aliasing: an `OffchainLookup` whose URL array repeats one 64 KiB string 2,047 times decodes to about 128 MiB today. The core refuses it. Only an array can alias. Every other decode (an ABI result with one dynamic field, JSON, Micheline, base64, hex) reads its input once, so its output never exceeds its input, which the answer cap bounds.
 

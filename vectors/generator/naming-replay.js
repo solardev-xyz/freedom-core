@@ -1196,8 +1196,20 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       if (!harnessPatch('memory-budgets')) return promise;
       if (call.fn !== 'resolveEnsContent') violations.push('memory-budgets: the patch models content lookups');
       // The session's name, kept as the core keeps it: 8 copies of its
-      // in-flight key.
-      charged += Buffer.byteLength(`content:${String(call.args?.[0] ?? '').trim().toLowerCase()}`) * 8;
+      // in-flight key, normalized as fastNormalize does (ENSIP-15 beyond
+      // plain ASCII, with the reference's own normalizer).
+      const trimmed = String(call.args?.[0] ?? '').trim();
+      const lowered = trimmed.toLowerCase();
+      let key = lowered;
+      if (!/^[a-z0-9-.]+$/.test(lowered)) {
+        try {
+          key = Module.createRequire(path.join(checkout, 'package.json'))('@adraffy/ens-normalize').ens_normalize(trimmed);
+        } catch {
+          // Refused by the normalizer: the core never starts the session,
+          // which the patch reports as a call ended otherwise.
+        }
+      }
+      charged += Buffer.byteLength(`content:${key}`) * 8;
       return new Promise((resolve, reject) => {
         let ended = false;
         endSession = (error) => {

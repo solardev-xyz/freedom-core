@@ -226,9 +226,13 @@ pub fn parse(text: &str) -> Result<JsValue, JsonError> {
                             break;
                         }
                         Some(b']') => {
-                            let Some(Frame::Array(items)) = stack.pop() else {
+                            let Some(Frame::Array(mut items)) = stack.pop() else {
                                 return Err(JsonError::Syntax(p.i));
                             };
+                            // Closed, it keeps only its length: a growing
+                            // vector's spare room never outlives the parse
+                            // (`memory-budgets`).
+                            items.shrink_to_fit();
                             value = JsValue::Array(items);
                         }
                         _ => return Err(JsonError::Syntax(p.i)),
@@ -248,7 +252,9 @@ pub fn parse(text: &str) -> Result<JsValue, JsonError> {
                             let Some(Frame::Object(props, _, _)) = stack.pop() else {
                                 return Err(JsonError::Syntax(p.i));
                             };
-                            value = JsValue::Object(order_properties(props));
+                            let mut props = order_properties(props);
+                            props.shrink_to_fit();
+                            value = JsValue::Object(props);
                         }
                         _ => return Err(JsonError::Syntax(p.i)),
                     }
@@ -417,7 +423,11 @@ impl Parser<'_> {
                 .map_err(|_| JsonError::Syntax(start))?;
             units.extend(run.encode_utf16());
             match self.next() {
-                Some(b'"') => return Ok(String::from_utf16_lossy(&units)),
+                Some(b'"') => {
+                    let mut text = String::from_utf16_lossy(&units);
+                    text.shrink_to_fit();
+                    return Ok(text);
+                }
                 Some(b'\\') => {
                     let unit = match self.next() {
                         Some(b'"') => 0x22,

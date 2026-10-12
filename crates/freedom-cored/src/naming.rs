@@ -290,14 +290,22 @@ struct Naming {
 }
 
 impl Naming {
+    /// Polls the machine, with what waits to be written counted in its
+    /// sessions' total (`memory-budgets`).
+    fn poll(&mut self) {
+        let backlog = self.backlog();
+        self.machine.set_output_backlog(backlog);
+        self.machine.poll();
+    }
+
     /// Fires the timers due by `now`, polling after each as the executor
     /// requires, then moves the clock to `now`.
     fn advance(&mut self, now: u64) -> Flow {
         while self.machine.fire_next(now).is_some() {
-            self.machine.poll();
+            self.poll();
             self.flush()?;
         }
-        self.machine.poll();
+        self.poll();
         self.flush()
     }
 
@@ -309,7 +317,7 @@ impl Naming {
             In::Cancel { id } => {
                 if let Some(caller) = self.callers.get(&id) {
                     self.machine.cancel(*caller);
-                    self.machine.poll();
+                    self.poll();
                 }
                 Ok(())
             }
@@ -335,7 +343,9 @@ impl Naming {
         }
         // A lookup's reply can't be written while the backlog is this deep:
         // busy, which is small, in its place.
-        if method.starts_with("naming.resolve_") && self.backlog() > self.max_backlog {
+        let backlog = self.backlog();
+        self.machine.set_output_backlog(backlog);
+        if method.starts_with("naming.resolve_") && backlog > self.max_backlog {
             return self.error(
                 id,
                 ErrorBody::new(ErrorCode::Busy, code_message(ErrorCode::Busy)),
@@ -475,7 +485,7 @@ impl Naming {
             if !settled {
                 return Ok(());
             }
-            self.machine.poll();
+            self.poll();
         }
     }
 
@@ -1286,6 +1296,39 @@ mod tests {
         let frames = written(&rx);
         assert!(frames.iter().all(|f| f["type"] == "response"), "{frames:?}");
         assert!(naming.outgoing.is_empty());
+    }
+
+    #[test]
+    fn unwritten_replies_count_in_the_sessions_total() {
+        let bounds = Bounds {
+            total_bytes: 2_000,
+            resume_bytes: 1_000,
+            ..Bounds::default()
+        };
+        // Room for one frame at a time; the admission guard out of the way.
+        let (mut naming, _rx) = naming_with(256, 1, bounds);
+        naming.max_backlog = usize::MAX;
+        let filler = format!(
+            r#"{{"type":"event","event":"x.y","data":{{"pad":"{}"}}}}"#,
+            "x".repeat(2000)
+        );
+        assert!(naming.send(filler.as_bytes()).is_ok());
+        assert!(naming.send(filler.as_bytes()).is_ok());
+        assert!(
+            naming
+                .request(
+                    7,
+                    "naming.resolve_content",
+                    Some(r#"{"name":"vitalik.eth"}"#)
+                )
+                .is_ok()
+        );
+        // The machine counted the backlog: no room for a session.
+        assert_eq!(naming.machine.running(), 0);
+        assert!(naming.flush().is_ok());
+        let busy: serde_json::Value =
+            serde_json::from_slice(&naming.outbox.back().unwrap()[5..]).unwrap();
+        assert_eq!(busy["error"]["code"], "busy");
     }
 
     #[test]

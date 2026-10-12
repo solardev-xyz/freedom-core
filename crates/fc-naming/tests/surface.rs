@@ -84,6 +84,8 @@ enum Pending {
 
 /// A request the machine made, as main saw it.
 struct Sent {
+    id: u64,
+    prefetch: bool,
     generations: Generations,
     endpoint: Option<String>,
     verified: bool,
@@ -105,6 +107,11 @@ struct World {
     sent: Vec<Sent>,
     /// When the machine cancelled requests.
     cancelled: Vec<u64>,
+    /// Which requests it cancelled.
+    cancelled_ids: Vec<u64>,
+    /// What the sessions held before the poll that made each caller's
+    /// reply.
+    held_before_reply: BTreeMap<u64, usize>,
     /// The most the sessions held at once.
     peak: usize,
     /// What the sessions held before each poll.
@@ -130,6 +137,8 @@ impl World {
             failing: Vec::new(),
             sent: Vec::new(),
             cancelled: Vec::new(),
+            cancelled_ids: Vec::new(),
+            held_before_reply: BTreeMap::new(),
             peak: 0,
             before_polls: Vec::new(),
             batch: false,
@@ -152,10 +161,14 @@ impl World {
             self.deliver(at, Pending::Configure(Box::new(config)));
         }
         loop {
-            self.before_polls.push(self.machine.held());
+            let held = self.machine.held();
+            self.before_polls.push(held);
             self.machine.poll();
             self.peak = self.peak.max(self.machine.held());
-            self.replies.extend(self.machine.take_replies());
+            for reply in self.machine.take_replies() {
+                self.held_before_reply.entry(reply.caller).or_insert(held);
+                self.replies.push(reply);
+            }
             for Emitted {
                 effect,
                 generations,
@@ -166,8 +179,9 @@ impl World {
                     Effect::Request {
                         id, at, request, ..
                     } => (id, at, request),
-                    Effect::Cancel { at, .. } => {
+                    Effect::Cancel { id, at } => {
                         self.cancelled.push(at);
+                        self.cancelled_ids.push(id);
                         continue;
                     }
                 };
@@ -176,6 +190,8 @@ impl World {
                     _ => None,
                 };
                 self.sent.push(Sent {
+                    id,
+                    prefetch: matches!(request, Request::Prefetch { .. }),
                     generations,
                     endpoint: endpoint.clone(),
                     verified: matches!(request, Request::Verified(_)),
@@ -914,5 +930,134 @@ fn every_callers_error_counts_against_the_session() {
         for caller in &callers {
             assert_eq!(message(world.reply(*caller)), Some(outcome));
         }
+    }
+}
+
+#[test]
+fn replies_hold_their_room_until_written() {
+    let mut bounded = config();
+    bounded.bounds.total_bytes = 200_000;
+    bounded.bounds.resume_bytes = 100_000;
+    let mut world = World::new(bounded);
+    // Main's backlog fills the total: a new lookup is busy.
+    world.machine.set_output_backlog(200_000);
+    let busy = world.machine.resolve_content("vitalik.eth");
+    world.run(0);
+    assert_eq!(protocol(world.reply(busy)), Some("busy"));
+    // Room for the name, not for the lookup: it ends with `budget`.
+    world.machine.set_output_backlog(199_000);
+    let squeezed = world.machine.resolve_content("vitalik.eth");
+    assert_eq!(world.machine.running(), 1);
+    world.run(10_000);
+    assert_eq!(message(world.reply(squeezed)), Some("budget"));
+    // Written, the room is back.
+    world.machine.set_output_backlog(0);
+    let fits = world.machine.resolve_content("vitalik.eth");
+    world.run(20_000);
+    assert!(world.reply(fits).outcome.is_ok());
+}
+
+#[test]
+fn a_configuration_changes_replies_count_against_the_session() {
+    let name = format!("{}.eth", "a".repeat(2_000));
+    let reply = format!("Name resolution configuration changed while resolving {name}").len() + 2;
+    let callers = |world: &mut World| -> Vec<u64> {
+        (0..3)
+            .map(|_| world.machine.resolve_content(&name))
+            .collect()
+    };
+    // What the session holds when the change comes: nothing happens
+    // between its requests at 0 and their answers at 10.
+    let mut probe = World::new(config());
+    callers(&mut probe);
+    probe.run(4);
+    let held = probe.machine.held();
+    for (room, expected) in [
+        (
+            3 * reply,
+            format!("Name resolution configuration changed while resolving {name}"),
+        ),
+        (3 * reply - 1, "budget".to_owned()),
+    ] {
+        let mut bounded = config();
+        bounded.bounds.session_bytes = held + room;
+        let mut world = World::new(bounded);
+        let ids = callers(&mut world);
+        world.configures.push((5, changed()));
+        world.run(6);
+        for id in ids {
+            let reply = world.reply(id);
+            assert_eq!(message(reply), Some(expected.as_str()));
+            // Either way it carries the generation main discards it for.
+            assert_eq!(reply.generations.ens, 0);
+        }
+    }
+}
+
+#[test]
+fn an_exhausted_callers_reply_counts_against_the_session() {
+    let start = |bound: Option<usize>| {
+        let mut bounded = config();
+        if let Some(bound) = bound {
+            bounded.bounds.session_bytes = bound;
+        }
+        let mut world = World::new(bounded);
+        world.machine.resolve_content("vitalik.eth");
+        let exhausted = world.machine.resolve_content_with(
+            "vitalik.eth",
+            CallOptions {
+                attempts_used: 2,
+                ..CallOptions::default()
+            },
+        );
+        world.changes.push(5);
+        world.run(10_000);
+        (world, exhausted)
+    };
+    let text = "Myotis availability changed repeatedly while resolving vitalik.eth";
+    let (probe, exhausted) = start(None);
+    let held = probe.held_before_reply[&exhausted];
+    for (room, expected) in [(text.len() + 2, text), (text.len() + 1, "budget")] {
+        let (world, exhausted) = start(Some(held + room));
+        assert_eq!(message(world.reply(exhausted)), Some(expected));
+    }
+}
+
+#[test]
+fn a_reply_budget_failure_cancels_the_sessions_prefetch() {
+    // Every answer arrives before the poll that finishes the session, so it
+    // hands off its prefetch and charges its replies in one poll.
+    let run = |bound: Option<usize>| {
+        let mut bounded = config();
+        if let Some(bound) = bound {
+            bounded.bounds.session_bytes = bound;
+        }
+        let mut world = World::new(bounded);
+        world.batch = true;
+        let ids: Vec<u64> = (0..3)
+            .map(|_| world.machine.resolve_content("vitalik.eth"))
+            .collect();
+        world.run(10_000);
+        (world, ids)
+    };
+    let (probe, ids) = run(None);
+    let result = probe.reply(ids[0]).outcome.as_ref().unwrap();
+    let uri = result.get("uri").and_then(JsValue::as_str).unwrap();
+    let reply = result.stringify().len();
+    // Room for the prefetch request, not for the third caller's reply.
+    let bound = probe.held_before_reply[&ids[0]] + uri.len() + 3 * reply - 1;
+    let (world, ids) = run(Some(bound));
+    for id in &ids {
+        assert_eq!(message(world.reply(*id)), Some("budget"));
+    }
+    let prefetches: Vec<u64> = world
+        .sent
+        .iter()
+        .filter(|s| s.prefetch)
+        .map(|s| s.id)
+        .collect();
+    assert!(!prefetches.is_empty(), "the prefetch was handed off");
+    for id in prefetches {
+        assert!(world.cancelled_ids.contains(&id), "prefetch {id} survives");
     }
 }

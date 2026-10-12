@@ -305,6 +305,17 @@ test('replay\'s memory-budgets patch refuses what it can\'t model', async () => 
   const empty = structuredClone(definition(ethers, 'deviation-memory-budgets'));
   empty.steps[0].call = { fn: 'resolveEnsContent', args: [''] };
   await assert.rejects(replay.runScenario(REFERENCE, ethers, FakeTimers, empty), /ended otherwise/);
+  // A name is charged as the core keys it, normalized: a decomposed name
+  // and its composed form record the same trace.
+  const named = (name) => {
+    const scenario = structuredClone(definition(ethers, 'deviation-memory-budgets'));
+    scenario.steps[0].call = { fn: 'resolveEnsContent', args: [name] };
+    scenario.world.bounds = { sessionBytes: 22_000 };
+    return replay.runScenario(REFERENCE, ethers, FakeTimers, scenario);
+  };
+  const decomposed = `${('e' + String.fromCharCode(0x301)).repeat(100)}.eth`;
+  const trace = (vector) => [vector.steps.map((s) => s.results), vector.io.map((e) => [e.t, e.end, e.host, e.outcome])];
+  assert.deepEqual(trace(await named(decomposed)), trace(await named(decomposed.normalize('NFC'))));
 });
 
 test('replay\'s overall-deadline patch refuses what it can\'t model', async () => {
