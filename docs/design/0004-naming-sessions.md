@@ -125,7 +125,7 @@ Myotis and Colibri keep running in main, through today's adapters, **one whole o
 - **The adapters guard themselves.** An operation that crosses a change of Myotis availability fails inside the adapter:
   - `verifiedRequest` checks around each raw call and throws `MYOTIS_UNAVAILABLE`, which is `{ failure: "lifecycle" }`;
   - the record operation's `MyotisProvider` checks the epoch it started with before and after each raw call. Its error carries no code, so it is `{ failure: "error" }` (`myotis-lifecycle-between-calls`).
-- **`failure`** is a closed set of classes (`unavailable`, `lifecycle`, `timeout`, `too_large`, `error`) and carries no text. `lifecycle` is today's `MYOTIS_UNAVAILABLE` from `verifiedRequest`. The method that made the operation handles a failure as today's code handles that adapter's error ([Verified methods](#verified-methods)).
+- **`failure`** is a closed set of classes (`unavailable`, `lifecycle`, `timeout`, `too_large`, `invalid_argument`, `error`) and carries no text. `lifecycle` is today's `MYOTIS_UNAVAILABLE` from `verifiedRequest`; `invalid_argument` is ethers' own `INVALID_ARGUMENT`, thrown inside the adapter (`universalResolverCall`'s `dnsEncode(name, 255)` refusing a label over 255 bytes). The method that made the operation handles a failure as today's code handles that adapter's error ([Verified methods](#verified-methods)).
 - **Reply size:** main serializes each reply first. One over 1 MiB (a large return, revert or name) is replaced by `{ failure: "too_large" }`: a method error, so the order continues (deviation `verified-reply-size`).
 - **Provenance:** a `revert` is the verifier's proven revert data. The core records which verifier produced it.
 - **The adapters' own bounds** are unchanged. Main bounds physical work: at most 8 operations per verifier are running, counted until the adapter's promise actually settles, not when the core cancels. Beyond that, main answers `{ failure: "unavailable" }` at once.
@@ -568,6 +568,7 @@ Each deviation gets a boundary vector in the implementation PR, generated from t
 | `random-streams` | the 429 back-off and the shuffle draw from one `Math.random` | separate streams | later shuffles don't depend on earlier back-offs; vectors seed the back-off apart |
 | `core-restart` | — (no separate process) | pending naming requests fail when the core restarts | `RESOLUTION_ERROR`; nothing cached |
 | `prefetch-set` | unbounded | 32 surviving prefetches | the oldest is cancelled |
+| `verified-failure-text` | a failed verified operation throws the adapter's own error | the core sees the failure class alone, and the method throws `verified call failed: <class>`; for a name with a label over 255 bytes, an `invalid_argument` from the Myotis record operation or Colibri's `ur` resolver (which `dnsEncode` the name first) is that refusal, whose ethers message the core rebuilds | the same failure, with the class's text where the order ends on it |
 
 ## Replay
 

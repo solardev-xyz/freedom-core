@@ -416,6 +416,10 @@ module.exports.__configure = () => __retire(getEffectiveRpcEndpoints(), ${b.reti
       },
     },
   }),
+  'verified-failure-text': () => ({
+    text: 'A verified operation that fails reaches the core as its class alone, and the method throws "verified call failed: <class>"; an invalid_argument for a name with a label over 255 bytes is dnsEncode\'s, whose message the core rebuilds.',
+    harness: ['verified-failure-text'],
+  }),
   'null-block-hash': () => ({
     text: 'A null block hash fails like a missing block: out of the hash vote (and quarantined), and the single-source anchor fails.',
     source: {
@@ -817,7 +821,21 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     // request was running.
     if (err?.code === 'MYOTIS_UNAVAILABLE') return 'lifecycle';
     if (err?.code === 'TIMEOUT') return 'timeout';
+    // ethers' own argument check inside the adapter (dnsEncode's label
+    // limit, for one).
+    if (err?.code === 'INVALID_ARGUMENT') return 'invalid_argument';
     return 'error';
+  };
+  // The core's text for a failed operation (deviation
+  // `verified-failure-text`).
+  // Only an ENS forward operation through universalResolverCall (Myotis'
+  // record, Colibri's `ur` resolver) dnsEncodes its name first, so only
+  // there is an invalid_argument for an over-long label that refusal.
+  const __verifiedFailure = (failure, host, op, params, err) => {
+    const name = params.name;
+    const overLong = typeof name === 'string' && name.split('.').some((label) => Buffer.byteLength(label, 'utf8') > 255);
+    const encodes = (host === 'myotis' && op === 'record' && params.method !== 'reverse') || (host === 'colibri' && op === 'resolve' && !params.nameNft);
+    return failure === 'invalid_argument' && overLong && encodes ? err : new Error(`verified call failed: ${failure}`);
   };
   const revertOf = (err) => {
     const data = err?.data ?? err?.info?.error?.data;
@@ -834,12 +852,21 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       (value) => {
         item.answer = toAnswer(value);
         close(item, 'answered');
+        // A failure the adapter returns as a status (a NameNFT call's
+        // { status: 'error' }) is thrown by its caller in its own words;
+        // the core's class text applies there too, but the patch would
+        // have to stand in for that caller.
+        if (harnessPatch('verified-failure-text') && item.answer?.failure) {
+          violations.push(`verified-failure-text: a failure returned as a status (${host} ${op}) isn't modelled`);
+        }
         return value;
       },
       (err) => {
         const revert = revertOf(err);
         item.answer = revert ? { revert } : { failure: failureClass(err) };
         close(item, 'answered');
+        // Deviation `verified-failure-text`: the core sees only the class.
+        if (harnessPatch('verified-failure-text') && !revert) throw __verifiedFailure(item.answer.failure, host, op, params, err);
         throw err;
       }
     );
@@ -896,7 +923,11 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
   // Colibri requests queued by operations: { method, params, op }.
   const colibriSends = [];
   const COLIBRI_HOST = {
-    ensureWorker: async () => {},
+    // `workerFails`: the worker doesn't start (colibri-resolver.test.js's
+    // startup failure), before any operation reaches its resolver.
+    ensureWorker: async () => {
+      if (colibri().workerFails) throw new Error('Colibri worker failed to start: init failed (EACCES)');
+    },
     createClient: () => ({
       async request({ method, params }) {
         // The client knows its chain: answered locally, without I/O.
@@ -1514,6 +1545,36 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
     },
     // One endpoint answers blocks with a null hash: the core counts it as a
     // failed fetch (and quarantines it), so the second lookup's legs avoid it.
+    // Colibri's worker doesn't start: its operation fails as `error`, before
+    // any resolver runs. With Colibri last, the lookup ends on the core's
+    // class text, whether or not the name's label is too long.
+    deviation('verified-failure-text', base({
+      network: { ...QUORUM_NETWORK, verification: { order: ['colibri'], preferVerified: false } },
+      colibri: { prover: 'https://prover.example', workerFails: true, calls: { resolve: GOOD } },
+    }), [
+      { call: content() },
+      { after: 1000, call: content(`${'é'.repeat(150)}.eth`) },
+    ]),
+    {
+      // A .wei name through Colibri's NameNFT resolver, which doesn't
+      // dnsEncode: an odd-length revert is ethers' invalid_argument too, but
+      // not a label refusal, so the class text stands.
+      ...deviation('verified-failure-text', base({
+        network: { ...QUORUM_NETWORK, verification: { order: ['colibri'], preferVerified: false } },
+        colibri: { prover: 'https://prover.example', calls: { 'wns:contenthash': { revert: '0x123' } } },
+      }), [{ call: content(`${'é'.repeat(150)}.wei`) }]),
+      id: 'deviation-verified-failure-text-namenft',
+    },
+    {
+      // Myotis refuses the label (invalid_argument, the message rebuilt),
+      // then Colibri fails to start, which ends the order.
+      ...deviation('verified-failure-text', base({
+        network: { ...QUORUM_NETWORK, verification: { order: ['myotis', 'colibri'], preferVerified: true } },
+        myotis: { enabled: true, ready: true, calls: { resolve: GOOD } },
+        colibri: { prover: 'https://prover.example', workerFails: true, calls: { resolve: GOOD } },
+      }), [{ call: content(`${'é'.repeat(150)}.eth`) }]),
+      id: 'deviation-verified-failure-text-order',
+    },
     deviation('null-block-hash', base({ hosts: { 'c.rpc.example': { nullHash: true } } }), [
       { call: content() },
       { after: 31_000, call: content('alice.eth') },
@@ -1594,6 +1655,25 @@ function verifiedPaths(ethers, base, one, order, GOOD, lookup) {
     one('myotis-not-ready-falls-to-quorum', base({ network: order(['myotis', 'quorum']), myotis: { enabled: true, ready: false } })),
     one('colibri-verified', base({ network: order(['colibri', 'quorum']), colibri: COLIBRI({ resolve: GOOD }) })),
     one('colibri-resolver-not-found', base({ network: order(['colibri', 'quorum']), colibri: COLIBRI({ resolve: { revert: notFound } }) })),
+    // A label of 150 é (300 bytes) through each verified method alone:
+    // its adapter's universalResolverCall refuses it in dnsEncode, and
+    // that error is what the lookup ends with.
+    {
+      id: 'myotis-label-over-255-bytes',
+      world: base({ network: order(['myotis']), myotis: { enabled: true, ready: true, calls: { resolve: GOOD } } }),
+      steps: [
+        { call: content(`${'é'.repeat(150)}.eth`) },
+        { after: 1000, call: { fn: 'resolveEnsAddress', args: [`${'é'.repeat(150)}.eth`] } },
+      ],
+    },
+    {
+      id: 'colibri-label-over-255-bytes',
+      world: base({ network: order(['colibri']), colibri: COLIBRI({ resolve: GOOD }) }),
+      steps: [
+        { call: content(`${'é'.repeat(150)}.eth`) },
+        { after: 1000, call: { fn: 'resolveEnsAddress', args: [`${'é'.repeat(150)}.eth`] } },
+      ],
+    },
     one('colibri-unavailable-falls-to-quorum', base({ network: order(['colibri', 'quorum']), colibri: COLIBRI({ resolve: { unavailable: true } }) })),
     // Colibri with ethers' built-in CCIP-Read, and two operations at once:
     // every raw call belongs to its own operation.
@@ -1696,7 +1776,7 @@ function addressAndReverse(ethers, base, one) {
       world: base({}),
       steps: [
         { call: content(`${'é'.repeat(150)}.eth`) },
-        { after: 1000, call: address(`${'é'.repeat(150)}.eth`) },
+        { after: 1000, call: { fn: 'resolveEnsAddress', args: [`${'é'.repeat(150)}.eth`] } },
         { after: 1000, call: content(`${'a'.repeat(255)}.eth`) },
       ],
     },

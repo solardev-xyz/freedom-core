@@ -79,6 +79,19 @@ pub(crate) fn colibri_trust(ctx: &Ctx, system: &str) -> JsValue {
     ])
 }
 
+/// The error of an operation through `universalResolverCall`: for a name
+/// `dnsEncode(name, 255)` refuses, an `invalid_argument` failure (ethers'
+/// own argument check, which main reports without text) is that refusal,
+/// whose message the reference keeps.
+fn ur_error(outcome: &Verified, name: &str) -> Thrown {
+    match (outcome, super::leg::label_too_long(name)) {
+        (Verified::Failure(class), Some(message)) if class == "invalid_argument" => {
+            Thrown::new(message)
+        }
+        _ => verifier_error(outcome),
+    }
+}
+
 /// A verifier's thrown error, by its outcome.
 pub(crate) fn verifier_error(outcome: &Verified) -> Thrown {
     match outcome {
@@ -189,7 +202,7 @@ pub(crate) async fn myotis_ens(
     };
     let outcome = verified(ctx, op).await;
     let Verified::Result(record) = &outcome else {
-        return Err(verifier_error(&outcome));
+        return Err(ur_error(&outcome, lookup.name));
     };
     let finalized = record.get("verified") == Some(&JsValue::Bool(true));
     let block = record.get("blockNumber").cloned().unwrap_or(JsValue::Null);
@@ -276,6 +289,7 @@ pub(crate) async fn colibri(ctx: &Ctx, lookup: &Lookup<'_>) -> Result<Consensus,
                 trust,
             })
         }
+        other if resolver == "ur" => Err(ur_error(&other, lookup.name)),
         other => Err(verifier_error(&other)),
     }
 }

@@ -445,18 +445,31 @@ pub(crate) async fn contract_call(
 /// message for a label over the limit, the one a normalized name can reach.
 fn dns_error(name: &str, error: &crate::Error) -> CallError {
     match error {
-        crate::Error::LabelTooLong(limit) => CallError::Invalid(crate::ethers::make_error(
-            &format!(
-                "label {} exceeds {limit} bytes",
-                crate::ethers::string(name)
-            ),
-            "INVALID_ARGUMENT",
-            &[
-                ("argument", crate::ethers::string("name")),
-                ("value", crate::ethers::string(name)),
-            ],
-        )),
+        crate::Error::LabelTooLong(limit) => CallError::Invalid(label_message(name, *limit)),
         other => CallError::Invalid(format!("dns|{other}")),
+    }
+}
+
+fn label_message(name: &str, limit: usize) -> String {
+    crate::ethers::make_error(
+        &format!(
+            "label {} exceeds {limit} bytes",
+            crate::ethers::string(name)
+        ),
+        "INVALID_ARGUMENT",
+        &[
+            ("argument", crate::ethers::string("name")),
+            ("value", crate::ethers::string(name)),
+        ],
+    )
+}
+
+/// ethers' message when `universalResolverCall`'s `dnsEncode(name, 255)`
+/// refuses `name`, or `None` when it encodes.
+pub(crate) fn label_too_long(name: &str) -> Option<String> {
+    match crate::dns_encode(name, 255) {
+        Err(crate::Error::LabelTooLong(limit)) => Some(label_message(name, limit)),
+        _ => None,
     }
 }
 

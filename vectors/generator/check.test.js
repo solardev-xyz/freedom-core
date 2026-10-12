@@ -274,6 +274,16 @@ test('a host named like an Object property is declared only when the world lists
   assert.ok(result.io.some((item) => item.host === 'constructor'));
 });
 
+test('replay\'s verified-failure-text patch refuses failures returned as a status', async () => {
+  const ethers = referenceEthers();
+  const FakeTimers = replay.loadFakeTimers(REFERENCE);
+  // A NameNFT call through Myotis that comes back { status: 'error' }.
+  const scenario = structuredClone(definition(ethers, 'myotis-wns-call-unavailable'));
+  scenario.world.network = { ...scenario.world.network, verification: { order: ['myotis'], preferVerified: false } };
+  Object.assign(scenario, { deviation: 'verified-failure-text', patches: ['verified-failure-text'] });
+  await assert.rejects(replay.runScenario(REFERENCE, ethers, FakeTimers, scenario), /failure returned as a status/);
+});
+
 test('replay\'s overall-deadline patch refuses what it can\'t model', async () => {
   const ethers = referenceEthers();
   const FakeTimers = replay.loadFakeTimers(REFERENCE);
