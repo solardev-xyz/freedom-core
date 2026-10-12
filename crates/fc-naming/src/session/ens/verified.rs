@@ -79,12 +79,15 @@ pub(crate) fn colibri_trust(ctx: &Ctx, system: &str) -> JsValue {
     ])
 }
 
-/// The error of an operation through `universalResolverCall`: its first
-/// step is `dnsEncode(name, 255)`, so an `error` failure for a name that
-/// refuses is that throw, whose message the reference keeps.
+/// The error of an operation through `universalResolverCall`: for a name
+/// `dnsEncode(name, 255)` refuses, an `invalid_argument` failure (ethers'
+/// own argument check, which main reports without text) is that refusal,
+/// whose message the reference keeps.
 fn ur_error(outcome: &Verified, name: &str) -> Thrown {
     match (outcome, super::leg::label_too_long(name)) {
-        (Verified::Failure(class), Some(message)) if class == "error" => Thrown::new(message),
+        (Verified::Failure(class), Some(message)) if class == "invalid_argument" => {
+            Thrown::new(message)
+        }
         _ => verifier_error(outcome),
     }
 }

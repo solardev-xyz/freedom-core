@@ -416,6 +416,10 @@ module.exports.__configure = () => __retire(getEffectiveRpcEndpoints(), ${b.reti
       },
     },
   }),
+  'verified-failure-text': () => ({
+    text: 'A verified operation that fails reaches the core as its class alone, and the method throws "verified call failed: <class>"; an invalid_argument for a name with a label over 255 bytes is dnsEncode\'s, whose message the core rebuilds.',
+    harness: ['verified-failure-text'],
+  }),
   'null-block-hash': () => ({
     text: 'A null block hash fails like a missing block: out of the hash vote (and quarantined), and the single-source anchor fails.',
     source: {
@@ -817,7 +821,16 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     // request was running.
     if (err?.code === 'MYOTIS_UNAVAILABLE') return 'lifecycle';
     if (err?.code === 'TIMEOUT') return 'timeout';
+    // ethers' own argument check inside the adapter (dnsEncode's label
+    // limit, for one).
+    if (err?.code === 'INVALID_ARGUMENT') return 'invalid_argument';
     return 'error';
+  };
+  // The core's text for a failed operation (deviation
+  // `verified-failure-text`).
+  const __verifiedFailure = (failure, name, err) => {
+    const overLong = typeof name === 'string' && name.split('.').some((label) => Buffer.byteLength(label, 'utf8') > 255);
+    return failure === 'invalid_argument' && overLong ? err : new Error(`verified call failed: ${failure}`);
   };
   const revertOf = (err) => {
     const data = err?.data ?? err?.info?.error?.data;
@@ -840,6 +853,8 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
         const revert = revertOf(err);
         item.answer = revert ? { revert } : { failure: failureClass(err) };
         close(item, 'answered');
+        // Deviation `verified-failure-text`: the core sees only the class.
+        if (harnessPatch('verified-failure-text') && !revert) throw __verifiedFailure(item.answer.failure, params.name, err);
         throw err;
       }
     );
@@ -896,7 +911,11 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
   // Colibri requests queued by operations: { method, params, op }.
   const colibriSends = [];
   const COLIBRI_HOST = {
-    ensureWorker: async () => {},
+    // `workerFails`: the worker doesn't start (colibri-resolver.test.js's
+    // startup failure), before any operation reaches its resolver.
+    ensureWorker: async () => {
+      if (colibri().workerFails) throw new Error('Colibri worker failed to start: init failed (EACCES)');
+    },
     createClient: () => ({
       async request({ method, params }) {
         // The client knows its chain: answered locally, without I/O.
@@ -1514,6 +1533,26 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
     },
     // One endpoint answers blocks with a null hash: the core counts it as a
     // failed fetch (and quarantines it), so the second lookup's legs avoid it.
+    // Colibri's worker doesn't start: its operation fails as `error`, before
+    // any resolver runs. With Colibri last, the lookup ends on the core's
+    // class text, whether or not the name's label is too long.
+    deviation('verified-failure-text', base({
+      network: { ...QUORUM_NETWORK, verification: { order: ['colibri'], preferVerified: false } },
+      colibri: { prover: 'https://prover.example', workerFails: true, calls: { resolve: GOOD } },
+    }), [
+      { call: content() },
+      { after: 1000, call: content(`${'é'.repeat(150)}.eth`) },
+    ]),
+    {
+      // Myotis refuses the label (invalid_argument, the message rebuilt),
+      // then Colibri fails to start, which ends the order.
+      ...deviation('verified-failure-text', base({
+        network: { ...QUORUM_NETWORK, verification: { order: ['myotis', 'colibri'], preferVerified: true } },
+        myotis: { enabled: true, ready: true, calls: { resolve: GOOD } },
+        colibri: { prover: 'https://prover.example', workerFails: true, calls: { resolve: GOOD } },
+      }), [{ call: content(`${'é'.repeat(150)}.eth`) }]),
+      id: 'deviation-verified-failure-text-order',
+    },
     deviation('null-block-hash', base({ hosts: { 'c.rpc.example': { nullHash: true } } }), [
       { call: content() },
       { after: 31_000, call: content('alice.eth') },
