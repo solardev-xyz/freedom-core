@@ -8,6 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { createRequire } = require('node:module');
+const { buildSigning } = require('./signing');
 
 const REFERENCE_COMMIT = 'fb540328162839e68150fe2c5e517edb86734d1c';
 const OUTPUT = path.resolve(__dirname, '..');
@@ -85,6 +86,9 @@ function loadReference(checkout) {
     vault: referenceRequire('./src/main/identity/vault.js'),
     passworder: referenceRequire('@metamask/browser-passworder'),
     ethers: referenceRequire('ethers'),
+    beeJs: referenceRequire('@ethersphere/bee-js'),
+    signingPackages: Object.fromEntries(['@ethersphere/bee-js', '@ethersphere/core-sdk']
+      .map((name) => [name, packageVersion(referenceRequire, name)])),
     bip39: referenceRequire('@scure/bip39'),
     wordlist: referenceRequire('@scure/bip39/wordlists/english.js').wordlist,
   };
@@ -469,6 +473,11 @@ async function main() {
     'keys.json': buildKeys(reference),
     'mnemonic-validation.json': buildValidation(reference),
     'identity-formats.json': buildIdentities(reference),
+    // Its own meta: the shared one is frozen into the existing fixtures.
+    'signing.json': await buildSigning(reference, mnemonicFor, {
+      ...reference.meta,
+      packages: { ...reference.meta.packages, ...reference.signingPackages },
+    }),
   };
   // Check every deterministic file before doing the more expensive fixture checks.
   for (const [filename, contents] of Object.entries(deterministic)) {

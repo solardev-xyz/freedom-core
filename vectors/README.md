@@ -12,11 +12,13 @@ dependencies. It does not implement derivation, encryption or identity encoding.
 | --- | --- |
 | `keys.json` | Six mnemonic seeds; user and publisher keys at indices 0, 1, 2, 1000 and 2147483647; Bee, Radicle and IPFS keys; exact index errors and special JS inputs for every mnemonic. |
 | `mnemonic-validation.json` | Valid 12/15/18/21/24-word phrases, checksum/word/type/case/spacing/Unicode failures, accepted compatibility forms, seeds and wallet 0 for accepted inputs. |
+| `signing.json` | Design 0002's signing contract, from the reference's ethers and bee-js: EIP-155 and EIP-1559 transactions (`Wallet.signTransaction`, with `keccak256` hashes), EIP-191 messages, EIP-712 typed data (signature and `TypedDataEncoder.hash`, including the Safe, x402 and Permit2 payloads and every ethers rejection), and single-owner chunks (`makeContentAddressedChunk(…).toSingleOwnerChunk(…)`) for account, Bee wallet and publisher keys. Inputs are in the core's wire form. Entries marked `deviation` are signed by ethers but must be rejected by the core. It has its own `meta`, which adds the bee-js packages. |
 | `identity-formats.json` | Deterministic IPFS private-key protobuf/base64 and PeerID; Radicle DID, node ID and public SSH file with default `FreedomBrowser` comment and custom `vector-alias`; `didFromPublicKey`. |
 | `fixtures/vaults.json` | Exact vault file contents from real `importVault`, including timestamps and the embedded encrypted JSON string. Five password/mnemonic cases, parsed payloads, successful unlocks, exact failing files/passwords/outcomes, plus one explicitly synthetic positive legacy vault. |
 | `fixtures/bee-keystores.json` | Two actual `createBeeKeystore` outputs, passwords, expected keys/addresses, parsed JSON, KDF parameters and the Unicode password normalization check. |
 | `fixtures/radicle-openssh.json` | Twelve actual `createRadicleIdentity` results (six mnemonics, two comments), extracted check integers and padding; checked by parsing and replaying the same check integer through the reference JS. |
 | `generator/generate.js` | Plain CommonJS generator and verifier. |
+| `generator/signing.js` | The signing cases and their builder, used by `generate.js`. |
 | `generator/check.test.js` | Integration tests that damage copies of the oracle outputs and require `check` to fail. |
 
 Every JSON file has a `meta` block with the full reference commit, actual installed
@@ -35,6 +37,8 @@ The checked-in run used Node `v24.15.0` and these installed versions:
 | `@scure/base` | `1.2.6` |
 | `micro-key-producer` | `0.10.2` |
 | `@metamask/browser-passworder` | `6.0.0` |
+| `@ethersphere/bee-js` | `13.1.0` (signing only) |
+| `@ethersphere/core-sdk` | `0.1.1` (signing only) |
 
 From a clean reference checkout at that commit, install its lockfile dependencies
 (this changes no tracked files):

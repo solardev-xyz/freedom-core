@@ -9,9 +9,9 @@ const test = require('node:test');
 
 const SOURCE = path.resolve(__dirname, '..');
 const REFERENCE = process.env.FREEDOM_BROWSER_CHECKOUT || '/root/herdr/freedom-browser';
-const FILES = ['keys.json', 'mnemonic-validation.json', 'identity-formats.json',
+const FILES = ['keys.json', 'mnemonic-validation.json', 'identity-formats.json', 'signing.json',
   'fixtures/vaults.json', 'fixtures/bee-keystores.json', 'fixtures/radicle-openssh.json',
-  'generator/generate.js'];
+  'generator/generate.js', 'generator/signing.js'];
 
 function corruptedCheck(filename, corrupt) {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
@@ -36,6 +36,14 @@ test('check rejects a changed deterministic private key', () => {
     contents.vectors[0].userWallets[0].privateKey = '0x' + '00'.repeat(32);
   });
   assert.match(stderr, /Byte mismatch: keys.json/);
+});
+
+test('check rejects a changed signature', () => {
+  const stderr = corruptedCheck('signing.json', (contents) => {
+    const entry = contents.typedData.find((item) => item.result.status === 'success');
+    entry.result.signature = entry.result.signature.slice(0, -2) + '1b';
+  });
+  assert.match(stderr, /Byte mismatch: signing.json/);
 });
 
 test('check decrypts vault fixtures and rejects a damaged authentication tag', () => {
