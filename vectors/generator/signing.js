@@ -27,7 +27,18 @@ const TRANSACTIONS = [
   { id: 'legacy-gnosis', tx: { type: 0, chain_id: '100', nonce: '255', gas_limit: '30000', to: ADDRESS, value: '0', data: '0x1234', gas_price: '1' } },
   { id: 'legacy-big-chain', tx: { type: 0, chain_id: '4294967296', nonce: '256', gas_limit: '21000', to: ADDRESS, value: '0', data: '0x', gas_price: '0' } },
   { id: 'legacy-create', tx: { type: 0, chain_id: '11155111', nonce: '0', gas_limit: '53000', to: null, value: '0', data: '0x00', gas_price: '1000000000' } },
+  { id: 'legacy-chain-above-2-53', tx: { type: 0, chain_id: '9007199254740993', nonce: '1', gas_limit: '21000', to: ADDRESS, value: '0', data: '0x', gas_price: '1' } },
+  { id: 'legacy-chain-above-2-64', tx: { type: 0, chain_id: '18446744073709551617', nonce: '1', gas_limit: '21000', to: ADDRESS, value: '0', data: '0x', gas_price: '1' } },
+  { id: 'eip1559-chain-above-2-64', tx: { type: 2, chain_id: '18446744073709551617', nonce: '1', gas_limit: '21000', to: ADDRESS, value: '0', data: '0x', max_fee_per_gas: '2', max_priority_fee_per_gas: '1' } },
+  // The largest legacy chain id whose v fits for both parities: 2^255 - 19.
+  { id: 'legacy-chain-id-limit', tx: { type: 0, chain_id: ((2n ** 255n) - 19n).toString(), nonce: '0', gas_limit: '21000', to: ADDRESS, value: '0', data: '0x', gas_price: '1' } },
+  // Above it, ethers still signs, with a v wider than 256 bits: a transaction
+  // its own Transaction.from can't parse. The core refuses (design 0002).
+  { id: 'deviation-legacy-v-above-256-bits', deviation: 'legacy-chain-id', tx: { type: 0, chain_id: ((2n ** 255n) - 18n).toString(), nonce: '0', gas_limit: '21000', to: ADDRESS, value: '0', data: '0x', gas_price: '1' } },
+  { id: 'deviation-legacy-chain-2-255', deviation: 'legacy-chain-id', tx: { type: 0, chain_id: (2n ** 255n).toString(), nonce: '0', gas_limit: '21000', to: ADDRESS, value: '0', data: '0x', gas_price: '1' } },
+  { id: 'eip1559-chain-max-u256', tx: { type: 2, chain_id: MAX_U256, nonce: '0', gas_limit: '21000', to: ADDRESS, value: '0', data: '0x', max_fee_per_gas: '2', max_priority_fee_per_gas: '1' } },
   // ethers rejects these; so does the core.
+  { id: 'error-eip1559-chain-2-256', tx: { type: 2, chain_id: (2n ** 256n).toString(), nonce: '0', gas_limit: '21000', to: ADDRESS, value: '0', data: '0x', max_fee_per_gas: '2', max_priority_fee_per_gas: '1' } },
   { id: 'error-priority-above-max', tx: { type: 2, chain_id: '1', nonce: '0', gas_limit: '21000', to: ADDRESS, value: '0', data: '0x', max_fee_per_gas: '1', max_priority_fee_per_gas: '2' } },
   { id: 'error-unsafe-nonce', tx: { type: 2, chain_id: '1', nonce: '9007199254740992', gas_limit: '21000', to: ADDRESS, value: '0', data: '0x', max_fee_per_gas: '2', max_priority_fee_per_gas: '1' } },
 ];
@@ -102,6 +113,8 @@ const TYPED_DATA = [
   { id: 'deviation-bool-string-false', deviation: 'bool-strict', typed_data: { domain: { name: 'D' }, types: ONE('bool'), message: { v: 'false' } } },
   { id: 'deviation-bool-number', deviation: 'bool-strict', typed_data: { domain: { name: 'D' }, types: ONE('bool'), message: { v: 1 } } },
   { id: 'deviation-bool-missing', deviation: 'bool-strict', typed_data: { domain: { name: 'D' }, types: ONE('bool'), message: {} } },
+  { id: 'deviation-bool-null', deviation: 'bool-strict', typed_data: { domain: { name: 'D' }, types: ONE('bool'), message: { v: null } } },
+  { id: 'deviation-bool-string-zero', deviation: 'bool-strict', typed_data: { domain: { name: 'D' }, types: ONE('bool'), message: { v: '0' } } },
   // ethers parses quantity strings with JS BigInt(); the core takes only
   // [-]digits or [-]0x/0X hex (design 0002).
   { id: 'deviation-quantity-lone-minus', deviation: 'quantity-strict', typed_data: { domain: { name: 'D' }, types: ONE('uint256'), message: { v: '-' } } },
@@ -118,6 +131,10 @@ const TYPED_DATA = [
   { id: 'domain-null-field-skipped', typed_data: { domain: { name: null, version: '1', chainId: 0 }, types: ONE('uint8'), message: { v: 1 } } },
   { id: 'empty-struct', typed_data: { domain: { name: 'Empty' }, types: { M: [] }, message: {} } },
   { id: 'quantity-forms', typed_data: { domain: { name: 'Q' }, types: { M: [{ name: 'a', type: 'uint256' }, { name: 'b', type: 'int256' }, { name: 'c', type: 'uint256' }, { name: 'd', type: 'int16' }] }, message: { a: '0X1F', b: '-0x10', c: '00012', d: '-0' } } },
+  { id: 'address-uppercase', typed_data: { domain: { name: 'A' }, types: ONE('address'), message: { v: '0x' + ADDRESS.slice(2).toUpperCase() } } },
+  { id: 'domain-unknown-key-null-skipped', typed_data: { domain: { name: 'N', foo: null }, types: ONE('uint8'), message: { v: 1 } } },
+  { id: 'unreachable-cycle-accepted', typed_data: { domain: { name: 'C' }, types: { M: [{ name: 'v', type: 'uint8' }], A: [{ name: 'b', type: 'B' }], B: [{ name: 'a', type: 'A' }] }, message: { v: 1 } } },
+  { id: 'array-suffix-written-form', typed_data: { domain: { name: 'S' }, types: ONE('uint8[02]'), message: { v: [1, 2] } } },
   { id: 'error-duplicate-field', typed_data: { domain: { name: 'E' }, types: { M: [{ name: 'a', type: 'uint8' }, { name: 'a', type: 'uint8' }] }, message: { a: 1 } } },
   { id: 'error-mutual-reference', typed_data: { domain: { name: 'E' }, types: { A: [{ name: 'b', type: 'B' }], B: [{ name: 'a', type: 'A' }] }, message: {} } },
   { id: 'error-bad-width', typed_data: { domain: { name: 'E' }, types: ONE('uint7'), message: { v: 1 } } },
@@ -133,6 +150,9 @@ const SOCS = [
   { id: 'full-4096', identifier: '33'.repeat(32), payload: Buffer.alloc(4096, 7).toString('hex') },
   { id: 'span-above-payload', identifier: '44'.repeat(32), payload: 'ef'.repeat(64), span: '1000000' },
   { id: 'span-below-payload', identifier: '55'.repeat(32), payload: 'ef'.repeat(64), span: '1' },
+  // bee-js treats a 0n span as omitted: the payload length.
+  { id: 'span-zero-means-length', identifier: '66'.repeat(32), payload: 'ef'.repeat(40), span: '0' },
+  { id: 'span-max', identifier: '77'.repeat(32), payload: '01', span: (2n ** 64n - 1n).toString() },
 ];
 
 function keyFor(reference, mnemonicFor, { mnemonicId, key }) {
@@ -175,10 +195,11 @@ async function buildSigning(reference, mnemonicFor, meta) {
   const accounts = keys.filter((entry) => entry.key.kind === 'account');
 
   const transactions = [];
-  for (const { id, tx } of TRANSACTIONS) {
+  for (const { id, tx, deviation } of TRANSACTIONS) {
     for (const signer of accounts) {
       transactions.push({
         id: `${id}/${signer.id}`, keyId: signer.id, tx,
+        ...(deviation ? { deviation } : {}),
         result: await settle(async () => {
           const raw = await signer.wallet.signTransaction(toEthersTx(tx));
           return { raw, hash: ethers.keccak256(raw) };

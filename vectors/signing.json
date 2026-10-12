@@ -664,6 +664,474 @@
       }
     },
     {
+      "id": "legacy-chain-above-2-53/account-0",
+      "keyId": "account-0",
+      "tx": {
+        "type": 0,
+        "chain_id": "9007199254740993",
+        "nonce": "1",
+        "gas_limit": "21000",
+        "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+        "value": "0",
+        "data": "0x",
+        "gas_price": "1"
+      },
+      "result": {
+        "status": "success",
+        "raw": "0xf8660101825208948ba1f109551bd432803012645ac136ddd64dba7280808740000000000026a08311f6b4d4f8458f9a53fdec954ccc328dfc679ccc2c8f3f55cfd8e593138454a0609aba029105f82cbdc2b73976d0095af9d46c822e6a41e6d3e620ee209089fe",
+        "hash": "0x5a62846beb053f5a6e6ea227c8ca163ec12bfe959f52204975f2518113a0fa2b"
+      }
+    },
+    {
+      "id": "legacy-chain-above-2-53/account-max",
+      "keyId": "account-max",
+      "tx": {
+        "type": 0,
+        "chain_id": "9007199254740993",
+        "nonce": "1",
+        "gas_limit": "21000",
+        "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+        "value": "0",
+        "data": "0x",
+        "gas_price": "1"
+      },
+      "result": {
+        "status": "success",
+        "raw": "0xf8660101825208948ba1f109551bd432803012645ac136ddd64dba7280808740000000000025a0cb6476607f28dc889fadef9fbc75ccb0676448278b05d397abf61b57bc2dce09a0590df212b9e6dbecae013f130b6bc540d6434c5920dd6f8cfe6dcdcf8e589883",
+        "hash": "0xd9474a9b079cefd55efe32bfef89d05a972fd7f9fe6b5af03c73d2aae33f3a89"
+      }
+    },
+    {
+      "id": "legacy-chain-above-2-53/legal-account-1",
+      "keyId": "legal-account-1",
+      "tx": {
+        "type": 0,
+        "chain_id": "9007199254740993",
+        "nonce": "1",
+        "gas_limit": "21000",
+        "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+        "value": "0",
+        "data": "0x",
+        "gas_price": "1"
+      },
+      "result": {
+        "status": "success",
+        "raw": "0xf8660101825208948ba1f109551bd432803012645ac136ddd64dba7280808740000000000025a06be66d7cc543b24afaf102daf18603d314ab7f648b3cc3f86c64d8f1d4287c37a07f9a302aaf128acf3973e335a085d7301b736d2814033567186f0b08cb9a1c30",
+        "hash": "0xcc5db4c1417192c1dc24655e53605d4658da1c18015f5aec5080f4fc0d9d4ad3"
+      }
+    },
+    {
+      "id": "legacy-chain-above-2-64/account-0",
+      "keyId": "account-0",
+      "tx": {
+        "type": 0,
+        "chain_id": "18446744073709551617",
+        "nonce": "1",
+        "gas_limit": "21000",
+        "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+        "value": "0",
+        "data": "0x",
+        "gas_price": "1"
+      },
+      "result": {
+        "status": "success",
+        "raw": "0xf8680101825208948ba1f109551bd432803012645ac136ddd64dba72808089020000000000000025a062740400c1f55c87007f92dcfb646a04573fef5cea52270374ce45bf2f15b1d5a005a6b7a6edb63fac64d38d00bee592ee6ca0ae14e59ca443bcc4a8388bdf1a6c",
+        "hash": "0x3a67fd29329c12ebba4634f770b2de2c1f1e124ae9ae415dafc3b19aa121f248"
+      }
+    },
+    {
+      "id": "legacy-chain-above-2-64/account-max",
+      "keyId": "account-max",
+      "tx": {
+        "type": 0,
+        "chain_id": "18446744073709551617",
+        "nonce": "1",
+        "gas_limit": "21000",
+        "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+        "value": "0",
+        "data": "0x",
+        "gas_price": "1"
+      },
+      "result": {
+        "status": "success",
+        "raw": "0xf8680101825208948ba1f109551bd432803012645ac136ddd64dba72808089020000000000000025a01375ed650f0dcb0dad7efe4f99b728d4e2dffbb480f39b8f29a8319fd3d5c8d2a0714360a3fd73475e750e244dd6554f48a565087373cd8eed0de814b80200287e",
+        "hash": "0xd1fe7c85117f0b9a1bbd7393a1450f4bac86d5bb9d8d38a4b2c13bb45ec0e504"
+      }
+    },
+    {
+      "id": "legacy-chain-above-2-64/legal-account-1",
+      "keyId": "legal-account-1",
+      "tx": {
+        "type": 0,
+        "chain_id": "18446744073709551617",
+        "nonce": "1",
+        "gas_limit": "21000",
+        "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+        "value": "0",
+        "data": "0x",
+        "gas_price": "1"
+      },
+      "result": {
+        "status": "success",
+        "raw": "0xf8680101825208948ba1f109551bd432803012645ac136ddd64dba72808089020000000000000025a09b7368f8bcd3527d7734e25bdb57b7701417673fc39fe297f03040551418e50ca06e4e35fe8405625cccb6f14c15dccb9d7bd0ff235bd6edeffa301bd9faec67cd",
+        "hash": "0x641a51a4d5f100c56c54d300c8ba3021e764bc07b4351553b6a1d439b5229708"
+      }
+    },
+    {
+      "id": "eip1559-chain-above-2-64/account-0",
+      "keyId": "account-0",
+      "tx": {
+        "type": 2,
+        "chain_id": "18446744073709551617",
+        "nonce": "1",
+        "gas_limit": "21000",
+        "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+        "value": "0",
+        "data": "0x",
+        "max_fee_per_gas": "2",
+        "max_priority_fee_per_gas": "1"
+      },
+      "result": {
+        "status": "success",
+        "raw": "0x02f86b89010000000000000001010102825208948ba1f109551bd432803012645ac136ddd64dba728080c001a0abec5710f249d3b95f644cfbc6759534cb6e3d9c908bf9ccfe2ce6f9d4012e5aa044e36c0e6ba72c8f226e91dba12b35880301af7a939a0eec510b518fe3c549e3",
+        "hash": "0xa8affd15aa0bb801a6e54630b287734e7ee9e689e50e84b97e61fc1fd7226f59"
+      }
+    },
+    {
+      "id": "eip1559-chain-above-2-64/account-max",
+      "keyId": "account-max",
+      "tx": {
+        "type": 2,
+        "chain_id": "18446744073709551617",
+        "nonce": "1",
+        "gas_limit": "21000",
+        "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+        "value": "0",
+        "data": "0x",
+        "max_fee_per_gas": "2",
+        "max_priority_fee_per_gas": "1"
+      },
+      "result": {
+        "status": "success",
+        "raw": "0x02f86b89010000000000000001010102825208948ba1f109551bd432803012645ac136ddd64dba728080c001a0ee23215278258219fb27a60fd3f4689d35021fb1a15b855825cafa0728645322a0709cd8be82df47702a7f6197250993b2cb751f630cd7bfc32e4b96e93a9b2a88",
+        "hash": "0x61407d4c3def7ae9384a759b7fdedcff30ac55a7494fcd95f53946278bc88b0b"
+      }
+    },
+    {
+      "id": "eip1559-chain-above-2-64/legal-account-1",
+      "keyId": "legal-account-1",
+      "tx": {
+        "type": 2,
+        "chain_id": "18446744073709551617",
+        "nonce": "1",
+        "gas_limit": "21000",
+        "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+        "value": "0",
+        "data": "0x",
+        "max_fee_per_gas": "2",
+        "max_priority_fee_per_gas": "1"
+      },
+      "result": {
+        "status": "success",
+        "raw": "0x02f86b89010000000000000001010102825208948ba1f109551bd432803012645ac136ddd64dba728080c080a0013c6fac588a0f97e1858ebc94a35e26341d9c2e81fa64de44bfbe731697c828a008ace9609297ba4bd661270713543861dcc00076ef6910f75b8c2930289b02c2",
+        "hash": "0x4f0fcbec489945ecb95fa1aedf2ea5125277734af9d48883b1bcd0eff40abe12"
+      }
+    },
+    {
+      "id": "legacy-chain-id-limit/account-0",
+      "keyId": "account-0",
+      "tx": {
+        "type": 0,
+        "chain_id": "57896044618658097711785492504343953926634992332820282019728792003956564819949",
+        "nonce": "0",
+        "gas_limit": "21000",
+        "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+        "value": "0",
+        "data": "0x",
+        "gas_price": "1"
+      },
+      "result": {
+        "status": "success",
+        "raw": "0xf87f8001825208948ba1f109551bd432803012645ac136ddd64dba728080a0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffea0b52f05317f5d8d63e333666ffff05ff3aa80503ebfd563ef2929dea42f06b72da068a039c0ff715719df694f2087d0694de43e6774838b7cc5c3ca6589c9fa80d7",
+        "hash": "0xcf4a9184f547b039937403d0654b034c3b6b6e29b2478ab0f01272df119a7918"
+      }
+    },
+    {
+      "id": "legacy-chain-id-limit/account-max",
+      "keyId": "account-max",
+      "tx": {
+        "type": 0,
+        "chain_id": "57896044618658097711785492504343953926634992332820282019728792003956564819949",
+        "nonce": "0",
+        "gas_limit": "21000",
+        "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+        "value": "0",
+        "data": "0x",
+        "gas_price": "1"
+      },
+      "result": {
+        "status": "success",
+        "raw": "0xf87f8001825208948ba1f109551bd432803012645ac136ddd64dba728080a0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffea02a618c4ad7ab0a40db8c60d25d2147e75c477499888bbf63742364c0ca5e937ca06bac43da7378d223f5cdc5cf0e4e3e3f153c050b5ece501f9cc0c04981c89704",
+        "hash": "0x13901c950b909c9ec8531e4d28b5bda5b9fca8c226f4174dd1354385cc9a7d68"
+      }
+    },
+    {
+      "id": "legacy-chain-id-limit/legal-account-1",
+      "keyId": "legal-account-1",
+      "tx": {
+        "type": 0,
+        "chain_id": "57896044618658097711785492504343953926634992332820282019728792003956564819949",
+        "nonce": "0",
+        "gas_limit": "21000",
+        "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+        "value": "0",
+        "data": "0x",
+        "gas_price": "1"
+      },
+      "result": {
+        "status": "success",
+        "raw": "0xf87f8001825208948ba1f109551bd432803012645ac136ddd64dba728080a0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffda0045c9ce22a3f46bb8afe93961873d5568daa738e2752a054ca03d6040bc63e7ba06b1db7ca0404d5a3736b41baf665bee5d4c65afa6d53300a4554670270c333a4",
+        "hash": "0x347db4b718759816e4ee288506169d0b70a538be04dc04595455677301f7aa4a"
+      }
+    },
+    {
+      "id": "deviation-legacy-v-above-256-bits/account-0",
+      "keyId": "account-0",
+      "tx": {
+        "type": 0,
+        "chain_id": "57896044618658097711785492504343953926634992332820282019728792003956564819950",
+        "nonce": "0",
+        "gas_limit": "21000",
+        "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+        "value": "0",
+        "data": "0x",
+        "gas_price": "1"
+      },
+      "deviation": "legacy-chain-id",
+      "result": {
+        "status": "success",
+        "raw": "0xf8808001825208948ba1f109551bd432803012645ac136ddd64dba728080a1010000000000000000000000000000000000000000000000000000000000000000a081d954502f6ec7be100c4a8b5be6fa65c393b718e004f28f0caee2e79330cd32a00999706cf7b67a70f9266700d959e539020ddc868932c9432fb4dfb299bbb926",
+        "hash": "0xb607ebd88d01e543930df31cd33645e721cad6c11f17e56f723f8e07f85ccfb5"
+      }
+    },
+    {
+      "id": "deviation-legacy-v-above-256-bits/account-max",
+      "keyId": "account-max",
+      "tx": {
+        "type": 0,
+        "chain_id": "57896044618658097711785492504343953926634992332820282019728792003956564819950",
+        "nonce": "0",
+        "gas_limit": "21000",
+        "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+        "value": "0",
+        "data": "0x",
+        "gas_price": "1"
+      },
+      "deviation": "legacy-chain-id",
+      "result": {
+        "status": "success",
+        "raw": "0xf87f8001825208948ba1f109551bd432803012645ac136ddd64dba728080a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa0b6daf3bf0d1d745cba2b520fcdbe913b0381527347a0c1ed29bab6a96ecabe86a0700c5daa9dd838567a0cc3bb3f7e002763cbb654bb90fbec7aa60765ad590eb5",
+        "hash": "0xac4ed81324b856b9ef8c2a82a0ca13944bd8e27d8fdcf7e3e599bb531721e76a"
+      }
+    },
+    {
+      "id": "deviation-legacy-v-above-256-bits/legal-account-1",
+      "keyId": "legal-account-1",
+      "tx": {
+        "type": 0,
+        "chain_id": "57896044618658097711785492504343953926634992332820282019728792003956564819950",
+        "nonce": "0",
+        "gas_limit": "21000",
+        "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+        "value": "0",
+        "data": "0x",
+        "gas_price": "1"
+      },
+      "deviation": "legacy-chain-id",
+      "result": {
+        "status": "success",
+        "raw": "0xf8808001825208948ba1f109551bd432803012645ac136ddd64dba728080a1010000000000000000000000000000000000000000000000000000000000000000a0c6c6bc053500c9ee30a2dd44002299f4c1ce46746726f7acc7808eb176673affa02de9e3c19d9e824e6fccc2d70e0ce9c550f884537fedf41bc4ef418892b0f6cb",
+        "hash": "0xf0c5239f9c50fb67c6d704a1e82a72defc31fc7bad276883320bf7aa19d1c421"
+      }
+    },
+    {
+      "id": "deviation-legacy-chain-2-255/account-0",
+      "keyId": "account-0",
+      "tx": {
+        "type": 0,
+        "chain_id": "57896044618658097711785492504343953926634992332820282019728792003956564819968",
+        "nonce": "0",
+        "gas_limit": "21000",
+        "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+        "value": "0",
+        "data": "0x",
+        "gas_price": "1"
+      },
+      "deviation": "legacy-chain-id",
+      "result": {
+        "status": "success",
+        "raw": "0xf8808001825208948ba1f109551bd432803012645ac136ddd64dba728080a1010000000000000000000000000000000000000000000000000000000000000024a0c1171d4ec093f561a92b023212e9aad5a47247cffe27bc1fd2d2d3f002ff9e17a07a38a875de0ee0b2a060e18682b10f37dd0c7b7af0c416db6da0620b4991b1a9",
+        "hash": "0xd2f375d52a409a2fbd862ea6e34c2dcd865714767ac09a20defc8059846a75ac"
+      }
+    },
+    {
+      "id": "deviation-legacy-chain-2-255/account-max",
+      "keyId": "account-max",
+      "tx": {
+        "type": 0,
+        "chain_id": "57896044618658097711785492504343953926634992332820282019728792003956564819968",
+        "nonce": "0",
+        "gas_limit": "21000",
+        "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+        "value": "0",
+        "data": "0x",
+        "gas_price": "1"
+      },
+      "deviation": "legacy-chain-id",
+      "result": {
+        "status": "success",
+        "raw": "0xf8808001825208948ba1f109551bd432803012645ac136ddd64dba728080a1010000000000000000000000000000000000000000000000000000000000000024a0213e31370efd838c229e650ab4e4c437e1f4153c2ace6088603223272c3f4bd3a001bd08517346dc383d3bdd06d969a647e65a2970ad7b0ca9d92dbaf715ac1393",
+        "hash": "0xeed53bac494819bad9a5a8d2fc2a6fca20dbdba4ea2557ea704113960239086f"
+      }
+    },
+    {
+      "id": "deviation-legacy-chain-2-255/legal-account-1",
+      "keyId": "legal-account-1",
+      "tx": {
+        "type": 0,
+        "chain_id": "57896044618658097711785492504343953926634992332820282019728792003956564819968",
+        "nonce": "0",
+        "gas_limit": "21000",
+        "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+        "value": "0",
+        "data": "0x",
+        "gas_price": "1"
+      },
+      "deviation": "legacy-chain-id",
+      "result": {
+        "status": "success",
+        "raw": "0xf8808001825208948ba1f109551bd432803012645ac136ddd64dba728080a1010000000000000000000000000000000000000000000000000000000000000023a0e1318214093daab70c526116ed7b6325e95038fcbf2ed7869d62060d345c74cba045f3d9e66e98a55645ff432a8ba5cedbe1e9877227d564ac6163a75895329d42",
+        "hash": "0x2a418761a04036f559a76843a46d39d70b473248a002384d51cb6beccee97ebe"
+      }
+    },
+    {
+      "id": "eip1559-chain-max-u256/account-0",
+      "keyId": "account-0",
+      "tx": {
+        "type": 2,
+        "chain_id": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+        "nonce": "0",
+        "gas_limit": "21000",
+        "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+        "value": "0",
+        "data": "0x",
+        "max_fee_per_gas": "2",
+        "max_priority_fee_per_gas": "1"
+      },
+      "result": {
+        "status": "success",
+        "raw": "0x02f882a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff800102825208948ba1f109551bd432803012645ac136ddd64dba728080c080a0a2b43316615c508328ed72879b577c5c093d9f58e1e8c93c04ba3ac63c8ad9dda0643e51bc584d0d0f3f1accc6500567f6f95bfe341ed65aa84dc449bfafc8f899",
+        "hash": "0xb428e25385eca90997a3b28f08e5adb17d84c9a0354b991701e98f98a329b1d0"
+      }
+    },
+    {
+      "id": "eip1559-chain-max-u256/account-max",
+      "keyId": "account-max",
+      "tx": {
+        "type": 2,
+        "chain_id": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+        "nonce": "0",
+        "gas_limit": "21000",
+        "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+        "value": "0",
+        "data": "0x",
+        "max_fee_per_gas": "2",
+        "max_priority_fee_per_gas": "1"
+      },
+      "result": {
+        "status": "success",
+        "raw": "0x02f882a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff800102825208948ba1f109551bd432803012645ac136ddd64dba728080c001a0f6dbe38317fcfa62974e7735792845f3b343d041582eeecbed9c3ecfb44227e2a033c251c5914b64a0880f10e12e48bbbd60bcee16556ccae3b9f42e7dcaa5956d",
+        "hash": "0x803615bc575fa79b9510d28b7c27f64749298d239ed0ca49b4e714b3134f52f8"
+      }
+    },
+    {
+      "id": "eip1559-chain-max-u256/legal-account-1",
+      "keyId": "legal-account-1",
+      "tx": {
+        "type": 2,
+        "chain_id": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+        "nonce": "0",
+        "gas_limit": "21000",
+        "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+        "value": "0",
+        "data": "0x",
+        "max_fee_per_gas": "2",
+        "max_priority_fee_per_gas": "1"
+      },
+      "result": {
+        "status": "success",
+        "raw": "0x02f882a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff800102825208948ba1f109551bd432803012645ac136ddd64dba728080c001a02dda6874ffc48ec2579c8cd70dc90abb61208fa2c847f87bfbcefc55cf565230a03ca03bac47b8216251b5ab9217decd767c6eaf8f5ab429fbb62a4694b5a4768c",
+        "hash": "0xaaf4b815e3fe35a76aa0fe9a43b4d61c64a99be0ad135eaa667f2ab43e93ff36"
+      }
+    },
+    {
+      "id": "error-eip1559-chain-2-256/account-0",
+      "keyId": "account-0",
+      "tx": {
+        "type": 2,
+        "chain_id": "115792089237316195423570985008687907853269984665640564039457584007913129639936",
+        "nonce": "0",
+        "gas_limit": "21000",
+        "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+        "value": "0",
+        "data": "0x",
+        "max_fee_per_gas": "2",
+        "max_priority_fee_per_gas": "1"
+      },
+      "result": {
+        "status": "error",
+        "message": "value too large"
+      }
+    },
+    {
+      "id": "error-eip1559-chain-2-256/account-max",
+      "keyId": "account-max",
+      "tx": {
+        "type": 2,
+        "chain_id": "115792089237316195423570985008687907853269984665640564039457584007913129639936",
+        "nonce": "0",
+        "gas_limit": "21000",
+        "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+        "value": "0",
+        "data": "0x",
+        "max_fee_per_gas": "2",
+        "max_priority_fee_per_gas": "1"
+      },
+      "result": {
+        "status": "error",
+        "message": "value too large"
+      }
+    },
+    {
+      "id": "error-eip1559-chain-2-256/legal-account-1",
+      "keyId": "legal-account-1",
+      "tx": {
+        "type": 2,
+        "chain_id": "115792089237316195423570985008687907853269984665640564039457584007913129639936",
+        "nonce": "0",
+        "gas_limit": "21000",
+        "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+        "value": "0",
+        "data": "0x",
+        "max_fee_per_gas": "2",
+        "max_priority_fee_per_gas": "1"
+      },
+      "result": {
+        "status": "error",
+        "message": "value too large"
+      }
+    },
+    {
       "id": "error-priority-above-max/account-0",
       "keyId": "account-0",
       "tx": {
@@ -4607,6 +5075,162 @@
       }
     },
     {
+      "id": "deviation-bool-null/account-0",
+      "keyId": "account-0",
+      "typed_data": {
+        "domain": {
+          "name": "D"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "v",
+              "type": "bool"
+            }
+          ]
+        },
+        "message": {
+          "v": null
+        }
+      },
+      "deviation": "bool-strict",
+      "result": {
+        "status": "success",
+        "signature": "0x7a37e39f6d40cd8605ecbff290e9108b06b1ca3a53bb24bf907cf353732627f346f1426aea38509ccf5c5f6c8667d7a07773fd033f2f3fb1efefc8884c8406a31c",
+        "hash": "0x9365a5a0f4be192de0cf6a377f0b28accc07842a4ba634e7f8f24a15e2ec4d79"
+      }
+    },
+    {
+      "id": "deviation-bool-null/account-max",
+      "keyId": "account-max",
+      "typed_data": {
+        "domain": {
+          "name": "D"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "v",
+              "type": "bool"
+            }
+          ]
+        },
+        "message": {
+          "v": null
+        }
+      },
+      "deviation": "bool-strict",
+      "result": {
+        "status": "success",
+        "signature": "0xb228c58584ebdcdcb9fd5565752bc79be7290386c029e1d5da1d4448d19d2ae561045d52a7ca935219c1d203108b10e29c117f7a0d7cbc5e085ff5a71990383e1b",
+        "hash": "0x9365a5a0f4be192de0cf6a377f0b28accc07842a4ba634e7f8f24a15e2ec4d79"
+      }
+    },
+    {
+      "id": "deviation-bool-null/legal-account-1",
+      "keyId": "legal-account-1",
+      "typed_data": {
+        "domain": {
+          "name": "D"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "v",
+              "type": "bool"
+            }
+          ]
+        },
+        "message": {
+          "v": null
+        }
+      },
+      "deviation": "bool-strict",
+      "result": {
+        "status": "success",
+        "signature": "0x026460a3de4d36ea7133008593a4555f920f814350dbe45f09dafb5c46ea537751904625183c40b93eb9e5543d9fe3c772733d878e4d6540dbce7e4edf47ae6a1b",
+        "hash": "0x9365a5a0f4be192de0cf6a377f0b28accc07842a4ba634e7f8f24a15e2ec4d79"
+      }
+    },
+    {
+      "id": "deviation-bool-string-zero/account-0",
+      "keyId": "account-0",
+      "typed_data": {
+        "domain": {
+          "name": "D"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "v",
+              "type": "bool"
+            }
+          ]
+        },
+        "message": {
+          "v": "0"
+        }
+      },
+      "deviation": "bool-strict",
+      "result": {
+        "status": "success",
+        "signature": "0xce30865dd22a26f471c2b17a55a904245998b031f2590c94b950107f0136f6154c1525e00e7296f249a2b2305ab7d83cadfc973f0dda96f793956170af37a3911c",
+        "hash": "0x345cacebba6deaefce3ddea01ab6ed38f993cdf2e67ddde9dc4d2fc613cd7be2"
+      }
+    },
+    {
+      "id": "deviation-bool-string-zero/account-max",
+      "keyId": "account-max",
+      "typed_data": {
+        "domain": {
+          "name": "D"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "v",
+              "type": "bool"
+            }
+          ]
+        },
+        "message": {
+          "v": "0"
+        }
+      },
+      "deviation": "bool-strict",
+      "result": {
+        "status": "success",
+        "signature": "0x2554d6506374fa218a041c171043e42d8587a69cd2f0ee4d3674cac97324a8292e2c177e6383ac7b0c55b17a5c798491b1458f1217675878c6db5fc90fc9c1501b",
+        "hash": "0x345cacebba6deaefce3ddea01ab6ed38f993cdf2e67ddde9dc4d2fc613cd7be2"
+      }
+    },
+    {
+      "id": "deviation-bool-string-zero/legal-account-1",
+      "keyId": "legal-account-1",
+      "typed_data": {
+        "domain": {
+          "name": "D"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "v",
+              "type": "bool"
+            }
+          ]
+        },
+        "message": {
+          "v": "0"
+        }
+      },
+      "deviation": "bool-strict",
+      "result": {
+        "status": "success",
+        "signature": "0x9efa0e9328f1b755e6659f7f8e2e22c4504440a030738e3da3a918ad7c84b92a7bb499a104a818f9ba40ce9b482f52bb4548c0a9dc9bfef1e466d0a91db6dd1d1c",
+        "hash": "0x345cacebba6deaefce3ddea01ab6ed38f993cdf2e67ddde9dc4d2fc613cd7be2"
+      }
+    },
+    {
       "id": "deviation-quantity-lone-minus/account-0",
       "keyId": "account-0",
       "typed_data": {
@@ -5495,6 +6119,354 @@
         "status": "success",
         "signature": "0x0d57907f163c378cc21ac6df1a6c96d97fa2406df5d4e2309fb267e62ca8cb2f7626748016084b7c404ef93f33a8743e92342ffc1933707b34d0392046b1f78f1c",
         "hash": "0xcd0e7e69028ec4045130a80c70f2d028f789eb1239fedcf9a89ce9cf46b3a0f2"
+      }
+    },
+    {
+      "id": "address-uppercase/account-0",
+      "keyId": "account-0",
+      "typed_data": {
+        "domain": {
+          "name": "A"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "v",
+              "type": "address"
+            }
+          ]
+        },
+        "message": {
+          "v": "0x8BA1F109551BD432803012645AC136DDD64DBA72"
+        }
+      },
+      "result": {
+        "status": "success",
+        "signature": "0x8217aa308e15669d1102d00062159b746250be5b2f256bc128bcec837f360ad901d6c9633383dced221881fd2616e2db175627b0ef506ee222c6d1b3c5cc3c5a1c",
+        "hash": "0x9e8317e09405ca8e33f4d60bd853e487fb6358226131f06d41cc80bbe536dc01"
+      }
+    },
+    {
+      "id": "address-uppercase/account-max",
+      "keyId": "account-max",
+      "typed_data": {
+        "domain": {
+          "name": "A"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "v",
+              "type": "address"
+            }
+          ]
+        },
+        "message": {
+          "v": "0x8BA1F109551BD432803012645AC136DDD64DBA72"
+        }
+      },
+      "result": {
+        "status": "success",
+        "signature": "0x4f599db7032ba40d98394b8104cd2ce5d1dc19d5019b974b1c7434760f1fdced6544b0695427f186c480b308dd2e7b9a16f63980d00f53b999495bb5d763e22b1b",
+        "hash": "0x9e8317e09405ca8e33f4d60bd853e487fb6358226131f06d41cc80bbe536dc01"
+      }
+    },
+    {
+      "id": "address-uppercase/legal-account-1",
+      "keyId": "legal-account-1",
+      "typed_data": {
+        "domain": {
+          "name": "A"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "v",
+              "type": "address"
+            }
+          ]
+        },
+        "message": {
+          "v": "0x8BA1F109551BD432803012645AC136DDD64DBA72"
+        }
+      },
+      "result": {
+        "status": "success",
+        "signature": "0x34157df7c1dfe6fefa29aa2c9e4fedf25e9e554c27d76c112b4fa346f207185b25535a360cfb778a5e5be9342c2ce7172d8c3e22883a3e7b0ac18837035204b21b",
+        "hash": "0x9e8317e09405ca8e33f4d60bd853e487fb6358226131f06d41cc80bbe536dc01"
+      }
+    },
+    {
+      "id": "domain-unknown-key-null-skipped/account-0",
+      "keyId": "account-0",
+      "typed_data": {
+        "domain": {
+          "name": "N",
+          "foo": null
+        },
+        "types": {
+          "M": [
+            {
+              "name": "v",
+              "type": "uint8"
+            }
+          ]
+        },
+        "message": {
+          "v": 1
+        }
+      },
+      "result": {
+        "status": "success",
+        "signature": "0x1f1615d39e298314c01a059251824038f1c5b8401717946d0b0e1e876f6cf993596f0f83ea095578c61d186d97db2552e207e2502c586ecbf3301d6924e9df5c1b",
+        "hash": "0xd50adc5a5257502c1b8226f45be924b63e3b285e9416f2b36301a3ef483d323d"
+      }
+    },
+    {
+      "id": "domain-unknown-key-null-skipped/account-max",
+      "keyId": "account-max",
+      "typed_data": {
+        "domain": {
+          "name": "N",
+          "foo": null
+        },
+        "types": {
+          "M": [
+            {
+              "name": "v",
+              "type": "uint8"
+            }
+          ]
+        },
+        "message": {
+          "v": 1
+        }
+      },
+      "result": {
+        "status": "success",
+        "signature": "0x6214f906531f5b63bcad2d79b44e05f52ac6981faa989b37e9000e17bda99ffb137a6aa33a5246ec79810bad121cae9f8f176e2c7d55bd13f6c89338e4e35a4d1b",
+        "hash": "0xd50adc5a5257502c1b8226f45be924b63e3b285e9416f2b36301a3ef483d323d"
+      }
+    },
+    {
+      "id": "domain-unknown-key-null-skipped/legal-account-1",
+      "keyId": "legal-account-1",
+      "typed_data": {
+        "domain": {
+          "name": "N",
+          "foo": null
+        },
+        "types": {
+          "M": [
+            {
+              "name": "v",
+              "type": "uint8"
+            }
+          ]
+        },
+        "message": {
+          "v": 1
+        }
+      },
+      "result": {
+        "status": "success",
+        "signature": "0xb04f8080af32fb20a258dd0e48de293e97291035ae01c83b26a96e19d188c65f38184fbcf37372384bfee8a1066a25790119e10510eebc3639288ffa30718c461b",
+        "hash": "0xd50adc5a5257502c1b8226f45be924b63e3b285e9416f2b36301a3ef483d323d"
+      }
+    },
+    {
+      "id": "unreachable-cycle-accepted/account-0",
+      "keyId": "account-0",
+      "typed_data": {
+        "domain": {
+          "name": "C"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "v",
+              "type": "uint8"
+            }
+          ],
+          "A": [
+            {
+              "name": "b",
+              "type": "B"
+            }
+          ],
+          "B": [
+            {
+              "name": "a",
+              "type": "A"
+            }
+          ]
+        },
+        "message": {
+          "v": 1
+        }
+      },
+      "result": {
+        "status": "success",
+        "signature": "0x764ca16c53983ee88c673242f195b48e08c7e84830e58b4faf5f23a43690c3807c128caa50170aaaa3ea68373daecd738952c4cfe329065c3be25bc499df81ad1c",
+        "hash": "0x413dbacf1361f6d73daa2b63955892911ceb2b080aa39853b3b751b2144e6181"
+      }
+    },
+    {
+      "id": "unreachable-cycle-accepted/account-max",
+      "keyId": "account-max",
+      "typed_data": {
+        "domain": {
+          "name": "C"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "v",
+              "type": "uint8"
+            }
+          ],
+          "A": [
+            {
+              "name": "b",
+              "type": "B"
+            }
+          ],
+          "B": [
+            {
+              "name": "a",
+              "type": "A"
+            }
+          ]
+        },
+        "message": {
+          "v": 1
+        }
+      },
+      "result": {
+        "status": "success",
+        "signature": "0x5def28c7c61b75b1bec6786c28ebf620a926ff9a9e82c9f7da8068e1419c229a5df8a94d7a22fd99f37ee3b6bd5af5f3a5db9b5836cf04b95e56b8a06ef8af4f1c",
+        "hash": "0x413dbacf1361f6d73daa2b63955892911ceb2b080aa39853b3b751b2144e6181"
+      }
+    },
+    {
+      "id": "unreachable-cycle-accepted/legal-account-1",
+      "keyId": "legal-account-1",
+      "typed_data": {
+        "domain": {
+          "name": "C"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "v",
+              "type": "uint8"
+            }
+          ],
+          "A": [
+            {
+              "name": "b",
+              "type": "B"
+            }
+          ],
+          "B": [
+            {
+              "name": "a",
+              "type": "A"
+            }
+          ]
+        },
+        "message": {
+          "v": 1
+        }
+      },
+      "result": {
+        "status": "success",
+        "signature": "0x8557fce518dedb29b1da5a0c223c7a606e2e47014cd98ac9a16d0a39f06ba4b44be15e557ac9a497ea4f26fe87a9c8a7645b0ddc3ed7b79558863760395375d31c",
+        "hash": "0x413dbacf1361f6d73daa2b63955892911ceb2b080aa39853b3b751b2144e6181"
+      }
+    },
+    {
+      "id": "array-suffix-written-form/account-0",
+      "keyId": "account-0",
+      "typed_data": {
+        "domain": {
+          "name": "S"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "v",
+              "type": "uint8[02]"
+            }
+          ]
+        },
+        "message": {
+          "v": [
+            1,
+            2
+          ]
+        }
+      },
+      "result": {
+        "status": "success",
+        "signature": "0xef0b4e2d776ad3e5e596660ee3acc2388f6384842e45dbf7c3de3e21a1c9f86d177bb1324ac13cc7ee04d9f9ff9293f8d18758425cf94895430881aeb9a0ec9b1b",
+        "hash": "0x73a2b7096d5862f9a0b48813feff12df24b26b3f7627d354af2334e0f37cef72"
+      }
+    },
+    {
+      "id": "array-suffix-written-form/account-max",
+      "keyId": "account-max",
+      "typed_data": {
+        "domain": {
+          "name": "S"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "v",
+              "type": "uint8[02]"
+            }
+          ]
+        },
+        "message": {
+          "v": [
+            1,
+            2
+          ]
+        }
+      },
+      "result": {
+        "status": "success",
+        "signature": "0xf017df29505379650c1ad058e9ca89a2cfa0ceb98e09e4dc4c78e79462998670105cfefc4e0f63f287a1656e1d513d78db432876c41cc805a19bbd7c1bcc04191b",
+        "hash": "0x73a2b7096d5862f9a0b48813feff12df24b26b3f7627d354af2334e0f37cef72"
+      }
+    },
+    {
+      "id": "array-suffix-written-form/legal-account-1",
+      "keyId": "legal-account-1",
+      "typed_data": {
+        "domain": {
+          "name": "S"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "v",
+              "type": "uint8[02]"
+            }
+          ]
+        },
+        "message": {
+          "v": [
+            1,
+            2
+          ]
+        }
+      },
+      "result": {
+        "status": "success",
+        "signature": "0x1b573e357978ca55e5e2e3339bd8bc8b0d6666d2e4fab903741d907d36ffe7964702ac9d21a2dcfd03a34598c54cedfe4cf3751c18a156282bb2c8fba81cd3fb1b",
+        "hash": "0x73a2b7096d5862f9a0b48813feff12df24b26b3f7627d354af2334e0f37cef72"
       }
     },
     {
@@ -6469,6 +7441,186 @@
         "signature": "0xa8f6e7e67378e352cc6f72f8f965d662bf2aa236b3166f01a8e7fbd7c07570d64d97dcdfde587b3d47f2d3dfde0b6a8d5088687e482cd9dce6bc5d32f58e94811c",
         "owner": "0x6f0937fb9522f1a35CFD335491bbB553Eea2BC88",
         "socAddress": "0x6e3bf930763048175dda304df1f937c3363c0b89f2c72575fbc08921f61fdd12"
+      }
+    },
+    {
+      "id": "span-zero-means-length/account-0",
+      "keyId": "account-0",
+      "identifier": "0x6666666666666666666666666666666666666666666666666666666666666666",
+      "payload": "0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+      "span": "0",
+      "result": {
+        "status": "success",
+        "span": "40",
+        "chunkAddress": "0x9edee480f7440374ba7d2c5cc024d29016e04346d6ce0eb2463f8edd34255775",
+        "signature": "0x6ec8030637e4a987ee0d88c2b9de2c0ab0d5b2de9e9ba5b37eeec6908b7bb72b38528cbb5c996a329ca98a2c7588ed07dae09bd0744ccea5b41c2908f6cf09e41b",
+        "owner": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+        "socAddress": "0xea1884fc97afa8d04c61cc001b45593d8b5e4c67918900bc7f9c7c682e65cf30"
+      }
+    },
+    {
+      "id": "span-zero-means-length/account-max",
+      "keyId": "account-max",
+      "identifier": "0x6666666666666666666666666666666666666666666666666666666666666666",
+      "payload": "0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+      "span": "0",
+      "result": {
+        "status": "success",
+        "span": "40",
+        "chunkAddress": "0x9edee480f7440374ba7d2c5cc024d29016e04346d6ce0eb2463f8edd34255775",
+        "signature": "0x910b149667762abed1cfd49079968d9623f7964e7eb6195be7b4a9b11eb7b60356ae2b8c0c736b3bce30e7470ef3516026ff0162c2cf9ef16797421ef55eb83a1c",
+        "owner": "0x12DcC9F4feEa216Da086A8afaFCDd4438Bf7E751",
+        "socAddress": "0xa561fd899c29fa5552b1003fddeb20b53fc6c3e59170e404ecfc581c5365e040"
+      }
+    },
+    {
+      "id": "span-zero-means-length/legal-account-1",
+      "keyId": "legal-account-1",
+      "identifier": "0x6666666666666666666666666666666666666666666666666666666666666666",
+      "payload": "0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+      "span": "0",
+      "result": {
+        "status": "success",
+        "span": "40",
+        "chunkAddress": "0x9edee480f7440374ba7d2c5cc024d29016e04346d6ce0eb2463f8edd34255775",
+        "signature": "0xffc2380fa7535db019a67ec59ab8f776fad00ca206f4b62b7856e4cf8a6633536769a27a800347a73a816816e3ad4eea24c9ecaa8c686c886ee09e39bb970eb21c",
+        "owner": "0x44f649fc8Dc77694E6ABEF1aA966983Dd6ED7C64",
+        "socAddress": "0x61a56d40d7f5b22bc18324aa2084955f5fe37b5953bf5b57710ac3230d165bc7"
+      }
+    },
+    {
+      "id": "span-zero-means-length/bee-wallet",
+      "keyId": "bee-wallet",
+      "identifier": "0x6666666666666666666666666666666666666666666666666666666666666666",
+      "payload": "0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+      "span": "0",
+      "result": {
+        "status": "success",
+        "span": "40",
+        "chunkAddress": "0x9edee480f7440374ba7d2c5cc024d29016e04346d6ce0eb2463f8edd34255775",
+        "signature": "0xa76bf243fa413a170785d43e5c891b701bbc05e3ea497562069117b50295b2966a1c66c91c163e6194e0a43b893abe6ba10abf2911cdf4f8d32b7851031260121b",
+        "owner": "0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0",
+        "socAddress": "0x6c11d335dc02d17ffb3b86eaa4dd124e9ceb3d6cb36fc535ad086e3decc19766"
+      }
+    },
+    {
+      "id": "span-zero-means-length/publisher-0",
+      "keyId": "publisher-0",
+      "identifier": "0x6666666666666666666666666666666666666666666666666666666666666666",
+      "payload": "0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+      "span": "0",
+      "result": {
+        "status": "success",
+        "span": "40",
+        "chunkAddress": "0x9edee480f7440374ba7d2c5cc024d29016e04346d6ce0eb2463f8edd34255775",
+        "signature": "0xc8cc1b5edc63d0cad7cea4329ad6768418c1f54272d3da79778034c2657127f72730aba586094e93d07cdc614610d674e40dcabb1b2c85bf3a4b2ce3eb21eee11b",
+        "owner": "0xA274614c1D3425568Fd100B30322287c86085220",
+        "socAddress": "0xe1800f3ad9f80fa4de8d89b934b8313424d47b10d806c9edcfef855003d03666"
+      }
+    },
+    {
+      "id": "span-zero-means-length/publisher-7",
+      "keyId": "publisher-7",
+      "identifier": "0x6666666666666666666666666666666666666666666666666666666666666666",
+      "payload": "0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+      "span": "0",
+      "result": {
+        "status": "success",
+        "span": "40",
+        "chunkAddress": "0x9edee480f7440374ba7d2c5cc024d29016e04346d6ce0eb2463f8edd34255775",
+        "signature": "0xb1e9b3a8ad3569a09e4a0724beac47a14be066ba9efe6ac389ce17cfda6855896323effce7050c438bd8981b46e85214e39590b6052620cd95a9317d2330f69f1b",
+        "owner": "0x6f0937fb9522f1a35CFD335491bbB553Eea2BC88",
+        "socAddress": "0x065ce023f9c0f02396e7d49f465443c91a2800e4d1005654e61d491f9de852cd"
+      }
+    },
+    {
+      "id": "span-max/account-0",
+      "keyId": "account-0",
+      "identifier": "0x7777777777777777777777777777777777777777777777777777777777777777",
+      "payload": "0x01",
+      "span": "18446744073709551615",
+      "result": {
+        "status": "success",
+        "span": "18446744073709551615",
+        "chunkAddress": "0xfc9d1df3bd4337a865a89d3fb21acb51e4802783004944f557930e4d5e09d8c6",
+        "signature": "0x9a539eae5eaa1f488865c5af6d481cf72f75eccb08ac571bfd120dc32c2ead676b8f6b900a0a8ebf81b4d4e11af460a461dd327fafd926c4524c611363fd55551b",
+        "owner": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+        "socAddress": "0xb46a273d95d8b2a83a42bbe381f5bbe84760d098fc7d7c8ab88b9da10fa55390"
+      }
+    },
+    {
+      "id": "span-max/account-max",
+      "keyId": "account-max",
+      "identifier": "0x7777777777777777777777777777777777777777777777777777777777777777",
+      "payload": "0x01",
+      "span": "18446744073709551615",
+      "result": {
+        "status": "success",
+        "span": "18446744073709551615",
+        "chunkAddress": "0xfc9d1df3bd4337a865a89d3fb21acb51e4802783004944f557930e4d5e09d8c6",
+        "signature": "0xd9c358aa39465b0ce0a1a70791d783d0076e3994253dfa67dff5d9bd2488b5984827601a46611c5b12d9f2179c2e8224937c86941fba54c11d2e1e6b00712c6b1b",
+        "owner": "0x12DcC9F4feEa216Da086A8afaFCDd4438Bf7E751",
+        "socAddress": "0x88af2b3f2ef1fb54abb25b8a4f77b7dc48d8d354d19187eddc25daf13f6e71ef"
+      }
+    },
+    {
+      "id": "span-max/legal-account-1",
+      "keyId": "legal-account-1",
+      "identifier": "0x7777777777777777777777777777777777777777777777777777777777777777",
+      "payload": "0x01",
+      "span": "18446744073709551615",
+      "result": {
+        "status": "success",
+        "span": "18446744073709551615",
+        "chunkAddress": "0xfc9d1df3bd4337a865a89d3fb21acb51e4802783004944f557930e4d5e09d8c6",
+        "signature": "0x0cfc8e6841dadfd0ee5caff58bc773a3bc3c266c6ec77c29f52cb72419bff7163bcb82ddff528186ceb6bbdb8174069372744f5862eee157bb056597494880311b",
+        "owner": "0x44f649fc8Dc77694E6ABEF1aA966983Dd6ED7C64",
+        "socAddress": "0xdc6014ecc7a38a0723e88838481509cadaa64b8003e05923fba920f0a049ec28"
+      }
+    },
+    {
+      "id": "span-max/bee-wallet",
+      "keyId": "bee-wallet",
+      "identifier": "0x7777777777777777777777777777777777777777777777777777777777777777",
+      "payload": "0x01",
+      "span": "18446744073709551615",
+      "result": {
+        "status": "success",
+        "span": "18446744073709551615",
+        "chunkAddress": "0xfc9d1df3bd4337a865a89d3fb21acb51e4802783004944f557930e4d5e09d8c6",
+        "signature": "0xb05de98f0e2fa531940f0b75cf10a4c7a80a8ac43cd42007776cc70d5d47215f773dae0eed02f94eb18cc3ff075d802a202d3b9860689f627f3233b9bf007ae31b",
+        "owner": "0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0",
+        "socAddress": "0x48e387d366e326632ddbbb0f7473e416099901348c26ff7fa9f99e428170c0dc"
+      }
+    },
+    {
+      "id": "span-max/publisher-0",
+      "keyId": "publisher-0",
+      "identifier": "0x7777777777777777777777777777777777777777777777777777777777777777",
+      "payload": "0x01",
+      "span": "18446744073709551615",
+      "result": {
+        "status": "success",
+        "span": "18446744073709551615",
+        "chunkAddress": "0xfc9d1df3bd4337a865a89d3fb21acb51e4802783004944f557930e4d5e09d8c6",
+        "signature": "0xb265e1e2c1643c86bd6c182d95e9c56dffdbdf626a7e7dbede91eccf9348159f227a7103a4909013d2079162cbd2714ab892094d6a02a4aefe22cd53a4822ef41b",
+        "owner": "0xA274614c1D3425568Fd100B30322287c86085220",
+        "socAddress": "0x00290da47de8ae0324046bb1c91e93f81d185b70427c6b858b7ec0ce67015b05"
+      }
+    },
+    {
+      "id": "span-max/publisher-7",
+      "keyId": "publisher-7",
+      "identifier": "0x7777777777777777777777777777777777777777777777777777777777777777",
+      "payload": "0x01",
+      "span": "18446744073709551615",
+      "result": {
+        "status": "success",
+        "span": "18446744073709551615",
+        "chunkAddress": "0xfc9d1df3bd4337a865a89d3fb21acb51e4802783004944f557930e4d5e09d8c6",
+        "signature": "0x48ca8c2d3cfe8c9292179a1ad368fb9bb2b01a469cb4561797814534ea6095507707710c27ddf5c7105b88e0ec5e3db0ea0e98855d6c4bc48437d51e2d2502171c",
+        "owner": "0x6f0937fb9522f1a35CFD335491bbB553Eea2BC88",
+        "socAddress": "0x404682e3402798df85be79c0e82a221f7499a67590b7b63dbb85db72e911da95"
       }
     }
   ]
