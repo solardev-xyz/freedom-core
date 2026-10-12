@@ -40,11 +40,12 @@ Naming moves into a new logic crate, `fc-naming`, in two parts:
 |---|---|---|
 | `normalize` | ENSIP-15 through `ens-normalize`; JavaScript's exact `trim` (Rust's `str::trim` differs on U+FEFF and U+0085); Tezos trim-and-lowercase | `fastNormalize`, ethers' `ensNormalize` |
 | `ens` | namehash, `dns_encode` (labels up to 255 bytes; the NameNFT paths don't DNS-encode), ENSIP-11 coin types | ethers' `namehash`/`dnsEncode`, `ensCoinType` |
-| `abi` | ethers v6's strict decoder:<ul><li>whole-decode failures: reads past the end, the 1,024× read cap, an offset word above 2^53;</li><li>deferred per-field errors, raised only when the field is read: invalid UTF-8, an address with high bits set, a length above 2^53;</li><li>offsets relative to their tuple; unchecked padding.</li></ul> | `AbiCoder.defaultAbiCoder()` |
+| `abi` | ethers v6's strict decoder:<ul><li>whole-decode failures: reads past the end, the 1,024× read cap, an offset word above 2^53 − 1;</li><li>deferred per-field errors, raised only when the field is read: invalid UTF-8, an address with high bits set, a length above 2^53 − 1;</li><li>offsets relative to their tuple; unchecked padding.</li></ul> | `AbiCoder.defaultAbiCoder()` |
 | `ur` | Universal Resolver and NameNFT calls, `decodeFunctionResult`'s whole-word rule, revert classification by selector, `OffchainLookup` as the pinned RPC path decodes it, callbacks, `ReverseAddressMismatch`, the reverse-outcome codec, name systems by suffix | `ens-resolver.js` |
 | `contenthash` | the decoder in the JS's rule order: CIDv0 kept, multihash code unchecked, fall-through between rules, JavaScript's 32-bit varint arithmetic | `parseContentHashBytes`, `cid-utils.js` |
 | `ccip` | template expansion, the gateway URL policy on WHATWG hosts, POST bodies, answer parsing (lossy UTF-8, then JSON, then `isHexData`) | `ccip-fetch.js` |
-| `tezos` | `ScriptExpr` (BLAKE2b and base58check), `isTezosDomainName`, Micheline walking, record maps, metadata, published URIs (with `decodeURIComponent`'s exact failure rule) | `tezos-domains-resolver.js` |
+| `tezos` | `ScriptExpr` (BLAKE2b and base58check), `isTezosDomainName`, Micheline walking (iterative, any depth), record maps, metadata, published URIs (with `decodeURIComponent`'s exact failure rule) | `tezos-domains-resolver.js` |
+| `jsjson` | JSON as V8's `JSON.parse` reads it:<ul><li>numbers are doubles (`1e400` is `Infinity`; integers above 2^53 lose precision);</li><li>escaped lone surrogates are accepted (and become U+FFFD in Rust strings, as the WHATWG URL parser would make them);</li><li>nesting depth is limited only by the input size;</li><li>a duplicate key keeps its first position and its last value;</li><li>JavaScript's property order (integer keys first).</li></ul>Every JSON the codecs parse goes through it. | `JSON.parse` |
 
 **Dependencies:**
 - **`ens-normalize` =0.1.1** (MIT; only `serde` and `serde_json`): a Rust port of the reference normalizer, built from the same spec data as the JS library Freedom ships (spec 1.11.1, Unicode 17.0.0, CLDR 47).
@@ -62,14 +63,15 @@ All pass `cargo deny`.
 |---|---|---|
 | ENS normalization | a name whose lowercase form matches `^[a-z0-9-.]+$` skips ENSIP-15 (`fastNormalize`), and ethers' `namehash` refuses it later | every name is validated up front. The same names resolve and fail. Only names ethers refuses later (`ab--cd.eth`, `xn--x.eth`, `foo..eth`, `.eth`, `eth.`) get the normalizer's message instead of ethers'. Every other refusal message is the JS's own |
 | Input size | none for ENS names | 1,024 bytes, before and after normalization |
-| Tezos metadata errors | `invalid Tezos Domains metadata: <V8's JSON.parse message>` | the same prefix; the message comes from `serde_json`. `Invalid Micheline bytes value` is unchanged |
-| Tezos expiry | `Date.parse`, which also takes non-ISO forms | the ECMAScript ISO format, which is what the Tezos RPC returns; anything else counts as not expired, as an unparseable date does today |
+| Tezos metadata errors | `invalid Tezos Domains metadata: <V8's JSON.parse message>` | the same prefix and the same accept/refuse decision (`jsjson`); only the message after the prefix is the core's own. `Invalid Micheline bytes value` is unchanged |
+| JSON lone surrogates | an escaped lone surrogate (`"\ud800"`) stays in the JS string | it becomes U+FFFD. A URL field is unaffected (the WHATWG URL parser makes the same replacement), and a gateway's `data` is refused either way. Only a non-URL metadata string's stored value differs; a vector marks it |
+| Micheline depth | `flattenPairLeaves` recurses and throws a stack overflow somewhere past several thousand nested pairs | walked iteratively at any depth, so a storage V8 couldn't walk (past its stack) is walked; real storage nests a handful of levels |
 
 **Kept on purpose:** both `OffchainLookup` decoders exist today, and they differ in both directions.
 - The pinned RPC path uses the strict `AbiCoder`, which accepts nonzero padding after the callback selector.
 - ethers' built-in parser, on the Myotis and Colibri paths, rejects that padding but tolerates other malformed layouts.
 
-`ur` implements the strict one, the RPC path's. Whether the verified paths keep the other one is for design 0004 to decide. Either way the vectors list every encoding on which the two differ.
+`ur` implements the strict one, the RPC path's. Whether the verified paths keep the other one is for design 0004 to decide. Either way the vectors record both decoders on a set of malformed layouts, so every difference among them is pinned.
 
 ### Codec vectors
 
@@ -80,8 +82,11 @@ All pass `cargo deny`.
 - The cases cover:
   - names, with the stage that refuses each one;
   - coin types and contenthash, including the 32-bit truncation that turns `0xe3010155128180808010ab` into `ipfs://bafkrfamaqcabbky`;
-  - every ABI rule;
+  - the ABI rules: whole versus deferred failures, offsets, an aliased string, the 1,024× read cap at its boundary;
   - Universal Resolver results, reverts, calls and callbacks;
+  - `OffchainLookup` layouts through both the strict `AbiCoder` and ethers' built-in parser, including nonzero selector padding;
+  - the 1,024-byte name limit (a deviation vector);
+  - JSON as V8 reads it: huge numbers, lone surrogates, deep nesting, duplicate keys and property order;
   - the 13 refused gateway URLs from `ccip-fetch.test.js` plus numeric IPv4 forms and IDN hosts;
   - gateway answers;
   - the Tezos encodings, Micheline helpers and published URIs.
@@ -93,50 +98,70 @@ Rust replays every case. CI regenerates the file in `check` mode against the pin
 These decisions are fixed; design 0004 specifies the protocol that implements them.
 
 1. **Sans-I/O sessions.** A resolution is a session in the core. The core emits the requests it needs (JSON-RPC, Tezos HTTP, verified calls, gateway fetches), main performs them, and the core continues from the answers. The core opens no sockets (0001).
-2. **Main's transports.** Main performs every request through the Electron session's network stack, with today's bounds, credential rules and private-log protections. The onion gate applies to every host, RPC endpoints included.
+2. **Two kinds of transport.**
+   - **Shell HTTP:** JSON-RPC, Tezos HTTP and CCIP gateways. Main performs these through the Electron session's network stack, with today's bounds, credential, cache and custom-handler protections, and private-log rules.
+     - Today's Tor PAC proxies `.onion` hosts and sends clearnet `DIRECT`.
+     - The onion gate applies to every shell-HTTP host, RPC endpoints included: no empty or `DIRECT` route, and no `DIRECT` fallback.
+   - **Verified calls:** Myotis and Colibri, through their existing adapters, whose own networking (Myotis' P2P, Colibri's worker `fetch`) is unchanged until roadmap 3.3.
 3. **Opaque endpoint references.** The core never sees an endpoint URL, which can carry an API key. Main maps references back to today's hosts and URLs when it publishes a result.
 4. **The core owns the result cache.** Main keeps no second copy, so invalidation has one place to reach. Before committing to this, the implementation must measure cached subresource fan-out under concurrent vault work.
 5. **Parity is checked by replay.** The generator drives the pinned JS resolvers through a scripted world (requests, clock, randomness, settlement order), and Rust drives its machine through the same script.
 
 ### What design 0004 must satisfy
 
-Both Codex reviews of this design (on #22) found these. 0004 must answer every one, each with a vector where it is observable:
+Both Codex reviews of this design (on #22) found these. 0004 must answer every one, each with a replay vector where it is observable. Replay checks the requests made (endpoints, methods, params, block pinning), cancellations, cache lifetimes and the absence of unexpected I/O, not only the final result.
 
-- **Frames.**
-  - Every outgoing message, not each I/O request, must fit 0001's 1 MiB frame, so excess I/O is queued with a defined drain.
-  - Expansion and decoding budgets are reserved before allocating.
-  - Answer caps must sit above valid answers: `eth_getBlockByNumber(tag, false)` carries transaction hashes, so a large block exceeds 64 KiB. Either project the needed fields or justify the bound. Today's caps are 5 MiB (Tezos) and 4 MiB (gateways).
-- **Reference rules stated exactly.**
-  - The `direct` candidate is the first *registry* RPC endpoint, ignoring `ETH_RPC`, with its own trust flag.
-  - `resolveViaQuorum` clamps K and M from 1, but `getPinnedBlock` clamps from 2 and adjusts M to the available endpoints.
-  - Too few heads means no anchor (single-source fallback); a failed hash quorum **throws**.
-- **Deadlines.**
-  - `runQuorumLeg` puts one deadline around the whole RPC → gateway → callback sequence (5 s by default), and single-source head and hash share one too.
-  - Health classification follows today: a gateway failure doesn't quarantine the RPC endpoint.
+- **Results, exactly:**
+  - the per-kind result, trust and error schemas of today's resolvers, with key presence;
+  - present `undefined` (Tezos `ttl`, an address `error`) needs a tagged representation that main restores;
+  - today's TTLs and non-cacheable cases.
+- **Frames and budgets:**
+  - every outgoing message fits 0001's 1 MiB frame, with excess I/O queued and a defined drain;
+  - expansion and decoding budgets are reserved before allocating;
+  - aggregate bounds on retained, temporary and transport work;
+  - vault control stays responsive;
+  - answer caps sit above valid answers: `eth_getBlockByNumber(tag, false)` carries transaction hashes, so either project the needed fields or justify the bound. Today's caps are 5 MiB for Tezos and 4 MiB for gateways.
+- **The ENS orchestration, as the reference runs it:**
+  - the anchor probes every available endpoint, waits for all heads, needs at least 3, takes the upper median, and requires a hash plurality of max(M, strict majority). Too few heads means single-source fallback; a failed hash quorum throws;
+  - refreshed quarantine selection: 60 s doubling only while an entry lasts, reset on success or expiry; a gateway failure doesn't quarantine the RPC endpoint;
+  - the second wave picks endpoints the first didn't use, with wave-specific K/M;
+  - `resolveViaQuorum` clamps K/M from 1, `getPinnedBlock` from 2, plus the anchor's effective M;
+  - the `direct` candidate is the first registry endpoint (ignoring `ETH_RPC`), with its own trust flag;
+  - forward and reverse provisional rules;
+  - ENS → WNS → GNS reverse fallback with same-method forward checks;
+  - every EVM read on chain 1, the destination chain only selecting the coin type, `CHAIN_UNSUPPORTED` for WNS/GNS elsewhere.
+- **Tezos:** its own quorum, discovery isolation per endpoint, discovery and result caches, and expiry. Whether expiry parsing restricts `Date.parse` to the ISO format is a 0004 decision, with a deviation vector if it does.
+- **Deadlines:**
+  - one parent deadline per quorum leg around RPC → gateway → callback (5 s by default);
+  - single-source head and hash share one deadline;
   - NameNFT calls don't use CCIP.
-- **Generations.**
-  - Every reply and every I/O request carries the configuration generation, so main can drop an obsolete completion before publishing it, including one already in the pipe.
-  - Deduplication entries retire at the boundary.
-  - Three attempts in total.
-  - Each event invalidates what it does today: a Myotis transition keeps the anchor and provider order, and doesn't touch Tezos.
-- **Deduplication key.** The key comes from the core: normalized name, kind, destination chain, generation. Main cannot reproduce ENSIP-15. Subscriber cancellation and cleanup must be specified.
-- **Wire presence.** Results have keys present with `undefined` (Tezos `ttl`, an address `error`), which JSON can't carry. They need a tagged representation that main restores, and the vectors must record key presence.
-- **Verified answers.**
-  - A verified revert carries its provenance and proof mode, so a proved `ResolverNotFound` gets the right Colibri label.
-  - Failure answers carry bounded, redacted diagnostics. A raw RPC error message can echo a configured URL with its key, so it is never forwarded as is.
-  - Error strings that can't be reproduced are listed as deviations.
-  - A verifier keeps ownership across callbacks and retries.
-- **Timers and effects.**
-  - Deadline and idle expiry advance on the daemon's clock, without waiting for the next message, and tear the session down.
-  - A prefetch is a separately bounded effect. Today it survives any agreed-data outcome and has a 10 s timer.
-- **Deviations.** The full inventory: cache, session, I/O, endpoint and envelope budgets, monotonic cache time, and the address limit. Each gets its failure and cache behavior and a boundary vector.
+- **Security:**
+  - the CCIP sender is validated;
+  - callbacks stay on the endpoint and pinned block, or the verifier, that produced the lookup;
+  - a verified revert carries its provenance and proof mode;
+  - failure diagnostics are bounded and redacted: never a raw RPC message, which can echo a keyed URL;
+  - a verifier keeps ownership across callbacks and retries.
+- **Generations:**
+  - every reply and every I/O request carries the configuration generation (and the core process's), so main drops obsolete completions, including one already in the pipe;
+  - deduplication entries retire at the boundary;
+  - three attempts in total;
+  - each event invalidates what it does today: a Myotis transition keeps the anchor and provider order and doesn't touch Tezos.
+- **Sessions:**
+  - deduplication by a core-produced key (normalized name, kind, chain, generation), with subscriber cancellation;
+  - late and duplicate answers ignored;
+  - terminal replies cancel what is outstanding;
+  - deadline and idle expiry advance on the daemon's clock without waiting for a message;
+  - a prefetch is a separately bounded effect with today's survival rules (it survives any agreed-data outcome and has a 10 s timer).
+- **Deviations:** the full inventory (cache, session, I/O, endpoint and envelope budgets, monotonic cache time, the address limit), each with its failure and cache behavior and a boundary vector.
 
 ## Implementation steps
 
 1. **Codecs**, with the codec vectors (#23).
-2. **Design 0004**, then the replay harness, the machines and the `naming.*` methods. Release.
-3. **freedom-browser:** the resolvers become drivers of the core's sessions, and their JSON-RPC moves to the session's network stack.
-4. **Delete** the JS codec and orchestration. `cid-utils.js` stays for the browser's URL handling.
+2. **The replay harness:** the pinned resolvers in a scripted world, measuring the reference's orchestration.
+3. **Design 0004**, written from those measurements.
+4. **The machines and the `naming.*` methods**, with the replay vectors. Release.
+5. **freedom-browser:** the resolvers become drivers of the core's sessions, and their shell HTTP moves to the session's network stack.
+6. **Delete** the JS codec and orchestration. `cid-utils.js` stays for the browser's URL handling.
 
 ## Open questions
 
