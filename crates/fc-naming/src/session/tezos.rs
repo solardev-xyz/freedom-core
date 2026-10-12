@@ -77,7 +77,7 @@ async fn rpc_request(
         // Deviation `response-caps`: after the status, as `rpcRequest`
         // checks its size limit.
         Answer::Tezos { status, body }
-            if (200..300).contains(&status) && body.len() > ctx.bounds().answer_bytes =>
+            if (200..300).contains(&status) && !ctx.bounds().answer_fits(body.len()) =>
         {
             Err(Failed)
         }
@@ -852,7 +852,7 @@ pub(crate) async fn resolve(ctx: &Ctx, state: &TezosState, name: &str) -> Result
     // Cache lifetimes run on the monotonic clock; the expiry clamp reads
     // the wall clock (design 0004, monotonic-time).
     // Deviation `reply-size`: never cache what can't be replied.
-    if result.stringify().len() > ctx.bounds().reply_bytes {
+    if !ctx.bounds().reply_fits(result.stringify().len()) {
         return Ok(result);
     }
     let duration = cache_duration(&result, ctx.wall_now());

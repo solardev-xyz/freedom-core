@@ -28,7 +28,10 @@ pub struct Bounds {
     pub deadline_ms: u64,
     /// Bytes each cache may hold (`cache-bytes`).
     pub cache_bytes: usize,
-    /// Output bytes one decode may produce (`decode-budget`).
+    /// Output bytes (strings and bytes) one ABI decode of an answer may
+    /// produce (`decode-budget`). The session's decodes all take it, except
+    /// reading a revert reason or a prefetch URI: each reads one field once,
+    /// so its output is bounded by its input, which the answer cap bounds.
     pub decode_bytes: usize,
 }
 
@@ -57,6 +60,18 @@ impl Default for Bounds {
 pub const ENVELOPE_BYTES: usize = 4 * 1024;
 
 impl Bounds {
+    /// Whether an answer body of `len` bytes is within the cap
+    /// (`response-caps`): up to and including it.
+    pub fn answer_fits(&self, len: usize) -> bool {
+        len <= self.answer_bytes
+    }
+
+    /// Whether a result serialized to `len` bytes can be replied
+    /// (`reply-size`): up to and including the bound.
+    pub fn reply_fits(&self, len: usize) -> bool {
+        len <= self.reply_bytes
+    }
+
     /// Whether request payload strings, serialized, fit one message.
     pub fn fits(&self, payloads: &[&str]) -> bool {
         let size: usize = payloads
@@ -74,11 +89,15 @@ impl Bounds {
     /// characters, which keep what the renderer shows (the first 16 and
     /// last 10).
     pub fn shorten_hex(&self, hex: &str) -> String {
-        if hex.len() <= self.reply_hex {
+        // In characters, so text that isn't hex can't split one.
+        let count = hex.chars().count();
+        if count <= self.reply_hex {
             return hex.to_owned();
         }
         let half = self.reply_hex / 2;
-        format!("{}{}", &hex[..half], &hex[hex.len() - half..])
+        let head: String = hex.chars().take(half).collect();
+        let tail: String = hex.chars().skip(count - half).collect();
+        format!("{head}{tail}")
     }
 }
 
@@ -95,6 +114,26 @@ mod tests {
         assert_eq!(&short[..16], &long[..16]);
         assert_eq!(&short[short.len() - 10..], &long[long.len() - 10..]);
         assert_eq!(bounds.shorten_hex("0x12"), "0x12");
+        // Exactly at the bound it stays; one over, it is shortened.
+        let at = "a".repeat(8_192);
+        assert_eq!(bounds.shorten_hex(&at), at);
+        assert_eq!(bounds.shorten_hex(&format!("{at}b")).len(), 8_192);
+        // Not hex: no panic on a multi-byte character.
+        assert_eq!(
+            bounds.shorten_hex(&"€".repeat(9_000)).chars().count(),
+            8_192
+        );
+    }
+
+    #[test]
+    fn caps_include_their_bound() {
+        let bounds = Bounds {
+            answer_bytes: 10,
+            reply_bytes: 20,
+            ..Bounds::default()
+        };
+        assert!(bounds.answer_fits(10) && !bounds.answer_fits(11));
+        assert!(bounds.reply_fits(20) && !bounds.reply_fits(21));
     }
 
     #[test]

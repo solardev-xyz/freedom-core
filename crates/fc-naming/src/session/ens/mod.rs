@@ -294,6 +294,24 @@ impl Ctx {
         self.state.borrow().config.bounds
     }
 
+    /// An ABI decode of an answer, within the decode budget.
+    pub(crate) fn abi_decode(
+        &self,
+        kinds: &[Kind],
+        data: &[u8],
+    ) -> Result<Vec<crate::abi::Field>, crate::abi::DecodeError> {
+        crate::abi::decode_within(kinds, data, self.bounds().decode_bytes)
+    }
+
+    /// [`ur::decode_result`] within the decode budget.
+    pub(crate) fn decode_result(
+        &self,
+        kinds: &[Kind],
+        data: &[u8],
+    ) -> Result<Vec<crate::abi::Field>, ur::ResultError> {
+        ur::decode_result_within(kinds, data, self.bounds().decode_bytes)
+    }
+
     pub fn new(now: Ms, config: Config, random: Box<dyn Random>) -> Self {
         Self {
             rt: Rt::new(now),
@@ -389,7 +407,7 @@ impl Provider {
         };
         match ctx.rt.request(request).await {
             // Deviation `response-caps`: main caps answers; the core checks.
-            Answer::Rpc { body, .. } if body.len() > ctx.bounds().answer_bytes => {
+            Answer::Rpc { body, .. } if !ctx.bounds().answer_fits(body.len()) => {
                 Err(RpcError::Transport(Transport::TooLarge))
             }
             Answer::Rpc { status, body } => rpc::answer(id, method, status, &body),
@@ -461,7 +479,7 @@ pub(crate) enum Store {
 pub(crate) fn cache(ctx: &Ctx, store: Store, key: &str, result: JsValue) -> JsValue {
     // Deviation `reply-size`: a result too large to reply with is never
     // cached; the machine replies `result too large`.
-    if result.stringify().len() > ctx.bounds().reply_bytes {
+    if !ctx.bounds().reply_fits(result.stringify().len()) {
         return result;
     }
     let expires = ctx.now_f() + ttl_for(&result);

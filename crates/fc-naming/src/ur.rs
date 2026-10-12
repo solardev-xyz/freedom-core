@@ -115,10 +115,19 @@ pub enum ResultError {
 /// ethers' `Interface.decodeFunctionResult`: the data must be a whole number
 /// of words, then decodes with the strict coder. Field errors stay lazy.
 pub fn decode_result(kinds: &[Kind], data: &[u8]) -> Result<Vec<Field>, ResultError> {
+    decode_result_within(kinds, data, abi::MAX_DECODE_BYTES)
+}
+
+/// [`decode_result`] under a decode budget (deviation `decode-budget`).
+pub fn decode_result_within(
+    kinds: &[Kind],
+    data: &[u8],
+    output_limit: usize,
+) -> Result<Vec<Field>, ResultError> {
     if !data.len().is_multiple_of(32) {
         return Err(ResultError::InvalidLength);
     }
-    abi::decode(kinds, data).map_err(|_| ResultError::Undecodable)
+    abi::decode_within(kinds, data, output_limit).map_err(|_| ResultError::Undecodable)
 }
 
 /// How a Universal Resolver revert is classified, by its data's selector.

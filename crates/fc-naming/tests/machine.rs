@@ -8,7 +8,11 @@ use fc_naming::session::machine::Machine;
 use fc_naming::session::random::Mulberry32;
 
 fn machine() -> Machine {
-    let config = Config {
+    Machine::new(0, machine_config(), Box::new(Mulberry32::new(7)))
+}
+
+fn machine_config() -> Config {
+    Config {
         rpc: vec!["https://a.rpc.example".into()],
         direct: None,
         order: vec!["quorum".into()],
@@ -18,8 +22,7 @@ fn machine() -> Machine {
         prover: None,
         tezos: vec!["https://t1.tez.example".into()],
         bounds: fc_naming::session::bounds::Bounds::default(),
-    };
-    Machine::new(0, config, Box::new(Mulberry32::new(7)))
+    }
 }
 
 /// ENS events (a Myotis transition, `reset: "providers"`) retire ENS
@@ -42,4 +45,37 @@ fn ens_events_leave_tezos_lookups_shared() {
     machine.resolve_content("vitalik.eth");
     machine.poll();
     assert_eq!(machine.running(), 3);
+}
+
+/// Deviation `reply-size` holds for replies made at once too: an invalid
+/// address is echoed back, and a huge one would outgrow the frame.
+#[test]
+fn immediate_replies_obey_the_reply_size() {
+    let mut machine = machine();
+    let address = "x".repeat(600_000);
+    machine.resolve_reverse(&address, 1.0);
+    let replies = machine.take_replies();
+    assert_eq!(
+        replies[0]
+            .outcome
+            .as_ref()
+            .err()
+            .map(|e| e.message.as_str()),
+        Some("result too large")
+    );
+}
+
+/// A session needs room for its first caller: none per session admits none.
+#[test]
+fn zero_callers_per_session_admits_none() {
+    let mut config = machine_config();
+    config.bounds.callers_per_session = 0;
+    let mut machine = Machine::new(0, config, Box::new(Mulberry32::new(7)));
+    machine.resolve_content("vitalik.eth");
+    let replies = machine.take_replies();
+    assert_eq!(
+        replies[0].outcome.as_ref().err().and_then(|e| e.code),
+        Some("busy")
+    );
+    assert_eq!(machine.running(), 0);
 }

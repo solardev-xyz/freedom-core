@@ -106,6 +106,15 @@ fn with_deadline(
 
 type Resolve = Rc<dyn Fn(Rc<Ctx>, Rc<Shared>) -> Pin<Box<dyn Future<Output = Outcome>>>>;
 
+/// Deviation `reply-size`, for every reply: a result too large for one
+/// reply (an invalid input echoed back, say) becomes `result too large`.
+fn sized(outcome: Outcome, bounds: &super::bounds::Bounds) -> Outcome {
+    match outcome {
+        Ok(value) if !bounds.reply_fits(value.stringify().len()) => Err(Thrown::too_large()),
+        other => other,
+    }
+}
+
 impl Machine {
     pub fn new(now: Ms, config: Config, random: Box<dyn Random>) -> Self {
         let ctx = Rc::new(Ctx::new(now, config, random));
@@ -130,6 +139,7 @@ impl Machine {
         let caller = self.next_caller;
         self.next_caller += 1;
         let settled = self.now();
+        let outcome = sized(outcome, &self.ctx.bounds());
         self.replies.push(Reply {
             caller,
             outcome,
@@ -216,7 +226,8 @@ impl Machine {
         let bounds = self.ctx.bounds();
         let full = match self.sessions.iter().find(|s| s.key == dedup) {
             Some(session) => session.callers.len() >= bounds.callers_per_session,
-            None => self.sessions.len() >= bounds.sessions,
+            // Starting one needs room for its first caller too.
+            None => self.sessions.len() >= bounds.sessions || bounds.callers_per_session == 0,
         };
         full.then(|| self.reply(Err(Thrown::protocol("busy"))))
     }
@@ -327,7 +338,7 @@ impl Machine {
     pub fn poll(&mut self) {
         self.shared.poll();
         let now = self.now();
-        let reply_bytes = self.ctx.bounds().reply_bytes;
+        let bounds = self.ctx.bounds();
         let mut finished = Vec::new();
         for (i, session) in self.sessions.iter_mut().enumerate() {
             if session.task.poll() {
@@ -337,11 +348,7 @@ impl Machine {
         for i in finished.into_iter().rev() {
             let mut session = self.sessions.remove(i);
             if let Some(outcome) = session.task.take() {
-                // Deviation `reply-size`: a result too large for one reply.
-                let outcome = match outcome {
-                    Ok(value) if value.stringify().len() > reply_bytes => Err(Thrown::too_large()),
-                    other => other,
-                };
+                let outcome = sized(outcome, &bounds);
                 for caller in session.callers {
                     self.replies.push(Reply {
                         caller,

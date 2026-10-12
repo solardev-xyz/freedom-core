@@ -197,7 +197,13 @@ impl<'a> Reader<'a> {
 
     fn read_dynamic_bytes(&mut self) -> Result<&'a [u8], Fail> {
         let length = self.read_index()?;
-        let bytes = self.read_bytes(length)?;
+        self.read_bytes(length)
+    }
+
+    /// Charges decoded output to the budget (deviation `decode-budget`):
+    /// what a field produces, so a string that fails UTF-8 costs nothing,
+    /// as the reference's patch counts.
+    fn charge(&self, length: usize) -> Result<(), Fail> {
         let output = self.budget.output.get().saturating_add(length);
         self.budget.output.set(output);
         if output > self.budget.output_limit {
@@ -209,7 +215,7 @@ impl<'a> Reader<'a> {
                 &[],
             )));
         }
-        Ok(bytes)
+        Ok(())
     }
 
     fn decode(&mut self, kind: Kind) -> Result<Value, Fail> {
@@ -230,8 +236,16 @@ impl<'a> Reader<'a> {
                 out.copy_from_slice(bytes);
                 Value::Bytes4(out)
             }
-            Kind::Bytes => Value::Bytes(self.read_dynamic_bytes()?.to_vec()),
-            Kind::String => Value::String(utf8(self.read_dynamic_bytes()?)?),
+            Kind::Bytes => {
+                let bytes = self.read_dynamic_bytes()?;
+                self.charge(bytes.len())?;
+                Value::Bytes(bytes.to_vec())
+            }
+            Kind::String => {
+                let text = utf8(self.read_dynamic_bytes()?)?;
+                self.charge(text.len())?;
+                Value::String(text)
+            }
             Kind::StringArray => {
                 let count = self.read_index()?;
                 // ethers: each element needs at least a word.
@@ -404,6 +418,26 @@ mod explained {
         word_from_usize(n).to_vec()
     }
 
+    #[test]
+    fn the_decode_budget_includes_its_bound() {
+        // One four-byte string: output 4.
+        let mut data = word(32);
+        data.extend(word(4));
+        data.extend(b"abcd");
+        data.extend([0u8; 28]);
+        assert!(decode_within(&[Kind::String], &data, 4).is_ok());
+        assert!(decode_within(&[Kind::String], &data, 3).is_err());
+        // A string that isn't UTF-8 costs nothing: it produces no output.
+        let mut bad = word(32);
+        bad.extend(word(4));
+        bad.extend([0xff, 0xfe, 0xfd, 0xfc]);
+        bad.extend([0u8; 28]);
+        assert!(matches!(
+            decode_within(&[Kind::String], &bad, 0).as_deref(),
+            Ok([Err(FieldError::InvalidUtf8)])
+        ));
+    }
+
     /// Messages the pinned ethers produced for the same inputs.
     #[test]
     fn whole_decode_failures_carry_ethers_messages() {
@@ -454,9 +488,17 @@ mod explained {
         }
         data.extend(word(len));
         data.extend(vec![0x78; len]);
-        let message = decode_explained(&[Kind::StringArray], &data)
+        // ethers' own cap, with the core's decode budget lifted (it would
+        // refuse this first).
+        let message = decode_explained_within(&[Kind::StringArray], &data, usize::MAX)
             .err()
             .unwrap_or_default();
+        assert_eq!(
+            decode_explained(&[Kind::StringArray], &data)
+                .err()
+                .as_deref(),
+            Some("decode budget exceeded (code=BUFFER_OVERRUN, version=6.17.0)")
+        );
         assert!(message.starts_with("compressed ABI data exceeds inflation ratio of 1024 ( see: https://github.com/ethers-io/ethers.js/issues/4537 ) (buffer=0x0000"));
         assert!(message.ends_with(", offset=32, length=65536, info={ \"bytesRead\": 134348864, \"dataLength\": 131168 }, code=BUFFER_OVERRUN, version=6.17.0)"));
         assert_eq!(message.len(), 262_576);

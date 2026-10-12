@@ -738,3 +738,35 @@ fn replays_match_the_reference() {
     }
     assert!(report.is_empty(), "{}", report.join("\n"));
 }
+
+/// The decode budget reaches every session decode of an answer, not only
+/// an OffchainLookup's: with none, `quorum-agree`'s record can't decode.
+#[test]
+fn a_lowered_decode_budget_reaches_ordinary_decodes() {
+    let vectors = vectors();
+    let scenario = vectors
+        .get("scenarios")
+        .and_then(JsValue::as_array)
+        .unwrap_or(&[])
+        .iter()
+        .find(|s| str_of(s.get("id")) == "quorum-agree")
+        .cloned()
+        .unwrap_or(JsValue::Null);
+    let JsValue::Object(members) = &scenario else {
+        panic!("no quorum-agree");
+    };
+    let mut members = members.clone();
+    for (key, value) in &mut members {
+        if key == "world"
+            && let JsValue::Object(world) = value
+        {
+            world.push((
+                "bounds".into(),
+                JsValue::Object(vec![("decodeBytes".into(), JsValue::Number(0.0))]),
+            ));
+        }
+    }
+    let lowered = replay(&JsValue::Object(members)).unwrap_or_default();
+    assert!(!lowered.is_empty(), "a budget of 0 must change the outcome");
+    assert!(replay(&scenario).unwrap_or_default().is_empty());
+}

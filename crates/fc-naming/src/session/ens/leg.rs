@@ -287,7 +287,7 @@ pub(crate) async fn ur_call(
 ) -> Result<Vec<u8>, Failure> {
     let decoded = |result: &JsValue| -> Result<Vec<u8>, CallError> {
         let raw = rpc::call_result(result).map_err(CallError::Rpc)?;
-        ur::decode_result(kinds, &raw)
+        ctx.decode_result(kinds, &raw)
             .map_err(|_| CallError::Invalid(crate::ethers::bad_result(&raw, method, signature)))?;
         Ok(raw)
     };
@@ -314,8 +314,10 @@ pub(crate) async fn ur_call(
         }
         // `abi.decode(…, '0x' + data.slice(10))`, with ethers' messages.
         let lookup = match rpc::hex_string(&source) {
-            Some(bytes) => ur::decode_offchain_lookup_explained_within(&bytes, ctx.bounds().decode_bytes)
-                .map_err(|message| fail(CallError::Invalid(message), to, &data))?,
+            Some(bytes) => {
+                ur::decode_offchain_lookup_explained_within(&bytes, ctx.bounds().decode_bytes)
+                    .map_err(|message| fail(CallError::Invalid(message), to, &data))?
+            }
             None => {
                 let value = format!("0x{}", source.get(10..).unwrap_or(""));
                 return Err(fail(
@@ -385,7 +387,7 @@ pub(crate) async fn ccip_read_fetch(
         if let Either::Left(Answer::Gateway { status, body }) =
             race(fetch, ctx.rt.sleep(CCIP_TIMEOUT_MS)).await
             && (200..300).contains(&status)
-            && body.len() <= ctx.bounds().answer_bytes
+            && ctx.bounds().answer_fits(body.len())
             && let Some(data) = crate::ccip::parse_gateway_response(&body)
         {
             return Ok(data);
@@ -429,7 +431,8 @@ pub(crate) async fn contract_call(
     };
     let result = provider.send(ctx, &method).await.map_err(CallError::Rpc)?;
     let raw = rpc::call_result(&result).map_err(CallError::Rpc)?;
-    let fields = ur::decode_result(&[kind], &raw)
+    let fields = ctx
+        .decode_result(&[kind], &raw)
         .map_err(|_| CallError::Invalid(format!("result|{}", rpc::hex(&raw))))?;
     match fields.into_iter().next() {
         Some(Ok(value)) => Ok(value),
@@ -468,7 +471,8 @@ pub(crate) async fn resolver_call(
             )
             .await
             .map_err(|f| f.error)?;
-            match ur::decode_result(&[Kind::Bytes, Kind::Address], &raw)
+            match ctx
+                .decode_result(&[Kind::Bytes, Kind::Address], &raw)
                 .ok()
                 .as_deref()
             {
@@ -494,7 +498,8 @@ pub(crate) async fn resolver_call(
             )
             .await;
             match outcome {
-                Ok(raw) => match ur::decode_result(&kinds, &raw)
+                Ok(raw) => match ctx
+                    .decode_result(&kinds, &raw)
                     .ok()
                     .and_then(|f| f.into_iter().next())
                 {
