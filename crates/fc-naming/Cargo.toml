@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 blake2 = { version = "0.11", default-features = false }
 ens-normalize = "=0.1.1"
+fc-json = { path = "../fc-json" }
 sha2 = { version = "0.11", default-features = false }
 sha3 = "0.12"
 thiserror = "2"

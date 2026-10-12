@@ -1,5 +1,5 @@
-//! JSON as V8's `JSON.parse` reads it, for the documents the resolvers
-//! parse (gateway answers, Tezos metadata, and later RPC bodies), so the
+//! JSON as V8's `JSON.parse` reads it, for the documents the core parses
+//! (the resolvers' gateway answers and Tezos metadata, RPC bodies), so the
 //! core accepts and refuses exactly what the JS does:
 //!
 //! - numbers are doubles: `1e400` is infinite, and integers above 2^53 lose
@@ -15,6 +15,11 @@
 //!   numeric order, then the others in insertion order;
 //! - only JSON whitespace (tab, LF, CR, space) is allowed around tokens, so
 //!   a byte-order mark is an error, as in V8.
+//!
+//! [`index`] reads the same grammar without building values: a large text
+//! is kept once, with the spans of its values.
+
+pub mod index;
 
 /// A parsed JSON value with JavaScript's semantics.
 #[derive(Debug, Clone, PartialEq)]
@@ -343,6 +348,17 @@ fn order_properties(props: Vec<(String, JsValue)>) -> Vec<(String, JsValue)> {
     indices.into_iter().chain(strings).collect()
 }
 
+/// Two ASCII hex digits as a byte. (`u8::from_str_radix` would also take a
+/// sign, which JSON's `\u` escapes don't allow.)
+fn hex_byte(pair: &[u8]) -> Option<u8> {
+    match pair {
+        [hi, lo] if hi.is_ascii_hexdigit() && lo.is_ascii_hexdigit() => {
+            u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()
+        }
+        _ => None,
+    }
+}
+
 struct Parser<'a> {
     s: &'a [u8],
     i: usize,
@@ -446,7 +462,7 @@ impl Parser<'_> {
             .s
             .get(self.i..self.i + 4)
             .ok_or(JsonError::Syntax(self.i))?;
-        let (Some(hi), Some(lo)) = (crate::hex_byte(&hex[..2]), crate::hex_byte(&hex[2..])) else {
+        let (Some(hi), Some(lo)) = (hex_byte(&hex[..2]), hex_byte(&hex[2..])) else {
             return Err(JsonError::Syntax(self.i));
         };
         let unit = u16::from_be_bytes([hi, lo]);

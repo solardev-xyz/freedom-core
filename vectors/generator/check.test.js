@@ -10,8 +10,8 @@ const test = require('node:test');
 const SOURCE = path.resolve(__dirname, '..');
 const REFERENCE = process.env.FREEDOM_BROWSER_CHECKOUT || '/root/herdr/freedom-browser';
 const FILES = ['keys.json', 'mnemonic-validation.json', 'identity-formats.json', 'signing.json', 'naming.json', 'naming-replay.json',
-  'fixtures/vaults.json', 'fixtures/bee-keystores.json', 'fixtures/radicle-openssh.json',
-  'generator/generate.js', 'generator/signing.js', 'generator/naming.js', 'generator/naming-replay.js'];
+  'chain.json', 'fixtures/vaults.json', 'fixtures/bee-keystores.json', 'fixtures/radicle-openssh.json',
+  'generator/generate.js', 'generator/signing.js', 'generator/naming.js', 'generator/naming-replay.js', 'generator/chain.js'];
 
 function corruptedCheck(filename, corrupt) {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
@@ -51,6 +51,21 @@ test('check rejects a changed naming result', () => {
     contents.contenthash[0].js.decoded = 'Qm' + 'x'.repeat(44);
   });
   assert.match(stderr, /Byte mismatch: naming.json/);
+});
+
+test('check rejects a changed chain-data codec result', () => {
+  const stderr = corruptedCheck('chain.json', (contents) => {
+    const entry = contents.normalization.find((item) => item.id === 'decimal-negative');
+    entry.js.params = entry.js.params.replace('0x-1', '0x1');
+  });
+  assert.match(stderr, /Byte mismatch: chain.json/);
+});
+
+test('check rejects a changed chain-data aggregate text', () => {
+  const stderr = corruptedCheck('chain.json', (contents) => {
+    contents.failure_texts.request[0].failures[0].message_json = '"other"';
+  });
+  assert.match(stderr, /Byte mismatch: chain.json/);
 });
 
 test('check decrypts vault fixtures and rejects a damaged authentication tag', () => {

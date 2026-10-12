@@ -1,0 +1,21 @@
+[package]
+name = "fc-chain"
+description = "Chain data for Freedom (design 0005): the chain-data router's codecs, with the behavior of freedom-browser's chain-data-router.js"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fc-json = { path = "../fc-json" }
+sha2 = { version = "0.11", default-features = false }
+sha3 = "0.12"
+thiserror = "2"
+
+[dev-dependencies]
+hex = "0.4"
+serde_json = "1"

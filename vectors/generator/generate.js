@@ -11,6 +11,7 @@ const { createRequire } = require('node:module');
 const { buildSigning } = require('./signing');
 const { buildNaming } = require('./naming');
 const { buildNamingReplay } = require('./naming-replay');
+const { buildChain } = require('./chain');
 
 const REFERENCE_COMMIT = 'fb540328162839e68150fe2c5e517edb86734d1c';
 const OUTPUT = path.resolve(__dirname, '..');
@@ -489,6 +490,9 @@ async function main() {
       ...reference.meta,
       packages: { ...reference.meta.packages, '@adraffy/ens-normalize': packageVersion(createRequire(path.join(reference.checkout, 'package.json')), '@adraffy/ens-normalize') },
     }),
+    // Signed with the first test wallet; ethers only hashes them.
+    'chain.json': await buildChain(reference.checkout, reference.ethers,
+      reference.derivation.deriveUserWallet(mnemonicFor('abandon-12'), 0).privateKey, reference.meta),
   };
   // Check every deterministic file before doing the more expensive fixture checks.
   for (const [filename, contents] of Object.entries(deterministic)) {

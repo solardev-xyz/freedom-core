@@ -1,0 +1,14 @@
+[package]
+name = "fc-json"
+description = "JSON with JavaScript's semantics: V8's JSON.parse grammar, property order, doubles and JSON.stringify"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = "2"
