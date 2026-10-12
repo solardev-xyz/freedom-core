@@ -399,9 +399,14 @@ async function buildCcip(checkout) {
     '{"data":"0x01",}', '{"data":"\\u0030x01"}',
     // Signs aren't hex digits.
     '{"data":"0x+1"}', '{"data":"0x-1"}', '{"x":"\\u+041","data":"0x01"}',
+    // Deeper than the core's 512-level bound (a deviation): V8 accepts it.
+    '{"data":"0x01","deep":' + '['.repeat(600) + ']'.repeat(600) + '}',
   ];
   const answers = [];
-  for (const body of bodies) answers.push({ body, ...(await run(['https://gw.example/{data}'], '0x01', body)) });
+  for (const body of bodies) {
+    const deviation = body.includes('['.repeat(513)) ? { deviation: 'json-depth' } : {};
+    answers.push({ body, ...deviation, ...(await run(['https://gw.example/{data}'], '0x01', body)) });
+  }
   // Invalid UTF-8 outside `data`, and a non-2xx status.
   answers.push({ body_hex: Buffer.from('{"x":"\xff","data":"0x01"}', 'latin1').toString('hex'), ...(await run(['https://gw.example/{data}'], '0x01', Buffer.from('{"x":"\xff","data":"0x01"}', 'latin1'))) });
   answers.push({ body: '{"data":"0x01"}', status: 404, ...(await run(['https://gw.example/{data}'], '0x01', '{"data":"0x01"}', 404)) });
@@ -437,15 +442,21 @@ function buildTezos({ tezos }) {
     hexOf('9007199254740993'), hexOf('1e400'), hexOf('-0'), hexOf('"\\ud800"'), hexOf('{"b":1,"2":0,"a":3,"1":4,"01":5,"a":6}'),
     hexOf('[' .repeat(200) + ']'.repeat(200)), hexOf('1.5e-7'), hexOf('123456789012345680000'),
     '+a7b7d', '-a7b7d',
+    hexOf('[' .repeat(600) + ']'.repeat(600)),
+    hexOf('{"\\ud800":1,"\\ud801":2,"\\ufffd":3}'),
   ].map((hex) => {
     const result = attempt(() => ti.decodeJsonBytes(hex));
     // A lone surrogate survives in a JS string; a Rust string holds U+FFFD
     // (design 0003, jsjson).
     const loneSurrogate = typeof result.value === 'string' && /[\uD800-\uDFFF]/.test(result.value.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, ''));
     // Recorded as JSON.stringify, so non-JSON doubles (Infinity) survive.
+    const text = Buffer.from(hex, 'hex').toString('utf8');
+    const deviation = /^\[{513}/.test(text) ? 'json-depth'
+      : /\\ud8/i.test(text) && text.startsWith('{') ? 'lone-surrogate-keys'
+      : loneSurrogate ? 'lone-surrogate' : null;
     return {
       hex,
-      ...(loneSurrogate ? { deviation: 'lone-surrogate' } : {}),
+      ...(deviation ? { deviation } : {}),
       js: result.error ? result : { stringified: JSON.stringify(result.value) },
     };
   });
@@ -473,6 +484,7 @@ function buildTezos({ tezos }) {
     { type: { prim: 'pair', args: 'x' }, value: 1, annotation: '%a' },
     { type: { prim: 'pair', args: [{ annots: ['%a'] }] }, value: { prim: 'Pair', args: 'xy' }, annotation: '%a' },
     { type: 0, value: 1, annotation: '%a' },
+    { type: { prim: { toString: 1 }, args: [] }, value: 1, annotation: '%a' },
     { type: { annots: ['%a'] }, value: null, annotation: '%a' },
   ].map((c) => ({ ...c, js: walk(c.type, c.value, c.annotation) }));
   const scripts = [
@@ -492,6 +504,33 @@ function buildTezos({ tezos }) {
   return { script_expr: scriptExpr, names, uris, maps, metadata, annotated: { type: ty, value, cases: annotated }, micheline, scripts };
 }
 
+/** String(x) for doubles from seeded bit patterns, plus known ties. */
+function buildNumbers() {
+  let seed = 0x5eed;
+  const next = () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return (t ^ (t >>> 14)) >>> 0;
+  };
+  const view = new DataView(new ArrayBuffer(8));
+  const out = [];
+  const add = () => {
+    const x = view.getFloat64(0);
+    if (!Number.isNaN(x)) out.push({ bits: view.getBigUint64(0).toString(16).padStart(16, '0'), js: String(x) });
+  };
+  for (const x of [-1221953339504170.3, 0.1 + 0.2, 1e21, 1e-7, 5e-324, 1.7976931348623157e308, 9007199254740993, 123456789012345680000]) {
+    view.setFloat64(0, x);
+    add();
+  }
+  for (let i = 0; i < 3000; i += 1) {
+    view.setUint32(0, next());
+    view.setUint32(4, next());
+    add();
+  }
+  return out;
+}
+
 async function buildNaming(checkout, ethers, meta) {
   const reference = { ensResolver: loadEnsResolver(checkout), tezos: loadTezos(checkout), ethers };
   assert.equal(reference.ethers.namehash('vitalik.eth'), '0xee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a53475835', 'STOP: namehash sanity check failed');
@@ -504,6 +543,7 @@ async function buildNaming(checkout, ethers, meta) {
     ur: buildUr(reference),
     ccip: await buildCcip(checkout),
     offchain_lookup: buildOffchain(reference, checkout),
+    numbers: buildNumbers(),
     tezos: buildTezos(reference),
   };
 }

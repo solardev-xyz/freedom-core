@@ -7,7 +7,9 @@
 //! - escaped lone surrogates are accepted. Rust strings can't hold them, so
 //!   they become U+FFFD, which is also what the WHATWG URL parser makes of
 //!   them;
-//! - nesting depth is limited only by the input (the parser is iterative);
+//! - nesting deeper than [`MAX_DEPTH`] is refused (`TooDeep`), where V8
+//!   accepts any depth. That bound keeps every walk, comparison, copy and
+//!   drop of a value within a small stack (design 0003, Codec deviations);
 //! - a duplicate key keeps its first position and its last value, and
 //!   objects keep JavaScript's property order: array-index keys first, in
 //!   numeric order, then the others in insertion order;
@@ -61,27 +63,30 @@ impl JsValue {
         }
     }
 
-    /// `String(value)`.
-    pub fn js_string(&self) -> String {
-        match self {
+    /// `String(value)`. An object with an own `toString` key throws, as in
+    /// JavaScript: no JSON value is callable, so `ToPrimitive` finds neither
+    /// a usable `toString` nor a primitive `valueOf`.
+    pub fn js_string(&self) -> Result<String, ToPrimitiveError> {
+        Ok(match self {
             JsValue::Null => "null".into(),
             JsValue::Bool(b) => b.to_string(),
             JsValue::Number(n) => number_to_string(*n),
             JsValue::String(s) => s.clone(),
             // `Array.prototype.join(',')`, where null elements are empty.
-            JsValue::Array(items) => items
-                .iter()
-                .map(|item| {
-                    if matches!(item, JsValue::Null) {
+            JsValue::Array(items) => {
+                let mut parts = Vec::with_capacity(items.len());
+                for item in items {
+                    parts.push(if matches!(item, JsValue::Null) {
                         String::new()
                     } else {
-                        item.js_string()
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(","),
+                        item.js_string()?
+                    });
+                }
+                parts.join(",")
+            }
+            JsValue::Object(_) if self.get("toString").is_some() => return Err(ToPrimitiveError),
             JsValue::Object(_) => "[object Object]".into(),
-        }
+        })
     }
 
     /// `JSON.stringify(value)`.
@@ -92,10 +97,23 @@ impl JsValue {
     }
 }
 
-/// Why a document isn't JSON.
+/// `String(value)` would throw a `TypeError` ("Cannot convert object to
+/// primitive value").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("Cannot convert object to primitive value")]
+pub struct ToPrimitiveError;
+
+/// The deepest nesting the core accepts.
+pub const MAX_DEPTH: usize = 512;
+
+/// Why a document isn't accepted.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("invalid JSON at byte {0}")]
-pub struct JsonError(pub usize);
+pub enum JsonError {
+    #[error("invalid JSON at byte {0}")]
+    Syntax(usize),
+    #[error("JSON nested deeper than {MAX_DEPTH} levels")]
+    TooDeep,
+}
 
 enum Frame {
     Array(Vec<JsValue>),
@@ -117,6 +135,10 @@ pub fn parse(text: &str) -> Result<JsValue, JsonError> {
     p.ws();
     loop {
         // Parse one value, or open a container.
+        // Every container is a level, an empty one included.
+        if matches!(p.peek(), Some(b'{' | b'[')) && stack.len() >= MAX_DEPTH {
+            return Err(JsonError::TooDeep);
+        }
         let mut value = match p.peek() {
             Some(b'{') => {
                 p.i += 1;
@@ -152,7 +174,7 @@ pub fn parse(text: &str) -> Result<JsValue, JsonError> {
                     return if p.i == p.s.len() {
                         Ok(value)
                     } else {
-                        Err(JsonError(p.i))
+                        Err(JsonError::Syntax(p.i))
                     };
                 }
                 Some(Frame::Array(items)) => {
@@ -164,15 +186,15 @@ pub fn parse(text: &str) -> Result<JsValue, JsonError> {
                         }
                         Some(b']') => {
                             let Some(Frame::Array(items)) = stack.pop() else {
-                                return Err(JsonError(p.i));
+                                return Err(JsonError::Syntax(p.i));
                             };
                             value = JsValue::Array(items);
                         }
-                        _ => return Err(JsonError(p.i)),
+                        _ => return Err(JsonError::Syntax(p.i)),
                     }
                 }
                 Some(Frame::Object(props, index, pending)) => {
-                    let key = pending.take().ok_or(JsonError(p.i))?;
+                    let key = pending.take().ok_or(JsonError::Syntax(p.i))?;
                     set_property(props, index, key, value);
                     match p.next() {
                         Some(b',') => {
@@ -183,11 +205,11 @@ pub fn parse(text: &str) -> Result<JsValue, JsonError> {
                         }
                         Some(b'}') => {
                             let Some(Frame::Object(props, _, _)) = stack.pop() else {
-                                return Err(JsonError(p.i));
+                                return Err(JsonError::Syntax(p.i));
                             };
                             value = JsValue::Object(order_properties(props));
                         }
-                        _ => return Err(JsonError(p.i)),
+                        _ => return Err(JsonError::Syntax(p.i)),
                     }
                 }
             }
@@ -251,12 +273,12 @@ impl Parser<'_> {
 
     fn key(&mut self) -> Result<String, JsonError> {
         if self.peek() != Some(b'"') {
-            return Err(JsonError(self.i));
+            return Err(JsonError::Syntax(self.i));
         }
         let key = self.string()?;
         self.ws();
         if self.next() != Some(b':') {
-            return Err(JsonError(self.i));
+            return Err(JsonError::Syntax(self.i));
         }
         self.ws();
         Ok(key)
@@ -267,7 +289,7 @@ impl Parser<'_> {
             self.i += word.len();
             Ok(value)
         } else {
-            Err(JsonError(self.i))
+            Err(JsonError::Syntax(self.i))
         }
     }
 
@@ -278,7 +300,7 @@ impl Parser<'_> {
             Some(b'f') => self.literal(b"false", JsValue::Bool(false)),
             Some(b'n') => self.literal(b"null", JsValue::Null),
             Some(b'-' | b'0'..=b'9') => self.number(),
-            _ => Err(JsonError(self.i)),
+            _ => Err(JsonError::Syntax(self.i)),
         }
     }
 
@@ -300,12 +322,12 @@ impl Parser<'_> {
             Some(b'1'..=b'9') => {
                 self.digits();
             }
-            _ => return Err(JsonError(self.i)),
+            _ => return Err(JsonError::Syntax(self.i)),
         }
         if self.peek() == Some(b'.') {
             self.i += 1;
             if self.digits() == 0 {
-                return Err(JsonError(self.i));
+                return Err(JsonError::Syntax(self.i));
             }
         }
         if matches!(self.peek(), Some(b'e' | b'E')) {
@@ -314,20 +336,24 @@ impl Parser<'_> {
                 self.i += 1;
             }
             if self.digits() == 0 {
-                return Err(JsonError(self.i));
+                return Err(JsonError::Syntax(self.i));
             }
         }
         // Correctly rounded, as V8; out of range is infinite.
-        let text = std::str::from_utf8(&self.s[start..self.i]).map_err(|_| JsonError(start))?;
+        let text =
+            std::str::from_utf8(&self.s[start..self.i]).map_err(|_| JsonError::Syntax(start))?;
         text.parse::<f64>()
             .map(JsValue::Number)
-            .map_err(|_| JsonError(start))
+            .map_err(|_| JsonError::Syntax(start))
     }
 
     fn hex4(&mut self) -> Result<u16, JsonError> {
-        let hex = self.s.get(self.i..self.i + 4).ok_or(JsonError(self.i))?;
+        let hex = self
+            .s
+            .get(self.i..self.i + 4)
+            .ok_or(JsonError::Syntax(self.i))?;
         let (Some(hi), Some(lo)) = (crate::hex_byte(&hex[..2]), crate::hex_byte(&hex[2..])) else {
-            return Err(JsonError(self.i));
+            return Err(JsonError::Syntax(self.i));
         };
         let unit = u16::from_be_bytes([hi, lo]);
         self.i += 4;
@@ -346,7 +372,8 @@ impl Parser<'_> {
                 }
                 self.i += 1;
             }
-            let run = std::str::from_utf8(&self.s[start..self.i]).map_err(|_| JsonError(start))?;
+            let run = std::str::from_utf8(&self.s[start..self.i])
+                .map_err(|_| JsonError::Syntax(start))?;
             units.extend(run.encode_utf16());
             match self.next() {
                 Some(b'"') => return Ok(String::from_utf16_lossy(&units)),
@@ -361,12 +388,12 @@ impl Parser<'_> {
                         Some(b'r') => 0x0d,
                         Some(b't') => 0x09,
                         Some(b'u') => self.hex4()?,
-                        _ => return Err(JsonError(self.i)),
+                        _ => return Err(JsonError::Syntax(self.i)),
                     };
                     units.push(unit);
                 }
                 // A raw control character, or the end of the input.
-                _ => return Err(JsonError(self.i)),
+                _ => return Err(JsonError::Syntax(self.i)),
             }
         }
     }
@@ -388,8 +415,21 @@ pub fn number_to_string(n: f64) -> String {
         };
     }
     let sign = if n < 0.0 { "-" } else { "" };
-    // Rust's `{:e}` gives the shortest round-trip digits, as JavaScript uses.
-    let sci = format!("{:e}", n.abs());
+    // The fewest digits that round-trip (Rust's `{:e}`), and of those
+    // ECMAScript takes the decimal closest to the value, ties to even. The
+    // nearest decimal with that many digits is correctly rounded by `{:.*e}`;
+    // it is the answer whenever it round-trips, which fails only at the
+    // asymmetric rounding interval of a power of two.
+    let shortest = format!("{:e}", n.abs());
+    let k = shortest.split_once('e').map_or(shortest.len(), |(m, _)| {
+        m.chars().filter(char::is_ascii_digit).count()
+    });
+    let nearest = format!("{:.*e}", k.saturating_sub(1), n.abs());
+    let sci = if nearest.parse::<f64>() == Ok(n.abs()) {
+        nearest
+    } else {
+        shortest
+    };
     let (mantissa, exponent) = sci.split_once('e').unwrap_or((&sci, "0"));
     let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
     let k = digits.len() as i64;
@@ -489,8 +529,15 @@ mod tests {
             parse(r#"{"x":"\ud800","data":"0x01"}"#).unwrap().get("x"),
             Some(&JsValue::String("\u{FFFD}".into()))
         );
-        let deep = format!("{}{}", "[".repeat(5000), "]".repeat(5000));
-        assert!(parse(&deep).is_ok());
+        // Depth is bounded: 1,024 levels parse, 1,025 are refused.
+        let nest = |n: usize| format!("{}{}", "[".repeat(n), "]".repeat(n));
+        assert!(parse(&nest(MAX_DEPTH)).is_ok());
+        assert_eq!(parse(&nest(MAX_DEPTH + 1)), Err(JsonError::TooDeep));
+        // Far deeper input never touches the stack: refused, dropped safely.
+        assert_eq!(
+            parse(&format!(r#"{{"data":"0x01","x":{}}}"#, nest(100_000))),
+            Err(JsonError::TooDeep)
+        );
         assert_eq!(
             parse(r#"{"a":1,"a":2}"#).unwrap(),
             JsValue::Object(vec![("a".into(), JsValue::Number(2.0))])
@@ -516,6 +563,28 @@ mod tests {
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn the_deepest_value_is_stack_safe() {
+        // Walks, copies, comparisons and drops recurse; at MAX_DEPTH they
+        // fit a quarter of a spawned thread's default 2 MiB stack, even unoptimized.
+        let handle = std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(|| {
+                let text = format!(
+                    "{}{}",
+                    r#"{"a":["#.repeat(MAX_DEPTH / 2),
+                    "]}".repeat(MAX_DEPTH / 2)
+                );
+                let value = parse(&text).unwrap();
+                let copy = value.clone();
+                assert_eq!(copy, value);
+                assert_eq!(value.stringify().len(), text.len());
+                drop((value, copy));
+            })
+            .unwrap();
+        handle.join().unwrap();
     }
 
     #[test]
@@ -549,6 +618,8 @@ mod tests {
             (123.456, "123.456"),
             (f64::INFINITY, "Infinity"),
             (9007199254740993.0, "9007199254740992"),
+            // Of the shortest digit strings, ECMAScript takes the closest.
+            (-1221953339504170.3, "-1221953339504170.2"),
         ] {
             assert_eq!(number_to_string(n), text, "{n}");
         }
@@ -557,6 +628,15 @@ mod tests {
     #[test]
     fn strings_of_values() {
         let v = parse(r#"[["PAIR"],null,1.5,true,{"a":1}]"#).unwrap();
-        assert_eq!(v.js_string(), "PAIR,,1.5,true,[object Object]");
+        assert_eq!(v.js_string().unwrap(), "PAIR,,1.5,true,[object Object]");
+        // An own toString key: ToPrimitive throws.
+        assert_eq!(
+            parse(r#"{"toString":1}"#).unwrap().js_string(),
+            Err(ToPrimitiveError)
+        );
+        assert_eq!(
+            parse(r#"[[{"toString":1}]]"#).unwrap().js_string(),
+            Err(ToPrimitiveError)
+        );
     }
 }

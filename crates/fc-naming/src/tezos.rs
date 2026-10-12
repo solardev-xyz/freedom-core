@@ -102,31 +102,32 @@ fn annotation_matches(node: &JsValue, annotation: &str) -> bool {
 }
 
 /// `node && typeof node === 'object' && String(node.prim || '').toLowerCase() === 'pair'`.
-fn is_pair(node: &JsValue) -> bool {
+/// `String` throws for a `prim` object with its own `toString` key.
+fn is_pair(node: &JsValue) -> Result<bool, MichelineError> {
     if !matches!(node, JsValue::Object(_) | JsValue::Array(_)) {
-        return false;
+        return Ok(false);
     }
-    let prim = node
-        .get("prim")
-        .filter(|p| p.truthy())
-        .map(JsValue::js_string)
-        .unwrap_or_default();
-    prim.to_lowercase() == "pair"
+    let prim = match node.get("prim").filter(|p| p.truthy()) {
+        Some(prim) => prim.js_string().map_err(|_| MichelineError)?,
+        None => String::new(),
+    };
+    Ok(prim.to_lowercase() == "pair")
 }
 
-/// `flattenPairLeaves`: the leaves of nested pairs, left to right, walked
-/// iteratively (any depth). `(node.args || []).flatMap(…)` throws for an
-/// `args` that is truthy and not an array.
-fn flatten_pair_leaves(node: &JsValue) -> Result<Vec<JsValue>, MichelineError> {
+/// `flattenPairLeaves`: the leaves of nested pairs, left to right. The walk
+/// is iterative and borrows; a parsed value is at most `MAX_DEPTH` deep.
+/// `(node.args || []).flatMap(…)` throws for an `args` that is truthy and
+/// not an array.
+fn flatten_pair_leaves(node: &JsValue) -> Result<Vec<&JsValue>, MichelineError> {
     let mut leaves = Vec::new();
-    let mut stack = vec![node.clone()];
+    let mut stack = vec![node];
     while let Some(current) = stack.pop() {
-        if !is_pair(&current) {
+        if !is_pair(current)? {
             leaves.push(current);
             continue;
         }
         match current.get("args") {
-            Some(JsValue::Array(args)) => stack.extend(args.iter().rev().cloned()),
+            Some(JsValue::Array(args)) => stack.extend(args.iter().rev()),
             Some(args) if args.truthy() => return Err(MichelineError),
             _ => {}
         }
@@ -136,11 +137,11 @@ fn flatten_pair_leaves(node: &JsValue) -> Result<Vec<JsValue>, MichelineError> {
 
 /// `findAnnotatedValue`: the value leaf at the position of the type leaf
 /// annotated `annotation`, with that type leaf.
-pub fn find_annotated_value(
-    type_node: Option<&JsValue>,
-    value_node: Option<&JsValue>,
+pub fn find_annotated_value<'a>(
+    type_node: Option<&'a JsValue>,
+    value_node: Option<&'a JsValue>,
     annotation: &str,
-) -> Result<Option<(JsValue, JsValue)>, MichelineError> {
+) -> Result<Option<(&'a JsValue, &'a JsValue)>, MichelineError> {
     let (Some(type_node), Some(value_node)) = (type_node, value_node) else {
         return Ok(None);
     };
@@ -155,9 +156,7 @@ pub fn find_annotated_value(
     else {
         return Ok(None);
     };
-    Ok(value_leaves
-        .get(i)
-        .map(|value| (type_leaves[i].clone(), value.clone())))
+    Ok(value_leaves.get(i).map(|value| (type_leaves[i], *value)))
 }
 
 /// `storageTypeFromScript`: `script?.code?.find(e => e?.prim === 'storage')?.args?.[0] || null`.
@@ -384,10 +383,13 @@ mod tests {
         );
         let found = |annotation| find_annotated_value(Some(&ty), Some(&value), annotation);
         assert_eq!(
-            found("%contract").unwrap().unwrap().1,
+            found("%contract").unwrap().unwrap().1.clone(),
             js(r#"{"string":"KT1x"}"#)
         );
-        assert_eq!(found("%records").unwrap().unwrap().1, js(r#"{"int":"42"}"#));
+        assert_eq!(
+            found("%records").unwrap().unwrap().1.clone(),
+            js(r#"{"int":"42"}"#)
+        );
         assert_eq!(found("%missing"), Ok(None));
         let script = js(&format!(
             r#"{{"code":[{{"prim":"parameter"}},{{"prim":"storage","args":[{}]}}]}}"#,
@@ -411,23 +413,35 @@ mod tests {
             find_annotated_value(Some(&odd), Some(&vals), "%b")
                 .unwrap()
                 .unwrap()
-                .1,
+                .1
+                .clone(),
             js("2")
         );
     }
 
     #[test]
-    fn micheline_depth_is_unbounded() {
+    fn string_of_a_prim_can_throw() {
+        // String({toString: 1}) throws in JavaScript, so the walk fails.
+        let ty = js(r#"{"prim":{"toString":1},"args":[]}"#);
+        assert_eq!(
+            find_annotated_value(Some(&ty), Some(&js("1")), "%a"),
+            Err(MichelineError)
+        );
+    }
+
+    #[test]
+    fn micheline_walks_deep_pairs() {
         let mut ty = String::from(r#"{"annots":["%records"]}"#);
         let mut value = String::from(r#"{"int":"7"}"#);
         for _ in 0..200 {
             ty = format!(r#"{{"prim":"pair","args":[{ty}]}}"#);
             value = format!(r#"{{"prim":"Pair","args":[{value}]}}"#);
         }
-        let found = find_annotated_value(Some(&js(&ty)), Some(&js(&value)), "%records")
+        let (ty, value) = (js(&ty), js(&value));
+        let found = find_annotated_value(Some(&ty), Some(&value), "%records")
             .unwrap()
             .unwrap();
-        assert_eq!(found.1, js(r#"{"int":"7"}"#));
+        assert_eq!(found.1.clone(), js(r#"{"int":"7"}"#));
     }
 
     #[test]

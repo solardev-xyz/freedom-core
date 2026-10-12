@@ -405,7 +405,26 @@ fn ccip_gateways() {
             None => case["body"].as_str().unwrap().as_bytes().to_vec(),
         };
         let ours = ccip::parse_gateway_response(&body).map(|d| hex0x(&d));
+        if case["deviation"] == "json-depth" {
+            // Deeper than MAX_DEPTH: refused, where V8 accepts it.
+            assert_eq!(ours, None, "{case}");
+            continue;
+        }
         assert_eq!(ours.as_deref(), case["result"].as_str(), "{case}");
+    }
+}
+
+#[test]
+fn numbers_print_like_javascript() {
+    let v = vectors();
+    for case in v["numbers"].as_array().unwrap() {
+        let bits = u64::from_str_radix(case["bits"].as_str().unwrap(), 16).unwrap();
+        let n = f64::from_bits(bits);
+        assert_eq!(
+            jsjson::number_to_string(n),
+            case["js"].as_str().unwrap(),
+            "{bits:016x}"
+        );
     }
 }
 
@@ -466,6 +485,15 @@ fn tezos_codecs() {
     for case in t["metadata"].as_array().unwrap() {
         let hex = case["hex"].as_str().map(|h| JsValue::String(h.to_owned()));
         let ours = tezos::decode_json_bytes(hex.as_ref());
+        if case["deviation"] == "json-depth" {
+            assert!(ours.is_err(), "{}: deeper than MAX_DEPTH", case["hex"]);
+            continue;
+        }
+        if case["deviation"] == "lone-surrogate-keys" {
+            // Keys that differ only in lone surrogates become one key.
+            assert!(ours.is_ok(), "{}", case["hex"]);
+            continue;
+        }
         if case["deviation"] == "lone-surrogate" {
             // JavaScript keeps the lone surrogate; the core holds U+FFFD.
             assert_eq!(
@@ -492,14 +520,15 @@ fn tezos_codecs() {
         }
     }
     let annotated = &t["annotated"];
+    let (annotated_type, annotated_value) = (to_js(&annotated["type"]), to_js(&annotated["value"]));
     for case in annotated["cases"].as_array().unwrap() {
         let ours = tezos::find_annotated_value(
-            Some(&to_js(&annotated["type"])),
-            Some(&to_js(&annotated["value"])),
+            Some(&annotated_type),
+            Some(&annotated_value),
             case["annotation"].as_str().unwrap(),
         )
         .unwrap()
-        .map(|(ty, value)| to_value(&json_pair(&ty, &value)));
+        .map(|(ty, value)| to_value(&json_pair(ty, value)));
         assert_eq!(
             ours.unwrap_or(Value::Null),
             case["js"],
@@ -508,9 +537,10 @@ fn tezos_codecs() {
         );
     }
     for case in t["micheline"].as_array().unwrap() {
+        let (case_type, case_value) = (to_js(&case["type"]), to_js(&case["value"]));
         let ours = tezos::find_annotated_value(
-            Some(&to_js(&case["type"])),
-            Some(&to_js(&case["value"])),
+            Some(&case_type),
+            Some(&case_value),
             case["annotation"].as_str().unwrap(),
         );
         match case["js"].get("value") {
@@ -518,7 +548,7 @@ fn tezos_codecs() {
             Some(js) => {
                 let ours = ours
                     .unwrap()
-                    .map(|(ty, value)| to_value(&json_pair(&ty, &value)));
+                    .map(|(ty, value)| to_value(&json_pair(ty, value)));
                 assert_eq!(&ours.unwrap_or(Value::Null), js, "{}", case["type"]);
             }
         }
