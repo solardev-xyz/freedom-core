@@ -101,6 +101,29 @@ const TYPED_DATA = [
   // ethers signs these; the core rejects them (design 0002: bool is strict).
   { id: 'deviation-bool-string-false', deviation: 'bool-strict', typed_data: { domain: { name: 'D' }, types: ONE('bool'), message: { v: 'false' } } },
   { id: 'deviation-bool-number', deviation: 'bool-strict', typed_data: { domain: { name: 'D' }, types: ONE('bool'), message: { v: 1 } } },
+  { id: 'deviation-bool-missing', deviation: 'bool-strict', typed_data: { domain: { name: 'D' }, types: ONE('bool'), message: {} } },
+  // ethers parses quantity strings with JS BigInt(); the core takes only
+  // [-]digits or [-]0x/0X hex (design 0002).
+  { id: 'deviation-quantity-lone-minus', deviation: 'quantity-strict', typed_data: { domain: { name: 'D' }, types: ONE('uint256'), message: { v: '-' } } },
+  { id: 'deviation-quantity-whitespace', deviation: 'quantity-strict', typed_data: { domain: { name: 'D' }, types: ONE('uint256'), message: { v: ' 12 ' } } },
+  { id: 'deviation-quantity-plus', deviation: 'quantity-strict', typed_data: { domain: { name: 'D' }, types: ONE('uint256'), message: { v: '+5' } } },
+  { id: 'deviation-quantity-binary', deviation: 'quantity-strict', typed_data: { domain: { name: 'D' }, types: ONE('uint256'), message: { v: '0b101' } } },
+  { id: 'deviation-quantity-octal', deviation: 'quantity-strict', typed_data: { domain: { name: 'D' }, types: ONE('uint256'), message: { v: '0o17' } } },
+  // ethers takes any string as a type or field name; the core takes
+  // identifiers only, so encodeType strings can't be forged (design 0002).
+  { id: 'deviation-field-name-not-identifier', deviation: 'names-identifiers', typed_data: { domain: { name: 'D' }, types: { M: [{ name: 'a,uint8 b', type: 'uint8' }] }, message: { 'a,uint8 b': 1 } } },
+  { id: 'deviation-type-name-not-identifier', deviation: 'names-identifiers', typed_data: { domain: { name: 'D' }, types: { 'Mail Box': [{ name: 'a', type: 'uint8' }] }, message: { a: 1 } } },
+  // Accepted by both: aliases, null domain fields, chain id 0, empty structs.
+  { id: 'uint-int-aliases', typed_data: { domain: { name: 'Alias' }, types: { M: [{ name: 'a', type: 'uint' }, { name: 'b', type: 'int' }] }, message: { a: '7', b: '-7' } } },
+  { id: 'domain-null-field-skipped', typed_data: { domain: { name: null, version: '1', chainId: 0 }, types: ONE('uint8'), message: { v: 1 } } },
+  { id: 'empty-struct', typed_data: { domain: { name: 'Empty' }, types: { M: [] }, message: {} } },
+  { id: 'quantity-forms', typed_data: { domain: { name: 'Q' }, types: { M: [{ name: 'a', type: 'uint256' }, { name: 'b', type: 'int256' }, { name: 'c', type: 'uint256' }, { name: 'd', type: 'int16' }] }, message: { a: '0X1F', b: '-0x10', c: '00012', d: '-0' } } },
+  { id: 'error-duplicate-field', typed_data: { domain: { name: 'E' }, types: { M: [{ name: 'a', type: 'uint8' }, { name: 'a', type: 'uint8' }] }, message: { a: 1 } } },
+  { id: 'error-mutual-reference', typed_data: { domain: { name: 'E' }, types: { A: [{ name: 'b', type: 'B' }], B: [{ name: 'a', type: 'A' }] }, message: {} } },
+  { id: 'error-bad-width', typed_data: { domain: { name: 'E' }, types: ONE('uint7'), message: { v: 1 } } },
+  { id: 'error-address-no-prefix', typed_data: { domain: { name: 'E' }, types: ONE('address'), message: { v: '8ba1f109551bd432803012645ac136ddd64dba72' } } },
+  { id: 'error-quantity-empty', typed_data: { domain: { name: 'E' }, types: ONE('uint256'), message: { v: '' } } },
+  { id: 'error-quantity-exponent', typed_data: { domain: { name: 'E' }, types: ONE('uint256'), message: { v: '1e3' } } },
 ];
 
 const SOCS = [
