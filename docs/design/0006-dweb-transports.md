@@ -62,10 +62,11 @@ This design settles where each part goes:
 - **`method`** is `GET` or `HEAD`; anything else is planned as today's 405.
 - **`headers`** are the request's headers as name–value pairs, in order. The core applies the scheme's header policy to them. The IPFS small-text rule is chosen from them as today: the trimmed first `Accept` token, compared case-insensitively, equals `text/html`. A string that merely starts with `text/html`, such as `text/html;q=0.9`, doesn't count.
 - **`backend`** is the node main will use, as references with no URLs:
-  - for `bzz:`, `{ ant: "bundled" | "external" }`;
-  - for IPFS, `{ ipfs: "native" | "gateway" }`.
+  - for `bzz:`, `{ ant: "bundled" | "external" | "absent" }`;
+  - for IPFS, `{ ipfs: "native" | "gateway" | "absent" }`.
 
-  The core picks timers and the content label from it.
+  The core picks timers and the content label from it. `absent` keeps today's order: the method, path and host checks come first, then an absent node is an immediate 503, before any name is resolved.
+- **Binding:** main captures the backend instance when it admits the request and keeps it, retries included, so a settings change mid-request can't redirect the fetch.
 - **`private`** marks a private window's request. The core passes it to naming and never logs the URL.
 - **`attempts_used`** is naming's resubmission count (0004), sent again when main re-plans an overtaken plan.
 - **Caller kinds:** `shell` only. Pages never reach the core directly.
@@ -83,7 +84,7 @@ A plan is one of three things:
 
   ```jsonc
   { "fetch": {
-      "node": "ant",                       // or "ipfs": a reference, never a URL
+      "node": "ant",                       // or "ipfs": a reference, never a URL; the method is the request's own
       "path": "/bzz/<ref>/<path>?<query>", // the node-relative request target
       "headers": [["accept", "…"], ["range", "bytes=0-"], …],
       "retry": { "statuses": [500, 502, 503, 504], "on_error": true, "attempts": 10,
@@ -104,7 +105,7 @@ What the fields mean:
   - **Native IPFS** has a 15 s queue bound and 30 s to the headers, and no retry.
   - **The external IPFS gateway** has no header timeout, as today, and no retry.
   - **`body_idle_ms`** is new for all of them (deviation `body-idle`, [Main's executor](#main-executes-the-plan)).
-- **`response`** names the response operations main runs, in order ([below](#response-operations)). They depend on the bytes, so they stay in main.
+- **`response`** names the optional response operations main runs, in order ([below](#response-operations)). They depend on the bytes, so they stay in main. The security operations aren't optional: main runs them on every response, whatever the plan says.
 - **`trust`** carries the name's trust from naming and a **content** label from `backend`, for display only:
   - `node_asserted`: the bundled Ant, which validates the chunks it fetches, and the native IPFS node, which hash-checks blocks;
   - `unverified`: an external Ant, or an IPFS path gateway.
@@ -167,14 +168,19 @@ All of this is today's behavior, ported with vectors:
 
 ### Validation before any dial
 
-A plan is input to check, not permission to dial. Main refuses a plan (502, logged as a core fault) unless all of these hold:
-- `node` names the backend main sent;
-- the method is the request's own;
-- `path`, after URL normalization, stays in the node's namespace:
-  - for Ant, `/bzz/<64 or 128 hex>` and below;
-  - for IPFS, `/ipfs/<cid>` or `/ipns/<name>` and below;
-  - no `..` escapes, no encoded separators, no scheme or authority;
-- the headers are among the policy's names.
+A plan is input to check, not permission to dial. Main refuses a plan unless it passes the checks for its variant. A refused plan gets a 502 and is logged as a core fault.
+
+- **`fetch`:**
+  - `node` names the backend main admitted;
+  - main sends the request's own method;
+  - `path`, after URL normalization, stays in the node's namespace, with no `..` escape, scheme or authority:
+    - for Ant, `/bzz/<64 or 128 hex>` and below, with no encoded `/` or `\` (`bzz:`'s rule today);
+    - for IPFS, `/ipfs/<cid>` or `/ipns/<name>` and below, where encoded separators pass to the node as today;
+  - the headers are among the scheme's policy names, and Swarm's retrieval-timeout and redundancy headers carry today's fixed values;
+  - `retry` and `timers` are within today's values: at most 10 attempts, each delay at most 15 s, a queue bound of at most 15 s, at most 30 s to the headers, a body idle of at most 60 s;
+  - every named response operation is one the backend allows.
+- **`redirect`:** the status is 307, the `Location` is the canonical `ipfs:` or `ipns:` form of the request, and the only header is `Access-Control-Allow-Origin: *`.
+- **`error`:** the status is one of today's (400, 404, 405, 415, 502, 503), and the body is `{ code, message }` with a bounded message.
 
 ### Transport
 
@@ -192,32 +198,42 @@ A plan is input to check, not permission to dial. Main refuses a plan (502, logg
 
 ### Response operations
 
-These stay in main, because they depend on the bytes. Each is today's code, run when the plan names it:
+These stay in main, because they depend on the bytes. Each is today's code.
 
+**Always run,** whatever the plan names:
+- **`strip_page_state`** (O-12): removes `Set-Cookie`, `Set-Cookie2` and `Service-Worker-Allowed` from every dweb response.
+- **`strip_decoded_encoding`**, for every response from the external IPFS gateway: removes the decoded body's `content-encoding` and `content-length` and the hop-by-hop headers.
+
+**Run when the plan names them:**
 - **`canonicalize_redirect`** (`lib/gateway-location.js`): rewrites a gateway-space `Location` relative to the gateway request's directory, comparing decoded path segments, and leaves cross-origin and up-directory `Location`s untouched (#95). On a rewrite, `bzz:` cancels and drops the body and removes the length and encoding headers.
-- **`strip_page_state`** (O-12): removes `Set-Cookie`, `Set-Cookie2` and `Service-Worker-Allowed`.
-- **`strip_decoded_encoding`** (the external IPFS gateway): removes the decoded body's `content-encoding` and `content-length` and the hop-by-hop headers.
 - **`small_text`** (IPFS navigations only). It relabels a body as `text/plain` with `nosniff` only when all of these hold:
   - the request is a GET and the status 200;
-  - a positive declared length of at most 4096 bytes matches the body at EOF;
-  - there is no `Content-Disposition`, `nosniff` or range;
+  - the parsed media type is exactly `application/octet-stream`;
+  - there is no `X-Content-Type-Options` header at all, no `Content-Disposition` and no range;
+  - a body is present, with an integer declared length between 1 and 4096 bytes that matches the body at EOF;
   - the body is valid UTF-8 without forbidden control characters.
 
   Otherwise the buffered bytes are replayed intact.
-- **Unchanged:** statuses with no body, and `206`, `416` and `If-Range`, which pass through as received.
+  - **Its buffer:** the sniff reads until it has more than 4096 bytes or EOF. It holds at most 4 KiB plus one upstream chunk (64 KiB from the native node), because a lying length can deliver a whole chunk at once. Every byte is replayed.
+  - **Vectors:** they cover the oversized chunk and the wrong length.
+
+**Unchanged:** statuses with no body, and `206`, `416` and `If-Range`, which pass through as received.
 
 `fc-dweb` carries the same operations with the same vectors, for Stage 2 and mobile. In Electron, main's existing code runs them.
 
 ### Deadlines, cancel and bounds
 
 - **Retry:** the retry loop and its back-off stop when the page's signal aborts, as today. A retried attempt's body is cancelled before the next attempt.
-- **Body idle (deviation `body-idle`).** Main wraps the body in a pull-driven `ReadableStream`. The idle clock runs only while Chromium has asked for bytes and none have come. A paused video, which asks for nothing, is never cut off. A body that leaves a pending read unanswered for 60 s fails as a truncated resource (`controller.error`).
+- **Body idle (deviation `body-idle`).** Main wraps the body in a `ReadableStream` with `highWaterMark: 0`, so `pull` means a consumer is waiting.
+  - **The clock** runs only while Chromium has asked for bytes and none have come. A paused video, which asks for nothing, is never cut off.
+  - **On expiry,** a body that leaves a pending read unanswered for 60 s fails as a truncated resource (`controller.error`), and the upstream is aborted and freed.
 - **Admission in main:**
   - at most 256 active dweb fetches across sessions, and 512 waiting;
   - a request beyond that gets 503 at once;
-  - each fetch owns its node handle, its sniff buffer (at most 4 KiB) and its retry state, and frees them on every terminal path: done, error, cancel, or the session closing.
+  - each fetch owns its node handle, its sniff buffer (at most 4 KiB plus one upstream chunk) and its retry state, and frees them on every terminal path: done, error, cancel, or the session closing;
+  - a plan is checked against the generations once more after any wait in main's queue, so a plan that waited is never used stale.
 - **Local failures map to HTTP:** `busy` → 503, `deadline` → 504, `too_large` → 414 or 431 as above, and a refused plan → 502.
-- **Readiness keeps today's order.** `bzz:` checks that Ant is up before anything else, and a missing Ant is an immediate 503 before any name resolution. IPFS checks its node or gateway at dispatch, as today.
+- **Readiness keeps today's order.** The method, path and host checks come first, so a POST is still a 405 and an encoded separator still a 400 with Ant absent. Then an absent node is an immediate 503, before any name is resolved (`backend: absent`).
 
 ### Other callers
 
@@ -279,7 +295,7 @@ Before step 4 moves a handler:
 | a `dweb.open` request | one frame; URL ≤ 64 KiB, headers ≤ 64 KiB | 414 / 431 in main, before asking |
 | per-request state in the core | none after the plan | — |
 | active / waiting dweb fetches (main) | 256 / 512 | 503 at once |
-| sniff buffer (main) | 4 KiB per fetch | the body is replayed intact |
+| sniff buffer (main) | 4 KiB plus one upstream chunk per fetch | the body is replayed intact |
 | body idle (main) | 60 s with a read pending | the body errors as truncated |
 | `chain.html` | 0005's bounds; encoded ≤ `MAX_HTML_BYTES + 95`, document ≤ 8 MiB | 413 for size only |
 
