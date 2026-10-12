@@ -12991,6 +12991,434 @@
       ]
     },
     {
+      "id": "myotis-reverse-lifecycle-forward-check",
+      "system": "ens",
+      "seed": 7,
+      "world": {
+        "endpoints": [
+          "https://a.rpc.example",
+          "https://b.rpc.example",
+          "https://c.rpc.example",
+          "https://d.rpc.example"
+        ],
+        "network": {
+          "verification": {
+            "order": [
+              "myotis",
+              "quorum"
+            ],
+            "preferVerified": false
+          },
+          "quorum": {
+            "k": 3,
+            "m": 2,
+            "timeoutMs": 5000,
+            "anchor": "latest",
+            "anchorTtlMs": 30000
+          }
+        },
+        "calls": {
+          "reverse": {
+            "data": "0x0000000000000000000000000000000000000000000000000000000000000060000000000000000000000000222222222222222222222222222222222222222200000000000000000000000033333333333333333333333333333333333333330000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "wns:reverse": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000009616c6963652e7765690000000000000000000000000000000000000000000000"
+          },
+          "wns:addr": {
+            "data": "0x000000000000000000000000abababababababababababababababababababab"
+          },
+          "gns:reverse": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000"
+          }
+        },
+        "myotis": {
+          "enabled": true,
+          "ready": true,
+          "block": 23456789,
+          "calls": {
+            "reverse": {
+              "data": "0x0000000000000000000000000000000000000000000000000000000000000060000000000000000000000000222222222222222222222222222222222222222200000000000000000000000033333333333333333333333333333333333333330000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "wns:reverse": {
+              "data": "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000009616c6963652e7765690000000000000000000000000000000000000000000000"
+            },
+            "wns:addr": {
+              "data": "0x000000000000000000000000abababababababababababababababababababab"
+            },
+            "gns:reverse": {
+              "data": "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000"
+            }
+          }
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "call": {
+            "fn": "resolveEnsReverse",
+            "args": [
+              "0xabababababababababababababababababababab"
+            ]
+          },
+          "events": [
+            {
+              "at": 25,
+              "myotis": {
+                "ready": true
+              }
+            }
+          ],
+          "results": [
+            {
+              "value": {
+                "success": true,
+                "address": "0xabababababababababababababababababababab",
+                "name": "alice.wei",
+                "system": "wns",
+                "trust": {
+                  "level": "verified",
+                  "system": "wns",
+                  "method": "myotis",
+                  "finality": "optimistic",
+                  "proof": "P2P light client (optimistic beacon root — attested, not finalized)",
+                  "block": 23456789,
+                  "agreed": [
+                    "myotis-p2p"
+                  ],
+                  "dissented": [],
+                  "queried": [
+                    "myotis-p2p"
+                  ],
+                  "quorum": {
+                    "k": 1,
+                    "m": 1,
+                    "achieved": true
+                  }
+                }
+              },
+              "settled": 70
+            }
+          ]
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "t": 0,
+          "kind": "verified-op",
+          "host": "myotis",
+          "op": "record",
+          "params": {
+            "method": "reverse",
+            "name": null,
+            "address": "0xabababababababababababababababababababab",
+            "coinType": "60"
+          },
+          "end": 10,
+          "outcome": "answered",
+          "answer": {
+            "result": {
+              "verified": false,
+              "blockNumber": null,
+              "status": "noRecord",
+              "name": ""
+            }
+          }
+        },
+        {
+          "id": 1,
+          "step": 0,
+          "t": 0,
+          "kind": "verified",
+          "host": "myotis",
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
+              "data": "0x5d78a2170000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000003c0000000000000000000000000000000000000000000000000000000000000014abababababababababababababababababababab000000000000000000000000"
+            },
+            "latest"
+          ],
+          "call": "reverse",
+          "within": 0,
+          "end": 10,
+          "outcome": "answered",
+          "answer": {
+            "data": "0x0000000000000000000000000000000000000000000000000000000000000060000000000000000000000000222222222222222222222222222222222222222200000000000000000000000033333333333333333333333333333333333333330000000000000000000000000000000000000000000000000000000000000000"
+          }
+        },
+        {
+          "id": 2,
+          "step": 0,
+          "t": 10,
+          "kind": "verified-op",
+          "host": "myotis",
+          "op": "call",
+          "params": {
+            "to": "0x0000000000696760E15f265e828DB644A0c242EB",
+            "data": "0x9af8b7aa000000000000000000000000abababababababababababababababababababab"
+          },
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "result": {
+              "resultHex": "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000009616c6963652e7765690000000000000000000000000000000000000000000000",
+              "optimisticBlockNumber": 23456789
+            }
+          }
+        },
+        {
+          "id": 3,
+          "step": 0,
+          "t": 10,
+          "kind": "verified",
+          "host": "myotis",
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x0000000000696760E15f265e828DB644A0c242EB",
+              "data": "0x9af8b7aa000000000000000000000000abababababababababababababababababababab"
+            },
+            "latest"
+          ],
+          "call": "wns:reverse",
+          "within": 2,
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000009616c6963652e7765690000000000000000000000000000000000000000000000"
+          }
+        },
+        {
+          "id": 4,
+          "step": 0,
+          "t": 20,
+          "kind": "verified-op",
+          "host": "myotis",
+          "op": "call",
+          "params": {
+            "to": "0x0000000000696760E15f265e828DB644A0c242EB",
+            "data": "0x3b3b57deab8b935a479940b3bfb3690f7fa08a8ed1cfecc06dd69662d9b6f7cdcbdbed66"
+          },
+          "end": 30,
+          "outcome": "answered",
+          "answer": {
+            "failure": "lifecycle"
+          }
+        },
+        {
+          "id": 5,
+          "step": 0,
+          "t": 20,
+          "kind": "verified",
+          "host": "myotis",
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x0000000000696760E15f265e828DB644A0c242EB",
+              "data": "0x3b3b57deab8b935a479940b3bfb3690f7fa08a8ed1cfecc06dd69662d9b6f7cdcbdbed66"
+            },
+            "latest"
+          ],
+          "call": "wns:addr",
+          "within": 4,
+          "end": 30,
+          "outcome": "answered",
+          "answer": {
+            "data": "0x000000000000000000000000abababababababababababababababababababab"
+          }
+        },
+        {
+          "id": 6,
+          "step": 0,
+          "t": 25,
+          "kind": "event",
+          "host": null,
+          "event": {
+            "at": 25,
+            "myotis": {
+              "ready": true
+            }
+          },
+          "end": 25,
+          "outcome": "fired"
+        },
+        {
+          "id": 7,
+          "step": 0,
+          "t": 30,
+          "kind": "verified-op",
+          "host": "myotis",
+          "op": "call",
+          "params": {
+            "to": "0x9D51D507BC7264d4fE8Ad1cf7Fe191933A0a81d6",
+            "data": "0x9af8b7aa000000000000000000000000abababababababababababababababababababab"
+          },
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "result": {
+              "resultHex": "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000",
+              "optimisticBlockNumber": 23456789
+            }
+          }
+        },
+        {
+          "id": 8,
+          "step": 0,
+          "t": 30,
+          "kind": "verified",
+          "host": "myotis",
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x9D51D507BC7264d4fE8Ad1cf7Fe191933A0a81d6",
+              "data": "0x9af8b7aa000000000000000000000000abababababababababababababababababababab"
+            },
+            "latest"
+          ],
+          "call": "gns:reverse",
+          "within": 7,
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000"
+          }
+        },
+        {
+          "id": 9,
+          "step": 0,
+          "t": 40,
+          "kind": "verified-op",
+          "host": "myotis",
+          "op": "record",
+          "params": {
+            "method": "reverse",
+            "name": null,
+            "address": "0xabababababababababababababababababababab",
+            "coinType": "60"
+          },
+          "end": 50,
+          "outcome": "answered",
+          "answer": {
+            "result": {
+              "verified": false,
+              "blockNumber": null,
+              "status": "noRecord",
+              "name": ""
+            }
+          }
+        },
+        {
+          "id": 10,
+          "step": 0,
+          "t": 40,
+          "kind": "verified",
+          "host": "myotis",
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
+              "data": "0x5d78a2170000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000003c0000000000000000000000000000000000000000000000000000000000000014abababababababababababababababababababab000000000000000000000000"
+            },
+            "latest"
+          ],
+          "call": "reverse",
+          "within": 9,
+          "end": 50,
+          "outcome": "answered",
+          "answer": {
+            "data": "0x0000000000000000000000000000000000000000000000000000000000000060000000000000000000000000222222222222222222222222222222222222222200000000000000000000000033333333333333333333333333333333333333330000000000000000000000000000000000000000000000000000000000000000"
+          }
+        },
+        {
+          "id": 11,
+          "step": 0,
+          "t": 50,
+          "kind": "verified-op",
+          "host": "myotis",
+          "op": "call",
+          "params": {
+            "to": "0x0000000000696760E15f265e828DB644A0c242EB",
+            "data": "0x9af8b7aa000000000000000000000000abababababababababababababababababababab"
+          },
+          "end": 60,
+          "outcome": "answered",
+          "answer": {
+            "result": {
+              "resultHex": "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000009616c6963652e7765690000000000000000000000000000000000000000000000",
+              "optimisticBlockNumber": 23456789
+            }
+          }
+        },
+        {
+          "id": 12,
+          "step": 0,
+          "t": 50,
+          "kind": "verified",
+          "host": "myotis",
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x0000000000696760E15f265e828DB644A0c242EB",
+              "data": "0x9af8b7aa000000000000000000000000abababababababababababababababababababab"
+            },
+            "latest"
+          ],
+          "call": "wns:reverse",
+          "within": 11,
+          "end": 60,
+          "outcome": "answered",
+          "answer": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000009616c6963652e7765690000000000000000000000000000000000000000000000"
+          }
+        },
+        {
+          "id": 13,
+          "step": 0,
+          "t": 60,
+          "kind": "verified-op",
+          "host": "myotis",
+          "op": "call",
+          "params": {
+            "to": "0x0000000000696760E15f265e828DB644A0c242EB",
+            "data": "0x3b3b57deab8b935a479940b3bfb3690f7fa08a8ed1cfecc06dd69662d9b6f7cdcbdbed66"
+          },
+          "end": 70,
+          "outcome": "answered",
+          "answer": {
+            "result": {
+              "resultHex": "0x000000000000000000000000abababababababababababababababababababab",
+              "optimisticBlockNumber": 23456789
+            }
+          }
+        },
+        {
+          "id": 14,
+          "step": 0,
+          "t": 60,
+          "kind": "verified",
+          "host": "myotis",
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x0000000000696760E15f265e828DB644A0c242EB",
+              "data": "0x3b3b57deab8b935a479940b3bfb3690f7fa08a8ed1cfecc06dd69662d9b6f7cdcbdbed66"
+            },
+            "latest"
+          ],
+          "call": "wns:addr",
+          "within": 13,
+          "end": 70,
+          "outcome": "answered",
+          "answer": {
+            "data": "0x000000000000000000000000abababababababababababababababababababab"
+          }
+        }
+      ]
+    },
+    {
       "id": "myotis-wns-content",
       "system": "ens",
       "seed": 7,

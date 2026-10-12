@@ -829,6 +829,20 @@ function addressAndReverse(ethers, base, one) {
       network: { ...QUORUM_NETWORK, verification: { order: ['myotis'], preferVerified: false } },
       myotis: { enabled: true, ready: true, block: 23_456_789, calls: { reverse: urReverse(''), 'wns:reverse': nftString('alice.wei'), 'wns:addr': nftAddress(ACCOUNT) } },
     }), reverse),
+    {
+      // Availability changes during the WNS forward check of a Myotis
+      // reverse. readMyotisReverse catches that failure itself, keeps the
+      // unverified claim and tries GNS; tryMyotisReverse's check around the
+      // whole method then throws MYOTIS_LIFECYCLE_CHANGED, and the lookup
+      // restarts through Myotis at once, with no quorum I/O.
+      id: 'myotis-reverse-lifecycle-forward-check',
+      world: base({
+        network: { ...QUORUM_NETWORK, verification: { order: ['myotis', 'quorum'], preferVerified: false } },
+        myotis: { enabled: true, ready: true, block: 23_456_789, calls: { reverse: urReverse(''), 'wns:reverse': nftString('alice.wei'), 'wns:addr': nftAddress(ACCOUNT), 'gns:reverse': nftString('') } },
+        calls: { reverse: urReverse(''), 'wns:reverse': nftString('alice.wei'), 'wns:addr': nftAddress(ACCOUNT), 'gns:reverse': nftString('') },
+      }),
+      steps: [{ call: reverse, events: [{ at: 25, myotis: { ready: true } }] }],
+    },
     one('myotis-wns-content', base({
       network: { ...QUORUM_NETWORK, verification: { order: ['myotis'], preferVerified: false } },
       myotis: { enabled: true, ready: true, block: 23_456_789, calls: { 'wns:contenthash': nftBytes('0xe3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f') } },
