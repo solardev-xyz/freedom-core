@@ -14,6 +14,8 @@
 //! - The Ant profile's error ranking and range caps:
 //!   [`rank_log_scan_error`], [`log_scan_range_cap`], with
 //!   [`log_query_span`] and the range refusal ([`log_range_refusal_text`]).
+//! - Blockscout's log index: [`log_index_filter`], the transfer mappers,
+//!   [`logs_agree`], [`cooldown_from`] and the paged [`TransferScan`].
 //! - A broadcast's hash: [`transaction_hash`].
 //!
 //! Deviations, each pinned by vectors: `json-depth` (nesting deeper than
@@ -26,6 +28,7 @@
 mod answer;
 mod ant;
 mod bigint;
+mod blockscout;
 mod fee;
 mod js;
 mod logs;
@@ -45,6 +48,15 @@ pub use ant::{
     rank_log_scan_error,
 };
 pub use bigint::MAX_DECIMAL_BITS;
+pub use blockscout::{
+    BLOCKSCOUT_MAX_PAGES, BlockscoutError, CanonicalLog, ERC20_TRANSFER_TOPIC,
+    LOG_INDEX_ABORT_COOLDOWN_MS, LOG_INDEX_CHAIN_ID, LOG_INDEX_DISAGREEMENT_COOLDOWN_MS,
+    LOG_INDEX_PAIR_MALFORMED_COOLDOWN_MS, LOG_INDEX_TAIL_BLOCKS, LOG_INDEX_TOKEN, LogIndexFilter,
+    MAX_COOLDOWN_MS, MAX_PAGE_SIZE, MIN_COOLDOWN_MS, PageReply, Party, RATE_LIMIT_COOLDOWN_MS,
+    ScanStep, Transfer, TransferScan, agreed_rpc_logs, blockscout_transfer, canonical_log,
+    cooldown_from, log_index_filter, logs_agree, rpc_transfer, rpc_transfer_log_well_formed,
+    rpc_transfer_logs_well_formed, transfers_json,
+};
 pub use fee::{FeeQuote, fee_quote};
 pub use js::{JsError, JsString, is_js_whitespace};
 pub use logs::{

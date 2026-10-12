@@ -153,17 +153,24 @@ pub fn decode_answer(status: u16, body: Vec<u8>) -> Result<Answer, AnswerError> 
     if !(200..=299).contains(&status) {
         return Err(AnswerError::Status(status));
     }
+    let text = decode_text(body);
+    let reply = read(&text)?;
+    Ok(Answer { text, reply })
+}
+
+/// A body as undici's `text()` and `json()` decode it: UTF-8 with
+/// replacement; undici drops a BOM's bytes, then `TextDecoder` drops a
+/// decoded one.
+pub(crate) fn decode_text(body: Vec<u8>) -> String {
     let mut text = String::from_utf8(body)
         .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned());
-    // undici drops a BOM's bytes, then TextDecoder drops a decoded one.
     let boms = text
         .char_indices()
         .take(2)
         .take_while(|(_, c)| *c == '\u{FEFF}')
         .count();
     text.drain(..boms * '\u{FEFF}'.len_utf8());
-    let reply = read(&text)?;
-    Ok(Answer { text, reply })
+    text
 }
 
 fn read(text: &str) -> Result<Reply, AnswerError> {

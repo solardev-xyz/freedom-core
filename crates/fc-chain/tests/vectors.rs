@@ -6,16 +6,22 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use fc_chain::{
-    ANT_EXCLUDE_SOURCES, ANT_INCLUDE_SOURCES, ANT_LOG_SCAN_SHRINK_NEEDLES, AnswerError, ErrorRank,
-    JSON_PARSE_FAILURE, JsString, LOG_RANGE_CAP_TTL_MS, LOG_RANGE_REFUSAL_CODE,
-    LOG_SCAN_COOLDOWN_MS, LOG_SCAN_QUORUM_ROUNDS, LOG_SCAN_QUORUM_TIMEOUT_MS,
-    LOG_TRUNCATION_MIN_SPAN, LOG_TRUNCATION_TAIL_BLOCKS, MAX_DECIMAL_BITS,
-    MAX_MYOTIS_REFUSAL_MESSAGE, MYOTIS_BLOB_FIELDS, MYOTIS_NOT_READY, MyotisFailure,
-    MyotisOperation, Outcome, ReceivedError, SourceFailure, StableDigest, TxHash,
-    ant_shrinks_log_scan_on, broadcast_failure_text, decode_answer, fee_quote,
-    fee_quote_failure_text, is_js_whitespace, log_range_refusal_text, log_scan_range_cap,
-    myotis_answer, myotis_operation, myotis_trust, normalize_params, rank_log_scan_error,
-    request_failure_text, safe_error_message, stable_digest, stable_value, transaction_hash,
+    ANT_EXCLUDE_SOURCES, ANT_INCLUDE_SOURCES, ANT_LOG_SCAN_SHRINK_NEEDLES, AnswerError,
+    BLOCKSCOUT_MAX_PAGES, BlockscoutError, ERC20_TRANSFER_TOPIC, ErrorRank, JSON_PARSE_FAILURE,
+    JsString, LOG_INDEX_ABORT_COOLDOWN_MS, LOG_INDEX_CHAIN_ID, LOG_INDEX_DISAGREEMENT_COOLDOWN_MS,
+    LOG_INDEX_PAIR_MALFORMED_COOLDOWN_MS, LOG_INDEX_TAIL_BLOCKS, LOG_INDEX_TOKEN,
+    LOG_RANGE_CAP_TTL_MS, LOG_RANGE_REFUSAL_CODE, LOG_SCAN_COOLDOWN_MS, LOG_SCAN_QUORUM_ROUNDS,
+    LOG_SCAN_QUORUM_TIMEOUT_MS, LOG_TRUNCATION_MIN_SPAN, LOG_TRUNCATION_TAIL_BLOCKS,
+    LogIndexFilter, MAX_COOLDOWN_MS, MAX_DECIMAL_BITS, MAX_MYOTIS_REFUSAL_MESSAGE, MAX_PAGE_SIZE,
+    MIN_COOLDOWN_MS, MYOTIS_BLOB_FIELDS, MYOTIS_NOT_READY, MyotisFailure, MyotisOperation, Outcome,
+    PageReply, Party, RATE_LIMIT_COOLDOWN_MS, ReceivedError, ScanStep, SourceFailure, StableDigest,
+    TransferScan, TxHash, agreed_rpc_logs, ant_shrinks_log_scan_on, blockscout_transfer,
+    broadcast_failure_text, canonical_log, cooldown_from, decode_answer, fee_quote,
+    fee_quote_failure_text, is_js_whitespace, log_index_filter, log_range_refusal_text,
+    log_scan_range_cap, logs_agree, myotis_answer, myotis_operation, myotis_trust,
+    normalize_params, rank_log_scan_error, request_failure_text, rpc_transfer,
+    rpc_transfer_log_well_formed, safe_error_message, stable_digest, stable_value,
+    transaction_hash, transfers_json,
 };
 use fc_json::index::{Index, IndexError, KeyOrder};
 use serde_json::Value as Json;
@@ -620,4 +626,218 @@ fn ant_profile() {
     ] {
         assert_eq!(constants[key].as_u64(), Some(value), "{key}");
     }
+}
+
+/// The JSON of an optional value, `null` for none.
+fn or_null(text: Option<String>) -> String {
+    text.unwrap_or_else(|| "null".to_owned())
+}
+
+#[test]
+fn blockscout_mappers() {
+    let vectors = vectors();
+    let blockscout = &vectors["blockscout"];
+    let constants = &blockscout["constants"];
+    assert_eq!(constants["log_index_token"], LOG_INDEX_TOKEN);
+    assert_eq!(constants["erc20_transfer_topic"], ERC20_TRANSFER_TOPIC);
+    assert_eq!(
+        constants["log_index_chains"],
+        serde_json::json!([LOG_INDEX_CHAIN_ID])
+    );
+    assert_eq!(
+        constants["max_pages"].as_u64(),
+        Some(BLOCKSCOUT_MAX_PAGES as u64)
+    );
+    assert_eq!(
+        constants["max_response_bytes"].as_u64(),
+        Some(MAX_PAGE_SIZE as u64)
+    );
+    for (key, value) in [
+        ("rate_limit_cooldown_ms", RATE_LIMIT_COOLDOWN_MS),
+        ("min_cooldown_ms", MIN_COOLDOWN_MS),
+        ("max_cooldown_ms", MAX_COOLDOWN_MS),
+    ] {
+        assert_eq!(constants[key].as_f64(), Some(value), "{key}");
+    }
+    for (key, value) in [
+        ("tail_blocks", LOG_INDEX_TAIL_BLOCKS),
+        (
+            "disagreement_cooldown_ms",
+            LOG_INDEX_DISAGREEMENT_COOLDOWN_MS,
+        ),
+        ("abort_cooldown_ms", LOG_INDEX_ABORT_COOLDOWN_MS),
+        (
+            "pair_malformed_cooldown_ms",
+            LOG_INDEX_PAIR_MALFORMED_COOLDOWN_MS,
+        ),
+    ] {
+        assert_eq!(constants[key].as_u64(), Some(value), "{key}");
+    }
+    for case in blockscout["filters"].as_array().unwrap() {
+        let filter = log_index_filter(case["chain_id"].as_u64().unwrap(), str_of(case, "params"));
+        assert_eq!(
+            filter.map(|f| f.to_json()).as_deref(),
+            opt_str(&case["js"], "filter_json"),
+            "{}",
+            id(case)
+        );
+    }
+    for case in blockscout["logs"].as_array().unwrap() {
+        let index = Index::new(str_of(case, "entry_json")).unwrap();
+        let entry = index.root();
+        let js = &case["js"];
+        let name = id(case);
+        assert_eq!(
+            or_null(canonical_log(entry).map(|l| l.to_json())),
+            str_of(js, "canonical_json"),
+            "{name}"
+        );
+        assert_eq!(
+            rpc_transfer_log_well_formed(entry),
+            js["well_formed"] == true,
+            "{name}"
+        );
+        assert_eq!(
+            or_null(rpc_transfer(entry).map(|t| t.to_json())),
+            str_of(js, "transfer_json"),
+            "{name}"
+        );
+    }
+    for case in blockscout["items"].as_array().unwrap() {
+        let index = Index::new(str_of(case, "item_json")).unwrap();
+        assert_eq!(
+            or_null(blockscout_transfer(index.root()).map(|t| t.to_json())),
+            str_of(&case["js"], "transfer_json"),
+            "{}",
+            id(case)
+        );
+    }
+    let pairs = blockscout["pairs"].as_array().unwrap();
+    for case in pairs {
+        let name = id(case);
+        let items = Index::new(str_of(case, "items_json")).unwrap();
+        let indexed: Vec<_> = items
+            .root()
+            .children()
+            .map(|item| blockscout_transfer(item).unwrap())
+            .collect();
+        let rpc = Index::new(str_of(case, "rpc_json")).unwrap();
+        let agree = logs_agree(&indexed, rpc.root());
+        assert_eq!(agree, case["js"]["agree"] == true, "{name}");
+        if agree {
+            assert_eq!(
+                agreed_rpc_logs(rpc.root()).as_deref(),
+                opt_str(&case["js"], "agreed_json"),
+                "{name}"
+            );
+        }
+    }
+    assert!(pairs.iter().filter(|p| p["js"]["agree"] == true).count() >= 4);
+    for case in blockscout["cooldowns"].as_array().unwrap() {
+        assert_eq!(
+            cooldown_from(
+                opt_str(case, "x_ratelimit_reset"),
+                opt_str(case, "retry_after")
+            ),
+            case["js"]["cool_ms"].as_f64().unwrap(),
+            "{case}"
+        );
+    }
+}
+
+fn page_body(page: &Json) -> Vec<u8> {
+    if let Some(repeat) = page.get("body_repeat") {
+        let unit = str_of(repeat, "unit").repeat(repeat["count"].as_u64().unwrap() as usize);
+        return format!(
+            "{}{unit}{}",
+            str_of(repeat, "prefix"),
+            str_of(repeat, "suffix")
+        )
+        .into_bytes();
+    }
+    hex::decode(str_of(page, "body_hex")).unwrap()
+}
+
+/// A filter recorded as the reference's JSON.
+fn filter_of(json: &str) -> LogIndexFilter {
+    let filter: Json = serde_json::from_str(json).unwrap();
+    let topic = |key: &str| filter[key].as_str().map(str::to_owned);
+    let party = match (topic("sender"), topic("recipient")) {
+        (Some(sender), Some(recipient)) => Party::Both { sender, recipient },
+        (Some(sender), None) => Party::Sender(sender),
+        (None, Some(recipient)) => Party::Recipient(recipient),
+        (None, None) => panic!("{json}"),
+    };
+    let built = LogIndexFilter {
+        chain_id: filter["chainId"].as_u64().unwrap(),
+        party,
+        from_block: filter["fromBlock"].as_u64().unwrap(),
+        to_block: filter["toBlock"].as_u64().unwrap(),
+    };
+    assert_eq!(built.to_json(), json);
+    built
+}
+
+#[test]
+fn blockscout_scans() {
+    let vectors = vectors();
+    let blockscout = &vectors["blockscout"];
+    let base = str_of(&blockscout["constants"], "log_index_url");
+    let scans = blockscout["scans"].as_array().unwrap();
+    for case in scans {
+        let name = id(case);
+        let filter = match opt_str(case, "params") {
+            Some(params) => log_index_filter(LOG_INDEX_CHAIN_ID, params).unwrap(),
+            None => filter_of(str_of(case, "filter_json")),
+        };
+        let js = &case["js"];
+        let expect_error = |error: &BlockscoutError| {
+            assert_eq!(error.message, str_of(&js["error"], "message"), "{name}");
+            assert_eq!(
+                Some(error.cool_ms),
+                js["error"]["cool_ms"].as_f64(),
+                "{name}"
+            );
+        };
+        let mut scan = match TransferScan::new(filter, case["to_block"].as_u64().unwrap()) {
+            Ok(scan) => scan,
+            Err(error) => {
+                assert!(case["pages"].as_array().unwrap().is_empty(), "{name}");
+                expect_error(&error);
+                continue;
+            }
+        };
+        let pages = case["pages"].as_array().unwrap();
+        for (i, page) in pages.iter().enumerate() {
+            assert_eq!(
+                format!("{base}{}", scan.query()),
+                str_of(page, "url"),
+                "{name} {i}"
+            );
+            let reply = PageReply {
+                status: u16::try_from(page["status"].as_u64().unwrap()).unwrap(),
+                content_length: opt_str(page, "content_length"),
+                x_ratelimit_reset: opt_str(page, "x_ratelimit_reset"),
+                retry_after: opt_str(page, "retry_after"),
+                body: page_body(page),
+            };
+            let last = i + 1 == pages.len();
+            match scan.on_page(reply) {
+                Ok(ScanStep::Next) => assert!(!last, "{name}: more pages expected"),
+                Ok(ScanStep::Done(transfers)) => {
+                    assert!(last, "{name}: done early");
+                    assert_eq!(
+                        transfers_json(&transfers),
+                        str_of(js, "transfers_json"),
+                        "{name}"
+                    );
+                }
+                Err(error) => {
+                    assert!(last, "{name}: failed early: {error}");
+                    expect_error(&error);
+                }
+            }
+        }
+    }
+    assert!(scans.len() > 40);
 }
