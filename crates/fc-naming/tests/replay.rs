@@ -377,7 +377,47 @@ impl Driver {
         }
     }
 
+    /// Main's `FetchRequest` loop (design 0004, Replay): one `shell.rpc`
+    /// consumes its exchange's redirects (301, 302, 307, 308: to the
+    /// location's host, at once) and 429 retries (to the same host, after
+    /// the back-off), and its answer is the last one's.
+    fn final_exchange(&mut self, index: usize) -> usize {
+        let mut current = index;
+        loop {
+            let e = self.exchanges[current].entry.clone();
+            if str_of(e.get("kind")) != "rpc" {
+                return current;
+            }
+            let answer = e.get("answer");
+            let status = num(answer.and_then(|a| a.get("status")));
+            let host = match status {
+                301 | 302 | 307 | 308 => host_of(str_of(answer.and_then(|a| a.get("location")))),
+                429 => str_of(e.get("host")).to_owned(),
+                _ => return current,
+            };
+            let end = num(e.get("end"));
+            let next = self.exchanges.iter().position(|x| {
+                let n = &x.entry;
+                !x.used
+                    && str_of(n.get("kind")) == "rpc"
+                    && str_of(n.get("host")) == host
+                    && n.get("method") == e.get("method")
+                    && n.get("params") == e.get("params")
+                    && num(n.get("t")) >= end
+            });
+            match next {
+                Some(next) => {
+                    self.exchanges[next].used = true;
+                    current = next;
+                }
+                // ethers' last attempt: its answer stands.
+                None => return current,
+            }
+        }
+    }
+
     fn schedule_answer(&mut self, machine: &Machine, index: usize, id: u64) {
+        let index = self.final_exchange(index);
         let entry = self.exchanges[index].entry.clone();
         let Some(answer) = entry.get("answer") else {
             return;
