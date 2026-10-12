@@ -126,23 +126,28 @@ fn substitute(value: &JsValue) -> JsValue {
     }
 }
 
-/// Fields the core fills under deviation `error-text`: compared by
-/// presence, not text.
-fn mask_errors(value: &JsValue) -> JsValue {
-    match value {
-        JsValue::Object(members) => JsValue::Object(
-            members
-                .iter()
-                .map(|(k, v)| {
-                    if k == "error" {
-                        (k.clone(), JsValue::String("<error>".into()))
-                    } else {
-                        (k.clone(), mask_errors(v))
-                    }
+/// Deviation `error-text`: where the reference's value is an ethers
+/// composed message (it ends in ethers' version marker), the core's text is
+/// its own; the field must still be present. Every other value must match.
+fn same(got: &JsValue, want: &JsValue) -> bool {
+    match (got, want) {
+        (JsValue::Object(g), JsValue::Object(w)) => {
+            g.len() == w.len()
+                && g.iter().zip(w).all(|((gk, gv), (wk, wv))| {
+                    gk == wk
+                        && (if gk == "error"
+                            && wv.as_str().is_some_and(|t| t.contains("version=6."))
+                        {
+                            gv.as_str().is_some()
+                        } else {
+                            same(gv, wv)
+                        })
                 })
-                .collect(),
-        ),
-        other => other.clone(),
+        }
+        (JsValue::Array(g), JsValue::Array(w)) => {
+            g.len() == w.len() && g.iter().zip(w).all(|(a, b)| same(a, b))
+        }
+        _ => got == want,
     }
 }
 
@@ -218,6 +223,20 @@ fn replay(scenario: &JsValue) -> Result<Mismatches, String> {
             let args = call.get("args").and_then(JsValue::as_array).unwrap_or(&[]);
             match str_of(call.get("fn")) {
                 "resolveEnsContent" => callers.push(machine.resolve_content(str_of(args.first()))),
+                "resolveEnsAddress" => {
+                    let chain = match args.get(1) {
+                        Some(JsValue::Number(n)) => *n,
+                        _ => 1.0,
+                    };
+                    callers.push(machine.resolve_address(str_of(args.first()), chain));
+                }
+                "resolveEnsReverse" => {
+                    let chain = match args.get(1) {
+                        Some(JsValue::Number(n)) => *n,
+                        _ => 1.0,
+                    };
+                    callers.push(machine.resolve_reverse(str_of(args.first()), chain));
+                }
                 "invalidateCachedProvider" => {
                     machine.invalidate_providers();
                     callers.push(u64::MAX);
@@ -267,11 +286,12 @@ fn replay(scenario: &JsValue) -> Result<Mismatches, String> {
             }
             match (&reply.outcome, want.get("value"), want.get("thrown")) {
                 (Ok(value), Some(expected), _) => {
-                    let got = mask_errors(&substitute(value)).stringify();
-                    let want = mask_errors(expected).stringify();
-                    if got != want {
+                    let got = substitute(value);
+                    if !same(&got, expected) {
                         mismatches.push(format!(
-                            "{id} step {index}: result\n   got {got}\n  want {want}"
+                            "{id} step {index}: result\n   got {}\n  want {}",
+                            got.stringify(),
+                            expected.stringify()
                         ));
                     }
                 }
@@ -465,6 +485,19 @@ const SUPPORTED: &[&str] = &[
     "settings-invalidation",
     "direct-user-configured",
     "direct-builtin",
+    "dedup-concurrent",
+    "quarantine-doubles-on-overlapping-failures",
+    "address-agree",
+    "address-multicoin-base",
+    "address-zero-is-no-address",
+    "reverse-agree",
+    "reverse-mismatch",
+    "reverse-ens-empty-then-wns",
+    "reverse-ens-and-wns-empty-then-gns",
+    "reverse-wns-claim-fails-forward-then-gns-empty",
+    "wns-content",
+    "gns-content",
+    "wns-address-on-l2",
 ];
 
 #[test]

@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Waker};
 
-use super::ens::{self, Answer, Config, Ctx, Request, Thrown};
+use super::ens::{self, Answer, Config, Ctx, Request, Store, Thrown};
 use super::exec::{Effect, Fired, Io, Ms, Task};
 use super::random::Random;
 use crate::jsjson::JsValue;
@@ -57,6 +57,7 @@ impl Shared {
 pub type Outcome = Result<JsValue, Thrown>;
 
 struct Session {
+    /// The in-flight key; empty once retired (nothing joins it).
     key: String,
     callers: Vec<u64>,
     task: Task<'static, Outcome>,
@@ -79,6 +80,8 @@ pub struct Machine {
 }
 
 const MAX_LIFECYCLE_RESTARTS: u32 = 3;
+
+type Resolve = Rc<dyn Fn(Rc<Ctx>, Rc<Shared>) -> Pin<Box<dyn Future<Output = Outcome>>>>;
 
 impl Machine {
     pub fn new(now: Ms, config: Config, random: Box<dyn Random>) -> Self {
@@ -113,33 +116,33 @@ impl Machine {
         caller
     }
 
-    /// `resolveEnsContent(name)`: a caller id; its reply comes from
-    /// [`Machine::take_replies`].
-    pub fn resolve_content(&mut self, name: &str) -> u64 {
-        let trimmed = crate::js_trim(name);
-        if trimmed.is_empty() {
-            return self.reply(Err(Thrown {
-                message: "ENS name is empty".into(),
-            }));
-        }
-        let normalized = match ens::fast_normalize(trimmed) {
-            Ok(normalized) => normalized,
-            Err(error) => return self.reply(Err(error)),
+    fn cached(&self, store: Store, key: &str) -> Option<JsValue> {
+        let state = self.ctx.state.borrow();
+        let cache = match store {
+            Store::Content => &state.content,
+            Store::Address => &state.address,
+            Store::Reverse => &state.reverse,
         };
-        let cached = self
-            .ctx
-            .state
-            .borrow()
-            .content
-            .get(&normalized, self.now())
-            .cloned();
-        if let Some(result) = cached {
+        cache.get(key, self.now()).cloned()
+    }
+
+    /// `resolveWithCache` after normalization: a cache hit replies at
+    /// once; otherwise the caller joins or starts the in-flight session.
+    fn lookup(
+        &mut self,
+        store: Store,
+        label: &str,
+        key: String,
+        subject: String,
+        resolve: Resolve,
+    ) -> u64 {
+        if let Some(result) = self.cached(store, &key) {
             return self.reply(Ok(result));
         }
-        let key = format!("content:{normalized}");
+        let dedup = format!("{label}:{key}");
         let caller = self.next_caller;
         self.next_caller += 1;
-        if let Some(session) = self.sessions.iter_mut().find(|s| s.key == key) {
+        if let Some(session) = self.sessions.iter_mut().find(|s| s.key == dedup) {
             session.callers.push(caller);
             return caller;
         }
@@ -148,7 +151,7 @@ impl Machine {
         let task = Task::new(async move {
             for _attempt in 1..=MAX_LIFECYCLE_RESTARTS {
                 let epoch = ctx.state.borrow().lifecycle;
-                let result = ens::content(&ctx, &shared, &normalized).await;
+                let result = resolve(Rc::clone(&ctx), Rc::clone(&shared)).await;
                 if epoch == ctx.state.borrow().lifecycle {
                     return result;
                 }
@@ -157,23 +160,124 @@ impl Machine {
                     // unless a newer one replaced it.
                     let now = ctx.rt.now();
                     let mut state = ctx.state.borrow_mut();
-                    if state.content.get(&normalized, now) == Some(value) {
-                        state.content.delete(&normalized);
+                    let cache = match store {
+                        Store::Content => &mut state.content,
+                        Store::Address => &mut state.address,
+                        Store::Reverse => &mut state.reverse,
+                    };
+                    if cache.get(&key, now) == Some(value) {
+                        cache.delete(&key);
                     }
                 }
             }
             Err(Thrown {
                 message: format!(
-                    "Myotis availability changed repeatedly while resolving {normalized}"
+                    "Myotis availability changed repeatedly while resolving {subject}"
                 ),
             })
         });
         self.sessions.push(Session {
-            key,
+            key: dedup,
             callers: vec![caller],
             task,
         });
         caller
+    }
+
+    /// `trim()` and `fastNormalize`, or the caller's immediate error.
+    fn normalized(&mut self, name: &str) -> Result<String, u64> {
+        let trimmed = crate::js_trim(name);
+        if trimmed.is_empty() {
+            return Err(self.reply(Err(Thrown {
+                message: "ENS name is empty".into(),
+            })));
+        }
+        ens::fast_normalize(trimmed).map_err(|error| self.reply(Err(error)))
+    }
+
+    /// `resolveEnsContent(name)`: a caller id; its reply comes from
+    /// [`Machine::take_replies`].
+    pub fn resolve_content(&mut self, name: &str) -> u64 {
+        let normalized = match self.normalized(name) {
+            Ok(normalized) => normalized,
+            Err(caller) => return caller,
+        };
+        let name = normalized.clone();
+        self.lookup(
+            Store::Content,
+            "content",
+            normalized.clone(),
+            normalized,
+            Rc::new(move |ctx, shared| {
+                let name = name.clone();
+                Box::pin(async move { ens::content(&ctx, &shared, &name).await })
+            }),
+        )
+    }
+
+    /// `resolveEnsAddress(name, chainId)`.
+    pub fn resolve_address(&mut self, name: &str, chain_id: f64) -> u64 {
+        if let Err(error) = ens::coin_type(chain_id) {
+            return self.reply(Err(error));
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let chain = chain_id as u64;
+        let normalized = match self.normalized(name) {
+            Ok(normalized) => normalized,
+            Err(caller) => return caller,
+        };
+        let key = ens::chain_key(&normalized, chain);
+        let name = normalized.clone();
+        self.lookup(
+            Store::Address,
+            "addr",
+            key,
+            normalized,
+            Rc::new(move |ctx, shared| {
+                let name = name.clone();
+                Box::pin(async move { ens::address(&ctx, &shared, &name, chain).await })
+            }),
+        )
+    }
+
+    /// `resolveEnsReverse(address, chainId)`.
+    pub fn resolve_reverse(&mut self, address: &str, chain_id: f64) -> u64 {
+        let valid = address.len() == 42
+            && address.starts_with("0x")
+            && address[2..].bytes().all(|b| b.is_ascii_hexdigit());
+        if !valid {
+            let result = JsValue::Object(vec![
+                ("success".into(), JsValue::Bool(false)),
+                ("address".into(), JsValue::String(address.into())),
+                ("reason".into(), JsValue::String("INVALID_ADDRESS".into())),
+                (
+                    "error".into(),
+                    JsValue::String(format!("Invalid address: {address}")),
+                ),
+            ]);
+            return self.reply(Ok(result));
+        }
+        if let Err(error) = ens::coin_type(chain_id) {
+            return self.reply(Err(error));
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let chain = chain_id as u64;
+        let normalized = match self.normalized(address) {
+            Ok(normalized) => normalized,
+            Err(caller) => return caller,
+        };
+        let key = ens::chain_key(&normalized, chain);
+        let subject = normalized.clone();
+        self.lookup(
+            Store::Reverse,
+            "reverse",
+            key,
+            normalized,
+            Rc::new(move |ctx, shared| {
+                let address = subject.clone();
+                Box::pin(async move { ens::reverse(&ctx, &shared, &address, chain).await })
+            }),
+        )
     }
 
     /// Polls every session and prefetch once; finished sessions reply to
@@ -199,6 +303,7 @@ impl Machine {
                 }
             }
         }
+        self.replies.sort_by_key(|r| r.caller);
         self.shared.poll();
     }
 
@@ -239,6 +344,8 @@ impl Machine {
             state.pool.reset();
             state.anchor = None;
             state.content.clear();
+            state.address.clear();
+            state.reverse.clear();
             state.lifecycle += 1;
         }
         for session in &mut self.sessions {
