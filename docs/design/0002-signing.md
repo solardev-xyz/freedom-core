@@ -87,7 +87,7 @@ Byte strings are `0x`-prefixed hex. They are lowercase in replies; requests take
 | `tx` field | Type | Notes |
 |---|---|---|
 | `type` | `0` or `2` | legacy (always with EIP-155) or EIP-1559 |
-| `chain_id` | quantity ≥ 1 | required. ethers would sign a chain-less legacy transaction when `chainId` is missing; the core never does. For type 0, `chain_id · 2 + 36` must fit in 256 bits (`chain_id ≤ 2^255 − 19`) so that `v` always fits. Above that, ethers still signs, with a wider `v` that its own `Transaction.from` rejects. For type 2, any uint256 |
+| `chain_id` | quantity ≥ 1 | required. ethers would sign a chain-less legacy transaction when `chainId` is missing; the core never does. For type 0, `chain_id · 2 + 36` must fit in 256 bits (`chain_id ≤ 2^255 − 19`), so that `v` fits for either parity. At `2^255 − 18`, `v` fits only for parity 0; that transaction is valid, but the core still refuses the value. Further above, ethers signs with a `v` wider than 256 bits, which its own `Transaction.from` rejects. For type 2, any uint256 |
 | `nonce` | quantity ≤ 2^53 − 1 | ethers keeps the nonce in a JS number and fails above that ("overflow") |
 | `gas_limit` | quantity | |
 | `to` | address or `null` | `null` creates a contract. Hex only (ethers would try to resolve an ENS name; main resolves before signing) |
@@ -167,17 +167,30 @@ ethers accepts each input below; the core refuses it. Each is a `deviation` vect
 | quantity string with whitespace, `+`, `0b`/`0o`, or a lone `-` (which ethers reads as 0) | JS `BigInt()` accepts it | only `[-]digits` or `[-]0x hex` |
 | a type or field name that isn't an identifier (`[A-Za-z_$][A-Za-z0-9_$]*`) | any string, so a name containing `(`, `,` or a space can make two different type sets print the same `encodeType` | error |
 | inputs past the [limits](#limits) | no limits; its subtype walk is exponential on diamond-shaped type graphs | error |
-| type 0 `chain_id` above 2^255 − 19 | signs with a `v` wider than 256 bits, a transaction ethers itself can't parse | error |
+| type 0 `chain_id` above 2^255 − 19 | at 2^255 − 18, a valid transaction for parity 0; further above, a `v` wider than 256 bits that ethers itself can't parse | error: the bound guarantees `v` fits for both parities |
 
 ## Limits
 
 Typed-data work is bounded before any key is touched:
 
-- at most 256 types, 256 fields per type, and 1024 fields in total;
-- nesting depth (struct levels plus array levels) at most 32, and at most 32 array dimensions in one type;
-- type hashing at most 1 MiB of `encodeType` text in total, counting each struct's text once for itself and once for every struct whose type hash includes it.
+- **Types:**
+  - at most 256 types, 256 fields per type, and 1024 fields in total;
+  - names of at most 256 characters;
+  - at most 32 array dimensions in one type;
+  - at most 1 MiB of `encodeType` text in total, counting each struct's text once for itself and once for every struct whose type hash includes it.
+- **The message:**
+  - nesting depth (struct levels plus array levels) at most 32;
+  - at most 100,000 values encoded (fields, array elements, structs);
+  - at most 32 MiB hashed. A 1 MiB frame can drive about 22 MiB, so this cap never binds before the others do.
 
-The subtype closure is computed once per type (memoized), and type hashes are cached per request. With these limits, the worst case is a few milliseconds of hashing. A test checks this, along with a 40-level diamond graph that ethers' walk would take 2^40 steps over.
+The subtype closure is computed once per type (memoized), and each reachable type's hash is computed once per request, not per instance. The work is therefore linear in the input, within these caps.
+
+**Measured** (release build, this machine):
+- The worst accepted request, 99,999 empty struct instances under a type with a 256-character name, takes about 50 ms.
+- 99,999 `uint256` values take about 12 ms.
+- A realistic request (the Mail example) takes about 8 µs.
+
+That 50 ms is the longest a signing request can hold the core's event loop. Tests check accepted inputs just under the caps against a time bound, the rejections at the caps, and a 40-level diamond type graph, which ethers' walk would take 2^40 steps over.
 
 ## Parity contract and vectors
 
@@ -187,10 +200,10 @@ The subtype closure is computed once per type (memoized), and type hashes are ca
 |---|---|
 | Transactions | <ul><li>Type 0 and type 2.</li><li>Chain ids 1, 100, 11155111, 2^32, above 2^53 and above 2^64.</li><li>The legacy `chain_id` limit, values above it (deviations), and the type-2 bounds (2^256 − 1 signs; 2^256 is an error).</li><li>Nonce 0, small, and 2^53 − 1; 2^53 is an error.</li><li>Value 0 and 2^256 − 1.</li><li>Empty and long data; contract creation.</li><li>Priority = max; priority > max is an error.</li></ul> |
 | EIP-191 | Empty, ASCII, multi-byte UTF-8, binary, SIWE, and 1000 bytes (multi-digit length prefix). |
-| EIP-712 | <ul><li>The EIP-712 Mail example; nested structs and arrays of structs, fixed and dynamic.</li><li>Every `uintN`/`intN` boundary; the `uint`/`int` aliases; quantity forms (hex, signed hex, leading zeros, `-0`).</li><li>`bytesN` and `bytes`; lowercase, uppercase and checksummed addresses; Unicode strings.</li><li>Domain subsets, including a hex-string `chainId`, `salt`, null fields (known and unknown), chain id 0 and an empty domain.</li><li>Empty structs; an unreachable cycle (accepted); extra message fields (ignored).</li><li>The real payloads: Safe 1.4.1 SafeTx and SafeMessage, EIP-3009 TransferWithAuthorization, and Permit2 PermitWitnessTransferFrom with string quantities.</li><li>Every ethers error kind, and every [deviation](#deviations-from-ethers).</li></ul> |
+| EIP-712 | <ul><li>The EIP-712 Mail example; nested structs and arrays of structs, fixed and dynamic.</li><li>The bounds of every `uintN`/`intN` width (8 to 256), and the first value past each; the `uint`/`int` aliases; quantity forms (hex, signed hex, leading zeros, `-0`).</li><li>The limits that ethers accepts and the core refuses: name length, type count, fields per type, array dimensions, depth. The value and byte caps are too large for a vector and are covered by Rust tests.</li><li>`bytesN` and `bytes`; lowercase, uppercase and checksummed addresses; Unicode strings.</li><li>Domain subsets, including a hex-string `chainId`, `salt`, null fields (known and unknown), chain id 0 and an empty domain.</li><li>Empty structs; an unreachable cycle (accepted); extra message fields (ignored).</li><li>The real payloads: Safe 1.4.1 SafeTx and SafeMessage, EIP-3009 TransferWithAuthorization, and Permit2 PermitWitnessTransferFrom with string quantities.</li><li>Every ethers error kind, and every [deviation](#deviations-from-ethers).</li></ul> |
 | SOC | <ul><li>Payloads of 1, 32, 33 and 4096 bytes.</li><li>Spans above and below the payload length, and span 0.</li><li>All three key kinds.</li></ul> |
 
-Rust tests replay every case (#18). The generator's `check` mode re-derives every vector from the reference. CI fails if either side drifts.
+Rust tests replay every case, in the crates (#18) and over the wire through the binary (#19). A CI job checks out freedom-browser at the pinned commit, installs its lockfile, and runs the generator's `check` mode, which re-derives every vector from the reference. A drift on either side fails CI.
 
 ## Implementation
 
