@@ -1106,6 +1106,18 @@ function addressAndReverse(ethers, base, one) {
     one('address-agree', base({ calls: { resolve: urAddress(ACCOUNT) } }), address('vitalik.eth')),
     one('address-multicoin-base', base({ calls: { resolve: urMulticoin(ACCOUNT) } }), address('vitalik.eth', 8453)),
     one('address-zero-is-no-address', base({ calls: { resolve: urAddress(ethers.ZeroAddress) } }), address('vitalik.eth')),
+    {
+      // A label of 150 é is 300 bytes: ethers' dnsEncode(name, 255) refuses
+      // it in every leg, with its own message. One of exactly 255 bytes
+      // resolves.
+      id: 'ens-label-over-255-bytes',
+      world: base({}),
+      steps: [
+        { call: content(`${'é'.repeat(150)}.eth`) },
+        { after: 1000, call: address(`${'é'.repeat(150)}.eth`) },
+        { after: 1000, call: content(`${'a'.repeat(255)}.eth`) },
+      ],
+    },
     one('reverse-agree', base({ calls: { reverse: urReverse('vitalik.eth') } }), reverse),
     one('reverse-mismatch', base({ calls: { reverse: { rpc_error: { code: 3, message: 'execution reverted', data: mismatch } } } }), reverse),
     one('reverse-ens-empty-then-wns', base({ calls: { reverse: urReverse(''), 'wns:reverse': nftString('alice.wei'), 'wns:addr': nftAddress(ACCOUNT), 'gns:reverse': nftString('') } }), reverse),
