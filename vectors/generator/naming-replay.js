@@ -12,12 +12,14 @@
 // params, HTTP batch, end time and outcome (answered, cancelled, or still
 // open when the scenario ends), and the answer it got: so a replay serves
 // the recorded answer to the matching request instead of re-creating the
-// world. Present-`undefined` keys are kept as
+// world. Verifier adapters' whole operations are recorded too
+// (`verified-op`), next to the raw calls they make. Present-`undefined` keys are kept as
 // {"$undefined":true}.
 
 const fs = require('node:fs');
 const Module = require('node:module');
 const path = require('node:path');
+const { AsyncLocalStorage } = require('node:async_hooks');
 const { EventEmitter } = require('node:events');
 
 const EPOCH = 1_760_000_000_000;
@@ -58,11 +60,15 @@ function describe(value) {
  * the hook and evicts every checkout module under src/, so no state
  * survives into the next scenario; a failed load restores before throwing.
  */
-function loadModule(checkout, stubs, file) {
+function loadModule(checkout, stubs, file, wrappers = {}) {
   const src = path.join(checkout, 'src');
   const main = path.join(src, 'main');
   const filename = path.join(main, file);
   const byPath = new Map(Object.entries(stubs).map(([rel, stub]) => [path.join(main, `${rel}.js`), stub]));
+  // `wrappers` maps module paths to functions of the real exports: the real
+  // module loads, and its dependents get the wrapped exports.
+  const wrapBy = new Map(Object.entries(wrappers).map(([rel, wrap]) => [path.join(main, `${rel}.js`), wrap]));
+  const wrapped = new Map();
   const evict = () => {
     for (const key of Object.keys(Module._cache)) if (key.startsWith(src + path.sep)) delete Module._cache[key];
   };
@@ -81,6 +87,10 @@ function loadModule(checkout, stubs, file) {
         resolved = null;
       }
       if (resolved && byPath.has(resolved)) return byPath.get(resolved);
+      if (resolved && wrapBy.has(resolved)) {
+        if (!wrapped.has(resolved)) wrapped.set(resolved, wrapBy.get(resolved)(originalLoad.call(this, request, parent, isMain)));
+        return wrapped.get(resolved);
+      }
     }
     return originalLoad.call(this, request, parent, isMain);
   };
@@ -296,17 +306,82 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
   };
   const myotis = () => world.myotis ?? {};
   const colibri = () => world.colibri ?? {};
+  // A verifier adapter's whole operation, as design 0004's shell.verified
+  // carries it: its params, and its outcome without text (a result, the
+  // proven revert data, or a failure class).
+  const insideOperation = new AsyncLocalStorage();
+  const failureClass = (err) => {
+    if (err?.code === 'MYOTIS_LIFECYCLE_CHANGED' || err?.code === 'MYOTIS_UNAVAILABLE') return 'lifecycle';
+    if (err?.code === 'TIMEOUT') return 'timeout';
+    return 'error';
+  };
+  const revertOf = (err) => {
+    const data = err?.data ?? err?.info?.error?.data;
+    return typeof data === 'string' && /^0x[0-9a-f]*$/i.test(data) ? data : null;
+  };
+  // `toAnswer` maps a returned value to the recorded reply (default: the
+  // value itself). For Myotis, an availability change during the
+  // operation wins: main checks the epoch around it (design 0004). The
+  // reference always gets the original value or error.
+  const operation = (host, op, params, run, toAnswer = (value) => ({ result: describe(value) })) => {
+    const item = record({ kind: 'verified-op', host, op, params });
+    const epoch = myotisEpoch;
+    const lifecycleChanged = () => host === 'myotis' && (myotisEpoch !== epoch || !(myotis().ready ?? false));
+    return insideOperation.run(true, run).then(
+      (value) => {
+        item.answer = lifecycleChanged() ? { failure: 'lifecycle' } : toAnswer(value);
+        close(item, 'answered');
+        return value;
+      },
+      (err) => {
+        const revert = revertOf(err);
+        item.answer = lifecycleChanged() ? { failure: 'lifecycle' } : revert ? { revert } : { failure: failureClass(err) };
+        close(item, 'answered');
+        throw err;
+      }
+    );
+  };
+  const wrappers = {
+    'ens/myotis-resolver': (real) => ({
+      ...real,
+      resolveRecord: (params) => operation('myotis', 'record', {
+        method: params.method, name: params.name ?? null, address: params.addressHex ?? null, coinType: String(params.coinType ?? 60n),
+      }, () => real.resolveRecord(params)),
+    }),
+    'ens/colibri-resolver': (real) => ({
+      ...real,
+      resolveCallViaColibri: (name, callData, callResolver) => operation('colibri', 'resolve', {
+        name, callData, nameNft: callResolver?.name === 'nameNftResolverCall',
+      }, () => real.resolveCallViaColibri(name, callData, callResolver)),
+      resolveReverseViaColibri: (addressBytes, coinType) => operation('colibri', 'reverse', {
+        address: ethers.hexlify(addressBytes), coinType: String(coinType ?? 60n),
+      }, () => real.resolveReverseViaColibri(addressBytes, coinType)),
+    }),
+  };
   const MYOTIS = {
     onAvailabilityTransition: (listener) => { listeners.push(listener); },
     isEnabled: () => myotis().enabled ?? false,
     isReady: () => myotis().ready ?? false,
     getAvailabilityEpoch: () => myotisEpoch,
     getStatus: () => ({ state: myotis().ready ? 'ready' : 'stopped', optimisticBlockNumber: myotis().block ?? null }),
-    ethCall: async ({ to, data }) => {
-      const answer = await verified('myotis', myotis(), to, data);
-      if (answer.data) return { status: 'ok', resultHex: answer.data };
-      if (answer.revert) return { status: 'revert', dataHex: answer.revert };
-      return { status: 'error' };
+    ethCall: ({ to, data }) => {
+      const call = async () => {
+        const answer = await verified('myotis', myotis(), to, data);
+        if (answer.data) return { status: 'ok', resultHex: answer.data };
+        if (answer.revert) return { status: 'revert', dataHex: answer.revert };
+        return { status: 'error' };
+      };
+      // The resolver's own NameNFT calls are whole operations (with the
+      // block number it reads next); calls inside a record operation are
+      // that operation's raw calls.
+      if (insideOperation.getStore()) return call();
+      // The resolver reads the optimistic block right after a successful
+      // call; anything but `ok` with result data makes it throw.
+      return operation('myotis', 'call', { to, data }, call, (value) => (
+        value.status === 'ok' && typeof value.resultHex === 'string'
+          ? { result: { resultHex: value.resultHex, optimisticBlockNumber: myotis().block ?? null } }
+          : { failure: 'error' }
+      ));
     },
   };
   const COLIBRI_HOST = {
@@ -338,7 +413,7 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     if (route === '/chains/main/chain_id') return json(200, p.chain ?? 'NetXdQprcVkpaWU');
     if (route === '/chains/main/blocks/head/header') return json(200, { level });
     let m = route.match(/^\/chains\/main\/blocks\/(\d+)\/hash$/);
-    if (m) return json(200, `BL${p.fork ? 'fork' : 'main'}${m[1]}`);
+    if (m) return p.anchorFail ? json(500, { error: 'anchor' }) : json(200, `BL${p.fork ? 'fork' : 'main'}${m[1]}`);
     m = route.match(/^\/chains\/main\/blocks\/[^/]+\/context\/(.*)$/);
     const rest = m?.[1] ?? '';
     if (method === 'POST' && rest === `contracts/${TEZ_PROXY}/script/normalized`) return json(200, tezProxyScript());
@@ -346,6 +421,7 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       return p.scriptFail ? json(500, { error: 'script' }) : json(200, tezRegistryScript());
     }
     if (rest.startsWith('big_maps/1264/')) {
+      if (p.recordFail) return json(500, { error: 'record' });
       const rec = p.record !== undefined ? p.record : world.record;
       return rec === null ? json(404) : json(200, rec);
     }
@@ -464,7 +540,9 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     clock = FakeTimers.install({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'], now: EPOCH });
     undo.push(() => clock.uninstall());
 
-    const loaded = loadModule(checkout, stubs, system === 'tezos' ? 'tezos-domains-resolver.js' : 'ens-resolver.js');
+    const loaded = system === 'tezos'
+      ? loadModule(checkout, stubs, 'tezos-domains-resolver.js')
+      : loadModule(checkout, stubs, 'ens-resolver.js', wrappers);
     undo.push(loaded.restore);
     // `$fetch` drives one FetchRequest through the RPC transport, with its
     // real cancel signal: self-tests use it for the transport's semantics.
@@ -693,6 +771,47 @@ function addressAndReverse(ethers, base, one) {
     one('gns-content', base({ calls: { 'gns:contenthash': nftBytes('0xe3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f') } }), content('bob.gwei')),
     one('wns-content', base({ calls: { 'wns:contenthash': nftBytes('0xe3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f') } }), content('alice.wei')),
     one('wns-address-on-l2', base({}), address('alice.wei', 8453)),
+    // Through Myotis: the ENS reverse is a record operation; WNS calls are
+    // the resolver's own NameNFT operations, with the optimistic block.
+    one('myotis-reverse-then-wns', base({
+      network: { ...QUORUM_NETWORK, verification: { order: ['myotis'], preferVerified: false } },
+      myotis: { enabled: true, ready: true, block: 23_456_789, calls: { reverse: urReverse(''), 'wns:reverse': nftString('alice.wei'), 'wns:addr': nftAddress(ACCOUNT) } },
+    }), reverse),
+    one('myotis-wns-content', base({
+      network: { ...QUORUM_NETWORK, verification: { order: ['myotis'], preferVerified: false } },
+      myotis: { enabled: true, ready: true, block: 23_456_789, calls: { 'wns:contenthash': nftBytes('0xe3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f') } },
+    }), content('alice.wei')),
+    // A NameNFT call that doesn't succeed is a failed operation; the
+    // order moves on to quorum.
+    one('myotis-wns-call-unavailable', base({
+      network: { ...QUORUM_NETWORK, verification: { order: ['myotis', 'quorum'], preferVerified: false } },
+      myotis: { enabled: true, ready: true, block: 23_456_789, calls: { 'wns:contenthash': { unavailable: true } } },
+      calls: { 'wns:contenthash': nftBytes('0xe3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f') },
+    }), content('alice.wei')),
+    one('myotis-wns-call-revert', base({
+      network: { ...QUORUM_NETWORK, verification: { order: ['myotis', 'quorum'], preferVerified: false } },
+      myotis: { enabled: true, ready: true, block: 23_456_789, calls: { 'wns:contenthash': { revert: '0x12345678' } } },
+      calls: { 'wns:contenthash': nftBytes('0xe3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f') },
+    }), content('alice.wei')),
+    // Availability changes in the middle of each kind of operation.
+    {
+      id: 'myotis-record-lifecycle-mid-operation',
+      world: base({
+        network: { ...QUORUM_NETWORK, verification: { order: ['myotis', 'quorum'], preferVerified: false } },
+        myotis: { enabled: true, ready: true, calls: { resolve: urAddress(ACCOUNT) } },
+        calls: { resolve: urAddress(ACCOUNT) },
+      }),
+      steps: [{ call: address('vitalik.eth'), events: [{ at: 5, myotis: { ready: true } }] }],
+    },
+    {
+      id: 'myotis-call-lifecycle-mid-operation',
+      world: base({
+        network: { ...QUORUM_NETWORK, verification: { order: ['myotis', 'quorum'], preferVerified: false } },
+        myotis: { enabled: true, ready: true, block: 23_456_789, calls: { 'wns:contenthash': nftBytes('0xe3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f') } },
+        calls: { 'wns:contenthash': nftBytes('0xe3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f') },
+      }),
+      steps: [{ call: content('alice.wei'), events: [{ at: 5, myotis: { ready: true } }] }],
+    },
   ];
 }
 
@@ -720,6 +839,14 @@ function tezosScenarios() {
     one('tezos-no-record', base({ record: null }), [{ call: tez() }, { after: 29_999, call: tez() }, { after: 1, call: tez() }]),
     one('tezos-registry-script-fails', base({ hosts: { 't1.tez.example': { scriptFail: true } } })),
     one('tezos-invalid-name', base({}), [{ call: tez('alice.eth') }]),
+    // No anchor hash at all, and no successful lookup: distinct errors.
+    one('tezos-no-anchor', base({ hosts: Object.fromEntries(T.map((url) => [new URL(url).host, { anchorFail: true }])) })),
+    one('tezos-all-lookups-fail', base({ hosts: Object.fromEntries(T.map((url) => [new URL(url).host, { scriptFail: true }])) })),
+    // A lookup failing on cached discovery rediscovers once, then gives up.
+    one('tezos-cached-discovery-lookup-fails', base({}), [
+      { call: tez() },
+      { after: 1000, world: { hosts: { 't1.tez.example': { recordFail: true } } }, call: tez('bob.tez') },
+    ]),
   ];
 }
 
