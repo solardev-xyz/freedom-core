@@ -7,7 +7,11 @@
 //!   (including `"false"` and `"0"`), and a missing bool field as false.
 //! - Quantity strings are `[-]digits` or `[-]0x hex` (see `parse_signed`).
 //! - Type and field names are identifiers, so `encodeType` strings can't be
-//!   made ambiguous by names containing `(`, `,` or spaces.
+//!   made ambiguous by names containing `(`, `,` or spaces; and a type may
+//!   not be named like a primitive (`bool`, `uint256`, `uint7`), which ethers
+//!   would encode with the primitive's encoder.
+//! - A struct value must be a JSON object, even for a struct with no fields
+//!   (ethers then reads nothing, so it accepts null, a string or no value).
 //! - Limits: 256 types, 256 fields per type, 1024 fields in total, names of
 //!   at most 256 characters, nesting depth 32, 32 array dimensions per type,
 //!   1 MiB of type-hash text, 100,000 values and 32 MiB hashed while
@@ -199,6 +203,9 @@ impl Types {
         for name in object.keys() {
             if !is_identifier(name) {
                 return Err(err(format!("type name {name:?} is not an identifier")));
+            }
+            if !matches!(primitive(name), Ok(None)) {
+                return Err(err(format!("type name {name:?} is a primitive type")));
             }
         }
         let mut fields = BTreeMap::new();
@@ -607,6 +614,12 @@ mod tests {
         }
         assert_eq!(primitive("uint").unwrap(), None);
         assert_eq!(primitive("Mail").unwrap(), None);
+        for name in [
+            "bool", "uint256", "uint7", "bytes", "bytes32", "address", "string", "int8",
+        ] {
+            let types = json!({ name: [{ "name": "v", "type": "uint8" }] });
+            assert!(Types::parse(&types).is_err(), "{name}");
+        }
     }
 
     #[test]
