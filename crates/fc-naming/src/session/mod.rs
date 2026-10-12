@@ -3,3 +3,5 @@
 //! to the I/O the machine asks for.
 
 pub mod exec;
+pub mod pool;
+pub mod random;
