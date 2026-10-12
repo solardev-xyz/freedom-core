@@ -105,7 +105,7 @@ Main implements these. Each carries its generations and a `deadline_ms`. The cor
 
 - **Request bodies** travel as text: JSON-RPC and gateway bodies are ASCII JSON.
 - **Response bodies** travel as base64, so the core sees exactly the bytes main received.
-- **The serialized message must fit:** the core serializes each request before sending it. One that exceeds 0001's 1 MiB frame is never sent and completes locally as `too_large` (see [Bounds](#bounds)).
+- **The message must fit:** the requests whose size an answer can drive are measured before they are made. Those are a CCIP-Read callback (its call data, as a hex string) and a gateway request (its URL and POST body). The core measures those payload strings as serialized JSON strings, plus a 4 KiB reserve. The reserve covers the protocol envelope (method, IDs, generations, deadline) and a callback's fixed JSON-RPC wrapper; it is conservative. A request over 0001's 1 MiB frame by that measure is never made, as `request-size` states (see [Bounds](#bounds)). Every other request (an RPC call built from the core's own small data, a Tezos request, a verified operation) is checked when it is serialized for sending: one over the frame then completes locally as `too_large`.
 - **Gateway flags:** `redirect: 'error'` at the fetch level, `credentials: 'omit'`, `useSessionCookies: false`, `cache: 'no-store'`, `bypassCustomProtocolHandlers: true`, and `Accept: application/json`. Every gateway request in the vectors records them.
 
 ### Verified operations
@@ -482,11 +482,11 @@ No error carries a URL or a server's text.
 
 ## Bounds
 
-**Messages and bodies.** Every message fits 0001's 1 MiB frame. The core enforces it by serializing first, so the measure is the complete message:
+**Messages and bodies.** Every message fits 0001's 1 MiB frame. For a callback or a gateway request the core measures its payload strings, serialized, plus a 4 KiB reserve; any other request is checked as serialized; for a reply, the serialized result:
 
 | What | Bound | Exhausted |
 |---|---|---|
-| any core → main request (a JSON-RPC body, a gateway URL or POST body) | the serialized message ≤ 1 MiB | completes locally as `too_large`: a gateway fails and the next URL is tried; a callback fails its leg as `CCIP_GATEWAY_FAILED`. Today these were sent (deviation `request-size`) |
+| a CCIP-Read callback (its call data) or gateway request (its URL and POST body) | its payload strings serialized, plus 4 KiB, ≤ 1 MiB | never made: a gateway fails and the next URL is tried; a callback fails its leg as `CCIP_GATEWAY_FAILED`. Today these were sent (deviation `request-size`) |
 | any answer body (RPC, Tezos, gateway) | 720 KiB, which is 960 KiB in base64 | `too_large`: a provider failure for RPC, a failed Tezos endpoint, or the next gateway (deviation `response-caps`) |
 | a resolution reply | 960 KiB serialized | `resolution_failed: result too large`, never cached (deviation `reply-size`) |
 
@@ -507,7 +507,7 @@ Measured valid answers sit well below the 720 KiB cap:
 
 | Budget | Bound | Exhausted |
 |---|---|---|
-| one decode (ABI, JSON, Micheline, base64, hex): output bytes | 4 MiB | the decode fails as malformed: a leg's `NO_CONTENTHASH` as today's decode errors; Tezos `unsupported` or a failed lookup (deviation `decode-budget`) |
+| one ABI decode with an array (an `OffchainLookup`'s URLs): output bytes | 4 MiB | the decode fails as malformed (`BUFFER_OVERRUN`, "decode budget exceeded"): the leg fails as for any lookup that won't decode (deviation `decode-budget`) |
 | one decode: reads | 0003's 1024× ABI read cap, JSON depth 512, Micheline depth and node count | as above |
 | one session: retained and in-flight bytes (answers held, decoded values, queued requests, its serialized replies until written) | 16 MiB | the session fails `resolution_failed: budget`, not cached |
 | all sessions | 64 MiB | a running session whose reservation would cross it fails `resolution_failed: budget`, not cached; new sessions get `busy` until usage drops below 48 MiB |
@@ -519,7 +519,7 @@ Measured valid answers sit well below the 720 KiB cap:
 
 **Lifetimes:** a reservation is held from allocation until the bytes are freed. For a serialized reply, that is until the writer has written it.
 
-The 4 MiB decode budget caps aliasing: an `OffchainLookup` whose URL array repeats one 64 KiB string 2,047 times decodes to about 128 MiB today. The core refuses it.
+The 4 MiB decode budget caps aliasing: an `OffchainLookup` whose URL array repeats one 64 KiB string 2,047 times decodes to about 128 MiB today. The core refuses it. Only an array can alias. Every other decode (an ABI result with one dynamic field, JSON, Micheline, base64, hex) reads its input once, so its output never exceeds its input, which the answer cap bounds.
 
 **Work.**
 - **I/O per session** is bounded by its structure:
@@ -542,16 +542,17 @@ Each deviation gets a boundary vector in the implementation PR, generated from t
 | `admission` | unbounded callers and lookups | 32 sessions, 256 callers, 64 per session | `busy`; nothing retained |
 | `abandoned-exchanges` | an exchange nobody waits for (a losing leg, a timed-out leg) runs on: it finishes, can retry after a 429, and its late settlement still clears or marks quarantine | cancelled when the core stops waiting, with no late requests or health changes | later lookups can see a different quarantine set; requests the reference made after the cancellation don't happen. Vectors: a slow losing leg across three lookups, and a leg timing out during a 429 back-off |
 | `rpc-stall` | ethers holds every JSON-RPC request 10 ms (its batch stall) | sent at once | none; replay adds the 10 ms back |
-| `request-size` | requests of any size are sent | a request over the frame completes locally as `too_large` | the next gateway, or the leg fails as `CCIP_GATEWAY_FAILED`; not cached |
+| `request-size` | requests of any size are sent | a callback or gateway request over the frame (its payload strings plus 4 KiB) is never made | the next gateway, or the leg fails as `CCIP_GATEWAY_FAILED`; not cached |
 | `response-caps` | none for JSON-RPC; 5 MiB Tezos; 4 MiB gateways | 720 KiB each | `too_large`: a provider failure, a failed endpoint, or the next gateway |
 | `reply-size` | unbounded | 960 KiB | `resolution_failed: result too large`; not cached |
 | `reply-shortening` | full `resolvedData` and `contentHash` | first + last 4,096 hex characters when longer | none in the renderer |
-| `decode-budget` | unbounded | 4 MiB of output per decode | malformed, per the decode's caller |
+| `decode-budget` | unbounded | 4 MiB of output per ABI decode with an array | malformed, per the decode's caller |
 | `cache-bytes` | 500 entries per cache | also 8 MiB per cache | eviction |
 | `ccip-urls` | every URL in the lookup | the first 32 | the rest aren't tried |
 | `monotonic-time` | TTLs, quarantine and deadlines on `Date.now()` | the monotonic clock; Tezos expiry still compares wall time | none unless the wall clock jumps |
 | `error-text` | ethers' full message, which embeds node text and request data | the class's short message, sanitized | same branches; [agreement](#errors-agreement-and-text) unchanged |
 | `classification` | rules 3, 6 and 9 of [Classification](#classification), and text matched in composed messages | the core's rules | a malformed answer quarantines; a revert never does |
+| `null-block-hash` | a block whose hash is `null` (ethers' formatter accepts one, for pending blocks) is a hash vote like any other; when the chosen anchor's hash is `null`, the legs call at `latest`, where CCIP-Read takes ethers' built-in path | the hash fetch fails, as for a missing block | that endpoint is out of the hash vote and quarantined; the single-source anchor fails, so `direct` is unavailable |
 | `node-failures` | node errors can agree into a verified not-found (`node-errors-agree`) | freedom-browser#656's rule | until the reference pin includes it |
 | `transport` | Node's HTTP stack | the session's network stack | `.onion` endpoints work under Tor, and a missing route fails closed (`refused`) |
 | `rpc-redirects` | hops followed without checks | each hop checked against the endpoint policy and the onion gate | a refused hop is a provider failure |
