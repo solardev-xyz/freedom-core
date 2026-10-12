@@ -8,10 +8,13 @@
 //! - Quantity strings are `[-]digits` or `[-]0x hex` (see `parse_signed`).
 //! - Type and field names are identifiers, so `encodeType` strings can't be
 //!   made ambiguous by names containing `(`, `,` or spaces.
-//! - Limits: 256 types, 256 fields per type, 1024 fields in total, nesting
-//!   depth 32, 32 array dimensions per type, and 1 MiB of type-hash text.
-//!   ethers has none, and its subtype walk is exponential on diamond-shaped
-//!   types.
+//! - Limits: 256 types, 256 fields per type, 1024 fields in total, names of
+//!   at most 256 characters, nesting depth 32, 32 array dimensions per type,
+//!   1 MiB of type-hash text, 100,000 values and 32 MiB hashed while
+//!   encoding. ethers
+//!   has none, and its subtype walk is exponential on diamond-shaped types.
+//!   Type hashes are computed once per type, so the work is bounded by the
+//!   input size and these limits.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,6 +30,14 @@ const MAX_DIMENSIONS: usize = 32;
 /// `encodeType` text hashed across all type hashes: each struct's own text,
 /// counted once more for every struct whose type hash includes it.
 const MAX_TYPE_TEXT: usize = 1 << 20;
+/// Bytes hashed while encoding the message. A 1 MiB frame can drive at most
+/// about 22 MiB (32 bytes per value plus array concatenations), so this
+/// refuses nothing a frame can carry and still caps the work.
+const MAX_ENCODE_BYTES: usize = 32 << 20;
+/// Values encoded (fields, array elements, structs): it bounds the time a
+/// request can hold the core's event loop (design 0002, "Limits").
+const MAX_VALUES: usize = 100_000;
+const MAX_NAME: usize = 256;
 /// The largest integer a JS number holds exactly.
 const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 const DOMAIN_FIELDS: [(&str, &str); 5] = [
@@ -71,6 +82,9 @@ struct Field {
 }
 
 fn is_identifier(name: &str) -> bool {
+    if name.len() > MAX_NAME {
+        return false;
+    }
     let mut chars = name.chars();
     chars
         .next()
@@ -144,8 +158,34 @@ fn primitive(base: &str) -> Result<Option<Base>, Error> {
 struct Types {
     fields: BTreeMap<String, Vec<Field>>,
     primary: String,
-    /// `encodeType` of each struct with its sorted subtypes appended.
-    full: BTreeMap<String, String>,
+    /// keccak256 of each reachable struct's `encodeType` with its sorted
+    /// subtypes appended, computed once.
+    type_hashes: BTreeMap<String, [u8; 32]>,
+}
+
+/// Work done so far while encoding: bytes hashed and values visited.
+#[derive(Default)]
+struct Budget {
+    bytes: usize,
+    values: usize,
+}
+
+impl Budget {
+    fn hash(&mut self, data: &[u8]) -> Result<[u8; 32], Error> {
+        self.bytes += data.len();
+        if self.bytes > MAX_ENCODE_BYTES {
+            return Err(err("message too large to hash"));
+        }
+        Ok(keccak256(data))
+    }
+
+    fn visit(&mut self) -> Result<(), Error> {
+        self.values += 1;
+        if self.values > MAX_VALUES {
+            return Err(err("message has too many values"));
+        }
+        Ok(())
+    }
 }
 
 impl Types {
@@ -265,31 +305,37 @@ impl Types {
                 return Err(err("types: too much type-hash text"));
             }
         }
-        let mut full = BTreeMap::new();
+        let mut type_hashes = BTreeMap::new();
         for (name, subtypes) in &descendants {
             // BTreeSet iterates in byte order: JS sort order for ASCII names.
             let mut text = encode_type(name);
             for subtype in subtypes {
                 text.push_str(&encode_type(subtype));
             }
-            full.insert(name.clone(), text);
+            type_hashes.insert(name.clone(), keccak256(text.as_bytes()));
         }
         Ok(Types {
             fields,
             primary,
-            full,
+            type_hashes,
         })
     }
 
     fn type_hash(&self, name: &str) -> Result<[u8; 32], Error> {
-        self.full
+        self.type_hashes
             .get(name)
-            .map(|text| keccak256(text.as_bytes()))
+            .copied()
             .ok_or_else(|| err(format!("unknown type {name:?}")))
     }
 
     /// `encodeData` of a struct: its type hash, then each field's 32 bytes.
-    fn encode_struct(&self, name: &str, value: &Value, depth: usize) -> Result<Vec<u8>, Error> {
+    fn encode_struct(
+        &self,
+        name: &str,
+        value: &Value,
+        depth: usize,
+        budget: &mut Budget,
+    ) -> Result<Vec<u8>, Error> {
         if depth > MAX_DEPTH {
             return Err(err("nested too deeply"));
         }
@@ -312,6 +358,7 @@ impl Types {
                 &field.ty.dims,
                 value,
                 depth + 1,
+                budget,
             )?);
         }
         Ok(out)
@@ -324,14 +371,19 @@ impl Types {
         dims: &[Option<u64>],
         value: &Value,
         depth: usize,
+        budget: &mut Budget,
     ) -> Result<[u8; 32], Error> {
         if depth > MAX_DEPTH {
             return Err(err("nested too deeply"));
         }
+        budget.visit()?;
         let Some((outer, inner)) = dims.split_last() else {
             return match base {
-                Base::Struct(name) => Ok(keccak256(&self.encode_struct(name, value, depth)?)),
-                _ => encode_base(base, value),
+                Base::Struct(name) => {
+                    let encoded = self.encode_struct(name, value, depth, budget)?;
+                    budget.hash(&encoded)
+                }
+                _ => encode_base(base, value, budget),
             };
         };
         let items = value.as_array().ok_or_else(|| err("expected an array"))?;
@@ -344,9 +396,15 @@ impl Types {
         }
         let mut concatenated = Vec::with_capacity(32 * items.len());
         for item in items {
-            concatenated.extend_from_slice(&self.encode_field(base, inner, item, depth + 1)?);
+            concatenated.extend_from_slice(&self.encode_field(
+                base,
+                inner,
+                item,
+                depth + 1,
+                budget,
+            )?);
         }
-        Ok(keccak256(&concatenated))
+        budget.hash(&concatenated)
     }
 }
 
@@ -403,7 +461,7 @@ fn number(value: &Value) -> Result<(bool, U256), Error> {
     }
 }
 
-fn encode_base(base: &Base, value: &Value) -> Result<[u8; 32], Error> {
+fn encode_base(base: &Base, value: &Value, budget: &mut Budget) -> Result<[u8; 32], Error> {
     match base {
         Base::Uint(bits) => {
             let (negative, magnitude) = number(value)?;
@@ -448,14 +506,14 @@ fn encode_base(base: &Base, value: &Value) -> Result<[u8; 32], Error> {
                 value.as_str().ok_or_else(|| err("expected hex bytes"))?,
                 "bytes",
             )?;
-            Ok(keccak256(&bytes))
+            budget.hash(&bytes)
         }
-        Base::String => Ok(keccak256(
+        Base::String => budget.hash(
             value
                 .as_str()
                 .ok_or_else(|| err("expected a string"))?
                 .as_bytes(),
-        )),
+        ),
         Base::Address => {
             let address = parse_address(value.as_str().ok_or_else(|| err("expected an address"))?)?;
             let mut out = [0u8; 32];
@@ -502,7 +560,7 @@ fn domain_hash(value: &Value) -> Result<[u8; 32], Error> {
     out.extend_from_slice(&keccak256(type_text.as_bytes()));
     for (_, ty, value) in present {
         let base = primitive(ty)?.ok_or_else(|| err("domain type"))?;
-        out.extend_from_slice(&encode_base(&base, value)?);
+        out.extend_from_slice(&encode_base(&base, value, &mut Budget::default())?);
     }
     Ok(keccak256(&out))
 }
@@ -512,7 +570,9 @@ fn domain_hash(value: &Value) -> Result<[u8; 32], Error> {
 pub fn typed_data_hash(domain: &Value, types: &Value, message: &Value) -> Result<[u8; 32], Error> {
     let types = Types::parse(types)?;
     let domain = domain_hash(domain)?;
-    let message = keccak256(&types.encode_struct(&types.primary, message, 0)?);
+    let mut budget = Budget::default();
+    let encoded = types.encode_struct(&types.primary, message, 0, &mut budget)?;
+    let message = budget.hash(&encoded)?;
     let mut data = Vec::with_capacity(66);
     data.extend_from_slice(&[0x19, 0x01]);
     data.extend_from_slice(&domain);
@@ -593,6 +653,73 @@ mod tests {
         );
     }
 
+    fn timed(
+        domain: &Value,
+        types: &Value,
+        message: &Value,
+    ) -> (Result<[u8; 32], Error>, std::time::Duration) {
+        let started = std::time::Instant::now();
+        let result = typed_data_hash(domain, types, message);
+        (result, started.elapsed())
+    }
+
+    #[test]
+    fn accepted_inputs_near_the_limits_are_fast() {
+        // The review's case at the name limit: an array of empty instances
+        // of a type with a 256-character name. Just under the value cap it
+        // is accepted quickly; one past it, refused.
+        let name = format!("E{}", "x".repeat(255));
+        let mut types = Map::new();
+        types.insert(
+            "M".into(),
+            json!([{ "name": "items", "type": format!("{name}[]") }]),
+        );
+        types.insert(name, json!([]));
+        let types = Value::Object(types);
+        // The array field, and one value per instance.
+        let items = vec![json!({}); MAX_VALUES - 1];
+        let (result, elapsed) = timed(&json!({}), &types, &json!({ "items": items }));
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            elapsed < std::time::Duration::from_millis(200),
+            "{elapsed:?}"
+        );
+        let items = vec![json!({}); MAX_VALUES];
+        assert!(typed_data_hash(&json!({}), &types, &json!({ "items": items })).is_err());
+
+        // 1024 fields in total (4 types of 255, and the root's 4), ~900 KB of
+        // string values.
+        let mut many = Map::new();
+        let mut message = Map::new();
+        let mut root = Vec::new();
+        for t in 0..4 {
+            let fields: Vec<Value> = (0..255)
+                .map(|f| json!({ "name": format!("f{f}"), "type": "string" }))
+                .collect();
+            many.insert(format!("T{t}"), Value::Array(fields));
+            root.push(json!({ "name": format!("t{t}"), "type": format!("T{t}") }));
+            let value: Map<String, Value> = (0..255)
+                .map(|f| (format!("f{f}"), json!("y".repeat(850))))
+                .collect();
+            message.insert(format!("t{t}"), Value::Object(value));
+        }
+        many.insert("M".into(), Value::Array(root));
+        let (result, elapsed) = timed(&json!({}), &Value::Object(many), &Value::Object(message));
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            elapsed < std::time::Duration::from_millis(200),
+            "{elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn the_encode_budget_holds() {
+        // 40 MiB of string data (far more than one frame carries): refused.
+        let types = json!({ "M": [{ "name": "v", "type": "string[]" }] });
+        let items = vec![json!("z".repeat(1 << 16)); 640];
+        assert!(typed_data_hash(&json!({}), &types, &json!({ "v": items })).is_err());
+    }
+
     #[test]
     fn limits() {
         let field = |t: &str| json!([{ "name": "v", "type": t }]);
@@ -603,18 +730,23 @@ mod tests {
             .map(|i| json!({ "name": format!("f{i}"), "type": "uint8" }))
             .collect();
         assert!(Types::parse(&json!({ "M": many })).is_err());
+        assert!(!is_identifier(&"n".repeat(257)));
+        assert!(is_identifier(&"n".repeat(256)));
     }
 
     #[test]
     fn int_bounds() {
-        let ok = |v: Value| encode_base(&Base::Int(8), &v).is_ok();
+        let ok = |v: Value| encode_base(&Base::Int(8), &v, &mut Budget::default()).is_ok();
         assert!(ok(json!(-128)) && ok(json!(127)) && ok(json!("-0x80")));
         assert!(!ok(json!(-129)) && !ok(json!(128)));
-        assert_eq!(encode_base(&Base::Int(8), &json!(-1)).unwrap(), [0xff; 32]);
+        assert_eq!(
+            encode_base(&Base::Int(8), &json!(-1), &mut Budget::default()).unwrap(),
+            [0xff; 32]
+        );
         let min = format!(
             "-{}",
             "57896044618658097711785492504343953926634992332820282019728792003956564819968"
         );
-        assert!(encode_base(&Base::Int(256), &json!(min)).is_ok());
+        assert!(encode_base(&Base::Int(256), &json!(min), &mut Budget::default()).is_ok());
     }
 }
