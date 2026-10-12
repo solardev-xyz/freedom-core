@@ -209,3 +209,66 @@ fn an_unsolicited_shell_response_ends_the_core() {
     // Exit::Protocol.
     assert_eq!(core.exit_code(std::time::Duration::from_secs(10)), 76);
 }
+
+#[test]
+fn a_burst_while_main_is_not_reading_backs_up_rather_than_exiting() {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    let mut many = snapshot();
+    many["rpc"] = (1..=64)
+        .map(|i| json!({ "endpoint": format!("e{i}") }))
+        .collect();
+    core.call(2, "naming.configure", many);
+    // Main stalls: 2,048 lookups and then a vault request arrive while it
+    // reads nothing. The core's shell requests and busy replies back up
+    // behind the pipe, far past what it holds.
+    core.pause_reading();
+    for i in 0..2048u64 {
+        core.send(&request(
+            100 + i,
+            "naming.resolve_content",
+            json!({ "name": format!("n{i}.eth"), "private": false }),
+        ));
+    }
+    core.send(&request(10_000, "vault.status", json!({})));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    core.resume_reading();
+    // Reading again, the vault's reply arrives (its share of the writer
+    // is its own) and every lookup was taken in.
+    let (mut status, mut busy, mut shell) = (false, 0, 0);
+    while !(status && busy == 2048 - 32 && shell == 256) {
+        let message = core.recv();
+        match (message["type"].as_str(), message["id"].as_u64()) {
+            (Some("response"), Some(10_000)) => {
+                assert!(message["result"].is_object(), "{message}");
+                status = true;
+            }
+            (Some("response"), _) if message["error"]["code"] == "busy" => busy += 1,
+            (Some("request"), _) => shell += 1,
+            // Unanswered, the probes time out and are cancelled.
+            _ => {}
+        }
+    }
+    // The core is alive.
+    assert!(core.call(10_001, "vault.status", json!({}))["result"].is_object());
+}
+
+#[test]
+fn an_error_that_echoes_a_huge_name_still_fits_a_frame() {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    // Without a configuration the lookup fails at once, with a message
+    // that echoes the name: nearly a whole frame of it.
+    let name = format!("{}.eth", "a".repeat(1_040_000));
+    core.send(&request(
+        2,
+        "naming.resolve_content",
+        json!({ "name": name, "private": false }),
+    ));
+    let reply = core.until_response(2);
+    assert_eq!(reply["error"]["code"], "resolution_failed", "{reply}");
+    assert_eq!(reply["error"]["data"]["message"], "result too large");
+    assert!(core.call(3, "vault.status", json!({}))["result"].is_object());
+}

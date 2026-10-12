@@ -7,8 +7,9 @@
 //! request to main, each answer goes back to it, and its timers run on this
 //! thread's monotonic clock.
 
-use std::collections::BTreeMap;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
@@ -16,7 +17,10 @@ use fc_naming::jsjson::{self, JsValue};
 use fc_naming::session::bounds::Bounds;
 use fc_naming::session::ens::{Answer, Config, Direct, Request, Thrown, Verified, VerifiedOp};
 use fc_naming::session::exec::Effect;
-use fc_naming::session::machine::{CallOptions, Emitted, Generations, Machine, Reply};
+use fc_naming::session::exec::Ms;
+use fc_naming::session::machine::{
+    CallOptions, Emitted, Generations, MAX_LIFECYCLE_ATTEMPTS, Machine, Reply,
+};
 use fc_naming::session::random::Random;
 use fc_naming::session::rpc::Transport;
 use fc_protocol::error::{ErrorBody, ErrorCode};
@@ -26,7 +30,8 @@ use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
 use crate::serve::Event;
-use crate::{log, transport};
+use crate::transport;
+use crate::transport::{Allowance, Credit, Out};
 
 /// The methods the naming thread answers.
 pub const METHODS: &[&str] = &[
@@ -59,31 +64,45 @@ pub enum In {
         id: u64,
         outcome: Result<Box<RawValue>, ErrorBody>,
     },
+    /// The writer has room again for frames that wait here.
+    Drained,
 }
 
-/// The event loop's side of the naming thread.
+/// A message, with the reader's credit for the frame it came in: the
+/// reader counts it until this thread has handled it.
+type Mail = (In, Option<Credit>);
+
+/// The event loop's side of the naming thread. The writer's wake-up holds
+/// only a weak reference, so dropping this ends the thread.
 pub struct Handle {
-    tx: Sender<In>,
+    tx: Arc<Sender<Mail>>,
 }
 
 impl Handle {
     /// False once the thread has gone.
-    pub fn send(&self, message: In) -> bool {
-        self.tx.send(message).is_ok()
+    pub fn send(&self, message: In, credit: Option<Credit>) -> bool {
+        self.tx.send((message, credit)).is_ok()
     }
 }
 
 /// Starts the naming thread. It writes to `out` and reports a protocol
 /// error from main, or its own end, to the event loop.
-pub fn spawn(
-    out: SyncSender<Zeroizing<Vec<u8>>>,
-    events: Sender<Event>,
-) -> std::io::Result<Handle> {
+pub fn spawn(out: Sender<Out>, events: Sender<Event>) -> std::io::Result<Handle> {
     let (tx, rx) = mpsc::channel();
+    let tx = Arc::new(tx);
+    // Naming's share of the writer (design 0004, Bounds: the writer).
+    let allowance = Allowance::new(usize::MAX, transport::MAX_QUEUED_NAMING_BYTES);
+    let wake: Weak<Sender<Mail>> = Arc::downgrade(&tx);
+    allowance.on_room(move || {
+        if let Some(tx) = wake.upgrade() {
+            let _ = tx.send((In::Drained, None));
+        }
+    });
     std::thread::Builder::new()
         .name("naming".into())
         .spawn(move || {
-            let event = match run(&rx, out) {
+            let _notice = transport::DeathNotice::new(events.clone(), "naming");
+            let event = match run(&rx, out, allowance) {
                 Stop::Protocol(category) => Event::ProtocolError(category),
                 Stop::Writer => Event::WriterFailed,
                 // The event loop has gone: nothing to report to.
@@ -138,7 +157,7 @@ enum Stop {
 type Flow = Result<(), Stop>;
 
 /// The thread's loop, until it has to stop.
-fn run(rx: &Receiver<In>, out: SyncSender<Zeroizing<Vec<u8>>>) -> Stop {
+fn run(rx: &Receiver<Mail>, out: Sender<Out>, allowance: Arc<Allowance>) -> Stop {
     let started = Instant::now();
     let mut machine = Machine::new(0, empty_config(), Box::new(OsRandom));
     #[allow(clippy::cast_precision_loss)]
@@ -149,11 +168,13 @@ fn run(rx: &Receiver<In>, out: SyncSender<Zeroizing<Vec<u8>>>) -> Stop {
     let mut naming = Naming {
         machine,
         out,
+        allowance,
+        outbox: VecDeque::new(),
         callers: BTreeMap::new(),
         outgoing: BTreeMap::new(),
         by_io: BTreeMap::new(),
         next_id: 1,
-        queued: std::collections::VecDeque::new(),
+        queued: VecDeque::new(),
         max_outstanding: MAX_OUTSTANDING,
     };
     let now = || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -168,7 +189,8 @@ fn run(rx: &Receiver<In>, out: SyncSender<Zeroizing<Vec<u8>>>) -> Stop {
                 Duration::from_millis(at.saturating_sub(now()))
             });
         let flow = match rx.recv_timeout(wait) {
-            Ok(message) => naming
+            // The frame's credit goes once its message is handled.
+            Ok((message, _credit)) => naming
                 .advance(now())
                 .and_then(|()| naming.handle(message))
                 .and_then(|()| naming.flush()),
@@ -198,16 +220,23 @@ struct Outgoing {
     kind: Kind,
 }
 
+/// A verified operation's failure classes (design 0004, Verified
+/// operations).
+const FAILURE_CLASSES: &[&str] = &["unavailable", "lifecycle", "timeout", "too_large", "error"];
+
 /// At most this many `shell.*` requests outstanding at main (design 0004,
 /// Bounds: Work); more wait here, first in, first out.
 const MAX_OUTSTANDING: usize = 256;
 
 struct Naming {
     machine: Machine,
-    out: SyncSender<Zeroizing<Vec<u8>>>,
+    out: Sender<Out>,
+    allowance: Arc<Allowance>,
+    /// Frames waiting for room in the writer, in order.
+    outbox: VecDeque<Zeroizing<Vec<u8>>>,
     /// Requests waiting for a slot: the machine's request id, the request,
-    /// and the generations current when the machine made it.
-    queued: std::collections::VecDeque<(u64, Request, Generations)>,
+    /// its attempt's generations, and its session's deadline.
+    queued: VecDeque<(u64, Request, Generations, Ms)>,
     max_outstanding: usize,
     /// The machine's callers, by the request ID main gave them.
     callers: BTreeMap<u64, u64>,
@@ -243,6 +272,7 @@ impl Naming {
                 Ok(())
             }
             In::Response { id, outcome } => self.response(id, outcome),
+            In::Drained => self.pump(),
         }
     }
 
@@ -286,37 +316,53 @@ impl Naming {
             }
             "naming.resolve_content" => {
                 let params = parse!(NameParams);
-                let caller = self
-                    .machine
-                    .resolve_content_with(&params.name, params.options());
+                let Some(options) = params.options() else {
+                    return self.error(
+                        id,
+                        ErrorBody::new(ErrorCode::InvalidArgument, "Invalid parameters"),
+                    );
+                };
+                let caller = self.machine.resolve_content_with(&params.name, options);
                 self.callers.insert(id, caller);
                 Ok(())
             }
             "naming.resolve_tezos" => {
                 let params = parse!(NameParams);
-                let caller = self
-                    .machine
-                    .resolve_tezos_with(&params.name, params.options());
+                let Some(options) = params.options() else {
+                    return self.error(
+                        id,
+                        ErrorBody::new(ErrorCode::InvalidArgument, "Invalid parameters"),
+                    );
+                };
+                let caller = self.machine.resolve_tezos_with(&params.name, options);
                 self.callers.insert(id, caller);
                 Ok(())
             }
             "naming.resolve_address" => {
                 let params = parse!(AddressParams);
-                let caller = self.machine.resolve_address_with(
-                    &params.name,
-                    params.chain_id,
-                    params.options(),
-                );
+                let Some(options) = params.options() else {
+                    return self.error(
+                        id,
+                        ErrorBody::new(ErrorCode::InvalidArgument, "Invalid parameters"),
+                    );
+                };
+                let caller =
+                    self.machine
+                        .resolve_address_with(&params.name, params.chain_id, options);
                 self.callers.insert(id, caller);
                 Ok(())
             }
             "naming.resolve_reverse" => {
                 let params = parse!(ReverseParams);
-                let caller = self.machine.resolve_reverse_with(
-                    &params.address,
-                    params.chain_id,
-                    params.options(),
-                );
+                let Some(options) = params.options() else {
+                    return self.error(
+                        id,
+                        ErrorBody::new(ErrorCode::InvalidArgument, "Invalid parameters"),
+                    );
+                };
+                let caller =
+                    self.machine
+                        .resolve_reverse_with(&params.address, params.chain_id, options);
                 self.callers.insert(id, caller);
                 Ok(())
             }
@@ -361,15 +407,16 @@ impl Naming {
         for Emitted {
             effect,
             generations,
+            deadline,
         } in self.machine.take_effects()
         {
             match effect {
                 Effect::Request {
                     id: io, request, ..
-                } => self.queued.push_back((io, request, generations)),
+                } => self.queued.push_back((io, request, generations, deadline)),
                 Effect::Cancel { id: io, .. } => {
                     // Still waiting for a slot: never sent.
-                    if let Some(at) = self.queued.iter().position(|(q, _, _)| *q == io) {
+                    if let Some(at) = self.queued.iter().position(|(q, ..)| *q == io) {
                         self.queued.remove(at);
                         continue;
                     }
@@ -385,13 +432,22 @@ impl Naming {
             }
         }
         // A request holds its slot until main's terminal reply, even after
-        // the machine cancelled it.
+        // the machine cancelled it. Requests also wait while frames wait
+        // for the writer, so they back up here, in order.
         while self.outgoing.len() < self.max_outstanding
-            && let Some((io, request, generations)) = self.queued.pop_front()
+            && self.outbox.is_empty()
+            && let Some((io, request, generations, deadline)) = self.queued.pop_front()
         {
+            // Its session has ended by now: it completes here, unsent.
+            let left = deadline.saturating_sub(self.machine.now());
+            if left == 0 {
+                self.machine
+                    .complete(io, Answer::Failed(Transport::Timeout));
+                continue;
+            }
             let id = self.next_id;
             self.next_id += 1;
-            let (method, kind, params) = shell_request(&request, generations);
+            let (method, kind, params) = shell_request(&request, generations, left);
             let mut payload = Zeroizing::new(Vec::with_capacity(256));
             if message::write_request(&mut *payload, id, method, &params, &Context::shell())
                 .is_err()
@@ -469,18 +525,28 @@ impl Naming {
         self.send(&payload)
     }
 
-    /// Queues a frame. A full queue means main stopped reading: the event
-    /// loop ends the process.
-    fn send(&self, payload: &[u8]) -> Flow {
+    /// Queues a frame behind any that wait for the writer.
+    fn send(&mut self, payload: &[u8]) -> Flow {
         let frame = transport::frame(payload).ok_or(Stop::Protocol("oversized_message"))?;
-        match self.out.try_send(frame) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => {
-                log::error("main is not reading replies", serde_json::json!({}));
-                Err(Stop::Writer)
-            }
-            Err(TrySendError::Disconnected(_)) => Err(Stop::Writer),
+        self.outbox.push_back(frame);
+        self.pump()
+    }
+
+    /// Hands waiting frames to the writer while naming's allowance has room;
+    /// the rest wait for [`In::Drained`].
+    fn pump(&mut self) -> Flow {
+        while let Some(frame) = self.outbox.front() {
+            let Some(hold) = self.allowance.take(frame.len()) else {
+                return Ok(());
+            };
+            let Some(frame) = self.outbox.pop_front() else {
+                return Ok(());
+            };
+            self.out
+                .send(Out { frame, hold })
+                .map_err(|_| Stop::Writer)?;
         }
+        Ok(())
     }
 }
 
@@ -524,11 +590,13 @@ fn with_placeholders(value: &JsValue) -> (JsValue, Vec<String>) {
 
 /// A machine request as a `shell.*` request: its method, how to read the
 /// answer, and its params with the generations of its scopes.
+/// A `shell.*` request: its method, kind and params. `deadline_ms` is what
+/// is left of its session's deadline.
 fn shell_request(
     request: &Request,
     generations: Generations,
+    deadline_ms: Ms,
 ) -> (&'static str, Kind, serde_json::Value) {
-    let deadline_ms = Bounds::default().deadline_ms;
     let ens = serde_json::json!({ "ens": generations.ens });
     match request {
         Request::Rpc { endpoint, body } => (
@@ -668,10 +736,24 @@ fn answer(kind: Kind, outcome: Result<Box<RawValue>, ErrorBody>) -> Option<Answe
         Kind::Prefetch => Some(Answer::Done),
         Kind::Verified => {
             let value = jsjson::parse(result.get()).ok()?;
-            if let Some(class) = value.get("failure").and_then(JsValue::as_str) {
+            let JsValue::Object(members) = &value else {
+                return None;
+            };
+            let only = |key: &str| members.len() == 1 && members[0].0 == key;
+            // A failure is one of design 0004's classes and carries no text;
+            // a failure or a revert stands alone.
+            if members.iter().any(|(k, _)| k == "failure") {
+                let class = value.get("failure").and_then(JsValue::as_str)?;
+                if !only("failure") || !FAILURE_CLASSES.contains(&class) {
+                    return None;
+                }
                 return Some(Answer::Verified(Verified::Failure(class.to_owned())));
             }
-            if let Some(revert) = value.get("revert").and_then(JsValue::as_str) {
+            if members.iter().any(|(k, _)| k == "revert") {
+                let revert = value.get("revert").and_then(JsValue::as_str)?;
+                if !only("revert") {
+                    return None;
+                }
                 let data = fc_naming::session::rpc::hex_string(revert)?;
                 return Some(Answer::Verified(Verified::Revert(data)));
             }
@@ -726,11 +808,16 @@ struct Common {
 }
 
 impl Common {
-    fn options(&self) -> CallOptions {
-        CallOptions {
+    /// The caller's options, or `None` out of range: main resubmits only
+    /// with attempts left, and with the remainder of the caller's deadline.
+    fn options(&self) -> Option<CallOptions> {
+        let deadline = Bounds::default().deadline_ms;
+        (self.attempts_used < MAX_LIFECYCLE_ATTEMPTS
+            && self.deadline_ms.is_none_or(|ms| ms <= deadline))
+        .then_some(CallOptions {
             attempts_used: self.attempts_used,
             deadline_ms: self.deadline_ms,
-        }
+        })
     }
 }
 
@@ -742,7 +829,7 @@ struct NameParams {
 }
 
 impl NameParams {
-    fn options(&self) -> CallOptions {
+    fn options(&self) -> Option<CallOptions> {
         self.common.options()
     }
 }
@@ -757,7 +844,7 @@ struct AddressParams {
 }
 
 impl AddressParams {
-    fn options(&self) -> CallOptions {
+    fn options(&self) -> Option<CallOptions> {
         self.common.options()
     }
 }
@@ -772,7 +859,7 @@ struct ReverseParams {
 }
 
 impl ReverseParams {
-    fn options(&self) -> CallOptions {
+    fn options(&self) -> Option<CallOptions> {
         self.common.options()
     }
 }
@@ -874,34 +961,50 @@ mod tests {
     use super::*;
 
     /// The frames the thread wrote, as JSON.
-    fn written(rx: &mpsc::Receiver<Zeroizing<Vec<u8>>>) -> Vec<serde_json::Value> {
+    /// What the writer got; reading a frame frees its allowance.
+    fn written(rx: &mpsc::Receiver<Out>) -> Vec<serde_json::Value> {
         let mut out = Vec::new();
-        while let Ok(frame) = rx.try_recv() {
+        while let Ok(Out { frame, .. }) = rx.try_recv() {
             out.extend(serde_json::from_slice(&frame[5..]).ok());
         }
         out
     }
 
-    #[test]
-    fn requests_past_the_cap_wait_their_turn() {
-        let (tx, rx) = mpsc::sync_channel(64);
-        let mut naming = Naming {
+    fn naming(max_outstanding: usize, writer_bytes: usize) -> (Naming, mpsc::Receiver<Out>) {
+        let (tx, rx) = mpsc::channel();
+        let naming = Naming {
             machine: Machine::new(0, empty_config(), Box::new(OsRandom)),
             out: tx,
+            allowance: Allowance::new(usize::MAX, writer_bytes),
+            outbox: VecDeque::new(),
             callers: BTreeMap::new(),
             outgoing: BTreeMap::new(),
             by_io: BTreeMap::new(),
             next_id: 1,
-            queued: std::collections::VecDeque::new(),
-            max_outstanding: 2,
+            queued: VecDeque::new(),
+            max_outstanding,
         };
-        let snapshot = r#"{"rpc":[{"endpoint":"e1"},{"endpoint":"e2"},{"endpoint":"e3"},{"endpoint":"e4"}],
-            "direct":null,"prover":null,"policy":{"order":["quorum"],"prefer_verified":false},
-            "quorum":{"k":3,"m":2,"timeout_ms":5000,"anchor":"latest","anchor_ttl_ms":30000},
-            "myotis_enabled":false,"tezos":[]}"#;
+        (naming, rx)
+    }
+
+    const SNAPSHOT: &str = r#"{"rpc":[{"endpoint":"e1"},{"endpoint":"e2"},{"endpoint":"e3"},{"endpoint":"e4"}],
+        "direct":null,"prover":null,"policy":{"order":["quorum"],"prefer_verified":false},
+        "quorum":{"k":3,"m":2,"timeout_ms":5000,"anchor":"latest","anchor_ttl_ms":30000},
+        "myotis_enabled":false,"tezos":[]}"#;
+
+    fn shell(frames: &[serde_json::Value]) -> Vec<&serde_json::Value> {
+        frames
+            .iter()
+            .filter(|f| f["method"] == "shell.rpc")
+            .collect()
+    }
+
+    #[test]
+    fn requests_past_the_cap_wait_their_turn() {
+        let (mut naming, rx) = naming(2, usize::MAX);
         assert!(
             naming
-                .request(1, "naming.configure", Some(snapshot))
+                .request(1, "naming.configure", Some(SNAPSHOT))
                 .is_ok()
         );
         assert!(
@@ -921,19 +1024,112 @@ mod tests {
                 .map(|f| f["id"].as_u64().unwrap_or(0))
                 .collect::<Vec<_>>()
         };
-        // Four head probes, two at a time.
-        let first = requests(&written(&rx));
+        // Four head probes, two at a time, each with its session's deadline.
+        let frames = written(&rx);
+        assert!(
+            shell(&frames)
+                .iter()
+                .all(|f| f["params"]["deadline_ms"] == 120_000)
+        );
+        let first = requests(&frames);
         assert_eq!(first.len(), 2);
         assert_eq!(naming.queued.len(), 2);
-        // An answer frees a slot for the next.
+        // An answer frees a slot for the next, sent with what is left.
         let body = base64::engine::general_purpose::STANDARD
             .encode(r#"{"jsonrpc":"2.0","id":1,"result":"0x1312d00"}"#);
         let answer = RawValue::from_string(format!(r#"{{"status":200,"body":"{body}"}}"#))
             .unwrap_or_else(|_| unreachable!());
+        assert!(naming.advance(4).is_ok());
         assert!(naming.response(first[0], Ok(answer)).is_ok());
         assert!(naming.flush().is_ok());
-        assert_eq!(requests(&written(&rx)).len(), 1);
+        let frames = written(&rx);
+        assert_eq!(requests(&frames).len(), 1);
+        assert_eq!(shell(&frames)[0]["params"]["deadline_ms"], 119_996);
         assert_eq!(naming.queued.len(), 1);
+    }
+
+    #[test]
+    fn frames_past_the_writer_share_wait_here() {
+        // Room for one frame at a time.
+        let (mut naming, rx) = naming(256, 1);
+        assert!(
+            naming
+                .request(1, "naming.configure", Some(SNAPSHOT))
+                .is_ok()
+        );
+        assert!(
+            naming
+                .request(
+                    2,
+                    "naming.resolve_content",
+                    Some(r#"{"name":"vitalik.eth"}"#)
+                )
+                .is_ok()
+        );
+        assert!(naming.advance(0).is_ok());
+        // The configure reply took the room: the probes wait, in the FIFO
+        // behind the waiting frames, rather than ending the process.
+        assert_eq!(written(&rx).len(), 1);
+        assert_eq!(naming.outbox.len() + naming.queued.len(), 4);
+        // Each time the writer frees room, one more goes.
+        for _ in 0..4 {
+            assert!(naming.handle(In::Drained).is_ok());
+            assert!(naming.flush().is_ok());
+            assert_eq!(shell(&written(&rx)).len(), 1);
+        }
+        assert!(naming.outbox.is_empty() && naming.queued.is_empty());
+    }
+
+    #[test]
+    fn options_out_of_range_are_invalid_arguments() {
+        let (mut naming, rx) = naming(256, usize::MAX);
+        for (id, params) in [
+            (1, r#"{"name":"vitalik.eth","attempts_used":3}"#),
+            (2, r#"{"name":"vitalik.eth","deadline_ms":120001}"#),
+        ] {
+            assert!(
+                naming
+                    .request(id, "naming.resolve_content", Some(params))
+                    .is_ok()
+            );
+        }
+        let frames = written(&rx);
+        assert_eq!(frames.len(), 2);
+        assert!(
+            frames
+                .iter()
+                .all(|f| f["error"]["code"] == "invalid_argument")
+        );
+        assert!(naming.callers.is_empty());
+    }
+
+    #[test]
+    fn verified_replies_are_one_closed_shape() {
+        let verified = |text: &str| {
+            answer(
+                Kind::Verified,
+                Ok(RawValue::from_string(text.to_owned()).unwrap_or_else(|_| unreachable!())),
+            )
+        };
+        assert!(matches!(
+            verified(r#"{"failure":"timeout"}"#),
+            Some(Answer::Verified(Verified::Failure(class))) if class == "timeout"
+        ));
+        assert!(matches!(
+            verified(r#"{"revert":"0x12"}"#),
+            Some(Answer::Verified(Verified::Revert(data))) if data == [0x12]
+        ));
+        // Diagnostic text, a failure beside a revert, extra members, or
+        // anything but an object is malformed.
+        for text in [
+            r#"{"failure":"see https://example.com/key=1"}"#,
+            r#"{"failure":"timeout","revert":"0x12"}"#,
+            r#"{"revert":"0x12","name":"x"}"#,
+            r#"{"failure":1}"#,
+            r#""ok""#,
+        ] {
+            assert!(verified(text).is_none(), "{text}");
+        }
     }
 
     #[test]

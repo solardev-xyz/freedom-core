@@ -7,6 +7,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -28,6 +29,8 @@ pub struct Core {
     stderr: Option<std::thread::JoinHandle<String>>,
     /// Events seen while waiting for responses.
     pub events: Vec<Value>,
+    /// While set, stdout isn't read: the pipe fills, as when main stalls.
+    paused: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl Drop for Core {
@@ -66,6 +69,8 @@ pub fn spawn_env(
     let mut stderr = child.stderr.take().unwrap();
     let (tx, output) = mpsc::channel();
     let lines = command != "serve";
+    let paused = Arc::new((Mutex::new(false), Condvar::new()));
+    let gate = Arc::clone(&paused);
     std::thread::spawn(move || {
         if lines {
             for line in BufReader::new(stdout).lines() {
@@ -77,6 +82,13 @@ pub fn spawn_env(
             return;
         }
         loop {
+            {
+                let (lock, resumed) = &*gate;
+                let mut paused = lock.lock().unwrap();
+                while *paused {
+                    paused = resumed.wait(paused).unwrap();
+                }
+            }
             let mut header = [0u8; 5];
             if stdout.read_exact(&mut header).is_err() {
                 return;
@@ -105,6 +117,7 @@ pub fn spawn_env(
         output,
         stderr: Some(stderr),
         events: Vec::new(),
+        paused,
     }
 }
 
@@ -129,6 +142,17 @@ pub fn shell_request(id: u64, method: &str, params: Value) -> Value {
 }
 
 impl Core {
+    /// Stops reading stdout after the frame being read, until
+    /// [`Core::resume_reading`].
+    pub fn pause_reading(&self) {
+        *self.paused.0.lock().unwrap() = true;
+    }
+
+    pub fn resume_reading(&self) {
+        *self.paused.0.lock().unwrap() = false;
+        self.paused.1.notify_all();
+    }
+
     pub fn send(&mut self, message: &Value) {
         self.send_raw(&frame(message));
     }

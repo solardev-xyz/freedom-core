@@ -114,6 +114,8 @@ enum Scope {
 pub struct Emitted {
     pub effect: Effect<Request>,
     pub generations: Generations,
+    /// When the session that made it ends: no request outlives that.
+    pub deadline: Ms,
 }
 
 struct Session {
@@ -134,6 +136,8 @@ struct Session {
     scope: Scope,
     /// Tags the current attempt's requests ([`Machine::take_effects`]).
     owner: u64,
+    /// When its deadline ends it.
+    ends: Ms,
 }
 
 /// One caller's terminal reply.
@@ -160,8 +164,8 @@ pub struct Machine {
     retired_rpc: std::collections::VecDeque<String>,
     retired_tezos: std::collections::VecDeque<String>,
     /// The generations of each attempt that may still have untaken
-    /// requests, by owner.
-    origins: std::collections::BTreeMap<u64, Generations>,
+    /// requests, and when its session ends, by owner.
+    origins: std::collections::BTreeMap<u64, (Generations, Ms)>,
     next_owner: u64,
 }
 
@@ -189,15 +193,21 @@ fn retire(
 
 /// `resolveAcrossStableLifecycle`'s attempts, per caller (design 0004,
 /// Generations).
-const MAX_LIFECYCLE_ATTEMPTS: u32 = 3;
+pub const MAX_LIFECYCLE_ATTEMPTS: u32 = 3;
 
 type Resolve = Rc<dyn Fn(Rc<Ctx>, Rc<Shared>) -> Pin<Box<dyn Future<Output = Outcome>>>>;
 
-/// Deviation `reply-size`, for every reply: a result too large for one
-/// reply (an invalid input echoed back, say) becomes `result too large`.
+/// Deviation `reply-size`, for every reply: a result or thrown message too
+/// large for one reply (an input echoed back, say) becomes `result too
+/// large`.
 fn sized(outcome: Outcome, bounds: &super::bounds::Bounds) -> Outcome {
     match outcome {
         Ok(value) if !bounds.reply_fits(value.stringify().len()) => Err(Thrown::too_large()),
+        Err(thrown)
+            if !bounds.reply_fits(JsValue::String(thrown.message.clone()).stringify().len()) =>
+        {
+            Err(Thrown::too_large())
+        }
         other => other,
     }
 }
@@ -237,11 +247,12 @@ impl Machine {
         }
     }
 
-    /// A new attempt's owner, under `generations`.
-    fn owner(&mut self, generations: Generations) -> u64 {
+    /// A new attempt's owner, under `generations`, in a session that ends
+    /// at `ends`.
+    fn owner(&mut self, generations: Generations, ends: Ms) -> u64 {
         let owner = self.next_owner;
         self.next_owner += 1;
-        self.origins.insert(owner, generations);
+        self.origins.insert(owner, (generations, ends));
         owner
     }
 
@@ -301,9 +312,11 @@ impl Machine {
     ) -> u64 {
         let id = caller.id;
         let task = start();
-        let deadline = started(self.ctx.rt.sleep(self.ctx.bounds().deadline_ms));
+        let deadline_ms = self.ctx.bounds().deadline_ms;
+        let deadline = started(self.ctx.rt.sleep(deadline_ms));
+        let ends = self.now().saturating_add(deadline_ms);
         let generations = self.generations();
-        let owner = self.owner(generations);
+        let owner = self.owner(generations, ends);
         self.sessions.push(Session {
             key,
             callers: vec![caller],
@@ -315,6 +328,7 @@ impl Machine {
             subject,
             scope,
             owner,
+            ends,
         });
         id
     }
@@ -653,7 +667,8 @@ impl Machine {
             caller.attempts = caller.attempts.saturating_add(1);
         }
         session.generations = current;
-        let owner = self.owner(current);
+        let ends = session.ends;
+        let owner = self.owner(current, ends);
         self.sessions[i].owner = owner;
         true
     }
@@ -777,14 +792,17 @@ impl Machine {
     /// The effects since the last call, each with its attempt's
     /// generations.
     pub fn take_effects(&mut self) -> Vec<Emitted> {
-        let current = self.generations();
+        let current = (
+            self.generations(),
+            self.now().saturating_add(self.ctx.bounds().deadline_ms),
+        );
         let emitted = self
             .ctx
             .rt
             .take_effects()
             .into_iter()
             .map(|effect| {
-                let generations = match &effect {
+                let (generations, deadline) = match &effect {
                     Effect::Request { owner, .. } => {
                         self.origins.get(owner).copied().unwrap_or(current)
                     }
@@ -793,6 +811,7 @@ impl Machine {
                 Emitted {
                     effect,
                     generations,
+                    deadline,
                 }
             })
             .collect();

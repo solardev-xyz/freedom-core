@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::mpsc::{self, RecvTimeoutError, Sender, TrySendError};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
@@ -43,7 +43,8 @@ pub struct Options {
 
 /// What the loop reacts to.
 pub enum Event {
-    Frame(Frame),
+    /// A frame, and its place in the reader's credits.
+    Frame(Frame, transport::Credit),
     Eof {
         at_boundary: bool,
     },
@@ -153,6 +154,8 @@ pub fn run(options: &Options) -> Exit {
         node_recovery: None,
         pending_hello: None,
         out: writer.queue,
+        allowance: transport::Allowance::new(transport::MAX_QUEUED_REPLIES, usize::MAX),
+        credit: None,
         hello_done: false,
         last_request_id: 0,
         vault: Vault::new(
@@ -187,10 +190,13 @@ pub fn run(options: &Options) -> Exit {
             }
         }
         match received {
-            Ok(Event::Frame(frame)) => {
+            Ok(Event::Frame(frame, credit)) => {
+                // A message forwarded to the naming thread takes the credit
+                // along; otherwise it goes once the frame is handled.
+                core.credit = Some(credit);
                 let flow = core.handle_frame(&frame);
                 drop(frame);
-                credits.release();
+                core.credit = None;
                 if let Flow::Exit(exit) = flow {
                     break exit;
                 }
@@ -314,7 +320,12 @@ struct Core {
     node_recovery: NodeRecovery,
     /// A valid core.hello received before the snapshot was ready.
     pending_hello: Option<u64>,
-    out: mpsc::SyncSender<Zeroizing<Vec<u8>>>,
+    out: mpsc::Sender<transport::Out>,
+    /// The loop's own share of the writer: 0001's reserved capacity, which
+    /// naming traffic can't take.
+    allowance: Arc<transport::Allowance>,
+    /// The credit of the frame being handled.
+    credit: Option<transport::Credit>,
     hello_done: bool,
     last_request_id: u64,
     vault: Vault,
@@ -417,7 +428,10 @@ impl Core {
             // A cancel names a vault request or a naming one; each side
             // ignores IDs it doesn't hold.
             Message::Cancel { id } => {
-                if !self.naming.send(naming::In::Cancel { id }) {
+                if !self
+                    .naming
+                    .send(naming::In::Cancel { id }, self.credit.take())
+                {
                     return Flow::Exit(Exit::Internal);
                 }
                 let outs = self.vault.cancel(id);
@@ -433,7 +447,10 @@ impl Core {
                     },
                     Err(error) => Err(error),
                 };
-                if self.naming.send(naming::In::Response { id, outcome }) {
+                if self
+                    .naming
+                    .send(naming::In::Response { id, outcome }, self.credit.take())
+                {
                     Flow::Continue
                 } else {
                     Flow::Exit(Exit::Internal)
@@ -476,11 +493,14 @@ impl Core {
                     Some(Err(_)) => return Flow::Exit(Exit::Internal),
                     None => None,
                 };
-                if self.naming.send(naming::In::Request {
-                    id,
-                    method: loggable(method),
-                    params,
-                }) {
+                if self.naming.send(
+                    naming::In::Request {
+                        id,
+                        method: loggable(method),
+                        params,
+                    },
+                    self.credit.take(),
+                ) {
                     Flow::Continue
                 } else {
                     Flow::Exit(Exit::Internal)
@@ -578,19 +598,19 @@ impl Core {
         }
     }
 
-    /// Queues a reply. A full queue means main stopped reading stdout: exit
-    /// rather than buffer without limit.
+    /// Queues a reply. A full allowance means main stopped reading stdout:
+    /// exit rather than buffer without limit.
     fn send(&self, payload: &[u8]) -> Flow {
         let Some(frame) = transport::frame(payload) else {
             return Flow::Exit(Exit::Internal);
         };
-        match self.out.try_send(frame) {
+        let Some(hold) = self.allowance.take(frame.len()) else {
+            log::error("main is not reading replies", serde_json::json!({}));
+            return Flow::Exit(Exit::Protocol);
+        };
+        match self.out.send(transport::Out { frame, hold }) {
             Ok(()) => Flow::Continue,
-            Err(TrySendError::Full(_)) => {
-                log::error("main is not reading replies", serde_json::json!({}));
-                Flow::Exit(Exit::Protocol)
-            }
-            Err(TrySendError::Disconnected(_)) => Flow::Exit(Exit::Protocol),
+            Err(_) => Flow::Exit(Exit::Protocol),
         }
     }
 }

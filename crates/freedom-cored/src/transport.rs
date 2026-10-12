@@ -1,17 +1,23 @@
 //! Stdio transport (design 0001, "Transport"):
 //!
 //! - **Reader thread:** turns stdin into frames. At most
-//!   [`MAX_QUEUED_FRAMES`] frames wait for the event loop at any time; beyond
-//!   that the reader stops reading, which is backpressure on main.
-//! - **Writer thread:** one serialized writer for stdout, behind a bounded
-//!   queue. A full queue means main has stopped reading, and the core exits
-//!   rather than buffer without limit.
+//!   [`MAX_QUEUED_FRAMES`] frames and [`MAX_QUEUED_FRAME_BYTES`] wait to be
+//!   handled at any time, by the event loop or the naming thread a frame is
+//!   forwarded to; beyond that the reader stops reading, which is
+//!   backpressure on main.
+//! - **Writer thread:** one serialized writer for stdout. Each producer has
+//!   its own [`Allowance`] of queued frames, so naming traffic can't take
+//!   the vault loop's room (0001's reserved control capacity). The vault
+//!   loop's full allowance means main has stopped reading, and the core
+//!   exits rather than buffer without limit; naming's frames wait in the
+//!   naming thread instead.
 //!
 //! Lifecycle events (EOF, framing errors, writer failure, a thread dying) go
 //! through an unbounded channel that frames can't fill.
 
 use std::io::{Read, Write};
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 
 use fc_protocol::frame::Decoder;
@@ -20,39 +26,141 @@ use zeroize::Zeroizing;
 use crate::serve::Event;
 
 const READ_CHUNK: usize = 64 * 1024;
-/// Frames waiting for the event loop.
+/// Frames read and not yet handled...
 pub const MAX_QUEUED_FRAMES: usize = 256;
-/// Replies waiting for the writer.
+/// ...and their bytes (a frame alone always passes).
+pub const MAX_QUEUED_FRAME_BYTES: usize = 16 * 1024 * 1024;
+/// The vault loop's replies waiting for the writer.
 pub const MAX_QUEUED_REPLIES: usize = 256;
+/// Naming's frames waiting for the writer (design 0004, Bounds: the writer).
+pub const MAX_QUEUED_NAMING_BYTES: usize = 8 * 1024 * 1024;
 
-/// Counts frames handed to the event loop and not yet handled.
+/// Counts frames read and not yet handled, and their bytes.
 #[derive(Default)]
 pub struct Credits {
-    in_flight: Mutex<usize>,
+    in_flight: Mutex<(usize, usize)>,
     freed: Condvar,
 }
 
 impl Credits {
-    fn acquire(&self) {
-        let Ok(mut in_flight) = self.in_flight.lock() else {
-            return;
-        };
-        while *in_flight >= MAX_QUEUED_FRAMES {
-            in_flight = match self.freed.wait(in_flight) {
-                Ok(guard) => guard,
-                Err(_) => return,
-            };
+    /// Waits for room for a frame of `len` bytes.
+    fn acquire(self: &Arc<Self>, len: usize) -> Credit {
+        if let Ok(mut held) = self.in_flight.lock() {
+            while held.0 >= MAX_QUEUED_FRAMES
+                || (held.0 > 0 && held.1 + len > MAX_QUEUED_FRAME_BYTES)
+            {
+                held = match self.freed.wait(held) {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+            }
+            held.0 += 1;
+            held.1 += len;
         }
-        *in_flight += 1;
+        Credit {
+            credits: Arc::clone(self),
+            len,
+        }
     }
 
-    /// Called by the event loop after handling a frame.
-    pub fn release(&self) {
-        if let Ok(mut in_flight) = self.in_flight.lock() {
-            *in_flight = in_flight.saturating_sub(1);
+    fn release(&self, len: usize) {
+        if let Ok(mut held) = self.in_flight.lock() {
+            held.0 = held.0.saturating_sub(1);
+            held.1 = held.1.saturating_sub(len);
             self.freed.notify_one();
         }
     }
+}
+
+/// A read frame's place in [`Credits`], freed when dropped: once the event
+/// loop has handled the frame, or the naming thread a message it forwarded.
+pub struct Credit {
+    credits: Arc<Credits>,
+    len: usize,
+}
+
+impl Drop for Credit {
+    fn drop(&mut self) {
+        self.credits.release(self.len);
+    }
+}
+
+/// One producer's share of the writer: the frames it has queued and the
+/// writer hasn't written yet.
+pub struct Allowance {
+    held: Mutex<(usize, usize)>,
+    max_frames: usize,
+    max_bytes: usize,
+    /// Set by a refusal; the next release then calls `wake`.
+    refused: AtomicBool,
+    wake: Mutex<Option<Box<dyn Fn() + Send>>>,
+}
+
+impl Allowance {
+    pub fn new(max_frames: usize, max_bytes: usize) -> Arc<Self> {
+        Arc::new(Self {
+            held: Mutex::new((0, 0)),
+            max_frames,
+            max_bytes,
+            refused: AtomicBool::new(false),
+            wake: Mutex::new(None),
+        })
+    }
+
+    /// What to call when room frees up after a refusal.
+    pub fn on_room(&self, wake: impl Fn() + Send + 'static) {
+        if let Ok(mut slot) = self.wake.lock() {
+            *slot = Some(Box::new(wake));
+        }
+    }
+
+    /// Room for a frame of `len` bytes, or `None` when the producer has
+    /// used its share (a frame alone always fits).
+    pub fn take(self: &Arc<Self>, len: usize) -> Option<Hold> {
+        let mut held = self.held.lock().ok()?;
+        if held.0 > 0 && (held.0 >= self.max_frames || held.1 + len > self.max_bytes) {
+            self.refused.store(true, Ordering::SeqCst);
+            return None;
+        }
+        held.0 += 1;
+        held.1 += len;
+        Some(Hold {
+            allowance: Arc::clone(self),
+            len,
+        })
+    }
+
+    fn release(&self, len: usize) {
+        if let Ok(mut held) = self.held.lock() {
+            held.0 = held.0.saturating_sub(1);
+            held.1 = held.1.saturating_sub(len);
+        }
+        if self.refused.swap(false, Ordering::SeqCst)
+            && let Ok(wake) = self.wake.lock()
+            && let Some(wake) = wake.as_ref()
+        {
+            wake();
+        }
+    }
+}
+
+/// A queued frame's place in its producer's [`Allowance`], freed once the
+/// writer has written it.
+pub struct Hold {
+    allowance: Arc<Allowance>,
+    len: usize,
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        self.allowance.release(self.len);
+    }
+}
+
+/// A frame for the writer, with its place in its producer's allowance.
+pub struct Out {
+    pub frame: Zeroizing<Vec<u8>>,
+    pub hold: Hold,
 }
 
 /// Reports a thread that ends by panicking.
@@ -118,8 +226,8 @@ pub fn spawn_reader(
                     };
                     rest = &rest[consumed..];
                     while let Some(frame) = decoder.pop() {
-                        credits.acquire();
-                        if events.send(Event::Frame(frame)).is_err() {
+                        let credit = credits.acquire(frame.payload.len());
+                        if events.send(Event::Frame(frame, credit)).is_err() {
                             return;
                         }
                     }
@@ -135,15 +243,16 @@ fn protocol_category(error: &fc_protocol::frame::FrameError) -> &'static str {
     }
 }
 
-/// The writer's handles: its bounded queue, and a signal when it finishes.
+/// The writer's handles: its queue, bounded by each producer's
+/// [`Allowance`], and a signal when it finishes.
 pub struct Writer {
-    pub queue: SyncSender<Zeroizing<Vec<u8>>>,
+    pub queue: Sender<Out>,
     pub done: Receiver<()>,
 }
 
 /// Writes framed messages to stdout, in order, until the queue closes.
 pub fn spawn_writer(events: Sender<Event>) -> std::io::Result<Writer> {
-    let (queue, frames) = mpsc::sync_channel::<Zeroizing<Vec<u8>>>(MAX_QUEUED_REPLIES);
+    let (queue, frames) = mpsc::channel::<Out>();
     let (done_tx, done) = mpsc::channel();
     std::thread::Builder::new()
         .name("stdout".into())
@@ -153,7 +262,7 @@ pub fn spawn_writer(events: Sender<Event>) -> std::io::Result<Writer> {
                 name: "stdout",
             };
             let mut stdout = std::io::stdout().lock();
-            for frame in frames {
+            for Out { frame, hold } in frames {
                 if stdout
                     .write_all(&frame)
                     .and_then(|()| stdout.flush())
@@ -162,6 +271,8 @@ pub fn spawn_writer(events: Sender<Event>) -> std::io::Result<Writer> {
                     let _ = events.send(Event::WriterFailed);
                     return;
                 }
+                // Written: its place in the producer's allowance is free.
+                drop(hold);
             }
             let _ = done_tx.send(());
         })?;
@@ -173,4 +284,45 @@ pub fn frame(payload: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
     let mut out = Zeroizing::new(Vec::with_capacity(payload.len() + 5));
     fc_protocol::frame::encode_json(payload, &mut out).ok()?;
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_allowance_refuses_past_its_share_and_wakes_once_freed() {
+        let allowance = Allowance::new(usize::MAX, 10);
+        let woken = Arc::new(Mutex::new(0));
+        let count = Arc::clone(&woken);
+        allowance.on_room(move || *count.lock().unwrap() += 1);
+        let first = allowance.take(8).unwrap();
+        assert!(allowance.take(3).is_none());
+        // Freed after a refusal: one wake.
+        drop(first);
+        assert_eq!(*woken.lock().unwrap(), 1);
+        // A frame alone always fits, whatever its size.
+        let big = allowance.take(64).unwrap();
+        let small = allowance.take(1);
+        assert!(small.is_none());
+        drop(big);
+        assert_eq!(*woken.lock().unwrap(), 2);
+        let frames = Allowance::new(1, usize::MAX);
+        let _one = frames.take(1).unwrap();
+        assert!(frames.take(1).is_none());
+    }
+
+    #[test]
+    fn credits_bound_bytes_as_well_as_frames() {
+        let credits = Arc::new(Credits::default());
+        let big = credits.acquire(MAX_QUEUED_FRAME_BYTES);
+        let waiter = {
+            let credits = Arc::clone(&credits);
+            std::thread::spawn(move || drop(credits.acquire(1)))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!waiter.is_finished(), "the next frame waits for room");
+        drop(big);
+        waiter.join().unwrap();
+    }
 }
