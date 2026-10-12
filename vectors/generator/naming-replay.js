@@ -319,17 +319,23 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     const data = err?.data ?? err?.info?.error?.data;
     return typeof data === 'string' && /^0x[0-9a-f]*$/i.test(data) ? data : null;
   };
-  const operation = (host, op, params, run) => {
+  // `toAnswer` maps a returned value to the recorded reply (default: the
+  // value itself). For Myotis, an availability change during the
+  // operation wins: main checks the epoch around it (design 0004). The
+  // reference always gets the original value or error.
+  const operation = (host, op, params, run, toAnswer = (value) => ({ result: describe(value) })) => {
     const item = record({ kind: 'verified-op', host, op, params });
+    const epoch = myotisEpoch;
+    const lifecycleChanged = () => host === 'myotis' && (myotisEpoch !== epoch || !(myotis().ready ?? false));
     return insideOperation.run(true, run).then(
       (value) => {
-        item.answer = { result: describe(value) };
+        item.answer = lifecycleChanged() ? { failure: 'lifecycle' } : toAnswer(value);
         close(item, 'answered');
         return value;
       },
       (err) => {
         const revert = revertOf(err);
-        item.answer = revert ? { revert } : { failure: failureClass(err) };
+        item.answer = lifecycleChanged() ? { failure: 'lifecycle' } : revert ? { revert } : { failure: failureClass(err) };
         close(item, 'answered');
         throw err;
       }
@@ -369,7 +375,13 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       // block number it reads next); calls inside a record operation are
       // that operation's raw calls.
       if (insideOperation.getStore()) return call();
-      return operation('myotis', 'call', { to, data }, async () => ({ ...(await call()), optimisticBlockNumber: myotis().block ?? null }));
+      // The resolver reads the optimistic block right after a successful
+      // call; anything but `ok` with result data makes it throw.
+      return operation('myotis', 'call', { to, data }, call, (value) => (
+        value.status === 'ok' && typeof value.resultHex === 'string'
+          ? { result: { resultHex: value.resultHex, optimisticBlockNumber: myotis().block ?? null } }
+          : { failure: 'error' }
+      ));
     },
   };
   const COLIBRI_HOST = {
@@ -769,6 +781,37 @@ function addressAndReverse(ethers, base, one) {
       network: { ...QUORUM_NETWORK, verification: { order: ['myotis'], preferVerified: false } },
       myotis: { enabled: true, ready: true, block: 23_456_789, calls: { 'wns:contenthash': nftBytes('0xe3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f') } },
     }), content('alice.wei')),
+    // A NameNFT call that doesn't succeed is a failed operation; the
+    // order moves on to quorum.
+    one('myotis-wns-call-unavailable', base({
+      network: { ...QUORUM_NETWORK, verification: { order: ['myotis', 'quorum'], preferVerified: false } },
+      myotis: { enabled: true, ready: true, block: 23_456_789, calls: { 'wns:contenthash': { unavailable: true } } },
+      calls: { 'wns:contenthash': nftBytes('0xe3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f') },
+    }), content('alice.wei')),
+    one('myotis-wns-call-revert', base({
+      network: { ...QUORUM_NETWORK, verification: { order: ['myotis', 'quorum'], preferVerified: false } },
+      myotis: { enabled: true, ready: true, block: 23_456_789, calls: { 'wns:contenthash': { revert: '0x12345678' } } },
+      calls: { 'wns:contenthash': nftBytes('0xe3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f') },
+    }), content('alice.wei')),
+    // Availability changes in the middle of each kind of operation.
+    {
+      id: 'myotis-record-lifecycle-mid-operation',
+      world: base({
+        network: { ...QUORUM_NETWORK, verification: { order: ['myotis', 'quorum'], preferVerified: false } },
+        myotis: { enabled: true, ready: true, calls: { resolve: urAddress(ACCOUNT) } },
+        calls: { resolve: urAddress(ACCOUNT) },
+      }),
+      steps: [{ call: address('vitalik.eth'), events: [{ at: 5, myotis: { ready: true } }] }],
+    },
+    {
+      id: 'myotis-call-lifecycle-mid-operation',
+      world: base({
+        network: { ...QUORUM_NETWORK, verification: { order: ['myotis', 'quorum'], preferVerified: false } },
+        myotis: { enabled: true, ready: true, block: 23_456_789, calls: { 'wns:contenthash': nftBytes('0xe3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f') } },
+        calls: { 'wns:contenthash': nftBytes('0xe3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f') },
+      }),
+      steps: [{ call: content('alice.wei'), events: [{ at: 5, myotis: { ready: true } }] }],
+    },
   ];
 }
 
