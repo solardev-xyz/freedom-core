@@ -14,6 +14,11 @@ const path = require('node:path');
 const { EventEmitter } = require('node:events');
 
 const EPOCH = 1_760_000_000_000;
+const WNS = '0x0000000000696760e15f265e828db644a0c242eb';
+const GNS = '0x9d51d507bc7264d4fe8ad1cf7fe191933a0a81d6';
+// Inner and NameNFT selectors: contenthash(bytes32), addr(bytes32),
+// addr(bytes32,uint256), reverseResolve(address).
+const SELECTORS = { '0xbc1c58d1': 'contenthash', '0x3b3b57de': 'addr', '0xf1cb7e06': 'addr-multicoin', '0x9af8b7aa': 'reverse' };
 const HEAD = 20_000_000;
 const UR = '0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe';
 
@@ -83,9 +88,22 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
         };
       }
       case 'eth_call': {
-        const data = r.params[0].data;
-        const kind = data.startsWith('0x9061b923') ? 'resolve' : data.startsWith('0x5d78a217') ? 'reverse' : 'callback';
-        const answer = p.calls?.[kind] ?? p.calls?.['*'] ?? world.calls?.[kind] ?? world.calls?.['*'];
+        const { to, data } = r.params[0];
+        const target = String(to).toLowerCase();
+        // A call's kind: the UR's resolve (by its inner call) or reverse, a
+        // CCIP callback, or a WNS/GNS NameNFT call ('wns:addr', say).
+        let kind;
+        if (target === WNS || target === GNS) {
+          kind = `${target === WNS ? 'wns' : 'gns'}:${SELECTORS[data.slice(0, 10)] ?? 'unknown'}`;
+        } else if (data.startsWith('0x9061b923')) {
+          const [, inner] = ethers.AbiCoder.defaultAbiCoder().decode(['bytes', 'bytes'], '0x' + data.slice(10));
+          kind = `resolve:${SELECTORS[inner.slice(0, 10)] ?? 'unknown'}`;
+        } else {
+          kind = data.startsWith('0x5d78a217') ? 'reverse' : 'callback';
+        }
+        const general = kind.startsWith('resolve:') ? 'resolve' : kind;
+        const answer = p.calls?.[kind] ?? p.calls?.[general] ?? p.calls?.['*']
+          ?? world.calls?.[kind] ?? world.calls?.[general] ?? world.calls?.['*'];
         if (!answer) throw new Error(`unscripted ${kind} call to ${host}`);
         if (answer.rpc_error) return { error: answer.rpc_error };
         if (answer.hang) return { hang: true };
@@ -217,6 +235,34 @@ function scenarios(ethers) {
     { id: 'single-source-two-endpoints', world: base({ endpoints: ENDPOINTS.slice(0, 2) }), call: content },
     { id: 'anchor-hash-split', world: base({ hosts: { 'c.rpc.example': { fork: true }, 'd.rpc.example': { fork: true } } }), call: content },
     { id: 'node-errors-agree', world: base({ calls: { resolve: { rpc_error: { code: -32000, message: 'header not found' } } } }), call: content },
+    ...addressAndReverse(ethers, base),
+  ];
+}
+
+/** Address and reverse lookups, ENS and WNS/GNS. */
+function addressAndReverse(ethers, base) {
+  const coder = ethers.AbiCoder.defaultAbiCoder();
+  const ACCOUNT = '0x' + 'ab'.repeat(20);
+  const urAddress = (address) => ({ data: coder.encode(['bytes', 'address'], [coder.encode(['address'], [address]), '0x' + '22'.repeat(20)]) });
+  const urMulticoin = (bytes) => ({ data: coder.encode(['bytes', 'address'], [coder.encode(['bytes'], [bytes]), '0x' + '22'.repeat(20)]) });
+  const urReverse = (name) => ({ data: coder.encode(['string', 'address', 'address'], [name, '0x' + '22'.repeat(20), '0x' + '33'.repeat(20)]) });
+  const mismatch = ethers.id('ReverseAddressMismatch(string,bytes)').slice(0, 10) + coder.encode(['string', 'bytes'], ['claimed.eth', '0x']).slice(2);
+  const nftString = (text) => ({ data: coder.encode(['string'], [text]) });
+  const nftAddress = (address) => ({ data: coder.encode(['address'], [address]) });
+  const nftBytes = (bytes) => ({ data: coder.encode(['bytes'], [bytes]) });
+  return [
+    { id: 'address-agree', world: base({ calls: { resolve: urAddress(ACCOUNT) } }), call: { fn: 'resolveEnsAddress', args: ['vitalik.eth'] } },
+    { id: 'address-multicoin-base', world: base({ calls: { resolve: urMulticoin(ACCOUNT) } }), call: { fn: 'resolveEnsAddress', args: ['vitalik.eth', 8453] } },
+    { id: 'address-zero-is-no-address', world: base({ calls: { resolve: urAddress(ethers.ZeroAddress) } }), call: { fn: 'resolveEnsAddress', args: ['vitalik.eth'] } },
+    { id: 'reverse-agree', world: base({ calls: { reverse: urReverse('vitalik.eth') } }), call: { fn: 'resolveEnsReverse', args: [ACCOUNT] } },
+    { id: 'reverse-mismatch', world: base({ calls: { reverse: { rpc_error: { code: 3, message: 'execution reverted', data: mismatch } } } }), call: { fn: 'resolveEnsReverse', args: [ACCOUNT] } },
+    {
+      id: 'reverse-ens-empty-then-wns',
+      world: base({ calls: { reverse: urReverse(''), 'wns:reverse': nftString('alice.wei'), 'wns:addr': nftAddress(ACCOUNT), 'gns:reverse': nftString('') } }),
+      call: { fn: 'resolveEnsReverse', args: [ACCOUNT] },
+    },
+    { id: 'wns-content', world: base({ calls: { 'wns:contenthash': nftBytes('0xe3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f') } }), call: { fn: 'resolveEnsContent', args: ['alice.wei'] } },
+    { id: 'wns-address-on-l2', world: base({}), call: { fn: 'resolveEnsAddress', args: ['alice.wei', 8453] } },
   ];
 }
 

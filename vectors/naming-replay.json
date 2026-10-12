@@ -1179,6 +1179,940 @@
           "elapsed": 75
         }
       ]
+    },
+    {
+      "id": "address-agree",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveEnsAddress",
+            "args": [
+              "vitalik.eth"
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 10,
+              "host": "c.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 10,
+              "host": "b.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 10,
+              "host": "d.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 10,
+              "host": "a.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "c.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "b.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "d.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "a.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 50,
+              "host": "c.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x9061b923"
+            },
+            {
+              "t": 50,
+              "host": "b.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x9061b923"
+            },
+            {
+              "t": 50,
+              "host": "d.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x9061b923"
+            }
+          ],
+          "value": {
+            "success": true,
+            "name": "vitalik.eth",
+            "system": "ens",
+            "address": "0xABaBaBaBABabABabAbAbABAbABabababaBaBABaB",
+            "trust": {
+              "level": "verified",
+              "system": "ens",
+              "block": {
+                "number": 19999992,
+                "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+              },
+              "agreed": [
+                "c.rpc.example",
+                "b.rpc.example"
+              ],
+              "dissented": [],
+              "queried": [
+                "c.rpc.example",
+                "b.rpc.example",
+                "d.rpc.example"
+              ],
+              "quorum": {
+                "k": 3,
+                "m": 2,
+                "achieved": true
+              }
+            }
+          },
+          "elapsed": 75
+        }
+      ]
+    },
+    {
+      "id": "address-multicoin-base",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveEnsAddress",
+            "args": [
+              "vitalik.eth",
+              8453
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 10,
+              "host": "c.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 10,
+              "host": "b.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 10,
+              "host": "d.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 10,
+              "host": "a.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "c.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "b.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "d.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "a.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 50,
+              "host": "c.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x9061b923"
+            },
+            {
+              "t": 50,
+              "host": "b.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x9061b923"
+            },
+            {
+              "t": 50,
+              "host": "d.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x9061b923"
+            }
+          ],
+          "value": {
+            "success": true,
+            "name": "vitalik.eth",
+            "system": "ens",
+            "address": "0xABaBaBaBABabABabAbAbABAbABabababaBaBABaB",
+            "trust": {
+              "level": "verified",
+              "system": "ens",
+              "block": {
+                "number": 19999992,
+                "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+              },
+              "agreed": [
+                "c.rpc.example",
+                "b.rpc.example"
+              ],
+              "dissented": [],
+              "queried": [
+                "c.rpc.example",
+                "b.rpc.example",
+                "d.rpc.example"
+              ],
+              "quorum": {
+                "k": 3,
+                "m": 2,
+                "achieved": true
+              }
+            }
+          },
+          "elapsed": 75
+        }
+      ]
+    },
+    {
+      "id": "address-zero-is-no-address",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveEnsAddress",
+            "args": [
+              "vitalik.eth"
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 10,
+              "host": "c.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 10,
+              "host": "b.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 10,
+              "host": "d.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 10,
+              "host": "a.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "c.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "b.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "d.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "a.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 50,
+              "host": "c.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x9061b923"
+            },
+            {
+              "t": 50,
+              "host": "b.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x9061b923"
+            },
+            {
+              "t": 50,
+              "host": "d.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x9061b923"
+            }
+          ],
+          "value": {
+            "success": false,
+            "name": "vitalik.eth",
+            "reason": "NO_ADDRESS",
+            "error": "No address record set for vitalik.eth",
+            "system": "ens",
+            "trust": {
+              "level": "verified",
+              "system": "ens",
+              "block": {
+                "number": 19999992,
+                "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+              },
+              "agreed": [
+                "c.rpc.example",
+                "b.rpc.example"
+              ],
+              "dissented": [],
+              "queried": [
+                "c.rpc.example",
+                "b.rpc.example",
+                "d.rpc.example"
+              ],
+              "quorum": {
+                "k": 3,
+                "m": 2,
+                "achieved": true
+              }
+            }
+          },
+          "elapsed": 75
+        }
+      ]
+    },
+    {
+      "id": "reverse-agree",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveEnsReverse",
+            "args": [
+              "0xabababababababababababababababababababab"
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 10,
+              "host": "c.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 10,
+              "host": "b.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 10,
+              "host": "d.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 10,
+              "host": "a.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "c.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "b.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "d.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "a.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 50,
+              "host": "c.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x5d78a217"
+            },
+            {
+              "t": 50,
+              "host": "b.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x5d78a217"
+            },
+            {
+              "t": 50,
+              "host": "d.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x5d78a217"
+            }
+          ],
+          "value": {
+            "success": true,
+            "address": "0xabababababababababababababababababababab",
+            "name": "vitalik.eth",
+            "system": "ens",
+            "trust": {
+              "level": "verified",
+              "system": "ens",
+              "block": {
+                "number": 19999992,
+                "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+              },
+              "agreed": [
+                "c.rpc.example",
+                "b.rpc.example"
+              ],
+              "dissented": [],
+              "queried": [
+                "c.rpc.example",
+                "b.rpc.example",
+                "d.rpc.example"
+              ],
+              "quorum": {
+                "k": 3,
+                "m": 2,
+                "achieved": true
+              }
+            }
+          },
+          "elapsed": 75
+        }
+      ]
+    },
+    {
+      "id": "reverse-mismatch",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveEnsReverse",
+            "args": [
+              "0xabababababababababababababababababababab"
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 10,
+              "host": "c.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 10,
+              "host": "b.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 10,
+              "host": "d.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 10,
+              "host": "a.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "c.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "b.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "d.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "a.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 50,
+              "host": "c.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x5d78a217"
+            },
+            {
+              "t": 50,
+              "host": "b.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x5d78a217"
+            },
+            {
+              "t": 50,
+              "host": "d.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x5d78a217"
+            }
+          ],
+          "value": {
+            "success": false,
+            "address": "0xabababababababababababababababababababab",
+            "system": "ens",
+            "reason": "UNVERIFIED",
+            "claimedName": "claimed.eth",
+            "error": "Reverse record for 0xabababababababababababababababababababab does not forward-verify",
+            "trust": {
+              "level": "verified",
+              "system": "ens",
+              "block": {
+                "number": 19999992,
+                "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+              },
+              "agreed": [
+                "c.rpc.example",
+                "b.rpc.example"
+              ],
+              "dissented": [],
+              "queried": [
+                "c.rpc.example",
+                "b.rpc.example",
+                "d.rpc.example"
+              ],
+              "quorum": {
+                "k": 3,
+                "m": 2,
+                "achieved": true
+              }
+            }
+          },
+          "elapsed": 75
+        }
+      ]
+    },
+    {
+      "id": "reverse-ens-empty-then-wns",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveEnsReverse",
+            "args": [
+              "0xabababababababababababababababababababab"
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 10,
+              "host": "c.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 10,
+              "host": "b.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 10,
+              "host": "d.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 10,
+              "host": "a.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "c.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "b.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "d.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "a.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 50,
+              "host": "c.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x5d78a217"
+            },
+            {
+              "t": 50,
+              "host": "b.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x5d78a217"
+            },
+            {
+              "t": 50,
+              "host": "d.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x5d78a217"
+            },
+            {
+              "t": 70,
+              "host": "c.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x9af8b7aa"
+            },
+            {
+              "t": 70,
+              "host": "b.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x9af8b7aa"
+            },
+            {
+              "t": 70,
+              "host": "d.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x9af8b7aa"
+            },
+            {
+              "t": 90,
+              "host": "c.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x3b3b57de"
+            },
+            {
+              "t": 90,
+              "host": "b.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x3b3b57de"
+            },
+            {
+              "t": 90,
+              "host": "d.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x3b3b57de"
+            }
+          ],
+          "value": {
+            "success": true,
+            "address": "0xabababababababababababababababababababab",
+            "name": "alice.wei",
+            "system": "wns",
+            "trust": {
+              "level": "verified",
+              "system": "wns",
+              "block": {
+                "number": 19999992,
+                "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+              },
+              "agreed": [
+                "c.rpc.example",
+                "b.rpc.example"
+              ],
+              "dissented": [],
+              "queried": [
+                "c.rpc.example",
+                "b.rpc.example",
+                "d.rpc.example"
+              ],
+              "quorum": {
+                "k": 3,
+                "m": 2,
+                "achieved": true
+              }
+            }
+          },
+          "elapsed": 100
+        }
+      ]
+    },
+    {
+      "id": "wns-content",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveEnsContent",
+            "args": [
+              "alice.wei"
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 10,
+              "host": "c.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 10,
+              "host": "b.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 10,
+              "host": "d.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 10,
+              "host": "a.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "c.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "b.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "d.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "a.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 50,
+              "host": "c.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0xbc1c58d1"
+            },
+            {
+              "t": 50,
+              "host": "b.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0xbc1c58d1"
+            },
+            {
+              "t": 50,
+              "host": "d.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0xbc1c58d1"
+            }
+          ],
+          "value": {
+            "type": "ok",
+            "name": "alice.wei",
+            "system": "wns",
+            "codec": "ipfs-ns",
+            "protocol": "ipfs",
+            "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+            "decoded": "QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+            "trust": {
+              "level": "verified",
+              "system": "wns",
+              "block": {
+                "number": 19999992,
+                "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+              },
+              "agreed": [
+                "c.rpc.example",
+                "b.rpc.example"
+              ],
+              "dissented": [],
+              "queried": [
+                "c.rpc.example",
+                "b.rpc.example",
+                "d.rpc.example"
+              ],
+              "quorum": {
+                "k": 3,
+                "m": 2,
+                "achieved": true
+              }
+            }
+          },
+          "elapsed": 75
+        }
+      ]
+    },
+    {
+      "id": "wns-address-on-l2",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveEnsAddress",
+            "args": [
+              "alice.wei",
+              8453
+            ]
+          },
+          "at": 0,
+          "requests": [],
+          "value": {
+            "success": false,
+            "name": "alice.wei",
+            "system": "wns",
+            "reason": "CHAIN_UNSUPPORTED",
+            "error": "WNS names resolve on Ethereum mainnet only — alice.wei has no address record for this network"
+          },
+          "elapsed": 25
+        }
+      ]
     }
   ]
 }
