@@ -52,7 +52,7 @@ All accept caller kinds `chrome` and `shell`.
 | `chain.availability` | `{ chain_id, ready }` for each Myotis chain | `{}` | the router's live `myotis.isReady()` samples |
 | `chain.request` | `{ chain_id, method, params, include_trust, origin?, background, profile, deadline_ms }` | `{ result, source, verified, trust? }` | `request()` |
 | `chain.fee_quote` | `{ chain_id, deadline_ms }` | today's quote shape | `getFeeQuote()` |
-| `chain.broadcast` | `{ chain_id, raw, deadline_ms }` | `{ hash, source, outcome, refusal? }` | `broadcastRawTransaction()` |
+| `chain.broadcast` | `{ chain_id, raw, deadline_ms }` | `{ hash, source, outcome }` | `broadcastRawTransaction()` |
 
 - **`params`** is the caller's JSON as main serializes it. The core parses it keeping JavaScript's property order, which [normalization](#normalization) depends on.
 - **`origin`** is the router's routing context: the dApp's permission key or the `web3:` page's. It makes the read *interactive*. The core keeps it only in memory, for the [adaptive bypass](#adaptive-bypass), and never logs it.
@@ -372,7 +372,15 @@ The router's broadcast is the riskiest behavior it has:
 - **Direct re-sends the same bytes** to every endpoint on any error, and reports the *last* error.
 - **A lost reply looks like a failure.** Say an endpoint accepts the transaction but answers too slowly, and the next one answers `already known` or `nonce too low`. That is reported as a failure. The wallet then says "Transaction failed" while the transaction propagates, and a retry re-signs the intent with a newer nonce: the payment goes twice.
 
-Re-sending the same signed bytes is always safe, because they can be mined only once. Re-signing is what can pay twice. The core keeps today's order and re-sending, and replaces the outcome rule (deviation `broadcast-outcome`) with one goal: no definite failure unless the transaction was definitely not admitted.
+Two facts make this fixable:
+- **Re-sending the same signed bytes** is always safe, because they can be mined only once.
+- **At most one transaction per nonce** can be mined. Signing an intent again at the *same* nonce therefore can't pay twice either; only a *new* nonce can.
+
+So the design has two parts:
+- **The core** classifies each broadcast as honestly as the network allows (deviation `broadcast-outcome`).
+- **Main's wallet** never moves an intent to a new nonce because of an outcome ([Retrying an intent](#retrying-an-intent)).
+
+Safety rests on the second part. No outcome authorizes a new nonce, however it was reached, so a classification can be wrong without a payment going twice. The core keeps today's order and re-sending.
 
 ### Attempts
 
@@ -381,19 +389,17 @@ Every attempt (a Direct endpoint's `eth_sendRawTransaction`, Myotis's `broadcast
 | Class | When |
 |---|---|
 | **accepted** | a success whose result is the transaction's hash; Myotis `{ hash }` likewise |
-| **refused** | on a **first** broadcast only: a node error matching a [refusal predicate](#refusals), or Myotis `{ rejected }` |
+| **refused** | a node error matching a [refusal predicate](#refusals), or Myotis `{ rejected }` |
 | **not sent** | main's `not_sent`; Myotis `{ not_sent }`; an attempt the core never sent to main |
-| **ambiguous** | everything else: other node errors (`already known`, unrecognized ones, and every refusal on a repeat broadcast), a success with a different, missing or malformed hash, a non-2xx status, a transport failure, a timeout, a cancel or a deadline after the request reached main, Myotis `{ uncertain }` |
+| **ambiguous** | everything else: other node errors (`already known` and unrecognized ones), a success with a different, missing or malformed hash, a non-2xx status, a transport failure, a timeout, a cancel or a deadline after the request reached main, Myotis `{ uncertain }` |
 
 - **The hash** is computed by the core: keccak-256 of the signed bytes. Hashes compare as 32-byte values, any hex case.
 - **An attempt is possibly sent** from the moment the core sends its request to main until main's reply proves otherwise (`not_sent`).
 
 ### Refusals
 
-A node's error can prove only that *these* bytes weren't admitted *now*. It proves that the transaction is absent from the network only when nothing else could have sent the bytes.
-- **First broadcasts** are decided by the core alone, from its **broadcast ledger** ([below](#the-ledger)). Bytes are first only when the core signed them itself and the ledger shows they were never handed to a broadcaster. Bytes the core didn't sign, such as the Ant bridge's, and bytes the ledger no longer holds are never first: a fresh caller hasn't necessarily seen them, and deterministic signing can reproduce identical bytes.
-- **On a first broadcast,** the bytes can reach the network only through this broadcast's own attempts. A refusal then means the transaction is nowhere, unless an earlier attempt was ambiguous, which the outcome table already covers.
-- **Otherwise** (the wallet re-sending after `uncertain`, a bridge retry, any bytes from elsewhere), they may already be pending or mined. A state-dependent error (`insufficient funds`, `nonce too low`) can then be caused by that very success. Every refusal is therefore ambiguous.
+A node's error proves only that *these* bytes weren't admitted by *that* node *now*.
+- **Earlier sends can fake a refusal.** Bytes may have been sent before: by an earlier broadcast, or by another wallet holding the same key. A state-dependent refusal (`insufficient funds`, `nonce too low`) can then be caused by that very success. The core can't know every earlier send, so `rejected` means "every node this broadcast reached refused it", not "the transaction is nowhere". The wallet's rule makes that enough.
 - **The predicates** are exact. A refusal is a JSON-RPC error whose code is `-32000` (or the client's documented code for it) and whose message starts with one of a fixed list of txpool rejections:
   - insufficient funds;
   - nonce too low;
@@ -403,25 +409,9 @@ A node's error can prove only that *these* bytes weren't admitted *now*. It prov
   - invalid sender, and invalid chain id;
   - oversized data, and transaction type not supported.
 
-  Vectors pin each client's wording: geth, Nethermind, Erigon, Besu and the large providers. `already known` is never a refusal, because it says the bytes exist. Anything unmatched is ambiguous, so a misclassification can only lean towards `uncertain`.
-- **Myotis `rejected`** counts as a refusal on the same terms; its reasons include a used nonce.
+  Vectors pin each client's wording: geth, Nethermind, Erigon, Besu and the large providers. `already known` is never a refusal, because it says the bytes exist. Anything unmatched is ambiguous.
+- **Myotis `rejected`** counts as a refusal; its reasons include a used nonce.
 - **Order doesn't matter.** A refusal after an ambiguous attempt stops the attempt loop, as Myotis's final verdict does today, but it can't erase that attempt: the outcome table looks at every attempt.
-
-### The ledger
-
-The core signs every transaction the wallet sends (0002), so it alone can know whether a set of bytes has left it before.
-- **Entries:** one per signed transaction hash, with a state:
-  - `signed` when the core signs it;
-  - `handed` before the first attempt of any broadcast is dispatched;
-  - `sent` once an attempt is accepted or reconciliation finds it.
-
-  States only move forward.
-- **Durable:** the ledger lives in the core's data directory and is written atomically, with fsync, under 0001's file rules. An entry moves to `handed` *before* the attempt goes out, so a crash can never leave a possibly-sent transaction recorded as unsent.
-- **Bounded:** entries are kept 30 days, at most the last 10,000. A dropped entry reads as unknown, which counts as not first. Losing an entry can only make outcomes more conservative.
-- **The outcome floor:** the outcome table judges this broadcast's attempts, and the ledger sets a floor under it. For bytes that are `handed`, `sent` or unknown, the outcome is never `rejected` or `not sent`. It is at least `uncertain`, and `sent` when the ledger says so.
-  - A repeat that expires before dispatch, sends nothing, or is refused therefore never turns an earlier possible send into a definite failure.
-  - The reply still carries the last refusal, if any, as `refusal: { code, message, data? }`, for drivers to show.
-- **No secrets:** the ledger holds hashes and states, no keys or transaction contents, and it isn't part of a vault export.
 
 ### Outcome
 
@@ -432,26 +422,32 @@ The core signs every transaction the wallet sends (0002), so it alone can know w
 | **not sent** | every attempt not sent, or none made | a failure tagged `outcome: "not_sent"`, with today's text, or `deadline` / `cancelled` / `reconfigured` |
 | **uncertain** | otherwise | `{ hash, source, outcome: "uncertain" }` |
 
-- **Every terminal path** goes through this table: the overall deadline, a `cancel`, a configuration change, a budget exhaustion and core shutdown. An outstanding attempt counts as ambiguous once it is possibly sent, so the outcome is then `uncertain`, never `deadline` or `cancelled`. Only `rejected` and `not sent` are failures; both are safe to sign again.
+- **Every terminal path** goes through this table: the overall deadline, a `cancel`, a configuration change, a budget exhaustion and core shutdown. An outstanding attempt counts as ambiguous once it is possibly sent, so the outcome is then `uncertain`, never `deadline` or `cancelled`.
+- **Only `rejected` and `not sent` are failures.** Neither lets the intent move to a new nonce ([Retrying an intent](#retrying-an-intent)).
 - **Reconciliation:** before reporting `uncertain`, the core asks once whether the network knows the hash, within the reconciliation room ([Deadlines](#deadlines)).
   - **The lookup** is `eth_getTransactionByHash(hash)`, run as a non-interactive read through the read order.
   - **A match** is a result object whose `hash` equals the transaction's. A match makes the outcome `sent`.
-  - **Anything else** leaves the outcome `uncertain`: `null`, an error, a mismatched or malformed object, or no time left. Absence is never evidence that the transaction wasn't sent, so a lookup never produces `rejected`.
+  - **Anything else** leaves the outcome `uncertain`: `null`, an error, a mismatched or malformed object, or no time left. A lookup never produces `rejected`.
 - **Myotis:** `rejected` and `uncertain` end the attempt loop, as today, and `not_sent` falls to the next broadcaster. What the loop ended with is then classified like any other attempt.
+
+### Retrying an intent
+
+Main's wallet chooses nonces (0002). Its driver follows one rule, which makes every outcome safe to act on (deviation `nonce-retry`):
+- **Same nonce until settled.** An intent signed at nonce N stays at N. After `rejected`, `not sent` or `uncertain`, the wallet may broadcast the same bytes again, or sign the intent again at N: a replacement, with a higher fee if the network asks. Either way at most one transaction with nonce N is mined, so the intent can't pay twice.
+- **Settled** means the account's confirmed nonce, `eth_getTransactionCount(account, "latest")`, has passed N. The wallet then checks the receipts of every transaction it signed for the intent:
+  - **one of them was mined:** the intent is paid, and it is done;
+  - **none was:** another transaction used N. The intent is unpaid, and only now may it be signed at a new nonce.
+- **Unsettled intents hold their nonces.** A new intent's nonce is the `pending` count, as today, but at least one above the highest nonce an unsettled intent of the same account holds. So it can't replace that intent by accident.
+- **History.** The hashes signed for each intent are kept with the wallet's transaction history. A profile that lost that history (a restore) has no pending intent to retry, so nothing can move to a new nonce.
+- **Scope.** The rule rests on nonces, not on who signed. It covers every account the wallet sends from, hardware-signed (Ledger) transactions included, and keys used elsewhere too: a nonce another wallet used just settles the intent as unpaid.
+- **The Ant bridge** returns outcomes to the Ant node, which chooses its own nonces. The bridge keeps its replies: `rejected` as today's error, and `uncertain` as its reconcile reply.
 
 ### Main's record
 
 The core can die mid-broadcast: an exit, the watchdog, a protocol error. Main therefore keeps its own record of every `chain.broadcast` in flight: the hash, and whether any attempt is possibly sent.
 - **Marking:** main's executors mark the record when they start an exchange whose body is an `eth_sendRawTransaction` of that raw transaction, or a Myotis `broadcast` of it.
-- **No reply from the core:** main reports `uncertain` unless it knows the broadcast was a first. A definite `not_sent` failure needs all three of these; any doubt gives `uncertain`, and main never reports `rejected` on its own:
-  - the record is unmarked;
-  - the wallet signed the bytes in this session;
-  - the wallet's history shows no earlier broadcast of the hash.
-
-  Bytes from the Ant bridge always give `uncertain`.
-- **Main's drivers:**
-  - **The wallet** treats `uncertain` as sent-but-unconfirmed. It records the hash and tracks the receipt as for any send. It may offer to broadcast the same signed bytes again, or to replace them at the same nonce, but never to sign the intent again at a new nonce. Its text and UI are a [follow-up](#open-questions).
-  - **The Ant bridge** keeps its `Broadcast outcome uncertain; reconcile the signed transaction` reply.
+- **No reply from the core:** main reports `uncertain` if the record is marked, and `not sent` otherwise. Either is safe under the wallet's rule. Main never reports `rejected` on its own.
+- **The wallet** treats `uncertain` as sent-but-unconfirmed. It records the hash and tracks the receipt as for any send, and offers only what the rule allows. Its text and UI are a [follow-up](#open-questions).
 
 ## Fee quotes
 
@@ -542,7 +538,8 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 | `adapter-error-text` | adapter and transport diagnostics' own text, Colibri's errors included | the core's fixed text; only errors parsed from node bodies pass through | a local diagnostic, or a Colibri revert's message, reads differently |
 | `myotis-readiness` | `isReady()` sampled live | the last `chain.availability` | |
 | `memory-budgets` | unbounded | per request and in total | `budget`, `busy` |
-| `broadcast-outcome` | the last error wins; lost replies look like failures | attempt classes, refusals only on first broadcasts, the ledger's floor, `sent` / `uncertain` / `rejected` / `not_sent`, reconciliation, main's record | no definite failure for a transaction that may have gone out; the Ant bridge's refused external bytes are `uncertain`, with the refusal attached |
+| `broadcast-outcome` | the last error wins; lost replies look like failures | attempt classes, exact refusals, `sent` / `uncertain` / `rejected` / `not_sent`, reconciliation, main's record | a lost reply is `uncertain`, not a failure |
+| `nonce-retry` | a retry re-signs at the `pending` count, possibly a new nonce | an intent keeps its nonce until it settles; new intents skip held nonces | no intent pays twice, whatever an outcome said |
 | `monotonic-time` | cooldowns on `Date.now()` | the monotonic clock | |
 
 ## Replay
@@ -568,10 +565,8 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
   - Direct's lower-index member that answered later;
   - quorum on answers without `result`;
   - truncation probes that fail or come back empty;
-  - refusals on first and repeat broadcasts, and a refusal after an ambiguous attempt;
-  - external bytes refused on their first sight;
-  - a repeat that expires before dispatch, or sends nothing, after an uncertain first;
-  - a core restart, and an evicted ledger entry, between the two;
+  - a refusal after an ambiguous attempt;
+  - a repeat broadcast of mined bytes refused with `nonce too low` (the wallet's rule keeps the nonce; freedom-browser tests cover the rule);
   - a read's reply overtaken by a configuration change after it was made;
   - a truncation with Direct still available;
   - nesting at 512 and 513 levels;
@@ -585,7 +580,6 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
    - `feeQuote`, Myotis payload classification, `blockscout-logs`' mappers and filters;
    - the Ant profile's ranking and cap parsing;
    - the broadcast refusal list and transaction hash;
-   - the broadcast ledger (`fc-chain` defines its states; the daemon stores it);
    - byte parity from the pinned JS.
 2. **The replay harness** (`vectors/chain-replay.json`).
 3. **`fc-chain`:** the machine, replayed.
@@ -598,18 +592,17 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
    - the executors;
    - main's chain I/O pool and fragment handling;
    - the router, the fee quote and the broadcast become drivers, with main's broadcast record and reply fencing;
-   - the wallet's `uncertain` handling;
+   - the wallet's `uncertain` handling and its retry rule;
    - delete the JS router.
 
 [0002](0002-signing.md)'s non-goal on fee estimation and broadcasting is amended there: fee quotes, reads and broadcast routing move into the core with step 5, while nonces and gas limits stay in main.
 
 ## Open questions
 
-1. **Nonce floor.** Should the core keep a per-account floor, the highest nonce it broadcast plus one, so that concurrent sends and a send after `uncertain` can't reuse or skip a nonce?
 2. **Revert agreement.** Today reverts never agree in a quorum, so a dApp loses the revert data unless Myotis or Colibri gave it. Should identical error objects (code and data) count as agreement?
 3. **Colibri's coverage.** Which methods does Colibri's `VerifiedOnly` client actually prove (`eth_gasPrice`, `eth_feeHistory`, `eth_blockNumber`, `pending` reads)? Today any Colibri success is labelled verified.
 4. **Gnosis' Direct after a failed quorum** has nothing to ask without API keys. Intended?
 5. **Myotis' head-of-line wait.** Methods Myotis doesn't serve take a slot before being refused. Checking the method first is a pure improvement, but observable in timing.
-6. **The wallet's `uncertain` text and UI** (step 5): how to show "sent, unconfirmed", offer the same bytes again, and block a new signature for the same intent.
+6. **The wallet's `uncertain` text and UI** (step 5): how to show "sent, unconfirmed", and offer the same bytes again or a replacement at the same nonce.
 7. **HTTP statuses on broadcast.** A 401, 403 or 429 is ambiguous here, although a gateway usually answers it before forwarding. Is a misconfigured key showing `uncertain` acceptable, or should these be refusals?
 8. **Pinning and trust** (roadmap 3.1): whether a quorum of unpinned `latest` reads may be called `verified`.
