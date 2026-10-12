@@ -31,11 +31,11 @@ Unlike naming, chain data passes **node errors** through to dApps, and its answe
 - **Every deviation** is listed in [Deviations](#deviations) with its behavior and a boundary vector.
 - **Bounded resources:** requests, answers, replies, retained state and time all have bounds, with a defined result when exhausted. Today none exist beyond the verifiers' slots.
 - **The core is never given an endpoint URL** (0004's [Secrets](0004-naming-sessions.md#secrets)).
-- **No double payments:** a lost or misread broadcast reply never leads to an intent being paid twice, on any path, including a lost core ([Broadcast](#broadcast)).
+- **No double payments from the wallet's own sends:** a lost or misread broadcast reply never leads the wallet to pay an intent twice, on any path, including a lost core ([Retrying an intent](#retrying-an-intent) sets the scope).
 
 **Non-goals**
 - **Pinning chain reads to a block**, and new trust semantics. Today's router reads at the caller's tag and calls m equal answers `verified`. Changing either is roadmap 3.1's decision, not this design's.
-- **Nonce management** stays in main. Main's wallet gains one rule, that an intent keeps its nonce until it settles ([Retrying an intent](#retrying-an-intent)). The core keeps no nonce state.
+- **Nonce management** stays in main. Main's wallet gains durable intent records and one rule: an intent keeps its nonce until finalized evidence resolves it ([Retrying an intent](#retrying-an-intent)). The core keeps no nonce state.
 - **Paths that bypass the router today:** provider-manager's Safe reads and `wallet:test-provider`. Absorbing them is a follow-up; `wallet:proxy-rpc` has no callers and should be deleted.
 - **The verifiers' own networking** (roadmap 3.3), as in 0004.
 - **Mobile drivers.**
@@ -432,15 +432,27 @@ A node's error proves only that *these* bytes weren't admitted by *that* node *n
 
 ### Retrying an intent
 
-Main's wallet chooses nonces (0002). Its driver follows one rule, which makes every outcome safe to act on (deviation `nonce-retry`):
-- **Same nonce until settled.** An intent signed at nonce N stays at N. After `rejected`, `not sent` or `uncertain`, the wallet may broadcast the same bytes again, or sign the intent again at N: a replacement, with a higher fee if the network asks. Either way at most one transaction with nonce N is mined, so the intent can't pay twice.
-- **Settled** means the account's confirmed nonce, `eth_getTransactionCount(account, "latest")`, has passed N. The wallet then checks the receipts of every transaction it signed for the intent:
-  - **one of them was mined:** the intent is paid, and it is done;
-  - **none was:** another transaction used N. The intent is unpaid, and only now may it be signed at a new nonce.
-- **Unsettled intents hold their nonces.** A new intent's nonce is the `pending` count, as today, but at least one above the highest nonce an unsettled intent of the same account holds. So it can't replace that intent by accident.
-- **History.** The hashes signed for each intent are kept with the wallet's transaction history. A profile that lost that history (a restore) has no pending intent to retry, so nothing can move to a new nonce.
-- **Scope.** The rule rests on nonces, not on who signed. It covers every account the wallet sends from, hardware-signed (Ledger) transactions included, and keys used elsewhere too: a nonce another wallet used just settles the intent as unpaid.
-- **The Ant bridge** returns outcomes to the Ant node, which chooses its own nonces. The bridge keeps its replies: `rejected` as today's error, and `uncertain` as its reconcile reply.
+Main's wallet chooses nonces for the sends it controls (0002). The guarantee covers what the wallet does on its own and what it offers as a retry. A payment the user starts afresh is a new intent, and theirs to decide.
+
+- **Scope.** The rule covers drivers that choose the nonce and see every attempt's bytes: keys the core signs with, and Ledger devices (main picks the nonce, and the device signs it).
+  - **Phone wallets** (the remote signer) sign and broadcast themselves, so main has neither the nonce nor the bytes. Their path stays as today, except that a lost response is shown as unknown, never as failed, and is never retried automatically.
+  - **The Ant bridge** returns outcomes to the Ant node, which chooses its own nonces. The bridge keeps its replies: `rejected` as today's error, and `uncertain` as its reconcile reply.
+- **Same nonce while unresolved.** An intent signed at nonce N stays at N until it is resolved. After `rejected`, `not sent` or `uncertain`, the wallet may only broadcast the same bytes again, or sign the intent again at N: a replacement, with a higher fee if the network asks. At most one transaction with nonce N can be mined, so these retries can't pay twice.
+- **Resolution needs positive evidence.** Absence proves nothing: another wallet holding the key may have paid the same intent at N, and a receipt can lag. Every check is read at the chain's **finalized** block, which both Ethereum and Gnosis expose; a chain without one keeps its intents held.
+  - **Paid:** one of the intent's own transactions is included at or below the finalized block, with status 1. The intent is done.
+  - **Failed:** one of its own transactions is included there with status 0. It consumed N and executed nothing, and being final it can't execute later. Only now may the wallet offer to sign the intent again at a new nonce.
+  - **Taken:** the finalized nonce, `eth_getTransactionCount(sender, "finalized")`, has passed N, and none of the intent's own transactions is included. Some other transaction used N, possibly a payment of this very intent signed elsewhere. The wallet doesn't call the intent unpaid and offers no retry. It tells the user that the nonce went to another transaction and the payment may or may not have happened, and leaves any new payment to them.
+  - **Otherwise** the intent is unresolved, and the hold stays.
+- **Inclusion** means that a receipt's block number is at or below the finalized block's, and that its block hash is the canonical hash at that height.
+- **Trust.** These reads decide safety, so they need a verified source: Myotis, Colibri or a quorum. With only Direct (unverified), intents stay unresolved.
+- **Records.** Each intent has a durable record in main, separate from the display history, which can be cleared: `{ intent_id, chain_id, sender, nonce, hashes }`.
+  - **Committed first:** the record, with each new hash, is committed (written atomically, with fsync) before those bytes are handed to a broadcaster.
+  - **Kept** until the intent resolves, and never removed by clearing the history.
+  - **Identity:** `intent_id` is created when the user confirms a send, and retries carry it.
+  - **After a restore,** a profile without records has nothing to retry. A request that arrives again (the same dApp call) is a new intent, for the user to confirm.
+- **Reservations.** Nonces are reserved per `(chain_id, sender)` under one lock in main, from reading the `pending` count to committing the record. That includes a pending device approval, so two callers can't take the same nonce.
+  - **The first free nonce:** a new intent takes the `pending` count, as today, but at least one above every nonce an unresolved intent of that account holds.
+  - **Release:** a reservation whose signature never happened (the user rejected it on the device) is released, since no bytes exist.
 
 ### Main's record
 
@@ -540,7 +552,7 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 | `myotis-readiness` | `isReady()` sampled live | the last `chain.availability` | |
 | `memory-budgets` | unbounded | per request and in total | `budget`, `busy` |
 | `broadcast-outcome` | the last error wins; lost replies look like failures | attempt classes, exact refusals, `sent` / `uncertain` / `rejected` / `not_sent`, reconciliation, main's record | a lost reply is `uncertain`, not a failure |
-| `nonce-retry` | a retry re-signs at the `pending` count, possibly a new nonce | an intent keeps its nonce until it settles; new intents skip held nonces | no intent pays twice, whatever an outcome said |
+| `nonce-retry` | a retry re-signs at the `pending` count, possibly a new nonce; history is written after broadcast and can be cleared | durable intent records committed before broadcast; an intent keeps its nonce until finalized, verified evidence resolves it as paid, failed or taken; reservations under a per-account lock | the wallet never pays one intent twice, whatever an outcome said; "taken" intents go back to the user |
 | `monotonic-time` | cooldowns on `Date.now()` | the monotonic clock | |
 
 ## Replay
@@ -567,7 +579,7 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
   - quorum on answers without `result`;
   - truncation probes that fail or come back empty;
   - a refusal after an ambiguous attempt;
-  - a repeat broadcast of mined bytes refused with `nonce too low` (the wallet's rule keeps the nonce; freedom-browser tests cover the rule);
+  - a repeat broadcast of mined bytes refused with `nonce too low` (freedom-browser's tests cover the wallet's rule: external same-payment replacements, lagging and inconsistent receipts, a reorg before finality, status-0 receipts, a crash between dispatch and record, and concurrent reservations);
   - a read's reply overtaken by a configuration change after it was made;
   - a truncation with Direct still available;
   - nesting at 512 and 513 levels;
@@ -593,7 +605,7 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
    - the executors;
    - main's chain I/O pool and fragment handling;
    - the router, the fee quote and the broadcast become drivers, with main's broadcast record and reply fencing;
-   - the wallet's `uncertain` handling and its retry rule;
+   - the wallet's intent records, nonce reservations and retry rule;
    - delete the JS router.
 
 [0002](0002-signing.md)'s non-goal on fee estimation and broadcasting is amended there: fee quotes, reads and broadcast routing move into the core with step 5, while nonces and gas limits stay in main.
@@ -604,6 +616,6 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
 2. **Colibri's coverage.** Which methods does Colibri's `VerifiedOnly` client actually prove (`eth_gasPrice`, `eth_feeHistory`, `eth_blockNumber`, `pending` reads)? Today any Colibri success is labelled verified.
 3. **Gnosis' Direct after a failed quorum** has nothing to ask without API keys. Intended?
 4. **Myotis' head-of-line wait.** Methods Myotis doesn't serve take a slot before being refused. Checking the method first is a pure improvement, but observable in timing.
-5. **The wallet's `uncertain` text and UI** (step 5): how to show "sent, unconfirmed", and offer the same bytes again or a replacement at the same nonce.
+5. **The wallet's texts and UI** (step 5): how to show "sent, unconfirmed", unresolved and "taken" intents, and how to offer the same bytes again or a replacement at the same nonce.
 6. **HTTP statuses on broadcast.** A 401, 403 or 429 is ambiguous here, although a gateway usually answers it before forwarding. Is a misconfigured key showing `uncertain` acceptable, or should these be refusals?
 7. **Pinning and trust** (roadmap 3.1): whether a quorum of unpinned `latest` reads may be called `verified`.
