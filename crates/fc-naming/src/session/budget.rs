@@ -124,35 +124,6 @@ mod tests {
         }
     }
 
-    /// What a parsed value holds, as glibc's malloc lays it out: an
-    /// allocation takes an 8-byte header, rounds to 16 bytes, and is at
-    /// least 32.
-    fn held(value: &crate::jsjson::JsValue) -> usize {
-        use crate::jsjson::JsValue;
-        fn block(size: usize) -> usize {
-            if size == 0 {
-                0
-            } else {
-                (size + 8).div_ceil(16).saturating_mul(16).max(32)
-            }
-        }
-        match value {
-            JsValue::String(text) => block(text.capacity()),
-            JsValue::Array(items) => {
-                block(items.capacity() * std::mem::size_of::<JsValue>())
-                    + items.iter().map(held).sum::<usize>()
-            }
-            JsValue::Object(props) => {
-                block(props.capacity() * std::mem::size_of::<(String, JsValue)>())
-                    + props
-                        .iter()
-                        .map(|(key, value)| block(key.capacity()) + held(value))
-                        .sum::<usize>()
-            }
-            _ => 0,
-        }
-    }
-
     #[test]
     fn a_parsed_value_fits_its_factor() {
         assert_eq!(std::mem::size_of::<crate::jsjson::JsValue>(), 32);
@@ -178,7 +149,7 @@ mod tests {
         for text in &shapes {
             let value = crate::jsjson::parse(text).unwrap();
             // Its own slot, wherever it is kept.
-            let holds = held(&value) + 32;
+            let holds = value.held() + 32;
             assert!(
                 holds <= PARSED_FACTOR * text.len(),
                 "{} bytes hold {holds}: {}",

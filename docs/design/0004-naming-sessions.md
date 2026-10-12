@@ -510,7 +510,7 @@ Measured valid answers sit well below the 720 KiB cap:
 - **its requests:** their payload strings, as each is made; one whose charge crosses is never made;
 - **its answers:** each body at 32 bytes per byte, more than its parsed JSON can take. The parser shrinks each container and string to its length as it closes, so a value holds its 32-byte slot and its own allocation: at worst a nested array, 2 bytes of input a level, holds about 24 bytes a byte as allocated. A verifier's result is charged likewise, by its serialized size;
 - **its aliasing decodes' output** (an `OffchainLookup`'s URLs and data);
-- **its replies:** the serialized result or error message, once per caller, including the replies a configuration change or a spent lifecycle allowance makes. A reply past the budget is `budget` instead. A session that spends its budget, on a reply or anything else, cancels the prefetches it handed off.
+- **its replies:** each caller's own copy of the result or error message, as the larger of its tree (as allocated) and its serialized form, including the replies a configuration change or a spent lifecycle allowance makes. A reply stays counted as output after its session ends, until it is written. A reply past the budget is `budget` instead. A session that spends its budget, on a reply or anything else, cancels the prefetches it handed off.
 
 Everything a session retains derives from those: copies of its name, values parsed from its answers, and decodes that can't alias, which never outgrow their input:
 

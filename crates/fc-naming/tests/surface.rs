@@ -434,6 +434,12 @@ fn replies_carry_generations_and_attempts() {
     assert_eq!((immediate[0].caller, immediate[0].attempts), (b, 0));
 }
 
+/// What one caller's reply costs the session: its own copy of the value
+/// (the tree and its slot) or its serialized form, whichever is larger.
+fn reply_size(value: &JsValue) -> usize {
+    (value.held() + 32).max(value.stringify().len())
+}
+
 fn message(reply: &Reply) -> Option<&str> {
     reply.outcome.as_ref().err().map(|e| e.message.as_str())
 }
@@ -702,7 +708,7 @@ fn every_callers_reply_counts_against_the_session() {
     let mut alone = World::new(config());
     let a = alone.machine.resolve_content("vitalik.eth");
     alone.run(10_000);
-    let reply = alone.reply(a).outcome.as_ref().unwrap().stringify().len();
+    let reply = reply_size(alone.reply(a).outcome.as_ref().unwrap());
     for (room, outcome) in [(3 * reply, None), (3 * reply - 1, Some("budget"))] {
         let mut bounded = config();
         bounded.bounds.session_bytes = peak + room;
@@ -917,7 +923,7 @@ fn every_callers_error_counts_against_the_session() {
     let error = message(alone.reply(a)).unwrap().to_owned();
     assert!(error.contains(&name));
     // As it is sent: a JSON string.
-    let reply = error.len() + 2;
+    let reply = reply_size(&JsValue::String(error.clone()));
     let peak = alone.peak.max(8 * format!("content:{name}").len());
     for (room, outcome) in [(3 * reply, error.as_str()), (3 * reply - 1, "budget")] {
         let mut bounded = failing.clone();
@@ -960,7 +966,9 @@ fn replies_hold_their_room_until_written() {
 #[test]
 fn a_configuration_changes_replies_count_against_the_session() {
     let name = format!("{}.eth", "a".repeat(2_000));
-    let reply = format!("Name resolution configuration changed while resolving {name}").len() + 2;
+    let reply = reply_size(&JsValue::String(format!(
+        "Name resolution configuration changed while resolving {name}"
+    )));
     let callers = |world: &mut World| -> Vec<u64> {
         (0..3)
             .map(|_| world.machine.resolve_content(&name))
@@ -1017,7 +1025,8 @@ fn an_exhausted_callers_reply_counts_against_the_session() {
     let text = "Myotis availability changed repeatedly while resolving vitalik.eth";
     let (probe, exhausted) = start(None);
     let held = probe.held_before_reply[&exhausted];
-    for (room, expected) in [(text.len() + 2, text), (text.len() + 1, "budget")] {
+    let size = reply_size(&JsValue::String(text.to_owned()));
+    for (room, expected) in [(size, text), (size - 1, "budget")] {
         let (world, exhausted) = start(Some(held + room));
         assert_eq!(message(world.reply(exhausted)), Some(expected));
     }
@@ -1043,7 +1052,7 @@ fn a_reply_budget_failure_cancels_the_sessions_prefetch() {
     let (probe, ids) = run(None);
     let result = probe.reply(ids[0]).outcome.as_ref().unwrap();
     let uri = result.get("uri").and_then(JsValue::as_str).unwrap();
-    let reply = result.stringify().len();
+    let reply = reply_size(result);
     // Room for the prefetch request, not for the third caller's reply.
     let bound = probe.held_before_reply[&ids[0]] + uri.len() + 3 * reply - 1;
     let (world, ids) = run(Some(bound));
@@ -1057,6 +1066,165 @@ fn a_reply_budget_failure_cancels_the_sessions_prefetch() {
         .map(|s| s.id)
         .collect();
     assert!(!prefetches.is_empty(), "the prefetch was handed off");
+    for id in prefetches {
+        assert!(world.cancelled_ids.contains(&id), "prefetch {id} survives");
+    }
+}
+
+/// What `tezos-agree` recorded for `alice.tez`, by request path.
+fn tezos_answers() -> BTreeMap<String, String> {
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../vectors/naming-replay.json"
+    ))
+    .unwrap();
+    let vectors = jsjson::parse(&text).unwrap();
+    let scenario = match vectors.get("scenarios") {
+        Some(JsValue::Array(all)) => all
+            .iter()
+            .find(|s| s.get("id").and_then(JsValue::as_str) == Some("tezos-agree"))
+            .unwrap()
+            .clone(),
+        _ => panic!("no scenarios"),
+    };
+    let Some(JsValue::Array(io)) = scenario.get("io") else {
+        panic!("no io");
+    };
+    let mut answers = BTreeMap::new();
+    for exchange in io {
+        let path = exchange.get("path").and_then(JsValue::as_str);
+        let body = exchange
+            .get("answer")
+            .and_then(|a| a.get("body"))
+            .and_then(JsValue::as_str);
+        if let (Some(path), Some(body)) = (path, body) {
+            answers
+                .entry(path.to_owned())
+                .or_insert_with(|| body.to_owned());
+        }
+    }
+    answers
+}
+
+/// `alice.tez` for `callers` callers, its record's `td:ttl` replaced by
+/// `ttl` (JSON): what each caller is answered.
+fn structured_ttl_lookup(callers: usize, ttl: &str, bounds: Bounds) -> Vec<Reply> {
+    let answers = tezos_answers();
+    let mut config = config();
+    config.tezos = vec!["t1".into()];
+    config.bounds = bounds;
+    let mut machine = Machine::new(0, config, Box::new(Mulberry32::new(7)));
+    for _ in 0..callers {
+        machine.resolve_tezos("alice.tez");
+    }
+    let mut replies = Vec::new();
+    for _ in 0..16 {
+        machine.poll();
+        replies.extend(machine.take_replies());
+        for emitted in machine.take_effects() {
+            if let Effect::Request {
+                id,
+                request: Request::Tezos { path, .. },
+                ..
+            } = emitted.effect
+            {
+                // "600", hex-encoded in the record's metadata.
+                let body = answers[&path].replace("363030", &hex(ttl.as_bytes()));
+                machine.complete(
+                    id,
+                    Answer::Tezos {
+                        status: 200,
+                        body: body.into_bytes(),
+                    },
+                );
+            }
+        }
+    }
+    replies
+}
+
+#[test]
+fn each_callers_copy_of_a_result_counts_as_the_tree_it_is() {
+    // A small record whose tree is large: 200 chains of 100 nested arrays.
+    let chain = format!("{}0{}", "[".repeat(100), "]".repeat(100));
+    let ttl = format!("[{}]", vec![chain; 200].join(","));
+    // One caller's copy fits a session.
+    let one = structured_ttl_lookup(1, &ttl, Bounds::default());
+    let result = one[0].outcome.as_ref().unwrap();
+    assert_eq!(result.get("type").and_then(JsValue::as_str), Some("ok"));
+    let (tree, wire) = (result.held(), result.stringify().len());
+    assert!(
+        tree > 16 * wire,
+        "the tree ({tree}) dwarfs the wire ({wire})"
+    );
+    // Thirty-two copies don't, though they serialize to a fraction of it.
+    assert!(32 * wire < Bounds::default().session_bytes);
+    assert!(32 * tree > Bounds::default().session_bytes);
+    let many = structured_ttl_lookup(32, &ttl, Bounds::default());
+    assert_eq!(many.len(), 32);
+    for reply in &many {
+        assert_eq!(message(reply), Some("budget"));
+    }
+}
+
+#[test]
+fn an_exhausted_callers_reply_is_sized_too() {
+    let name = format!("{}.eth", "a".repeat(990_000));
+    let mut world = World::new(config());
+    world.changes.push(5);
+    let caller = world.machine.resolve_content_with(
+        &name,
+        CallOptions {
+            attempts_used: 2,
+            ..CallOptions::default()
+        },
+    );
+    world.run(10_000);
+    let reply = world.reply(caller);
+    // Over the reply cap: "result too large", attempts kept.
+    assert_eq!(message(reply), Some("result too large"));
+    assert_eq!(reply.attempts, 3);
+}
+
+#[test]
+fn a_budget_failure_at_the_last_restart_cancels_the_sessions_prefetches() {
+    // Every attempt resolves, prefetch included, and crosses a lifecycle
+    // change: the third ends the caller's allowance.
+    let run = |bound: usize| {
+        let mut bounded = config();
+        bounded.bounds.session_bytes = bound;
+        let mut world = World::new(bounded);
+        world.batch = true;
+        world.changes.extend([5, 35, 45]);
+        let caller = world.machine.resolve_content("vitalik.eth");
+        world.run(10_000);
+        (world, caller)
+    };
+    let repeated = "Myotis availability changed repeatedly while resolving vitalik.eth";
+    let (unbounded, caller) = run(Bounds::default().session_bytes);
+    assert_eq!(message(unbounded.reply(caller)), Some(repeated));
+    // The least room the final reply fits in.
+    let (mut lo, mut hi) = (0, Bounds::default().session_bytes);
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        let (world, caller) = run(mid);
+        if message(world.reply(caller)) == Some(repeated) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    // One byte less: the final reply crosses, and the session ends there.
+    let (world, caller) = run(lo);
+    let reply = world.reply(caller);
+    assert_eq!((message(reply), reply.attempts), (Some("budget"), 3));
+    let prefetches: Vec<u64> = world
+        .sent
+        .iter()
+        .filter(|s| s.prefetch)
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(prefetches.len(), 3, "each attempt handed one off");
     for id in prefetches {
         assert!(world.cancelled_ids.contains(&id), "prefetch {id} survives");
     }

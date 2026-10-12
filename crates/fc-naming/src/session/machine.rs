@@ -237,12 +237,20 @@ pub struct Reply {
     pub attempts: u32,
 }
 
-/// What a reply holds, serialized.
+/// What a reply costs: its own copy of the outcome (each caller gets one),
+/// or its serialized form, whichever is larger. A result's tree can hold
+/// far more than it serializes to (nested arrays in a Tezos record, say),
+/// so its size on the heap counts, not its length on the wire.
 fn reply_bytes(outcome: &Outcome) -> usize {
-    match outcome {
-        Ok(value) => value.stringify().len(),
-        Err(thrown) => JsValue::String(thrown.message.clone()).stringify().len(),
-    }
+    let (tree, wire) = match outcome {
+        Ok(value) => (value.held(), value.stringify().len()),
+        Err(thrown) => {
+            let message = JsValue::String(thrown.message.clone());
+            (message.held(), message.stringify().len())
+        }
+    };
+    // The copy's own slot, too.
+    tree.saturating_add(32).max(wire)
 }
 
 /// The replies made and not yet taken: each counts in the budget's total
@@ -494,12 +502,9 @@ impl Machine {
     /// callers get `budget` instead, and the result it cached goes.
     fn charge_replies(&self, i: usize, outcome: Outcome) -> Outcome {
         let session = &self.sessions[i];
-        // An error's message can be as large as its name: it counts too.
-        let serialized = match &outcome {
-            Ok(value) => value.stringify(),
-            Err(thrown) => JsValue::String(thrown.message.clone()).stringify(),
-        };
-        let bytes = serialized.len().saturating_mul(session.callers.len());
+        // Each caller gets its own copy; an error's message can be as large
+        // as its name, so it counts too.
+        let bytes = reply_bytes(&outcome).saturating_mul(session.callers.len());
         let bounds = self.ctx.bounds();
         if self
             .ctx
@@ -893,14 +898,15 @@ impl Machine {
             session.subject
         );
         let generations = session.generations;
-        // Charged like any reply: past the budget, `budget` instead, and the
-        // session, now over, ends at its next poll.
+        // Sized and charged like any reply: past the budget, `budget`
+        // instead, and the session, now over, ends (at its next poll, or now
+        // if this was its last attempt).
         let exhausted = session
             .callers
             .iter()
             .filter(|caller| caller.attempts >= MAX_LIFECYCLE_ATTEMPTS)
             .count();
-        let mut outcome = Err(Thrown::new(message));
+        let mut outcome = sized(Err(Thrown::new(message)), &self.ctx.bounds());
         let bytes = reply_bytes(&outcome).saturating_mul(exhausted);
         if exhausted > 0
             && !self
@@ -909,6 +915,9 @@ impl Machine {
                 .borrow_mut()
                 .charge(session.id, bytes, &self.ctx.bounds())
         {
+            // Spent: it keeps nothing running, whether it restarts or ends
+            // here.
+            self.shared.cancel_prefetches(session.id);
             outcome = Err(Thrown::budget());
         }
         let session = &mut self.sessions[i];
