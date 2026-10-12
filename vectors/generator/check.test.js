@@ -181,6 +181,50 @@ test('replay restores every global, also when setup fails', async () => {
   assert.deepEqual(globalsSnapshot(ethers), before);
 });
 
+test('replay patches the reference per scenario, and loudly', async () => {
+  const ethers = referenceEthers();
+  const FakeTimers = replay.loadFakeTimers(REFERENCE);
+  const scenario = definition(ethers, 'deviation-ccip-urls');
+  const patched = await replay.runScenario(REFERENCE, ethers, FakeTimers, scenario);
+  assert.deepEqual(patched.patches.map((patch) => patch.id), ['ccip-urls']);
+  // A patched module never outlives its scenario.
+  const plain = await replay.runScenario(REFERENCE, ethers, FakeTimers, { ...scenario, deviation: undefined, patches: [] });
+  assert.notDeepEqual(plain.steps, patched.steps);
+  assert.deepEqual(await replay.runScenario(REFERENCE, ethers, FakeTimers, scenario), patched);
+  await assert.rejects(replay.runScenario(REFERENCE, ethers, FakeTimers, { ...scenario, patches: ['no-such-patch'] }), /unknown patch no-such-patch/);
+  // An edit whose text isn't there exactly once fails the run.
+  replay.PATCHES.stale = () => ({ text: 'stale', source: { 'ens-resolver.js': { edits: [['no such text', '']], append: [] } } });
+  try {
+    await assert.rejects(replay.runScenario(REFERENCE, ethers, FakeTimers, { ...scenario, patches: ['stale'] }), /patch for ens-resolver\.js: 0 matches/);
+  } finally {
+    delete replay.PATCHES.stale;
+  }
+  // So does one for a module the resolver loads lazily, before any global
+  // changes.
+  const before = globalsSnapshot(ethers);
+  replay.PATCHES.staleLazy = () => ({ text: 'stale', source: { 'ens/myotis-resolver.js': { edits: [['no such text', '']], append: [] } } });
+  try {
+    await assert.rejects(replay.runScenario(REFERENCE, ethers, FakeTimers, { ...definition(ethers, 'myotis-ccip'), patches: ['staleLazy'] }), /patch for ens\/myotis-resolver\.js: 0 matches/);
+  } finally {
+    delete replay.PATCHES.staleLazy;
+  }
+  assert.deepEqual(globalsSnapshot(ethers), before);
+});
+
+test('replay\'s response-caps patch leaves verifier adapters\' CCIP alone', async () => {
+  const ethers = referenceEthers();
+  const FakeTimers = replay.loadFakeTimers(REFERENCE);
+  // Myotis' own CCIP with a gateway answer over the lowered cap: the
+  // adapter keeps its 4 MiB cap, so the patch changes nothing.
+  const scenario = structuredClone(definition(ethers, 'myotis-ccip'));
+  scenario.world.bounds = { answerBytes: 4096 };
+  scenario.world.gateways['gw.example'].body = JSON.stringify({ data: '0xcafe', pad: 'x'.repeat(5000) });
+  const plain = await replay.runScenario(REFERENCE, ethers, FakeTimers, scenario);
+  const patched = await replay.runScenario(REFERENCE, ethers, FakeTimers, { ...scenario, deviation: 'response-caps', patches: ['response-caps'] });
+  assert.deepEqual(patched.steps, plain.steps);
+  assert.deepEqual(patched.io, plain.io);
+});
+
 test('replay fails loudly on unscripted I/O', async () => {
   const ethers = referenceEthers();
   const FakeTimers = replay.loadFakeTimers(REFERENCE);
