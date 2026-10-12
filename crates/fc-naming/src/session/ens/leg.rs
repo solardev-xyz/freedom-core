@@ -441,6 +441,25 @@ pub(crate) async fn contract_call(
     }
 }
 
+/// `dnsEncode(name, 255)`'s failure as the leg carries it: ethers' own
+/// message for a label over the limit, the one a normalized name can reach.
+fn dns_error(name: &str, error: &crate::Error) -> CallError {
+    match error {
+        crate::Error::LabelTooLong(limit) => CallError::Invalid(crate::ethers::make_error(
+            &format!(
+                "label {} exceeds {limit} bytes",
+                crate::ethers::string(name)
+            ),
+            "INVALID_ARGUMENT",
+            &[
+                ("argument", crate::ethers::string("name")),
+                ("value", crate::ethers::string(name)),
+            ],
+        )),
+        other => CallError::Invalid(format!("dns|{other}")),
+    }
+}
+
 /// One leg's call (`callResolver(provider, name, callData, overrides)`):
 /// the agreement bytes, or a failure for the leg's classification.
 pub(crate) async fn resolver_call(
@@ -454,8 +473,7 @@ pub(crate) async fn resolver_call(
 ) -> Result<Vec<u8>, CallError> {
     match resolver {
         Resolver::Ur => {
-            let dns =
-                crate::dns_encode(name, 255).map_err(|e| CallError::Invalid(format!("dns|{e}")))?;
+            let dns = crate::dns_encode(name, 255).map_err(|e| dns_error(name, &e))?;
             let raw = ur_call(
                 ctx,
                 provider,
