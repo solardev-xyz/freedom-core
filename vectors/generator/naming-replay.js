@@ -828,9 +828,14 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
   };
   // The core's text for a failed operation (deviation
   // `verified-failure-text`).
-  const __verifiedFailure = (failure, name, err) => {
+  // Only an ENS forward operation through universalResolverCall (Myotis'
+  // record, Colibri's `ur` resolver) dnsEncodes its name first, so only
+  // there is an invalid_argument for an over-long label that refusal.
+  const __verifiedFailure = (failure, host, op, params, err) => {
+    const name = params.name;
     const overLong = typeof name === 'string' && name.split('.').some((label) => Buffer.byteLength(label, 'utf8') > 255);
-    return failure === 'invalid_argument' && overLong ? err : new Error(`verified call failed: ${failure}`);
+    const encodes = (host === 'myotis' && op === 'record' && params.method !== 'reverse') || (host === 'colibri' && op === 'resolve' && !params.nameNft);
+    return failure === 'invalid_argument' && overLong && encodes ? err : new Error(`verified call failed: ${failure}`);
   };
   const revertOf = (err) => {
     const data = err?.data ?? err?.info?.error?.data;
@@ -847,6 +852,13 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       (value) => {
         item.answer = toAnswer(value);
         close(item, 'answered');
+        // A failure the adapter returns as a status (a NameNFT call's
+        // { status: 'error' }) is thrown by its caller in its own words;
+        // the core's class text applies there too, but the patch would
+        // have to stand in for that caller.
+        if (harnessPatch('verified-failure-text') && item.answer?.failure) {
+          violations.push(`verified-failure-text: a failure returned as a status (${host} ${op}) isn't modelled`);
+        }
         return value;
       },
       (err) => {
@@ -854,7 +866,7 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
         item.answer = revert ? { revert } : { failure: failureClass(err) };
         close(item, 'answered');
         // Deviation `verified-failure-text`: the core sees only the class.
-        if (harnessPatch('verified-failure-text') && !revert) throw __verifiedFailure(item.answer.failure, params.name, err);
+        if (harnessPatch('verified-failure-text') && !revert) throw __verifiedFailure(item.answer.failure, host, op, params, err);
         throw err;
       }
     );
@@ -1543,6 +1555,16 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
       { call: content() },
       { after: 1000, call: content(`${'é'.repeat(150)}.eth`) },
     ]),
+    {
+      // A .wei name through Colibri's NameNFT resolver, which doesn't
+      // dnsEncode: an odd-length revert is ethers' invalid_argument too, but
+      // not a label refusal, so the class text stands.
+      ...deviation('verified-failure-text', base({
+        network: { ...QUORUM_NETWORK, verification: { order: ['colibri'], preferVerified: false } },
+        colibri: { prover: 'https://prover.example', calls: { 'wns:contenthash': { revert: '0x123' } } },
+      }), [{ call: content(`${'é'.repeat(150)}.wei`) }]),
+      id: 'deviation-verified-failure-text-namenft',
+    },
     {
       // Myotis refuses the label (invalid_argument, the message rebuilt),
       // then Colibri fails to start, which ends the order.

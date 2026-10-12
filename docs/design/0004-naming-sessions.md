@@ -568,7 +568,7 @@ Each deviation gets a boundary vector in the implementation PR, generated from t
 | `random-streams` | the 429 back-off and the shuffle draw from one `Math.random` | separate streams | later shuffles don't depend on earlier back-offs; vectors seed the back-off apart |
 | `core-restart` | — (no separate process) | pending naming requests fail when the core restarts | `RESOLUTION_ERROR`; nothing cached |
 | `prefetch-set` | unbounded | 32 surviving prefetches | the oldest is cancelled |
-| `verified-failure-text` | a failed verified operation throws the adapter's own error | the core sees the failure class alone, and the method throws `verified call failed: <class>`; for a name with a label over 255 bytes, an `invalid_argument` is `dnsEncode`'s refusal, whose ethers message the core rebuilds | the same failure, with the class's text where the order ends on it |
+| `verified-failure-text` | a failed verified operation throws the adapter's own error | the core sees the failure class alone, and the method throws `verified call failed: <class>`; for a name with a label over 255 bytes, an `invalid_argument` from the Myotis record operation or Colibri's `ur` resolver (which `dnsEncode` the name first) is that refusal, whose ethers message the core rebuilds | the same failure, with the class's text where the order ends on it |
 
 ## Replay
 

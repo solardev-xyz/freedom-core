@@ -246,7 +246,14 @@ struct Outgoing {
 
 /// A verified operation's failure classes (design 0004, Verified
 /// operations).
-const FAILURE_CLASSES: &[&str] = &["unavailable", "lifecycle", "timeout", "too_large", "error"];
+const FAILURE_CLASSES: &[&str] = &[
+    "unavailable",
+    "lifecycle",
+    "timeout",
+    "too_large",
+    "invalid_argument",
+    "error",
+];
 
 /// At most this many `shell.*` requests outstanding at main (design 0004,
 /// Bounds: Work); more wait here, first in, first out.
@@ -1282,10 +1289,12 @@ mod tests {
                 Ok(RawValue::from_string(text.to_owned()).unwrap_or_else(|_| unreachable!())),
             )
         };
-        assert!(matches!(
-            verified(r#"{"failure":"timeout"}"#),
-            Some(Answer::Verified(Verified::Failure(class))) if class == "timeout"
-        ));
+        for class in FAILURE_CLASSES {
+            assert!(matches!(
+                verified(&format!(r#"{{"failure":"{class}"}}"#)),
+                Some(Answer::Verified(Verified::Failure(c))) if c == *class
+            ));
+        }
         assert!(matches!(
             verified(r#"{"revert":"0x12"}"#),
             Some(Answer::Verified(Verified::Revert(data))) if data == [0x12]

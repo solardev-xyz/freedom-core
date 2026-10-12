@@ -33761,6 +33761,127 @@
       ]
     },
     {
+      "id": "deviation-verified-failure-text-namenft",
+      "system": "ens",
+      "seed": 7,
+      "deviation": "verified-failure-text",
+      "patches": [
+        {
+          "id": "verified-failure-text",
+          "text": "A verified operation that fails reaches the core as its class alone, and the method throws \"verified call failed: <class>\"; an invalid_argument for a name with a label over 255 bytes is dnsEncode's, whose message the core rebuilds.",
+          "harness": [
+            "verified-failure-text"
+          ]
+        }
+      ],
+      "world": {
+        "endpoints": [
+          "https://a.rpc.example",
+          "https://b.rpc.example",
+          "https://c.rpc.example",
+          "https://d.rpc.example"
+        ],
+        "network": {
+          "verification": {
+            "order": [
+              "colibri"
+            ],
+            "preferVerified": false
+          },
+          "quorum": {
+            "k": 3,
+            "m": 2,
+            "timeoutMs": 5000,
+            "anchor": "latest",
+            "anchorTtlMs": 30000
+          }
+        },
+        "calls": {
+          "resolve": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000"
+          },
+          "callback": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000"
+          }
+        },
+        "colibri": {
+          "prover": "https://prover.example",
+          "calls": {
+            "wns:contenthash": {
+              "revert": "0x123"
+            }
+          }
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "call": {
+            "fn": "resolveEnsContent",
+            "args": [
+              "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé.wei"
+            ]
+          },
+          "results": [
+            {
+              "thrown": "verified call failed: invalid_argument",
+              "settled": 10
+            }
+          ]
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "t": 0,
+          "kind": "verified-op",
+          "host": "colibri",
+          "op": "resolve",
+          "params": {
+            "name": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé.wei",
+            "callData": "0xbc1c58d1903cefb507ef3b0e02f929ffab0f200bcc4252d3787dd03d283a206677d70b06",
+            "nameNft": true
+          },
+          "end": 10,
+          "outcome": "answered",
+          "answer": {
+            "failure": "invalid_argument"
+          }
+        },
+        {
+          "id": 1,
+          "step": 0,
+          "t": 0,
+          "kind": "verified",
+          "host": "colibri",
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x0000000000696760e15f265e828db644a0c242eb",
+              "data": "0xbc1c58d1903cefb507ef3b0e02f929ffab0f200bcc4252d3787dd03d283a206677d70b06"
+            },
+            "latest"
+          ],
+          "call": "wns:contenthash",
+          "within": 0,
+          "end": 10,
+          "outcome": "answered",
+          "answer": {
+            "revert": "0x123"
+          }
+        }
+      ],
+      "unpatched": [
+        [
+          {
+            "thrown": "invalid BytesLike value (argument=\"value\", value=\"0x123\", code=INVALID_ARGUMENT, version=6.17.0)",
+            "settled": 10
+          }
+        ]
+      ]
+    },
+    {
       "id": "deviation-verified-failure-text-order",
       "system": "ens",
       "seed": 7,
