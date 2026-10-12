@@ -66,6 +66,38 @@ jobs:
       - run: cargo check --locked --workspace --lib --target aarch64-apple-ios
       - run: cargo check --locked --workspace --lib --target aarch64-linux-android
 
+  vectors:
+    name: vectors (pinned JS reference)
+    # Both sides of the parity contract: Rust tests replay vectors/, and this
+    # job re-derives every vector from the pinned freedom-browser JS, so a
+    # drift on either side fails CI.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: solardev-xyz/freedom-browser
+          ref: fb540328162839e68150fe2c5e517edb86734d1c
+          path: reference
+          persist-credentials: false
+      # The vectors' meta records the Node version; it is part of the check.
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 24.15.0
+      - name: Install the reference's dependencies
+        working-directory: reference
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Check every vector against the reference
+        env:
+          FREEDOM_BROWSER_CHECKOUT: ${{ github.workspace }}/reference
+        run: |
+          node vectors/generator/generate.js check --freedom-browser "$FREEDOM_BROWSER_CHECKOUT"
+          node --test vectors/generator/check.test.js
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
