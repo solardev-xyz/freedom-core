@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::task::{Context, Waker};
 
 use super::ens::{self, Answer, Config, Ctx, Request, Store, Thrown};
-use super::exec::{Effect, Either, Fired, Io, Ms, Task, race};
+use super::exec::{Effect, Fired, Io, Ms, Sleep, Task};
 use super::random::Random;
 use crate::jsjson::JsValue;
 
@@ -64,11 +64,58 @@ impl Shared {
 /// A resolution's outcome.
 pub type Outcome = Result<JsValue, Thrown>;
 
+/// Design 0004's generations. Each only ever advances within a machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Generations {
+    /// Advanced by a configuration whose ENS part changed.
+    pub ens: u64,
+    /// Advanced by a configuration whose Tezos part changed.
+    pub tezos: u64,
+    /// Advanced by `naming.availability` and `reset: "providers"`.
+    pub lifecycle: u64,
+}
+
+/// A caller's options (design 0004, Generations and Admission).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CallOptions {
+    /// Lifecycle attempts used before main resubmitted this request.
+    pub attempts_used: u32,
+    /// The caller's deadline from its admission; the bound's when `None`.
+    pub deadline_ms: Option<Ms>,
+}
+
+/// A waiting caller: its lifecycle attempts and its own deadline.
+struct Caller {
+    id: u64,
+    attempts: u32,
+    deadline: Sleep<Request, Answer>,
+}
+
+/// How an attempt ended.
+enum Attempt {
+    Done(Outcome),
+    /// It crossed a lifecycle change: its result is discarded.
+    Crossed,
+}
+
+/// Starts one attempt of a session's work.
+type Start = Rc<dyn Fn() -> Task<'static, Attempt>>;
+
 struct Session {
     /// The in-flight key; empty once retired (nothing joins it).
     key: String,
-    callers: Vec<u64>,
-    task: Task<'static, Outcome>,
+    callers: Vec<Caller>,
+    task: Task<'static, Attempt>,
+    /// The attempts the session has run, which bound it without callers.
+    attempts: u32,
+    /// The generations its current attempt runs under.
+    generations: Generations,
+    /// The session's own deadline (`overall-deadline`).
+    deadline: Sleep<Request, Answer>,
+    /// Starts another attempt; `None` where nothing restarts (Tezos).
+    restart: Option<Start>,
+    /// The name in "changed repeatedly" errors.
+    subject: String,
 }
 
 /// One caller's terminal reply.
@@ -77,6 +124,10 @@ pub struct Reply {
     pub caller: u64,
     pub outcome: Outcome,
     pub settled: Ms,
+    /// The generations the result was computed under.
+    pub generations: Generations,
+    /// The lifecycle attempts this caller used.
+    pub attempts: u32,
 }
 
 pub struct Machine {
@@ -85,24 +136,13 @@ pub struct Machine {
     sessions: Vec<Session>,
     replies: Vec<Reply>,
     next_caller: u64,
+    ens_generation: u64,
+    tezos_generation: u64,
 }
 
-const MAX_LIFECYCLE_RESTARTS: u32 = 3;
-
-/// A session's work under its deadline (`overall-deadline`): the inner
-/// future is dropped at the deadline, which cancels its I/O.
-fn with_deadline(
-    ctx: &Ctx,
-    work: impl Future<Output = Outcome> + 'static,
-) -> Task<'static, Outcome> {
-    let deadline = ctx.rt.sleep(ctx.bounds().deadline_ms);
-    Task::new(async move {
-        match race(work, deadline).await {
-            Either::Left(outcome) => outcome,
-            Either::Right(()) => Err(Thrown::protocol("deadline")),
-        }
-    })
-}
+/// `resolveAcrossStableLifecycle`'s attempts, per caller (design 0004,
+/// Generations).
+const MAX_LIFECYCLE_ATTEMPTS: u32 = 3;
 
 type Resolve = Rc<dyn Fn(Rc<Ctx>, Rc<Shared>) -> Pin<Box<dyn Future<Output = Outcome>>>>;
 
@@ -113,6 +153,19 @@ fn sized(outcome: Outcome, bounds: &super::bounds::Bounds) -> Outcome {
         Ok(value) if !bounds.reply_fits(value.stringify().len()) => Err(Thrown::too_large()),
         other => other,
     }
+}
+
+/// A sleep that has registered its timer: [`Sleep`] starts counting when
+/// it is first polled.
+fn started(mut sleep: Sleep<Request, Answer>) -> Sleep<Request, Answer> {
+    let mut cx = Context::from_waker(Waker::noop());
+    let _ = Pin::new(&mut sleep).poll(&mut cx);
+    sleep
+}
+
+fn ready(sleep: &mut Sleep<Request, Answer>) -> bool {
+    let mut cx = Context::from_waker(Waker::noop());
+    Pin::new(sleep).poll(&mut cx).is_ready()
 }
 
 impl Machine {
@@ -128,6 +181,17 @@ impl Machine {
             sessions: Vec::new(),
             replies: Vec::new(),
             next_caller: 1,
+            ens_generation: 0,
+            tezos_generation: 0,
+        }
+    }
+
+    /// The current generations.
+    pub fn generations(&self) -> Generations {
+        Generations {
+            ens: self.ens_generation,
+            tezos: self.tezos_generation,
+            lifecycle: self.ctx.state.borrow().lifecycle,
         }
     }
 
@@ -135,17 +199,61 @@ impl Machine {
         self.ctx.rt.now()
     }
 
+    /// A caller answered at once (a cache hit, an invalid input, busy):
+    /// it used no attempt.
     fn reply(&mut self, outcome: Outcome) -> u64 {
         let caller = self.next_caller;
         self.next_caller += 1;
         let settled = self.now();
         let outcome = sized(outcome, &self.ctx.bounds());
+        let generations = self.generations();
         self.replies.push(Reply {
             caller,
             outcome,
             settled,
+            generations,
+            attempts: 0,
         });
         caller
+    }
+
+    /// A new waiting caller with its own deadline, counting the attempt it
+    /// joins.
+    fn caller(&mut self, options: CallOptions) -> Caller {
+        let id = self.next_caller;
+        self.next_caller += 1;
+        let ms = options.deadline_ms.unwrap_or(self.ctx.bounds().deadline_ms);
+        Caller {
+            id,
+            attempts: options.attempts_used + 1,
+            deadline: started(self.ctx.rt.sleep(ms)),
+        }
+    }
+
+    /// Starts a session with its first caller.
+    fn start(
+        &mut self,
+        key: String,
+        caller: Caller,
+        start: Start,
+        restarts: bool,
+        subject: String,
+    ) -> u64 {
+        let id = caller.id;
+        let task = start();
+        let deadline = started(self.ctx.rt.sleep(self.ctx.bounds().deadline_ms));
+        let generations = self.generations();
+        self.sessions.push(Session {
+            key,
+            callers: vec![caller],
+            task,
+            attempts: 1,
+            generations,
+            deadline,
+            restart: restarts.then_some(start),
+            subject,
+        });
+        id
     }
 
     fn cached(&self, store: Store, key: &str) -> Option<JsValue> {
@@ -167,6 +275,7 @@ impl Machine {
         key: String,
         subject: String,
         resolve: Resolve,
+        options: CallOptions,
     ) -> u64 {
         if let Some(busy) = self.admit_caller() {
             return busy;
@@ -178,20 +287,28 @@ impl Machine {
         if let Some(busy) = self.admit(&dedup) {
             return busy;
         }
-        let caller = self.next_caller;
-        self.next_caller += 1;
+        let caller = self.caller(options);
         if let Some(session) = self.sessions.iter_mut().find(|s| s.key == dedup) {
+            let id = caller.id;
             session.callers.push(caller);
-            return caller;
+            return id;
         }
         let ctx = Rc::clone(&self.ctx);
         let shared = Rc::clone(&self.shared);
-        let task = with_deadline(&self.ctx, async move {
-            for _attempt in 1..=MAX_LIFECYCLE_RESTARTS {
+        // One attempt of `resolveAcrossStableLifecycle`: a result that
+        // crossed a lifecycle change is discarded.
+        let start: Start = Rc::new(move || {
+            let (ctx, shared, resolve, key) = (
+                Rc::clone(&ctx),
+                Rc::clone(&shared),
+                Rc::clone(&resolve),
+                key.clone(),
+            );
+            Task::new(async move {
                 let epoch = ctx.state.borrow().lifecycle;
-                let result = resolve(Rc::clone(&ctx), Rc::clone(&shared)).await;
+                let result = resolve(Rc::clone(&ctx), shared).await;
                 if epoch == ctx.state.borrow().lifecycle {
-                    return result;
+                    return Attempt::Done(result);
                 }
                 if let Ok(value) = &result {
                     // The stale result went into the cache; take it out
@@ -207,17 +324,10 @@ impl Machine {
                         cache.delete(&key);
                     }
                 }
-            }
-            Err(Thrown::new(format!(
-                "Myotis availability changed repeatedly while resolving {subject}"
-            )))
+                Attempt::Crossed
+            })
         });
-        self.sessions.push(Session {
-            key: dedup,
-            callers: vec![caller],
-            task,
-        });
-        caller
+        self.start(dedup, caller, start, true, subject)
     }
 
     /// Admission (design 0004): `Some(busy reply)` when joining or starting
@@ -251,6 +361,11 @@ impl Machine {
     /// `resolveEnsContent(name)`: a caller id; its reply comes from
     /// [`Machine::take_replies`].
     pub fn resolve_content(&mut self, name: &str) -> u64 {
+        self.resolve_content_with(name, CallOptions::default())
+    }
+
+    /// [`Machine::resolve_content`] for a caller with its own options.
+    pub fn resolve_content_with(&mut self, name: &str, options: CallOptions) -> u64 {
         let normalized = match self.normalized(name) {
             Ok(normalized) => normalized,
             Err(caller) => return caller,
@@ -265,11 +380,17 @@ impl Machine {
                 let name = name.clone();
                 Box::pin(async move { ens::content(&ctx, &shared, &name).await })
             }),
+            options,
         )
     }
 
     /// `resolveEnsAddress(name, chainId)`.
     pub fn resolve_address(&mut self, name: &str, chain_id: f64) -> u64 {
+        self.resolve_address_with(name, chain_id, CallOptions::default())
+    }
+
+    /// [`Machine::resolve_address`] for a caller with its own options.
+    pub fn resolve_address_with(&mut self, name: &str, chain_id: f64, options: CallOptions) -> u64 {
         if let Err(error) = ens::coin_type(chain_id) {
             return self.reply(Err(error));
         }
@@ -290,11 +411,22 @@ impl Machine {
                 let name = name.clone();
                 Box::pin(async move { ens::address(&ctx, &shared, &name, chain).await })
             }),
+            options,
         )
     }
 
     /// `resolveEnsReverse(address, chainId)`.
     pub fn resolve_reverse(&mut self, address: &str, chain_id: f64) -> u64 {
+        self.resolve_reverse_with(address, chain_id, CallOptions::default())
+    }
+
+    /// [`Machine::resolve_reverse`] for a caller with its own options.
+    pub fn resolve_reverse_with(
+        &mut self,
+        address: &str,
+        chain_id: f64,
+        options: CallOptions,
+    ) -> u64 {
         let valid = address.len() == 42
             && address.starts_with("0x")
             && address[2..].bytes().all(|b| b.is_ascii_hexdigit());
@@ -330,6 +462,7 @@ impl Machine {
                 let address = subject.clone();
                 Box::pin(async move { ens::reverse(&ctx, &shared, &address, chain).await })
             }),
+            options,
         )
     }
 
@@ -339,27 +472,178 @@ impl Machine {
         self.shared.poll();
         let now = self.now();
         let bounds = self.ctx.bounds();
-        let mut finished = Vec::new();
-        for (i, session) in self.sessions.iter_mut().enumerate() {
-            if session.task.poll() {
-                finished.push(i);
-            }
-        }
-        for i in finished.into_iter().rev() {
-            let mut session = self.sessions.remove(i);
-            if let Some(outcome) = session.task.take() {
-                let outcome = sized(outcome, &bounds);
-                for caller in session.callers {
-                    self.replies.push(Reply {
-                        caller,
-                        outcome: outcome.clone(),
-                        settled: now,
-                    });
+        let mut i = 0;
+        while i < self.sessions.len() {
+            let generations = self.sessions[i].generations;
+            // The attempt first: a result that arrives with a deadline wins,
+            // as the race it replaces let it.
+            if self.sessions[i].task.poll() {
+                match self.sessions[i].task.take() {
+                    Some(Attempt::Done(outcome)) => {
+                        let outcome = sized(outcome, &bounds);
+                        let session = self.sessions.remove(i);
+                        self.replies
+                            .extend(session.callers.into_iter().map(|caller| Reply {
+                                caller: caller.id,
+                                outcome: outcome.clone(),
+                                settled: now,
+                                generations,
+                                attempts: caller.attempts,
+                            }));
+                        continue;
+                    }
+                    Some(Attempt::Crossed) => {
+                        if self.restart(i, now) {
+                            // The new attempt starts in this poll.
+                            continue;
+                        }
+                        self.sessions.remove(i);
+                        continue;
+                    }
+                    None => {}
                 }
             }
+            let session = &mut self.sessions[i];
+            // The session's deadline ends it: dropping the attempt cancels
+            // its I/O, and nothing is cached (`overall-deadline`).
+            if ready(&mut session.deadline) {
+                let session = self.sessions.remove(i);
+                self.replies
+                    .extend(session.callers.into_iter().map(|caller| Reply {
+                        caller: caller.id,
+                        outcome: Err(Thrown::protocol("deadline")),
+                        settled: now,
+                        generations,
+                        attempts: caller.attempts,
+                    }));
+                continue;
+            }
+            // A caller's own deadline detaches it; the session runs on.
+            let mut replies = Vec::new();
+            session.callers.retain_mut(|caller| {
+                if !ready(&mut caller.deadline) {
+                    return true;
+                }
+                replies.push(Reply {
+                    caller: caller.id,
+                    outcome: Err(Thrown::protocol("deadline")),
+                    settled: now,
+                    generations,
+                    attempts: caller.attempts,
+                });
+                false
+            });
+            self.replies.extend(replies);
+            i += 1;
         }
         self.replies.sort_by_key(|r| r.caller);
         self.shared.poll();
+    }
+
+    /// After an attempt crossed a lifecycle change. Per-caller allowances:
+    /// a caller that has used its attempts fails; the session restarts while
+    /// any caller has some left, or on its own attempts without callers.
+    /// False when it ends instead.
+    fn restart(&mut self, i: usize, now: Ms) -> bool {
+        let current = self.generations();
+        let session = &mut self.sessions[i];
+        let message = format!(
+            "Myotis availability changed repeatedly while resolving {}",
+            session.subject
+        );
+        let generations = session.generations;
+        let mut replies = Vec::new();
+        session.callers.retain(|caller| {
+            if caller.attempts < MAX_LIFECYCLE_ATTEMPTS {
+                return true;
+            }
+            replies.push(Reply {
+                caller: caller.id,
+                outcome: Err(Thrown::new(message.clone())),
+                settled: now,
+                generations,
+                attempts: caller.attempts,
+            });
+            false
+        });
+        self.replies.extend(replies);
+        let session = &mut self.sessions[i];
+        let again = !session.callers.is_empty() || session.attempts < MAX_LIFECYCLE_ATTEMPTS;
+        let Some(start) = session.restart.as_ref().filter(|_| again) else {
+            return false;
+        };
+        session.task = start();
+        session.attempts += 1;
+        for caller in &mut session.callers {
+            caller.attempts += 1;
+        }
+        session.generations = current;
+        true
+    }
+
+    /// `cancel` from main: the caller is detached and replied `cancelled`;
+    /// its session runs on (design 0004, Admission). False when the caller
+    /// is not waiting (its reply already went).
+    pub fn cancel(&mut self, caller: u64) -> bool {
+        let now = self.now();
+        for session in &mut self.sessions {
+            if let Some(at) = session.callers.iter().position(|c| c.id == caller) {
+                let caller = session.callers.remove(at);
+                let generations = session.generations;
+                self.replies.push(Reply {
+                    caller: caller.id,
+                    outcome: Err(Thrown::protocol("cancelled")),
+                    settled: now,
+                    generations,
+                    attempts: caller.attempts,
+                });
+                return true;
+            }
+        }
+        false
+    }
+
+    /// `naming.configure`: the whole snapshot is replaced, and a part that
+    /// changed advances its generation. `reset_providers` is today's
+    /// `invalidateCachedProvider`. The machine's bounds stay.
+    pub fn configure(&mut self, mut config: Config, reset_providers: bool) -> Generations {
+        let (ens_changed, tezos_changed) = {
+            let mut state = self.ctx.state.borrow_mut();
+            config.bounds = state.config.bounds;
+            let old = &state.config;
+            let ens_changed = old.rpc != config.rpc
+                || old.direct != config.direct
+                || old.order != config.order
+                || old.prefer_verified != config.prefer_verified
+                || old.quorum != config.quorum
+                || old.myotis_enabled != config.myotis_enabled
+                || old.prover != config.prover;
+            let tezos_changed = old.tezos != config.tezos;
+            state.config = config;
+            (ens_changed, tezos_changed)
+        };
+        if ens_changed {
+            self.ens_generation += 1;
+        }
+        if tezos_changed {
+            self.tezos_generation += 1;
+        }
+        if reset_providers {
+            self.invalidate_providers();
+        }
+        self.generations()
+    }
+
+    /// `invalidateEnsContent(name)`: whether the content cache held it.
+    pub fn invalidate_content(&mut self, name: &str) -> bool {
+        let trimmed = crate::js_trim(name);
+        if trimmed.is_empty() {
+            return false;
+        }
+        let Ok(key) = ens::fast_normalize(trimmed) else {
+            return false;
+        };
+        self.ctx.state.borrow_mut().content.delete(&key)
     }
 
     pub fn take_replies(&mut self) -> Vec<Reply> {
@@ -393,6 +677,11 @@ impl Machine {
     /// `resolveTezosDomain(name)`: its own cache and in-flight table, and
     /// no lifecycle restarts.
     pub fn resolve_tezos(&mut self, name: &str) -> u64 {
+        self.resolve_tezos_with(name, CallOptions::default())
+    }
+
+    /// [`Machine::resolve_tezos`] for a caller with its own options.
+    pub fn resolve_tezos_with(&mut self, name: &str, options: CallOptions) -> u64 {
         let Some(normalized) = super::tezos::normalize(name) else {
             return self.reply(Ok(super::tezos::invalid()));
         };
@@ -417,22 +706,21 @@ impl Machine {
         if let Some(busy) = self.admit(&dedup) {
             return busy;
         }
-        let caller = self.next_caller;
-        self.next_caller += 1;
+        let caller = self.caller(options);
         if let Some(session) = self.sessions.iter_mut().find(|s| s.key == dedup) {
+            let id = caller.id;
             session.callers.push(caller);
-            return caller;
+            return id;
         }
         let ctx = Rc::clone(&self.ctx);
-        let task = with_deadline(&self.ctx, async move {
-            super::tezos::resolve(&ctx, &ctx.tezos, &normalized).await
+        let subject = normalized.clone();
+        let start: Start = Rc::new(move || {
+            let (ctx, name) = (Rc::clone(&ctx), normalized.clone());
+            Task::new(
+                async move { Attempt::Done(super::tezos::resolve(&ctx, &ctx.tezos, &name).await) },
+            )
         });
-        self.sessions.push(Session {
-            key: dedup,
-            callers: vec![caller],
-            task,
-        });
-        caller
+        self.start(dedup, caller, start, false, subject)
     }
 
     /// `invalidateTezosDomain(name?)`: one result, or every result and

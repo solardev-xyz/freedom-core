@@ -614,6 +614,8 @@ fn replay(scenario: &JsValue) -> Result<Vec<String>, String> {
                             JsValue::Bool(true),
                         )])),
                         settled: machine.now(),
+                        generations: machine.generations(),
+                        attempts: 0,
                     });
                 }
                 other => return Err(format!("{id}: `{other}` isn't supported yet")),
