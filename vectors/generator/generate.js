@@ -10,6 +10,7 @@ const { execFileSync } = require('node:child_process');
 const { createRequire } = require('node:module');
 const { buildSigning } = require('./signing');
 const { buildNaming } = require('./naming');
+const { buildNamingReplay } = require('./naming-replay');
 
 const REFERENCE_COMMIT = 'fb540328162839e68150fe2c5e517edb86734d1c';
 const OUTPUT = path.resolve(__dirname, '..');
@@ -479,6 +480,10 @@ async function main() {
     'signing.json': await buildSigning(reference, mnemonicFor, {
       ...reference.meta,
       packages: { ...reference.meta.packages, ...reference.signingPackages },
+    }),
+    'naming-replay.json': await buildNamingReplay(reference.checkout, reference.ethers, {
+      ...reference.meta,
+      packages: { ...reference.meta.packages, '@sinonjs/fake-timers': packageVersion(createRequire(path.join(reference.checkout, 'package.json')), '@sinonjs/fake-timers') },
     }),
     'naming.json': await buildNaming(reference.checkout, reference.ethers, {
       ...reference.meta,
