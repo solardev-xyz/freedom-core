@@ -136,19 +136,6 @@ struct Session {
     owner: u64,
 }
 
-impl Session {
-    /// Whether its attempt still runs under its scope's current
-    /// generation. One that crossed a change is discarded: its reply
-    /// carries the generations it started under, and it writes no shared
-    /// state (caches, quarantine, the anchor, Tezos discovery).
-    fn current(&self, now: Generations) -> bool {
-        match self.scope {
-            Scope::Ens => self.generations.ens == now.ens,
-            Scope::Tezos => self.generations.tezos == now.tezos,
-        }
-    }
-}
-
 /// One caller's terminal reply.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reply {
@@ -557,18 +544,14 @@ impl Machine {
         self.shared.poll();
         let now = self.now();
         let bounds = self.ctx.bounds();
-        let current = self.generations();
         let mut i = 0;
         while i < self.sessions.len() {
             let generations = self.sessions[i].generations;
             // The attempt first: a result that arrives with a deadline wins,
-            // as the race it replaces let it. Its requests carry its owner,
-            // and a discarded attempt writes nothing shared.
+            // as the race it replaces let it. Its requests carry its owner.
             self.ctx.rt.set_owner(self.sessions[i].owner);
-            self.ctx.writes.set(self.sessions[i].current(current));
             let finished = self.sessions[i].task.poll();
             self.ctx.rt.set_owner(0);
-            self.ctx.writes.set(true);
             if finished {
                 match self.sessions[i].task.take() {
                     Some(Attempt::Done(outcome)) => {
@@ -738,14 +721,36 @@ impl Machine {
         if tezos_changed {
             self.tezos_generation += 1;
         }
-        // Sessions of a scope that changed are discarded, so a lookup now
-        // starts afresh rather than joining one.
-        for session in &mut self.sessions {
-            match session.scope {
-                Scope::Ens if ens_changed => session.key.clear(),
-                Scope::Tezos if tezos_changed => session.key.clear(),
-                _ => {}
+        // Sessions of a scope that changed end now: their I/O is cancelled
+        // and nothing of theirs runs again, so they write no shared state.
+        // Their callers' replies carry the generations they ran under,
+        // which main discards, resubmitting with the attempts left.
+        let now = self.now();
+        let bounds = self.ctx.bounds();
+        let mut i = 0;
+        while i < self.sessions.len() {
+            let crossed = match self.sessions[i].scope {
+                Scope::Ens => ens_changed,
+                Scope::Tezos => tezos_changed,
+            };
+            if !crossed {
+                i += 1;
+                continue;
             }
+            let session = self.sessions.remove(i);
+            let message = format!(
+                "Name resolution configuration changed while resolving {}",
+                session.subject
+            );
+            let outcome = sized(Err(Thrown::new(message)), &bounds);
+            self.replies
+                .extend(session.callers.into_iter().map(|caller| Reply {
+                    caller: caller.id,
+                    outcome: outcome.clone(),
+                    settled: now,
+                    generations: session.generations,
+                    attempts: caller.attempts,
+                }));
         }
         if reset_providers {
             self.invalidate_providers();
@@ -828,6 +833,13 @@ impl Machine {
         let Some(normalized) = super::tezos::normalize(name) else {
             return self.reply(Ok(super::tezos::invalid()), options.attempts_used);
         };
+        // The same allowance: main resubmits a reply a configuration change
+        // overtook only with attempts left.
+        if options.attempts_used >= MAX_LIFECYCLE_ATTEMPTS {
+            let message =
+                format!("Tezos configuration changed repeatedly while resolving {normalized}");
+            return self.reply(Err(Thrown::new(message)), options.attempts_used);
+        }
         if let Some(busy) = self.admit_caller(options.attempts_used) {
             return busy;
         }

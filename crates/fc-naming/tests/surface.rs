@@ -13,7 +13,7 @@ use fc_naming::session::bounds::Bounds;
 use fc_naming::session::ens::{Answer, Config, Request};
 use fc_naming::session::exec::{Effect, Fired};
 use fc_naming::session::machine::{CallOptions, Emitted, Generations, Machine, Reply};
-use fc_naming::session::random::Mulberry32;
+use fc_naming::session::random::{Mulberry32, Random};
 use fc_naming::session::rpc::Transport;
 
 const ENDPOINTS: [&str; 4] = [
@@ -84,7 +84,6 @@ enum Pending {
 
 /// A request the machine made, as main saw it.
 struct Sent {
-    at: u64,
     generations: Generations,
     endpoint: Option<String>,
     verified: bool,
@@ -104,12 +103,18 @@ struct World {
     configures: Vec<(u64, Config)>,
     failing: Vec<String>,
     sent: Vec<Sent>,
+    /// When the machine cancelled requests.
+    cancelled: Vec<u64>,
 }
 
 impl World {
     fn new(config: Config) -> Self {
+        Self::with_random(config, Box::new(Mulberry32::new(7)))
+    }
+
+    fn with_random(config: Config, random: Box<dyn Random>) -> Self {
         Self {
-            machine: Machine::new(0, config, Box::new(Mulberry32::new(7))),
+            machine: Machine::new(0, config, random),
             answers: recorded(),
             pending: BTreeMap::new(),
             next_token: 1,
@@ -118,6 +123,7 @@ impl World {
             configures: Vec::new(),
             failing: Vec::new(),
             sent: Vec::new(),
+            cancelled: Vec::new(),
         }
     }
 
@@ -144,18 +150,20 @@ impl World {
                 generations,
             } in self.machine.take_effects()
             {
-                let Effect::Request {
-                    id, at, request, ..
-                } = effect
-                else {
-                    continue;
+                let (id, at, request) = match effect {
+                    Effect::Request {
+                        id, at, request, ..
+                    } => (id, at, request),
+                    Effect::Cancel { at, .. } => {
+                        self.cancelled.push(at);
+                        continue;
+                    }
                 };
                 let endpoint = match &request {
                     Request::Rpc { endpoint, .. } => Some(endpoint.clone()),
                     _ => None,
                 };
                 self.sent.push(Sent {
-                    at,
                     generations,
                     endpoint: endpoint.clone(),
                     verified: matches!(request, Request::Verified(_)),
@@ -407,6 +415,19 @@ fn a_spent_allowance_fails_at_once_and_counts_carry_over() {
         );
         assert_eq!(reply.attempts, used);
     }
+    let tezos = world.machine.resolve_tezos_with(
+        "alice.tez",
+        CallOptions {
+            attempts_used: 3,
+            ..CallOptions::default()
+        },
+    );
+    world.run(0);
+    assert_eq!(
+        message(world.reply(tezos)),
+        Some("Tezos configuration changed repeatedly while resolving alice.tez")
+    );
+    assert_eq!(world.reply(tezos).attempts, 3);
     assert!(world.sent.is_empty());
     // A cache hit, a busy reply or an invalid input keeps the count the
     // caller came with, so a resubmission can't regain its allowance.
@@ -427,53 +448,56 @@ fn a_spent_allowance_fails_at_once_and_counts_carry_over() {
     assert_eq!(world.reply(invalid).attempts, 2);
 }
 
-#[test]
-fn an_attempt_that_crosses_a_configuration_change_is_discarded() {
-    let mut world = World::new(config());
-    let a = world.machine.resolve_content("vitalik.eth");
-    // An ENS change at 5 ms, while the first heads are outstanding.
+/// An ENS change: a quorum timeout of 4 s instead of 5.
+fn changed() -> Config {
     let mut changed = config();
     changed.quorum =
         jsjson::parse(r#"{"k":3,"m":2,"timeoutMs":4000,"anchor":"latest","anchorTtlMs":30000}"#)
             .unwrap();
-    world.configures.push((5, changed));
-    world.run(6);
-    // A lookup now starts a session rather than joining the discarded one.
-    let b = world.machine.resolve_content("vitalik.eth");
-    assert_eq!(world.machine.running(), 2);
-    world.run(10_000);
-    // The discarded attempt's requests, those after the change included,
-    // carry the generation it started under, which main refuses as stale.
-    let old: Vec<&Sent> = world
-        .sent
-        .iter()
-        .filter(|s| s.generations.ens == 0)
-        .collect();
-    assert!(old.iter().any(|s| s.at > 5));
-    // Its reply carries that generation too, so main discards it; the new
-    // session's carries the current one.
-    assert_eq!(world.reply(a).generations.ens, 0);
-    assert!(world.reply(b).outcome.is_ok());
-    assert_eq!(world.reply(b).generations.ens, 1);
-    // The new session's requests are all of the new generation.
-    let new = world.sent.iter().filter(|s| s.generations.ens == 1).count();
-    assert_eq!(new, world.sent.len() - old.len());
+    changed
 }
 
 #[test]
-fn a_discarded_attempt_writes_no_shared_state() {
+fn a_configuration_change_ends_its_scopes_sessions() {
     let mut world = World::new(config());
     let a = world.machine.resolve_content("vitalik.eth");
-    let mut changed = config();
-    changed.quorum =
-        jsjson::parse(r#"{"k":3,"m":2,"timeoutMs":4000,"anchor":"latest","anchorTtlMs":30000}"#)
-            .unwrap();
-    world.configures.push((5, changed));
+    world.machine.resolve_tezos("alice.tez");
+    world.configures.push((5, changed()));
+    world.run(6);
+    // The ENS session ended at the change, its requests cancelled. Its
+    // reply carries the generation it ran under, which main discards.
+    let reply = world.reply(a);
+    assert_eq!((reply.settled, reply.generations.ens), (5, 0));
+    assert_eq!(
+        message(reply),
+        Some("Name resolution configuration changed while resolving vitalik.eth")
+    );
+    assert!(world.cancelled.contains(&5));
+    // The Tezos session runs on; an ENS lookup now starts afresh.
+    assert_eq!(world.machine.running(), 1);
+    let before = world.sent.len();
+    let b = world.machine.resolve_content("vitalik.eth");
     world.run(10_000);
-    assert!(world.reply(a).outcome.is_ok());
+    assert!(world.reply(b).outcome.is_ok());
+    assert_eq!(world.reply(b).generations.ens, 1);
+    // Every RPC request since is the new session's.
+    assert!(
+        world.sent[before..]
+            .iter()
+            .filter(|s| s.endpoint.is_some())
+            .all(|s| s.generations.ens == 1)
+    );
+}
+
+#[test]
+fn an_ended_session_writes_nothing_shared() {
+    let mut world = World::new(config());
+    let a = world.machine.resolve_content("vitalik.eth");
+    world.configures.push((5, changed()));
+    world.run(10_000);
     assert_eq!(world.reply(a).generations.ens, 0);
-    // Neither its result nor its anchor was kept: main's resubmission
-    // starts a session that probes the heads again.
+    // Neither a result nor an anchor was kept: main's resubmission starts
+    // a session that probes the heads again.
     let sent = world.sent.len();
     let b = world.machine.resolve_content_with(
         "vitalik.eth",
@@ -486,6 +510,51 @@ fn a_discarded_attempt_writes_no_shared_state() {
     world.run(20_000);
     assert_eq!(world.reply(b).generations.ens, 1);
     assert!(world.sent.len() > sent + ENDPOINTS.len());
+}
+
+#[test]
+fn a_late_answer_to_an_ended_session_leaves_a_newer_result_cached() {
+    let mut world = World::new(config());
+    world.machine.resolve_content("vitalik.eth");
+    // A configuration change and a lifecycle change while its first
+    // answers are outstanding (they arrive at 10 ms).
+    world.configures.push((5, changed()));
+    world.changes.push(5);
+    world.run(6);
+    // A lookup under the new generations resolves and caches...
+    let b = world.machine.resolve_content("vitalik.eth");
+    world.run(10_000);
+    assert!(world.reply(b).outcome.is_ok());
+    // ...and the old session's late answers changed nothing: a hit.
+    world.machine.resolve_content("vitalik.eth");
+    assert_eq!(world.machine.running(), 0);
+}
+
+/// Mulberry32, counting its draws.
+struct Counting(Mulberry32, std::rc::Rc<std::cell::Cell<usize>>);
+
+impl Random for Counting {
+    fn next_f64(&mut self) -> f64 {
+        self.1.set(self.1.get() + 1);
+        self.0.next_f64()
+    }
+}
+
+#[test]
+fn an_ended_session_draws_no_randomness() {
+    let draws = std::rc::Rc::new(std::cell::Cell::new(0));
+    let random = Counting(Mulberry32::new(7), std::rc::Rc::clone(&draws));
+    let mut world = World::with_random(config(), Box::new(random));
+    world.failing = ENDPOINTS.iter().map(|e| (*e).to_owned()).collect();
+    world.machine.resolve_content("vitalik.eth");
+    // Its failing heads would have sent it to the fallback's selection.
+    let mut moved = config();
+    moved.rpc.reverse();
+    world.configures.push((5, moved));
+    world.run(6);
+    let at_change = draws.get();
+    world.run(10_000);
+    assert_eq!(draws.get(), at_change);
 }
 
 #[test]

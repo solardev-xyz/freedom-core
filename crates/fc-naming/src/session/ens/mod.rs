@@ -286,9 +286,6 @@ pub struct Ctx {
     /// Wall-clock milliseconds at monotonic zero (Tezos expiry reads the
     /// wall clock).
     pub(crate) wall_offset: std::cell::Cell<f64>,
-    /// False while the machine polls an attempt that crossed a change of
-    /// its scope's generation: it writes no shared state then.
-    pub(crate) writes: std::cell::Cell<bool>,
 }
 
 impl Ctx {
@@ -314,7 +311,6 @@ impl Ctx {
             random: RefCell::new(random),
             tezos: super::tezos::TezosState::default(),
             wall_offset: std::cell::Cell::new(0.0),
-            writes: std::cell::Cell::new(true),
         }
     }
 
@@ -346,16 +342,12 @@ impl Ctx {
     }
 
     fn mark_failure(&self, endpoint: &str) {
-        if self.writes.get() {
-            let now = self.now();
-            self.state.borrow_mut().pool.mark_failure(endpoint, now);
-        }
+        let now = self.now();
+        self.state.borrow_mut().pool.mark_failure(endpoint, now);
     }
 
     fn mark_success(&self, endpoint: &str) {
-        if self.writes.get() {
-            self.state.borrow_mut().pool.mark_success(endpoint);
-        }
+        self.state.borrow_mut().pool.mark_success(endpoint);
     }
 
     fn timeout_ms(&self) -> f64 {
@@ -469,7 +461,7 @@ pub(crate) enum Store {
 pub(crate) fn cache(ctx: &Ctx, store: Store, key: &str, result: JsValue) -> JsValue {
     // Deviation `reply-size`: a result too large to reply with is never
     // cached; the machine replies `result too large`.
-    if !ctx.bounds().reply_fits(result.stringify().len()) || !ctx.writes.get() {
+    if !ctx.bounds().reply_fits(result.stringify().len()) {
         return result;
     }
     let expires = ctx.now_f() + ttl_for(&result);
