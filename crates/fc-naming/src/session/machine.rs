@@ -37,9 +37,16 @@ impl Shared {
     /// After `agreed_data` the prefetch survives its session in the
     /// machine's set (design 0004, Prefetch). Deviation `prefetch-set`:
     /// past the bound, the oldest is cancelled.
-    pub(crate) fn keep_prefetch(&self, io: Io<Request, Answer>) {
+    pub(crate) fn keep_prefetch(&self, mut io: Io<Request, Answer>) {
         let limit = self.ctx.bounds().prefetches;
+        let mut cx = Context::from_waker(Waker::noop());
+        // A prefetch that already finished has nothing left to keep.
+        if Pin::new(&mut io).poll(&mut cx).is_ready() {
+            return;
+        }
         let mut prefetches = self.prefetches.borrow_mut();
+        // Finished ones have left the set before it is counted.
+        prefetches.retain_mut(|kept| Pin::new(kept).poll(&mut cx).is_pending());
         prefetches.push(io);
         while prefetches.len() > limit {
             prefetches.remove(0);
