@@ -626,7 +626,7 @@ impl Vault {
                 | "compat.private_key"
                 | "compat.bee_wallet_key"
                 | "compat.publisher_key"
-        )
+        ) || crate::signing::METHODS.contains(&method)
     }
 
     /// Handles a request. Inline methods reply at once; KDF methods are
@@ -693,6 +693,10 @@ impl Vault {
                     .map_err(locked_or_internal)?;
                 private_key_result(id, key.to_secret_bytes().as_slice())
             }),
+            _ if crate::signing::METHODS.contains(&method) => {
+                crate::signing::handle(&self.state, method, raw)
+                    .map(|result| json_result(id, &result))
+            }
             _ => match self.enqueue(id, method, raw) {
                 Ok(()) => {
                     self.start_next(&mut out);
@@ -1522,11 +1526,11 @@ fn locked() -> ErrorBody {
     ErrorBody::new(ErrorCode::VaultLocked, MSG_LOCKED)
 }
 
-fn internal() -> ErrorBody {
+pub(crate) fn internal() -> ErrorBody {
     ErrorBody::new(ErrorCode::Internal, "Internal error")
 }
 
-fn locked_or_internal(error: fc_vault::Error) -> ErrorBody {
+pub(crate) fn locked_or_internal(error: fc_vault::Error) -> ErrorBody {
     match error {
         fc_vault::Error::Locked => ErrorBody::new(ErrorCode::VaultLocked, MSG_LOCKED),
         fc_vault::Error::Keys(fc_keys::Error::IndexOutOfRange(_)) => {

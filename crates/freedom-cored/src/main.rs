@@ -15,6 +15,7 @@ mod log;
 mod nodes;
 mod rng;
 mod serve;
+mod signing;
 mod storage;
 mod testhooks;
 mod transport;

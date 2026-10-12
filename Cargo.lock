@@ -399,8 +399,10 @@ name = "freedom-cored"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "fc-evm",
  "fc-keys",
  "fc-protocol",
+ "fc-swarm",
  "fc-vault",
  "getrandom",
  "rand_core",

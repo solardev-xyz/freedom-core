@@ -29,8 +29,10 @@ name = "freedom-cored"
 path = "src/main.rs"
 
 [dependencies]
+fc-evm = { path = "../fc-evm" }
 fc-keys = { path = "../fc-keys" }
 fc-protocol = { path = "../fc-protocol" }
+fc-swarm = { path = "../fc-swarm" }
 fc-vault = { path = "../fc-vault" }
 getrandom = "0.4"
 rand_core = "0.10"
