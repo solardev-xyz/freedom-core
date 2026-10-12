@@ -18,13 +18,11 @@ Freedom Browser signs with vault keys in exactly two places:
 
 Nothing else signs with a vault key. GSOC signs with keys it mines itself. The Ant node signs postage and cheques with the keystore that `nodes.write_identity` writes. Ledger, phone and Safe accounts keep their own signers.
 
-The core gets four methods:
-- `sign.transaction`
-- `sign.message`
-- `sign.typed_data`
-- `swarm.sign_soc`
+The core gets five methods:
+- four that sign: `sign.transaction`, `sign.message`, `sign.typed_data` and `swarm.sign_soc`;
+- one public hash: `typed_data.hash`, so that main never computes an EIP-712 digest that a vault key will sign with weaker rules than the core's.
 
-Each returns exactly the bytes ethers or bee-js return today, and each takes a key **reference**, never key bytes.
+Each returns exactly the bytes ethers or bee-js return today, and each signing method takes a key **reference**, never key bytes.
 
 ## Goals and non-goals
 
@@ -33,38 +31,54 @@ Each returns exactly the bytes ethers or bee-js return today, and each takes a k
 - **Byte-exact parity.**
   - The same key and input give the same raw transaction, signature or SOC as today. ethers and k256 both sign with RFC 6979 deterministic nonces and low-s, so the signatures are identical, not just valid.
   - Golden vectors from the pinned JS check this (see [Parity](#parity-contract-and-vectors)).
-  - Where ethers is dangerously lenient, the core is stricter, and this document lists every such case.
+  - Where ethers is dangerously lenient, the core is stricter. Every such case is listed under [Deviations](#deviations-from-ethers) and has a vector.
 - **Least authority per key.**
   - User accounts sign transactions, messages and typed data.
   - The Bee wallet and publisher keys sign **only** SOCs.
-  - A SOC's digest is computed in the core from the chunk itself, so `swarm.sign_soc` can't be used to sign an arbitrary 32-byte value.
+  - A SOC's chunk address is computed in the core from the chunk itself, so every SOC signature is bound to a chunk that actually hashes to that address.
 
 **Non-goals**
-- **Approval and policy.** As in 0001's threat model, stage 1 trusts main: it runs the approval UI and decides what gets signed. A compromised main can still ask for signatures. Phase 2 removes key *exposure*, not main's authority. Policy moves with the Chromium work.
+- **Approval and policy.** As in 0001's threat model, stage 1 trusts main: it runs the approval UI and decides what gets signed. A compromised main can still:
+  - ask for signatures;
+  - make a backup export with a password it knows or has recovered;
+  - read the Bee node's keystore and its config password.
+
+  Phase 2 removes routine key *exposure*, not main's authority. No signature can be recalled once delivered. Policy moves with the Chromium work.
 - **Transaction building:** nonces, fee estimation, gas limits, broadcasting and receipts stay in main. The core signs a fully specified transaction.
 - **Other transaction types:** EIP-2930 access lists, blob (EIP-4844) and set-code (EIP-7702) transactions. Freedom doesn't send them today, and the core rejects them.
 - **`eth_sign`** (raw digest signing). Freedom rejects it today and the core doesn't offer it.
 - **Ledger, phone and Safe accounts.** Safe owners that are vault accounts sign through the core like any other account.
+- **The Ant node's own signing** (postage, cheques) is unaffected. The SOC-only rule for the Bee wallet constrains the core's signing API, not the node.
 
-## Key references
+## Key references, callers and execution
 
-Every signing method takes `key`:
+The signing methods take `key`:
 
 | `key` | Key | Derivation (unchanged from 0001) | Allowed in |
 |---|---|---|---|
-| `{ "kind": "account", "index": n }` | user wallet *n* | `m/44'/60'/n'/0/0` | all four methods |
+| `{ "kind": "account", "index": n }` | user wallet *n* | `m/44'/60'/n'/0/0` | all four signing methods |
 | `{ "kind": "bee_wallet" }` | Bee wallet | `m/44'/60'/0'/0/1`, distinct from every account | `swarm.sign_soc` only |
 | `{ "kind": "publisher", "origin_index": n }` | Swarm publisher key for an origin | `m/44'/73406'/n'/0/0` | `swarm.sign_soc` only |
 
-- **Index range:** the same as `compat.private_key` and `compat.publisher_key` (`0..=2147483647`, JS's index error strings).
-- **Wrong method:** a key kind used outside its row returns `invalid_params`.
-- **Main keeps its guards.** Main still refuses hardware-range indices and non-mnemonic wallet records before it asks the core, as `vault-access.js` does today. The core doesn't know about wallet records.
+- **Index range:** the same as `compat.private_key` and `compat.publisher_key` (`0..=2147483647`).
+- **Wrong method:** a key kind used outside its row returns `invalid_argument`.
+- **Main keeps its guards.** Main still refuses hardware-range indices and non-mnemonic wallet records before it asks the core, as `vault-access.js` does today.
+- **Callers:** all five methods accept the `chrome` and `shell` callers, like Phase 1. The `page` caller stays reserved: binding a page's approval to a key and an operation belongs to the policy phase, not this one. Main keeps making these requests on a page's behalf after its own approval.
+- **Locking and the timer:**
+  - The signing methods need an unlocked vault and return `vault_locked` otherwise. `typed_data.hash` is public and works while locked.
+  - The signing methods don't touch the auto-lock timer. Main keeps calling `vault.touch` where it does today.
 
-Every method needs an unlocked vault and returns `vault_locked` otherwise. Signing work is admitted against the current epoch, exactly like `compat.*` (0001, "Concurrency, epochs and revocation"). The methods don't touch the auto-lock timer; main keeps calling `vault.touch` where it does today.
+**Execution.** Signing runs inline on the core's event loop, as `compat.*` does today (`vault.rs`), not on the KDF worker. Each method:
+
+1. does all its public work first: parsing and validation, RLP, EIP-712 hashing, BMT. The [limits](#limits) bound this work.
+2. then derives the key and makes one signature;
+3. then replies.
+
+No secret is held while untrusted input is processed. A request either signs within one turn of the loop or fails before it touches a key. Lock and epoch semantics are therefore those of `compat.*`: a request admitted before a lock completes; any later one returns `vault_locked`.
 
 ## API
 
-Byte strings are `0x`-prefixed lowercase hex, which is not secret data. Quantities are JSON strings, decimal or `0x` hex, because JSON numbers can't carry `uint256`. Unknown fields are rejected, as in 0001.
+Byte strings are `0x`-prefixed hex. They are lowercase in replies; requests take either case. Quantities are JSON strings: `[-]` then decimal digits, or `[-]0x` hex digits. Leading zeros are allowed. Unknown fields are rejected, as in 0001.
 
 ### `sign.transaction`
 
@@ -73,95 +87,123 @@ Byte strings are `0x`-prefixed lowercase hex, which is not secret data. Quantiti
 | `tx` field | Type | Notes |
 |---|---|---|
 | `type` | `0` or `2` | legacy (always with EIP-155) or EIP-1559 |
-| `chain_id` | quantity ≥ 1 | required. ethers would sign a chain-less legacy transaction when `chainId` is missing; the core never does |
-| `nonce` | quantity < 2^64 | |
+| `chain_id` | quantity ≥ 1 | required. ethers would sign a chain-less legacy transaction when `chainId` is missing; the core never does. For type 0, `chain_id · 2 + 36` must fit in 256 bits (`chain_id ≤ 2^255 − 19`) so that `v` always fits. Above that, ethers still signs, with a wider `v` that its own `Transaction.from` rejects. For type 2, any uint256 |
+| `nonce` | quantity ≤ 2^53 − 1 | ethers keeps the nonce in a JS number and fails above that ("overflow") |
 | `gas_limit` | quantity | |
 | `to` | address or `null` | `null` creates a contract. Hex only (ethers would try to resolve an ENS name; main resolves before signing) |
 | `value` | quantity | |
 | `data` | bytes | `"0x"` when empty |
 | `gas_price` | quantity | type 0 only |
-| `max_fee_per_gas`, `max_priority_fee_per_gas` | quantity | type 2 only. Priority ≤ max, as ethers requires ("priorityFee cannot be more than maxFee") |
+| `max_fee_per_gas`, `max_priority_fee_per_gas` | quantity | type 2 only. Priority ≤ max, as ethers requires |
 
 - **`raw`:** byte-for-byte `Wallet.signTransaction(tx)`.
-  - Type 0: `rlp([nonce, gasPrice, gasLimit, to, value, data, v, r, s])` with `v = chainId·2 + 35 + yParity`.
+  - Type 0: `rlp([nonce, gasPrice, gasLimit, to, value, data, v, r, s])` with `v = chainId·2 + 35 + yParity`, computed in 256 bits.
   - Type 2: `0x02 ‖ rlp([chainId, nonce, maxPriorityFeePerGas, maxFeePerGas, gasLimit, to, value, data, [], yParity, r, s])`.
+- **Three different "v" values, kept apart:**
+  - `yParity` is 0 or 1, and is what type 2 encodes;
+  - the legacy `v` is EIP-155's network value above;
+  - the 27/28 byte belongs to message signatures only.
 - **`hash`:** `keccak256(raw)`, which is what main records before broadcasting.
 
 ### `sign.message`
 
 `{ key, message }` → `{ signature }`
 
-- **`message`:** the bytes to sign. Main keeps today's normalization (`signing-utils.js`): a `0x` string is hex-decoded, anything else is signed as UTF-8. It sends the resulting bytes as hex.
+- **`message`:** the bytes to sign. Main keeps today's normalization (`signing-utils.js`): a `0x` string is hex-decoded, anything else is signed as UTF-8. It sends the resulting bytes as hex. Main must validate the hex strictly: `Buffer.from(hex, 'hex')` stops silently at the first invalid character.
 - **`signature`:** EIP-191 over `"\x19Ethereum Signed Message:\n" ‖ len ‖ message`. It is 65 bytes `r ‖ s ‖ v` with `v ∈ {27, 28}`, byte-for-byte `Wallet.signMessage(bytes)`.
 
-### `sign.typed_data`
+### `sign.typed_data` and `typed_data.hash`
 
-`{ key, typed_data: { domain, types, message } }` → `{ signature }`
+- `sign.typed_data { key, typed_data: { domain, types, message } }` → `{ signature }`.
+- `typed_data.hash { typed_data }` → `{ hash }`: the same digest, with no key. It is public, works while locked, and applies the same validation and limits.
 
 This is EIP-712 with ethers v6 `TypedDataEncoder` semantics, which is what `Wallet.signTypedData(domain, types, message)` does today. Main already strips `EIP712Domain` from `types` and drops `primaryType`; it keeps doing both.
 
-- **Primary type:** inferred as the single type that no other type references. Ambiguous roots, unused types and cycles are errors, as in ethers.
-- **Domain:** the keys `name`, `version` (strings), `chainId` (quantity), `verifyingContract` (address) and `salt` (32 bytes), with the domain type built from the keys present. Any other key is an error ("invalid typed-data domain key").
-- **Encoding:**
-  - `uintN` and `intN` take a quantity string or a JSON integer within ±(2^53−1), range-checked for N. A JSON float or an unsafe integer is an error.
-  - `bytesN` takes exactly N bytes as hex.
-  - `bytes` takes hex.
-  - `string` takes a JSON string; ethers rejects anything else there too.
-  - `address` is hex: all-lowercase, or EIP-55 mixed case with a valid checksum.
-  - Arrays: `T[]` and `T[n]`, with the length checked for `T[n]`.
-  - Structs nest.
-- **Missing and extra fields:** a missing field is an error. An extra message field is ignored, as in ethers. The approval UI shows the message main received.
-- **Stricter than ethers:** `bool` takes only JSON `true` or `false`. ethers encodes any truthy value as true, including the strings `"false"` and `"0"`, so a request that *displays* false could be signed as true. The core rejects such requests.
-- **Limits:** nesting depth ≤ 32. Total size is bounded by the frame limit.
-- **x402:** it passes `BigInt` message values. Main serializes them as decimal strings before calling the core.
+- **Types:**
+  - The primary type is inferred as the single type that no other type references. No root, several roots (unused types count), a cycle reachable from the primary type, a duplicate field name, an unknown type and an ill-formed width (`uint7`, `uint08`, `bytes33`) are errors, as in ethers.
+  - A cycle that is *not* reachable from the primary type is accepted, as in ethers.
+  - `uint` and `int` mean `uint256` and `int256`, unless a struct with that name exists. Array suffixes keep their written form in `encodeType`, as in ethers.
+- **Domain:**
+  - The keys `name`, `version` (strings), `chainId` (quantity), `verifyingContract` (address) and `salt` (32 bytes). The domain type is built from the keys present, in that order.
+  - A key whose value is `null` is skipped, even an unknown one. Any other key is an error.
+- **Values:**
+  - `uintN` and `intN` take a quantity string or a JSON integer within ±(2^53 − 1), range-checked for N. A JSON float or an unsafe integer is an error, as in ethers.
+  - `bytesN` takes exactly N bytes and `bytes` takes any; both are hex with `0x` or `0X`.
+  - `string` takes a JSON string.
+  - `address` takes `0x` and 40 hex digits: all-lowercase, all-uppercase, or EIP-55 mixed case with a valid checksum. Without `0x`, ethers tries ENS when signing and fails.
+  - Arrays: `T[]` and `T[n]`, with the length checked for `T[n]`. Structs nest.
+  - An extra message field is ignored, as in ethers. The approval UI shows the message main received.
 
 ### `swarm.sign_soc`
 
-`{ key, identifier, span, payload }` → `{ signature, owner, chunk_address, soc_address }`
+`{ key, identifier, span?, payload }` → `{ signature, owner, chunk_address, soc_address, span }`
 
 - **Inputs:**
   - `identifier`: 32 bytes, hex.
-  - `span`: a u64 quantity. For a leaf chunk it equals `payload.length`. For the root chunk of a `/bytes` upload, which `writeFeedPayload` wraps, it is the whole content length.
-  - `payload`: 0–4096 bytes, hex.
+  - `payload`: **1–4096** bytes, hex. bee-js rejects an empty payload.
+  - `span`: a u64 quantity, optional. If absent or **0**, it is the payload length. This matches bee-js, which treats a `0n` span as omitted, and the browser passes `0n` for a zero span. Any other value is used as given: for the root chunk of a `/bytes` upload, which `writeFeedPayload` wraps, it is the whole content length, and it may even be smaller than the payload, as bee-js allows.
 - **Computed in the core (`fc-swarm`):**
-  - `chunk_address` = BMT(`span` as 8 bytes little-endian ‖ `payload`), the content-addressed chunk address. The tree is Swarm's binary Merkle tree: 128 32-byte segments, zero-padded, keccak256.
+  - `chunk_address` = keccak256(`span` as 8 bytes little-endian ‖ BMT root). The BMT root is computed over `payload` alone, zero-padded to 4096 bytes: 128 segments of 32 bytes, hashed pairwise with keccak256. The span is not a leaf.
   - `digest` = keccak256(`identifier` ‖ `chunk_address`).
   - `signature` = EIP-191 over the 32-byte digest, with `v ∈ {27, 28}`.
   - `owner` is the key's address.
   - `soc_address` = keccak256(`identifier` ‖ `owner`).
 - **Parity:** the output equals bee-js's `makeContentAddressedChunk(payload, span).toSingleOwnerChunk(identifier, key)`. Main uploads `span ‖ payload` to Bee's `/soc/{owner}/{identifier}?sig=…` as bee-js does today.
-- **Why the core computes the chunk address:** if main supplied the chunk address, `swarm.sign_soc` would be an oracle for EIP-191 signatures over arbitrary 32-byte values, made with the Bee wallet and publisher keys. Because the core hashes the chunk itself, only genuine SOC digests get signed.
+- **Why the core computes the chunk address:** an API that took the chunk address from main would let main get the Bee wallet and publisher keys to sign statements about chunks that don't exist (any identifier and chunk-address pair). Hashing the payload in the core binds every SOC signature to a real chunk. Raw-digest signing stays unavailable regardless.
 
 ### Errors
 
-- **Malformed input** returns `invalid_params` with a description: wrong key kind, invalid quantity, range, length, checksum or type, unsupported transaction type, typed-data violation, oversize payload. Main maps it the way it maps ethers' errors today: a dApp request fails, and no signature is made.
+- **`invalid_argument`** (0001's code) covers every malformed input: wrong key kind, an invalid quantity, range, length, checksum or type, an unsupported transaction type, a typed-data violation, an oversize payload, or an exceeded limit. It carries a description. Main maps it the way it maps ethers' errors today: a dApp request fails, and no signature is made.
 - **Locked vault:** `vault_locked`, as for `compat.*`.
+
+## Deviations from ethers
+
+ethers accepts each input below; the core refuses it. Each is a `deviation` vector, which records that ethers signed it and requires the core to reject it.
+
+| Input | ethers | Core |
+|---|---|---|
+| `bool` given `"false"`, `"0"`, `1`, or another non-boolean | encodes truthiness, so `"false"` signs as **true** | only JSON `true` / `false` |
+| `bool` field missing or `null` | encodes **false** | error, like every other missing field |
+| quantity string with whitespace, `+`, `0b`/`0o`, or a lone `-` (which ethers reads as 0) | JS `BigInt()` accepts it | only `[-]digits` or `[-]0x hex` |
+| a type or field name that isn't an identifier (`[A-Za-z_$][A-Za-z0-9_$]*`) | any string, so a name containing `(`, `,` or a space can make two different type sets print the same `encodeType` | error |
+| inputs past the [limits](#limits) | no limits; its subtype walk is exponential on diamond-shaped type graphs | error |
+| type 0 `chain_id` above 2^255 − 19 | signs with a `v` wider than 256 bits, a transaction ethers itself can't parse | error |
+
+## Limits
+
+Typed-data work is bounded before any key is touched:
+
+- at most 256 types, 256 fields per type, and 1024 fields in total;
+- nesting depth (struct levels plus array levels) at most 32, and at most 32 array dimensions in one type;
+- type hashing at most 1 MiB of `encodeType` text in total, counting each struct's text once for itself and once for every struct whose type hash includes it.
+
+The subtype closure is computed once per type (memoized), and type hashes are cached per request. With these limits, the worst case is a few milliseconds of hashing. A test checks this, along with a 40-level diamond graph that ethers' walk would take 2^40 steps over.
 
 ## Parity contract and vectors
 
-`vectors/signing.json` comes from the pinned reference checkout, like the Phase 1 vectors. It uses that checkout's own ethers 6.17.0 (`Wallet.signTransaction`, `signMessage`, `signTypedData`, `TypedDataEncoder.hash`) and bee-js (`makeContentAddressedChunk(…).toSingleOwnerChunk(…)`). The keys are the Phase 1 test mnemonics.
+`vectors/signing.json` comes from the pinned reference checkout, like the Phase 1 vectors (#17). It uses that checkout's own ethers 6.17.0 and bee-js 13.1.0, with keys from the Phase 1 test mnemonics. Every case records ethers' or bee-js's actual result: a success, an error, or a success marked as a deviation.
 
 | Area | Cases |
 |---|---|
-| Transactions | <ul><li>Type 0 and type 2.</li><li>Chain ids 1, 100, 11155111 and one above 2^32.</li><li>Nonce 0, small, and 2^64−1.</li><li>Value 0 and 2^256−1.</li><li>Empty and long data; contract creation.</li><li>Priority = max; the error when priority > max.</li><li>The other rejections: missing chain id, other types, an ENS-style `to`.</li></ul> |
-| EIP-191 | Empty, ASCII, multi-byte UTF-8, binary, and ≥ 1000 bytes (multi-digit length prefix). |
-| EIP-712 | <ul><li>The EIP-712 Mail example.</li><li>Nested structs, and arrays of structs, fixed and dynamic.</li><li>Every `uintN`/`intN` boundary.</li><li>`bytesN` and `bytes`.</li><li>Lowercase and checksummed addresses.</li><li>Unicode strings.</li><li>Every domain subset, including a hex-string `chainId` and `salt`.</li><li>Extra message fields (ignored).</li><li>The three real payloads: Safe 1.4.1 SafeTx, the SafeMessage envelope, EIP-3009 TransferWithAuthorization and Permit2 PermitWitnessTransferFrom with string quantities.</li><li>Every ethers error kind: ambiguous root, unused type, cycle, unknown domain key, out of range, bad length, bad checksum, missing field, float, unsafe integer.</li><li>The strict-`bool` cases, recorded as the core's documented deviation.</li></ul> |
-| SOC | <ul><li>Payloads of 0, 1, 32, 33 and 4096 bytes.</li><li>A span above the payload length.</li><li>Feed identifiers (keccak256(topic ‖ uint64BE index)) with feed-update payloads (uint64BE timestamp ‖ reference).</li><li>All three key kinds.</li></ul> |
+| Transactions | <ul><li>Type 0 and type 2.</li><li>Chain ids 1, 100, 11155111, 2^32, above 2^53 and above 2^64.</li><li>The legacy `chain_id` limit, values above it (deviations), and the type-2 bounds (2^256 − 1 signs; 2^256 is an error).</li><li>Nonce 0, small, and 2^53 − 1; 2^53 is an error.</li><li>Value 0 and 2^256 − 1.</li><li>Empty and long data; contract creation.</li><li>Priority = max; priority > max is an error.</li></ul> |
+| EIP-191 | Empty, ASCII, multi-byte UTF-8, binary, SIWE, and 1000 bytes (multi-digit length prefix). |
+| EIP-712 | <ul><li>The EIP-712 Mail example; nested structs and arrays of structs, fixed and dynamic.</li><li>Every `uintN`/`intN` boundary; the `uint`/`int` aliases; quantity forms (hex, signed hex, leading zeros, `-0`).</li><li>`bytesN` and `bytes`; lowercase, uppercase and checksummed addresses; Unicode strings.</li><li>Domain subsets, including a hex-string `chainId`, `salt`, null fields (known and unknown), chain id 0 and an empty domain.</li><li>Empty structs; an unreachable cycle (accepted); extra message fields (ignored).</li><li>The real payloads: Safe 1.4.1 SafeTx and SafeMessage, EIP-3009 TransferWithAuthorization, and Permit2 PermitWitnessTransferFrom with string quantities.</li><li>Every ethers error kind, and every [deviation](#deviations-from-ethers).</li></ul> |
+| SOC | <ul><li>Payloads of 1, 32, 33 and 4096 bytes.</li><li>Spans above and below the payload length, and span 0.</li><li>All three key kinds.</li></ul> |
 
-Rust tests replay every case. The generator's `check` mode re-derives every vector from the reference. CI fails if either side drifts.
+Rust tests replay every case (#18). The generator's `check` mode re-derives every vector from the reference. CI fails if either side drifts.
 
 ## Implementation
 
 - **`fc-evm` (logic crate, no I/O):**
-  - an RLP encoder (minimal big-endian integers, the byte-string and list rules);
+  - a minimal U256;
+  - RLP;
   - the two transaction serializations;
   - EIP-191;
-  - the EIP-712 encoder above;
-  - the `r ‖ s ‖ v` signature format.
-
-  It uses `k256` (RFC 6979, low-s, recovery id) and `sha3` (keccak), both already in the workspace. There are no new dependencies. The encoder is written for ethers' semantics rather than taken from a general ABI library, because parity, including which inputs are rejected, is the contract.
-- **`fc-swarm` (logic crate, no I/O):** BMT, the content-addressed chunk address, the SOC digest and the SOC address. Single owner chunks only; no network.
-- **`freedom-cored`:** the four methods, in the same worker path as `compat.*`: admitted against the epoch, secrets zeroized after use, `vault_locked` on revocation. Signing takes no KDF, so it is fast. It still runs in the worker, so a large typed-data request can't stall the event loop.
+  - the EIP-712 encoder above, written from ethers' source because parity, including which inputs are rejected, is the contract;
+  - the signature format.
+- **`fc-swarm` (logic crate, no I/O):** the BMT, the chunk address, and SOC signing.
+- **Dependencies:** none new. `k256` (RFC 6979, low-s, recovery id), `sha3`, `serde_json` and `thiserror` are already in the workspace.
+- **`freedom-cored`:** the five methods, executed as described in [Execution](#key-references-callers-and-execution), with secrets zeroized after use. Each method is in `fc-protocol`'s method table with its callers (`chrome`, `shell`) and is advertised in `core.hello`'s capabilities.
 - Both crates compile for iOS and Android, as CI requires of logic crates.
 
 ## Migration in freedom-browser
@@ -171,7 +213,10 @@ One PR per step, each after the freedom-core release that provides it.
 1. **EVM signing.**
    - `signers.js`'s vault backend calls `sign.transaction`, `sign.message` and `sign.typed_data`.
    - `computeAddress(pk)` gives way to `keys.addresses`.
-   - Safe owner signatures, the executor EOA and x402 go through the same backend. x402's `BigInt`s are serialized as strings.
+   - Safe owner signatures, the executor EOA and x402 go through the same backend.
+   - x402's `BigInt`s are converted recursively to decimal strings at the vault backend boundary, so Ledger and phone dispatch stays unchanged.
+   - **Safe's EIP-1271 SafeMessage:** main hashes the dApp's original request, then signs a SafeMessage over that digest. The inner digest of a typed-data request now comes from `typed_data.hash`, with the same strict rules and limits, instead of ethers' `TypedDataEncoder.hash`. Otherwise a `"false"` the dApp displayed could still be hashed as true and then signed by the core. An inner `personal_sign` digest stays `hashMessage` of the strictly validated bytes.
+   - `normalizeMessage` validates hex strictly.
    - Ledger, phone and Safe dispatch is unchanged.
 2. **Swarm.**
    - `chunk-service` and `feed-service` stop building bee-js `PrivateKey`s. Main computes identifiers, payloads and next indices, which are public, and gets owners from `keys.addresses`. The core signs (`swarm.sign_soc`) and main uploads the SOC through Bee's HTTP API.
@@ -186,6 +231,6 @@ One PR per step, each after the freedom-core release that provides it.
 
 ## Open questions
 
-1. **Auto-lock.** Should `sign.*` restart the auto-lock timer itself? Proposed: no. Main keeps calling `vault.touch` where it does today: after vault-account signing, but not after Swarm signing. Revisit with policy.
+1. **Auto-lock.** Should signing restart the auto-lock timer itself? Proposed: no. Main keeps calling `vault.touch` where it does today: after vault-account signing, but not after Swarm signing. Revisit with policy.
 2. **SOC payloads larger than one chunk.** `writeFeedPayload` uploads big payloads through `/bytes` first, and the core then signs the root chunk. A later phase could chunk and hash the whole payload in the core. That isn't needed for parity.
 3. **Error strings.** dApps see main's error mapping, not ethers' exact messages. Do any callers match on ethers' message text? Check during the browser migration.
