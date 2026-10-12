@@ -49,7 +49,7 @@ pub(crate) async fn content(
                 ("trust", trust),
             ];
             if let Some(error) = &error {
-                fields.push(("error", s(&error.short_message())));
+                fields.push(("error", s(&error.display())));
             }
             let out = obj(fields);
             if reason == "NO_CONTENTHASH" && error.is_some() {
@@ -208,7 +208,7 @@ pub(crate) async fn address(
             ..
         } => Ok(store(failure(
             "RESOLUTION_ERROR",
-            error.map(|e| e.short_message()),
+            error.map(|e| e.display()),
             trust,
         ))),
         Consensus::NotFound { .. } => Ok(store(none(trust))),
@@ -390,14 +390,10 @@ pub(crate) async fn ens_reverse_with(
     }))
 }
 
-/// The display text for an agreement identity: its class's short message.
+/// The display text for an agreement identity (ethers' composed message):
+/// its class's short message, sanitized (design 0004, Errors).
 pub(crate) fn display_of(identity: &str) -> String {
-    identity
-        .split('|')
-        .nth(1)
-        .filter(|_| identity.starts_with("CALL_EXCEPTION|"))
-        .unwrap_or(identity)
-        .to_owned()
+    crate::ethers::sanitize(crate::ethers::short_of(identity))
 }
 
 /// `resolveContractBackedReverseWithMethod`.

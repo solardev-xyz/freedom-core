@@ -229,6 +229,104 @@ pub fn invalid_bytes_like(value: &str) -> String {
     )
 }
 
+/// The short message of a composed ethers message (what precedes its
+/// details); other messages (deferred errors, the resolver's own) are
+/// already short.
+pub fn short_of(message: &str) -> &str {
+    if !message.ends_with(&format!(", version={VERSION})")) {
+        return message;
+    }
+    // Each code's first detail key; the short part never holds one
+    // unescaped (reasons are JSON strings).
+    for marker in [
+        " (action=\"call\"",
+        " (argument=",
+        " (value=",
+        " (buffer=",
+        " (code=",
+    ] {
+        if let Some(at) = message.find(marker) {
+            return &message[..at];
+        }
+    }
+    message
+}
+
+/// `sanitizeErrorDetail(value)`, as display text takes it (design 0004,
+/// Errors): URLs become `<url>`, hex over 32 bytes is shortened, runs of
+/// whitespace become one space, and the result is trimmed to 240 UTF-16
+/// units.
+pub fn sanitize(value: &str) -> String {
+    const MAX: usize = 240;
+    // URLs: `https?://` (any case) and every character up to whitespace or
+    // one of `"'<>`.
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while !rest.is_empty() {
+        let lower: String = rest
+            .chars()
+            .take(8)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        let scheme = if lower.starts_with("https://") {
+            8
+        } else if lower.starts_with("http://") {
+            7
+        } else {
+            0
+        };
+        let tail_len = rest[scheme..]
+            .find(|c: char| {
+                crate::normalize::is_js_whitespace(c) || matches!(c, '"' | '\'' | '<' | '>')
+            })
+            .unwrap_or(rest.len() - scheme);
+        if scheme > 0 && tail_len > 0 {
+            out.push_str("<url>");
+            rest = &rest[scheme + tail_len..];
+        } else {
+            let c = rest.chars().next().unwrap_or(' ');
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    // Hex: `0x` and 66 or more hex digits.
+    let mut shortened = String::with_capacity(out.len());
+    let mut rest = out.as_str();
+    while !rest.is_empty() {
+        let digits = rest.strip_prefix("0x").map_or(0, |after| {
+            after.bytes().take_while(u8::is_ascii_hexdigit).count()
+        });
+        if digits >= 66 {
+            shortened.push_str(&rest[..10]);
+            shortened.push_str(&format!("…({} bytes)", digits / 2));
+            rest = &rest[2 + digits..];
+        } else {
+            let c = rest.chars().next().unwrap_or(' ');
+            shortened.push(c);
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    // Whitespace runs, then trimming.
+    let mut collapsed = String::with_capacity(shortened.len());
+    let mut space = false;
+    for c in shortened.chars() {
+        if crate::normalize::is_js_whitespace(c) {
+            space = true;
+        } else {
+            if space && !collapsed.is_empty() {
+                collapsed.push(' ');
+            }
+            space = false;
+            collapsed.push(c);
+        }
+    }
+    let units: Vec<u16> = collapsed.encode_utf16().collect();
+    if units.len() <= MAX {
+        return collapsed;
+    }
+    format!("{}…", String::from_utf16_lossy(&units[..MAX - 1]))
+}
+
 /// `Result`'s deferred error, when a failed field is read.
 pub fn deferred(index: usize) -> String {
     format!("deferred error during ABI decoding triggered accessing index {index}")
@@ -335,6 +433,35 @@ mod tests {
             invalid_bytes_like("0x12zz"),
             "invalid BytesLike value (argument=\"value\", value=\"0x12zz\", code=INVALID_ARGUMENT, version=6.17.0)"
         );
+    }
+
+    #[test]
+    fn display_text_is_the_short_message_sanitized() {
+        let message = format!(
+            "missing revert data (action=\"call\", data=null, reason=null, {TX}, invocation=null, revert=null, code=CALL_EXCEPTION, version=6.17.0)"
+        );
+        assert_eq!(short_of(&message), "missing revert data");
+        assert_eq!(
+            short_of("deferred error during ABI decoding triggered accessing index 1"),
+            "deferred error during ABI decoding triggered accessing index 1"
+        );
+        assert_eq!(
+            short_of(
+                "data out-of-bounds (buffer=0x00, length=1, offset=32, code=BUFFER_OVERRUN, version=6.17.0)"
+            ),
+            "data out-of-bounds"
+        );
+        assert_eq!(
+            sanitize(&format!(
+                "see https://gw.example/x?a=1 and 0x{}  now\n",
+                "ab".repeat(40)
+            )),
+            "see <url> and 0xabababab…(40 bytes) now"
+        );
+        let long = "é".repeat(300);
+        assert_eq!(sanitize(&long).chars().count(), 240);
+        assert!(sanitize(&long).ends_with('…'));
+        assert_eq!(sanitize("   "), "");
     }
 
     #[test]

@@ -456,16 +456,18 @@ pub(crate) fn parse_rfc3339(text: &str) -> f64 {
         return f64::NAN;
     };
     let mut millis = 0i64;
+    let mut fractional = false;
     if let Some(frac) = fraction.strip_prefix('.') {
         if frac.is_empty() || !frac.bytes().all(|b| b.is_ascii_digit()) {
             return f64::NAN;
         }
         let first3: String = frac.chars().chain("000".chars()).take(3).collect();
         millis = first3.parse().unwrap_or(0);
+        fractional = frac.bytes().any(|b| b != b'0');
     }
-    // 24:00:00 is the end of the day only exactly (V8 reads
-    // 24:00:00.001 as NaN).
-    if h > 24 || mi > 59 || sec > 59 || (h == 24 && (mi > 0 || sec > 0 || millis > 0)) {
+    // 24:00:00 is the end of the day only exactly: V8 reads any nonzero
+    // fraction there (24:00:00.0001 too) as NaN.
+    if h > 24 || mi > 59 || sec > 59 || (h == 24 && (mi > 0 || sec > 0 || fractional)) {
         return f64::NAN;
     }
     ms += ((h * 3_600 + mi * 60 + sec) * 1_000 + millis) as f64;
@@ -883,5 +885,10 @@ mod tests {
         assert!(parse_rfc3339("2020-02-30").is_nan());
         assert_eq!(parse_rfc3339("2020-01-01T24:00:00Z"), 1_577_923_200_000.0);
         assert!(parse_rfc3339("2020-01-01T24:00:00.001Z").is_nan());
+        assert!(parse_rfc3339("2020-01-01T24:00:00.0001Z").is_nan());
+        assert_eq!(
+            parse_rfc3339("2020-01-01T24:00:00.000Z"),
+            1_577_923_200_000.0
+        );
     }
 }
