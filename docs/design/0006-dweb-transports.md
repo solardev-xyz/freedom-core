@@ -20,7 +20,7 @@ This design settles where each part goes:
   - resolves a name host;
   - picks the node;
   - fixes the request's headers, retries and deadlines;
-  - says how to transform the response head.
+  - names the response operations main runs on the answer.
 
   Main executes the plan with its fetchers and streams the body to Chromium. The core keeps no state per request once the plan is returned.
 - **Why not bytes through the core:**
@@ -39,10 +39,10 @@ This design settles where each part goes:
 ## Goals and non-goals
 
 **Goals**
-- **One place for dweb request logic**, shared with mobile and with the Chromium shell (Stage 2), where these handlers become `URLLoaderFactory`s. That logic is URL parsing, CID and host canonicalization, header policy, retry policy and response-head transforms. The plan is shaped like a URL loader's request, so the Chromium build calls the same logic in process.
+- **One place for dweb request logic**, shared with mobile and with the Chromium shell (Stage 2), where these handlers become `URLLoaderFactory`s. That logic is URL parsing, CID and host canonicalization, header policy, and retry and timer policy. The response operations depend on the bytes, so they stay in main's existing code, with the same vectors as `fc-dweb`'s copy for Stage 2. The plan is shaped like a URL loader's request, so the Chromium build calls the same logic in process.
 - **Parity:** every request makes the same node request as today, with the same headers, retries and status mapping. The [deviations](#deviations) are listed.
 - **One hop:** a named subresource costs one core round trip, as on the integration branch today. A hash host costs one new, small round trip, measured before it ships ([Latency](#latency)).
-- **The proxy and onion rules:** `bzz:` moves onto the session's network stack, which closes #360.
+- **The proxy and onion rules:** a non-loopback Ant moves onto the session's network stack, with manual redirects and the onion refusal, which closes #360.
 
 **Non-goals**
 - **Content verification (4.5)** and the `window.swarm` backend (4.6): later designs, with prerequisites listed [below](#later-designs).
@@ -56,15 +56,24 @@ This design settles where each part goes:
 
 | Method | Params | Result |
 |---|---|---|
-| `dweb.open` | `{ url, method, headers, navigation, private, deadline_ms }` | a [plan](#plans) |
+| `dweb.open` | `{ url, method, headers, backend, private, deadline_ms, attempts_used? }` | a [plan](#plans), with `generations` and `attempts` |
 
 - **`url`** is the request URL as Chromium hands it to the handler, with the scheme `bzz`, `ipfs` or `ipns`.
 - **`method`** is `GET` or `HEAD`; anything else is planned as today's 405.
-- **`headers`** are the request's headers as name–value pairs, in order. The core applies the scheme's header policy to them.
-- **`navigation`** is true for a main-frame document request, identified as today by `Accept` starting with `text/html`. It selects IPFS's small-text rule.
+- **`headers`** are the request's headers as name–value pairs, in order. The core applies the scheme's header policy to them. The IPFS small-text rule is chosen from them as today: the trimmed first `Accept` token, compared case-insensitively, equals `text/html`. A string that merely starts with `text/html`, such as `text/html;q=0.9`, doesn't count.
+- **`backend`** is the node main will use, as references with no URLs:
+  - for `bzz:`, `{ ant: "bundled" | "external" }`;
+  - for IPFS, `{ ipfs: "native" | "gateway" }`.
+
+  The core picks timers and the content label from it.
 - **`private`** marks a private window's request. The core passes it to naming and never logs the URL.
+- **`attempts_used`** is naming's resubmission count (0004), sent again when main re-plans an overtaken plan.
 - **Caller kinds:** `shell` only. Pages never reach the core directly.
+- **Size:** the request must fit one frame. Main refuses a URL over 64 KiB with 414 and headers over 64 KiB in all with 431, before asking.
 - **Thread:** `dweb.open` runs on the naming thread, under naming's admission (0004). A named host is a naming lookup plus planning. A hash host is planning alone, with no I/O.
+- **Generations:** the result carries the naming generations and attempts a lookup's result carries (0004).
+  - Main's driver fences plans exactly as it fences lookups (freedom-browser #672). A plan is sent and judged only with no naming control in flight. An overtaken plan is planned again with `attempts_used`, within the remaining deadline. A plan is bound to the core process that made it, and a restart re-plans nothing.
+  - A plan is used once, immediately; main never caches one.
 
 ### Plans
 
@@ -74,34 +83,29 @@ A plan is one of three things:
 
   ```jsonc
   { "fetch": {
-      "node": "ant",                       // or "ipfs"
+      "node": "ant",                       // or "ipfs": a reference, never a URL
       "path": "/bzz/<ref>/<path>?<query>", // the node-relative request target
       "headers": [["accept", "…"], ["range", "bytes=0-"], …],
-      "retry": { "statuses": [500, 502, 503, 504], "on_error": true,
+      "retry": { "statuses": [500, 502, 503, 504], "on_error": true, "attempts": 10,
                  "delays_ms": [500, 1000, 2000, 3000, 5000, 5000, 10000, 10000, 15000] },
-      "deadline": { "headers_ms": 30000, "body_idle_ms": 60000 },
-      "head": { "redirect_base": "/bzz/<ref>", "strip": ["set-cookie", "set-cookie2", "service-worker-allowed"],
-                "small_text": false },
+      "timers": { "queue_ms": null, "headers_ms": 30000, "body_idle_ms": 60000 },
+      "response": ["canonicalize_redirect", "strip_page_state"],  // operations main runs, in order
       "trust": { "name": "verified", "content": "node_asserted" } } }
   ```
 
-- **`{ redirect: { status, location } }`:** answered without a node. Today that covers IPFS's gateway-form URLs, which get a 307 to the canonical `ipfs://` form.
+- **`{ redirect: { status, location, headers } }`:** answered without a node. Today that covers IPFS's gateway-form URLs: a 307 to the canonical `ipfs://` form, with `Access-Control-Allow-Origin: *` as today.
 - **`{ error: { status, code, message } }`:** answered without a node, as today's 400, 404, 405, 415 and 502 are.
 
 What the fields mean:
 
-- **`node`** is a reference, not an address. Main maps `ant` and `ipfs` to the configured Ant API URL and to the native IPFS node or the external gateway, as 0004 maps endpoint references. The core never learns a node's URL (0004 *Secrets*).
-- **Readiness stays in main:** a node that isn't up answers today's immediate 503 ("Swarm node is not ready"), and the core needn't track node state.
-- **`retry` and `deadline`** are today's values per scheme: `bzz:` retries for about 50 s, and IPFS doesn't retry.
-  - `headers_ms` counts to the response headers, as today.
-  - **`body_idle_ms`** is new (deviation `body-idle`). A body that delivers nothing for 60 s fails as a truncated resource, where today it can hang forever.
-- **`head`** lists the response-head transforms main applies, mechanically:
-  - rewriting gateway-space `Location`s relative to `redirect_base` (#95);
-  - stripping the page-state headers (O-12);
-  - IPFS's small-text relabelling for navigations.
-
-  They are data, so main's applier is a few lines and its vectors come from `fc-dweb`.
-- **`trust`** carries the name's trust from naming, and a **content** label, for display only:
+- **`node`** is a reference. Main maps `ant` and `ipfs` to the backend it named in the request, as 0004 maps endpoint references. The core never learns a node's URL (0004 *Secrets*).
+- **`retry` and `timers`** are today's values for the scheme and backend:
+  - **`bzz:`** makes up to ten attempts, each with 30 s to the response headers, separated by about 50 s of back-off in all.
+  - **Native IPFS** has a 15 s queue bound and 30 s to the headers, and no retry.
+  - **The external IPFS gateway** has no header timeout, as today, and no retry.
+  - **`body_idle_ms`** is new for all of them (deviation `body-idle`, [Main's executor](#main-executes-the-plan)).
+- **`response`** names the response operations main runs, in order ([below](#response-operations)). They depend on the bytes, so they stay in main.
+- **`trust`** carries the name's trust from naming and a **content** label from `backend`, for display only:
   - `node_asserted`: the bundled Ant, which validates the chunks it fetches, and the native IPFS node, which hash-checks blocks;
   - `unverified`: an external Ant, or an IPFS path gateway.
 
@@ -124,42 +128,101 @@ All of this is today's behavior, ported with vectors:
   - gateway-form URLs get the canonical 307, or a 400 when no case-safe form exists;
   - name hosts resolve as for `bzz:`.
 - **`ipfs:` headers:** today's strip-list (`host`, `origin`, `referer`, `cookie`, `authorization`, hop-by-hop). The asymmetry with `bzz:`'s allowlist is kept (parity); unifying them is an [open question](#open-questions).
+- **The response operations** each scheme needs, and in which order.
 - **Errors:** today's statuses and JSON bodies, `{ code, message }`.
 
 ### `chain.html` (4.3)
 
 | Method | Params | Result |
 |---|---|---|
-| `chain.html` | `{ chain_id, contract, origin, deadline_ms }` | `{ html_base64, hash, source, trust, gate }` |
+| `chain.html` | `{ chain_id, contract, origin, deadline_ms }` | `{ html_base64, hash, source, trust, class, generation }` |
 
-- **A request on 0005's machine:** an `eth_call` of `html()` (selector `0x33c34ac3`) at `latest`, interactive for `origin`, as today. The core:
-  - decodes the ABI string;
-  - checks UTF-8;
-  - applies the 8 MiB cap: 413 when exceeded;
-  - computes `hash = keccak256(utf8(html))`.
+- **A request on 0005's machine:** an `eth_call` of `html()` (selector `0x33c34ac3`) at `latest`, interactive for `origin`, as today. The core then checks the answer as today's `onchain-html.js` does, with vectors:
+  - the encoded answer may be at most `MAX_HTML_BYTES + 95` bytes before any decode, or the result is 413 (`too_large`);
+  - the ABI string is decoded with ethers' function-result rules, then checked as UTF-8;
+  - the decoded document may be at most 8 MiB (413);
+  - `hash = keccak256(utf8(html))`.
 
   This replaces the worker thread and its ethers decode.
 - **`html_base64`** carries the document's UTF-8 bytes. Base64 keeps the reply within 0005's message cap at 10.7 MiB, where a JSON string of control characters could grow six-fold.
-- **`gate`** is today's decision, made in the core:
-  - **`pass`:** the trust is `verified` or `user-configured`;
-  - **`conflict`:** the quorum had dissenters and the trust isn't `verified`. It gets no approval token;
-  - **`stage`:** anything else.
+- **`class`** is a stateless classification. It is the gate's input, not its decision:
+  - `trusted`: the trust is `verified` or `user-configured`;
+  - `conflict`: the quorum had dissenters and the trust isn't `verified`;
+  - `untrusted`: anything else.
+- **Main decides, in today's order** (`onchain-app-protocol.js:399-470`):
+  1. a GET carrying a staged document's approval token serves that document, consuming the token, with no chain read and no core call;
+  2. otherwise main asks `chain.html`;
+  3. an exactly approved `(chain, contract, hash)` passes, whatever `class` says;
+  4. `trusted` passes;
+  5. a HEAD that hasn't passed returns 200 with no body, and stages nothing;
+  6. `conflict` gets a 451 with no token;
+  7. `untrusted` is staged, and gets a 451 with a token and the interstitial.
 
-  Whether a `verified` quorum with dissenters should still pass is an [open question](#open-questions); the core keeps today's rule.
-- **Main keeps** the staged documents, the session's approvals, the 451 and its interstitial, the CSP and the response headers. They all need `webContents` or the session.
-- **Cancellation:** main sends 0001's `cancel` when the navigation aborts. Today the chain read runs on (deviation `web3-cancel`).
+  Whether a `verified` quorum with dissenters should still pass is an [open question](#open-questions); `class` keeps today's rule.
+- **Errors:** a 413 means only that the document is too large. A deadline or a cancel is 504, as today, `busy` is 503, and other failures are 502. 0005's other bounds don't map to 413.
+- **Generations:** results and errors carry the chain's generation. Main fences them with 0005's single resend (0005 *Generations*).
+- **Cancellation:** main sends 0001's `cancel` when the navigation aborts, and the chain read stops (deviation `web3-cancel`). Cancelling the plan and cancelling the body that follows are separate things: a `chain.html` result is whole when it arrives.
 
-## Main's executor
+## Main executes the plan
 
-- **`bzz:` uses the session's network stack** (`net.fetch` on the request's session) instead of Node's undici (deviation `transport`). An external Ant on a `.onion` host then follows the proxy and the onion gate (#360), as 0004 and 0005 do for RPC. A loopback Ant connects directly, as today.
-- **IPFS keeps its dispatch:** the native node's pull reads with real backpressure, or the external gateway through `net.request`.
-- **Main applies the plan:**
-  - it sends the node request with the plan's headers;
-  - it retries and enforces deadlines as the plan says;
-  - it transforms the response head;
-  - it streams the body as today, cancelling on the page's signal.
-- **Hash hosts:** main may plan a hash host locally only if the measurements require it ([Latency](#latency)), and then only with logic generated from the same vectors.
-- **Other callers keep working through the handlers:** `http-fetch.js` ("save image"), downloads, `permission-manifests.js` (which calls the `bzz:` handler in process) and `ens-prefetch.js`.
+### Validation before any dial
+
+A plan is input to check, not permission to dial. Main refuses a plan (502, logged as a core fault) unless all of these hold:
+- `node` names the backend main sent;
+- the method is the request's own;
+- `path`, after URL normalization, stays in the node's namespace:
+  - for Ant, `/bzz/<64 or 128 hex>` and below;
+  - for IPFS, `/ipfs/<cid>` or `/ipns/<name>` and below;
+  - no `..` escapes, no encoded separators, no scheme or authority;
+- the headers are among the policy's names.
+
+### Transport
+
+- **A loopback Ant**, bundled or external, is dialled with undici as today. It needs no proxy, and the dial stays outside the session's `webRequest`.
+- **A non-loopback Ant** (deviation `transport`, #360) is dialled with `net.request` on the request's session, with the properties `ipfs/gateway-transport.js` already gives the external IPFS gateway:
+  - `redirect: "manual"`, so a 3xx comes back and is never followed in main;
+  - the onion refusal before dialling when `resolveProxy` would fall back to DIRECT;
+  - credentials omitted, a `no-store` cache mode and no custom handlers.
+
+  `net.fetch` can't do this: it follows redirects, or rejects a manual one, and it always uses the default session.
+- **The Ant API guard** stays. A frameless dial to the configured Ant is cancelled unless announced (`ant-api-guard.js`). Main announces exactly this content dial, as `ens-prefetch.js` does, and releases it on every terminal path. The node's origin isn't exempted, and neither is frameless traffic.
+- **The `web3:` and `radapi:` frame guards** are unchanged.
+- **IPFS keeps its dispatch:** the native node's pull reads with real backpressure, or the external gateway through `gatewayFetch`.
+- **Logging:** main keeps the private-window log context (`runWithPrivateLogContext`) around the whole execution.
+
+### Response operations
+
+These stay in main, because they depend on the bytes. Each is today's code, run when the plan names it:
+
+- **`canonicalize_redirect`** (`lib/gateway-location.js`): rewrites a gateway-space `Location` relative to the gateway request's directory, comparing decoded path segments, and leaves cross-origin and up-directory `Location`s untouched (#95). On a rewrite, `bzz:` cancels and drops the body and removes the length and encoding headers.
+- **`strip_page_state`** (O-12): removes `Set-Cookie`, `Set-Cookie2` and `Service-Worker-Allowed`.
+- **`strip_decoded_encoding`** (the external IPFS gateway): removes the decoded body's `content-encoding` and `content-length` and the hop-by-hop headers.
+- **`small_text`** (IPFS navigations only). It relabels a body as `text/plain` with `nosniff` only when all of these hold:
+  - the request is a GET and the status 200;
+  - a positive declared length of at most 4096 bytes matches the body at EOF;
+  - there is no `Content-Disposition`, `nosniff` or range;
+  - the body is valid UTF-8 without forbidden control characters.
+
+  Otherwise the buffered bytes are replayed intact.
+- **Unchanged:** statuses with no body, and `206`, `416` and `If-Range`, which pass through as received.
+
+`fc-dweb` carries the same operations with the same vectors, for Stage 2 and mobile. In Electron, main's existing code runs them.
+
+### Deadlines, cancel and bounds
+
+- **Retry:** the retry loop and its back-off stop when the page's signal aborts, as today. A retried attempt's body is cancelled before the next attempt.
+- **Body idle (deviation `body-idle`).** Main wraps the body in a pull-driven `ReadableStream`. The idle clock runs only while Chromium has asked for bytes and none have come. A paused video, which asks for nothing, is never cut off. A body that leaves a pending read unanswered for 60 s fails as a truncated resource (`controller.error`).
+- **Admission in main:**
+  - at most 256 active dweb fetches across sessions, and 512 waiting;
+  - a request beyond that gets 503 at once;
+  - each fetch owns its node handle, its sniff buffer (at most 4 KiB) and its retry state, and frees them on every terminal path: done, error, cancel, or the session closing.
+- **Local failures map to HTTP:** `busy` → 503, `deadline` → 504, `too_large` → 414 or 431 as above, and a refused plan → 502.
+- **Readiness keeps today's order.** `bzz:` checks that Ant is up before anything else, and a missing Ant is an immediate 503 before any name resolution. IPFS checks its node or gateway at dispatch, as today.
+
+### Other callers
+
+- **Through the handlers:** `http-fetch.js` ("save image"), downloads, and `permission-manifests.js`, which calls the `bzz:` handler in process and passes its session and private context explicitly.
+- **Not through the handlers:** `ens-prefetch.js` warms Ant by calling `gatewayFetch` directly. It keeps its own transport and guard announcement, unchanged by this design.
 
 ## Latency
 
@@ -213,18 +276,22 @@ Before step 4 moves a handler:
 | Budget | Bound | Exhausted |
 |---|---|---|
 | `dweb.open` admission | naming's (0004) | `busy`: main answers 503 |
+| a `dweb.open` request | one frame; URL ≤ 64 KiB, headers ≤ 64 KiB | 414 / 431 in main, before asking |
 | per-request state in the core | none after the plan | — |
-| body idle (main) | 60 s | the body errors as truncated |
-| `chain.html` | 0005's bounds; the document ≤ 8 MiB | 413 |
+| active / waiting dweb fetches (main) | 256 / 512 | 503 at once |
+| sniff buffer (main) | 4 KiB per fetch | the body is replayed intact |
+| body idle (main) | 60 s with a read pending | the body errors as truncated |
+| `chain.html` | 0005's bounds; encoded ≤ `MAX_HTML_BYTES + 95`, document ≤ 8 MiB | 413 for size only |
 
 ## Deviations
 
 | ID | Today | After | Effect |
 |---|---|---|---|
-| `transport` | `bzz:` through undici, outside the session | the session's stack | an external `.onion` Ant follows the proxy and onion gate (#360) |
-| `body-idle` | no body idle timeout | 60 s | a stalled body fails as truncated instead of hanging |
+| `transport` | a non-loopback Ant through undici, outside the session | `net.request` on the request's session, with manual redirects and the onion refusal | an external `.onion` Ant follows the proxy and onion gate (#360) |
+| `body-idle` | no body idle timeout | 60 s with a read pending; paused streams untouched | a stalled body fails as truncated instead of hanging |
+| `fetch-admission` | unbounded | 256 active, 512 waiting | 503 under extreme load |
 | `web3-cancel` | an aborted navigation leaves the chain read running | `cancel` reaches it | |
-| `web3-decode` | ethers in a worker | the core | same document, same hash; the worker goes |
+| `web3-decode` | ethers in a worker | the core | the same document, hash and 413s; the worker goes |
 | `hash-host-hop` | hash hosts need no lookup | one planning round trip | measured ([Latency](#latency)) |
 
 ## Implementation steps
@@ -234,15 +301,15 @@ Before step 4 moves a handler:
    - the URL and host canonicalization for `bzz:`, `ipfs:` and `ipns:`;
    - the header policies;
    - the retry and deadline tables;
-   - the response-head transforms (redirect canonicalization, header stripping, small text);
+   - the response operations (redirect canonicalization, header stripping, small text), pinned by vectors that main's existing code also passes;
    - the status mapping;
-   - the `html()` decode, cap and hash;
+   - the `html()` precheck, decode, caps, hash and classification;
    - byte parity with the pinned JS.
 3. **`freedom-cored`:** `dweb.open` on the naming thread, and `chain.html` on 0005's machine (after 0005's machine lands).
 4. **freedom-browser:**
-   - the handlers execute plans;
-   - `bzz:` moves onto the session stack;
-   - the body idle timeout;
+   - the handlers validate and execute plans, under the naming driver's fence;
+   - a non-loopback Ant moves onto the session stack, with the guard's announcement;
+   - the body idle timeout and the fetch admission;
    - `web3:` uses `chain.html`, with cancel;
    - the latency measurement.
 5. **Service processes:** the freedom-ipfs and libradicle designs, then their binaries.
