@@ -519,7 +519,7 @@ function buildNumbers() {
     const x = view.getFloat64(0);
     if (!Number.isNaN(x)) out.push({ bits: view.getBigUint64(0).toString(16).padStart(16, '0'), js: String(x) });
   };
-  for (const x of [-1221953339504170.3, 0.1 + 0.2, 1e21, 1e-7, 5e-324, 1.7976931348623157e308, 9007199254740993, 123456789012345680000]) {
+  for (const x of [-1221953339504170.3, 137839762462415.625, 0.1 + 0.2, 1e21, 1e-7, 5e-324, 1.7976931348623157e308, 9007199254740993, 123456789012345680000]) {
     view.setFloat64(0, x);
     add();
   }
