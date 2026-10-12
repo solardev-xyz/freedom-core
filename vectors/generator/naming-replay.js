@@ -1594,6 +1594,25 @@ function verifiedPaths(ethers, base, one, order, GOOD, lookup) {
     one('myotis-not-ready-falls-to-quorum', base({ network: order(['myotis', 'quorum']), myotis: { enabled: true, ready: false } })),
     one('colibri-verified', base({ network: order(['colibri', 'quorum']), colibri: COLIBRI({ resolve: GOOD }) })),
     one('colibri-resolver-not-found', base({ network: order(['colibri', 'quorum']), colibri: COLIBRI({ resolve: { revert: notFound } }) })),
+    // A label of 150 é (300 bytes) through each verified method alone:
+    // its adapter's universalResolverCall refuses it in dnsEncode, and
+    // that error is what the lookup ends with.
+    {
+      id: 'myotis-label-over-255-bytes',
+      world: base({ network: order(['myotis']), myotis: { enabled: true, ready: true, calls: { resolve: GOOD } } }),
+      steps: [
+        { call: content(`${'é'.repeat(150)}.eth`) },
+        { after: 1000, call: { fn: 'resolveEnsAddress', args: [`${'é'.repeat(150)}.eth`] } },
+      ],
+    },
+    {
+      id: 'colibri-label-over-255-bytes',
+      world: base({ network: order(['colibri']), colibri: COLIBRI({ resolve: GOOD }) }),
+      steps: [
+        { call: content(`${'é'.repeat(150)}.eth`) },
+        { after: 1000, call: { fn: 'resolveEnsAddress', args: [`${'é'.repeat(150)}.eth`] } },
+      ],
+    },
     one('colibri-unavailable-falls-to-quorum', base({ network: order(['colibri', 'quorum']), colibri: COLIBRI({ resolve: { unavailable: true } }) })),
     // Colibri with ethers' built-in CCIP-Read, and two operations at once:
     // every raw call belongs to its own operation.
@@ -1696,7 +1715,7 @@ function addressAndReverse(ethers, base, one) {
       world: base({}),
       steps: [
         { call: content(`${'é'.repeat(150)}.eth`) },
-        { after: 1000, call: address(`${'é'.repeat(150)}.eth`) },
+        { after: 1000, call: { fn: 'resolveEnsAddress', args: [`${'é'.repeat(150)}.eth`] } },
         { after: 1000, call: content(`${'a'.repeat(255)}.eth`) },
       ],
     },
