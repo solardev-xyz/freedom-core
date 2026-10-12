@@ -121,7 +121,7 @@ Myotis and Colibri keep running in main, through today's adapters, **one whole o
 - **The adapters guard themselves.** An operation that crosses a change of Myotis availability fails inside the adapter:
   - `verifiedRequest` checks around each raw call and throws `MYOTIS_UNAVAILABLE`, which is `{ failure: "lifecycle" }`;
   - the record operation's `MyotisProvider` checks the epoch it started with before and after each raw call. Its error carries no code, so it is `{ failure: "error" }` (`myotis-lifecycle-between-calls`).
-- **`failure`** is a closed set of classes (`unavailable`, `lifecycle`, `timeout`, `too_large`, `error`) and carries no text. A failure is a method error, and the order continues. That includes `lifecycle`, which is today's `MYOTIS_UNAVAILABLE` from `verifiedRequest`; the epoch change itself restarts the lookup ([Sessions](#sessions)).
+- **`failure`** is a closed set of classes (`unavailable`, `lifecycle`, `timeout`, `too_large`, `error`) and carries no text. `lifecycle` is today's `MYOTIS_UNAVAILABLE` from `verifiedRequest`. The method that made the operation handles a failure as today's code handles that adapter's error ([Verified methods](#verified-methods)).
 - **Reply size:** main serializes each reply first. One over 1 MiB (a large return, revert or name) is replaced by `{ failure: "too_large" }`: a method error, so the order continues (deviation `verified-reply-size`).
 - **Provenance:** a `revert` is the verifier's proven revert data. The core records which verifier produced it.
 - **The adapters' own bounds** are unchanged. Main bounds physical work: at most 8 operations per verifier are running, counted until the adapter's promise actually settles, not when the core cancels. Beyond that, main answers `{ failure: "unavailable" }` at once.
@@ -257,11 +257,14 @@ The rules below restate the reference, so a reviewer can check them against the 
   - **Calls:** through `{ colibri: … }`, whose single client rebuild and retry wraps the whole operation (`colibri-unavailable-falls-to-quorum`: two verified attempts, then quorum).
   - **Results:** a proven `ResolverNotFound` is a verified `NO_RESOLVER` (`colibri-resolver-not-found`). Any other failure is a method error, and the order continues.
   - **Trust:** `prover` is the prover's host, and `proof` is `ZK sync-committee proof` or `Sync-committee proof` (from `zk`).
-- **Lifecycle, two outcomes, as in the reference:**
-  - **The operation fails** inside its adapter ([Verified operations](#verified-operations)): a method error, and the order continues. The attempt crossed a change, so at its end it is discarded and the session restarts ([Sessions](#sessions); `myotis-record-lifecycle-mid-operation`, `myotis-call-lifecycle-mid-operation`, `myotis-lifecycle-between-calls`).
-  - **The operation succeeds, but the core's own check after it fails** (today's `MYOTIS_LIFECYCLE_CHANGED` in `tryMyotisPath` and `tryMyotisReverse`): the method order is aborted at once and the session restarts.
-    - **The check:** Myotis' readiness and epoch, as the last `naming.availability` gave them, against their values when the method began.
-    - **Reachability:** timers can't reach this, in the reference or in the core. A successful operation's last guard ran in the turn it settled, and main sends `naming.availability` from the transition itself, ahead of any later reply on the same connection. Unit tests in the core cover it.
+- **A Myotis method and its operations:** a method (`tryMyotisPath`, `tryMyotisReverse`) runs one or more operations. A forward lookup runs one. A reverse runs the ENS reverse record and then, for WNS and GNS in turn, a reverse call and a forward check.
+  - **A failed operation** is handled where today's code handles that error. A failed WNS or GNS forward check is caught inside the reverse: the claim stays unverified, and the next system is tried. Any other failure leaves the method.
+  - **The method-wide check:** when the method ends without an error escaping, the core compares Myotis' readiness and epoch, as the last `naming.availability` gave them, against their values when the method began (today's `MYOTIS_LIFECYCLE_CHANGED` in `tryMyotisPath` and `tryMyotisReverse`). On a change the method order is aborted at once, and the session restarts.
+  - **An error that leaves the method** is a method error, and the order continues. If the attempt crossed a change, it is discarded at its end and the session restarts ([Sessions](#sessions)).
+- **Lifecycle vectors:**
+  - **A forward operation fails on a change:** `myotis-record-lifecycle-mid-operation`, `myotis-call-lifecycle-mid-operation`, `myotis-lifecycle-between-calls`. It falls back to quorum, then restarts.
+  - **A reverse's forward check fails on a change:** `myotis-reverse-lifecycle-forward-check`. GNS is tried, the method-wide check fails, and the lookup restarts through Myotis at once with no quorum I/O.
+  - **The ordering:** main sends `naming.availability` from the transition itself, ahead of any later reply on the same connection, so the core's check sees every change the reference's would.
 
 ### Method order
 
@@ -287,7 +290,7 @@ These follow `doResolveEnsContent`, `doResolveEnsAddress` and `doResolveEnsRever
   - The zero address and empty bytes are `NO_ADDRESS` (`address-*`).
 - **Reverse:**
   - **ENS:** through the UR's `reverse`, as an `(outcome, detail)` agreement value. A `ReverseAddressMismatch` is `UNVERIFIED` with the claimed name (`reverse-*`).
-  - **WNS, then GNS:** on chain 1, an ENS `NO_REVERSE` falls back to WNS, then GNS, through **the same method** that produced the ENS answer. A claim is checked by a forward `addr` through that method too (`reverse-ens-empty-then-wns`, `reverse-ens-and-wns-empty-then-gns`, `reverse-wns-claim-fails-forward-then-gns-empty`).
+  - **WNS, then GNS:** on chain 1, an ENS `NO_REVERSE` falls back to WNS, then GNS, through **the same method** that produced the ENS answer. A claim is checked by a forward `addr` through that method too. A failed forward check leaves the claim unverified, and the next system is tried (`reverse-ens-empty-then-wns`, `reverse-ens-and-wns-empty-then-gns`, `reverse-wns-claim-fails-forward-then-gns-empty`; through Myotis, [Verified methods](#verified-methods)).
   - **Provisional:** a result that is `unverified` or `UNVERIFIED`.
   - **Error outcomes** agree by their [agreement identity](#errors-agreement-and-text), not by display text.
 
