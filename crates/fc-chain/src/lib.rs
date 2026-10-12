@@ -19,12 +19,14 @@
 //!   [`log_query_span`] and the range refusal ([`log_range_refusal_text`]).
 //! - Blockscout's log index: [`log_index_filter`], the transfer mappers,
 //!   [`logs_agree`], [`cooldown_from`] and the paged [`TransferScan`].
-//! - A broadcast's hash: [`transaction_hash`].
+//! - A broadcast's hash and attempts: [`transaction_hash`],
+//!   [`broadcast_refusal`], [`classify_broadcast_answer`]. The refusal
+//!   predicates are the design's own (deviation `broadcast-outcome`).
 //!
 //! Deviations, each pinned by vectors: `json-depth` (nesting deeper than
 //! 512 levels is refused), `json-parse-text` (a fixed text for a body that
 //! isn't JSON), `bigint-width` (decimal input, gas prices and Myotis
-//! numbers wider than 4096 bits are refused).
+//! numbers wider than 4096 bits are refused) and `broadcast-outcome`.
 //!
 //! The crate does no I/O.
 
@@ -32,6 +34,7 @@ mod answer;
 mod ant;
 mod bigint;
 mod blockscout;
+mod broadcast;
 mod fee;
 mod js;
 mod logs;
@@ -61,6 +64,7 @@ pub use blockscout::{
     cooldown_from, log_index_filter, logs_agree, rpc_transfer, rpc_transfer_log_well_formed,
     rpc_transfer_logs_well_formed, transfers_json,
 };
+pub use broadcast::{AttemptClass, RefusalReason, broadcast_refusal, classify_broadcast_answer};
 pub use fee::{FeeQuote, fee_quote};
 pub use js::{JsError, JsString, is_js_whitespace};
 pub use logs::{

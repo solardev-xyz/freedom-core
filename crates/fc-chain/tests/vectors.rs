@@ -6,21 +6,22 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use fc_chain::{
-    ANT_EXCLUDE_SOURCES, ANT_INCLUDE_SOURCES, ANT_LOG_SCAN_SHRINK_NEEDLES, AnswerError, BLOCKSCOUT,
-    BLOCKSCOUT_MAX_PAGES, BlockscoutError, ERC20_TRANSFER_TOPIC, ErrorRank, JSON_PARSE_FAILURE,
-    JsString, LOG_INDEX_ABORT_COOLDOWN_MS, LOG_INDEX_CHAIN_ID, LOG_INDEX_DISAGREEMENT_COOLDOWN_MS,
-    LOG_INDEX_PAIR_MALFORMED_COOLDOWN_MS, LOG_INDEX_TAIL_BLOCKS, LOG_INDEX_TOKEN,
-    LOG_RANGE_CAP_TTL_MS, LOG_RANGE_REFUSAL_CODE, LOG_SCAN_COOLDOWN_MS, LOG_SCAN_QUORUM_ROUNDS,
-    LOG_SCAN_QUORUM_TIMEOUT_MS, LOG_TRUNCATION_MIN_SPAN, LOG_TRUNCATION_TAIL_BLOCKS,
-    LogIndexFilter, MAX_COOLDOWN_MS, MAX_DECIMAL_BITS, MAX_MYOTIS_REFUSAL_MESSAGE, MAX_PAGE_SIZE,
-    MIN_COOLDOWN_MS, MYOTIS_BLOB_FIELDS, MYOTIS_NOT_READY, MyotisFailure, MyotisOperation, Outcome,
-    PageReply, Party, RATE_LIMIT_COOLDOWN_MS, READ_METHODS, ReceivedError, SINGLE_NODE_METHODS,
+    ANT_EXCLUDE_SOURCES, ANT_INCLUDE_SOURCES, ANT_LOG_SCAN_SHRINK_NEEDLES, AnswerError,
+    AttemptClass, BLOCKSCOUT, BLOCKSCOUT_MAX_PAGES, BlockscoutError, ERC20_TRANSFER_TOPIC,
+    ErrorRank, JSON_PARSE_FAILURE, JsString, LOG_INDEX_ABORT_COOLDOWN_MS, LOG_INDEX_CHAIN_ID,
+    LOG_INDEX_DISAGREEMENT_COOLDOWN_MS, LOG_INDEX_PAIR_MALFORMED_COOLDOWN_MS,
+    LOG_INDEX_TAIL_BLOCKS, LOG_INDEX_TOKEN, LOG_RANGE_CAP_TTL_MS, LOG_RANGE_REFUSAL_CODE,
+    LOG_SCAN_COOLDOWN_MS, LOG_SCAN_QUORUM_ROUNDS, LOG_SCAN_QUORUM_TIMEOUT_MS,
+    LOG_TRUNCATION_MIN_SPAN, LOG_TRUNCATION_TAIL_BLOCKS, LogIndexFilter, MAX_COOLDOWN_MS,
+    MAX_DECIMAL_BITS, MAX_MYOTIS_REFUSAL_MESSAGE, MAX_PAGE_SIZE, MIN_COOLDOWN_MS,
+    MYOTIS_BLOB_FIELDS, MYOTIS_NOT_READY, MyotisFailure, MyotisOperation, Outcome, PageReply,
+    Party, RATE_LIMIT_COOLDOWN_MS, READ_METHODS, ReceivedError, RefusalReason, SINGLE_NODE_METHODS,
     ScanStep, SourceFailure, StableDigest, TransferScan, TxHash, agreed_rpc_logs,
     ant_shrinks_log_scan_on, blockscout_transfer, broadcast_failure_text, canonical_log,
-    cooldown_from, decode_answer, fee_quote, fee_quote_failure_text, is_js_whitespace,
-    is_read_method, log_index_filter, log_query_span, log_range_refusal_text, log_scan_range_cap,
-    logs_agree, myotis_answer, myotis_operation, myotis_trust, no_source_left_text,
-    normalize_params, rank_log_scan_error, request_failure_text, rpc_transfer,
+    classify_broadcast_answer, cooldown_from, decode_answer, fee_quote, fee_quote_failure_text,
+    is_js_whitespace, is_read_method, log_index_filter, log_query_span, log_range_refusal_text,
+    log_scan_range_cap, logs_agree, myotis_answer, myotis_operation, myotis_trust,
+    no_source_left_text, normalize_params, rank_log_scan_error, request_failure_text, rpc_transfer,
     rpc_transfer_log_well_formed, safe_error_message, source_order, source_serves_method,
     stable_digest, stable_value, transaction_hash, transfers_json, unsupported_read_method_text,
 };
@@ -929,4 +930,60 @@ fn blockscout_scans() {
         }
     }
     assert!(scans.len() > 40);
+}
+
+#[test]
+fn broadcast_refusals() {
+    let vectors = vectors();
+    let refusals = &vectors["broadcast_refusals"];
+    assert_eq!(refusals["deviation"], "broadcast-outcome");
+    let hash = TxHash::from_hex(str_of(refusals, "hash")).unwrap();
+    assert_eq!(transaction_hash(str_of(refusals, "raw")), Ok(hash));
+    let class_of = |design: &Json| match str_of(design, "class") {
+        "accepted" => AttemptClass::Accepted,
+        "ambiguous" => AttemptClass::Ambiguous,
+        "refused" => {
+            let reason = str_of(design, "reason");
+            let all = [
+                RefusalReason::InsufficientFunds,
+                RefusalReason::NonceTooLow,
+                RefusalReason::ReplacementUnderpriced,
+                RefusalReason::Underpriced,
+                RefusalReason::IntrinsicGasTooLow,
+                RefusalReason::ExceedsBlockGasLimit,
+                RefusalReason::FeeCapBelowBaseFee,
+                RefusalReason::TipAboveFeeCap,
+                RefusalReason::InvalidSender,
+                RefusalReason::InvalidChainId,
+                RefusalReason::OversizedData,
+                RefusalReason::TransactionTypeNotSupported,
+            ];
+            AttemptClass::Refused(*all.iter().find(|r| r.as_str() == reason).unwrap())
+        }
+        other => panic!("{other}"),
+    };
+    let mut refused = std::collections::HashSet::new();
+    for key in ["errors", "attempts"] {
+        for case in refusals[key].as_array().unwrap() {
+            let status = u16::try_from(case["status"].as_u64().unwrap()).unwrap();
+            let answer = decode_answer(status, str_of(case, "body").as_bytes().to_vec());
+            // The classifier reads the error the router builds today.
+            if let (Ok(decoded), Some(error)) = (&answer, case["js"].get("error"))
+                && let Outcome::NodeError(node) = decoded.outcome()
+            {
+                assert_eq!(
+                    node.message.to_json(),
+                    str_of(error, "message_json"),
+                    "{case}"
+                );
+            }
+            let class = classify_broadcast_answer(&hash, &answer);
+            assert_eq!(class, class_of(&case["design"]), "{case}");
+            if let AttemptClass::Refused(reason) = class {
+                refused.insert(reason);
+            }
+        }
+    }
+    // Every reason has a client's wording.
+    assert_eq!(refused.len(), 12);
 }
