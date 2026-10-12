@@ -627,6 +627,7 @@ These refine 0003's step 4:
    - **Order:** timers fire in (time, creation) order with a poll after each, as JavaScript runs microtasks between callbacks.
    - **I/O:** a request is an effect the driver answers. Dropping one cancels it.
 2. **`freedom-cored`:** the `naming.*` methods, the `shell.*` requests, admission, the naming thread and the budgets. Measure cached subresource fan-out under concurrent vault work (0003 decision 4) before committing to core-owned caches.
+   - **Measured** (`cached_fanout_under_vault_work`, a release build on a 4-core dev server, 2026-10-12): a page's worth of cache hits, 50 sent at once and repeated 20 times, replies in 1.6 ms median and 3.0 ms p99. With 16 password checks' KDFs in flight (2.9 s of vault work, run one at a time) it is 3.3 ms median and 5.1 ms p99. The naming thread doesn't wait on vault work, so the core keeps the cache.
 3. **freedom-browser:** main's executors, the verified operations around today's adapters, and the result mapping. The resolvers become drivers (0003 step 5).
 
 ## Open questions
