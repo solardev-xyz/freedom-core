@@ -34366,6 +34366,849 @@
       ]
     },
     {
+      "id": "deviation-abandoned-exchanges",
+      "system": "ens",
+      "seed": 7,
+      "deviation": "abandoned-exchanges",
+      "patches": [
+        {
+          "id": "abandoned-exchanges",
+          "text": "A leg the wave stopped waiting for is cancelled: whatever it settles to afterwards leaves quarantine alone.",
+          "source": {
+            "ens-resolver.js": {
+              "edits": [
+                [
+                  "    for (const fn of cancelToken.cleanups) fn();",
+                  "    cancelToken.abandoned = true;\n    for (const fn of cancelToken.cleanups) fn();"
+                ],
+                [
+                  "    markProviderSuccess(url);\n    return { url, status: 'data'",
+                  "    if (!cancelToken?.abandoned) markProviderSuccess(url);\n    return { url, status: 'data'"
+                ],
+                [
+                  "      markProviderSuccess(url);\n      return { url, status: 'error', error: err };",
+                  "      if (!cancelToken?.abandoned) markProviderSuccess(url);\n      return { url, status: 'error', error: err };"
+                ],
+                [
+                  "      markProviderSuccess(url);\n      return { url, status: 'not_found', reason: 'NO_RESOLVER' };",
+                  "      if (!cancelToken?.abandoned) markProviderSuccess(url);\n      return { url, status: 'not_found', reason: 'NO_RESOLVER' };"
+                ],
+                [
+                  "      markProviderFailure(url);\n      return { url, status: 'error', error: err };",
+                  "      if (!cancelToken?.abandoned) markProviderFailure(url);\n      return { url, status: 'error', error: err };"
+                ],
+                [
+                  "    markProviderSuccess(url);\n    return { url, status: 'not_found', reason: 'NO_CONTENTHASH', error: err };",
+                  "    if (!cancelToken?.abandoned) markProviderSuccess(url);\n    return { url, status: 'not_found', reason: 'NO_CONTENTHASH', error: err };"
+                ]
+              ],
+              "append": []
+            }
+          }
+        }
+      ],
+      "world": {
+        "endpoints": [
+          "https://a.rpc.example",
+          "https://b.rpc.example",
+          "https://c.rpc.example",
+          "https://d.rpc.example"
+        ],
+        "network": {
+          "verification": {
+            "order": [
+              "quorum"
+            ],
+            "preferVerified": false
+          },
+          "quorum": {
+            "k": 3,
+            "m": 2,
+            "timeoutMs": 5000,
+            "anchor": "latest",
+            "anchorTtlMs": 30000
+          }
+        },
+        "calls": {
+          "resolve": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000"
+          },
+          "resolve:addr": {
+            "data": "0x000000000000000000000000000000000000000000000000000000000000004000000000000000000000000022222222222222222222222222222222222222220000000000000000000000000000000000000000000000000000000000000020000000000000000000000000abababababababababababababababababababab",
+            "delay": 50
+          }
+        },
+        "hosts": {
+          "c.rpc.example": {
+            "calls": {
+              "resolve:contenthash": {
+                "rpc_error": {
+                  "code": -32603,
+                  "message": "internal error"
+                }
+              },
+              "resolve:addr": {
+                "data": "0x000000000000000000000000000000000000000000000000000000000000004000000000000000000000000022222222222222222222222222222222222222220000000000000000000000000000000000000000000000000000000000000020000000000000000000000000abababababababababababababababababababab",
+                "delay": 500
+              }
+            }
+          }
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "resolveEnsContent",
+              "args": [
+                "vitalik.eth"
+              ]
+            },
+            {
+              "fn": "resolveEnsAddress",
+              "args": [
+                "vitalik.eth"
+              ]
+            }
+          ],
+          "results": [
+            {
+              "value": {
+                "type": "ok",
+                "name": "vitalik.eth",
+                "system": "ens",
+                "codec": "ipfs-ns",
+                "protocol": "ipfs",
+                "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+                "decoded": "QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+                "trust": {
+                  "level": "verified",
+                  "system": "ens",
+                  "block": {
+                    "number": 19999992,
+                    "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+                  },
+                  "agreed": [
+                    "b.rpc.example",
+                    "d.rpc.example"
+                  ],
+                  "dissented": [],
+                  "queried": [
+                    "c.rpc.example",
+                    "b.rpc.example",
+                    "d.rpc.example"
+                  ],
+                  "quorum": {
+                    "k": 3,
+                    "m": 2,
+                    "achieved": true
+                  }
+                }
+              },
+              "settled": 60
+            },
+            {
+              "value": {
+                "success": true,
+                "name": "vitalik.eth",
+                "system": "ens",
+                "address": "0xABaBaBaBABabABabAbAbABAbABabababaBaBABaB",
+                "trust": {
+                  "level": "verified",
+                  "system": "ens",
+                  "block": {
+                    "number": 19999992,
+                    "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+                  },
+                  "agreed": [
+                    "b.rpc.example",
+                    "d.rpc.example"
+                  ],
+                  "dissented": [],
+                  "queried": [
+                    "c.rpc.example",
+                    "b.rpc.example",
+                    "d.rpc.example"
+                  ],
+                  "quorum": {
+                    "k": 3,
+                    "m": 2,
+                    "achieved": true
+                  }
+                }
+              },
+              "settled": 100
+            }
+          ]
+        },
+        {
+          "at": 1100,
+          "after": 1000,
+          "call": {
+            "fn": "resolveEnsContent",
+            "args": [
+              "alice.eth"
+            ]
+          },
+          "results": [
+            {
+              "value": {
+                "type": "ok",
+                "name": "alice.eth",
+                "system": "ens",
+                "codec": "ipfs-ns",
+                "protocol": "ipfs",
+                "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+                "decoded": "QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+                "trust": {
+                  "level": "verified",
+                  "system": "ens",
+                  "block": {
+                    "number": 19999992,
+                    "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+                  },
+                  "agreed": [
+                    "b.rpc.example",
+                    "d.rpc.example"
+                  ],
+                  "dissented": [],
+                  "queried": [
+                    "b.rpc.example",
+                    "d.rpc.example",
+                    "a.rpc.example"
+                  ],
+                  "quorum": {
+                    "k": 3,
+                    "m": 2,
+                    "achieved": true
+                  }
+                }
+              },
+              "settled": 1120
+            }
+          ]
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 1,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 1,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 2,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 2,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 3,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 3,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 4,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 4,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 5,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 5,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 6,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 6,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 7,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 7,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 8,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 8,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 9,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 9,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 10,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 10,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 11,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 11,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 12,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 12,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 13,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 13,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 14,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 14,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 15,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 15,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 16,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 16,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 17,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b92300000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000d07766974616c696b0365746800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1ee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a5347583500000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 60,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32603,\"message\":\"internal error\"}}"
+          }
+        },
+        {
+          "id": 17,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 18,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b92300000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000d07766974616c696b0365746800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1ee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a5347583500000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 60,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000\"}"
+          }
+        },
+        {
+          "id": 18,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 19,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b92300000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000d07766974616c696b0365746800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1ee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a5347583500000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 60,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000\"}"
+          }
+        },
+        {
+          "id": 19,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 20,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b92300000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000d07766974616c696b03657468000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000243b3b57deee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a5347583500000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:addr",
+          "end": 550,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x000000000000000000000000000000000000000000000000000000000000004000000000000000000000000022222222222222222222222222222222222222220000000000000000000000000000000000000000000000000000000000000020000000000000000000000000abababababababababababababababababababab\"}"
+          }
+        },
+        {
+          "id": 20,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 21,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b92300000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000d07766974616c696b03657468000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000243b3b57deee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a5347583500000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:addr",
+          "end": 100,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x000000000000000000000000000000000000000000000000000000000000004000000000000000000000000022222222222222222222222222222222222222220000000000000000000000000000000000000000000000000000000000000020000000000000000000000000abababababababababababababababababababab\"}"
+          }
+        },
+        {
+          "id": 21,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 22,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b92300000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000d07766974616c696b03657468000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000243b3b57deee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a5347583500000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:addr",
+          "end": 100,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x000000000000000000000000000000000000000000000000000000000000004000000000000000000000000022222222222222222222222222222222222222220000000000000000000000000000000000000000000000000000000000000020000000000000000000000000abababababababababababababababababababab\"}"
+          }
+        },
+        {
+          "id": 22,
+          "step": 0,
+          "t": 60,
+          "kind": "prefetch",
+          "host": null,
+          "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+          "end": null,
+          "outcome": "open"
+        },
+        {
+          "id": 23,
+          "step": 1,
+          "t": 1110,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 23,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b92300000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000b05616c69636503657468000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec00000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 1120,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000\"}"
+          }
+        },
+        {
+          "id": 24,
+          "step": 1,
+          "t": 1110,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 24,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b92300000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000b05616c69636503657468000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec00000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 1120,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000\"}"
+          }
+        },
+        {
+          "id": 25,
+          "step": 1,
+          "t": 1110,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 25,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b92300000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000b05616c69636503657468000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec00000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 1120,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000\"}"
+          }
+        },
+        {
+          "id": 26,
+          "step": 1,
+          "t": 1120,
+          "kind": "prefetch",
+          "host": null,
+          "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+          "end": null,
+          "outcome": "open"
+        }
+      ],
+      "unpatched": [
+        [
+          {
+            "value": {
+              "type": "ok",
+              "name": "vitalik.eth",
+              "system": "ens",
+              "codec": "ipfs-ns",
+              "protocol": "ipfs",
+              "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+              "decoded": "QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+              "trust": {
+                "level": "verified",
+                "system": "ens",
+                "block": {
+                  "number": 19999992,
+                  "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+                },
+                "agreed": [
+                  "b.rpc.example",
+                  "d.rpc.example"
+                ],
+                "dissented": [],
+                "queried": [
+                  "c.rpc.example",
+                  "b.rpc.example",
+                  "d.rpc.example"
+                ],
+                "quorum": {
+                  "k": 3,
+                  "m": 2,
+                  "achieved": true
+                }
+              }
+            },
+            "settled": 60
+          },
+          {
+            "value": {
+              "success": true,
+              "name": "vitalik.eth",
+              "system": "ens",
+              "address": "0xABaBaBaBABabABabAbAbABAbABabababaBaBABaB",
+              "trust": {
+                "level": "verified",
+                "system": "ens",
+                "block": {
+                  "number": 19999992,
+                  "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+                },
+                "agreed": [
+                  "b.rpc.example",
+                  "d.rpc.example"
+                ],
+                "dissented": [],
+                "queried": [
+                  "c.rpc.example",
+                  "b.rpc.example",
+                  "d.rpc.example"
+                ],
+                "quorum": {
+                  "k": 3,
+                  "m": 2,
+                  "achieved": true
+                }
+              }
+            },
+            "settled": 100
+          }
+        ],
+        [
+          {
+            "value": {
+              "type": "ok",
+              "name": "alice.eth",
+              "system": "ens",
+              "codec": "ipfs-ns",
+              "protocol": "ipfs",
+              "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+              "decoded": "QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+              "trust": {
+                "level": "verified",
+                "system": "ens",
+                "block": {
+                  "number": 19999992,
+                  "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+                },
+                "agreed": [
+                  "b.rpc.example",
+                  "d.rpc.example"
+                ],
+                "dissented": [],
+                "queried": [
+                  "c.rpc.example",
+                  "b.rpc.example",
+                  "d.rpc.example"
+                ],
+                "quorum": {
+                  "k": 3,
+                  "m": 2,
+                  "achieved": true
+                }
+              }
+            },
+            "settled": 1120
+          }
+        ]
+      ]
+    },
+    {
       "id": "deviation-overall-deadline",
       "system": "ens",
       "seed": 7,

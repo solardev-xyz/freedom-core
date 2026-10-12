@@ -399,6 +399,22 @@ function __retire(effective, n) {
     text: "ethers' 429 back-off draws from its own stream (main's), not the shuffle's.",
     harness: ['random-streams'],
   }),
+  'abandoned-exchanges': () => ({
+    text: 'A leg the wave stopped waiting for is cancelled: whatever it settles to afterwards leaves quarantine alone.',
+    source: {
+      'ens-resolver.js': {
+        edits: [
+          ['    for (const fn of cancelToken.cleanups) fn();', '    cancelToken.abandoned = true;\n    for (const fn of cancelToken.cleanups) fn();'],
+          ["    markProviderSuccess(url);\n    return { url, status: 'data'", "    if (!cancelToken?.abandoned) markProviderSuccess(url);\n    return { url, status: 'data'"],
+          ["      markProviderSuccess(url);\n      return { url, status: 'error', error: err };", "      if (!cancelToken?.abandoned) markProviderSuccess(url);\n      return { url, status: 'error', error: err };"],
+          ["      markProviderSuccess(url);\n      return { url, status: 'not_found', reason: 'NO_RESOLVER' };", "      if (!cancelToken?.abandoned) markProviderSuccess(url);\n      return { url, status: 'not_found', reason: 'NO_RESOLVER' };"],
+          ["      markProviderFailure(url);\n      return { url, status: 'error', error: err };", "      if (!cancelToken?.abandoned) markProviderFailure(url);\n      return { url, status: 'error', error: err };"],
+          ["    markProviderSuccess(url);\n    return { url, status: 'not_found', reason: 'NO_CONTENTHASH', error: err };", "    if (!cancelToken?.abandoned) markProviderSuccess(url);\n    return { url, status: 'not_found', reason: 'NO_CONTENTHASH', error: err };"],
+        ],
+        append: [],
+      },
+    },
+  }),
   'null-block-hash': () => ({
     text: 'A null block hash fails like a missing block: out of the hash vote (and quarantined), and the single-source anchor fails.',
     source: {
@@ -634,9 +650,9 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
         const kind = callKind(to, data);
         const answer = pickAnswer([p.calls, world.calls], kind);
         if (!answer) return unscripted(`${kind} call to ${host}`);
-        if (answer.rpc_error) return { error: answer.rpc_error };
+        if (answer.rpc_error) return { error: answer.rpc_error, delay: answer.delay };
         if (answer.hang) return { hang: true };
-        return { result: answer.data };
+        return { result: answer.data, delay: answer.delay };
       }
       default:
         return unscripted(`${r.method} at ${host}`);
@@ -679,6 +695,8 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       // Node's socket timer is off at zero.
       const inactivity = req.timeout > 0 ? setTimeout(() => fail('request timeout', 'TIMEOUT'), req.timeout) : null;
       if (p.hang || answers.some((a) => a.hang)) return;
+      // A scripted answer's own `delay` beats the host's.
+      const delay = Math.max(-1, ...answers.map((a) => a.delay ?? -1));
       setTimeout(() => {
         // Cancelled at a session's deadline: the exchange never answers.
         if (entries.every((item) => item.outcome === 'cancelled')) return;
@@ -687,6 +705,7 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
         // `pad` grows each answer by a member JSON-RPC readers ignore.
         const padding = p.pad ? { pad: 'x'.repeat(p.pad) } : {};
         const out = answers.map(({ id, result, error }) => (error ? { jsonrpc: '2.0', id, error, ...padding } : { jsonrpc: '2.0', id, result, ...padding }));
+
         const redirect = scripted >= 300 && scripted < 400;
         const answer = scripted
           ? { status: scripted, body: '', ...(redirect ? { location: p.location } : {}) }
@@ -708,7 +727,7 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
         settled = true;
         const headers = answer.location ? { location: answer.location } : p.status || scripted ? {} : { 'content-type': 'application/json' };
         resolve({ statusCode: answer.status, statusMessage: answer.status === 200 ? 'OK' : 'Unavailable', headers, body: Buffer.from(answer.body) });
-      }, p.delay ?? 10);
+      }, delay >= 0 ? delay : p.delay ?? 10);
     });
   };
 
@@ -1286,6 +1305,7 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
   };
   const coder = ethers.AbiCoder.defaultAbiCoder();
   const revert = (data) => ({ rpc_error: { code: 3, message: 'execution reverted', data } });
+  const ADDRESS = { data: coder.encode(['bytes', 'address'], [coder.encode(['address'], ['0x' + 'ab'.repeat(20)]), '0x' + '22'.repeat(20)]) };
   const offchain = (urls, callData = '0x0102', extraData = '0x09') => revert('0x556f1830' + coder.encode(
     ['address', 'string[]', 'bytes', 'bytes4', 'bytes'], [UR, urls, callData, '0xdeadbeef', extraData]).slice(2));
   // An OffchainLookup whose URL array points every entry at one string,
@@ -1502,6 +1522,19 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
       { call: content() },
       { after: 1000, world: { endpoints: [...ENDPOINTS, 'https://e.rpc.example'] }, call: content('alice.eth') },
     ]),
+    // Two lookups at once: c fails the content lookup's leg (quarantined)
+    // while its slow address leg loses that wave. The reference's
+    // abandoned leg settles and clears c's quarantine, so the third lookup
+    // uses c; the core cancelled that leg, and c stays quarantined.
+    {
+      ...deviation('abandoned-exchanges', base({
+        calls: { resolve: GOOD, 'resolve:addr': { ...ADDRESS, delay: 50 } },
+        hosts: { 'c.rpc.example': { calls: { 'resolve:contenthash': { rpc_error: { code: -32603, message: 'internal error' } }, 'resolve:addr': { ...ADDRESS, delay: 500 } } } },
+      }), [
+        { calls: [content(), { fn: 'resolveEnsAddress', args: ['vitalik.eth'] }] },
+        { after: 1000, call: content('alice.eth') },
+      ]),
+    },
     // Every endpoint answers after a second; the session ends at 300 ms.
     deviation('overall-deadline', base({
       bounds: { deadlineMs: 300 },
