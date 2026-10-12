@@ -12,6 +12,7 @@ const { buildSigning } = require('./signing');
 const { buildNaming } = require('./naming');
 const { buildNamingReplay } = require('./naming-replay');
 const { buildChain } = require('./chain');
+const { buildChainReplay } = require('./chain-replay');
 
 const REFERENCE_COMMIT = 'fb540328162839e68150fe2c5e517edb86734d1c';
 const OUTPUT = path.resolve(__dirname, '..');
@@ -493,6 +494,12 @@ async function main() {
     // Signed with the first test wallet; ethers only hashes them.
     'chain.json': await buildChain(reference.checkout, reference.ethers,
       reference.derivation.deriveUserWallet(mnemonicFor('abandon-12'), 0).privateKey, reference.meta),
+    // Its broadcasts are signed with the same wallet.
+    'chain-replay.json': await buildChainReplay(reference.checkout, reference.ethers,
+      reference.derivation.deriveUserWallet(mnemonicFor('abandon-12'), 0).privateKey, {
+        ...reference.meta,
+        packages: { ...reference.meta.packages, '@sinonjs/fake-timers': packageVersion(createRequire(path.join(reference.checkout, 'package.json')), '@sinonjs/fake-timers') },
+      }),
   };
   // Check every deterministic file before doing the more expensive fixture checks.
   for (const [filename, contents] of Object.entries(deterministic)) {
