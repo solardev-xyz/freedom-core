@@ -4,7 +4,7 @@
 use k256::ecdsa::SigningKey;
 use serde_json::{Map, Value};
 
-use crate::signature::sign_prehash;
+use crate::signature::sign_digest;
 use crate::{Error, U256, keccak256, parse_address, parse_bytes, parse_unsigned, rlp};
 
 /// ethers keeps the nonce in a JS number: at most 2^53 - 1.
@@ -161,10 +161,12 @@ impl Transaction {
         rlp::list(out, &[]); // access list
     }
 
-    pub fn sign(&self, key: &SigningKey) -> Result<SignedTransaction, Error> {
-        let raw = match &self.fees {
+    /// All the public work of signing: the fields and the digest to sign.
+    /// The key is needed only between this and [`PreparedTransaction::finish`].
+    pub fn prepare(&self) -> Result<PreparedTransaction, Error> {
+        let mut fields = Vec::new();
+        let digest = match &self.fees {
             Fees::Legacy { gas_price } => {
-                let mut fields = Vec::new();
                 rlp::uint(&mut fields, &U256::from_u64(self.nonce));
                 rlp::uint(&mut fields, gas_price);
                 self.common(&mut fields);
@@ -175,32 +177,75 @@ impl Transaction {
                 rlp::uint(&mut unsigned, &U256::ZERO);
                 let mut payload = Vec::new();
                 rlp::list(&mut payload, &unsigned);
-                let (signature, parity) = sign_prehash(key, &keccak256(&payload))?;
-                // v = chain_id * 2 + 35 + parity
-                let v = self
-                    .chain_id
-                    .checked_add(&self.chain_id)
-                    .and_then(|double| double.checked_add(&U256::from_u64(35 + u64::from(parity))))
-                    .ok_or_else(|| err("chain_id: too large"))?;
-                rlp::uint(&mut fields, &v);
-                push_rs(&mut fields, &signature);
-                let mut raw = Vec::new();
-                rlp::list(&mut raw, &fields);
-                raw
+                keccak256(&payload)
             }
             Fees::Eip1559 {
                 max_fee_per_gas,
                 max_priority_fee_per_gas,
             } => {
-                let mut fields = Vec::new();
                 self.eip1559_fields(&mut fields, max_fee_per_gas, max_priority_fee_per_gas);
                 let mut unsigned = vec![0x02];
                 rlp::list(&mut unsigned, &fields);
-                let (signature, parity) = sign_prehash(key, &keccak256(&unsigned))?;
-                rlp::uint(&mut fields, &U256::from_u64(u64::from(parity)));
-                push_rs(&mut fields, &signature);
+                keccak256(&unsigned)
+            }
+        };
+        Ok(PreparedTransaction {
+            legacy_chain_id: matches!(self.fees, Fees::Legacy { .. }).then_some(self.chain_id),
+            fields,
+            digest,
+        })
+    }
+
+    /// `prepare`, sign the digest, `finish`.
+    pub fn sign(&self, key: &SigningKey) -> Result<SignedTransaction, Error> {
+        let prepared = self.prepare()?;
+        let signature = sign_digest(key, &prepared.digest())?;
+        prepared.finish(&signature)
+    }
+}
+
+/// A transaction ready to sign: its fields (without the signature) and the
+/// digest. Nothing in it is secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedTransaction {
+    /// Set for legacy (EIP-155) transactions, whose v encodes the chain id.
+    legacy_chain_id: Option<U256>,
+    fields: Vec<u8>,
+    digest: [u8; 32],
+}
+
+impl PreparedTransaction {
+    /// What the key signs.
+    pub fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
+    /// The signed serialization, from a 65-byte `r ‖ s ‖ v` signature of
+    /// [`Self::digest`] (`v ∈ {27, 28}`).
+    pub fn finish(mut self, signature: &[u8; 65]) -> Result<SignedTransaction, Error> {
+        let parity = match signature[64] {
+            27 => 0u64,
+            28 => 1u64,
+            _ => return Err(Error::Signing),
+        };
+        let raw = match self.legacy_chain_id {
+            Some(chain_id) => {
+                // v = chain_id * 2 + 35 + parity
+                let v = chain_id
+                    .checked_add(&chain_id)
+                    .and_then(|double| double.checked_add(&U256::from_u64(35 + parity)))
+                    .ok_or_else(|| err("chain_id: too large"))?;
+                rlp::uint(&mut self.fields, &v);
+                push_rs(&mut self.fields, signature);
+                let mut raw = Vec::new();
+                rlp::list(&mut raw, &self.fields);
+                raw
+            }
+            None => {
+                rlp::uint(&mut self.fields, &U256::from_u64(parity));
+                push_rs(&mut self.fields, signature);
                 let mut raw = vec![0x02];
-                rlp::list(&mut raw, &fields);
+                rlp::list(&mut raw, &self.fields);
                 raw
             }
         };

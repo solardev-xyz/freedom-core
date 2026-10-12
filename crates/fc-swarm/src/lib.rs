@@ -6,7 +6,7 @@
 //! The chunk address is computed here from the payload, so a caller can only
 //! get genuine SOC digests signed, never an arbitrary 32-byte value.
 
-use fc_evm::{address_of, keccak256, sign_message};
+use fc_evm::{address_of, eip191_digest, keccak256, sign_digest};
 use k256::ecdsa::SigningKey;
 
 /// The largest chunk payload.
@@ -56,14 +56,46 @@ pub struct SignedChunk {
     pub soc_address: [u8; 32],
 }
 
-/// Signs a single-owner chunk. `span` defaults to the payload length; as in
-/// bee-js, a span of 0 also means the payload length.
-pub fn sign_soc(
-    key: &SigningKey,
+/// A single-owner chunk ready to sign: everything public, computed before a
+/// key is touched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedChunk {
+    pub span: u64,
+    pub chunk_address: [u8; 32],
+    identifier: [u8; 32],
+    digest: [u8; 32],
+}
+
+impl PreparedChunk {
+    /// What the key signs: EIP-191 over keccak256(identifier ‖ chunk address),
+    /// as bee-js' PrivateKey.sign does.
+    pub fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
+    /// The signed chunk, from the signature of [`Self::digest`] and the
+    /// signing key's address.
+    pub fn finish(self, signature: [u8; 65], owner: [u8; 20]) -> SignedChunk {
+        let mut soc_input = [0u8; 52];
+        soc_input[..32].copy_from_slice(&self.identifier);
+        soc_input[32..].copy_from_slice(&owner);
+        SignedChunk {
+            span: self.span,
+            chunk_address: self.chunk_address,
+            signature,
+            owner,
+            soc_address: keccak256(&soc_input),
+        }
+    }
+}
+
+/// Prepares a single-owner chunk. `span` defaults to the payload length; as
+/// in bee-js, a span of 0 also means the payload length.
+pub fn prepare_soc(
     identifier: &[u8; 32],
     span: Option<u64>,
     payload: &[u8],
-) -> Result<SignedChunk, Error> {
+) -> Result<PreparedChunk, Error> {
     let span = match span {
         Some(span) if span != 0 => span,
         _ => payload.len() as u64,
@@ -72,19 +104,24 @@ pub fn sign_soc(
     let mut digest_input = [0u8; 64];
     digest_input[..32].copy_from_slice(identifier);
     digest_input[32..].copy_from_slice(&chunk_address);
-    // EIP-191 over the 32-byte digest, as bee-js' PrivateKey.sign does.
-    let signature = sign_message(key, &keccak256(&digest_input)).map_err(|_| Error::Signing)?;
-    let owner = address_of(key);
-    let mut soc_input = [0u8; 52];
-    soc_input[..32].copy_from_slice(identifier);
-    soc_input[32..].copy_from_slice(&owner);
-    Ok(SignedChunk {
+    Ok(PreparedChunk {
         span,
         chunk_address,
-        signature,
-        owner,
-        soc_address: keccak256(&soc_input),
+        identifier: *identifier,
+        digest: eip191_digest(&keccak256(&digest_input)),
     })
+}
+
+/// `prepare_soc`, sign the digest, `finish`.
+pub fn sign_soc(
+    key: &SigningKey,
+    identifier: &[u8; 32],
+    span: Option<u64>,
+    payload: &[u8],
+) -> Result<SignedChunk, Error> {
+    let prepared = prepare_soc(identifier, span, payload)?;
+    let signature = sign_digest(key, &prepared.digest()).map_err(|_| Error::Signing)?;
+    Ok(prepared.finish(signature, address_of(key)))
 }
 
 #[cfg(test)]

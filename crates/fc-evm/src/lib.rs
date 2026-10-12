@@ -19,5 +19,5 @@ pub use eip712::typed_data_hash;
 pub use error::Error;
 pub use hex::{parse_bytes, to_hex};
 pub use signature::{eip191_digest, sign_digest, sign_message, sign_typed_data};
-pub use tx::{SignedTransaction, Transaction};
+pub use tx::{PreparedTransaction, SignedTransaction, Transaction};
 pub use u256::{U256, parse_signed, parse_unsigned};
