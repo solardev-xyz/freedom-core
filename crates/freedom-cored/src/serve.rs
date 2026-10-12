@@ -8,20 +8,21 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::mpsc::{self, RecvTimeoutError, Sender, TrySendError};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::frame::{Frame, KIND_JSON};
 use fc_protocol::message::{self, CallerKind, Context, Message, MessageError};
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
 use crate::exit::Exit;
 use crate::transport::{self, Credits};
 use crate::vault::{FileSnapshot, Finished, NodeRecovery, Out, Vault};
 use crate::worker::Worker;
-use crate::{gate, hardening, log};
+use crate::{gate, hardening, log, naming};
 
 /// How long the writer may take to flush on exit.
 const EXIT_DRAIN: Duration = Duration::from_secs(2);
@@ -42,7 +43,8 @@ pub struct Options {
 
 /// What the loop reacts to.
 pub enum Event {
-    Frame(Frame),
+    /// A frame, and its place in the reader's credits.
+    Frame(Frame, transport::Credit),
     Eof {
         at_boundary: bool,
     },
@@ -88,6 +90,14 @@ const CAPABILITIES: &[&str] = &[
     "sign.typed_data",
     "swarm.sign_soc",
     "typed_data.hash",
+    "naming.configure",
+    "naming.availability",
+    "naming.resolve_content",
+    "naming.resolve_address",
+    "naming.resolve_reverse",
+    "naming.resolve_tezos",
+    "naming.invalidate_content",
+    "naming.invalidate_tezos",
 ];
 
 pub fn run(options: &Options) -> Exit {
@@ -122,6 +132,11 @@ pub fn run(options: &Options) -> Exit {
     let Ok(worker) = Worker::spawn(events_tx.clone()) else {
         return Exit::Internal;
     };
+    // Naming runs on its own thread and writes its own frames (design 0004,
+    // Admission: vault control traffic never waits on naming work).
+    let Ok(naming) = naming::spawn(writer.queue.clone(), events_tx.clone()) else {
+        return Exit::Internal;
+    };
     // The status snapshot is read once, on its own thread: the gate makes
     // this process the only writer, so it never needs re-reading, and slow
     // storage can't hold up the loop (deadline, EOF, parent exit). core.hello
@@ -139,6 +154,8 @@ pub fn run(options: &Options) -> Exit {
         node_recovery: None,
         pending_hello: None,
         out: writer.queue,
+        allowance: transport::Allowance::new(transport::MAX_QUEUED_REPLIES, usize::MAX),
+        credit: None,
         hello_done: false,
         last_request_id: 0,
         vault: Vault::new(
@@ -146,6 +163,7 @@ pub fn run(options: &Options) -> Exit {
             fc_vault::state::DEFAULT_AUTO_LOCK_MS,
         ),
         worker,
+        naming,
     };
     let hello_deadline = options.started + options.hello_timeout;
     let exit = loop {
@@ -172,10 +190,13 @@ pub fn run(options: &Options) -> Exit {
             }
         }
         match received {
-            Ok(Event::Frame(frame)) => {
+            Ok(Event::Frame(frame, credit)) => {
+                // A message forwarded to the naming thread takes the credit
+                // along; otherwise it goes once the frame is handled.
+                core.credit = Some(credit);
                 let flow = core.handle_frame(&frame);
                 drop(frame);
-                credits.release();
+                core.credit = None;
                 if let Flow::Exit(exit) = flow {
                     break exit;
                 }
@@ -228,6 +249,8 @@ pub fn run(options: &Options) -> Exit {
             Err(RecvTimeoutError::Disconnected) => break Exit::Ok,
         }
     };
+    // Naming starts no more I/O, whatever ended the loop.
+    core.naming.close();
     // Wipe the vault and revoke pre-commit work. Work past its commit point
     // finishes and replies before exit (bounded). Then let the writer flush
     // what's queued, but never wait on a peer that stopped reading: exiting
@@ -299,11 +322,17 @@ struct Core {
     node_recovery: NodeRecovery,
     /// A valid core.hello received before the snapshot was ready.
     pending_hello: Option<u64>,
-    out: mpsc::SyncSender<Zeroizing<Vec<u8>>>,
+    out: mpsc::Sender<transport::Out>,
+    /// The loop's own share of the writer: 0001's reserved capacity, which
+    /// naming traffic can't take.
+    allowance: Arc<transport::Allowance>,
+    /// The credit of the frame being handled.
+    credit: Option<transport::Credit>,
     hello_done: bool,
     last_request_id: u64,
     vault: Vault,
     worker: Worker,
+    naming: naming::Handle,
 }
 
 #[derive(Deserialize)]
@@ -398,17 +427,36 @@ impl Core {
                 );
                 Flow::Exit(Exit::Protocol)
             }
+            // A cancel names a vault request or a naming one; each side
+            // ignores IDs it doesn't hold.
             Message::Cancel { id } => {
+                if !self
+                    .naming
+                    .send(naming::In::Cancel { id }, self.credit.take())
+                {
+                    return Flow::Exit(Exit::Internal);
+                }
                 let outs = self.vault.cancel(id);
                 self.dispatch(outs)
             }
-            // The core sends no requests yet, so any response is unsolicited.
-            Message::Response { id, .. } => {
-                log::error(
-                    "protocol error",
-                    serde_json::json!({ "category": "unsolicited_response", "id": id }),
-                );
-                Flow::Exit(Exit::Protocol)
+            // Only the naming thread sends requests (shell.*): it checks
+            // that a response answers one of them.
+            Message::Response { id, outcome } => {
+                let outcome = match outcome {
+                    Ok(result) => match RawValue::from_string(result.get().to_owned()) {
+                        Ok(result) => Ok(result),
+                        Err(_) => return Flow::Exit(Exit::Internal),
+                    },
+                    Err(error) => Err(error),
+                };
+                if self
+                    .naming
+                    .send(naming::In::Response { id, outcome }, self.credit.take())
+                {
+                    Flow::Continue
+                } else {
+                    Flow::Exit(Exit::Internal)
+                }
             }
             Message::Event { .. } => {
                 log::warn("ignoring an event from main", serde_json::json!({}));
@@ -433,13 +481,36 @@ impl Core {
         }
         let flow = match method {
             "core.hello" => self.hello(id, params),
-            "core.shutdown" => match self.result(id, &serde_json::json!({})) {
-                Flow::Continue => Flow::Exit(Exit::Ok),
-                exit => exit,
-            },
+            "core.shutdown" => {
+                // No naming request goes after the acknowledgement.
+                self.naming.close();
+                match self.result(id, &serde_json::json!({})) {
+                    Flow::Continue => Flow::Exit(Exit::Ok),
+                    exit => exit,
+                }
+            }
             method if Vault::handles(method) => {
                 let outs = self.vault.request(id, method, params, context.caller);
                 self.dispatch(outs)
+            }
+            method if naming::handles(method) => {
+                let params = match params.map(|p| RawValue::from_string(p.to_owned())) {
+                    Some(Ok(params)) => Some(params),
+                    Some(Err(_)) => return Flow::Exit(Exit::Internal),
+                    None => None,
+                };
+                if self.naming.send(
+                    naming::In::Request {
+                        id,
+                        method: loggable(method),
+                        params,
+                    },
+                    self.credit.take(),
+                ) {
+                    Flow::Continue
+                } else {
+                    Flow::Exit(Exit::Internal)
+                }
             }
             _ => self.error(
                 id,
@@ -533,19 +604,19 @@ impl Core {
         }
     }
 
-    /// Queues a reply. A full queue means main stopped reading stdout: exit
-    /// rather than buffer without limit.
+    /// Queues a reply. A full allowance means main stopped reading stdout:
+    /// exit rather than buffer without limit.
     fn send(&self, payload: &[u8]) -> Flow {
         let Some(frame) = transport::frame(payload) else {
             return Flow::Exit(Exit::Internal);
         };
-        match self.out.try_send(frame) {
+        let Some(hold) = self.allowance.take(frame.len()) else {
+            log::error("main is not reading replies", serde_json::json!({}));
+            return Flow::Exit(Exit::Protocol);
+        };
+        match self.out.send(transport::Out { frame, hold }) {
             Ok(()) => Flow::Continue,
-            Err(TrySendError::Full(_)) => {
-                log::error("main is not reading replies", serde_json::json!({}));
-                Flow::Exit(Exit::Protocol)
-            }
-            Err(TrySendError::Disconnected(_)) => Flow::Exit(Exit::Protocol),
+            Err(_) => Flow::Exit(Exit::Protocol),
         }
     }
 }

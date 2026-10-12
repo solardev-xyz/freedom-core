@@ -455,6 +455,7 @@ dependencies = [
  "base64",
  "fc-evm",
  "fc-keys",
+ "fc-naming",
  "fc-protocol",
  "fc-swarm",
  "fc-vault",

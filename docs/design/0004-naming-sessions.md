@@ -57,7 +57,9 @@ All accept caller kinds `chrome` and `shell`. Each resolution carries `private: 
 This section amends 0001's admission rules for naming.
 - **A separate pool:** naming requests don't take 0001's 64 vault-work slots. They have their own limits: at most **32 running sessions** and **256 waiting callers** in all, and at most **64 callers per session**.
 - **Every caller counts,** including one answered from the cache or one that joins a running session. The core answers a request over a limit with `busy` at once and keeps nothing for it.
-- **Control-class replies:** `busy` and every terminal naming reply use 0001's reserved control capacity. Main itself holds at most 256 naming requests outstanding, so that capacity bounds the backlog.
+- **The writer:** the naming thread has its own share of 0001's writer, 8 MiB of queued frames, apart from the event loop's. Naming traffic therefore never takes the room that vault and control replies need. Past its share, naming's replies and cancels wait in the naming thread, and its `shell.*` requests wait in their FIFO, where a cancel still removes them; this is never a protocol failure. At shutdown, the event loop closes naming's request admission before it acknowledges, so no `shell.*` request follows the acknowledgement; the waiting replies and cancels still go to the writer, within 0001's bounded drain, and queued requests are dropped unsent. Main itself holds at most 256 naming requests outstanding, which bounds the replies that can wait.
+- **The reader:** a frame forwarded to the naming thread keeps its reader credit until that thread has handled it. 0001's bound on unhandled frames therefore covers naming's mailbox too, and that bound counts bytes as well as frames.
+- **Arguments:** an `attempts_used` of three or more, or a `deadline_ms` over 120 s, is `invalid_argument`. Main never sends either.
 - **One terminal reply per caller:** a result, `resolution_failed`, `cancelled` or `deadline`. The naming thread decides races between `cancel`, the caller's deadline and the result in the order it processes them; the first wins.
 - **Two deadlines:**
   - **The caller's:** 120 s from its admission, or the `deadline_ms` it carries ([Generations](#generations)). On expiry that caller alone gets `deadline` and is detached.
@@ -93,7 +95,7 @@ Three counters, each owned by the core and only ever increasing within a core pr
 
 ### Requests the core makes
 
-Main implements these. Each carries its generations and a `deadline_ms`. The core cancels with 0001's `cancel`; main aborts and still sends one terminal reply.
+Main implements these. Each carries its attempt's generations and a `deadline_ms`, the time left until its session's deadline; a request still queued at that deadline completes in the core as `timeout`, unsent. The core cancels with 0001's `cancel`; main aborts and still sends one terminal reply.
 
 | Method | Params | Main does | Reply |
 |---|---|---|---|
@@ -488,7 +490,7 @@ No error carries a URL or a server's text.
 |---|---|---|
 | a CCIP-Read callback (its call data) or gateway request (its URL and POST body) | its payload strings serialized, plus 4 KiB, ≤ 1 MiB | never made: a gateway fails and the next URL is tried; a callback fails its leg as `CCIP_GATEWAY_FAILED`. Today these were sent (deviation `request-size`) |
 | any answer body (RPC, Tezos, gateway) | 720 KiB, which is 960 KiB in base64 | `too_large`: a provider failure for RPC, a failed Tezos endpoint, or the next gateway (deviation `response-caps`) |
-| a resolution reply | 960 KiB serialized | `resolution_failed: result too large`, never cached (deviation `reply-size`) |
+| a resolution reply, a result or a thrown message | 960 KiB serialized | `resolution_failed: result too large`, never cached (deviation `reply-size`) |
 
 Measured valid answers sit well below the 720 KiB cap:
 
@@ -511,7 +513,7 @@ Measured valid answers sit well below the 720 KiB cap:
 | one decode: reads | 0003's 1024× ABI read cap, JSON depth 512, Micheline depth and node count | as above |
 | one session: retained and in-flight bytes (answers held, decoded values, queued requests, its serialized replies until written) | 16 MiB | the session fails `resolution_failed: budget`, not cached |
 | all sessions | 64 MiB | a running session whose reservation would cross it fails `resolution_failed: budget`, not cached; new sessions get `busy` until usage drops below 48 MiB |
-| the writer: naming replies queued for the pipe | 8 MiB | further replies wait in their sessions, still counted there |
+| the writer: naming frames queued for the pipe | 8 MiB | further frames wait in the naming thread, and `shell.*` requests in their FIFO |
 | caches | 500 entries and 8 MiB each | eviction (deviation `cache-bytes`) |
 | Tezos discovery entries | one per configured endpoint | — |
 | endpoint state (quarantine, discovery) for endpoints no longer configured | the 64 most recently retired | the oldest retired entries are dropped (deviation `endpoint-retention`); a re-added endpoint within that bound keeps its state |

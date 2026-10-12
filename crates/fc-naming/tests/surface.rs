@@ -148,6 +148,7 @@ impl World {
             for Emitted {
                 effect,
                 generations,
+                ..
             } in self.machine.take_effects()
             {
                 let (id, at, request) = match effect {
@@ -602,4 +603,26 @@ fn enabling_myotis_is_live_state_not_a_configuration_change() {
     world.machine.resolve_content("nick.eth");
     world.run(200_001);
     assert!(world.sent.iter().any(|s| s.verified), "Myotis is tried now");
+}
+
+#[test]
+fn a_thrown_message_too_large_to_reply_is_result_too_large() {
+    let mut config = config();
+    config.bounds.reply_bytes = 100;
+    let mut world = World::new(config);
+    // The "changed repeatedly" message echoes the name: over the bound, it
+    // becomes `result too large`, as an oversized result does.
+    let long = format!("{}.eth", "a".repeat(100));
+    let spent = CallOptions {
+        attempts_used: 3,
+        ..CallOptions::default()
+    };
+    let over = world.machine.resolve_content_with(&long, spent);
+    let under = world.machine.resolve_content_with("nick.eth", spent);
+    world.run(0);
+    assert_eq!(message(world.reply(over)), Some("result too large"));
+    assert_eq!(
+        message(world.reply(under)),
+        Some("Myotis availability changed repeatedly while resolving nick.eth")
+    );
 }

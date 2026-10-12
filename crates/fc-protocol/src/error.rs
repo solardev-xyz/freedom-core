@@ -20,6 +20,15 @@ pub enum ErrorCode {
     WeakPassword,
     Storage,
     NodeIdentityCorrupt,
+    /// A thrown name resolution (design 0004, Replies).
+    ResolutionFailed,
+    // Transport errors, main's terminal replies to `shell.*` requests
+    // (design 0004, Transport errors). None carries a URL or server text.
+    Timeout,
+    Network,
+    Refused,
+    TooLarge,
+    StaleGeneration,
     // Protocol-level.
     Forbidden,
     Busy,
