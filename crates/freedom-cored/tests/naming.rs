@@ -101,10 +101,16 @@ fn resolves_content_through_main() {
     core.hello();
     // From the empty snapshot, both parts change.
     let configured = core.call(2, "naming.configure", snapshot());
-    assert_eq!(configured["result"], json!({ "ens": 1, "tezos": 1 }));
+    assert_eq!(
+        configured["result"],
+        json!({ "ens": 1, "tezos": 1, "lifecycle": 0 })
+    );
     // The same snapshot again changes nothing.
     let again = core.call(20, "naming.configure", snapshot());
-    assert_eq!(again["result"], json!({ "ens": 1, "tezos": 1 }));
+    assert_eq!(
+        again["result"],
+        json!({ "ens": 1, "tezos": 1, "lifecycle": 0 })
+    );
     let answers = recorded();
 
     core.send(&request(
@@ -394,5 +400,25 @@ fn no_shell_request_follows_the_shutdown_reply() {
     assert!(
         !rest[acknowledged..].iter().any(|m| m["type"] == "request"),
         "a request after the shutdown reply"
+    );
+}
+
+#[test]
+fn configure_reports_every_generation() {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    let configured = core.call(2, "naming.configure", snapshot());
+    assert_eq!(
+        configured["result"],
+        json!({ "ens": 1, "tezos": 1, "lifecycle": 0 })
+    );
+    // A provider reset advances the lifecycle, which main tracks.
+    let mut reset = snapshot();
+    reset["reset"] = json!("providers");
+    let reset = core.call(3, "naming.configure", reset);
+    assert_eq!(
+        reset["result"],
+        json!({ "ens": 1, "tezos": 1, "lifecycle": 1 })
     );
 }

@@ -337,7 +337,13 @@ impl Naming {
                 let generations = self.machine.configure(config, reset);
                 self.result(
                     id,
-                    &serde_json::json!({ "ens": generations.ens, "tezos": generations.tezos }),
+                    // All three: `reset: "providers"` advances the
+                    // lifecycle, which main tracks for its fence.
+                    &serde_json::json!({
+                        "ens": generations.ens,
+                        "tezos": generations.tezos,
+                        "lifecycle": generations.lifecycle,
+                    }),
                 )
             }
             "naming.availability" => {
