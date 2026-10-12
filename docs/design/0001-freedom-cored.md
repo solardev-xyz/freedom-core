@@ -408,8 +408,8 @@ New code goes in `src/main/core/`:
 ### Rollback
 
 - **No runtime switch.** A runtime switch would mean a release in which two writers, the JS vault and the core, share one identity directory without sharing the lock. Step 1's `FREEDOM_CORE=1` opt-in exists only in dev builds (`!app.isPackaged`), while the core does nothing yet. Step 2 removes it: from then on the core always runs, and no JS code path is left to switch back to.
-- **A rollback hotfix is more than a revert of step 2.** Step 1's code never runs `recover`, but a JS writer must (see [Lifetime lock](#lifetime-lock)). The hotfix keeps shipping the binary and runs `recover` at startup, before it starts any node, so a journal the core left behind is finished first.
 - **Rollback is a hotfix release** that reverts step 2. That's safe because the JS reads everything the core writes. `vectors/` checks vault files and Bee keystores written by Rust against the pinned JS, in CI, on every change.
+- **But not a bare revert.** Step 1's code never runs `recover`, but a JS writer must (see [Lifetime lock](#lifetime-lock)). The hotfix keeps shipping the binary and runs `recover` at startup, before it starts any node, so a journal the core left behind is finished first.
 
 ### Quick unlock
 
