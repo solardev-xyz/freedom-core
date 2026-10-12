@@ -331,6 +331,64 @@ impl Machine {
         self.sessions.len()
     }
 
+    /// `resolveTezosDomain(name)`: its own cache and in-flight table, and
+    /// no lifecycle restarts.
+    pub fn resolve_tezos(&mut self, name: &str) -> u64 {
+        let Some(normalized) = super::tezos::normalize(name) else {
+            return self.reply(Ok(super::tezos::invalid()));
+        };
+        let now = self.now();
+        let cached = self
+            .ctx
+            .tezos
+            .results
+            .borrow()
+            .get(&normalized, now)
+            .cloned();
+        if let Some(result) = cached {
+            return self.reply(Ok(result));
+        }
+        // The reference deletes a stale entry here, so a fresh one is
+        // appended, not updated in place.
+        self.ctx.tezos.results.borrow_mut().delete(&normalized);
+        let dedup = format!("tezos:{normalized}");
+        let caller = self.next_caller;
+        self.next_caller += 1;
+        if let Some(session) = self.sessions.iter_mut().find(|s| s.key == dedup) {
+            session.callers.push(caller);
+            return caller;
+        }
+        let ctx = Rc::clone(&self.ctx);
+        let task =
+            Task::new(async move { super::tezos::resolve(&ctx, &ctx.tezos, &normalized).await });
+        self.sessions.push(Session {
+            key: dedup,
+            callers: vec![caller],
+            task,
+        });
+        caller
+    }
+
+    /// `invalidateTezosDomain(name?)`: one result, or every result and
+    /// discovery.
+    pub fn invalidate_tezos(&mut self, name: Option<&str>) {
+        match name {
+            Some(name) => {
+                let key = crate::js_trim(name).to_lowercase();
+                self.ctx.tezos.results.borrow_mut().delete(&key);
+            }
+            None => {
+                self.ctx.tezos.results.borrow_mut().clear();
+                self.ctx.tezos.discovery.borrow_mut().clear();
+            }
+        }
+    }
+
+    /// The wall clock at monotonic zero, in milliseconds since the epoch.
+    pub fn set_wall_clock(&mut self, epoch_ms: f64) {
+        self.ctx.wall_offset.set(epoch_ms);
+    }
+
     /// `naming.availability`, today's Myotis transition listener: the
     /// caches and the in-flight table go and the lifecycle advances; the
     /// anchor, the shuffle and quarantine stay.

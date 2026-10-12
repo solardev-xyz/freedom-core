@@ -35,6 +35,13 @@ pub enum Request {
     /// A whole verifier operation through main's adapter (design 0004,
     /// Verified operations).
     Verified(VerifiedOp),
+    /// GET (or POST with `body`) of `endpoint`'s URL + `path`.
+    Tezos {
+        endpoint: Endpoint,
+        post: bool,
+        path: String,
+        body: Option<String>,
+    },
 }
 
 /// A verifier operation.
@@ -82,6 +89,10 @@ pub enum Answer {
     },
     Failed(Transport),
     Verified(Verified),
+    Tezos {
+        status: u16,
+        body: Vec<u8>,
+    },
     Done,
 }
 
@@ -97,6 +108,8 @@ pub struct Config {
     pub myotis_enabled: bool,
     /// The Colibri prover, and whether proofs are zk.
     pub prover: Option<(Endpoint, bool)>,
+    /// Tezos RPC endpoints, in order.
+    pub tezos: Vec<Endpoint>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -209,6 +222,11 @@ pub struct Ctx {
     pub(crate) rt: Rt<Request, Answer>,
     pub(crate) state: RefCell<State>,
     pub(crate) random: RefCell<Box<dyn Random>>,
+    /// The Tezos machine's caches.
+    pub(crate) tezos: super::tezos::TezosState,
+    /// Wall-clock milliseconds at monotonic zero (Tezos expiry reads the
+    /// wall clock).
+    pub(crate) wall_offset: std::cell::Cell<f64>,
 }
 
 impl Ctx {
@@ -227,15 +245,22 @@ impl Ctx {
                 lifecycle: 0,
             }),
             random: RefCell::new(random),
+            tezos: super::tezos::TezosState::default(),
+            wall_offset: std::cell::Cell::new(0.0),
         }
     }
 
-    fn now(&self) -> Ms {
+    pub(crate) fn now(&self) -> Ms {
         self.rt.now()
     }
 
+    /// `Date.now()`.
+    pub(crate) fn wall_now(&self) -> f64 {
+        self.now_f() + self.wall_offset.get()
+    }
+
     #[allow(clippy::cast_precision_loss)]
-    fn now_f(&self) -> f64 {
+    pub(crate) fn now_f(&self) -> f64 {
         self.rt.now() as f64
     }
 

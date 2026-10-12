@@ -9,3 +9,4 @@ pub mod machine;
 pub mod pool;
 pub mod random;
 pub mod rpc;
+pub mod tezos;

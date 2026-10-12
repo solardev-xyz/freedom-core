@@ -19,6 +19,9 @@
 /// A parsed JSON value with JavaScript's semantics.
 #[derive(Debug, Clone, PartialEq)]
 pub enum JsValue {
+    /// `undefined`: never parsed from JSON; a present-undefined property
+    /// in a result (Tezos' `ttl`).
+    Undefined,
     Null,
     Bool(bool),
     Number(f64),
@@ -76,7 +79,7 @@ impl JsValue {
     /// `!!value`: JavaScript truthiness.
     pub fn truthy(&self) -> bool {
         match self {
-            JsValue::Null => false,
+            JsValue::Undefined | JsValue::Null => false,
             JsValue::Bool(b) => *b,
             JsValue::Number(n) => *n != 0.0 && !n.is_nan(),
             JsValue::String(s) => !s.is_empty(),
@@ -89,6 +92,7 @@ impl JsValue {
     /// a usable `toString` nor a primitive `valueOf`.
     pub fn js_string(&self) -> Result<String, ToPrimitiveError> {
         Ok(match self {
+            JsValue::Undefined => "undefined".into(),
             JsValue::Null => "null".into(),
             JsValue::Bool(b) => b.to_string(),
             JsValue::Number(n) => number_to_string(*n),
@@ -118,7 +122,7 @@ fn join_arrays(root: &[JsValue]) -> Result<String, ToPrimitiveError> {
         };
         match items.next() {
             Some(JsValue::Array(inner)) => stack.push((inner.iter(), Vec::new())),
-            Some(JsValue::Null) => parts.push(String::new()),
+            Some(JsValue::Undefined | JsValue::Null) => parts.push(String::new()),
             Some(item) => parts.push(item.js_string()?),
             None => {
                 let joined = stack
@@ -512,7 +516,9 @@ fn stringify_into(value: &JsValue, out: &mut String) {
                 quote(key, out);
                 out.push(':');
             }
-            Piece::Value(JsValue::Null) => out.push_str("null"),
+            // `undefined` is `null` in an array; object members holding it
+            // are skipped below.
+            Piece::Value(JsValue::Undefined | JsValue::Null) => out.push_str("null"),
             Piece::Value(JsValue::Bool(b)) => out.push_str(if *b { "true" } else { "false" }),
             Piece::Value(JsValue::Number(n)) => {
                 out.push_str(&if n.is_finite() {
@@ -535,6 +541,10 @@ fn stringify_into(value: &JsValue, out: &mut String) {
             Piece::Value(JsValue::Object(props)) => {
                 out.push('{');
                 stack.push(Piece::Text("}"));
+                let props: Vec<&(String, JsValue)> = props
+                    .iter()
+                    .filter(|(_, v)| !matches!(v, JsValue::Undefined))
+                    .collect();
                 for (i, (key, item)) in props.iter().enumerate().rev() {
                     stack.push(Piece::Value(item));
                     stack.push(Piece::Key(key));
