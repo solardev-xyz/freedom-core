@@ -1562,7 +1562,8 @@ function addressAndReverse(ethers, base, one) {
     // Reverse error outcomes agree on ethers' composed message (design
     // 0004, Errors): callbacks with different data conflict, legacy
     // envelopes differing only in info.error.data agree, and invalid URLs
-    // at different indexes conflict.
+    // at different indexes are different identities (those at the same
+    // index agree).
     one('reverse-callbacks-differ', base({
       calls: { callback: { rpc_error: { code: 3, message: 'execution reverted', data: '0xdeadbeef' } } },
       hosts: Object.fromEntries(ENDPOINTS.map((url, i) => [new URL(url).host, { calls: { reverse: reverseLookup([`https://gw.example/{sender}/{data}.json`], `0x0${i}`) } }])),
