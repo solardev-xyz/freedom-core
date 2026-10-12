@@ -153,6 +153,8 @@ fn run(rx: &Receiver<In>, out: SyncSender<Zeroizing<Vec<u8>>>) -> Stop {
         outgoing: BTreeMap::new(),
         by_io: BTreeMap::new(),
         next_id: 1,
+        queued: std::collections::VecDeque::new(),
+        max_outstanding: MAX_OUTSTANDING,
     };
     let now = || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     loop {
@@ -196,9 +198,17 @@ struct Outgoing {
     kind: Kind,
 }
 
+/// At most this many `shell.*` requests outstanding at main (design 0004,
+/// Bounds: Work); more wait here, first in, first out.
+const MAX_OUTSTANDING: usize = 256;
+
 struct Naming {
     machine: Machine,
     out: SyncSender<Zeroizing<Vec<u8>>>,
+    /// Requests waiting for a slot: the machine's request id, the request,
+    /// and the generations current when the machine made it.
+    queued: std::collections::VecDeque<(u64, Request, Generations)>,
+    max_outstanding: usize,
     /// The machine's callers, by the request ID main gave them.
     callers: BTreeMap<u64, u64>,
     /// This thread's `shell.*` requests, by their message ID.
@@ -356,21 +366,13 @@ impl Naming {
             match effect {
                 Effect::Request {
                     id: io, request, ..
-                } => {
-                    let id = self.next_id;
-                    self.next_id += 1;
-                    let (method, kind, params) = shell_request(&request, generations);
-                    let mut payload = Zeroizing::new(Vec::with_capacity(256));
-                    if message::write_request(&mut *payload, id, method, &params, &Context::shell())
-                        .is_err()
-                    {
-                        return Err(Stop::Protocol("unwritable_request"));
-                    }
-                    self.outgoing.insert(id, Outgoing { io: Some(io), kind });
-                    self.by_io.insert(io, id);
-                    self.send(&payload)?;
-                }
+                } => self.queued.push_back((io, request, generations)),
                 Effect::Cancel { id: io, .. } => {
+                    // Still waiting for a slot: never sent.
+                    if let Some(at) = self.queued.iter().position(|(q, _, _)| *q == io) {
+                        self.queued.remove(at);
+                        continue;
+                    }
                     let Some(id) = self.by_io.remove(&io) else {
                         continue;
                     };
@@ -381,6 +383,24 @@ impl Naming {
                     self.send(payload.to_string().as_bytes())?;
                 }
             }
+        }
+        // A request holds its slot until main's terminal reply, even after
+        // the machine cancelled it.
+        while self.outgoing.len() < self.max_outstanding
+            && let Some((io, request, generations)) = self.queued.pop_front()
+        {
+            let id = self.next_id;
+            self.next_id += 1;
+            let (method, kind, params) = shell_request(&request, generations);
+            let mut payload = Zeroizing::new(Vec::with_capacity(256));
+            if message::write_request(&mut *payload, id, method, &params, &Context::shell())
+                .is_err()
+            {
+                return Err(Stop::Protocol("unwritable_request"));
+            }
+            self.outgoing.insert(id, Outgoing { io: Some(io), kind });
+            self.by_io.insert(io, id);
+            self.send(&payload)?;
         }
         for reply in self.machine.take_replies() {
             let Some((&id, _)) = self.callers.iter().find(|(_, c)| **c == reply.caller) else {
@@ -852,6 +872,69 @@ impl Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The frames the thread wrote, as JSON.
+    fn written(rx: &mpsc::Receiver<Zeroizing<Vec<u8>>>) -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            out.extend(serde_json::from_slice(&frame[5..]).ok());
+        }
+        out
+    }
+
+    #[test]
+    fn requests_past_the_cap_wait_their_turn() {
+        let (tx, rx) = mpsc::sync_channel(64);
+        let mut naming = Naming {
+            machine: Machine::new(0, empty_config(), Box::new(OsRandom)),
+            out: tx,
+            callers: BTreeMap::new(),
+            outgoing: BTreeMap::new(),
+            by_io: BTreeMap::new(),
+            next_id: 1,
+            queued: std::collections::VecDeque::new(),
+            max_outstanding: 2,
+        };
+        let snapshot = r#"{"rpc":[{"endpoint":"e1"},{"endpoint":"e2"},{"endpoint":"e3"},{"endpoint":"e4"}],
+            "direct":null,"prover":null,"policy":{"order":["quorum"],"prefer_verified":false},
+            "quorum":{"k":3,"m":2,"timeout_ms":5000,"anchor":"latest","anchor_ttl_ms":30000},
+            "myotis_enabled":false,"tezos":[]}"#;
+        assert!(
+            naming
+                .request(1, "naming.configure", Some(snapshot))
+                .is_ok()
+        );
+        assert!(
+            naming
+                .request(
+                    2,
+                    "naming.resolve_content",
+                    Some(r#"{"name":"vitalik.eth"}"#)
+                )
+                .is_ok()
+        );
+        assert!(naming.advance(0).is_ok());
+        let requests = |frames: &[serde_json::Value]| {
+            frames
+                .iter()
+                .filter(|f| f["method"] == "shell.rpc")
+                .map(|f| f["id"].as_u64().unwrap_or(0))
+                .collect::<Vec<_>>()
+        };
+        // Four head probes, two at a time.
+        let first = requests(&written(&rx));
+        assert_eq!(first.len(), 2);
+        assert_eq!(naming.queued.len(), 2);
+        // An answer frees a slot for the next.
+        let body = base64::engine::general_purpose::STANDARD
+            .encode(r#"{"jsonrpc":"2.0","id":1,"result":"0x1312d00"}"#);
+        let answer = RawValue::from_string(format!(r#"{{"status":200,"body":"{body}"}}"#))
+            .unwrap_or_else(|_| unreachable!());
+        assert!(naming.response(first[0], Ok(answer)).is_ok());
+        assert!(naming.flush().is_ok());
+        assert_eq!(requests(&written(&rx)).len(), 1);
+        assert_eq!(naming.queued.len(), 1);
+    }
 
     #[test]
     fn os_random_stays_in_range() {
