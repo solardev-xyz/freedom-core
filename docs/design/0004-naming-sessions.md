@@ -126,7 +126,8 @@ Myotis and Colibri keep running in main, through today's adapters, **one whole o
   - `verifiedRequest` checks around each raw call and throws `MYOTIS_UNAVAILABLE`, which is `{ failure: "lifecycle" }`;
   - the record operation's `MyotisProvider` checks the epoch it started with before and after each raw call. Its error carries no code, so it is `{ failure: "error" }` (`myotis-lifecycle-between-calls`).
 - **`failure`** is a closed set of classes (`unavailable`, `lifecycle`, `timeout`, `too_large`, `invalid_argument`, `error`) and carries no text. `lifecycle` is today's `MYOTIS_UNAVAILABLE` from `verifiedRequest`; `invalid_argument` is ethers' own `INVALID_ARGUMENT`, thrown inside the adapter (`universalResolverCall`'s `dnsEncode(name, 255)` refusing a label over 255 bytes). The method that made the operation handles a failure as today's code handles that adapter's error ([Verified methods](#verified-methods)).
-- **Reply size:** main serializes each reply first. One over 1 MiB (a large return, revert or name) is replaced by `{ failure: "too_large" }`: a method error, so the order continues (deviation `verified-reply-size`).
+- **Reply size:** main serializes each reply first. One whose response wouldn't fit a frame (1 MiB, the envelope and the largest ID included), such as a large return, revert or name, is replaced by `{ failure: "too_large" }`: a method error, so the order continues (deviation `verified-reply-size`).
+- **Revert data** goes as bytes the core reads: `0x` and whole bytes. An error carrying anything else (an odd digit, a `0X`) is `{ failure: "error" }`; the core would refuse it as a malformed reply.
 - **Provenance:** a `revert` is the verifier's proven revert data. The core records which verifier produced it.
 - **The adapters' own bounds** are unchanged. Main bounds physical work: at most 8 operations per verifier are running, counted until the adapter's promise actually settles, not when the core cancels. Beyond that, main answers `{ failure: "unavailable" }` at once.
 
@@ -569,7 +570,7 @@ Each deviation gets a boundary vector in the implementation PR, generated from t
 | `tezos-redirects` | `fetch` follows redirects | refused | the endpoint fails for that lookup |
 | `tezos-expiry` | V8's legacy `Date.parse` formats | RFC 3339 only | an unreadable expiry is ignored, as today's `NaN` |
 | `verified-bounds` | no limit on concurrent adapter work | 8 operations per verifier | `{ failure: "unavailable" }`; the order continues |
-| `verified-reply-size` | any size | a verified reply over 1 MiB is `{ failure: "too_large" }` | a method error; the order continues |
+| `verified-reply-size` | any size | a verified reply whose response wouldn't fit a frame (1 MiB) is `{ failure: "too_large" }` | a method error; the order continues |
 | `memory-budgets` | unbounded | 16 MiB charged per session, 64 MiB in all (charges as in [Bounds](#bounds)), 8 MiB of queued frames | the session ends with `resolution_failed: budget`, or a new one gets `busy`; not cached |
 | `rpc-endpoints` | every effective endpoint is in the pool | the first 64, in effective order | the rest are never tried; today's builtin pool is far smaller, so only a user adding more sees it |
 | `endpoint-retention` | quarantine and discovery entries live for the process | 64 retired endpoints kept | an endpoint re-added after 64 others were retired has forgotten its quarantine |

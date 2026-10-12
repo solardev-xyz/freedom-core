@@ -873,9 +873,11 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     const encodes = (host === 'myotis' && op === 'record' && params.method !== 'reverse') || (host === 'colibri' && op === 'resolve' && !params.nameNft);
     return failure === 'invalid_argument' && overLong && encodes ? err : new Error(`verified call failed: ${failure}`);
   };
+  // Revert data as main sends it: bytes the core can read (`0x` and whole
+  // bytes); anything else is a failure (freedom-browser#670).
   const revertOf = (err) => {
     const data = err?.data ?? err?.info?.error?.data;
-    return typeof data === 'string' && /^0x[0-9a-f]*$/i.test(data) ? data : null;
+    return typeof data === 'string' && /^0x(?:[0-9a-fA-F]{2})*$/.test(data) ? data : null;
   };
   // `toAnswer` maps a returned value to the recorded reply (default: the
   // value itself). The reply is the outcome the reference receives: main
