@@ -326,13 +326,16 @@ impl Ctx {
         }
     }
 
-    /// Charges `bytes` to the session being polled.
-    pub(crate) fn charge(&self, bytes: usize) {
+    /// Charges `bytes` to the session being polled: false once it is over
+    /// its budget (outside a session, always true).
+    pub(crate) fn charge(&self, bytes: usize) -> bool {
         let session = self.session.get();
-        if session != 0 {
-            let bounds = self.bounds();
-            self.budget.borrow_mut().charge(session, bytes, &bounds);
+        if session == 0 {
+            return true;
         }
+        let bounds = self.bounds();
+        let mut budget = self.budget.borrow_mut();
+        budget.charge(session, bytes, &bounds) && !budget.over(session)
     }
 
     /// Whether the session being polled has spent its budget: it ends at

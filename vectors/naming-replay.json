@@ -37984,7 +37984,7 @@
       "patches": [
         {
           "id": "memory-budgets",
-          "text": "A session is charged for its requests (endpoint and body) as it makes them and its answers' bodies as they arrive; one an answer takes past 1500 bytes ends at once: its callers get \"budget\", the answer is dropped, its outstanding I/O is cancelled and it makes no more. The patch holds for one step with one call on JSON-RPC alone, crossed by an answer (enforced): the core charges a poll's requests together, and its replies and aliasing decodes are its own tests.",
+          "text": "A session is charged for its name's copies (8 per byte of its in-flight key) as it starts, its requests (endpoint and body) as it makes them, and its answers as they arrive, at 32 per byte (their parsed JSON at worst); one an answer takes past 25000 bytes ends at once: its callers get \"budget\", the answer is dropped, its outstanding I/O is cancelled and it makes no more. The patch holds for one step with one content lookup on JSON-RPC alone, without redirects or 429s, ended by an answer crossing (enforced); the core's replies and aliasing decodes are its own tests.",
           "harness": [
             "memory-budgets"
           ]
@@ -38021,7 +38021,7 @@
           }
         },
         "bounds": {
-          "sessionBytes": 1500
+          "sessionBytes": 25000
         }
       },
       "steps": [

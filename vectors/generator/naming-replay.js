@@ -373,7 +373,7 @@ function __admit(session) {
     },
   }),
   'memory-budgets': (b) => ({
-    text: `A session is charged for its requests (endpoint and body) as it makes them and its answers' bodies as they arrive; one an answer takes past ${b.sessionBytes} bytes ends at once: its callers get "budget", the answer is dropped, its outstanding I/O is cancelled and it makes no more. The patch holds for one step with one call on JSON-RPC alone, crossed by an answer (enforced): the core charges a poll's requests together, and its replies and aliasing decodes are its own tests.`,
+    text: `A session is charged for its name's copies (8 per byte of its in-flight key) as it starts, its requests (endpoint and body) as it makes them, and its answers as they arrive, at 32 per byte (their parsed JSON at worst); one an answer takes past ${b.sessionBytes} bytes ends at once: its callers get "budget", the answer is dropped, its outstanding I/O is cancelled and it makes no more. The patch holds for one step with one content lookup on JSON-RPC alone, without redirects or 429s, ended by an answer crossing (enforced); the core's replies and aliasing decodes are its own tests.`,
     harness: ['memory-budgets'],
   }),
   'overall-deadline': (b) => ({
@@ -717,7 +717,7 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     if (!declared(host)) violations.push(`undeclared RPC endpoint ${host}`);
     if (harnessPatch('memory-budgets')) {
       charged += Buffer.byteLength(req.url) + Buffer.byteLength(Buffer.from(req.body).toString());
-      if (charged > bounds.sessionBytes) violations.push('memory-budgets: a request crossed the budget; the core charges a poll\'s requests together, so pick a bound an answer crosses');
+      if (charged > bounds.sessionBytes) violations.push('memory-budgets: a request crossed the budget; pick a bound an answer crosses');
     }
     const p = plan(host);
     // `statuses`: this host's first requests get these statuses (a 3xx
@@ -763,7 +763,10 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
         // Deviation `memory-budgets`: an answer that crosses the budget is
         // dropped, and the session ends.
         if (harnessPatch('memory-budgets')) {
-          charged += Buffer.byteLength(answer.body);
+          // The core charges one exchange's final answer: a hop or a retry
+          // isn't a modelled one.
+          if (redirect || answer.status === 429) violations.push('memory-budgets: the patch models no redirects or 429s');
+          charged += Buffer.byteLength(answer.body) * 32;
           if (charged > bounds.sessionBytes) {
             endStep(entries[0].step, new Error('budget'), entries);
             return;
@@ -1189,16 +1192,34 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     }));
     // Deviation `memory-budgets`: the step's one session ends when an
     // answer crosses its budget.
-    const budget = (promise) => (!harnessPatch('memory-budgets') ? promise : new Promise((resolve, reject) => {
-      endSession = reject;
-      promise.then((value) => {
-        violations.push('memory-budgets: the session finished under its budget; pick a bound an answer crosses');
-        resolve(value);
-      }, reject);
-    }));
+    const budget = (promise, call) => {
+      if (!harnessPatch('memory-budgets')) return promise;
+      if (call.fn !== 'resolveEnsContent') violations.push('memory-budgets: the patch models content lookups');
+      // The session's name, kept as the core keeps it: 8 copies of its
+      // in-flight key.
+      charged += Buffer.byteLength(`content:${String(call.args?.[0] ?? '').trim().toLowerCase()}`) * 8;
+      return new Promise((resolve, reject) => {
+        let ended = false;
+        endSession = (error) => {
+          ended = true;
+          reject(error);
+        };
+        // Only an answer crossing the budget ends it, as the vector shows.
+        promise.then(
+          (value) => {
+            violations.push('memory-budgets: the session finished under its budget; pick a bound an answer crosses');
+            resolve(value);
+          },
+          (error) => {
+            if (!ended) violations.push('memory-budgets: the call ended otherwise; pick a lookup an answer ends');
+            reject(error);
+          }
+        );
+      });
+    };
     const invoke = ({ fn, args = [] }) => budget(deadline(Promise.resolve().then(() => (fn === '$fetch' ? probeFetch(...args) : system === 'tezos'
       ? loaded.exports[fn](...args, { fetchImpl, endpoints: world.endpoints })
-      : loaded.exports[fn](...args))))).then(replyLimit);
+      : loaded.exports[fn](...args)))), { fn, args }).then(replyLimit);
 
     const steps = [];
     for (const [index, step] of scenario.steps.entries()) {
@@ -1679,10 +1700,11 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
         { after: 1000, call: content('alice.eth') },
       ]),
     },
-    // The session's charge: 932 bytes before the block answers at 40 ms
-    // (423 bytes each), so the second of them crosses 1,500. The session
-    // ends there: the other two block requests are cancelled.
-    deviation('memory-budgets', base({ bounds: { sessionBytes: 1500 } })),
+    // The session's charge: its name (152), its requests, and its answers at
+    // 32 per byte: 6,664 before the block answers at 40 ms (423 bytes, so
+    // 13,536 each), so the second of them crosses 25,000. The session ends
+    // there: the other two block requests are cancelled.
+    deviation('memory-budgets', base({ bounds: { sessionBytes: 25000 } })),
     // Every endpoint answers after a second; the session ends at 300 ms.
     deviation('overall-deadline', base({
       bounds: { deadlineMs: 300 },

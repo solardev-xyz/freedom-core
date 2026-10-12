@@ -38,6 +38,11 @@ impl Shared {
     /// machine's set (design 0004, Prefetch). Deviation `prefetch-set`:
     /// past the bound, the oldest is cancelled.
     pub(crate) fn keep_prefetch(&self, mut io: Io<Request, Answer>) {
+        // A session that spent its budget hands nothing off: dropping the
+        // prefetch cancels it.
+        if self.ctx.over_budget() {
+            return;
+        }
         let limit = self.ctx.bounds().prefetches;
         let mut cx = Context::from_waker(Waker::noop());
         // A prefetch that already finished has nothing left to keep.
@@ -164,6 +169,11 @@ impl Drop for Held {
     }
 }
 
+/// What a session keeps of its name and key: `dedup` is its in-flight key.
+fn input_bytes(dedup: &str) -> usize {
+    dedup.len().saturating_mul(super::budget::INPUT_COPIES)
+}
+
 /// What a request holds while it is made: its payload strings.
 fn request_bytes(request: &Request) -> usize {
     match request {
@@ -189,13 +199,17 @@ fn request_bytes(request: &Request) -> usize {
     }
 }
 
-/// What an answer holds: its body, or the verifier's outcome.
+/// What an answer can come to hold: its body parsed as JSON (its worst-case
+/// tree, `PARSED_FACTOR` per byte), or the verifier's outcome.
 fn answer_bytes(answer: &Answer) -> usize {
+    use super::budget::PARSED_FACTOR;
     match answer {
         Answer::Rpc { body, .. } | Answer::Gateway { body, .. } | Answer::Tezos { body, .. } => {
-            body.len()
+            body.len().saturating_mul(PARSED_FACTOR)
         }
-        Answer::Verified(super::ens::Verified::Result(value)) => value.stringify().len(),
+        Answer::Verified(super::ens::Verified::Result(value)) => {
+            value.stringify().len().saturating_mul(PARSED_FACTOR)
+        }
         Answer::Verified(super::ens::Verified::Revert(data)) => data.len(),
         Answer::Verified(super::ens::Verified::Failure(class)) => class.len(),
         Answer::Failed(_) | Answer::Done => 0,
@@ -291,6 +305,13 @@ fn ready(sleep: &mut Sleep<Request, Answer>) -> bool {
 impl Machine {
     pub fn new(now: Ms, config: Config, random: Box<dyn Random>) -> Self {
         let ctx = Rc::new(Ctx::new(now, config, random));
+        // A request counts against the session making it as it is made: one
+        // that crosses the budget is never emitted (`memory-budgets`).
+        let weak = Rc::downgrade(&ctx);
+        ctx.rt.set_admit(move |request| {
+            weak.upgrade()
+                .is_none_or(|ctx| ctx.charge(request_bytes(request)))
+        });
         let shared = Rc::new(Shared {
             ctx: Rc::clone(&ctx),
             prefetches: RefCell::new(Vec::new()),
@@ -385,6 +406,11 @@ impl Machine {
         let generations = self.generations();
         let session = self.next_owner;
         self.next_owner += 1;
+        // Its name's copies, reserved at admission.
+        self.ctx
+            .budget
+            .borrow_mut()
+            .charge(session, input_bytes(&key), &self.ctx.bounds());
         let owner = self.owner(generations, ends, session);
         self.sessions.push(Session {
             key,
@@ -408,18 +434,17 @@ impl Machine {
         id
     }
 
-    /// A finished session's replies, serialized for each caller, count
+    /// A finished session's replies (results or errors), serialized for each caller, count
     /// against its budget until written (`memory-budgets`). Over it, the
     /// callers get `budget` instead, and the result it cached goes.
     fn charge_replies(&self, i: usize, outcome: Outcome) -> Outcome {
         let session = &self.sessions[i];
-        let Ok(value) = &outcome else {
-            return outcome;
+        // An error's message can be as large as its name: it counts too.
+        let serialized = match &outcome {
+            Ok(value) => value.stringify(),
+            Err(thrown) => JsValue::String(thrown.message.clone()).stringify(),
         };
-        let bytes = value
-            .stringify()
-            .len()
-            .saturating_mul(session.callers.len());
+        let bytes = serialized.len().saturating_mul(session.callers.len());
         let bounds = self.ctx.bounds();
         if self
             .ctx
@@ -429,6 +454,16 @@ impl Machine {
         {
             return outcome;
         }
+        if let Ok(value) = &outcome {
+            self.take_back(i, value);
+        }
+        Err(Thrown::budget())
+    }
+
+    /// Takes a session's result back out of the cache, if it is still the
+    /// cached one.
+    fn take_back(&self, i: usize, value: &JsValue) {
+        let session = &self.sessions[i];
         let now = self.now();
         match &session.cached {
             Cached::Ens(store, key) => {
@@ -449,7 +484,6 @@ impl Machine {
                 }
             }
         }
-        Err(Thrown::budget())
     }
 
     fn cached(&self, store: Store, key: &str) -> Option<JsValue> {
@@ -543,12 +577,16 @@ impl Machine {
         let full = match self.sessions.iter().find(|s| s.key == dedup) {
             Some(session) => session.callers.len() >= bounds.callers_per_session,
             // Starting one needs room for its first caller too.
-            // While the sessions' total budget is saturated, none starts
-            // (`memory-budgets`).
+            // A new session reserves its name's copies first, and none
+            // starts while the total is saturated (`memory-budgets`).
             None => {
                 self.sessions.len() >= bounds.sessions
                     || bounds.callers_per_session == 0
-                    || self.ctx.budget.borrow_mut().saturated(&bounds)
+                    || !self
+                        .ctx
+                        .budget
+                        .borrow_mut()
+                        .admits(input_bytes(dedup), &bounds)
             }
         };
         full.then(|| self.reply(Err(Thrown::protocol("busy")), attempts))
@@ -692,26 +730,21 @@ impl Machine {
             // as the race it replaces let it. Its requests carry its owner,
             // and what it charges goes to its session.
             let id = self.sessions[i].id;
-            let mark = self.ctx.rt.pending_effects();
             self.ctx.rt.set_owner(self.sessions[i].owner);
             self.ctx.session.set(id);
             let finished = self.sessions[i].task.poll();
             self.ctx.rt.set_owner(0);
             self.ctx.session.set(0);
-            // Its new requests count from now on: one that crosses the
-            // budget ends the session in this poll, so it is never sent.
-            let mut bytes = 0usize;
-            self.ctx
-                .rt
-                .each_request_from(mark, |request| bytes += request_bytes(request));
-            if bytes > 0 {
-                self.ctx.budget.borrow_mut().charge(id, bytes, &bounds);
-            }
             let spent = self.ctx.budget.borrow().over(id);
             if finished {
                 match self.sessions[i].task.take() {
                     Some(Attempt::Done(outcome)) => {
                         let outcome = if spent {
+                            // It may have cached before crossing, in this
+                            // very poll.
+                            if let Ok(value) = &outcome {
+                                self.take_back(i, value);
+                            }
                             Err(Thrown::budget())
                         } else {
                             self.charge_replies(i, sized(outcome, &bounds))

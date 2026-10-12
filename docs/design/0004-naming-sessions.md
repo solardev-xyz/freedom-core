@@ -505,7 +505,14 @@ Measured valid answers sit well below the 720 KiB cap:
 - **Conflict groups:** a `resolvedData` longer than 8,192 hex characters is shortened to its first 4,096 and last 4,096 characters. Today's renderer shows only a value's first 16 and last 10 characters, and its exact matches have fixed short lengths, so nothing it shows changes.
 - **Unsupported results:** the same applies to `contentHash` (deviation `reply-shortening`).
 
-**Memory.** What a session can come to hold is bounded by what it is charged for. A session is charged, from the moment each arrives or is made until the session ends, for its requests (their payload strings), its answers (their bodies, or a verifier's outcome), its aliasing decodes' output, and its replies (the serialized result, once per caller). Everything a session retains derives from those, and a decode that can't alias never outgrows its input. So the charge bounds what it holds without accounting for each value; it can only overstate it:
+**Memory.** What a session can come to hold is bounded by what it is charged for, conservatively, from the moment each part arrives or is made until the session ends. A session is charged for:
+- **its name and key:** 8 copies of its in-flight key, reserved at admission; a session that can't reserve them doesn't start;
+- **its requests:** their payload strings, as each is made; one whose charge crosses is never made;
+- **its answers:** each body at 32 bytes per byte, the most its parsed JSON can take (each value takes at least two bytes of input, and at most two 32-byte slots); a verifier's result likewise, by its serialized size;
+- **its aliasing decodes' output** (an `OffchainLookup`'s URLs and data);
+- **its replies:** the serialized result or error message, once per caller.
+
+Everything a session retains derives from those: copies of its name, values parsed from its answers, and decodes that can't alias, which never outgrow their input:
 
 | Budget | Bound | Exhausted |
 |---|---|---|
@@ -519,7 +526,7 @@ Measured valid answers sit well below the 720 KiB cap:
 | endpoint state (quarantine, discovery) for endpoints no longer configured | the 64 most recently retired | the oldest retired entries are dropped (deviation `endpoint-retention`); a re-added endpoint within that bound keeps its state |
 | surviving prefetches | 32 | the oldest is cancelled |
 
-**Lifetimes:** a session's charge is released when it ends, however it ends. Its replies' bytes then wait in naming's share of the writer (8 MiB), bounded on their own.
+**Lifetimes:** a session's charge is released when it ends, however it ends. Its replies then wait in naming's share of the writer (8 MiB) and the naming thread's own queue; past 16 MiB waiting in all, new lookups get `busy` (small replies, which main's 256 outstanding requests bound).
 
 The 4 MiB decode budget caps aliasing: an `OffchainLookup` whose URL array repeats one 64 KiB string 2,047 times decodes to about 128 MiB today. The core refuses it. Only an array can alias. Every other decode (an ABI result with one dynamic field, JSON, Micheline, base64, hex) reads its input once, so its output never exceeds its input, which the answer cap bounds.
 

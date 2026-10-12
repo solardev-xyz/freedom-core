@@ -188,6 +188,7 @@ fn run(
         allowance,
         closing,
         outbox: VecDeque::new(),
+        max_backlog: MAX_NAMING_BACKLOG,
         callers: BTreeMap::new(),
         outgoing: BTreeMap::new(),
         by_io: BTreeMap::new(),
@@ -255,6 +256,12 @@ const FAILURE_CLASSES: &[&str] = &[
     "error",
 ];
 
+/// Naming's frames waiting to be written (its writer share and its own
+/// queue) past which new lookups are busy (design 0004, Bounds: Memory):
+/// their replies can't outgrow it by more than main's 256 outstanding
+/// requests' small busy replies.
+const MAX_NAMING_BACKLOG: usize = 16 * 1024 * 1024;
+
 /// At most this many `shell.*` requests outstanding at main (design 0004,
 /// Bounds: Work); more wait here, first in, first out.
 const MAX_OUTSTANDING: usize = 256;
@@ -267,6 +274,8 @@ struct Naming {
     closing: Arc<Mutex<bool>>,
     /// Frames waiting for room in the writer, in order.
     outbox: VecDeque<Zeroizing<Vec<u8>>>,
+    /// See MAX_NAMING_BACKLOG.
+    max_backlog: usize,
     /// Requests waiting for a slot: the machine's request id, the request,
     /// its attempt's generations, and its session's deadline.
     queued: VecDeque<(u64, Request, Generations, Ms)>,
@@ -323,6 +332,14 @@ impl Naming {
                     }
                 }
             };
+        }
+        // A lookup's reply can't be written while the backlog is this deep:
+        // busy, which is small, in its place.
+        if method.starts_with("naming.resolve_") && self.backlog() > self.max_backlog {
+            return self.error(
+                id,
+                ErrorBody::new(ErrorCode::Busy, code_message(ErrorCode::Busy)),
+            );
         }
         match method {
             "naming.configure" => {
@@ -615,6 +632,12 @@ impl Naming {
         let frame = transport::frame(payload).ok_or(Stop::Protocol("oversized_message"))?;
         self.outbox.push_back(frame);
         self.pump()
+    }
+
+    /// Naming's frames not yet written: those the writer holds and those
+    /// waiting here.
+    fn backlog(&self) -> usize {
+        self.allowance.held_bytes() + self.outbox.iter().map(|f| f.len()).sum::<usize>()
     }
 
     /// Hands every waiting frame to the writer, past the allowance: at
@@ -1093,6 +1116,7 @@ mod tests {
             allowance: Allowance::new(usize::MAX, writer_bytes),
             closing: Arc::new(Mutex::new(false)),
             outbox: VecDeque::new(),
+            max_backlog: MAX_NAMING_BACKLOG,
             callers: BTreeMap::new(),
             outgoing: BTreeMap::new(),
             by_io: BTreeMap::new(),
@@ -1262,6 +1286,51 @@ mod tests {
         let frames = written(&rx);
         assert!(frames.iter().all(|f| f["type"] == "response"), "{frames:?}");
         assert!(naming.outgoing.is_empty());
+    }
+
+    #[test]
+    fn lookups_are_busy_while_naming_cannot_write() {
+        // Room for one frame at a time, and a backlog bound of 1,000 bytes.
+        let (mut naming, rx) = naming(256, 1);
+        naming.max_backlog = 1000;
+        let filler = format!(
+            r#"{{"type":"event","event":"x.y","data":{{"pad":"{}"}}}}"#,
+            "x".repeat(2000)
+        );
+        assert!(naming.send(filler.as_bytes()).is_ok());
+        assert!(naming.send(filler.as_bytes()).is_ok());
+        assert!(naming.backlog() > 1000);
+        assert!(
+            naming
+                .request(
+                    7,
+                    "naming.resolve_content",
+                    Some(r#"{"name":"vitalik.eth"}"#)
+                )
+                .is_ok()
+        );
+        // Not started: busy instead, behind the waiting frames.
+        assert_eq!(naming.machine.running(), 0);
+        let busy: serde_json::Value =
+            serde_json::from_slice(&naming.outbox.back().unwrap()[5..]).unwrap();
+        assert_eq!(busy["id"], 7);
+        assert_eq!(busy["error"]["code"], "busy");
+        // Written, the backlog clears and lookups start again.
+        drop(written(&rx));
+        assert!(naming.handle(In::Drained).is_ok());
+        drop(written(&rx));
+        assert!(naming.handle(In::Drained).is_ok());
+        drop(written(&rx));
+        assert!(
+            naming
+                .request(
+                    8,
+                    "naming.resolve_content",
+                    Some(r#"{"name":"vitalik.eth"}"#)
+                )
+                .is_ok()
+        );
+        assert_eq!(naming.machine.running(), 1);
     }
 
     #[test]

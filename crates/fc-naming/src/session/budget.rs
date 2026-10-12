@@ -10,6 +10,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::bounds::Bounds;
 
+/// What a JSON body can come to hold once parsed, per byte: each value
+/// takes at least two bytes (a one-character literal and its separator)
+/// and at most two `JsValue` slots (a vector grows by doubling). A test
+/// keeps `JsValue` within it.
+pub(crate) const PARSED_FACTOR: usize = 32;
+
+/// The copies a session keeps of its name and key (its in-flight key, its
+/// subject, the cache key, each attempt's captures), per byte.
+pub(crate) const INPUT_COPIES: usize = 8;
+
 #[derive(Debug, Default)]
 pub(crate) struct Budget {
     used: BTreeMap<u64, usize>,
@@ -34,6 +44,14 @@ impl Budget {
             self.over.insert(session);
         }
         !(own || all)
+    }
+
+    /// Whether a new session charged `bytes` could start: within its own
+    /// bound and the total's, and the total not saturated.
+    pub(crate) fn admits(&mut self, bytes: usize, bounds: &Bounds) -> bool {
+        bytes <= bounds.session_bytes
+            && self.total.saturating_add(bytes) <= bounds.total_bytes
+            && !self.saturated(bounds)
     }
 
     pub(crate) fn over(&self, session: u64) -> bool {
@@ -72,6 +90,12 @@ mod tests {
             resume_bytes: 120,
             ..Bounds::default()
         }
+    }
+
+    #[test]
+    fn a_parsed_value_fits_its_factor() {
+        // Two slots (a doubled vector's room) for every two bytes.
+        assert!(std::mem::size_of::<crate::jsjson::JsValue>() <= PARSED_FACTOR);
     }
 
     #[test]

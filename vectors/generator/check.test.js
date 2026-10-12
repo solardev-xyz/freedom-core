@@ -297,6 +297,14 @@ test('replay\'s memory-budgets patch refuses what it can\'t model', async () => 
   await assert.rejects(run(100), /a request crossed the budget/);
   // Nothing crosses a megabyte: no deviation to show.
   await assert.rejects(run(1 << 20), /finished under its budget/);
+  // A redirect is a hop, not an exchange the core charges.
+  const redirected = structuredClone(definition(ethers, 'deviation-memory-budgets'));
+  redirected.world.hosts = { 'a.rpc.example': { statuses: [302], location: 'https://r.rpc.example/' }, 'r.rpc.example': {} };
+  await assert.rejects(replay.runScenario(REFERENCE, ethers, FakeTimers, redirected), /no redirects or 429s/);
+  // An empty name ends at once, with no answer to cross the budget.
+  const empty = structuredClone(definition(ethers, 'deviation-memory-budgets'));
+  empty.steps[0].call = { fn: 'resolveEnsContent', args: [''] };
+  await assert.rejects(replay.runScenario(REFERENCE, ethers, FakeTimers, empty), /ended otherwise/);
 });
 
 test('replay\'s overall-deadline patch refuses what it can\'t model', async () => {

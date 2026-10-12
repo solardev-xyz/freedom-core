@@ -107,6 +107,10 @@ struct World {
     cancelled: Vec<u64>,
     /// The most the sessions held at once.
     peak: usize,
+    /// What the sessions held before each poll.
+    before_polls: Vec<usize>,
+    /// Delivers everything due at one time before polling.
+    batch: bool,
 }
 
 impl World {
@@ -127,6 +131,8 @@ impl World {
             sent: Vec::new(),
             cancelled: Vec::new(),
             peak: 0,
+            before_polls: Vec::new(),
+            batch: false,
         }
     }
 
@@ -146,6 +152,7 @@ impl World {
             self.deliver(at, Pending::Configure(Box::new(config)));
         }
         loop {
+            self.before_polls.push(self.machine.held());
             self.machine.poll();
             self.peak = self.peak.max(self.machine.held());
             self.replies.extend(self.machine.take_replies());
@@ -189,21 +196,35 @@ impl World {
                 self.deliver(at + 10, Pending::Answer(id, answer));
             }
             self.peak = self.peak.max(self.machine.held());
-            match self.machine.fire_next(until) {
+            let fired = self.machine.fire_next(until);
+            if self.batch && fired.is_some() {
+                let now = self.machine.now();
+                while self.machine.next_due() == Some(now) {
+                    if let Some(Fired::External(token)) = self.machine.fire_next(now) {
+                        self.handle(token);
+                    }
+                }
+            }
+            match fired {
                 None => return,
                 Some(Fired::Timer) => {}
-                Some(Fired::External(token)) => match self.pending.remove(&token) {
-                    Some(Pending::Change) => self.machine.availability(false),
-                    Some(Pending::Configure(config)) => {
-                        self.machine.configure(*config, false);
-                    }
-                    Some(Pending::Answer(id, answer)) => {
-                        self.machine.complete(id, answer);
-                        self.peak = self.peak.max(self.machine.held());
-                    }
-                    None => {}
-                },
+                Some(Fired::External(token)) => self.handle(token),
             }
+        }
+    }
+
+    /// Delivers one of main's events.
+    fn handle(&mut self, token: u64) {
+        match self.pending.remove(&token) {
+            Some(Pending::Change) => self.machine.availability(false),
+            Some(Pending::Configure(config)) => {
+                self.machine.configure(*config, false);
+            }
+            Some(Pending::Answer(id, answer)) => {
+                self.machine.complete(id, answer);
+                self.peak = self.peak.max(self.machine.held());
+            }
+            None => {}
         }
     }
 
@@ -687,7 +708,8 @@ fn every_callers_reply_counts_against_the_session() {
 fn crossing_the_total_fails_a_session_and_holds_new_ones_back() {
     let peak = peak_of("vitalik.eth").max(peak_of("nick.eth"));
     let mut bounded = config();
-    bounded.bounds.total_bytes = peak + peak / 2;
+    // Two sessions in step cross it about halfway; the survivor alone fits.
+    bounded.bounds.total_bytes = peak;
     bounded.bounds.resume_bytes = 1;
     let mut world = World::new(bounded);
     let a = world.machine.resolve_content("vitalik.eth");
@@ -786,4 +808,111 @@ fn an_aliasing_decode_counts_against_the_session() {
     let a = world.machine.resolve_content("vitalik.eth");
     world.run(10_000);
     assert_eq!(message(world.reply(a)), Some("budget"));
+}
+
+#[test]
+fn a_new_sessions_name_counts_at_admission() {
+    let mut bounded = config();
+    bounded.bounds.session_bytes = 1000;
+    let mut world = World::new(bounded);
+    // 8 copies of `content:<204 bytes>` is more than 1,000: never started.
+    let long = world
+        .machine
+        .resolve_content(&format!("{}.eth", "a".repeat(200)));
+    world.run(0);
+    assert_eq!(protocol(world.reply(long)), Some("busy"));
+    assert_eq!(world.machine.running(), 0);
+    world.machine.resolve_content("vitalik.eth");
+    assert_eq!(world.machine.running(), 1);
+}
+
+#[test]
+fn a_request_that_crosses_the_budget_is_never_sent() {
+    // The name's copies, then room for two of the four head probes.
+    let name = 8 * "content:vitalik.eth".len();
+    let probe = ENDPOINTS[0].len()
+        + r#"{"method":"eth_blockNumber","params":[],"id":1,"jsonrpc":"2.0"}"#.len();
+    let mut bounded = config();
+    bounded.bounds.session_bytes = name + 2 * probe + probe / 2;
+    let mut world = World::new(bounded);
+    let a = world.machine.resolve_content("vitalik.eth");
+    world.run(10_000);
+    assert_eq!(message(world.reply(a)), Some("budget"));
+    assert_eq!(
+        world.sent.len(),
+        2,
+        "the probes past the budget were never sent"
+    );
+    assert_eq!(world.machine.held(), 0);
+}
+
+#[test]
+fn spent_in_its_finishing_poll_a_session_caches_nothing() {
+    // Answers that arrive together are delivered before the poll that
+    // finishes the session: whatever that poll charges crosses.
+    let mut unbounded = World::new(config());
+    unbounded.batch = true;
+    unbounded.machine.resolve_content("vitalik.eth");
+    unbounded.run(10_000);
+    let before_last = *unbounded
+        .before_polls
+        .iter()
+        .rev()
+        .find(|held| **held > 0)
+        .unwrap();
+    let mut bounded = config();
+    bounded.bounds.session_bytes = before_last;
+    let mut world = World::new(bounded);
+    world.batch = true;
+    let a = world.machine.resolve_content("vitalik.eth");
+    world.run(10_000);
+    assert_eq!(message(world.reply(a)), Some("budget"));
+    // Nothing of it was kept: the next lookup starts a session.
+    world.machine.resolve_content("vitalik.eth");
+    assert_eq!(world.machine.running(), 1);
+}
+
+#[test]
+fn answers_count_as_their_parsed_tree() {
+    // 2 KB more per answer: about 30 KB of bodies in all, which raw would
+    // fit 200,000 bytes, but parsed (32 per byte) can't.
+    let mut bounded = config();
+    bounded.bounds.session_bytes = 200_000;
+    let mut world = World::new(bounded);
+    let pad = format!(r#","pad":"{}"}}"#, "x".repeat(2_000));
+    for body in world.answers.values_mut() {
+        body.pop();
+        body.push_str(&pad);
+    }
+    let a = world.machine.resolve_content("vitalik.eth");
+    world.run(10_000);
+    assert_eq!(message(world.reply(a)), Some("budget"));
+}
+
+#[test]
+fn every_callers_error_counts_against_the_session() {
+    // No method can resolve: each caller's error carries the name.
+    let mut failing = config();
+    failing.order = vec!["myotis".into()];
+    let name = format!("{}.eth", "a".repeat(2_000));
+    let mut alone = World::new(failing.clone());
+    let a = alone.machine.resolve_content(&name);
+    alone.run(10_000);
+    let error = message(alone.reply(a)).unwrap().to_owned();
+    assert!(error.contains(&name));
+    // As it is sent: a JSON string.
+    let reply = error.len() + 2;
+    let peak = alone.peak.max(8 * format!("content:{name}").len());
+    for (room, outcome) in [(3 * reply, error.as_str()), (3 * reply - 1, "budget")] {
+        let mut bounded = failing.clone();
+        bounded.bounds.session_bytes = peak + room;
+        let mut world = World::new(bounded);
+        let callers: Vec<u64> = (0..3)
+            .map(|_| world.machine.resolve_content(&name))
+            .collect();
+        world.run(10_000);
+        for caller in &callers {
+            assert_eq!(message(world.reply(*caller)), Some(outcome));
+        }
+    }
 }

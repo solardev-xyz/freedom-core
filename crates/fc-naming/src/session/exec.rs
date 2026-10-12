@@ -67,16 +67,22 @@ struct Inner<Q, A> {
     owner: u64,
 }
 
+/// Decides, as a request is made, whether it may be: one refused is never
+/// emitted, and its future never resolves.
+type Admit<Q> = Rc<dyn Fn(&Q) -> bool>;
+
 /// The executor's shared state: the clock, timers and outstanding I/O.
 /// Clones share it.
 pub struct Rt<Q, A> {
     inner: Rc<RefCell<Inner<Q, A>>>,
+    admit: Rc<RefCell<Option<Admit<Q>>>>,
 }
 
 impl<Q, A> Clone for Rt<Q, A> {
     fn clone(&self) -> Self {
         Self {
             inner: Rc::clone(&self.inner),
+            admit: Rc::clone(&self.admit),
         }
     }
 }
@@ -93,7 +99,13 @@ impl<Q, A> Rt<Q, A> {
                 effects: Vec::new(),
                 owner: 0,
             })),
+            admit: Rc::new(RefCell::new(None)),
         }
+    }
+
+    /// Sets the check every request passes as it is made.
+    pub fn set_admit(&self, admit: impl Fn(&Q) -> bool + 'static) {
+        *self.admit.borrow_mut() = Some(Rc::new(admit));
     }
 
     pub fn now(&self) -> Ms {
@@ -118,6 +130,7 @@ impl<Q, A> Rt<Q, A> {
             request: Some(request),
             id: None,
             done: false,
+            refused: false,
         }
     }
 
@@ -125,21 +138,6 @@ impl<Q, A> Rt<Q, A> {
     /// driver polling several roots tells their requests apart by it.
     pub fn set_owner(&self, owner: u64) {
         self.inner.borrow_mut().owner = owner;
-    }
-
-    /// How many effects are waiting to be taken.
-    pub fn pending_effects(&self) -> usize {
-        self.inner.borrow().effects.len()
-    }
-
-    /// Calls `f` on each request among the waiting effects from index
-    /// `from` on.
-    pub fn each_request_from(&self, from: usize, mut f: impl FnMut(&Q)) {
-        for effect in self.inner.borrow().effects.iter().skip(from) {
-            if let Effect::Request { request, .. } = effect {
-                f(request);
-            }
-        }
     }
 
     /// The effects emitted since the last call, in order.
@@ -259,6 +257,8 @@ pub struct Io<Q, A> {
     request: Option<Q>,
     id: Option<u64>,
     done: bool,
+    /// Refused as it was made: never emitted, never resolved.
+    refused: bool,
 }
 
 impl<Q: Unpin, A> Future for Io<Q, A> {
@@ -266,6 +266,19 @@ impl<Q: Unpin, A> Future for Io<Q, A> {
 
     fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<A> {
         let this = &mut *self;
+        if this.refused {
+            return Poll::Pending;
+        }
+        if this.id.is_none() {
+            let admit = this.rt.admit.borrow().clone();
+            if let (Some(admit), Some(request)) = (admit, this.request.as_ref())
+                && !admit(request)
+            {
+                this.refused = true;
+                this.request = None;
+                return Poll::Pending;
+            }
+        }
         let mut inner = this.rt.inner.borrow_mut();
         match this.id {
             None => {
