@@ -117,7 +117,10 @@ Myotis and Colibri keep running in main, through today's adapters, **one whole o
 | `{ colibri: "resolve", name, call_data, resolver }` | `resolveCallViaColibri(name, callData, callResolver)`, where `resolver` (`ur`, `name_nft` or `name_nft_reverse`) picks the call resolver; with today's whole-operation client rebuild and retry (`withColibriClientRetry`) and ethers' built-in CCIP | `{ resolved_data, resolver_address }`, `{ revert }` or `{ failure }` |
 | `{ colibri: "reverse", address, coin_type }` | `resolveReverseViaColibri` | `{ name }`, `{ revert }` or `{ failure }` |
 
-- **Main checks Myotis' epoch** around each operation, as `tryMyotisPath` does today. A changed epoch is `{ failure: "lifecycle" }`, which the core treats as a lifecycle change.
+- **Main runs no epoch check of its own.** The reply is the outcome the adapter gives, as the reference receives it. A success is forwarded as a success, and `tryMyotisPath`'s check after it is the core's ([Verified methods](#verified-methods)).
+- **The adapters guard themselves.** An operation that crosses a change of Myotis availability fails inside the adapter:
+  - `verifiedRequest` checks around each raw call and throws `MYOTIS_UNAVAILABLE`, which is `{ failure: "lifecycle" }`;
+  - the record operation's `MyotisProvider` checks the epoch it started with before and after each raw call. Its error carries no code, so it is `{ failure: "error" }` (`myotis-lifecycle-between-calls`).
 - **`failure`** is a closed set of classes (`unavailable`, `lifecycle`, `timeout`, `too_large`, `error`) and carries no text. A failure is a method error, and the order continues. That includes `lifecycle`, which is today's `MYOTIS_UNAVAILABLE` from `verifiedRequest`; the epoch change itself restarts the lookup ([Sessions](#sessions)).
 - **Reply size:** main serializes each reply first. One over 1 MiB (a large return, revert or name) is replaced by `{ failure: "too_large" }`: a method error, so the order continues (deviation `verified-reply-size`).
 - **Provenance:** a `revert` is the verifier's proven revert data. The core records which verifier produced it.
@@ -255,8 +258,10 @@ The rules below restate the reference, so a reviewer can check them against the 
   - **Results:** a proven `ResolverNotFound` is a verified `NO_RESOLVER` (`colibri-resolver-not-found`). Any other failure is a method error, and the order continues.
   - **Trust:** `prover` is the prover's host, and `proof` is `ZK sync-committee proof` or `Sync-committee proof` (from `zk`).
 - **Lifecycle, two outcomes, as in the reference:**
-  - **The operation fails** (`{ failure: "lifecycle" }`, today's `MYOTIS_UNAVAILABLE`): a method error, and the order continues (`myotis-record-lifecycle-mid-operation`, `myotis-call-lifecycle-mid-operation`).
-  - **The operation succeeds, but the core's own epoch check after it fails** (today's `MYOTIS_LIFECYCLE_CHANGED` in `tryMyotisPath` and `tryMyotisReverse`): the method order is aborted at once and the session restarts. Neither the reference nor the core can reach this through timers, because the check runs in the same turn as the answer. Unit tests in the core cover it.
+  - **The operation fails** inside its adapter ([Verified operations](#verified-operations)): a method error, and the order continues. The attempt crossed a change, so at its end it is discarded and the session restarts ([Sessions](#sessions); `myotis-record-lifecycle-mid-operation`, `myotis-call-lifecycle-mid-operation`, `myotis-lifecycle-between-calls`).
+  - **The operation succeeds, but the core's own check after it fails** (today's `MYOTIS_LIFECYCLE_CHANGED` in `tryMyotisPath` and `tryMyotisReverse`): the method order is aborted at once and the session restarts.
+    - **The check:** Myotis' readiness and epoch, as the last `naming.availability` gave them, against their values when the method began.
+    - **Reachability:** timers can't reach this, in the reference or in the core. A successful operation's last guard ran in the turn it settled, and main sends `naming.availability` from the transition itself, ahead of any later reply on the same connection. Unit tests in the core cover it.
 
 ### Method order
 
