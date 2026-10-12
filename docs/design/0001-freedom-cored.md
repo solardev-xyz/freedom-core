@@ -105,7 +105,7 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
 - **One gate for every core-format writer.** The same `freedom-cored` binary provides two more subcommands, both of which take the gate under the same rules:
   - **`hold-lock --data-dir … --lock-dir …`** prints `locked`, then holds the gate until its stdin closes. Profile delete and reset (`profile-catalog.js`) and data migrations hold it for the whole destructive operation. The gate lives outside the directory being removed, so no core can start until the operation releases it.
   - **`recover --data-dir … --lock-dir …`** takes the gate, rolls forward any node-identity journal (see [Multi-file writes](#multi-file-writes)), prints `recovered` (or `corrupt` with details), then exits.
-- **The JS vault writer** (`FREEDOM_CORE=0` in dev builds, or a hotfix that reverts to the JS vault) can't hold an OS lock itself, because Node has no `flock`. So:
+- **The JS vault writer** (a step-1 dev build without the `FREEDOM_CORE=1` opt-in, or a hotfix that reverts to the JS vault) can't hold an OS lock itself, because Node has no `flock`. So:
   - **It runs `recover` at startup,** before it starts any node or writes any identity file. A journal that a core left behind is therefore always completed first. Such builds keep shipping the binary for this purpose.
   - **Running the JS writer and a core on the same identity directory at the same time is an unsupported configuration,** not something the design can rule out. Packaged builds have no backend switch, and one profile process runs one backend. But alternate roots (`--profile-dir`, `FREEDOM_IDENTITY_DATA`) and different release versions can still bring the two together. Release notes and the profile docs state the limitation.
 
@@ -408,6 +408,7 @@ New code goes in `src/main/core/`:
 ### Rollback
 
 - **No runtime switch.** A runtime switch would mean a release in which two writers, the JS vault and the core, share one identity directory without sharing the lock. Step 1's `FREEDOM_CORE=1` opt-in exists only in dev builds (`!app.isPackaged`), while the core does nothing yet. Step 2 removes it: from then on the core always runs, and no JS code path is left to switch back to.
+- **A rollback hotfix is more than a revert of step 2.** Step 1's code never runs `recover`, but a JS writer must (see [Lifetime lock](#lifetime-lock)). The hotfix keeps shipping the binary and runs `recover` at startup, before it starts any node, so a journal the core left behind is finished first.
 - **Rollback is a hotfix release** that reverts step 2. That's safe because the JS reads everything the core writes. `vectors/` checks vault files and Bee keystores written by Rust against the pinned JS, in CI, on every change.
 
 ### Quick unlock
