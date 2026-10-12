@@ -293,6 +293,33 @@ pub async fn all<T>(futures: Vec<BoxFuture<'_, T>>) -> Vec<T> {
     .await
 }
 
+/// `Promise.all`: every output in input order, or the first error as soon
+/// as it settles. The others are dropped then, which cancels their I/O.
+pub async fn try_all<T, E>(futures: Vec<BoxFuture<'_, Result<T, E>>>) -> Result<Vec<T>, E> {
+    let mut results: Vec<Option<T>> = futures.iter().map(|_| None).collect();
+    let mut futures: Vec<Option<BoxFuture<'_, Result<T, E>>>> =
+        futures.into_iter().map(Some).collect();
+    std::future::poll_fn(move |cx| {
+        for (result, future) in results.iter_mut().zip(futures.iter_mut()) {
+            if let Some(running) = future
+                && let Poll::Ready(value) = running.as_mut().poll(cx)
+            {
+                *future = None;
+                match value {
+                    Ok(value) => *result = Some(value),
+                    Err(error) => return Poll::Ready(Err(error)),
+                }
+            }
+        }
+        if results.iter().all(Option::is_some) {
+            Poll::Ready(Ok(results.iter_mut().filter_map(Option::take).collect()))
+        } else {
+            Poll::Pending
+        }
+    })
+    .await
+}
+
 /// One of two outcomes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Either<L, R> {
@@ -324,6 +351,9 @@ pub async fn race<L, R>(
 pub struct Task<'a, T> {
     future: BoxFuture<'a, T>,
     output: Option<T>,
+    /// Set once the future has completed: it is never polled again, even
+    /// after [`Task::take`] emptied `output`.
+    done: bool,
 }
 
 impl<'a, T> Task<'a, T> {
@@ -331,18 +361,20 @@ impl<'a, T> Task<'a, T> {
         Self {
             future: Box::pin(future),
             output: None,
+            done: false,
         }
     }
 
-    /// Polls once; true once the output is ready.
+    /// Polls once; true once the future has completed.
     pub fn poll(&mut self) -> bool {
-        if self.output.is_none() {
+        if !self.done {
             let mut cx = Context::from_waker(Waker::noop());
             if let Poll::Ready(value) = self.future.as_mut().poll(&mut cx) {
                 self.output = Some(value);
+                self.done = true;
             }
         }
-        self.output.is_some()
+        self.done
     }
 
     pub fn take(&mut self) -> Option<T> {
@@ -355,6 +387,43 @@ mod tests {
     use super::*;
 
     type R = Rt<&'static str, &'static str>;
+
+    #[test]
+    fn try_all_fails_fast_and_cancels_the_rest() {
+        let rt = R::new(0);
+        let slow = rt.request("slow");
+        let failing = rt.sleep(10);
+        let mut task = Task::new(try_all::<&str, &str>(vec![
+            Box::pin(async move { Ok(slow.await) }),
+            Box::pin(async move {
+                failing.await;
+                Err("failed")
+            }),
+        ]));
+        assert!(!task.poll());
+        let effects = rt.take_effects();
+        let Some(Effect::Request { id, .. }) = effects.first() else {
+            panic!("no request");
+        };
+        let id = *id;
+        assert_eq!(rt.fire_next(100), Some(Fired::Timer));
+        assert!(task.poll());
+        assert_eq!(task.take(), Some(Err("failed")));
+        // The slow request was cancelled when the error settled, at 10 ms.
+        assert!(matches!(
+            rt.take_effects().as_slice(),
+            [Effect::Cancel { id: cancelled, at: 10 }] if *cancelled == id
+        ));
+    }
+
+    #[test]
+    fn a_completed_task_is_never_polled_again() {
+        let mut task = Task::new(async { 42 });
+        assert!(task.poll());
+        assert_eq!(task.take(), Some(42));
+        assert!(task.poll());
+        assert_eq!(task.take(), None);
+    }
 
     async fn with_timeout(
         rt: &R,

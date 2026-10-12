@@ -402,8 +402,11 @@ impl Machine {
             state.reverse.clear();
             state.lifecycle += 1;
         }
+        // Tezos has its own in-flight table, which ENS events leave alone.
         for session in &mut self.sessions {
-            session.key.clear();
+            if !session.key.starts_with("tezos:") {
+                session.key.clear();
+            }
         }
     }
 
@@ -425,8 +428,11 @@ impl Machine {
             state.reverse.clear();
             state.lifecycle += 1;
         }
+        // Tezos has its own in-flight table, which ENS events leave alone.
         for session in &mut self.sessions {
-            session.key.clear();
+            if !session.key.starts_with("tezos:") {
+                session.key.clear();
+            }
         }
     }
 }

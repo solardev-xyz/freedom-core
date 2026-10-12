@@ -42,14 +42,15 @@ pub(crate) async fn fetch_head(
     .and_then(|inner| inner)
 }
 
-/// `fetchProviderBlockHashAt`: the block's hash, `None` for a pending
-/// block's `null`.
+/// `fetchProviderBlockHashAt`: the block's hash. A `null` hash (which
+/// ethers' formatter accepts, for pending blocks) fails like a missing
+/// block: an anchor must name a block (deviation `null-block-hash`).
 pub(crate) async fn fetch_hash_at(
     ctx: &Ctx,
     endpoint: &str,
     number: i64,
     timeout: f64,
-) -> Result<Option<String>, ()> {
+) -> Result<String, ()> {
     let mut provider = Provider::new(endpoint);
     let Ok(number) = u64::try_from(number) else {
         return Err(());
@@ -60,7 +61,7 @@ pub(crate) async fn fetch_hash_at(
             .await
             .map_err(|_| ())?;
         let block = rpc::block_result(&block).map_err(|_| ())?.ok_or(())?;
-        Ok(block.hash)
+        block.hash.ok_or(())
     })
     .await
     .and_then(|inner| inner)
@@ -143,25 +144,25 @@ pub(crate) async fn pinned_block(ctx: &Ctx) -> Result<Option<(i64, String)>, Thr
                     }
                     (endpoint.clone(), hash)
                 })
-                    as Pin<Box<dyn Future<Output = (Endpoint, Result<Option<String>, ()>)> + '_>>
+                    as Pin<Box<dyn Future<Output = (Endpoint, Result<String, ()>)> + '_>>
             })
             .collect(),
     )
     .await;
-    let hashes: Vec<(Endpoint, Option<String>)> = hashes
+    let hashes: Vec<(Endpoint, String)> = hashes
         .into_iter()
         .filter_map(|(e, h)| h.ok().map(|h| (e, h)))
         .collect();
 
     // Buckets in response order; the first strictly largest wins.
-    let mut buckets: Vec<(Option<String>, Vec<Endpoint>)> = Vec::new();
+    let mut buckets: Vec<(String, Vec<Endpoint>)> = Vec::new();
     for (endpoint, hash) in &hashes {
         match buckets.iter_mut().find(|(h, _)| h == hash) {
             Some((_, members)) => members.push(endpoint.clone()),
             None => buckets.push((hash.clone(), vec![endpoint.clone()])),
         }
     }
-    let mut winner: (Option<String>, Vec<Endpoint>) = (None, Vec::new());
+    let mut winner: (String, Vec<Endpoint>) = (String::new(), Vec::new());
     for (hash, members) in buckets {
         if members.len() > winner.1.len() {
             winner = (hash, members);
@@ -174,7 +175,7 @@ pub(crate) async fn pinned_block(ctx: &Ctx) -> Result<Option<(i64, String)>, Thr
         for endpoint in &winner.1 {
             ctx.mark_success(endpoint);
         }
-        let hash = winner.0.unwrap_or_default();
+        let hash = winner.0;
         ctx.state.borrow_mut().anchor = Some(Anchor {
             tag,
             number: target,
@@ -225,7 +226,11 @@ pub(crate) async fn single_source_anchor(
         let block = rpc::block_result(&block)
             .map_err(|_| "bad block".to_owned())?
             .ok_or(format!("block {target} not available"))?;
-        Ok::<_, String>((target, block.hash.unwrap_or_default()))
+        // Deviation `null-block-hash`: as a missing block.
+        let hash = block
+            .hash
+            .ok_or_else(|| format!("block {target} not available"))?;
+        Ok::<_, String>((target, hash))
     };
     match with_timeout(ctx, timeout, attempt).await {
         Ok(result) => result,

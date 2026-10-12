@@ -459,6 +459,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn internal_and_malformed_errors_are_provider_failures() {
+        let call = Method::Call {
+            to: [0; 20],
+            data: Vec::new(),
+            block: "latest".into(),
+        };
+        let classify = |body: &[u8]| match rpc::answer(1, &call, 200, body) {
+            Err(error) => CallError::Rpc(error).provider_failure(),
+            Ok(_) => unreachable!(),
+        };
+        // Rule 4: an error member that isn't an object.
+        assert!(classify(br#"{"id":1,"error":"oops"}"#));
+        // Rule 5 before revert data: −32603 with data.
+        assert!(classify(
+            br#"{"id":1,"error":{"code":-32603,"message":"execution reverted","data":"0x12345678"}}"#
+        ));
+        // Rule 5a: a revert with extracted data.
+        assert!(!classify(
+            br#"{"id":1,"error":{"code":3,"message":"execution reverted","data":"0x12345678"}}"#
+        ));
+    }
+
+    #[test]
     fn caches_keep_map_order_and_evict_expired_first() {
         let mut cache = Cache::default();
         cache.set("a", JsValue::Null, 10.0, 0);

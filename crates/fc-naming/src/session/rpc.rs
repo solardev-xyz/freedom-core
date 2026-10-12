@@ -143,6 +143,9 @@ pub enum RpcError {
     /// The result failed ethers' formatting (`INVALID_ARGUMENT`,
     /// `BAD_DATA`, `NUMERIC_FAULT`).
     BadResult,
+    /// An `error` member that isn't an object (design 0004,
+    /// Classification rule 4).
+    MalformedError,
 }
 
 /// Turns a 2xx body into the result for request `id`, as
@@ -173,16 +176,15 @@ pub fn answer(id: u64, method: &Method, status: u16, body: &[u8]) -> Result<JsVa
 }
 
 fn node_error(method: &Method, error: JsValue) -> RpcError {
+    if !matches!(error, JsValue::Object(_)) {
+        return RpcError::MalformedError;
+    }
     match method {
-        Method::Call { .. } => match spelunk_data(&error, 0) {
-            Some(data) => RpcError::CallException {
-                data: Some(data),
-                node: None,
-            },
-            None => RpcError::CallException {
-                data: None,
-                node: Some(NodeError { value: error }),
-            },
+        // The node's error stays beside any revert data ethers extracts:
+        // classification checks its code first (rule 5, −32603).
+        Method::Call { .. } => RpcError::CallException {
+            data: spelunk_data(&error, 0),
+            node: Some(NodeError { value: error }),
         },
         _ => RpcError::Coalesce(NodeError { value: error }),
     }
@@ -255,18 +257,35 @@ pub fn get_number(value: &JsValue) -> Option<i64> {
     }
 }
 
-/// ethers' `getBigInt` for a JSON value, enough to validate it.
+/// ethers' `getBigInt` for a JSON value, enough to validate it: any width
+/// (a block's difficulty can exceed 128 bits).
 fn is_big_int(value: &JsValue) -> bool {
     match value {
         JsValue::Number(n) => n.fract() == 0.0 && n.abs() <= 9_007_199_254_740_991.0,
-        JsValue::String(s) if !s.is_empty() => {
-            let s = s
-                .strip_prefix('-')
-                .filter(|rest| !rest.starts_with('-'))
-                .unwrap_or(s);
-            string_to_bigint_digits(s).is_some()
-        }
+        // `-BigInt(rest)` for a leading `-` not followed by another.
+        JsValue::String(s) if !s.is_empty() => match s.strip_prefix('-') {
+            Some(rest) if !rest.starts_with('-') => bigint_syntax(rest),
+            _ => bigint_syntax(s),
+        },
         _ => false,
+    }
+}
+
+/// Whether JavaScript's `BigInt(text)` parses, at any width: trimmed of
+/// JavaScript whitespace; empty is 0; a decimal with an optional sign, or
+/// `0x`/`0o`/`0b` digits without one.
+fn bigint_syntax(text: &str) -> bool {
+    let trimmed = crate::js_trim(text);
+    if trimmed.is_empty() {
+        return true;
+    }
+    let digits =
+        |rest: &str, radix: u32| !rest.is_empty() && rest.chars().all(|c| c.is_digit(radix));
+    match trimmed.get(..2).map(str::to_ascii_lowercase).as_deref() {
+        Some("0x") => digits(&trimmed[2..], 16),
+        Some("0o") => digits(&trimmed[2..], 8),
+        Some("0b") => digits(&trimmed[2..], 2),
+        _ => digits(trimmed.strip_prefix(['+', '-']).unwrap_or(trimmed), 10),
     }
 }
 
@@ -404,6 +423,24 @@ mod tests {
     const UR: [u8; 20] = crate::ur::UNIVERSAL_RESOLVER;
 
     #[test]
+    fn big_ints_validate_at_any_width() {
+        let s = |v: &str| JsValue::String(v.into());
+        // 2^160, as a difficulty ethers accepts.
+        assert!(is_big_int(&s(
+            "0x10000000000000000000000000000000000000000"
+        )));
+        assert!(is_big_int(&s(&"9".repeat(60))));
+        assert!(is_big_int(&s(" 12 ")));
+        assert!(is_big_int(&s("-0x10")));
+        assert!(is_big_int(&s("-")));
+        assert!(!is_big_int(&s("--1")));
+        assert!(!is_big_int(&s("0x")));
+        assert!(!is_big_int(&s("+0x1")));
+        assert!(!is_big_int(&s("")));
+        assert!(!is_big_int(&s("1.5")));
+    }
+
+    #[test]
     fn bodies_are_ethers_payloads() {
         assert_eq!(
             body(1, &Method::BlockNumber),
@@ -462,13 +499,10 @@ mod tests {
             200,
             br#"{"id":1,"error":{"code":3,"message":"execution reverted","data":"0x12345678"}}"#,
         );
-        assert_eq!(
+        assert!(matches!(
             reverted,
-            Err(RpcError::CallException {
-                data: Some(vec![0x12, 0x34, 0x56, 0x78]),
-                node: None
-            })
-        );
+            Err(RpcError::CallException { data: Some(ref data), node: Some(_) }) if data == &[0x12, 0x34, 0x56, 0x78]
+        ));
         let failed = answer(
             1,
             &call,
@@ -497,13 +531,13 @@ mod tests {
         ));
         // Nested and JSON-in-string data, as spelunkData finds them.
         let nested = answer(1, &call, 200, br#"{"id":1,"error":{"code":-32000,"message":"x","data":"{\"message\":\"reverted\",\"data\":\"0xaa\"}"}}"#);
-        assert_eq!(
+        assert!(matches!(
             nested,
-            Err(RpcError::CallException {
-                data: Some(vec![0xaa]),
-                node: None
-            })
-        );
+            Err(RpcError::CallException { data: Some(ref data), node: Some(_) }) if data == &[0xaa]
+        ));
+        // An error member that isn't an object is malformed.
+        let malformed = answer(1, &call, 200, br#"{"id":1,"error":"oops"}"#);
+        assert_eq!(malformed, Err(RpcError::MalformedError));
     }
 
     #[test]
