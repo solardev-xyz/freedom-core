@@ -52,7 +52,7 @@ All accept caller kinds `chrome` and `shell`.
 | `chain.availability` | `{ chain_id, ready }` for each Myotis chain | `{}` | the router's live `myotis.isReady()` samples |
 | `chain.request` | `{ chain_id, method, params, include_trust, origin?, background, profile, deadline_ms }` | `{ result, source, verified, trust? }` | `request()` |
 | `chain.fee_quote` | `{ chain_id, deadline_ms }` | today's quote shape | `getFeeQuote()` |
-| `chain.broadcast` | `{ chain_id, raw, first, deadline_ms }` | `{ hash, source, outcome }` | `broadcastRawTransaction()` |
+| `chain.broadcast` | `{ chain_id, raw, deadline_ms }` | `{ hash, source, outcome, refusal? }` | `broadcastRawTransaction()` |
 
 - **`params`** is the caller's JSON as main serializes it. The core parses it keeping JavaScript's property order, which [normalization](#normalization) depends on.
 - **`origin`** is the router's routing context: the dApp's permission key or the `web3:` page's. It makes the read *interactive*. The core keeps it only in memory, for the [adaptive bypass](#adaptive-bypass), and never logs it.
@@ -115,7 +115,11 @@ Chain-data answers routinely exceed 0001's 1 MiB frame: full-history `eth_getLog
 Main holds what its executors produce until it is written: bodies being read, verifier results, and serialized replies waiting for credit or for the writer. One **chain I/O pool** of 192 MiB bounds them:
 - **Charges:** an exchange charges its body as it reads it, and its serialized reply from serialization until written; the body is released once serialized. A verifier operation charges its result the same way.
 - **Exhausted:** an exchange ends with the transport failure `busy`. That is a source failure; for a broadcast it is an ambiguous attempt. A verifier reply becomes `{ failure: "busy" }`.
-- **Exempt:** control messages and replies under 64 KiB never wait for the pool. Main's limit of 256 outstanding requests (0004) bounds them at 16 MiB.
+- **What is exempt** is defined by size, not by writer priority. 0001 counts every response as a control message for the writer's reserved capacity; that orders writing and exempts no storage.
+  - **Charged:** every response of 64 KiB or more, fragmented or not, from serialization until it is written or dropped.
+  - **Exempt:** replies under 64 KiB, which main's limit of 256 outstanding requests (0004) bounds at 16 MiB, and a closed set of control frames, each bounded on its own: `cancel` (one per outstanding request), the `0x13` credit (one per direction) and `core.shutdown`.
+  - **A test** stalls the bulk credit until the pool is full, and still sees credit, cancels and small failure replies written.
+- **Credit on discard:** a response that arrives for a cancelled or abandoned request is consumed and dropped, and its credit returns as for a delivered one.
 
 ### Verified operations
 
@@ -387,9 +391,9 @@ Every attempt (a Direct endpoint's `eth_sendRawTransaction`, Myotis's `broadcast
 ### Refusals
 
 A node's error can prove only that *these* bytes weren't admitted *now*. It proves that the transaction is absent from the network only when nothing else could have sent the bytes.
-- **`first`** is main's statement that these signed bytes were never handed to a broadcaster before: the wallet's fresh signature, or a raw transaction the Ant bridge hasn't seen. The core also remembers the last 4,096 hashes it has broadcast and treats a repeat as not first, whatever main says.
+- **First broadcasts** are decided by the core alone, from its **broadcast ledger** ([below](#the-ledger)). Bytes are first only when the core signed them itself and the ledger shows they were never handed to a broadcaster. Bytes the core didn't sign, such as the Ant bridge's, and bytes the ledger no longer holds are never first: a fresh caller hasn't necessarily seen them, and deterministic signing can reproduce identical bytes.
 - **On a first broadcast,** the bytes can reach the network only through this broadcast's own attempts. A refusal then means the transaction is nowhere, unless an earlier attempt was ambiguous, which the outcome table already covers.
-- **On a repeat** (the wallet re-sending after `uncertain`, a bridge retry), the bytes may already be pending or mined. A state-dependent error (`insufficient funds`, `nonce too low`) can then be caused by that very success. Every refusal is therefore ambiguous on a repeat.
+- **Otherwise** (the wallet re-sending after `uncertain`, a bridge retry, any bytes from elsewhere), they may already be pending or mined. A state-dependent error (`insufficient funds`, `nonce too low`) can then be caused by that very success. Every refusal is therefore ambiguous.
 - **The predicates** are exact. A refusal is a JSON-RPC error whose code is `-32000` (or the client's documented code for it) and whose message starts with one of a fixed list of txpool rejections:
   - insufficient funds;
   - nonce too low;
@@ -402,6 +406,22 @@ A node's error can prove only that *these* bytes weren't admitted *now*. It prov
   Vectors pin each client's wording: geth, Nethermind, Erigon, Besu and the large providers. `already known` is never a refusal, because it says the bytes exist. Anything unmatched is ambiguous, so a misclassification can only lean towards `uncertain`.
 - **Myotis `rejected`** counts as a refusal on the same terms; its reasons include a used nonce.
 - **Order doesn't matter.** A refusal after an ambiguous attempt stops the attempt loop, as Myotis's final verdict does today, but it can't erase that attempt: the outcome table looks at every attempt.
+
+### The ledger
+
+The core signs every transaction the wallet sends (0002), so it alone can know whether a set of bytes has left it before.
+- **Entries:** one per signed transaction hash, with a state:
+  - `signed` when the core signs it;
+  - `handed` before the first attempt of any broadcast is dispatched;
+  - `sent` once an attempt is accepted or reconciliation finds it.
+
+  States only move forward.
+- **Durable:** the ledger lives in the core's data directory and is written atomically, with fsync, under 0001's file rules. An entry moves to `handed` *before* the attempt goes out, so a crash can never leave a possibly-sent transaction recorded as unsent.
+- **Bounded:** entries are kept 30 days, at most the last 10,000. A dropped entry reads as unknown, which counts as not first. Losing an entry can only make outcomes more conservative.
+- **The outcome floor:** the outcome table judges this broadcast's attempts, and the ledger sets a floor under it. For bytes that are `handed`, `sent` or unknown, the outcome is never `rejected` or `not sent`. It is at least `uncertain`, and `sent` when the ledger says so.
+  - A repeat that expires before dispatch, sends nothing, or is refused therefore never turns an earlier possible send into a definite failure.
+  - The reply still carries the last refusal, if any, as `refusal: { code, message, data? }`, for drivers to show.
+- **No secrets:** the ledger holds hashes and states, no keys or transaction contents, and it isn't part of a vault export.
 
 ### Outcome
 
@@ -422,9 +442,13 @@ A node's error can prove only that *these* bytes weren't admitted *now*. It prov
 ### Main's record
 
 The core can die mid-broadcast: an exit, the watchdog, a protocol error. Main therefore keeps its own record of every `chain.broadcast` in flight: the hash, and whether any attempt is possibly sent.
-- **`first`:** main sets it from the record and its callers: the wallet sets it for a fresh signature, and the Ant bridge for a raw transaction it hasn't broadcast before.
 - **Marking:** main's executors mark the record when they start an exchange whose body is an `eth_sendRawTransaction` of that raw transaction, or a Myotis `broadcast` of it.
-- **No reply from the core:** main reports `uncertain` if the record is marked, and a definite `not_sent` failure if not. Main never reports `rejected` on its own.
+- **No reply from the core:** main reports `uncertain` unless it knows the broadcast was a first. A definite `not_sent` failure needs all three of these; any doubt gives `uncertain`, and main never reports `rejected` on its own:
+  - the record is unmarked;
+  - the wallet signed the bytes in this session;
+  - the wallet's history shows no earlier broadcast of the hash.
+
+  Bytes from the Ant bridge always give `uncertain`.
 - **Main's drivers:**
   - **The wallet** treats `uncertain` as sent-but-unconfirmed. It records the hash and tracks the receipt as for any send. It may offer to broadcast the same signed bytes again, or to replace them at the same nonce, but never to sign the intent again at a new nonce. Its text and UI are a [follow-up](#open-questions).
   - **The Ant bridge** keeps its `Broadcast outcome uncertain; reconcile the signed transaction` reply.
@@ -518,7 +542,7 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 | `adapter-error-text` | adapter and transport diagnostics' own text, Colibri's errors included | the core's fixed text; only errors parsed from node bodies pass through | a local diagnostic, or a Colibri revert's message, reads differently |
 | `myotis-readiness` | `isReady()` sampled live | the last `chain.availability` | |
 | `memory-budgets` | unbounded | per request and in total | `budget`, `busy` |
-| `broadcast-outcome` | the last error wins; lost replies look like failures | attempt classes, refusals only on first broadcasts, `sent` / `uncertain` / `rejected` / `not_sent`, reconciliation, main's record | no definite failure for a transaction that may have gone out |
+| `broadcast-outcome` | the last error wins; lost replies look like failures | attempt classes, refusals only on first broadcasts, the ledger's floor, `sent` / `uncertain` / `rejected` / `not_sent`, reconciliation, main's record | no definite failure for a transaction that may have gone out; the Ant bridge's refused external bytes are `uncertain`, with the refusal attached |
 | `monotonic-time` | cooldowns on `Date.now()` | the monotonic clock | |
 
 ## Replay
@@ -545,6 +569,9 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
   - quorum on answers without `result`;
   - truncation probes that fail or come back empty;
   - refusals on first and repeat broadcasts, and a refusal after an ambiguous attempt;
+  - external bytes refused on their first sight;
+  - a repeat that expires before dispatch, or sends nothing, after an uncertain first;
+  - a core restart, and an evicted ledger entry, between the two;
   - a read's reply overtaken by a configuration change after it was made;
   - a truncation with Direct still available;
   - nesting at 512 and 513 levels;
@@ -558,6 +585,7 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
    - `feeQuote`, Myotis payload classification, `blockscout-logs`' mappers and filters;
    - the Ant profile's ranking and cap parsing;
    - the broadcast refusal list and transaction hash;
+   - the broadcast ledger (`fc-chain` defines its states; the daemon stores it);
    - byte parity from the pinned JS.
 2. **The replay harness** (`vectors/chain-replay.json`).
 3. **`fc-chain`:** the machine, replayed.
