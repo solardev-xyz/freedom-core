@@ -24810,7 +24810,22 @@
                 ]
               ],
               "append": [
-                "function __toCore(value, refOf) {\n  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;\n  const one = (text) => {\n    const endpoint = typeof text === 'string' ? refOf(text) : undefined;\n    return endpoint === undefined ? text : { ref: endpoint };\n  };\n  const list = (items) => (Array.isArray(items) ? items.map(one) : items);\n  const core = { ...value };\n  if (value.trust && typeof value.trust === 'object' && !Array.isArray(value.trust)) {\n    const trust = { ...value.trust };\n    for (const key of ['agreed', 'dissented', 'queried']) if (key in trust) trust[key] = list(trust[key]);\n    if ('prover' in trust) trust.prover = one(trust.prover);\n    core.trust = trust;\n  }\n  if (Array.isArray(value.groups)) {\n    core.groups = value.groups.map((group) => (group && typeof group === 'object' && 'urls' in group ? { ...group, urls: list(group.urls) } : group));\n  }\n  return core;\n}\nvar __hostSources = new Map();\nfunction __noteHost(host, url) {\n  if (!__hostSources.has(host)) __hostSources.set(host, new Set());\n  __hostSources.get(host).add(url);\n}\nvar __ambiguousHost = null;\nfunction __refOf(host) {\n  const urls = __hostSources.get(host);\n  if (!urls) return undefined;\n  if (urls.size > 1) {\n    // Recorded as well as thrown: the resolver may catch the throw.\n    __ambiguousHost = host;\n    throw new Error('core size: one host from several endpoint URLs');\n  }\n  return [...urls][0];\n}\nfunction __coreSize(value) {\n  return Buffer.byteLength(JSON.stringify(__toCore(value, __refOf)), 'utf8');\n}\nmodule.exports.__coreSize = __coreSize;\nmodule.exports.__ambiguousHost = () => __ambiguousHost;"
+                "function __toCore(value, refOf) {\n  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;\n  const one = (text) => {\n    const endpoint = typeof text === 'string' ? refOf(text) : undefined;\n    return endpoint === undefined ? text : { ref: endpoint };\n  };\n  const list = (items) => (Array.isArray(items) ? items.map(one) : items);\n  const core = { ...value };\n  if (value.trust && typeof value.trust === 'object' && !Array.isArray(value.trust)) {\n    const trust = { ...value.trust };\n    for (const key of ['agreed', 'dissented', 'queried']) if (key in trust) trust[key] = list(trust[key]);\n    if ('prover' in trust) trust.prover = one(trust.prover);\n    core.trust = trust;\n  }\n  if (Array.isArray(value.groups)) {\n    core.groups = value.groups.map((group) => (group && typeof group === 'object' && 'urls' in group ? { ...group, urls: list(group.urls) } : group));\n  }\n  return core;\n}\nvar __hostSources = new Map();\nfunction __noteHost(host, url) {\n  if (!__hostSources.has(host)) __hostSources.set(host, new Set());\n  __hostSources.get(host).add(url);\n}\nvar __ambiguousHost = null;\nfunction __refOf(host) {\n  const urls = __hostSources.get(host);\n  if (!urls) return undefined;\n  if (urls.size > 1) {\n    // Recorded as well as thrown: the resolver may catch the throw.\n    __ambiguousHost = host;\n    throw new Error('core size: one host from several endpoint URLs');\n  }\n  return [...urls][0];\n}\n// `endpoints`: those published as whole URLs (Tezos' agreed list).\nfunction __coreSize(value, endpoints = []) {\n  const refOf = (text) => (endpoints.includes(text) ? text : __refOf(text));\n  return Buffer.byteLength(JSON.stringify(__toCore(value, refOf)), 'utf8');\n}\nmodule.exports.__coreSize = __coreSize;\nmodule.exports.__ambiguousHost = () => __ambiguousHost;"
+              ]
+            },
+            "tezos-domains-resolver.js": {
+              "edits": [
+                [
+                  "function hostOf(url) {\n  try { return new URL(url).host; }\n  catch { return url; }\n}\n",
+                  "function hostOf(url) {\n  const host = __hostOf(url);\n  __noteHost(host, url);\n  return host;\n}\nfunction __hostOf(url) {\n  try { return new URL(url).host; }\n  catch { return url; }\n}\n"
+                ],
+                [
+                  "  resultCache.set(normalized, { result, expiresAt: Date.now() + cacheDuration(result) });\n  capCache(resultCache);\n",
+                  "  if (__coreSize(result, endpoints) <= 4096) {\n    resultCache.set(normalized, { result, expiresAt: Date.now() + cacheDuration(result) });\n    capCache(resultCache);\n  }\n"
+                ]
+              ],
+              "append": [
+                "function __toCore(value, refOf) {\n  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;\n  const one = (text) => {\n    const endpoint = typeof text === 'string' ? refOf(text) : undefined;\n    return endpoint === undefined ? text : { ref: endpoint };\n  };\n  const list = (items) => (Array.isArray(items) ? items.map(one) : items);\n  const core = { ...value };\n  if (value.trust && typeof value.trust === 'object' && !Array.isArray(value.trust)) {\n    const trust = { ...value.trust };\n    for (const key of ['agreed', 'dissented', 'queried']) if (key in trust) trust[key] = list(trust[key]);\n    if ('prover' in trust) trust.prover = one(trust.prover);\n    core.trust = trust;\n  }\n  if (Array.isArray(value.groups)) {\n    core.groups = value.groups.map((group) => (group && typeof group === 'object' && 'urls' in group ? { ...group, urls: list(group.urls) } : group));\n  }\n  return core;\n}\nvar __hostSources = new Map();\nfunction __noteHost(host, url) {\n  if (!__hostSources.has(host)) __hostSources.set(host, new Set());\n  __hostSources.get(host).add(url);\n}\nvar __ambiguousHost = null;\nfunction __refOf(host) {\n  const urls = __hostSources.get(host);\n  if (!urls) return undefined;\n  if (urls.size > 1) {\n    // Recorded as well as thrown: the resolver may catch the throw.\n    __ambiguousHost = host;\n    throw new Error('core size: one host from several endpoint URLs');\n  }\n  return [...urls][0];\n}\n// `endpoints`: those published as whole URLs (Tezos' agreed list).\nfunction __coreSize(value, endpoints = []) {\n  const refOf = (text) => (endpoints.includes(text) ? text : __refOf(text));\n  return Buffer.byteLength(JSON.stringify(__toCore(value, refOf)), 'utf8');\n}\nmodule.exports.__coreSize = __coreSize;\nmodule.exports.__ambiguousHost = () => __ambiguousHost;"
               ]
             }
           }
@@ -25258,8 +25273,24 @@
                 ]
               ],
               "append": [
-                "function __toCore(value, refOf) {\n  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;\n  const one = (text) => {\n    const endpoint = typeof text === 'string' ? refOf(text) : undefined;\n    return endpoint === undefined ? text : { ref: endpoint };\n  };\n  const list = (items) => (Array.isArray(items) ? items.map(one) : items);\n  const core = { ...value };\n  if (value.trust && typeof value.trust === 'object' && !Array.isArray(value.trust)) {\n    const trust = { ...value.trust };\n    for (const key of ['agreed', 'dissented', 'queried']) if (key in trust) trust[key] = list(trust[key]);\n    if ('prover' in trust) trust.prover = one(trust.prover);\n    core.trust = trust;\n  }\n  if (Array.isArray(value.groups)) {\n    core.groups = value.groups.map((group) => (group && typeof group === 'object' && 'urls' in group ? { ...group, urls: list(group.urls) } : group));\n  }\n  return core;\n}\nvar __hostSources = new Map();\nfunction __noteHost(host, url) {\n  if (!__hostSources.has(host)) __hostSources.set(host, new Set());\n  __hostSources.get(host).add(url);\n}\nvar __ambiguousHost = null;\nfunction __refOf(host) {\n  const urls = __hostSources.get(host);\n  if (!urls) return undefined;\n  if (urls.size > 1) {\n    // Recorded as well as thrown: the resolver may catch the throw.\n    __ambiguousHost = host;\n    throw new Error('core size: one host from several endpoint URLs');\n  }\n  return [...urls][0];\n}\nfunction __coreSize(value) {\n  return Buffer.byteLength(JSON.stringify(__toCore(value, __refOf)), 'utf8');\n}\nmodule.exports.__coreSize = __coreSize;\nmodule.exports.__ambiguousHost = () => __ambiguousHost;",
-                "function __capBytes(cache, limit) {\n  const size = (key, entry) => Buffer.byteLength(key, 'utf8') + __coreSize(entry.result);\n  let bytes = 0;\n  for (const [key, entry] of cache) bytes += size(key, entry);\n  const now = Date.now();\n  for (const [key, entry] of cache) {\n    if (bytes <= limit) return;\n    if (entry.expiresAt <= now) {\n      cache.delete(key);\n      bytes -= size(key, entry);\n    }\n  }\n  for (const [key, entry] of cache) {\n    if (bytes <= limit) return;\n    cache.delete(key);\n    bytes -= size(key, entry);\n  }\n}"
+                "function __toCore(value, refOf) {\n  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;\n  const one = (text) => {\n    const endpoint = typeof text === 'string' ? refOf(text) : undefined;\n    return endpoint === undefined ? text : { ref: endpoint };\n  };\n  const list = (items) => (Array.isArray(items) ? items.map(one) : items);\n  const core = { ...value };\n  if (value.trust && typeof value.trust === 'object' && !Array.isArray(value.trust)) {\n    const trust = { ...value.trust };\n    for (const key of ['agreed', 'dissented', 'queried']) if (key in trust) trust[key] = list(trust[key]);\n    if ('prover' in trust) trust.prover = one(trust.prover);\n    core.trust = trust;\n  }\n  if (Array.isArray(value.groups)) {\n    core.groups = value.groups.map((group) => (group && typeof group === 'object' && 'urls' in group ? { ...group, urls: list(group.urls) } : group));\n  }\n  return core;\n}\nvar __hostSources = new Map();\nfunction __noteHost(host, url) {\n  if (!__hostSources.has(host)) __hostSources.set(host, new Set());\n  __hostSources.get(host).add(url);\n}\nvar __ambiguousHost = null;\nfunction __refOf(host) {\n  const urls = __hostSources.get(host);\n  if (!urls) return undefined;\n  if (urls.size > 1) {\n    // Recorded as well as thrown: the resolver may catch the throw.\n    __ambiguousHost = host;\n    throw new Error('core size: one host from several endpoint URLs');\n  }\n  return [...urls][0];\n}\n// `endpoints`: those published as whole URLs (Tezos' agreed list).\nfunction __coreSize(value, endpoints = []) {\n  const refOf = (text) => (endpoints.includes(text) ? text : __refOf(text));\n  return Buffer.byteLength(JSON.stringify(__toCore(value, refOf)), 'utf8');\n}\nmodule.exports.__coreSize = __coreSize;\nmodule.exports.__ambiguousHost = () => __ambiguousHost;",
+                "function __capBytes(cache, limit, endpoints = []) {\n  const size = (key, entry) => Buffer.byteLength(key, 'utf8') + __coreSize(entry.result, endpoints);\n  let bytes = 0;\n  for (const [key, entry] of cache) bytes += size(key, entry);\n  const now = Date.now();\n  for (const [key, entry] of cache) {\n    if (bytes <= limit) return;\n    if (entry.expiresAt <= now) {\n      cache.delete(key);\n      bytes -= size(key, entry);\n    }\n  }\n  for (const [key, entry] of cache) {\n    if (bytes <= limit) return;\n    cache.delete(key);\n    bytes -= size(key, entry);\n  }\n}"
+              ]
+            },
+            "tezos-domains-resolver.js": {
+              "edits": [
+                [
+                  "function hostOf(url) {\n  try { return new URL(url).host; }\n  catch { return url; }\n}\n",
+                  "function hostOf(url) {\n  const host = __hostOf(url);\n  __noteHost(host, url);\n  return host;\n}\nfunction __hostOf(url) {\n  try { return new URL(url).host; }\n  catch { return url; }\n}\n"
+                ],
+                [
+                  "  resultCache.set(normalized, { result, expiresAt: Date.now() + cacheDuration(result) });\n  capCache(resultCache);\n",
+                  "  resultCache.set(normalized, { result, expiresAt: Date.now() + cacheDuration(result) });\n  capCache(resultCache);\n  __capBytes(resultCache, 1280, endpoints);\n"
+                ]
+              ],
+              "append": [
+                "function __toCore(value, refOf) {\n  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;\n  const one = (text) => {\n    const endpoint = typeof text === 'string' ? refOf(text) : undefined;\n    return endpoint === undefined ? text : { ref: endpoint };\n  };\n  const list = (items) => (Array.isArray(items) ? items.map(one) : items);\n  const core = { ...value };\n  if (value.trust && typeof value.trust === 'object' && !Array.isArray(value.trust)) {\n    const trust = { ...value.trust };\n    for (const key of ['agreed', 'dissented', 'queried']) if (key in trust) trust[key] = list(trust[key]);\n    if ('prover' in trust) trust.prover = one(trust.prover);\n    core.trust = trust;\n  }\n  if (Array.isArray(value.groups)) {\n    core.groups = value.groups.map((group) => (group && typeof group === 'object' && 'urls' in group ? { ...group, urls: list(group.urls) } : group));\n  }\n  return core;\n}\nvar __hostSources = new Map();\nfunction __noteHost(host, url) {\n  if (!__hostSources.has(host)) __hostSources.set(host, new Set());\n  __hostSources.get(host).add(url);\n}\nvar __ambiguousHost = null;\nfunction __refOf(host) {\n  const urls = __hostSources.get(host);\n  if (!urls) return undefined;\n  if (urls.size > 1) {\n    // Recorded as well as thrown: the resolver may catch the throw.\n    __ambiguousHost = host;\n    throw new Error('core size: one host from several endpoint URLs');\n  }\n  return [...urls][0];\n}\n// `endpoints`: those published as whole URLs (Tezos' agreed list).\nfunction __coreSize(value, endpoints = []) {\n  const refOf = (text) => (endpoints.includes(text) ? text : __refOf(text));\n  return Buffer.byteLength(JSON.stringify(__toCore(value, refOf)), 'utf8');\n}\nmodule.exports.__coreSize = __coreSize;\nmodule.exports.__ambiguousHost = () => __ambiguousHost;",
+                "function __capBytes(cache, limit, endpoints = []) {\n  const size = (key, entry) => Buffer.byteLength(key, 'utf8') + __coreSize(entry.result, endpoints);\n  let bytes = 0;\n  for (const [key, entry] of cache) bytes += size(key, entry);\n  const now = Date.now();\n  for (const [key, entry] of cache) {\n    if (bytes <= limit) return;\n    if (entry.expiresAt <= now) {\n      cache.delete(key);\n      bytes -= size(key, entry);\n    }\n  }\n  for (const [key, entry] of cache) {\n    if (bytes <= limit) return;\n    cache.delete(key);\n    bytes -= size(key, entry);\n  }\n}"
               ]
             }
           }
@@ -27623,7 +27654,22 @@
                 ]
               ],
               "append": [
-                "function __toCore(value, refOf) {\n  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;\n  const one = (text) => {\n    const endpoint = typeof text === 'string' ? refOf(text) : undefined;\n    return endpoint === undefined ? text : { ref: endpoint };\n  };\n  const list = (items) => (Array.isArray(items) ? items.map(one) : items);\n  const core = { ...value };\n  if (value.trust && typeof value.trust === 'object' && !Array.isArray(value.trust)) {\n    const trust = { ...value.trust };\n    for (const key of ['agreed', 'dissented', 'queried']) if (key in trust) trust[key] = list(trust[key]);\n    if ('prover' in trust) trust.prover = one(trust.prover);\n    core.trust = trust;\n  }\n  if (Array.isArray(value.groups)) {\n    core.groups = value.groups.map((group) => (group && typeof group === 'object' && 'urls' in group ? { ...group, urls: list(group.urls) } : group));\n  }\n  return core;\n}\nvar __hostSources = new Map();\nfunction __noteHost(host, url) {\n  if (!__hostSources.has(host)) __hostSources.set(host, new Set());\n  __hostSources.get(host).add(url);\n}\nvar __ambiguousHost = null;\nfunction __refOf(host) {\n  const urls = __hostSources.get(host);\n  if (!urls) return undefined;\n  if (urls.size > 1) {\n    // Recorded as well as thrown: the resolver may catch the throw.\n    __ambiguousHost = host;\n    throw new Error('core size: one host from several endpoint URLs');\n  }\n  return [...urls][0];\n}\nfunction __coreSize(value) {\n  return Buffer.byteLength(JSON.stringify(__toCore(value, __refOf)), 'utf8');\n}\nmodule.exports.__coreSize = __coreSize;\nmodule.exports.__ambiguousHost = () => __ambiguousHost;"
+                "function __toCore(value, refOf) {\n  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;\n  const one = (text) => {\n    const endpoint = typeof text === 'string' ? refOf(text) : undefined;\n    return endpoint === undefined ? text : { ref: endpoint };\n  };\n  const list = (items) => (Array.isArray(items) ? items.map(one) : items);\n  const core = { ...value };\n  if (value.trust && typeof value.trust === 'object' && !Array.isArray(value.trust)) {\n    const trust = { ...value.trust };\n    for (const key of ['agreed', 'dissented', 'queried']) if (key in trust) trust[key] = list(trust[key]);\n    if ('prover' in trust) trust.prover = one(trust.prover);\n    core.trust = trust;\n  }\n  if (Array.isArray(value.groups)) {\n    core.groups = value.groups.map((group) => (group && typeof group === 'object' && 'urls' in group ? { ...group, urls: list(group.urls) } : group));\n  }\n  return core;\n}\nvar __hostSources = new Map();\nfunction __noteHost(host, url) {\n  if (!__hostSources.has(host)) __hostSources.set(host, new Set());\n  __hostSources.get(host).add(url);\n}\nvar __ambiguousHost = null;\nfunction __refOf(host) {\n  const urls = __hostSources.get(host);\n  if (!urls) return undefined;\n  if (urls.size > 1) {\n    // Recorded as well as thrown: the resolver may catch the throw.\n    __ambiguousHost = host;\n    throw new Error('core size: one host from several endpoint URLs');\n  }\n  return [...urls][0];\n}\n// `endpoints`: those published as whole URLs (Tezos' agreed list).\nfunction __coreSize(value, endpoints = []) {\n  const refOf = (text) => (endpoints.includes(text) ? text : __refOf(text));\n  return Buffer.byteLength(JSON.stringify(__toCore(value, refOf)), 'utf8');\n}\nmodule.exports.__coreSize = __coreSize;\nmodule.exports.__ambiguousHost = () => __ambiguousHost;"
+              ]
+            },
+            "tezos-domains-resolver.js": {
+              "edits": [
+                [
+                  "function hostOf(url) {\n  try { return new URL(url).host; }\n  catch { return url; }\n}\n",
+                  "function hostOf(url) {\n  const host = __hostOf(url);\n  __noteHost(host, url);\n  return host;\n}\nfunction __hostOf(url) {\n  try { return new URL(url).host; }\n  catch { return url; }\n}\n"
+                ],
+                [
+                  "  resultCache.set(normalized, { result, expiresAt: Date.now() + cacheDuration(result) });\n  capCache(resultCache);\n",
+                  "  if (__coreSize(result, endpoints) <= 734) {\n    resultCache.set(normalized, { result, expiresAt: Date.now() + cacheDuration(result) });\n    capCache(resultCache);\n  }\n"
+                ]
+              ],
+              "append": [
+                "function __toCore(value, refOf) {\n  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;\n  const one = (text) => {\n    const endpoint = typeof text === 'string' ? refOf(text) : undefined;\n    return endpoint === undefined ? text : { ref: endpoint };\n  };\n  const list = (items) => (Array.isArray(items) ? items.map(one) : items);\n  const core = { ...value };\n  if (value.trust && typeof value.trust === 'object' && !Array.isArray(value.trust)) {\n    const trust = { ...value.trust };\n    for (const key of ['agreed', 'dissented', 'queried']) if (key in trust) trust[key] = list(trust[key]);\n    if ('prover' in trust) trust.prover = one(trust.prover);\n    core.trust = trust;\n  }\n  if (Array.isArray(value.groups)) {\n    core.groups = value.groups.map((group) => (group && typeof group === 'object' && 'urls' in group ? { ...group, urls: list(group.urls) } : group));\n  }\n  return core;\n}\nvar __hostSources = new Map();\nfunction __noteHost(host, url) {\n  if (!__hostSources.has(host)) __hostSources.set(host, new Set());\n  __hostSources.get(host).add(url);\n}\nvar __ambiguousHost = null;\nfunction __refOf(host) {\n  const urls = __hostSources.get(host);\n  if (!urls) return undefined;\n  if (urls.size > 1) {\n    // Recorded as well as thrown: the resolver may catch the throw.\n    __ambiguousHost = host;\n    throw new Error('core size: one host from several endpoint URLs');\n  }\n  return [...urls][0];\n}\n// `endpoints`: those published as whole URLs (Tezos' agreed list).\nfunction __coreSize(value, endpoints = []) {\n  const refOf = (text) => (endpoints.includes(text) ? text : __refOf(text));\n  return Buffer.byteLength(JSON.stringify(__toCore(value, refOf)), 'utf8');\n}\nmodule.exports.__coreSize = __coreSize;\nmodule.exports.__ambiguousHost = () => __ambiguousHost;"
               ]
             }
           }
@@ -28098,7 +28144,22 @@
                 ]
               ],
               "append": [
-                "function __toCore(value, refOf) {\n  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;\n  const one = (text) => {\n    const endpoint = typeof text === 'string' ? refOf(text) : undefined;\n    return endpoint === undefined ? text : { ref: endpoint };\n  };\n  const list = (items) => (Array.isArray(items) ? items.map(one) : items);\n  const core = { ...value };\n  if (value.trust && typeof value.trust === 'object' && !Array.isArray(value.trust)) {\n    const trust = { ...value.trust };\n    for (const key of ['agreed', 'dissented', 'queried']) if (key in trust) trust[key] = list(trust[key]);\n    if ('prover' in trust) trust.prover = one(trust.prover);\n    core.trust = trust;\n  }\n  if (Array.isArray(value.groups)) {\n    core.groups = value.groups.map((group) => (group && typeof group === 'object' && 'urls' in group ? { ...group, urls: list(group.urls) } : group));\n  }\n  return core;\n}\nvar __hostSources = new Map();\nfunction __noteHost(host, url) {\n  if (!__hostSources.has(host)) __hostSources.set(host, new Set());\n  __hostSources.get(host).add(url);\n}\nvar __ambiguousHost = null;\nfunction __refOf(host) {\n  const urls = __hostSources.get(host);\n  if (!urls) return undefined;\n  if (urls.size > 1) {\n    // Recorded as well as thrown: the resolver may catch the throw.\n    __ambiguousHost = host;\n    throw new Error('core size: one host from several endpoint URLs');\n  }\n  return [...urls][0];\n}\nfunction __coreSize(value) {\n  return Buffer.byteLength(JSON.stringify(__toCore(value, __refOf)), 'utf8');\n}\nmodule.exports.__coreSize = __coreSize;\nmodule.exports.__ambiguousHost = () => __ambiguousHost;"
+                "function __toCore(value, refOf) {\n  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;\n  const one = (text) => {\n    const endpoint = typeof text === 'string' ? refOf(text) : undefined;\n    return endpoint === undefined ? text : { ref: endpoint };\n  };\n  const list = (items) => (Array.isArray(items) ? items.map(one) : items);\n  const core = { ...value };\n  if (value.trust && typeof value.trust === 'object' && !Array.isArray(value.trust)) {\n    const trust = { ...value.trust };\n    for (const key of ['agreed', 'dissented', 'queried']) if (key in trust) trust[key] = list(trust[key]);\n    if ('prover' in trust) trust.prover = one(trust.prover);\n    core.trust = trust;\n  }\n  if (Array.isArray(value.groups)) {\n    core.groups = value.groups.map((group) => (group && typeof group === 'object' && 'urls' in group ? { ...group, urls: list(group.urls) } : group));\n  }\n  return core;\n}\nvar __hostSources = new Map();\nfunction __noteHost(host, url) {\n  if (!__hostSources.has(host)) __hostSources.set(host, new Set());\n  __hostSources.get(host).add(url);\n}\nvar __ambiguousHost = null;\nfunction __refOf(host) {\n  const urls = __hostSources.get(host);\n  if (!urls) return undefined;\n  if (urls.size > 1) {\n    // Recorded as well as thrown: the resolver may catch the throw.\n    __ambiguousHost = host;\n    throw new Error('core size: one host from several endpoint URLs');\n  }\n  return [...urls][0];\n}\n// `endpoints`: those published as whole URLs (Tezos' agreed list).\nfunction __coreSize(value, endpoints = []) {\n  const refOf = (text) => (endpoints.includes(text) ? text : __refOf(text));\n  return Buffer.byteLength(JSON.stringify(__toCore(value, refOf)), 'utf8');\n}\nmodule.exports.__coreSize = __coreSize;\nmodule.exports.__ambiguousHost = () => __ambiguousHost;"
+              ]
+            },
+            "tezos-domains-resolver.js": {
+              "edits": [
+                [
+                  "function hostOf(url) {\n  try { return new URL(url).host; }\n  catch { return url; }\n}\n",
+                  "function hostOf(url) {\n  const host = __hostOf(url);\n  __noteHost(host, url);\n  return host;\n}\nfunction __hostOf(url) {\n  try { return new URL(url).host; }\n  catch { return url; }\n}\n"
+                ],
+                [
+                  "  resultCache.set(normalized, { result, expiresAt: Date.now() + cacheDuration(result) });\n  capCache(resultCache);\n",
+                  "  if (__coreSize(result, endpoints) <= 1000) {\n    resultCache.set(normalized, { result, expiresAt: Date.now() + cacheDuration(result) });\n    capCache(resultCache);\n  }\n"
+                ]
+              ],
+              "append": [
+                "function __toCore(value, refOf) {\n  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;\n  const one = (text) => {\n    const endpoint = typeof text === 'string' ? refOf(text) : undefined;\n    return endpoint === undefined ? text : { ref: endpoint };\n  };\n  const list = (items) => (Array.isArray(items) ? items.map(one) : items);\n  const core = { ...value };\n  if (value.trust && typeof value.trust === 'object' && !Array.isArray(value.trust)) {\n    const trust = { ...value.trust };\n    for (const key of ['agreed', 'dissented', 'queried']) if (key in trust) trust[key] = list(trust[key]);\n    if ('prover' in trust) trust.prover = one(trust.prover);\n    core.trust = trust;\n  }\n  if (Array.isArray(value.groups)) {\n    core.groups = value.groups.map((group) => (group && typeof group === 'object' && 'urls' in group ? { ...group, urls: list(group.urls) } : group));\n  }\n  return core;\n}\nvar __hostSources = new Map();\nfunction __noteHost(host, url) {\n  if (!__hostSources.has(host)) __hostSources.set(host, new Set());\n  __hostSources.get(host).add(url);\n}\nvar __ambiguousHost = null;\nfunction __refOf(host) {\n  const urls = __hostSources.get(host);\n  if (!urls) return undefined;\n  if (urls.size > 1) {\n    // Recorded as well as thrown: the resolver may catch the throw.\n    __ambiguousHost = host;\n    throw new Error('core size: one host from several endpoint URLs');\n  }\n  return [...urls][0];\n}\n// `endpoints`: those published as whole URLs (Tezos' agreed list).\nfunction __coreSize(value, endpoints = []) {\n  const refOf = (text) => (endpoints.includes(text) ? text : __refOf(text));\n  return Buffer.byteLength(JSON.stringify(__toCore(value, refOf)), 'utf8');\n}\nmodule.exports.__coreSize = __coreSize;\nmodule.exports.__ambiguousHost = () => __ambiguousHost;"
               ]
             }
           }
@@ -28503,8 +28564,24 @@
                 ]
               ],
               "append": [
-                "function __toCore(value, refOf) {\n  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;\n  const one = (text) => {\n    const endpoint = typeof text === 'string' ? refOf(text) : undefined;\n    return endpoint === undefined ? text : { ref: endpoint };\n  };\n  const list = (items) => (Array.isArray(items) ? items.map(one) : items);\n  const core = { ...value };\n  if (value.trust && typeof value.trust === 'object' && !Array.isArray(value.trust)) {\n    const trust = { ...value.trust };\n    for (const key of ['agreed', 'dissented', 'queried']) if (key in trust) trust[key] = list(trust[key]);\n    if ('prover' in trust) trust.prover = one(trust.prover);\n    core.trust = trust;\n  }\n  if (Array.isArray(value.groups)) {\n    core.groups = value.groups.map((group) => (group && typeof group === 'object' && 'urls' in group ? { ...group, urls: list(group.urls) } : group));\n  }\n  return core;\n}\nvar __hostSources = new Map();\nfunction __noteHost(host, url) {\n  if (!__hostSources.has(host)) __hostSources.set(host, new Set());\n  __hostSources.get(host).add(url);\n}\nvar __ambiguousHost = null;\nfunction __refOf(host) {\n  const urls = __hostSources.get(host);\n  if (!urls) return undefined;\n  if (urls.size > 1) {\n    // Recorded as well as thrown: the resolver may catch the throw.\n    __ambiguousHost = host;\n    throw new Error('core size: one host from several endpoint URLs');\n  }\n  return [...urls][0];\n}\nfunction __coreSize(value) {\n  return Buffer.byteLength(JSON.stringify(__toCore(value, __refOf)), 'utf8');\n}\nmodule.exports.__coreSize = __coreSize;\nmodule.exports.__ambiguousHost = () => __ambiguousHost;",
-                "function __capBytes(cache, limit) {\n  const size = (key, entry) => Buffer.byteLength(key, 'utf8') + __coreSize(entry.result);\n  let bytes = 0;\n  for (const [key, entry] of cache) bytes += size(key, entry);\n  const now = Date.now();\n  for (const [key, entry] of cache) {\n    if (bytes <= limit) return;\n    if (entry.expiresAt <= now) {\n      cache.delete(key);\n      bytes -= size(key, entry);\n    }\n  }\n  for (const [key, entry] of cache) {\n    if (bytes <= limit) return;\n    cache.delete(key);\n    bytes -= size(key, entry);\n  }\n}"
+                "function __toCore(value, refOf) {\n  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;\n  const one = (text) => {\n    const endpoint = typeof text === 'string' ? refOf(text) : undefined;\n    return endpoint === undefined ? text : { ref: endpoint };\n  };\n  const list = (items) => (Array.isArray(items) ? items.map(one) : items);\n  const core = { ...value };\n  if (value.trust && typeof value.trust === 'object' && !Array.isArray(value.trust)) {\n    const trust = { ...value.trust };\n    for (const key of ['agreed', 'dissented', 'queried']) if (key in trust) trust[key] = list(trust[key]);\n    if ('prover' in trust) trust.prover = one(trust.prover);\n    core.trust = trust;\n  }\n  if (Array.isArray(value.groups)) {\n    core.groups = value.groups.map((group) => (group && typeof group === 'object' && 'urls' in group ? { ...group, urls: list(group.urls) } : group));\n  }\n  return core;\n}\nvar __hostSources = new Map();\nfunction __noteHost(host, url) {\n  if (!__hostSources.has(host)) __hostSources.set(host, new Set());\n  __hostSources.get(host).add(url);\n}\nvar __ambiguousHost = null;\nfunction __refOf(host) {\n  const urls = __hostSources.get(host);\n  if (!urls) return undefined;\n  if (urls.size > 1) {\n    // Recorded as well as thrown: the resolver may catch the throw.\n    __ambiguousHost = host;\n    throw new Error('core size: one host from several endpoint URLs');\n  }\n  return [...urls][0];\n}\n// `endpoints`: those published as whole URLs (Tezos' agreed list).\nfunction __coreSize(value, endpoints = []) {\n  const refOf = (text) => (endpoints.includes(text) ? text : __refOf(text));\n  return Buffer.byteLength(JSON.stringify(__toCore(value, refOf)), 'utf8');\n}\nmodule.exports.__coreSize = __coreSize;\nmodule.exports.__ambiguousHost = () => __ambiguousHost;",
+                "function __capBytes(cache, limit, endpoints = []) {\n  const size = (key, entry) => Buffer.byteLength(key, 'utf8') + __coreSize(entry.result, endpoints);\n  let bytes = 0;\n  for (const [key, entry] of cache) bytes += size(key, entry);\n  const now = Date.now();\n  for (const [key, entry] of cache) {\n    if (bytes <= limit) return;\n    if (entry.expiresAt <= now) {\n      cache.delete(key);\n      bytes -= size(key, entry);\n    }\n  }\n  for (const [key, entry] of cache) {\n    if (bytes <= limit) return;\n    cache.delete(key);\n    bytes -= size(key, entry);\n  }\n}"
+              ]
+            },
+            "tezos-domains-resolver.js": {
+              "edits": [
+                [
+                  "function hostOf(url) {\n  try { return new URL(url).host; }\n  catch { return url; }\n}\n",
+                  "function hostOf(url) {\n  const host = __hostOf(url);\n  __noteHost(host, url);\n  return host;\n}\nfunction __hostOf(url) {\n  try { return new URL(url).host; }\n  catch { return url; }\n}\n"
+                ],
+                [
+                  "  resultCache.set(normalized, { result, expiresAt: Date.now() + cacheDuration(result) });\n  capCache(resultCache);\n",
+                  "  resultCache.set(normalized, { result, expiresAt: Date.now() + cacheDuration(result) });\n  capCache(resultCache);\n  __capBytes(resultCache, 1000, endpoints);\n"
+                ]
+              ],
+              "append": [
+                "function __toCore(value, refOf) {\n  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;\n  const one = (text) => {\n    const endpoint = typeof text === 'string' ? refOf(text) : undefined;\n    return endpoint === undefined ? text : { ref: endpoint };\n  };\n  const list = (items) => (Array.isArray(items) ? items.map(one) : items);\n  const core = { ...value };\n  if (value.trust && typeof value.trust === 'object' && !Array.isArray(value.trust)) {\n    const trust = { ...value.trust };\n    for (const key of ['agreed', 'dissented', 'queried']) if (key in trust) trust[key] = list(trust[key]);\n    if ('prover' in trust) trust.prover = one(trust.prover);\n    core.trust = trust;\n  }\n  if (Array.isArray(value.groups)) {\n    core.groups = value.groups.map((group) => (group && typeof group === 'object' && 'urls' in group ? { ...group, urls: list(group.urls) } : group));\n  }\n  return core;\n}\nvar __hostSources = new Map();\nfunction __noteHost(host, url) {\n  if (!__hostSources.has(host)) __hostSources.set(host, new Set());\n  __hostSources.get(host).add(url);\n}\nvar __ambiguousHost = null;\nfunction __refOf(host) {\n  const urls = __hostSources.get(host);\n  if (!urls) return undefined;\n  if (urls.size > 1) {\n    // Recorded as well as thrown: the resolver may catch the throw.\n    __ambiguousHost = host;\n    throw new Error('core size: one host from several endpoint URLs');\n  }\n  return [...urls][0];\n}\n// `endpoints`: those published as whole URLs (Tezos' agreed list).\nfunction __coreSize(value, endpoints = []) {\n  const refOf = (text) => (endpoints.includes(text) ? text : __refOf(text));\n  return Buffer.byteLength(JSON.stringify(__toCore(value, refOf)), 'utf8');\n}\nmodule.exports.__coreSize = __coreSize;\nmodule.exports.__ambiguousHost = () => __ambiguousHost;",
+                "function __capBytes(cache, limit, endpoints = []) {\n  const size = (key, entry) => Buffer.byteLength(key, 'utf8') + __coreSize(entry.result, endpoints);\n  let bytes = 0;\n  for (const [key, entry] of cache) bytes += size(key, entry);\n  const now = Date.now();\n  for (const [key, entry] of cache) {\n    if (bytes <= limit) return;\n    if (entry.expiresAt <= now) {\n      cache.delete(key);\n      bytes -= size(key, entry);\n    }\n  }\n  for (const [key, entry] of cache) {\n    if (bytes <= limit) return;\n    cache.delete(key);\n    bytes -= size(key, entry);\n  }\n}"
               ]
             }
           }
@@ -37975,6 +38052,1033 @@
               }
             },
             "settled": 60
+          }
+        ]
+      ]
+    },
+    {
+      "id": "deviation-reply-size-tezos-conflict",
+      "system": "tezos",
+      "seed": 7,
+      "deviation": "reply-size",
+      "patches": [
+        {
+          "id": "reply-size",
+          "text": "A result over 377 bytes, serialized (UTF-8, as the core holds it: endpoints as references), is never cached, and its callers get \"result too large\".",
+          "harness": [
+            "reply-size"
+          ],
+          "source": {
+            "ens-resolver.js": {
+              "edits": [
+                [
+                  "function hostOf(url) {\n  try { return new URL(url).host; }\n  catch { return url; }\n}\n",
+                  "function hostOf(url) {\n  const host = __hostOf(url);\n  __noteHost(host, url);\n  return host;\n}\nfunction __hostOf(url) {\n  try { return new URL(url).host; }\n  catch { return url; }\n}\n"
+                ],
+                [
+                  "  cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n  capCache(cache);\n",
+                  "  if (__coreSize(result) <= 377) {\n    cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n    capCache(cache);\n  }\n"
+                ]
+              ],
+              "append": [
+                "function __toCore(value, refOf) {\n  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;\n  const one = (text) => {\n    const endpoint = typeof text === 'string' ? refOf(text) : undefined;\n    return endpoint === undefined ? text : { ref: endpoint };\n  };\n  const list = (items) => (Array.isArray(items) ? items.map(one) : items);\n  const core = { ...value };\n  if (value.trust && typeof value.trust === 'object' && !Array.isArray(value.trust)) {\n    const trust = { ...value.trust };\n    for (const key of ['agreed', 'dissented', 'queried']) if (key in trust) trust[key] = list(trust[key]);\n    if ('prover' in trust) trust.prover = one(trust.prover);\n    core.trust = trust;\n  }\n  if (Array.isArray(value.groups)) {\n    core.groups = value.groups.map((group) => (group && typeof group === 'object' && 'urls' in group ? { ...group, urls: list(group.urls) } : group));\n  }\n  return core;\n}\nvar __hostSources = new Map();\nfunction __noteHost(host, url) {\n  if (!__hostSources.has(host)) __hostSources.set(host, new Set());\n  __hostSources.get(host).add(url);\n}\nvar __ambiguousHost = null;\nfunction __refOf(host) {\n  const urls = __hostSources.get(host);\n  if (!urls) return undefined;\n  if (urls.size > 1) {\n    // Recorded as well as thrown: the resolver may catch the throw.\n    __ambiguousHost = host;\n    throw new Error('core size: one host from several endpoint URLs');\n  }\n  return [...urls][0];\n}\n// `endpoints`: those published as whole URLs (Tezos' agreed list).\nfunction __coreSize(value, endpoints = []) {\n  const refOf = (text) => (endpoints.includes(text) ? text : __refOf(text));\n  return Buffer.byteLength(JSON.stringify(__toCore(value, refOf)), 'utf8');\n}\nmodule.exports.__coreSize = __coreSize;\nmodule.exports.__ambiguousHost = () => __ambiguousHost;"
+              ]
+            },
+            "tezos-domains-resolver.js": {
+              "edits": [
+                [
+                  "function hostOf(url) {\n  try { return new URL(url).host; }\n  catch { return url; }\n}\n",
+                  "function hostOf(url) {\n  const host = __hostOf(url);\n  __noteHost(host, url);\n  return host;\n}\nfunction __hostOf(url) {\n  try { return new URL(url).host; }\n  catch { return url; }\n}\n"
+                ],
+                [
+                  "  resultCache.set(normalized, { result, expiresAt: Date.now() + cacheDuration(result) });\n  capCache(resultCache);\n",
+                  "  if (__coreSize(result, endpoints) <= 377) {\n    resultCache.set(normalized, { result, expiresAt: Date.now() + cacheDuration(result) });\n    capCache(resultCache);\n  }\n"
+                ]
+              ],
+              "append": [
+                "function __toCore(value, refOf) {\n  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;\n  const one = (text) => {\n    const endpoint = typeof text === 'string' ? refOf(text) : undefined;\n    return endpoint === undefined ? text : { ref: endpoint };\n  };\n  const list = (items) => (Array.isArray(items) ? items.map(one) : items);\n  const core = { ...value };\n  if (value.trust && typeof value.trust === 'object' && !Array.isArray(value.trust)) {\n    const trust = { ...value.trust };\n    for (const key of ['agreed', 'dissented', 'queried']) if (key in trust) trust[key] = list(trust[key]);\n    if ('prover' in trust) trust.prover = one(trust.prover);\n    core.trust = trust;\n  }\n  if (Array.isArray(value.groups)) {\n    core.groups = value.groups.map((group) => (group && typeof group === 'object' && 'urls' in group ? { ...group, urls: list(group.urls) } : group));\n  }\n  return core;\n}\nvar __hostSources = new Map();\nfunction __noteHost(host, url) {\n  if (!__hostSources.has(host)) __hostSources.set(host, new Set());\n  __hostSources.get(host).add(url);\n}\nvar __ambiguousHost = null;\nfunction __refOf(host) {\n  const urls = __hostSources.get(host);\n  if (!urls) return undefined;\n  if (urls.size > 1) {\n    // Recorded as well as thrown: the resolver may catch the throw.\n    __ambiguousHost = host;\n    throw new Error('core size: one host from several endpoint URLs');\n  }\n  return [...urls][0];\n}\n// `endpoints`: those published as whole URLs (Tezos' agreed list).\nfunction __coreSize(value, endpoints = []) {\n  const refOf = (text) => (endpoints.includes(text) ? text : __refOf(text));\n  return Buffer.byteLength(JSON.stringify(__toCore(value, refOf)), 'utf8');\n}\nmodule.exports.__coreSize = __coreSize;\nmodule.exports.__ambiguousHost = () => __ambiguousHost;"
+              ]
+            }
+          }
+        }
+      ],
+      "world": {
+        "endpoints": [
+          "https://t1.tez.example",
+          "https://t2.tez.example",
+          "https://t3.tez.example"
+        ],
+        "record": {
+          "prim": "Pair",
+          "args": [
+            [
+              {
+                "prim": "Elt",
+                "args": [
+                  {
+                    "string": "web:content_url"
+                  },
+                  {
+                    "bytes": "22697066733a2f2f62616679626569676479727a74357366703775646d37687537367568377932366e6633656675796c71616266336f636c67747179353566627a64692f22"
+                  }
+                ]
+              },
+              {
+                "prim": "Elt",
+                "args": [
+                  {
+                    "string": "td:ttl"
+                  },
+                  {
+                    "bytes": "363030"
+                  }
+                ]
+              }
+            ],
+            {
+              "prim": "Some",
+              "args": [
+                {
+                  "bytes": "abcd"
+                }
+              ]
+            }
+          ]
+        },
+        "expiry": "2030-01-01T00:00:00Z",
+        "bounds": {
+          "replyBytes": 377
+        },
+        "hosts": {
+          "t1.tez.example": {
+            "level": 8999800
+          },
+          "t3.tez.example": {
+            "level": 9000200
+          }
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "call": {
+            "fn": "resolveTezosDomain",
+            "args": [
+              "alice.tez"
+            ]
+          },
+          "results": [
+            {
+              "thrown": "result too large",
+              "settled": 10
+            }
+          ]
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "t": 0,
+          "kind": "tezos",
+          "host": "t1.tez.example",
+          "method": "GET",
+          "path": "/chains/main/chain_id",
+          "body": null,
+          "end": 10,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "\"NetXdQprcVkpaWU\""
+          }
+        },
+        {
+          "id": 1,
+          "step": 0,
+          "t": 0,
+          "kind": "tezos",
+          "host": "t1.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/head/header",
+          "body": null,
+          "end": 10,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"level\":8999800}"
+          }
+        },
+        {
+          "id": 2,
+          "step": 0,
+          "t": 0,
+          "kind": "tezos",
+          "host": "t2.tez.example",
+          "method": "GET",
+          "path": "/chains/main/chain_id",
+          "body": null,
+          "end": 10,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "\"NetXdQprcVkpaWU\""
+          }
+        },
+        {
+          "id": 3,
+          "step": 0,
+          "t": 0,
+          "kind": "tezos",
+          "host": "t2.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/head/header",
+          "body": null,
+          "end": 10,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"level\":9000000}"
+          }
+        },
+        {
+          "id": 4,
+          "step": 0,
+          "t": 0,
+          "kind": "tezos",
+          "host": "t3.tez.example",
+          "method": "GET",
+          "path": "/chains/main/chain_id",
+          "body": null,
+          "end": 10,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "\"NetXdQprcVkpaWU\""
+          }
+        },
+        {
+          "id": 5,
+          "step": 0,
+          "t": 0,
+          "kind": "tezos",
+          "host": "t3.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/head/header",
+          "body": null,
+          "end": 10,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"level\":9000200}"
+          }
+        }
+      ],
+      "unpatched": [
+        [
+          {
+            "value": {
+              "type": "conflict",
+              "reason": "Tezos RPC providers disagree about the chain head",
+              "system": "tezos",
+              "groups": [
+                {
+                  "value": "chain head #8999800",
+                  "urls": [
+                    "t1.tez.example"
+                  ]
+                },
+                {
+                  "value": "chain head #9000000",
+                  "urls": [
+                    "t2.tez.example"
+                  ]
+                },
+                {
+                  "value": "chain head #9000200",
+                  "urls": [
+                    "t3.tez.example"
+                  ]
+                }
+              ],
+              "trust": {
+                "level": "conflict",
+                "system": "tezos",
+                "block": null,
+                "k": 3,
+                "m": 1
+              }
+            },
+            "settled": 10
+          }
+        ]
+      ]
+    },
+    {
+      "id": "deviation-reply-size-tezos-uncached",
+      "system": "tezos",
+      "seed": 7,
+      "deviation": "reply-size",
+      "patches": [
+        {
+          "id": "reply-size",
+          "text": "A result over 400 bytes, serialized (UTF-8, as the core holds it: endpoints as references), is never cached, and its callers get \"result too large\".",
+          "harness": [
+            "reply-size"
+          ],
+          "source": {
+            "ens-resolver.js": {
+              "edits": [
+                [
+                  "function hostOf(url) {\n  try { return new URL(url).host; }\n  catch { return url; }\n}\n",
+                  "function hostOf(url) {\n  const host = __hostOf(url);\n  __noteHost(host, url);\n  return host;\n}\nfunction __hostOf(url) {\n  try { return new URL(url).host; }\n  catch { return url; }\n}\n"
+                ],
+                [
+                  "  cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n  capCache(cache);\n",
+                  "  if (__coreSize(result) <= 400) {\n    cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n    capCache(cache);\n  }\n"
+                ]
+              ],
+              "append": [
+                "function __toCore(value, refOf) {\n  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;\n  const one = (text) => {\n    const endpoint = typeof text === 'string' ? refOf(text) : undefined;\n    return endpoint === undefined ? text : { ref: endpoint };\n  };\n  const list = (items) => (Array.isArray(items) ? items.map(one) : items);\n  const core = { ...value };\n  if (value.trust && typeof value.trust === 'object' && !Array.isArray(value.trust)) {\n    const trust = { ...value.trust };\n    for (const key of ['agreed', 'dissented', 'queried']) if (key in trust) trust[key] = list(trust[key]);\n    if ('prover' in trust) trust.prover = one(trust.prover);\n    core.trust = trust;\n  }\n  if (Array.isArray(value.groups)) {\n    core.groups = value.groups.map((group) => (group && typeof group === 'object' && 'urls' in group ? { ...group, urls: list(group.urls) } : group));\n  }\n  return core;\n}\nvar __hostSources = new Map();\nfunction __noteHost(host, url) {\n  if (!__hostSources.has(host)) __hostSources.set(host, new Set());\n  __hostSources.get(host).add(url);\n}\nvar __ambiguousHost = null;\nfunction __refOf(host) {\n  const urls = __hostSources.get(host);\n  if (!urls) return undefined;\n  if (urls.size > 1) {\n    // Recorded as well as thrown: the resolver may catch the throw.\n    __ambiguousHost = host;\n    throw new Error('core size: one host from several endpoint URLs');\n  }\n  return [...urls][0];\n}\n// `endpoints`: those published as whole URLs (Tezos' agreed list).\nfunction __coreSize(value, endpoints = []) {\n  const refOf = (text) => (endpoints.includes(text) ? text : __refOf(text));\n  return Buffer.byteLength(JSON.stringify(__toCore(value, refOf)), 'utf8');\n}\nmodule.exports.__coreSize = __coreSize;\nmodule.exports.__ambiguousHost = () => __ambiguousHost;"
+              ]
+            },
+            "tezos-domains-resolver.js": {
+              "edits": [
+                [
+                  "function hostOf(url) {\n  try { return new URL(url).host; }\n  catch { return url; }\n}\n",
+                  "function hostOf(url) {\n  const host = __hostOf(url);\n  __noteHost(host, url);\n  return host;\n}\nfunction __hostOf(url) {\n  try { return new URL(url).host; }\n  catch { return url; }\n}\n"
+                ],
+                [
+                  "  resultCache.set(normalized, { result, expiresAt: Date.now() + cacheDuration(result) });\n  capCache(resultCache);\n",
+                  "  if (__coreSize(result, endpoints) <= 400) {\n    resultCache.set(normalized, { result, expiresAt: Date.now() + cacheDuration(result) });\n    capCache(resultCache);\n  }\n"
+                ]
+              ],
+              "append": [
+                "function __toCore(value, refOf) {\n  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;\n  const one = (text) => {\n    const endpoint = typeof text === 'string' ? refOf(text) : undefined;\n    return endpoint === undefined ? text : { ref: endpoint };\n  };\n  const list = (items) => (Array.isArray(items) ? items.map(one) : items);\n  const core = { ...value };\n  if (value.trust && typeof value.trust === 'object' && !Array.isArray(value.trust)) {\n    const trust = { ...value.trust };\n    for (const key of ['agreed', 'dissented', 'queried']) if (key in trust) trust[key] = list(trust[key]);\n    if ('prover' in trust) trust.prover = one(trust.prover);\n    core.trust = trust;\n  }\n  if (Array.isArray(value.groups)) {\n    core.groups = value.groups.map((group) => (group && typeof group === 'object' && 'urls' in group ? { ...group, urls: list(group.urls) } : group));\n  }\n  return core;\n}\nvar __hostSources = new Map();\nfunction __noteHost(host, url) {\n  if (!__hostSources.has(host)) __hostSources.set(host, new Set());\n  __hostSources.get(host).add(url);\n}\nvar __ambiguousHost = null;\nfunction __refOf(host) {\n  const urls = __hostSources.get(host);\n  if (!urls) return undefined;\n  if (urls.size > 1) {\n    // Recorded as well as thrown: the resolver may catch the throw.\n    __ambiguousHost = host;\n    throw new Error('core size: one host from several endpoint URLs');\n  }\n  return [...urls][0];\n}\n// `endpoints`: those published as whole URLs (Tezos' agreed list).\nfunction __coreSize(value, endpoints = []) {\n  const refOf = (text) => (endpoints.includes(text) ? text : __refOf(text));\n  return Buffer.byteLength(JSON.stringify(__toCore(value, refOf)), 'utf8');\n}\nmodule.exports.__coreSize = __coreSize;\nmodule.exports.__ambiguousHost = () => __ambiguousHost;"
+              ]
+            }
+          }
+        }
+      ],
+      "world": {
+        "endpoints": [
+          "https://t1.tez.example",
+          "https://t2.tez.example",
+          "https://t3.tez.example"
+        ],
+        "record": {
+          "prim": "Pair",
+          "args": [
+            [
+              {
+                "prim": "Elt",
+                "args": [
+                  {
+                    "string": "web:content_url"
+                  },
+                  {
+                    "bytes": "22697066733a2f2f62616679626569676479727a74357366703775646d37687537367568377932366e6633656675796c71616266336f636c67747179353566627a64692f22"
+                  }
+                ]
+              },
+              {
+                "prim": "Elt",
+                "args": [
+                  {
+                    "string": "td:ttl"
+                  },
+                  {
+                    "bytes": "363030"
+                  }
+                ]
+              }
+            ],
+            {
+              "prim": "Some",
+              "args": [
+                {
+                  "bytes": "abcd"
+                }
+              ]
+            }
+          ]
+        },
+        "expiry": "2030-01-01T00:00:00Z",
+        "bounds": {
+          "replyBytes": 400
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "call": {
+            "fn": "resolveTezosDomain",
+            "args": [
+              "alice.tez"
+            ]
+          },
+          "results": [
+            {
+              "thrown": "result too large",
+              "settled": 60
+            }
+          ]
+        },
+        {
+          "at": 1060,
+          "after": 1000,
+          "call": {
+            "fn": "resolveTezosDomain",
+            "args": [
+              "alice.tez"
+            ]
+          },
+          "results": [
+            {
+              "thrown": "result too large",
+              "settled": 1100
+            }
+          ]
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "t": 0,
+          "kind": "tezos",
+          "host": "t1.tez.example",
+          "method": "GET",
+          "path": "/chains/main/chain_id",
+          "body": null,
+          "end": 10,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "\"NetXdQprcVkpaWU\""
+          }
+        },
+        {
+          "id": 1,
+          "step": 0,
+          "t": 0,
+          "kind": "tezos",
+          "host": "t1.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/head/header",
+          "body": null,
+          "end": 10,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"level\":9000000}"
+          }
+        },
+        {
+          "id": 2,
+          "step": 0,
+          "t": 0,
+          "kind": "tezos",
+          "host": "t2.tez.example",
+          "method": "GET",
+          "path": "/chains/main/chain_id",
+          "body": null,
+          "end": 10,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "\"NetXdQprcVkpaWU\""
+          }
+        },
+        {
+          "id": 3,
+          "step": 0,
+          "t": 0,
+          "kind": "tezos",
+          "host": "t2.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/head/header",
+          "body": null,
+          "end": 10,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"level\":9000000}"
+          }
+        },
+        {
+          "id": 4,
+          "step": 0,
+          "t": 0,
+          "kind": "tezos",
+          "host": "t3.tez.example",
+          "method": "GET",
+          "path": "/chains/main/chain_id",
+          "body": null,
+          "end": 10,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "\"NetXdQprcVkpaWU\""
+          }
+        },
+        {
+          "id": 5,
+          "step": 0,
+          "t": 0,
+          "kind": "tezos",
+          "host": "t3.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/head/header",
+          "body": null,
+          "end": 10,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"level\":9000000}"
+          }
+        },
+        {
+          "id": 6,
+          "step": 0,
+          "t": 10,
+          "kind": "tezos",
+          "host": "t1.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/8999992/hash",
+          "body": null,
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "\"BLmain8999992\""
+          }
+        },
+        {
+          "id": 7,
+          "step": 0,
+          "t": 10,
+          "kind": "tezos",
+          "host": "t2.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/8999992/hash",
+          "body": null,
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "\"BLmain8999992\""
+          }
+        },
+        {
+          "id": 8,
+          "step": 0,
+          "t": 10,
+          "kind": "tezos",
+          "host": "t3.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/8999992/hash",
+          "body": null,
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "\"BLmain8999992\""
+          }
+        },
+        {
+          "id": 9,
+          "step": 0,
+          "t": 20,
+          "kind": "tezos",
+          "host": "t1.tez.example",
+          "method": "POST",
+          "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized",
+          "body": "{\"unparsing_mode\":\"Readable\"}",
+          "end": 30,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"code\":[{\"prim\":\"parameter\",\"args\":[{\"prim\":\"unit\"}]},{\"prim\":\"storage\",\"args\":[{\"prim\":\"pair\",\"args\":[{\"prim\":\"address\",\"annots\":[\"%contract\"]},{\"prim\":\"address\",\"annots\":[\"%owner\"]}]}]}],\"storage\":{\"prim\":\"Pair\",\"args\":[{\"string\":\"KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx\"},{\"string\":\"tz1bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}]}}"
+          }
+        },
+        {
+          "id": 10,
+          "step": 0,
+          "t": 20,
+          "kind": "tezos",
+          "host": "t2.tez.example",
+          "method": "POST",
+          "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized",
+          "body": "{\"unparsing_mode\":\"Readable\"}",
+          "end": 30,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"code\":[{\"prim\":\"parameter\",\"args\":[{\"prim\":\"unit\"}]},{\"prim\":\"storage\",\"args\":[{\"prim\":\"pair\",\"args\":[{\"prim\":\"address\",\"annots\":[\"%contract\"]},{\"prim\":\"address\",\"annots\":[\"%owner\"]}]}]}],\"storage\":{\"prim\":\"Pair\",\"args\":[{\"string\":\"KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx\"},{\"string\":\"tz1bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}]}}"
+          }
+        },
+        {
+          "id": 11,
+          "step": 0,
+          "t": 20,
+          "kind": "tezos",
+          "host": "t3.tez.example",
+          "method": "POST",
+          "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized",
+          "body": "{\"unparsing_mode\":\"Readable\"}",
+          "end": 30,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"code\":[{\"prim\":\"parameter\",\"args\":[{\"prim\":\"unit\"}]},{\"prim\":\"storage\",\"args\":[{\"prim\":\"pair\",\"args\":[{\"prim\":\"address\",\"annots\":[\"%contract\"]},{\"prim\":\"address\",\"annots\":[\"%owner\"]}]}]}],\"storage\":{\"prim\":\"Pair\",\"args\":[{\"string\":\"KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx\"},{\"string\":\"tz1bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}]}}"
+          }
+        },
+        {
+          "id": 12,
+          "step": 0,
+          "t": 30,
+          "kind": "tezos",
+          "host": "t1.tez.example",
+          "method": "POST",
+          "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized",
+          "body": "{\"unparsing_mode\":\"Readable\"}",
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"code\":[{\"prim\":\"storage\",\"args\":[{\"prim\":\"pair\",\"args\":[{\"prim\":\"big_map\",\"args\":[{\"prim\":\"bytes\"},{\"prim\":\"pair\",\"args\":[{\"prim\":\"map\",\"args\":[{\"prim\":\"string\"},{\"prim\":\"bytes\"}],\"annots\":[\"%data\"]},{\"prim\":\"option\",\"args\":[{\"prim\":\"bytes\"}],\"annots\":[\"%expiry_key\"]}]}],\"annots\":[\"%records\"]},{\"prim\":\"big_map\",\"args\":[{\"prim\":\"bytes\"},{\"prim\":\"timestamp\"}],\"annots\":[\"%expiry_map\"]}]}]}],\"storage\":{\"prim\":\"Pair\",\"args\":[{\"int\":\"1264\"},{\"int\":\"1265\"}]}}"
+          }
+        },
+        {
+          "id": 13,
+          "step": 0,
+          "t": 30,
+          "kind": "tezos",
+          "host": "t2.tez.example",
+          "method": "POST",
+          "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized",
+          "body": "{\"unparsing_mode\":\"Readable\"}",
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"code\":[{\"prim\":\"storage\",\"args\":[{\"prim\":\"pair\",\"args\":[{\"prim\":\"big_map\",\"args\":[{\"prim\":\"bytes\"},{\"prim\":\"pair\",\"args\":[{\"prim\":\"map\",\"args\":[{\"prim\":\"string\"},{\"prim\":\"bytes\"}],\"annots\":[\"%data\"]},{\"prim\":\"option\",\"args\":[{\"prim\":\"bytes\"}],\"annots\":[\"%expiry_key\"]}]}],\"annots\":[\"%records\"]},{\"prim\":\"big_map\",\"args\":[{\"prim\":\"bytes\"},{\"prim\":\"timestamp\"}],\"annots\":[\"%expiry_map\"]}]}]}],\"storage\":{\"prim\":\"Pair\",\"args\":[{\"int\":\"1264\"},{\"int\":\"1265\"}]}}"
+          }
+        },
+        {
+          "id": 14,
+          "step": 0,
+          "t": 30,
+          "kind": "tezos",
+          "host": "t3.tez.example",
+          "method": "POST",
+          "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized",
+          "body": "{\"unparsing_mode\":\"Readable\"}",
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"code\":[{\"prim\":\"storage\",\"args\":[{\"prim\":\"pair\",\"args\":[{\"prim\":\"big_map\",\"args\":[{\"prim\":\"bytes\"},{\"prim\":\"pair\",\"args\":[{\"prim\":\"map\",\"args\":[{\"prim\":\"string\"},{\"prim\":\"bytes\"}],\"annots\":[\"%data\"]},{\"prim\":\"option\",\"args\":[{\"prim\":\"bytes\"}],\"annots\":[\"%expiry_key\"]}]}],\"annots\":[\"%records\"]},{\"prim\":\"big_map\",\"args\":[{\"prim\":\"bytes\"},{\"prim\":\"timestamp\"}],\"annots\":[\"%expiry_map\"]}]}]}],\"storage\":{\"prim\":\"Pair\",\"args\":[{\"int\":\"1264\"},{\"int\":\"1265\"}]}}"
+          }
+        },
+        {
+          "id": 15,
+          "step": 0,
+          "t": 40,
+          "kind": "tezos",
+          "host": "t1.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z",
+          "body": null,
+          "end": 50,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"prim\":\"Pair\",\"args\":[[{\"prim\":\"Elt\",\"args\":[{\"string\":\"web:content_url\"},{\"bytes\":\"22697066733a2f2f62616679626569676479727a74357366703775646d37687537367568377932366e6633656675796c71616266336f636c67747179353566627a64692f22\"}]},{\"prim\":\"Elt\",\"args\":[{\"string\":\"td:ttl\"},{\"bytes\":\"363030\"}]}],{\"prim\":\"Some\",\"args\":[{\"bytes\":\"abcd\"}]}]}"
+          }
+        },
+        {
+          "id": 16,
+          "step": 0,
+          "t": 40,
+          "kind": "tezos",
+          "host": "t2.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z",
+          "body": null,
+          "end": 50,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"prim\":\"Pair\",\"args\":[[{\"prim\":\"Elt\",\"args\":[{\"string\":\"web:content_url\"},{\"bytes\":\"22697066733a2f2f62616679626569676479727a74357366703775646d37687537367568377932366e6633656675796c71616266336f636c67747179353566627a64692f22\"}]},{\"prim\":\"Elt\",\"args\":[{\"string\":\"td:ttl\"},{\"bytes\":\"363030\"}]}],{\"prim\":\"Some\",\"args\":[{\"bytes\":\"abcd\"}]}]}"
+          }
+        },
+        {
+          "id": 17,
+          "step": 0,
+          "t": 40,
+          "kind": "tezos",
+          "host": "t3.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z",
+          "body": null,
+          "end": 50,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"prim\":\"Pair\",\"args\":[[{\"prim\":\"Elt\",\"args\":[{\"string\":\"web:content_url\"},{\"bytes\":\"22697066733a2f2f62616679626569676479727a74357366703775646d37687537367568377932366e6633656675796c71616266336f636c67747179353566627a64692f22\"}]},{\"prim\":\"Elt\",\"args\":[{\"string\":\"td:ttl\"},{\"bytes\":\"363030\"}]}],{\"prim\":\"Some\",\"args\":[{\"bytes\":\"abcd\"}]}]}"
+          }
+        },
+        {
+          "id": 18,
+          "step": 0,
+          "t": 50,
+          "kind": "tezos",
+          "host": "t1.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy",
+          "body": null,
+          "end": 60,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"string\":\"2030-01-01T00:00:00Z\"}"
+          }
+        },
+        {
+          "id": 19,
+          "step": 0,
+          "t": 50,
+          "kind": "tezos",
+          "host": "t2.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy",
+          "body": null,
+          "end": 60,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"string\":\"2030-01-01T00:00:00Z\"}"
+          }
+        },
+        {
+          "id": 20,
+          "step": 0,
+          "t": 50,
+          "kind": "tezos",
+          "host": "t3.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy",
+          "body": null,
+          "end": 60,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"string\":\"2030-01-01T00:00:00Z\"}"
+          }
+        },
+        {
+          "id": 21,
+          "step": 1,
+          "t": 1060,
+          "kind": "tezos",
+          "host": "t1.tez.example",
+          "method": "GET",
+          "path": "/chains/main/chain_id",
+          "body": null,
+          "end": 1070,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "\"NetXdQprcVkpaWU\""
+          }
+        },
+        {
+          "id": 22,
+          "step": 1,
+          "t": 1060,
+          "kind": "tezos",
+          "host": "t1.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/head/header",
+          "body": null,
+          "end": 1070,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"level\":9000000}"
+          }
+        },
+        {
+          "id": 23,
+          "step": 1,
+          "t": 1060,
+          "kind": "tezos",
+          "host": "t2.tez.example",
+          "method": "GET",
+          "path": "/chains/main/chain_id",
+          "body": null,
+          "end": 1070,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "\"NetXdQprcVkpaWU\""
+          }
+        },
+        {
+          "id": 24,
+          "step": 1,
+          "t": 1060,
+          "kind": "tezos",
+          "host": "t2.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/head/header",
+          "body": null,
+          "end": 1070,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"level\":9000000}"
+          }
+        },
+        {
+          "id": 25,
+          "step": 1,
+          "t": 1060,
+          "kind": "tezos",
+          "host": "t3.tez.example",
+          "method": "GET",
+          "path": "/chains/main/chain_id",
+          "body": null,
+          "end": 1070,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "\"NetXdQprcVkpaWU\""
+          }
+        },
+        {
+          "id": 26,
+          "step": 1,
+          "t": 1060,
+          "kind": "tezos",
+          "host": "t3.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/head/header",
+          "body": null,
+          "end": 1070,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"level\":9000000}"
+          }
+        },
+        {
+          "id": 27,
+          "step": 1,
+          "t": 1070,
+          "kind": "tezos",
+          "host": "t1.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/8999992/hash",
+          "body": null,
+          "end": 1080,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "\"BLmain8999992\""
+          }
+        },
+        {
+          "id": 28,
+          "step": 1,
+          "t": 1070,
+          "kind": "tezos",
+          "host": "t2.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/8999992/hash",
+          "body": null,
+          "end": 1080,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "\"BLmain8999992\""
+          }
+        },
+        {
+          "id": 29,
+          "step": 1,
+          "t": 1070,
+          "kind": "tezos",
+          "host": "t3.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/8999992/hash",
+          "body": null,
+          "end": 1080,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "\"BLmain8999992\""
+          }
+        },
+        {
+          "id": 30,
+          "step": 1,
+          "t": 1080,
+          "kind": "tezos",
+          "host": "t1.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z",
+          "body": null,
+          "end": 1090,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"prim\":\"Pair\",\"args\":[[{\"prim\":\"Elt\",\"args\":[{\"string\":\"web:content_url\"},{\"bytes\":\"22697066733a2f2f62616679626569676479727a74357366703775646d37687537367568377932366e6633656675796c71616266336f636c67747179353566627a64692f22\"}]},{\"prim\":\"Elt\",\"args\":[{\"string\":\"td:ttl\"},{\"bytes\":\"363030\"}]}],{\"prim\":\"Some\",\"args\":[{\"bytes\":\"abcd\"}]}]}"
+          }
+        },
+        {
+          "id": 31,
+          "step": 1,
+          "t": 1080,
+          "kind": "tezos",
+          "host": "t2.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z",
+          "body": null,
+          "end": 1090,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"prim\":\"Pair\",\"args\":[[{\"prim\":\"Elt\",\"args\":[{\"string\":\"web:content_url\"},{\"bytes\":\"22697066733a2f2f62616679626569676479727a74357366703775646d37687537367568377932366e6633656675796c71616266336f636c67747179353566627a64692f22\"}]},{\"prim\":\"Elt\",\"args\":[{\"string\":\"td:ttl\"},{\"bytes\":\"363030\"}]}],{\"prim\":\"Some\",\"args\":[{\"bytes\":\"abcd\"}]}]}"
+          }
+        },
+        {
+          "id": 32,
+          "step": 1,
+          "t": 1080,
+          "kind": "tezos",
+          "host": "t3.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z",
+          "body": null,
+          "end": 1090,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"prim\":\"Pair\",\"args\":[[{\"prim\":\"Elt\",\"args\":[{\"string\":\"web:content_url\"},{\"bytes\":\"22697066733a2f2f62616679626569676479727a74357366703775646d37687537367568377932366e6633656675796c71616266336f636c67747179353566627a64692f22\"}]},{\"prim\":\"Elt\",\"args\":[{\"string\":\"td:ttl\"},{\"bytes\":\"363030\"}]}],{\"prim\":\"Some\",\"args\":[{\"bytes\":\"abcd\"}]}]}"
+          }
+        },
+        {
+          "id": 33,
+          "step": 1,
+          "t": 1090,
+          "kind": "tezos",
+          "host": "t1.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy",
+          "body": null,
+          "end": 1100,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"string\":\"2030-01-01T00:00:00Z\"}"
+          }
+        },
+        {
+          "id": 34,
+          "step": 1,
+          "t": 1090,
+          "kind": "tezos",
+          "host": "t2.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy",
+          "body": null,
+          "end": 1100,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"string\":\"2030-01-01T00:00:00Z\"}"
+          }
+        },
+        {
+          "id": 35,
+          "step": 1,
+          "t": 1090,
+          "kind": "tezos",
+          "host": "t3.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy",
+          "body": null,
+          "end": 1100,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"string\":\"2030-01-01T00:00:00Z\"}"
+          }
+        }
+      ],
+      "unpatched": [
+        [
+          {
+            "value": {
+              "type": "ok",
+              "protocol": "ipfs",
+              "uri": "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/",
+              "decoded": "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+              "basePath": "",
+              "redirect": false,
+              "system": "tezos",
+              "expiry": "2030-01-01T00:00:00Z",
+              "ttl": 600,
+              "trust": {
+                "level": "verified",
+                "system": "tezos",
+                "block": {
+                  "number": 8999992,
+                  "hash": "BLmain8999992"
+                },
+                "k": 3,
+                "m": 3,
+                "agreed": [
+                  "https://t1.tez.example",
+                  "https://t2.tez.example",
+                  "https://t3.tez.example"
+                ]
+              }
+            },
+            "settled": 60
+          }
+        ],
+        [
+          {
+            "value": {
+              "type": "ok",
+              "protocol": "ipfs",
+              "uri": "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/",
+              "decoded": "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+              "basePath": "",
+              "redirect": false,
+              "system": "tezos",
+              "expiry": "2030-01-01T00:00:00Z",
+              "ttl": 600,
+              "trust": {
+                "level": "verified",
+                "system": "tezos",
+                "block": {
+                  "number": 8999992,
+                  "hash": "BLmain8999992"
+                },
+                "k": 3,
+                "m": 3,
+                "agreed": [
+                  "https://t1.tez.example",
+                  "https://t2.tez.example",
+                  "https://t3.tez.example"
+                ]
+              }
+            },
+            "settled": 1060
           }
         ]
       ]

@@ -106,10 +106,11 @@ function __toCore(value, refOf) {
   return core;
 }
 
-// The serialized size of an ENS result as the core measures it. ENS
-// publishes hosts, so hostOf records the endpoint URL behind each one: a
-// host that two URLs produced can't be told apart, and the patch refuses
-// to measure it.
+// The serialized size of a result as the core measures it. Results
+// publish hosts (ENS, Tezos conflict groups), so hostOf records the
+// endpoint URL behind each one: a host that two URLs produced can't be
+// told apart, and the patch refuses to measure it. Tezos' agreed list
+// publishes whole URLs, which map directly.
 const CORE_SIZE = `${__toCore.toString()}
 var __hostSources = new Map();
 function __noteHost(host, url) {
@@ -127,11 +128,35 @@ function __refOf(host) {
   }
   return [...urls][0];
 }
-function __coreSize(value) {
-  return Buffer.byteLength(JSON.stringify(__toCore(value, __refOf)), 'utf8');
+// \`endpoints\`: those published as whole URLs (Tezos' agreed list).
+function __coreSize(value, endpoints = []) {
+  const refOf = (text) => (endpoints.includes(text) ? text : __refOf(text));
+  return Buffer.byteLength(JSON.stringify(__toCore(value, refOf)), 'utf8');
 }
 module.exports.__coreSize = __coreSize;
 module.exports.__ambiguousHost = () => __ambiguousHost;`;
+// Deviation `cache-bytes`: a cache's bytes (UTF-8 keys, results as the
+// core holds them), evicting as capCache does.
+const CAP_BYTES = `function __capBytes(cache, limit, endpoints = []) {
+  const size = (key, entry) => Buffer.byteLength(key, 'utf8') + __coreSize(entry.result, endpoints);
+  let bytes = 0;
+  for (const [key, entry] of cache) bytes += size(key, entry);
+  const now = Date.now();
+  for (const [key, entry] of cache) {
+    if (bytes <= limit) return;
+    if (entry.expiresAt <= now) {
+      cache.delete(key);
+      bytes -= size(key, entry);
+    }
+  }
+  for (const [key, entry] of cache) {
+    if (bytes <= limit) return;
+    cache.delete(key);
+    bytes -= size(key, entry);
+  }
+}`;
+// Tezos' result cache, where its resolver inserts.
+const TEZOS_CACHE = '  resultCache.set(normalized, { result, expiresAt: Date.now() + cacheDuration(result) });\n  capCache(resultCache);\n';
 const HOST_SOURCES = ['function hostOf(url) {\n  try { return new URL(url).host; }\n  catch { return url; }\n}\n',
   'function hostOf(url) {\n  const host = __hostOf(url);\n  __noteHost(host, url);\n  return host;\n}\nfunction __hostOf(url) {\n  try { return new URL(url).host; }\n  catch { return url; }\n}\n'];
 // The legs' CCIP deps, shared by the patches that bound it.
@@ -274,6 +299,10 @@ const PATCHES = {
           `  if (__coreSize(result) <= ${b.replyBytes}) {\n    cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n    capCache(cache);\n  }\n`]],
         append: [CORE_SIZE],
       },
+      'tezos-domains-resolver.js': {
+        edits: [HOST_SOURCES, [TEZOS_CACHE, `  if (__coreSize(result, endpoints) <= ${b.replyBytes}) {\n  ${TEZOS_CACHE.replaceAll('\n  ', '\n    ')}  }\n`]],
+        append: [CORE_SIZE],
+      },
     },
   }),
   'cache-bytes': (b) => ({
@@ -282,24 +311,11 @@ const PATCHES = {
       'ens-resolver.js': {
         edits: [HOST_SOURCES, ['  cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n  capCache(cache);\n',
           `  cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n  capCache(cache);\n  __capBytes(cache, ${b.cacheBytes});\n`]],
-        append: [CORE_SIZE, `function __capBytes(cache, limit) {
-  const size = (key, entry) => Buffer.byteLength(key, 'utf8') + __coreSize(entry.result);
-  let bytes = 0;
-  for (const [key, entry] of cache) bytes += size(key, entry);
-  const now = Date.now();
-  for (const [key, entry] of cache) {
-    if (bytes <= limit) return;
-    if (entry.expiresAt <= now) {
-      cache.delete(key);
-      bytes -= size(key, entry);
-    }
-  }
-  for (const [key, entry] of cache) {
-    if (bytes <= limit) return;
-    cache.delete(key);
-    bytes -= size(key, entry);
-  }
-}`],
+        append: [CORE_SIZE, CAP_BYTES],
+      },
+      'tezos-domains-resolver.js': {
+        edits: [HOST_SOURCES, [TEZOS_CACHE, `${TEZOS_CACHE}  __capBytes(resultCache, ${b.cacheBytes}, endpoints);\n`]],
+        append: [CORE_SIZE, CAP_BYTES],
       },
     },
   }),
@@ -997,12 +1013,9 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     // Deviation `reply-size`: a result too large to reply with.
     const replyLimit = (value) => {
       if (harnessPatch('reply-size')) {
-        // Tezos publishes its endpoints' URLs; ENS measures with the hosts'
-        // recorded sources (CORE_SIZE).
-        const endpoints = world.endpoints ?? [];
-        const size = system === 'tezos'
-          ? Buffer.byteLength(JSON.stringify(__toCore(value, (url) => (endpoints.includes(url) ? url : undefined))), 'utf8')
-          : loaded.exports.__coreSize(value);
+        // Hosts map through their recorded sources (CORE_SIZE); Tezos' agreed
+        // list publishes its endpoints' whole URLs.
+        const size = loaded.exports.__coreSize(value, system === 'tezos' ? world.endpoints ?? [] : []);
         if (size > bounds.replyBytes) throw new Error('result too large');
       }
       return value;
@@ -1585,6 +1598,21 @@ function tezosScenarios() {
     // format only V8 reads, and a node whose answers outgrow the cap.
     { ...one('deviation-tezos-expiry', base({ expiry: 'Wed, 01 Jan 2020 00:00:00 GMT' })), deviation: 'tezos-expiry', patches: ['tezos-expiry'] },
     { ...one('deviation-response-caps-tezos', base({ bounds: { answerBytes: 4096 }, hosts: { 't3.tez.example': { pad: 5000 } } })), deviation: 'response-caps', patches: ['response-caps'] },
+    // A head conflict: its groups publish hosts, the core holds
+    // references, so it is 401 bytes, not 353, and a 377-byte bound
+    // refuses it.
+    {
+      ...one('deviation-reply-size-tezos-conflict', base({ bounds: { replyBytes: 377 }, hosts: { 't1.tez.example': { level: TEZ_HEAD - 200 }, 't3.tez.example': { level: TEZ_HEAD + 200 } } })),
+      deviation: 'reply-size',
+      patches: ['reply-size'],
+    },
+    // A result too large to reply is never cached: the second lookup
+    // resolves again.
+    {
+      ...one('deviation-reply-size-tezos-uncached', base({ bounds: { replyBytes: 400 } }), [{ call: tez() }, { after: 1000, call: tez() }]),
+      deviation: 'reply-size',
+      patches: ['reply-size'],
+    },
   ];
 }
 
