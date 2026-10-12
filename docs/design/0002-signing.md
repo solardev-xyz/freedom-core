@@ -78,7 +78,7 @@ No secret is held while untrusted input is processed. A request either signs wit
 
 ## API
 
-Byte strings are `0x`-prefixed hex. They are lowercase in replies; requests take either case. Quantities are JSON strings: `[-]` then decimal digits, or `[-]0x` hex digits. Leading zeros are allowed. Unknown fields are rejected, as in 0001.
+Byte strings are `0x`-prefixed hex. They are lowercase in replies; requests take either case. Quantities are JSON strings: `[-]` then decimal digits, or `[-]0x` hex digits. Leading zeros are allowed. Transaction quantities are unsigned: no `-` at all, not even `-0`. They are the core's own wire format, which main produces from ethers' parsed values. Unknown fields are rejected, as in 0001.
 
 ### `sign.transaction`
 
@@ -165,7 +165,9 @@ ethers accepts each input below; the core refuses it. Each is a `deviation` vect
 | `bool` given `"false"`, `"0"`, `1`, or another non-boolean | encodes truthiness, so `"false"` signs as **true** | only JSON `true` / `false` |
 | `bool` field missing or `null` | encodes **false** | error, like every other missing field |
 | quantity string with whitespace, `+`, `0b`/`0o`, or a lone `-` (which ethers reads as 0) | JS `BigInt()` accepts it | only `[-]digits` or `[-]0x hex` |
-| a type or field name that isn't an identifier (`[A-Za-z_$][A-Za-z0-9_$]*`) | any string, so a name containing `(`, `,` or a space can make two different type sets print the same `encodeType` | error |
+| a type or field name that isn't an identifier (`[A-Za-z_$][A-Za-z0-9_$]*`, ≤ 256 characters) | any string, so a name containing `(`, `,` or a space can make two different type sets print the same `encodeType` | error |
+| a type named like a primitive (`bool`, `uint256`, `bytes32`, even `uint7`) | as the primary type, encoded with the primitive's encoder: a struct `bool` hashes as true | error |
+| a struct value that isn't an object: `null`, a string, or missing, for a struct with no fields | reads no fields, so anything passes | error: a struct value must be an object |
 | inputs past the [limits](#limits) | no limits; its subtype walk is exponential on diamond-shaped type graphs | error |
 | type 0 `chain_id` above 2^255 − 19 | at 2^255 − 18, a valid transaction for parity 0; further above, a `v` wider than 256 bits that ethers itself can't parse | error: the bound guarantees `v` fits for both parities |
 
