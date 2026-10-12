@@ -314,7 +314,9 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
   // proven revert data, or a failure class).
   const insideOperation = new AsyncLocalStorage();
   const failureClass = (err) => {
-    if (err?.code === 'MYOTIS_LIFECYCLE_CHANGED' || err?.code === 'MYOTIS_UNAVAILABLE') return 'lifecycle';
+    // myotisManager's verifiedRequest: Myotis' state changed while a raw
+    // request was running.
+    if (err?.code === 'MYOTIS_UNAVAILABLE') return 'lifecycle';
     if (err?.code === 'TIMEOUT') return 'timeout';
     return 'error';
   };
@@ -323,22 +325,21 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     return typeof data === 'string' && /^0x[0-9a-f]*$/i.test(data) ? data : null;
   };
   // `toAnswer` maps a returned value to the recorded reply (default: the
-  // value itself). For Myotis, an availability change during the
-  // operation wins: main checks the epoch around it (design 0004). The
-  // reference always gets the original value or error.
+  // value itself). The reply is the outcome the reference receives: main
+  // runs no epoch check of its own, so a success that crossed an
+  // availability change is still a success, and the caller's own check
+  // (tryMyotisPath's) decides (design 0004, Verified operations).
   const operation = (host, op, params, run, toAnswer = (value) => ({ result: describe(value) })) => {
     const item = record({ kind: 'verified-op', host, op, params });
-    const epoch = myotisEpoch;
-    const lifecycleChanged = () => host === 'myotis' && (myotisEpoch !== epoch || !(myotis().ready ?? false));
     return insideOperation.run({ op: item.id }, run).then(
       (value) => {
-        item.answer = lifecycleChanged() ? { failure: 'lifecycle' } : toAnswer(value);
+        item.answer = toAnswer(value);
         close(item, 'answered');
         return value;
       },
       (err) => {
         const revert = revertOf(err);
-        item.answer = lifecycleChanged() ? { failure: 'lifecycle' } : revert ? { revert } : { failure: failureClass(err) };
+        item.answer = revert ? { revert } : { failure: failureClass(err) };
         close(item, 'answered');
         throw err;
       }
@@ -764,6 +765,20 @@ function verifiedPaths(ethers, base, one, order, GOOD, lookup) {
       myotis: { enabled: true, ready: true, calls: { resolve: { revert: lookup }, callback: GOOD } },
       gateways: { 'gw.example': { delay: 50, body: JSON.stringify({ data: '0xcafe' }) } },
     })),
+    {
+      // Availability changes during the operation's gateway fetch, between
+      // its raw calls. MyotisProvider checks the epoch the operation started
+      // with before each call, so the callback is never sent: the operation
+      // fails (`error`), the order continues to quorum, and the attempt,
+      // which crossed the change, restarts through Myotis.
+      id: 'myotis-lifecycle-between-calls',
+      world: base({
+        network: order(['myotis', 'quorum']),
+        myotis: { enabled: true, ready: true, calls: { resolve: { revert: lookup }, callback: GOOD } },
+        gateways: { 'gw.example': { delay: 50, body: JSON.stringify({ data: '0xcafe' }) } },
+      }),
+      steps: [{ call: content(), events: [{ at: 30, myotis: { ready: true } }] }],
+    },
     // Quorum can only reach one source (two endpoints): unverified, held
     // while Myotis is tried, which then answers verified.
     one('prefer-verified-holds-unverified', base({ endpoints: ['https://a.rpc.example', 'https://b.rpc.example'], network: order(['quorum', 'myotis'], true), myotis: { enabled: true, ready: true, calls: { resolve: GOOD } } })),
