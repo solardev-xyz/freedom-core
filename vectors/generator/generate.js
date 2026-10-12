@@ -9,6 +9,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { createRequire } = require('node:module');
 const { buildSigning } = require('./signing');
+const { buildNaming } = require('./naming');
 
 const REFERENCE_COMMIT = 'fb540328162839e68150fe2c5e517edb86734d1c';
 const OUTPUT = path.resolve(__dirname, '..');
@@ -80,6 +81,7 @@ function loadReference(checkout) {
     'ethers', '@scure/bip39', '@scure/base', 'micro-key-producer', '@metamask/browser-passworder',
   ].map((name) => [name, packageVersion(referenceRequire, name)]));
   return {
+    checkout,
     meta: { freedomBrowserCommit: commit, packages, nodeVersion: process.version, generator: 'vectors/generator/generate.js' },
     derivation: referenceRequire('./src/main/identity/derivation.js'),
     formats: referenceRequire('./src/main/identity/formats.js'),
@@ -477,6 +479,10 @@ async function main() {
     'signing.json': await buildSigning(reference, mnemonicFor, {
       ...reference.meta,
       packages: { ...reference.meta.packages, ...reference.signingPackages },
+    }),
+    'naming.json': await buildNaming(reference.checkout, reference.ethers, {
+      ...reference.meta,
+      packages: { ...reference.meta.packages, '@adraffy/ens-normalize': packageVersion(createRequire(path.join(reference.checkout, 'package.json')), '@adraffy/ens-normalize') },
     }),
   };
   // Check every deterministic file before doing the more expensive fixture checks.

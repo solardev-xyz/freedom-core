@@ -1,0 +1,1715 @@
+{
+  "meta": {
+    "freedomBrowserCommit": "fb540328162839e68150fe2c5e517edb86734d1c",
+    "packages": {
+      "ethers": "6.17.0",
+      "@scure/bip39": "2.4.0",
+      "@scure/base": "1.2.6",
+      "micro-key-producer": "0.10.2",
+      "@metamask/browser-passworder": "6.0.0",
+      "@adraffy/ens-normalize": "1.11.1"
+    },
+    "nodeVersion": "v24.15.0",
+    "generator": "vectors/generator/generate.js"
+  },
+  "names": [
+    {
+      "input": "vitalik.eth",
+      "js": {
+        "normalized": "vitalik.eth",
+        "namehash": "0xee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a53475835",
+        "dns_encoded": "0x07766974616c696b0365746800",
+        "dns_error": null,
+        "system": "ens"
+      }
+    },
+    {
+      "input": "  Vitalik.ETH  ",
+      "js": {
+        "normalized": "vitalik.eth",
+        "namehash": "0xee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a53475835",
+        "dns_encoded": "0x07766974616c696b0365746800",
+        "dns_error": null,
+        "system": "ens"
+      }
+    },
+    {
+      "input": "nick.eth",
+      "js": {
+        "normalized": "nick.eth",
+        "namehash": "0x05a67c0ee82964c4f7394cdd47fee7f4d9503a23c09c38341779ea012afe6e00",
+        "dns_encoded": "0x046e69636b0365746800",
+        "dns_error": null,
+        "system": "ens"
+      }
+    },
+    {
+      "input": "eth",
+      "js": {
+        "normalized": "eth",
+        "namehash": "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae",
+        "dns_encoded": "0x0365746800",
+        "dns_error": null,
+        "system": "ens"
+      }
+    },
+    {
+      "input": "a.b.c.d.eth",
+      "js": {
+        "normalized": "a.b.c.d.eth",
+        "namehash": "0xecdb2833e7fbd2b812d701e2ac4ac8af8d4dcdf8a57e8ff1679faa48a59dd794",
+        "dns_encoded": "0x01610162016301640365746800",
+        "dns_error": null,
+        "system": "ens"
+      }
+    },
+    {
+      "input": "xn--x.eth",
+      "js": {
+        "stage": "namehash",
+        "error": "invalid ENS name (Invalid label \"xn--x\"‎: invalid label extension: \"xn--\") (argument=\"name\", value=\"xn--x.eth\", code=INVALID_ARGUMENT, version=6.17.0)",
+        "normalized": "xn--x.eth"
+      }
+    },
+    {
+      "input": "ab--cd.eth",
+      "js": {
+        "stage": "namehash",
+        "error": "invalid ENS name (Invalid label \"ab--cd\"‎: invalid label extension: \"ab--\") (argument=\"name\", value=\"ab--cd.eth\", code=INVALID_ARGUMENT, version=6.17.0)",
+        "normalized": "ab--cd.eth"
+      }
+    },
+    {
+      "input": "foo..eth",
+      "js": {
+        "stage": "namehash",
+        "error": "invalid ENS name (Invalid label \"\"‎: empty label) (argument=\"name\", value=\"foo..eth\", code=INVALID_ARGUMENT, version=6.17.0)",
+        "normalized": "foo..eth"
+      }
+    },
+    {
+      "input": ".eth",
+      "js": {
+        "stage": "namehash",
+        "error": "invalid ENS name (Invalid label \"\"‎: empty label) (argument=\"name\", value=\".eth\", code=INVALID_ARGUMENT, version=6.17.0)",
+        "normalized": ".eth"
+      }
+    },
+    {
+      "input": "eth.",
+      "js": {
+        "stage": "namehash",
+        "error": "invalid ENS name (Invalid label \"\"‎: empty label) (argument=\"name\", value=\"eth.\", code=INVALID_ARGUMENT, version=6.17.0)",
+        "normalized": "eth."
+      }
+    },
+    {
+      "input": "a_b.eth",
+      "js": {
+        "stage": "normalize",
+        "error": "Invalid label \"a_b\"‎: underscore allowed only at start"
+      }
+    },
+    {
+      "input": "ＡＢＣ.eth",
+      "js": {
+        "normalized": "abc.eth",
+        "namehash": "0x9f5cd92e2589fadd191e7e7917b9328d03dc84b7a67773db26efb7d0a4635677",
+        "dns_encoded": "0x036162630365746800",
+        "dns_error": null,
+        "system": "ens"
+      }
+    },
+    {
+      "input": "Ⅻ.eth",
+      "js": {
+        "normalized": "xii.eth",
+        "namehash": "0x7b0059e7ec260a407661dcaff5ac191e60b8fc8648d212eac28afea4df2ef180",
+        "dns_encoded": "0x037869690365746800",
+        "dns_error": null,
+        "system": "ens"
+      }
+    },
+    {
+      "input": "Kelvin.eth",
+      "js": {
+        "normalized": "kelvin.eth",
+        "namehash": "0xa9946b588745e7f07c4743bf50d085c9eca5470d46488341cee88c037f2cab52",
+        "dns_encoded": "0x066b656c76696e0365746800",
+        "dns_error": null,
+        "system": "ens"
+      }
+    },
+    {
+      "input": "İstanbul.eth",
+      "js": {
+        "stage": "normalize",
+        "error": "Invalid label \"İstanbul\"‎: illegal mixture: Latin + Hebrew \"◌̇\"‎ {307}"
+      }
+    },
+    {
+      "input": "💩.eth",
+      "js": {
+        "normalized": "💩.eth",
+        "namehash": "0x3aef7cc933c5fb65036d4ddd389fdf5c65b1fc79e9c1f34655c86e373d974d76",
+        "dns_encoded": "0x04f09f92a90365746800",
+        "dns_error": null,
+        "system": "ens"
+      }
+    },
+    {
+      "input": "🏳️‍🌈.eth",
+      "js": {
+        "normalized": "🏳‍🌈.eth",
+        "namehash": "0x70b0ae8b08dbd05a92c4c365ca4ac570a1b6a7c764f03c3cb810d01ab667295f",
+        "dns_encoded": "0x0bf09f8fb3e2808df09f8c880365746800",
+        "dns_error": null,
+        "system": "ens"
+      }
+    },
+    {
+      "input": "ß.eth",
+      "js": {
+        "normalized": "ß.eth",
+        "namehash": "0x86262f2349fb651f652e87141e6db5856cd6e40f92d0b9dc486aaf8f9c509cff",
+        "dns_encoded": "0x02c39f0365746800",
+        "dns_error": null,
+        "system": "ens"
+      }
+    },
+    {
+      "input": "Ω.eth",
+      "js": {
+        "normalized": "ω.eth",
+        "namehash": "0x7b3278e76542bce02dd2d892414245c946adf426bc6ba9e9b81cfcbfcba006e1",
+        "dns_encoded": "0x02cf890365746800",
+        "dns_error": null,
+        "system": "ens"
+      }
+    },
+    {
+      "input": "café.eth",
+      "js": {
+        "normalized": "café.eth",
+        "namehash": "0xa7369e1df22e06ec6d91162508e400d7af475860638f927e6d1085bb0134a74a",
+        "dns_encoded": "0x05636166c3a90365746800",
+        "dns_error": null,
+        "system": "ens"
+      }
+    },
+    {
+      "input": "café.eth",
+      "js": {
+        "normalized": "café.eth",
+        "namehash": "0xa7369e1df22e06ec6d91162508e400d7af475860638f927e6d1085bb0134a74a",
+        "dns_encoded": "0x05636166c3a90365746800",
+        "dns_error": null,
+        "system": "ens"
+      }
+    },
+    {
+      "input": "﻿a.eth",
+      "js": {
+        "normalized": "a.eth",
+        "namehash": "0xfcec0ff58c10be0e399a3a51186968513cc3a4c572a51d688ff338b3fbf6a7f9",
+        "dns_encoded": "0x01610365746800",
+        "dns_error": null,
+        "system": "ens"
+      }
+    },
+    {
+      "input": "a.eth",
+      "js": {
+        "stage": "normalize",
+        "error": "Invalid label \"{85}a\"‎: disallowed character: {85}"
+      }
+    },
+    {
+      "input": "a‍b.eth",
+      "js": {
+        "stage": "normalize",
+        "error": "Invalid label \"a{200D}b\"‎: disallowed character: {200D}"
+      }
+    },
+    {
+      "input": "　a.eth　",
+      "js": {
+        "normalized": "a.eth",
+        "namehash": "0xfcec0ff58c10be0e399a3a51186968513cc3a4c572a51d688ff338b3fbf6a7f9",
+        "dns_encoded": "0x01610365746800",
+        "dns_error": null,
+        "system": "ens"
+      }
+    },
+    {
+      "input": " ",
+      "js": {
+        "stage": "empty",
+        "error": "ENS name is empty"
+      }
+    },
+    {
+      "input": "",
+      "js": {
+        "stage": "empty",
+        "error": "ENS name is empty"
+      }
+    },
+    {
+      "input": "a.wei",
+      "js": {
+        "normalized": "a.wei",
+        "namehash": "0x97577f7cde3a9e4c9f73beeaaf0044cf0b59c71e4bd9b29f3da2ee957532272f",
+        "dns_encoded": "0x01610377656900",
+        "dns_error": null,
+        "system": "wns"
+      }
+    },
+    {
+      "input": "b.GWEI",
+      "js": {
+        "normalized": "b.gwei",
+        "namehash": "0x35fe2450698f59b132af9e48800c6fa9133341c31f7dc211868c6a096eea5310",
+        "dns_encoded": "0x0162046777656900",
+        "dns_error": null,
+        "system": "gns"
+      }
+    },
+    {
+      "input": "test.offchaindemo.eth",
+      "js": {
+        "normalized": "test.offchaindemo.eth",
+        "namehash": "0x4467b5f8c1e9d30e96872fbd6fd70ad3b7752a79348d4efa78c2f8cf831aa792",
+        "dns_encoded": "0x04746573740c6f6666636861696e64656d6f0365746800",
+        "dns_error": null,
+        "system": "ens"
+      }
+    },
+    {
+      "input": "1inch.eth",
+      "js": {
+        "normalized": "1inch.eth",
+        "namehash": "0x74138d0a668bfa50b16d4628865b94618130db944e48326a49d17f23be3ead11",
+        "dns_encoded": "0x0531696e63680365746800",
+        "dns_error": null,
+        "system": "ens"
+      }
+    },
+    {
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.eth",
+      "js": {
+        "normalized": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.eth",
+        "namehash": "0xfce675109b13f902dc4f7eb3b91d9985208bc660b033776520b615d7badab91c",
+        "dns_encoded": "0x3f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610365746800",
+        "dns_error": null,
+        "system": "ens"
+      }
+    },
+    {
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.eth",
+      "js": {
+        "normalized": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.eth",
+        "namehash": "0xf72d3db95016596a024ef4d39afd9c687689c1bf0feee77e55fb6f46ab32c6ff",
+        "dns_encoded": "0xff6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610365746800",
+        "dns_error": null,
+        "system": "ens"
+      }
+    },
+    {
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.eth",
+      "js": {
+        "normalized": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.eth",
+        "namehash": "0x0c72d4e09d218993817b8b88c175b99e7c22c6b92d4678a1eb75b1bd2285e2ea",
+        "dns_encoded": null,
+        "dns_error": "label \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.eth\" exceeds 255 bytes (argument=\"name\", value=\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.eth\", code=INVALID_ARGUMENT, version=6.17.0)",
+        "system": "ens"
+      }
+    }
+  ],
+  "coin_types": [
+    {
+      "chain_id": 1,
+      "value": "60"
+    },
+    {
+      "chain_id": 10,
+      "value": "2147483658"
+    },
+    {
+      "chain_id": 100,
+      "value": "2147483748"
+    },
+    {
+      "chain_id": 8453,
+      "value": "2147492101"
+    },
+    {
+      "chain_id": 2147483647,
+      "value": "4294967295"
+    },
+    {
+      "chain_id": 0,
+      "error": "Invalid ENS destination chain ID"
+    },
+    {
+      "chain_id": -1,
+      "error": "Invalid ENS destination chain ID"
+    },
+    {
+      "chain_id": 2147483648,
+      "error": "Invalid ENS destination chain ID"
+    },
+    {
+      "chain_id": 1.5,
+      "error": "Invalid ENS destination chain ID"
+    },
+    {
+      "chain_id": 9007199254740992,
+      "error": "Invalid ENS destination chain ID"
+    }
+  ],
+  "contenthash": [
+    {
+      "input": "0xe3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f",
+      "js": {
+        "codec": "ipfs-ns",
+        "protocol": "ipfs",
+        "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+        "decoded": "QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa"
+      }
+    },
+    {
+      "input": "0xe30101700003616263",
+      "js": {
+        "codec": "ipfs-ns",
+        "protocol": "ipfs",
+        "uri": "ipfs://161g3c",
+        "decoded": "161g3c"
+      }
+    },
+    {
+      "input": "0xe30101551220178009fb926120f294c60ebc3ae54de9dccaace22db785445f6f54a807b322fd",
+      "js": {
+        "codec": "ipfs-ns",
+        "protocol": "ipfs",
+        "uri": "ipfs://bafkreiaxqae7xetbedzjjrqoxq5oktpj3tfkzyrnw6cuix3pksuapmzc7u",
+        "decoded": "bafkreiaxqae7xetbedzjjrqoxq5oktpj3tfkzyrnw6cuix3pksuapmzc7u"
+      }
+    },
+    {
+      "input": "0xe30101a90212200707070707070707070707070707070707070707070707070707070707070707",
+      "js": {
+        "codec": "ipfs-ns",
+        "protocol": "ipfs",
+        "uri": "ipfs://baguqeeraa4dqobyha4dqobyha4dqobyha4dqobyha4dqobyha4dqobyha4dq",
+        "decoded": "baguqeeraa4dqobyha4dqobyha4dqobyha4dqobyha4dqobyha4dqobyha4dq"
+      }
+    },
+    {
+      "input": "0xe3010170128100aa",
+      "js": {
+        "codec": "ipfs-ns",
+        "protocol": "ipfs",
+        "uri": "ipfs://bafybfaiavi",
+        "decoded": "bafybfaiavi"
+      }
+    },
+    {
+      "input": "0xe301017012ffffffff0f",
+      "js": null
+    },
+    {
+      "input": "0xe3010155128180808010ab",
+      "js": {
+        "codec": "ipfs-ns",
+        "protocol": "ipfs",
+        "uri": "ipfs://bafkrfamaqcabbky",
+        "decoded": "bafkrfamaqcabbky"
+      }
+    },
+    {
+      "input": "0xe301017012",
+      "js": null
+    },
+    {
+      "input": "0xe50101720024080112202ffa35a99d3a3cfbb17bb7c1dc5561b18a8dcca4df38dc613ea859c37eb1336b",
+      "js": {
+        "codec": "ipns-ns",
+        "protocol": "ipns",
+        "uri": "ipns://12D3KooWD3eckifWpRn9wQpMG9R9hX3sD158z7EqHWmweQAJU5SA",
+        "decoded": "12D3KooWD3eckifWpRn9wQpMG9R9hX3sD158z7EqHWmweQAJU5SA"
+      }
+    },
+    {
+      "input": "0xe5010172002408",
+      "js": null
+    },
+    {
+      "input": "0xe40101fa011b20abababababababababababababababababababababababababababababababab",
+      "js": {
+        "codec": "swarm-ns",
+        "protocol": "bzz",
+        "uri": "bzz://abababababababababababababababababababababababababababababababab",
+        "decoded": "abababababababababababababababababababababababababababababababab"
+      }
+    },
+    {
+      "input": "0xe40101fa011b20ababababababababababababababababababababababababababababababababab",
+      "js": null
+    },
+    {
+      "input": "0x90b2c60f0000",
+      "js": null
+    },
+    {
+      "input": "0xbc037a6a76",
+      "js": null
+    },
+    {
+      "input": "0x1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "js": null
+    },
+    {
+      "input": "0xe301",
+      "js": null
+    },
+    {
+      "input": "0xe30101",
+      "js": null
+    },
+    {
+      "input": "0xe3010170",
+      "js": null
+    },
+    {
+      "input": "0xe301010170",
+      "js": null
+    }
+  ],
+  "abi": [
+    {
+      "types": [
+        "bytes",
+        "address"
+      ],
+      "data": "0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000000707070707070707070707070707070707070707000000000000000000000000000000000000000000000000000000000000000568656c6c6f000000000000000000000000000000000000000000000000000000",
+      "js": {
+        "fields": [
+          {
+            "value": "0x68656c6c6f"
+          },
+          {
+            "value": "0x0707070707070707070707070707070707070707"
+          }
+        ]
+      }
+    },
+    {
+      "types": [
+        "bytes",
+        "address"
+      ],
+      "data": "0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000000707070707070707070707070707070707070707000000000000000000000000000000000000000000000000000000000000000568656c6c6f0000000000000000000000000000000000000000000000000000",
+      "js": {
+        "error": "BUFFER_OVERRUN"
+      }
+    },
+    {
+      "types": [
+        "bytes",
+        "address"
+      ],
+      "data": "0x00000000000000000000000000000000000000000000000000000000000000400100000000000000000000000707070707070707070707070707070707070707000000000000000000000000000000000000000000000000000000000000000568656c6c6f000000000000000000000000000000000000000000000000000000",
+      "js": {
+        "fields": [
+          {
+            "value": "0x68656c6c6f"
+          },
+          {
+            "error": "deferred error during ABI decoding triggered accessing index 1"
+          }
+        ]
+      }
+    },
+    {
+      "types": [
+        "bytes",
+        "address"
+      ],
+      "data": "0x00000000000000000000000000000000000000000000000000000000000000ff0000000000000000000000000707070707070707070707070707070707070707000000000000000000000000000000000000000000000000000000000000000568656c6c6f000000000000000000000000000000000000000000000000000000",
+      "js": {
+        "error": "BUFFER_OVERRUN"
+      }
+    },
+    {
+      "types": [
+        "bytes",
+        "address"
+      ],
+      "data": "0x01000000000000000000000000000000000000000000000000000000000000400000000000000000000000000707070707070707070707070707070707070707000000000000000000000000000000000000000000000000000000000000000568656c6c6f000000000000000000000000000000000000000000000000000000",
+      "js": {
+        "error": "INVALID_ARGUMENT"
+      }
+    },
+    {
+      "types": [
+        "bytes",
+        "address"
+      ],
+      "data": "0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000000707070707070707070707070707070707070707010000000000000000000000000000000000000000000000000000000000000568656c6c6f000000000000000000000000000000000000000000000000000000",
+      "js": {
+        "fields": [
+          {
+            "error": "deferred error during ABI decoding triggered accessing index 0"
+          },
+          {
+            "value": "0x0707070707070707070707070707070707070707"
+          }
+        ]
+      }
+    },
+    {
+      "types": [
+        "string",
+        "uint256"
+      ],
+      "data": "0x000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000002c080000000000000000000000000000000000000000000000000000000000000",
+      "js": {
+        "fields": [
+          {
+            "error": "deferred error during ABI decoding triggered accessing index 0"
+          },
+          {
+            "value": "7"
+          }
+        ]
+      }
+    },
+    {
+      "types": [
+        "string",
+        "uint256"
+      ],
+      "data": "0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000000000000668c3a96c6c6f0000000000000000000000000000000000000000000000000000",
+      "js": {
+        "fields": [
+          {
+            "value": "héllo"
+          },
+          {
+            "value": "7"
+          }
+        ]
+      }
+    },
+    {
+      "types": [
+        "string",
+        "address",
+        "address"
+      ],
+      "data": "0x000000000000000000000000000000000000000000000000000000000000006000000000000000000000000011111111111111111111111111111111111111110000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000000b766974616c696b2e657468000000000000000000000000000000000000000000",
+      "js": {
+        "fields": [
+          {
+            "value": "vitalik.eth"
+          },
+          {
+            "value": "0x1111111111111111111111111111111111111111"
+          },
+          {
+            "value": "0x2222222222222222222222222222222222222222"
+          }
+        ]
+      }
+    },
+    {
+      "types": [
+        "address",
+        "string[]",
+        "bytes",
+        "bytes4",
+        "bytes"
+      ],
+      "data": "0x000000000000000000000000eeeeeeee14d718c2b47d9923deab1335e144eeee00000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000180deadbeef0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001c0000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000001868747470733a2f2f612e6578616d706c652f7b646174617d0000000000000000000000000000000000000000000000000000000000000000000000000000001168747470733a2f2f622e6578616d706c650000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002010200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010900000000000000000000000000000000000000000000000000000000000000",
+      "js": {
+        "fields": [
+          {
+            "value": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"
+          },
+          {
+            "value": [
+              {
+                "value": "https://a.example/{data}"
+              },
+              {
+                "value": "https://b.example"
+              }
+            ]
+          },
+          {
+            "value": "0x0102"
+          },
+          {
+            "value": "0xdeadbeef"
+          },
+          {
+            "value": "0x09"
+          }
+        ]
+      }
+    },
+    {
+      "types": [
+        "string[]"
+      ],
+      "data": "0x0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000ffff",
+      "js": {
+        "error": "BUFFER_OVERRUN"
+      }
+    },
+    {
+      "types": [
+        "string",
+        "string"
+      ],
+      "data": "0x000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000e00000000000000000000000000000000000000000000000000000000000000064787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878780000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000017900000000000000000000000000000000000000000000000000000000000000",
+      "js": {
+        "fields": [
+          {
+            "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+          },
+          {
+            "value": "y"
+          }
+        ]
+      }
+    },
+    {
+      "types": [
+        "bytes"
+      ],
+      "data": "0x",
+      "js": {
+        "error": "BUFFER_OVERRUN"
+      }
+    },
+    {
+      "types": [
+        "address"
+      ],
+      "data": "0x000000000000000000000000ffffffffffffffffffffffffffffffffffffffff",
+      "js": {
+        "fields": [
+          {
+            "value": "0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF"
+          }
+        ]
+      }
+    }
+  ],
+  "ur": {
+    "results": [
+      {
+        "data": "0x0000000000000000000000000000000000000000000000000000000000000040000000000000000000000000333333333333333333333333333333333333333300000000000000000000000000000000000000000000000000000000000000021234000000000000000000000000000000000000000000000000000000000000",
+        "js": {
+          "fields": [
+            {
+              "value": "0x1234"
+            },
+            {
+              "value": "0x3333333333333333333333333333333333333333"
+            }
+          ]
+        }
+      },
+      {
+        "data": "0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000003333333333333333333333333333333333333333000000000000000000000000000000000000000000000000000000000000000212340000000000000000000000000000000000000000000000000000000000",
+        "js": {
+          "error": "BAD_DATA"
+        }
+      },
+      {
+        "data": "0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000003333333333333333333333333333333333333333000000000000000000000000000000000000000000000000000000000000000212340000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "js": {
+          "fields": [
+            {
+              "value": "0x1234"
+            },
+            {
+              "value": "0x3333333333333333333333333333333333333333"
+            }
+          ]
+        }
+      },
+      {
+        "data": "0x",
+        "js": {
+          "error": "BAD_DATA"
+        }
+      }
+    ],
+    "reverts": [
+      {
+        "data": "0x77209fe8000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000050376697461000000000000000000000000000000000000000000000000000000",
+        "js": {
+          "selector": "0x77209fe8",
+          "mismatch": false,
+          "claimed_name": null
+        }
+      },
+      {
+        "data": "0x1e9535f20000000000000000000000000000000000000000000000000000000000000040000000000000000000000000444444444444444444444444444444444444444400000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000",
+        "js": {
+          "selector": "0x1e9535f2",
+          "mismatch": false,
+          "claimed_name": null
+        }
+      },
+      {
+        "data": "0xef9c03ce00000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000b766974616c696b2e6574680000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "js": {
+          "selector": "0xef9c03ce",
+          "mismatch": true,
+          "claimed_name": "vitalik.eth"
+        }
+      },
+      {
+        "data": "0xef9c03ce0000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "js": {
+          "selector": "0xef9c03ce",
+          "mismatch": true,
+          "claimed_name": null
+        }
+      },
+      {
+        "data": "0xef9c03ce00000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000b766974616c696b2e657468000000000000000000000000000000000000000000",
+        "js": {
+          "selector": "0xef9c03ce",
+          "mismatch": true,
+          "claimed_name": null
+        }
+      },
+      {
+        "data": "0x95c0c75200000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000",
+        "js": {
+          "selector": "0x95c0c752",
+          "mismatch": false,
+          "claimed_name": null
+        }
+      },
+      {
+        "data": "0x77209FE8",
+        "js": {
+          "selector": "0x77209fe8",
+          "mismatch": false,
+          "claimed_name": null
+        }
+      },
+      {
+        "data": "0x1234",
+        "js": {
+          "selector": null,
+          "mismatch": false,
+          "claimed_name": null
+        }
+      }
+    ],
+    "calls": {
+      "resolve": "0x9061b92300000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000d07766974616c696b0365746800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1ee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a5347583500000000000000000000000000000000000000000000000000000000",
+      "reverse": "0x5d78a2170000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000003c0000000000000000000000000000000000000000000000000000000000000014abababababababababababababababababababab000000000000000000000000",
+      "addr_multicoin": "0xf1cb7e06ee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a534758350000000000000000000000000000000000000000000000000000000080002105",
+      "reverse_resolve": "0x9af8b7aa000000000000000000000000abababababababababababababababababababab"
+    },
+    "reverse_outcomes": [
+      {
+        "status": 0,
+        "detail": "",
+        "encoded": "0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000000"
+      },
+      {
+        "status": 1,
+        "detail": "vitalik.eth",
+        "encoded": "0x00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000b766974616c696b2e657468000000000000000000000000000000000000000000"
+      },
+      {
+        "status": 2,
+        "detail": "claimed.eth",
+        "encoded": "0x00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000b636c61696d65642e657468000000000000000000000000000000000000000000"
+      },
+      {
+        "status": 3,
+        "detail": "error detail",
+        "encoded": "0x00000000000000000000000000000000000000000000000000000000000000030000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000c6572726f722064657461696c0000000000000000000000000000000000000000"
+      }
+    ],
+    "nodes": [
+      {
+        "input": "0xbc1c58d1ee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a53475835",
+        "js": {
+          "value": "0xee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a53475835"
+        }
+      },
+      {
+        "input": "0x3b3b57deee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a5347583500",
+        "js": {
+          "value": "0xee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a53475835"
+        }
+      },
+      {
+        "input": "0x3b3b57deee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a53",
+        "js": {
+          "error": "Invalid resolver call data"
+        }
+      },
+      {
+        "input": "nope",
+        "js": {
+          "error": "Invalid resolver call data"
+        }
+      }
+    ],
+    "offchain_lookup": "0x556f1830000000000000000000000000eeeeeeee14d718c2b47d9923deab1335e144eeee00000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000001a0deadbeef0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001e00000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000000000002768747470733a2f2f67772e6578616d706c652f7b73656e6465727d2f7b646174617d2e6a736f6e00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001368747470733a2f2f6777322e6578616d706c65000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002010200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010900000000000000000000000000000000000000000000000000000000000000",
+    "callback": {
+      "selector": "0xdeadbeef",
+      "response": "0xcafe",
+      "extra": "0x09",
+      "encoded": "0xdeadbeef000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000800000000000000000000000000000000000000000000000000000000000000002cafe00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010900000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
+  "ccip": {
+    "sender": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
+    "policy": [
+      {
+        "template": "https://gw.example/{sender}/{data}.json",
+        "data": "0x0102",
+        "requests": [
+          {
+            "url": "https://gw.example/0xeeeeeeee14d718c2b47d9923deab1335e144eeee/0x0102.json",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "result": "0x00"
+      },
+      {
+        "template": "https://gw.example/lookup",
+        "data": "0x0102",
+        "requests": [
+          {
+            "url": "https://gw.example/lookup",
+            "method": "POST",
+            "body": "{\"sender\":\"0xeeeeeeee14d718c2b47d9923deab1335e144eeee\",\"data\":\"0x0102\"}"
+          }
+        ],
+        "result": "0x00"
+      },
+      {
+        "template": "https://GW.Example./x/{data}",
+        "data": "0x0102",
+        "requests": [
+          {
+            "url": "https://GW.Example./x/0x0102",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "result": "0x00"
+      },
+      {
+        "template": "file:///etc/passwd",
+        "data": "0x0102",
+        "requests": [],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "template": "http://127.0.0.1:1633/stamps/1/17",
+        "data": "0x0102",
+        "requests": [],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "template": "http://gateway.example/query",
+        "data": "0x0102",
+        "requests": [],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "template": "https://127.0.0.1/query",
+        "data": "0x0102",
+        "requests": [],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "template": "https://2130706433/query",
+        "data": "0x0102",
+        "requests": [],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "template": "https://[::1]/query",
+        "data": "0x0102",
+        "requests": [],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "template": "https://[::ffff:127.0.0.1]/query",
+        "data": "0x0102",
+        "requests": [],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "template": "https://localhost./query",
+        "data": "0x0102",
+        "requests": [],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "template": "https://node.localhost/query",
+        "data": "0x0102",
+        "requests": [],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "template": "https://node.local/query",
+        "data": "0x0102",
+        "requests": [],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "template": "https://node.internal/query",
+        "data": "0x0102",
+        "requests": [],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "template": "https://node/query",
+        "data": "0x0102",
+        "requests": [],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "template": "https://user:password@gateway.example/query",
+        "data": "0x0102",
+        "requests": [],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "template": "https://user@gateway.example/query",
+        "data": "0x0102",
+        "requests": [],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "template": "https://0x7f.1/q",
+        "data": "0x0102",
+        "requests": [],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "template": "https://127.1/q",
+        "data": "0x0102",
+        "requests": [],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "template": "https://0300.0250.0.1/q",
+        "data": "0x0102",
+        "requests": [],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "template": "not a url",
+        "data": "0x0102",
+        "requests": [],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "template": "https://xn--nxasmq6b.example/{data}",
+        "data": "0x0102",
+        "requests": [
+          {
+            "url": "https://xn--nxasmq6b.example/0x0102",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "result": "0x00"
+      },
+      {
+        "template": "https://bücher.example/{data}",
+        "data": "0x0102",
+        "requests": [
+          {
+            "url": "https://bücher.example/0x0102",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "result": "0x00"
+      }
+    ],
+    "answers": [
+      {
+        "body": "{\"data\":\"0x00ff\"}",
+        "requests": [
+          {
+            "url": "https://gw.example/0x01",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "result": "0x00ff"
+      },
+      {
+        "body": "{\"data\":\"0x\"}",
+        "requests": [
+          {
+            "url": "https://gw.example/0x01",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "result": "0x"
+      },
+      {
+        "body": "{\"data\":\"0x0\"}",
+        "requests": [
+          {
+            "url": "https://gw.example/0x01",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "body": "{\"data\":\"00ff\"}",
+        "requests": [
+          {
+            "url": "https://gw.example/0x01",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "body": "{\"data\":\"0X00\"}",
+        "requests": [
+          {
+            "url": "https://gw.example/0x01",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "body": "{\"data\":\"0xzz\"}",
+        "requests": [
+          {
+            "url": "https://gw.example/0x01",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "body": "{\"data\":1}",
+        "requests": [
+          {
+            "url": "https://gw.example/0x01",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "body": "[1]",
+        "requests": [
+          {
+            "url": "https://gw.example/0x01",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "body": "﻿{\"data\":\"0x\"}",
+        "requests": [
+          {
+            "url": "https://gw.example/0x01",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "body": "nope",
+        "requests": [
+          {
+            "url": "https://gw.example/0x01",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "body": "{\"data\":\"0x01\",\"data\":\"0x02\"}",
+        "requests": [
+          {
+            "url": "https://gw.example/0x01",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "result": "0x02"
+      },
+      {
+        "body": "{\"x\":\"�\",\"data\":\"0x01\"}",
+        "requests": [
+          {
+            "url": "https://gw.example/0x01",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "result": "0x01"
+      },
+      {
+        "body_hex": "7b2278223a22ff222c2264617461223a2230783031227d",
+        "requests": [
+          {
+            "url": "https://gw.example/0x01",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "result": "0x01"
+      },
+      {
+        "body": "{\"data\":\"0x01\"}",
+        "status": 404,
+        "requests": [
+          {
+            "url": "https://gw.example/0x01",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "error": "CCIP_GATEWAY_FAILED"
+      }
+    ]
+  },
+  "tezos": {
+    "script_expr": [
+      {
+        "key": "awesome-tezos.tez",
+        "js": "exprusUkj4PJBxvW1zeyb2JWiGTWF77vDLxMzPBv8LKtHrKGbDzmeB"
+      },
+      {
+        "key": "a.tez",
+        "js": "expruJVMojR41Rk6LCAGmu9q4pPwZsYytcVUewBS4NQgDUphdGBAyV"
+      },
+      {
+        "key": "",
+        "js": "expru3w5vUB5kLiEvvbFA81Su29kZM9bvCuVVPDNqVQq9RJ5PZ8oRw"
+      },
+      {
+        "key": "ünïcödé.tez",
+        "js": "exprvDen5hytM3xaU69usxKQbdWPmA4iHogyJTmfZqNcbLG8tGDFdv"
+      },
+      {
+        "key": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "js": "exprtxCAiq6FaKA9LxrfYFnugh7a8vdMmA97DEnExhiNhxFLkgHHEr"
+      }
+    ],
+    "names": [
+      {
+        "name": "Awesome-Tezos.TEZ",
+        "js": true
+      },
+      {
+        "name": "a.eth",
+        "js": false
+      },
+      {
+        "name": ".tez",
+        "js": false
+      },
+      {
+        "name": "a..tez",
+        "js": false
+      },
+      {
+        "name": "a b.tez",
+        "js": false
+      },
+      {
+        "name": "a/b.tez",
+        "js": false
+      },
+      {
+        "name": "a\u0001.tez",
+        "js": false
+      },
+      {
+        "name": "a?.tez",
+        "js": false
+      },
+      {
+        "name": "a#.tez",
+        "js": false
+      },
+      {
+        "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.tez",
+        "js": true
+      },
+      {
+        "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.tez",
+        "js": false
+      },
+      {
+        "name": "ΟΔΟΣ.tez",
+        "js": true
+      },
+      {
+        "name": " a.tez",
+        "js": false
+      }
+    ],
+    "uris": [
+      {
+        "raw": "https://Example.org/a",
+        "redirect": true,
+        "js": {
+          "type": "ok",
+          "protocol": "https",
+          "uri": "https://example.org/a",
+          "redirect": true,
+          "system": "tezos"
+        }
+      },
+      {
+        "raw": "http://example.org",
+        "redirect": false,
+        "js": {
+          "type": "ok",
+          "protocol": "http",
+          "uri": "http://example.org/",
+          "redirect": false,
+          "system": "tezos"
+        }
+      },
+      {
+        "raw": "ipfs://x",
+        "redirect": true,
+        "js": {
+          "type": "unsupported",
+          "reason": "redirect URL must use HTTP(S)",
+          "system": "tezos"
+        }
+      },
+      {
+        "raw": "ipfs://bafyCID/a/b/",
+        "redirect": false,
+        "js": {
+          "type": "ok",
+          "protocol": "ipfs",
+          "uri": "ipfs://bafyCID/a/b/",
+          "decoded": "bafyCID",
+          "basePath": "/a/b",
+          "redirect": false,
+          "system": "tezos"
+        }
+      },
+      {
+        "raw": "ipns://k51key/",
+        "redirect": false,
+        "js": {
+          "type": "ok",
+          "protocol": "ipns",
+          "uri": "ipns://k51key/",
+          "decoded": "k51key",
+          "basePath": "",
+          "redirect": false,
+          "system": "tezos"
+        }
+      },
+      {
+        "raw": "ipfs://self.tez/",
+        "redirect": false,
+        "js": {
+          "type": "unsupported",
+          "reason": "IPFS website URI must reference content, not a name",
+          "system": "tezos"
+        }
+      },
+      {
+        "raw": "ipns://self.tez./",
+        "redirect": false,
+        "js": {
+          "type": "unsupported",
+          "reason": "IPNS website URI must reference content, not a name",
+          "system": "tezos"
+        }
+      },
+      {
+        "raw": "ipns://self%2Etez/",
+        "redirect": false,
+        "js": {
+          "type": "unsupported",
+          "reason": "IPNS website URI must reference content, not a name",
+          "system": "tezos"
+        }
+      },
+      {
+        "raw": "ipns://%zz%2Etez/",
+        "redirect": false,
+        "js": {
+          "type": "ok",
+          "protocol": "ipns",
+          "uri": "ipns://%zz%2Etez/",
+          "decoded": "%zz%2Etez",
+          "basePath": "",
+          "redirect": false,
+          "system": "tezos"
+        }
+      },
+      {
+        "raw": "ipfs://cid:8080/",
+        "redirect": false,
+        "js": {
+          "type": "unsupported",
+          "reason": "invalid IPFS website URI",
+          "system": "tezos"
+        }
+      },
+      {
+        "raw": "ipfs://user@cid/",
+        "redirect": false,
+        "js": {
+          "type": "unsupported",
+          "reason": "invalid IPFS website URI",
+          "system": "tezos"
+        }
+      },
+      {
+        "raw": "https://user@example.org/",
+        "redirect": false,
+        "js": {
+          "type": "unsupported",
+          "reason": "invalid HTTP(S) website URI",
+          "system": "tezos"
+        }
+      },
+      {
+        "raw": "ftp://example.org/",
+        "redirect": false,
+        "js": {
+          "type": "unsupported",
+          "reason": "unsupported website protocol: ftp",
+          "system": "tezos"
+        }
+      },
+      {
+        "raw": "not a url",
+        "redirect": false,
+        "js": {
+          "type": "unsupported",
+          "reason": "invalid website URI",
+          "system": "tezos"
+        }
+      },
+      {
+        "raw": 42,
+        "redirect": false,
+        "js": {
+          "type": "unsupported",
+          "reason": "invalid website URI",
+          "system": "tezos"
+        }
+      },
+      {
+        "raw": null,
+        "redirect": false,
+        "js": {
+          "type": "unsupported",
+          "reason": "invalid website URI",
+          "system": "tezos"
+        }
+      },
+      {
+        "raw": "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "redirect": false,
+        "js": {
+          "type": "unsupported",
+          "reason": "invalid website URI",
+          "system": "tezos"
+        }
+      },
+      {
+        "raw": "ipfs://bafy/",
+        "redirect": false,
+        "js": {
+          "type": "ok",
+          "protocol": "ipfs",
+          "uri": "ipfs://bafy/",
+          "decoded": "bafy",
+          "basePath": "",
+          "redirect": false,
+          "system": "tezos"
+        }
+      },
+      {
+        "raw": "ipfs://BAFY/x",
+        "redirect": false,
+        "js": {
+          "type": "ok",
+          "protocol": "ipfs",
+          "uri": "ipfs://BAFY/x",
+          "decoded": "BAFY",
+          "basePath": "/x",
+          "redirect": false,
+          "system": "tezos"
+        }
+      },
+      {
+        "raw": "https:///nohost",
+        "redirect": false,
+        "js": {
+          "type": "ok",
+          "protocol": "https",
+          "uri": "https://nohost/",
+          "redirect": false,
+          "system": "tezos"
+        }
+      },
+      {
+        "raw": "ipns://name.eth/",
+        "redirect": false,
+        "js": {
+          "type": "unsupported",
+          "reason": "IPNS website URI must reference content, not a name",
+          "system": "tezos"
+        }
+      }
+    ],
+    "maps": [
+      {
+        "value": [
+          {
+            "prim": "Elt",
+            "args": [
+              {
+                "string": "web:content_url"
+              },
+              {
+                "bytes": "00"
+              }
+            ]
+          },
+          {
+            "prim": "Elt",
+            "args": [
+              {
+                "string": "web:content_url"
+              },
+              {
+                "bytes": "2268747470733a2f2f6578616d706c652e6f726722"
+              }
+            ]
+          },
+          {
+            "prim": "Elt",
+            "args": [
+              {
+                "int": "1"
+              },
+              {
+                "bytes": "00"
+              }
+            ]
+          }
+        ],
+        "js": [
+          [
+            "web:content_url",
+            "2268747470733a2f2f6578616d706c652e6f726722"
+          ]
+        ]
+      },
+      {
+        "value": [
+          {
+            "prim": "Elt",
+            "args": [
+              {
+                "string": "td:ttl"
+              }
+            ]
+          }
+        ],
+        "js": [
+          [
+            "td:ttl",
+            null
+          ]
+        ]
+      },
+      {
+        "value": "not an array",
+        "js": []
+      }
+    ],
+    "metadata": [
+      {
+        "hex": "2268747470733a2f2f6578616d706c652e6f726722",
+        "js": {
+          "value": "https://example.org"
+        }
+      },
+      {
+        "hex": "7b",
+        "js": {
+          "error": "Expected property name or '}' in JSON at position 1 (line 1 column 2)"
+        }
+      },
+      {
+        "hex": "0",
+        "js": {
+          "error": "Invalid Micheline bytes value"
+        }
+      },
+      {
+        "hex": "zz",
+        "js": {
+          "error": "Invalid Micheline bytes value"
+        }
+      },
+      {
+        "hex": "33363030",
+        "js": {
+          "value": 3600
+        }
+      },
+      {
+        "hex": "7b2261223a317d",
+        "js": {
+          "value": {
+            "a": 1
+          }
+        }
+      },
+      {
+        "hex": "ff227822",
+        "js": {
+          "error": "Unexpected token '�', \"�\"x\"\" is not valid JSON"
+        }
+      }
+    ],
+    "annotated": {
+      "type": {
+        "prim": "pair",
+        "args": [
+          {
+            "prim": "address",
+            "annots": [
+              "%contract"
+            ]
+          },
+          {
+            "prim": "PAIR",
+            "args": [
+              {
+                "prim": "nat",
+                "annots": [
+                  "%x"
+                ]
+              },
+              {
+                "prim": "big_map",
+                "annots": [
+                  "%records"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "value": {
+        "prim": "Pair",
+        "args": [
+          {
+            "string": "KT1x"
+          },
+          {
+            "prim": "Pair",
+            "args": [
+              {
+                "int": "1"
+              },
+              {
+                "int": "42"
+              }
+            ]
+          }
+        ]
+      },
+      "cases": [
+        {
+          "annotation": "%contract",
+          "js": {
+            "type": {
+              "prim": "address",
+              "annots": [
+                "%contract"
+              ]
+            },
+            "value": {
+              "string": "KT1x"
+            }
+          }
+        },
+        {
+          "annotation": "%records",
+          "js": {
+            "type": {
+              "prim": "big_map",
+              "annots": [
+                "%records"
+              ]
+            },
+            "value": {
+              "int": "42"
+            }
+          }
+        },
+        {
+          "annotation": "%x",
+          "js": {
+            "type": {
+              "prim": "nat",
+              "annots": [
+                "%x"
+              ]
+            },
+            "value": {
+              "int": "1"
+            }
+          }
+        },
+        {
+          "annotation": "%missing",
+          "js": null
+        }
+      ]
+    }
+  }
+}
