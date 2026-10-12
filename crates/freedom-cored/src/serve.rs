@@ -83,6 +83,11 @@ const CAPABILITIES: &[&str] = &[
     "compat.private_key",
     "compat.bee_wallet_key",
     "compat.publisher_key",
+    "sign.transaction",
+    "sign.message",
+    "sign.typed_data",
+    "swarm.sign_soc",
+    "typed_data.hash",
 ];
 
 pub fn run(options: &Options) -> Exit {
