@@ -171,6 +171,19 @@ impl Core {
         }
     }
 
+    /// Every frame left, until the core closes stdout.
+    pub fn rest(&mut self) -> Vec<Value> {
+        let mut frames = Vec::new();
+        loop {
+            match self.output.recv_timeout(READ_TIMEOUT) {
+                Ok(Output::Frame(value)) => frames.push(value),
+                Ok(Output::Line(line)) => panic!("expected a frame, got line {line:?}"),
+                Err(mpsc::RecvTimeoutError::Disconnected) => return frames,
+                Err(mpsc::RecvTimeoutError::Timeout) => panic!("stdout still open"),
+            }
+        }
+    }
+
     pub fn line(&mut self) -> String {
         match self.output.recv_timeout(READ_TIMEOUT) {
             Ok(Output::Line(line)) => line,

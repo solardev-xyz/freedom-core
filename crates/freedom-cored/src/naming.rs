@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
@@ -76,12 +76,22 @@ type Mail = (In, Option<Credit>);
 /// only a weak reference, so dropping this ends the thread.
 pub struct Handle {
     tx: Arc<Sender<Mail>>,
+    closing: Arc<Mutex<bool>>,
 }
 
 impl Handle {
     /// False once the thread has gone.
     pub fn send(&self, message: In, credit: Option<Credit>) -> bool {
         self.tx.send((message, credit)).is_ok()
+    }
+
+    /// The core is exiting: from now on no `shell.*` request is handed to
+    /// the writer. The thread admits requests under the same lock, so none
+    /// can follow what the caller writes next (the shutdown reply).
+    pub fn close(&self) {
+        if let Ok(mut closing) = self.closing.lock() {
+            *closing = true;
+        }
     }
 }
 
@@ -90,6 +100,8 @@ impl Handle {
 pub fn spawn(out: Sender<Out>, events: Sender<Event>) -> std::io::Result<Handle> {
     let (tx, rx) = mpsc::channel();
     let tx = Arc::new(tx);
+    let closing = Arc::new(Mutex::new(false));
+    let gate = Arc::clone(&closing);
     // Naming's share of the writer (design 0004, Bounds: the writer).
     let allowance = Allowance::new(usize::MAX, transport::MAX_QUEUED_NAMING_BYTES);
     let wake: Weak<Sender<Mail>> = Arc::downgrade(&tx);
@@ -102,7 +114,7 @@ pub fn spawn(out: Sender<Out>, events: Sender<Event>) -> std::io::Result<Handle>
         .name("naming".into())
         .spawn(move || {
             let _notice = transport::DeathNotice::new(events.clone(), "naming");
-            let event = match run(&rx, out, allowance) {
+            let event = match run(&rx, out, allowance, gate) {
                 Stop::Protocol(category) => Event::ProtocolError(category),
                 Stop::Writer => Event::WriterFailed,
                 // The event loop has gone: nothing to report to.
@@ -110,7 +122,7 @@ pub fn spawn(out: Sender<Out>, events: Sender<Event>) -> std::io::Result<Handle>
             };
             let _ = events.send(event);
         })?;
-    Ok(Handle { tx })
+    Ok(Handle { tx, closing })
 }
 
 /// Uniform values in `[0, 1)` from the OS generator: the shuffle needs no
@@ -157,7 +169,12 @@ enum Stop {
 type Flow = Result<(), Stop>;
 
 /// The thread's loop, until it has to stop.
-fn run(rx: &Receiver<Mail>, out: Sender<Out>, allowance: Arc<Allowance>) -> Stop {
+fn run(
+    rx: &Receiver<Mail>,
+    out: Sender<Out>,
+    allowance: Arc<Allowance>,
+    closing: Arc<Mutex<bool>>,
+) -> Stop {
     let started = Instant::now();
     let mut machine = Machine::new(0, empty_config(), Box::new(OsRandom));
     #[allow(clippy::cast_precision_loss)]
@@ -169,6 +186,7 @@ fn run(rx: &Receiver<Mail>, out: Sender<Out>, allowance: Arc<Allowance>) -> Stop
         machine,
         out,
         allowance,
+        closing,
         outbox: VecDeque::new(),
         callers: BTreeMap::new(),
         outgoing: BTreeMap::new(),
@@ -238,6 +256,8 @@ struct Naming {
     machine: Machine,
     out: Sender<Out>,
     allowance: Arc<Allowance>,
+    /// Set by [`Handle::close`]: no request is admitted after it.
+    closing: Arc<Mutex<bool>>,
     /// Frames waiting for room in the writer, in order.
     outbox: VecDeque<Zeroizing<Vec<u8>>>,
     /// Requests waiting for a slot: the machine's request id, the request,
@@ -497,6 +517,14 @@ impl Naming {
                 settled = true;
                 continue;
             };
+            // Admitted under the closing lock: once the core is exiting,
+            // nothing more goes.
+            let Ok(closing) = self.closing.lock() else {
+                break;
+            };
+            if *closing {
+                break;
+            }
             let Some(hold) = self.allowance.take(frame.len()) else {
                 break;
             };
@@ -507,6 +535,7 @@ impl Naming {
             self.out
                 .send(Out { frame, hold })
                 .map_err(|_| Stop::Writer)?;
+            drop(closing);
         }
         Ok(settled)
     }
@@ -1049,6 +1078,7 @@ mod tests {
             machine: Machine::new(0, config, Box::new(OsRandom)),
             out: tx,
             allowance: Allowance::new(usize::MAX, writer_bytes),
+            closing: Arc::new(Mutex::new(false)),
             outbox: VecDeque::new(),
             callers: BTreeMap::new(),
             outgoing: BTreeMap::new(),

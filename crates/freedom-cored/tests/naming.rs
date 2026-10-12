@@ -341,3 +341,58 @@ fn a_verified_request_too_large_to_send_settles_in_the_core() {
     assert_eq!(reply["error"]["code"], "resolution_failed", "{reply}");
     assert!(core.call(5, "vault.status", json!({}))["result"].is_object());
 }
+
+#[test]
+fn no_shell_request_follows_the_shutdown_reply() {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    let mut many = snapshot();
+    many["rpc"] = (1..=64)
+        .map(|i| json!({ "endpoint": format!("e{i}") }))
+        .collect();
+    core.call(2, "naming.configure", many);
+    for i in 0..32u64 {
+        core.send(&request(
+            100 + i,
+            "naming.resolve_content",
+            json!({ "name": format!("n{i}.eth"), "private": false }),
+        ));
+    }
+    // The first 256 probes, at the outstanding cap; more wait their turn.
+    let mut first = None;
+    let mut seen = 0;
+    while seen < 256 {
+        let message = core.recv();
+        if message["type"] == "request" {
+            first.get_or_insert(message["id"].clone());
+            seen += 1;
+        }
+    }
+    // In one write: a slow naming request, an answer that frees a slot,
+    // and shutdown. The freed slot must not admit a waiting probe after
+    // the shutdown reply.
+    let slow = format!("{}.eth", "a".repeat(600_000));
+    let mut batch = common::frame(&request(
+        500,
+        "naming.resolve_content",
+        json!({ "name": slow, "private": false }),
+    ));
+    batch.extend(common::frame(&json!({
+        "type": "response",
+        "id": first,
+        "error": { "code": "network", "message": "Network error" },
+    })));
+    batch.extend(common::frame(&request(501, "core.shutdown", json!({}))));
+    core.send_raw(&batch);
+    core.close_stdin();
+    let rest = core.rest();
+    let acknowledged = rest
+        .iter()
+        .position(|m| m["id"] == 501 && m["type"] == "response")
+        .expect("the shutdown reply");
+    assert!(
+        !rest[acknowledged..].iter().any(|m| m["type"] == "request"),
+        "a request after the shutdown reply"
+    );
+}

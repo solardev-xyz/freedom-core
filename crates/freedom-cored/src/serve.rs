@@ -249,6 +249,8 @@ pub fn run(options: &Options) -> Exit {
             Err(RecvTimeoutError::Disconnected) => break Exit::Ok,
         }
     };
+    // Naming starts no more I/O, whatever ended the loop.
+    core.naming.close();
     // Wipe the vault and revoke pre-commit work. Work past its commit point
     // finishes and replies before exit (bounded). Then let the writer flush
     // what's queued, but never wait on a peer that stopped reading: exiting
@@ -479,10 +481,14 @@ impl Core {
         }
         let flow = match method {
             "core.hello" => self.hello(id, params),
-            "core.shutdown" => match self.result(id, &serde_json::json!({})) {
-                Flow::Continue => Flow::Exit(Exit::Ok),
-                exit => exit,
-            },
+            "core.shutdown" => {
+                // No naming request goes after the acknowledgement.
+                self.naming.close();
+                match self.result(id, &serde_json::json!({})) {
+                    Flow::Continue => Flow::Exit(Exit::Ok),
+                    exit => exit,
+                }
+            }
             method if Vault::handles(method) => {
                 let outs = self.vault.request(id, method, params, context.caller);
                 self.dispatch(outs)
