@@ -314,7 +314,7 @@ pub(crate) async fn ur_call(
         }
         // `abi.decode(…, '0x' + data.slice(10))`, with ethers' messages.
         let lookup = match rpc::hex_string(&source) {
-            Some(bytes) => ur::decode_offchain_lookup_explained(&bytes)
+            Some(bytes) => ur::decode_offchain_lookup_explained_within(&bytes, ctx.bounds().decode_bytes)
                 .map_err(|message| fail(CallError::Invalid(message), to, &data))?,
             None => {
                 let value = format!("0x{}", source.get(10..).unwrap_or(""));
@@ -333,6 +333,11 @@ pub(crate) async fn ur_call(
             .await
             .map_err(|e| fail(e, to, &data))?;
         let callback = ur::encode_callback(lookup.callback, &response, &lookup.extra_data);
+        // Deviation `request-size`: a callback over the frame fails the leg as
+        // the gateways failing would.
+        if !ctx.bounds().fits(&[&rpc::hex(&callback)]) {
+            return Err(fail(CallError::GatewaysFailed, to, &data));
+        }
         let next = Method::Call {
             to: lookup.sender,
             data: callback.clone(),
@@ -353,7 +358,8 @@ pub(crate) async fn ccip_read_fetch(
     ctx: &Ctx,
     lookup: &ur::OffchainLookup,
 ) -> Result<Vec<u8>, CallError> {
-    for (index, template) in lookup.urls.iter().enumerate() {
+    // Deviation `ccip-urls`: the first 32 URLs.
+    for (index, template) in lookup.urls.iter().enumerate().take(ctx.bounds().ccip_urls) {
         // A URL that won't decode throws out of the loop where the JS
         // iteration reaches it.
         let template = template
@@ -364,6 +370,14 @@ pub(crate) async fn ccip_read_fetch(
         else {
             continue;
         };
+        // Deviation `request-size`: a request over the frame is never sent;
+        // that gateway fails.
+        if !ctx
+            .bounds()
+            .fits(&[&request.url, request.body.as_deref().unwrap_or("")])
+        {
+            continue;
+        }
         let fetch = ctx.rt.request(Request::Gateway {
             url: request.url,
             body: request.body,
@@ -371,6 +385,7 @@ pub(crate) async fn ccip_read_fetch(
         if let Either::Left(Answer::Gateway { status, body }) =
             race(fetch, ctx.rt.sleep(CCIP_TIMEOUT_MS)).await
             && (200..300).contains(&status)
+            && body.len() <= ctx.bounds().answer_bytes
             && let Some(data) = crate::ccip::parse_gateway_response(&body)
         {
             return Ok(data);

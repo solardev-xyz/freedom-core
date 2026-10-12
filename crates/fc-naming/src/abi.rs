@@ -61,6 +61,10 @@ pub type Field = Result<Value, FieldError>;
 
 const WORD: usize = 32;
 const MAX_INFLATION: usize = 1024;
+/// Design 0004's decode budget: the bytes and strings one decode may
+/// produce (deviation `decode-budget`). Offsets let one string stand for
+/// many, so the reads alone don't bound the output.
+pub const MAX_DECODE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 
 /// Shared by a decode and all its sub-readers: ethers counts bytes read
@@ -71,6 +75,8 @@ struct Budget<'a> {
     limit: usize,
     root: &'a [u8],
     root_offset: Cell<usize>,
+    output: Cell<usize>,
+    output_limit: usize,
 }
 
 struct Reader<'a> {
@@ -191,7 +197,19 @@ impl<'a> Reader<'a> {
 
     fn read_dynamic_bytes(&mut self) -> Result<&'a [u8], Fail> {
         let length = self.read_index()?;
-        self.read_bytes(length)
+        let bytes = self.read_bytes(length)?;
+        let output = self.budget.output.get().saturating_add(length);
+        self.budget.output.set(output);
+        if output > self.budget.output_limit {
+            // The core's own budget (deviation `decode-budget`), failing as
+            // the patched reference's does.
+            return Err(Fail::Overrun(ethers::make_error(
+                "decode budget exceeded",
+                "BUFFER_OVERRUN",
+                &[],
+            )));
+        }
+        Ok(bytes)
     }
 
     fn decode(&mut self, kind: Kind) -> Result<Value, Fail> {
@@ -289,16 +307,36 @@ fn utf8(bytes: &[u8]) -> Result<String, FieldError> {
 
 /// `AbiCoder.defaultAbiCoder().decode(kinds, data)`.
 pub fn decode(kinds: &[Kind], data: &[u8]) -> Result<Vec<Field>, DecodeError> {
-    decode_explained(kinds, data).map_err(|_| DecodeError)
+    decode_within(kinds, data, MAX_DECODE_BYTES)
+}
+
+/// [`decode`] with its output limited to `output_limit` bytes.
+pub fn decode_within(
+    kinds: &[Kind],
+    data: &[u8],
+    output_limit: usize,
+) -> Result<Vec<Field>, DecodeError> {
+    decode_explained_within(kinds, data, output_limit).map_err(|_| DecodeError)
 }
 
 /// [`decode`], with ethers' message when the whole decode fails.
 pub fn decode_explained(kinds: &[Kind], data: &[u8]) -> Result<Vec<Field>, String> {
+    decode_explained_within(kinds, data, MAX_DECODE_BYTES)
+}
+
+/// [`decode_explained`] with its output limited to `output_limit` bytes.
+pub fn decode_explained_within(
+    kinds: &[Kind],
+    data: &[u8],
+    output_limit: usize,
+) -> Result<Vec<Field>, String> {
     let budget = Budget {
         read: Cell::new(0),
         limit: data.len().saturating_mul(MAX_INFLATION),
         root: data,
         root_offset: Cell::new(0),
+        output: Cell::new(0),
+        output_limit,
     };
     let mut reader = Reader {
         data,

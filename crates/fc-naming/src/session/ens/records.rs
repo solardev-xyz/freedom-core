@@ -64,7 +64,10 @@ pub(crate) async fn content(
                     ("reason", s("UNSUPPORTED_CONTENTHASH_FORMAT")),
                     ("name", s(normalized)),
                     ("system", s(id)),
-                    ("contentHash", s(&rpc::hex(bytes))),
+                    (
+                        "contentHash",
+                        s(&ctx.bounds().shorten_hex(&rpc::hex(bytes))),
+                    ),
                     ("trust", trust),
                 ])
             };

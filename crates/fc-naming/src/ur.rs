@@ -162,10 +162,24 @@ pub fn decode_offchain_lookup(data: &[u8]) -> Option<OffchainLookup> {
     decode_offchain_lookup_explained(data).ok()
 }
 
+/// [`decode_offchain_lookup`] under a decode budget of `output_limit`
+/// bytes (deviation `decode-budget`).
+pub fn decode_offchain_lookup_within(data: &[u8], output_limit: usize) -> Option<OffchainLookup> {
+    decode_offchain_lookup_explained_within(data, output_limit).ok()
+}
+
 /// [`decode_offchain_lookup`], or the message the reference's error
 /// carries: ethers' own for a whole-decode failure, else the deferred error
 /// of the first field the destructuring reads.
 pub fn decode_offchain_lookup_explained(data: &[u8]) -> Result<OffchainLookup, String> {
+    decode_offchain_lookup_explained_within(data, abi::MAX_DECODE_BYTES)
+}
+
+/// [`decode_offchain_lookup_explained`] under a decode budget.
+pub fn decode_offchain_lookup_explained_within(
+    data: &[u8],
+    output_limit: usize,
+) -> Result<OffchainLookup, String> {
     if data.get(..4) != Some(&OFFCHAIN_LOOKUP[..]) {
         return Err(String::new());
     }
@@ -176,7 +190,7 @@ pub fn decode_offchain_lookup_explained(data: &[u8]) -> Result<OffchainLookup, S
         Kind::Bytes4,
         Kind::Bytes,
     ];
-    let fields = abi::decode_explained(&kinds, &data[4..])?;
+    let fields = abi::decode_explained_within(&kinds, &data[4..], output_limit)?;
     if let Some(index) = fields.iter().position(Result::is_err) {
         return Err(crate::ethers::deferred(index));
     }

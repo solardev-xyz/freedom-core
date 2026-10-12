@@ -74,6 +74,13 @@ async fn rpc_request(
     };
     match answer {
         Answer::Tezos { status: 404, .. } => Ok(JsValue::Null),
+        // Deviation `response-caps`: after the status, as `rpcRequest`
+        // checks its size limit.
+        Answer::Tezos { status, body }
+            if (200..300).contains(&status) && body.len() > ctx.bounds().answer_bytes =>
+        {
+            Err(Failed)
+        }
         Answer::Tezos { status, body } if (200..300).contains(&status) => {
             jsjson::parse(&String::from_utf8_lossy(&body)).map_err(|_| Failed)
         }
@@ -844,11 +851,18 @@ pub(crate) async fn resolve(ctx: &Ctx, state: &TezosState, name: &str) -> Result
     let result = JsValue::Object(fields);
     // Cache lifetimes run on the monotonic clock; the expiry clamp reads
     // the wall clock (design 0004, monotonic-time).
+    // Deviation `reply-size`: never cache what can't be replied.
+    if result.stringify().len() > ctx.bounds().reply_bytes {
+        return Ok(result);
+    }
     let duration = cache_duration(&result, ctx.wall_now());
-    state
-        .results
-        .borrow_mut()
-        .set(name, result.clone(), ctx.now_f() + duration, ctx.now());
+    state.results.borrow_mut().set(
+        name,
+        result.clone(),
+        ctx.now_f() + duration,
+        ctx.now(),
+        ctx.bounds().cache_bytes,
+    );
     Ok(result)
 }
 

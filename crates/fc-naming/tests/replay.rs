@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 
 use fc_naming::jsjson::{self, JsValue};
+use fc_naming::session::bounds::Bounds;
 use fc_naming::session::ens::{Answer, Config, Direct, Request, Verified, VerifiedOp};
 use fc_naming::session::exec::{Effect, Fired};
 use fc_naming::session::machine::{Machine, Reply};
@@ -118,7 +119,57 @@ fn config(world: &JsValue, system: &str) -> Config {
         myotis_enabled: world.get("myotis").and_then(|m| m.get("enabled"))
             == Some(&JsValue::Bool(true)),
         prover,
+        bounds: bounds(world),
     }
+}
+
+/// Design 0004's bounds, with the ones a deviation vector lowers
+/// (`world.bounds`).
+fn bounds(world: &JsValue) -> Bounds {
+    let mut bounds = Bounds::default();
+    let lowered = world.get("bounds");
+    let get = |key: &str| {
+        lowered
+            .and_then(|b| b.get(key))
+            .map(|v| usize::try_from(num(Some(v))).unwrap_or(usize::MAX))
+    };
+    if let Some(n) = get("ccipUrls") {
+        bounds.ccip_urls = n;
+    }
+    if let Some(n) = get("answerBytes") {
+        bounds.answer_bytes = n;
+    }
+    if let Some(n) = get("replyHex") {
+        bounds.reply_hex = n;
+    }
+    if let Some(n) = get("prefetches") {
+        bounds.prefetches = n;
+    }
+    if let Some(n) = get("messageBytes") {
+        bounds.message_bytes = n;
+    }
+    if let Some(n) = get("replyBytes") {
+        bounds.reply_bytes = n;
+    }
+    if let Some(n) = get("cacheBytes") {
+        bounds.cache_bytes = n;
+    }
+    if let Some(n) = get("decodeBytes") {
+        bounds.decode_bytes = n;
+    }
+    if let Some(n) = get("sessions") {
+        bounds.sessions = n;
+    }
+    if let Some(n) = get("callers") {
+        bounds.callers = n;
+    }
+    if let Some(n) = get("callersPerSession") {
+        bounds.callers_per_session = n;
+    }
+    if let Some(n) = get("deadlineMs") {
+        bounds.deadline_ms = n as u64;
+    }
+    bounds
 }
 
 /// Endpoint references back to what main publishes: Tezos' `trust.agreed`
@@ -335,6 +386,8 @@ impl Driver {
             "gateway" if answer.get("redirect").is_some() => Answer::Failed(Transport::Refused),
             "gateway" => Answer::Gateway { status, body },
             "tezos" => Answer::Tezos { status, body },
+            // Main's `{}`: the prefetch ended (finished, failed or timed out).
+            "prefetch" => Answer::Done,
             "verified-op" => Answer::Verified(if let Some(result) = answer.get("result") {
                 Verified::Result(result.clone())
             } else if let Some(revert) = answer.get("revert") {
@@ -573,6 +626,16 @@ fn replay(scenario: &JsValue) -> Result<Vec<String>, String> {
                 ));
             }
             match (&reply.outcome, want.get("value"), want.get("thrown")) {
+                // A protocol error (`busy`, `deadline`), not a resolution.
+                (Err(thrown), _, _) if want.get("protocol").is_some() || thrown.code.is_some() => {
+                    let expected = want.get("protocol").and_then(JsValue::as_str);
+                    if thrown.code != expected {
+                        driver.mismatches.push(format!(
+                            "{id} step {index}: protocol {:?} instead of {expected:?}",
+                            thrown.code
+                        ));
+                    }
+                }
                 (Ok(value), Some(expected), _) => {
                     let got = publish(value, system);
                     if !same(&got, expected) {

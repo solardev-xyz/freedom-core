@@ -204,7 +204,16 @@ fn abi_rules() {
             ),
             None => unhex(case["data"].as_str().unwrap()).unwrap(),
         };
-        let ours = abi::decode(&kinds, &data);
+        // Parity with ethers, whose decoder has no output budget.
+        let ours = abi::decode_within(&kinds, &data, usize::MAX);
+        // Deviation `decode-budget` (design 0004): the aliased string
+        // decodes to about 128 MiB in JS; within 4 MiB the core refuses it.
+        if case.get("recipe").is_some() {
+            assert!(
+                abi::decode(&kinds, &data).is_err(),
+                "an aliased decode over the budget must fail"
+            );
+        }
         match case["js"].get("fields") {
             None => assert!(
                 ours.is_err(),

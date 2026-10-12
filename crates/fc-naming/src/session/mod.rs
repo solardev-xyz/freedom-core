@@ -2,6 +2,7 @@
 //! sans-I/O machine. The driver supplies time, randomness and the answers
 //! to the I/O the machine asks for.
 
+pub mod bounds;
 pub mod ens;
 pub mod exec;
 pub mod js;

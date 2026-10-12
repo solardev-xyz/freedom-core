@@ -17,6 +17,7 @@ fn machine() -> Machine {
         myotis_enabled: false,
         prover: None,
         tezos: vec!["https://t1.tez.example".into()],
+        bounds: fc_naming::session::bounds::Bounds::default(),
     };
     Machine::new(0, config, Box::new(Mulberry32::new(7)))
 }

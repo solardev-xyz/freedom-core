@@ -2,14 +2,14 @@
 //! restarts (`resolveWithCache`, `resolveAcrossStableLifecycle`), and the
 //! prefetches it keeps alive.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Waker};
 
 use super::ens::{self, Answer, Config, Ctx, Request, Store, Thrown};
-use super::exec::{Effect, Fired, Io, Ms, Task};
+use super::exec::{Effect, Either, Fired, Io, Ms, Task, race};
 use super::random::Random;
 use crate::jsjson::JsValue;
 
@@ -17,14 +17,13 @@ use crate::jsjson::JsValue;
 /// prefetches it keeps running.
 pub struct Shared {
     ctx: Rc<Ctx>,
-    prefetches: RefCell<Vec<(u64, Io<Request, Answer>)>>,
-    next_prefetch: Cell<u64>,
+    prefetches: RefCell<Vec<Io<Request, Answer>>>,
 }
 
 impl Shared {
     /// `prefetchOnFirstData`: asks main to prefetch the first answer's URI.
-    /// The handle lets the wave abort it.
-    pub(crate) fn start_prefetch(&self, resolved: &[u8]) -> Option<u64> {
+    /// The wave owns the request until its outcome; dropping it cancels.
+    pub(crate) fn start_prefetch(&self, resolved: &[u8]) -> Option<Io<Request, Answer>> {
         let uri = ens::prefetch_uri(resolved)?;
         let mut io = self.ctx.rt.request(Request::Prefetch { uri });
         // The first poll emits the request.
@@ -32,24 +31,26 @@ impl Shared {
         if Pin::new(&mut io).poll(&mut cx).is_ready() {
             return None;
         }
-        let id = self.next_prefetch.get();
-        self.next_prefetch.set(id + 1);
-        self.prefetches.borrow_mut().push((id, io));
-        Some(id)
+        Some(io)
     }
 
-    /// Dropping the request cancels it.
-    pub(crate) fn abort_prefetch(&self, id: u64) {
-        self.prefetches
-            .borrow_mut()
-            .retain(|(handle, _)| *handle != id);
+    /// After `agreed_data` the prefetch survives its session in the
+    /// machine's set (design 0004, Prefetch). Deviation `prefetch-set`:
+    /// past the bound, the oldest is cancelled.
+    pub(crate) fn keep_prefetch(&self, io: Io<Request, Answer>) {
+        let limit = self.ctx.bounds().prefetches;
+        let mut prefetches = self.prefetches.borrow_mut();
+        prefetches.push(io);
+        while prefetches.len() > limit {
+            prefetches.remove(0);
+        }
     }
 
     fn poll(&self) {
         let mut cx = Context::from_waker(Waker::noop());
         self.prefetches
             .borrow_mut()
-            .retain_mut(|(_, io)| Pin::new(io).poll(&mut cx).is_pending());
+            .retain_mut(|io| Pin::new(io).poll(&mut cx).is_pending());
     }
 }
 
@@ -81,6 +82,21 @@ pub struct Machine {
 
 const MAX_LIFECYCLE_RESTARTS: u32 = 3;
 
+/// A session's work under its deadline (`overall-deadline`): the inner
+/// future is dropped at the deadline, which cancels its I/O.
+fn with_deadline(
+    ctx: &Ctx,
+    work: impl Future<Output = Outcome> + 'static,
+) -> Task<'static, Outcome> {
+    let deadline = ctx.rt.sleep(ctx.bounds().deadline_ms);
+    Task::new(async move {
+        match race(work, deadline).await {
+            Either::Left(outcome) => outcome,
+            Either::Right(()) => Err(Thrown::protocol("deadline")),
+        }
+    })
+}
+
 type Resolve = Rc<dyn Fn(Rc<Ctx>, Rc<Shared>) -> Pin<Box<dyn Future<Output = Outcome>>>>;
 
 impl Machine {
@@ -89,7 +105,6 @@ impl Machine {
         let shared = Rc::new(Shared {
             ctx: Rc::clone(&ctx),
             prefetches: RefCell::new(Vec::new()),
-            next_prefetch: Cell::new(1),
         });
         Self {
             ctx,
@@ -136,10 +151,16 @@ impl Machine {
         subject: String,
         resolve: Resolve,
     ) -> u64 {
+        if let Some(busy) = self.admit_caller() {
+            return busy;
+        }
         if let Some(result) = self.cached(store, &key) {
             return self.reply(Ok(result));
         }
         let dedup = format!("{label}:{key}");
+        if let Some(busy) = self.admit(&dedup) {
+            return busy;
+        }
         let caller = self.next_caller;
         self.next_caller += 1;
         if let Some(session) = self.sessions.iter_mut().find(|s| s.key == dedup) {
@@ -148,7 +169,7 @@ impl Machine {
         }
         let ctx = Rc::clone(&self.ctx);
         let shared = Rc::clone(&self.shared);
-        let task = Task::new(async move {
+        let task = with_deadline(&self.ctx, async move {
             for _attempt in 1..=MAX_LIFECYCLE_RESTARTS {
                 let epoch = ctx.state.borrow().lifecycle;
                 let result = resolve(Rc::clone(&ctx), Rc::clone(&shared)).await;
@@ -180,6 +201,24 @@ impl Machine {
             task,
         });
         caller
+    }
+
+    /// Admission (design 0004): `Some(busy reply)` when joining or starting
+    /// the session `dedup` would cross a limit.
+    fn admit(&mut self, dedup: &str) -> Option<u64> {
+        let bounds = self.ctx.bounds();
+        let full = match self.sessions.iter().find(|s| s.key == dedup) {
+            Some(session) => session.callers.len() >= bounds.callers_per_session,
+            None => self.sessions.len() >= bounds.sessions,
+        };
+        full.then(|| self.reply(Err(Thrown::protocol("busy"))))
+    }
+
+    /// Admission's caller limit, checked first: every caller counts, one
+    /// answered from the cache included (design 0004, Admission).
+    fn admit_caller(&mut self) -> Option<u64> {
+        let waiting: usize = self.sessions.iter().map(|s| s.callers.len()).sum();
+        (waiting >= self.ctx.bounds().callers).then(|| self.reply(Err(Thrown::protocol("busy"))))
     }
 
     /// `trim()` and `fastNormalize`, or the caller's immediate error.
@@ -281,6 +320,7 @@ impl Machine {
     pub fn poll(&mut self) {
         self.shared.poll();
         let now = self.now();
+        let reply_bytes = self.ctx.bounds().reply_bytes;
         let mut finished = Vec::new();
         for (i, session) in self.sessions.iter_mut().enumerate() {
             if session.task.poll() {
@@ -290,6 +330,11 @@ impl Machine {
         for i in finished.into_iter().rev() {
             let mut session = self.sessions.remove(i);
             if let Some(outcome) = session.task.take() {
+                // Deviation `reply-size`: a result too large for one reply.
+                let outcome = match outcome {
+                    Ok(value) if value.stringify().len() > reply_bytes => Err(Thrown::too_large()),
+                    other => other,
+                };
                 for caller in session.callers {
                     self.replies.push(Reply {
                         caller,
@@ -337,6 +382,9 @@ impl Machine {
         let Some(normalized) = super::tezos::normalize(name) else {
             return self.reply(Ok(super::tezos::invalid()));
         };
+        if let Some(busy) = self.admit_caller() {
+            return busy;
+        }
         let now = self.now();
         let cached = self
             .ctx
@@ -352,6 +400,9 @@ impl Machine {
         // appended, not updated in place.
         self.ctx.tezos.results.borrow_mut().delete(&normalized);
         let dedup = format!("tezos:{normalized}");
+        if let Some(busy) = self.admit(&dedup) {
+            return busy;
+        }
         let caller = self.next_caller;
         self.next_caller += 1;
         if let Some(session) = self.sessions.iter_mut().find(|s| s.key == dedup) {
@@ -359,8 +410,9 @@ impl Machine {
             return caller;
         }
         let ctx = Rc::clone(&self.ctx);
-        let task =
-            Task::new(async move { super::tezos::resolve(&ctx, &ctx.tezos, &normalized).await });
+        let task = with_deadline(&self.ctx, async move {
+            super::tezos::resolve(&ctx, &ctx.tezos, &normalized).await
+        });
         self.sessions.push(Session {
             key: dedup,
             callers: vec![caller],

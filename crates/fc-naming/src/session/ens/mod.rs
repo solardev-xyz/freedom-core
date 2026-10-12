@@ -122,6 +122,7 @@ pub struct Config {
     pub prover: Option<(Endpoint, bool)>,
     /// Tezos RPC endpoints, in order.
     pub tezos: Vec<Endpoint>,
+    pub bounds: crate::session::bounds::Bounds,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -136,13 +137,31 @@ pub struct Thrown {
     pub message: String,
     /// `MYOTIS_LIFECYCLE_CHANGED`: rethrown by the method order.
     pub lifecycle: bool,
+    /// A protocol error instead of a thrown resolution: `busy` (admission)
+    /// or `deadline` (design 0004, Admission).
+    pub code: Option<&'static str>,
 }
 
 impl Thrown {
+    /// A protocol error (`busy`, `deadline`).
+    pub fn protocol(code: &'static str) -> Self {
+        Self {
+            message: code.into(),
+            lifecycle: false,
+            code: Some(code),
+        }
+    }
+
+    /// `resolution_failed: result too large` (deviation `reply-size`).
+    pub fn too_large() -> Self {
+        Self::new("result too large")
+    }
+
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
             lifecycle: false,
+            code: None,
         }
     }
 
@@ -150,6 +169,7 @@ impl Thrown {
         Self {
             message: message.into(),
             lifecycle: true,
+            code: None,
         }
     }
 }
@@ -166,6 +186,13 @@ pub(crate) struct Anchor {
 #[derive(Debug, Default)]
 pub(crate) struct Cache {
     entries: Vec<(String, JsValue, f64)>,
+    /// What the entries take, serialized (deviation `cache-bytes`).
+    bytes: usize,
+}
+
+/// An entry's size for the byte budget.
+fn entry_bytes(key: &str, value: &JsValue) -> usize {
+    key.len() + value.stringify().len()
 }
 
 pub(crate) const MAX_CACHE_ENTRIES: usize = 500;
@@ -180,40 +207,60 @@ impl Cache {
             .map(|(_, v, _)| v)
     }
 
-    pub(crate) fn set(&mut self, key: &str, value: JsValue, expires: f64, now: Ms) {
+    pub(crate) fn set(
+        &mut self,
+        key: &str,
+        value: JsValue,
+        expires: f64,
+        now: Ms,
+        cache_bytes: usize,
+    ) {
+        let size = entry_bytes(key, &value);
         match self.entries.iter_mut().find(|(k, _, _)| k == key) {
             Some(entry) => {
+                self.bytes = self.bytes - entry_bytes(&entry.0, &entry.1) + size;
                 entry.1 = value;
                 entry.2 = expires;
             }
-            None => self.entries.push((key.to_owned(), value, expires)),
+            None => {
+                self.bytes += size;
+                self.entries.push((key.to_owned(), value, expires));
+            }
         }
-        // `capCache`: expired entries first, then the oldest.
-        if self.entries.len() > MAX_CACHE_ENTRIES {
+        // `capCache`: expired entries first, then the oldest. The byte
+        // budget evicts the same way.
+        let over = |c: &Self| c.entries.len() > MAX_CACHE_ENTRIES || c.bytes > cache_bytes;
+        if over(self) {
             #[allow(clippy::cast_precision_loss)]
             let now = now as f64;
             let mut i = 0;
-            while self.entries.len() > MAX_CACHE_ENTRIES && i < self.entries.len() {
+            while over(self) && i < self.entries.len() {
                 if self.entries[i].2 <= now {
-                    self.entries.remove(i);
+                    let (k, v, _) = self.entries.remove(i);
+                    self.bytes -= entry_bytes(&k, &v);
                 } else {
                     i += 1;
                 }
             }
-            while self.entries.len() > MAX_CACHE_ENTRIES {
-                self.entries.remove(0);
+            while over(self) && !self.entries.is_empty() {
+                let (k, v, _) = self.entries.remove(0);
+                self.bytes -= entry_bytes(&k, &v);
             }
         }
     }
 
     pub(crate) fn delete(&mut self, key: &str) -> bool {
-        let before = self.entries.len();
-        self.entries.retain(|(k, _, _)| k != key);
-        before != self.entries.len()
+        let Some(i) = self.entries.iter().position(|(k, _, _)| k == key) else {
+            return false;
+        };
+        let (k, v, _) = self.entries.remove(i);
+        self.bytes -= entry_bytes(&k, &v);
+        true
     }
 
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
+        self.bytes = 0;
     }
 }
 
@@ -242,6 +289,11 @@ pub struct Ctx {
 }
 
 impl Ctx {
+    /// The configured bounds (design 0004, Bounds).
+    pub(crate) fn bounds(&self) -> crate::session::bounds::Bounds {
+        self.state.borrow().config.bounds
+    }
+
     pub fn new(now: Ms, config: Config, random: Box<dyn Random>) -> Self {
         Self {
             rt: Rt::new(now),
@@ -336,6 +388,10 @@ impl Provider {
             body: rpc::body(id, method),
         };
         match ctx.rt.request(request).await {
+            // Deviation `response-caps`: main caps answers; the core checks.
+            Answer::Rpc { body, .. } if body.len() > ctx.bounds().answer_bytes => {
+                Err(RpcError::Transport(Transport::TooLarge))
+            }
             Answer::Rpc { status, body } => rpc::answer(id, method, status, &body),
             Answer::Failed(transport) => Err(RpcError::Transport(transport)),
             _ => Err(RpcError::Transport(Transport::Network)),
@@ -403,15 +459,21 @@ pub(crate) enum Store {
 
 /// `cacheAndLog`.
 pub(crate) fn cache(ctx: &Ctx, store: Store, key: &str, result: JsValue) -> JsValue {
+    // Deviation `reply-size`: a result too large to reply with is never
+    // cached; the machine replies `result too large`.
+    if result.stringify().len() > ctx.bounds().reply_bytes {
+        return result;
+    }
     let expires = ctx.now_f() + ttl_for(&result);
     let now = ctx.now();
+    let cache_bytes = ctx.bounds().cache_bytes;
     let mut state = ctx.state.borrow_mut();
     let cache = match store {
         Store::Content => &mut state.content,
         Store::Address => &mut state.address,
         Store::Reverse => &mut state.reverse,
     };
-    cache.set(key, result.clone(), expires, now);
+    cache.set(key, result.clone(), expires, now, cache_bytes);
     result
 }
 
@@ -484,9 +546,9 @@ mod tests {
     #[test]
     fn caches_keep_map_order_and_evict_expired_first() {
         let mut cache = Cache::default();
-        cache.set("a", JsValue::Null, 10.0, 0);
-        cache.set("b", JsValue::Null, 100.0, 0);
-        cache.set("a", JsValue::Bool(true), 100.0, 0);
+        cache.set("a", JsValue::Null, 10.0, 0, usize::MAX);
+        cache.set("b", JsValue::Null, 100.0, 0, usize::MAX);
+        cache.set("a", JsValue::Bool(true), 100.0, 0, usize::MAX);
         assert_eq!(
             cache
                 .entries

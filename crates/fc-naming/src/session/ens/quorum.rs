@@ -54,7 +54,7 @@ pub(crate) async fn run_wave(
     let mut results: Vec<(Endpoint, Leg)> = Vec::new();
     let mut by_data: Vec<(Vec<u8>, Vec<Endpoint>)> = Vec::new();
     let mut by_negative: Vec<(&'static str, Vec<Endpoint>)> = Vec::new();
-    let mut prefetch_handle: Option<u64> = None;
+    let mut prefetch = None;
     let mut first_data = false;
 
     let outcome = std::future::poll_fn(|cx| {
@@ -69,7 +69,7 @@ pub(crate) async fn run_wave(
                 Leg::Data { resolved } => {
                     if !first_data && lookup.prefetch {
                         first_data = true;
-                        prefetch_handle = machine.start_prefetch(resolved);
+                        prefetch = machine.start_prefetch(resolved);
                     }
                     match by_data.iter_mut().find(|(bytes, _)| bytes == resolved) {
                         Some((_, members)) => members.push(endpoint.clone()),
@@ -114,10 +114,11 @@ pub(crate) async fn run_wave(
     .await;
     // Unfinished legs are dropped here, which cancels them.
     drop(legs);
-    if !matches!(outcome, WaveOutcome::AgreedData { .. })
-        && let Some(handle) = prefetch_handle
+    // Any other outcome cancels the prefetch by dropping it.
+    if matches!(outcome, WaveOutcome::AgreedData { .. })
+        && let Some(io) = prefetch
     {
-        machine.abort_prefetch(handle);
+        machine.keep_prefetch(io);
     }
     Wave {
         outcome,
@@ -392,7 +393,10 @@ pub(crate) async fn via_quorum(
             let mut groups = Vec::new();
             for (bytes, members) in data_buckets(&wave) {
                 groups.push(obj(vec![
-                    ("resolvedData", s(&rpc::hex(&bytes))),
+                    (
+                        "resolvedData",
+                        s(&ctx.bounds().shorten_hex(&rpc::hex(&bytes))),
+                    ),
                     ("urls", refs(&members)),
                 ]));
             }
