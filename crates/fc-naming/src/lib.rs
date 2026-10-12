@@ -11,6 +11,7 @@ mod contenthash;
 mod ens;
 mod error;
 mod normalize;
+pub mod tezos;
 pub mod ur;
 
 pub use contenthash::{Content, cid_v1_bytes_to_base32, encode_base58, parse_contenthash};
