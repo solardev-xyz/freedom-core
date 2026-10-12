@@ -5,6 +5,8 @@
 use crate::jsjson::{self, JsValue};
 use blake2::{Blake2b, Digest, digest::consts::U32};
 use sha2::Sha256;
+use std::borrow::Cow;
+
 use url::Url;
 
 use crate::contenthash::encode_base58;
@@ -76,22 +78,33 @@ pub fn is_dweb_name_host(host: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MichelineError;
 
-/// `obj?.[key]` on a JSON value: an object's property, a string's
-/// character, or nothing.
-fn index(value: &JsValue, key: &str) -> Option<JsValue> {
+/// `obj?.[key]` on a JSON value: an object's property or an array's item,
+/// borrowed, or a string's character, which is a new value.
+fn index<'a>(value: &'a JsValue, key: &str) -> Option<Cow<'a, JsValue>> {
     match value {
-        JsValue::Object(_) => value.get(key).cloned(),
+        JsValue::Object(_) => value.get(key).map(Cow::Borrowed),
         JsValue::Array(items) => key
             .parse::<usize>()
             .ok()
-            .and_then(|i| items.get(i).cloned()),
+            .and_then(|i| items.get(i))
+            .map(Cow::Borrowed),
         JsValue::String(s) => {
-            // A string indexes by UTF-16 unit; only "0" is ever used here.
+            // A string indexes by UTF-16 unit; only "0" and "1" are used here.
             let i: usize = key.parse().ok()?;
             let unit = *s.encode_utf16().collect::<Vec<_>>().get(i)?;
-            Some(JsValue::String(String::from_utf16_lossy(&[unit])))
+            Some(Cow::Owned(JsValue::String(String::from_utf16_lossy(&[
+                unit,
+            ]))))
         }
         _ => None,
+    }
+}
+
+/// `obj?.[key]?.[field]`, borrowed: a string's character has no fields.
+fn index_field<'a>(value: &'a JsValue, key: &str, field: &str) -> Option<&'a JsValue> {
+    match index(value, key)? {
+        Cow::Borrowed(item) => item.get(field),
+        Cow::Owned(_) => None,
     }
 }
 
@@ -160,7 +173,9 @@ pub fn find_annotated_value<'a>(
 }
 
 /// `storageTypeFromScript`: `script?.code?.find(e => e?.prim === 'storage')?.args?.[0] || null`.
-pub fn storage_type_from_script(script: &JsValue) -> Result<Option<JsValue>, MichelineError> {
+pub fn storage_type_from_script(
+    script: &JsValue,
+) -> Result<Option<Cow<'_, JsValue>>, MichelineError> {
     let code = match script.get("code") {
         None | Some(JsValue::Null) => return Ok(None),
         Some(JsValue::Array(code)) => code,
@@ -175,14 +190,14 @@ pub fn storage_type_from_script(script: &JsValue) -> Result<Option<JsValue>, Mic
     Ok(entry
         .get("args")
         .and_then(|args| index(args, "0"))
-        .filter(JsValue::truthy))
+        .filter(|ty| ty.truthy()))
 }
 
 /// `mapEntries`: a Micheline map's `Elt`s whose key has a `string`, as
 /// key → `bytes`. Only string keys can ever be looked up, so only those are
 /// kept; a later duplicate wins, as in a JS `Map`.
-pub fn map_entries(value: &JsValue) -> Vec<(String, Option<JsValue>)> {
-    let mut out: Vec<(String, Option<JsValue>)> = Vec::new();
+pub fn map_entries(value: &JsValue) -> Vec<(String, Option<&JsValue>)> {
+    let mut out: Vec<(String, Option<&JsValue>)> = Vec::new();
     // Indexed, so a map of many records stays linear.
     let mut positions: std::collections::BTreeMap<String, usize> =
         std::collections::BTreeMap::new();
@@ -193,11 +208,11 @@ pub fn map_entries(value: &JsValue) -> Vec<(String, Option<JsValue>)> {
         let Some(args) = entry.get("args") else {
             continue;
         };
-        let Some(key) = index(args, "0").and_then(|k| k.get("string").cloned()) else {
+        let Some(JsValue::String(key)) = index_field(args, "0", "string") else {
             continue;
         };
-        let bytes = index(args, "1").and_then(|v| v.get("bytes").cloned());
-        let JsValue::String(key) = key else { continue };
+        let key = key.clone();
+        let bytes = index_field(args, "1", "bytes");
         if let Some(&i) = positions.get(&key) {
             out[i].1 = bytes;
         } else {
@@ -395,7 +410,10 @@ mod tests {
             r#"{{"code":[{{"prim":"parameter"}},{{"prim":"storage","args":[{}]}}]}}"#,
             ty.stringify()
         ));
-        assert_eq!(storage_type_from_script(&script), Ok(Some(ty.clone())));
+        assert_eq!(
+            storage_type_from_script(&script).unwrap().as_deref(),
+            Some(&ty)
+        );
         // `code` without `find`, and `args` without `flatMap`: TypeErrors.
         assert_eq!(
             storage_type_from_script(&js(r#"{"code":"x"}"#)),
@@ -453,7 +471,7 @@ mod tests {
         let entries = map_entries(&map);
         assert_eq!(entries.len(), 1);
         assert_eq!(
-            decode_json_bytes(entries[0].1.as_ref()).unwrap(),
+            decode_json_bytes(entries[0].1).unwrap(),
             js(r#""https://example.org""#)
         );
         assert_eq!(

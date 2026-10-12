@@ -554,7 +554,8 @@ fn tezos_codecs() {
         }
     }
     for case in t["scripts"].as_array().unwrap() {
-        let ours = tezos::storage_type_from_script(&to_js(&case["script"]));
+        let script = to_js(&case["script"]);
+        let ours = tezos::storage_type_from_script(&script);
         match case["js"].get("value") {
             None => assert!(ours.is_err(), "{}: a TypeError in JS", case["script"]),
             Some(js) => {

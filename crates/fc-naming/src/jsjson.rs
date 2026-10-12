@@ -28,6 +28,27 @@ pub enum JsValue {
     Object(Vec<(String, JsValue)>),
 }
 
+/// Dropped without recursion: children go onto an explicit stack, so no
+/// value, however deep, can overflow the stack when it is freed.
+impl Drop for JsValue {
+    fn drop(&mut self) {
+        let mut stack = Vec::new();
+        take_children(self, &mut stack);
+        while let Some(mut value) = stack.pop() {
+            take_children(&mut value, &mut stack);
+            // `value` has no children left; dropping it doesn't recurse.
+        }
+    }
+}
+
+fn take_children(value: &mut JsValue, stack: &mut Vec<JsValue>) {
+    match value {
+        JsValue::Array(items) => stack.append(items),
+        JsValue::Object(props) => stack.extend(std::mem::take(props).into_iter().map(|(_, v)| v)),
+        _ => {}
+    }
+}
+
 impl JsValue {
     /// A property, as `object[key]` reads it (`None` when absent or when this
     /// isn't an object).
@@ -72,18 +93,7 @@ impl JsValue {
             JsValue::Bool(b) => b.to_string(),
             JsValue::Number(n) => number_to_string(*n),
             JsValue::String(s) => s.clone(),
-            // `Array.prototype.join(',')`, where null elements are empty.
-            JsValue::Array(items) => {
-                let mut parts = Vec::with_capacity(items.len());
-                for item in items {
-                    parts.push(if matches!(item, JsValue::Null) {
-                        String::new()
-                    } else {
-                        item.js_string()?
-                    });
-                }
-                parts.join(",")
-            }
+            JsValue::Array(items) => join_arrays(items)?,
             JsValue::Object(_) if self.get("toString").is_some() => return Err(ToPrimitiveError),
             JsValue::Object(_) => "[object Object]".into(),
         })
@@ -94,6 +104,33 @@ impl JsValue {
         let mut out = String::new();
         stringify_into(self, &mut out);
         out
+    }
+}
+
+/// `Array.prototype.join(',')`, nested arrays included, without recursion:
+/// null elements are empty, arrays join their own elements.
+fn join_arrays(root: &[JsValue]) -> Result<String, ToPrimitiveError> {
+    let mut stack: Vec<(std::slice::Iter<'_, JsValue>, Vec<String>)> =
+        vec![(root.iter(), Vec::new())];
+    loop {
+        let Some((items, parts)) = stack.last_mut() else {
+            return Ok(String::new());
+        };
+        match items.next() {
+            Some(JsValue::Array(inner)) => stack.push((inner.iter(), Vec::new())),
+            Some(JsValue::Null) => parts.push(String::new()),
+            Some(item) => parts.push(item.js_string()?),
+            None => {
+                let joined = stack
+                    .pop()
+                    .map(|(_, parts)| parts.join(","))
+                    .unwrap_or_default();
+                match stack.last_mut() {
+                    Some((_, parent)) => parent.push(joined),
+                    None => return Ok(joined),
+                }
+            }
+        }
     }
 }
 
@@ -460,37 +497,52 @@ pub fn number_to_string(n: f64) -> String {
     format!("{sign}{body}")
 }
 
+/// `JSON.stringify`, without recursion: pending pieces on an explicit stack.
 fn stringify_into(value: &JsValue, out: &mut String) {
-    match value {
-        JsValue::Null => out.push_str("null"),
-        JsValue::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-        JsValue::Number(n) => out.push_str(&if n.is_finite() {
-            number_to_string(*n)
-        } else {
-            "null".into()
-        }),
-        JsValue::String(s) => quote(s, out),
-        JsValue::Array(items) => {
-            out.push('[');
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                stringify_into(item, out);
-            }
-            out.push(']');
-        }
-        JsValue::Object(props) => {
-            out.push('{');
-            for (i, (key, item)) in props.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
+    enum Piece<'a> {
+        Value(&'a JsValue),
+        Key(&'a str),
+        Text(&'static str),
+    }
+    let mut stack = vec![Piece::Value(value)];
+    while let Some(piece) = stack.pop() {
+        match piece {
+            Piece::Text(text) => out.push_str(text),
+            Piece::Key(key) => {
                 quote(key, out);
                 out.push(':');
-                stringify_into(item, out);
             }
-            out.push('}');
+            Piece::Value(JsValue::Null) => out.push_str("null"),
+            Piece::Value(JsValue::Bool(b)) => out.push_str(if *b { "true" } else { "false" }),
+            Piece::Value(JsValue::Number(n)) => {
+                out.push_str(&if n.is_finite() {
+                    number_to_string(*n)
+                } else {
+                    "null".into()
+                });
+            }
+            Piece::Value(JsValue::String(s)) => quote(s, out),
+            Piece::Value(JsValue::Array(items)) => {
+                out.push('[');
+                stack.push(Piece::Text("]"));
+                for (i, item) in items.iter().enumerate().rev() {
+                    stack.push(Piece::Value(item));
+                    if i > 0 {
+                        stack.push(Piece::Text(","));
+                    }
+                }
+            }
+            Piece::Value(JsValue::Object(props)) => {
+                out.push('{');
+                stack.push(Piece::Text("}"));
+                for (i, (key, item)) in props.iter().enumerate().rev() {
+                    stack.push(Piece::Value(item));
+                    stack.push(Piece::Key(key));
+                    if i > 0 {
+                        stack.push(Piece::Text(","));
+                    }
+                }
+            }
         }
     }
 }
@@ -567,10 +619,11 @@ mod tests {
 
     #[test]
     fn the_deepest_value_is_stack_safe() {
-        // Walks, copies, comparisons and drops recurse; at MAX_DEPTH they
-        // fit a quarter of a spawned thread's default 2 MiB stack, even unoptimized.
+        // Parsing, lookups, stringify, String() and drop never recurse, so
+        // the deepest accepted value, and far deeper rejected input, fit a
+        // 64 KiB stack even unoptimized, on every platform.
         let handle = std::thread::Builder::new()
-            .stack_size(512 * 1024)
+            .stack_size(64 * 1024)
             .spawn(|| {
                 let text = format!(
                     "{}{}",
@@ -578,10 +631,17 @@ mod tests {
                     "]}".repeat(MAX_DEPTH / 2)
                 );
                 let value = parse(&text).unwrap();
-                let copy = value.clone();
-                assert_eq!(copy, value);
                 assert_eq!(value.stringify().len(), text.len());
-                drop((value, copy));
+                assert_eq!(value.js_string().unwrap(), "[object Object]");
+                let arrays = parse(&format!(
+                    "{}{}",
+                    "[".repeat(MAX_DEPTH),
+                    "]".repeat(MAX_DEPTH)
+                ))
+                .unwrap();
+                assert_eq!(arrays.js_string().unwrap(), "");
+                drop((value, arrays));
+                assert_eq!(parse(&"[".repeat(200_000)), Err(JsonError::TooDeep));
             })
             .unwrap();
         handle.join().unwrap();
@@ -591,7 +651,8 @@ mod tests {
     fn many_keys_stay_linear() {
         let keys: Vec<String> = (0..50_000).map(|i| format!(r#""k{i}":{i}"#)).collect();
         let started = std::time::Instant::now();
-        let JsValue::Object(props) = parse(&format!("{{{}}}", keys.join(","))).unwrap() else {
+        let parsed = parse(&format!("{{{}}}", keys.join(","))).unwrap();
+        let JsValue::Object(props) = &parsed else {
             panic!()
         };
         assert_eq!(props.len(), 50_000);
