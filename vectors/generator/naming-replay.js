@@ -182,7 +182,7 @@ const PATCHES = {
           `  if (outcome.kind !== 'agreed_data' && prefetchHandle) {\n    try { prefetchHandle.abort(); } catch { /* never propagate */ }\n  } else if (prefetchHandle && prefetchHandle !== NOOP_PREFETCH) __keepPrefetch(prefetchHandle, ${b.prefetches});\n`]],
         // `settled` is the harness handle's: a prefetch that finished
         // leaves the set, as its request completes in the core.
-        append: ['var __kept = [];\nfunction __keepPrefetch(handle, n) {\n  __kept = __kept.filter((kept) => !kept.settled);\n  __kept.push(handle);\n  while (__kept.length > n) __kept.shift().abort();\n}'],
+        append: ['var __kept = [];\nfunction __keepPrefetch(handle, n) {\n  __kept = __kept.filter((kept) => !kept.settled);\n  if (handle.settled) return;\n  __kept.push(handle);\n  while (__kept.length > n) __kept.shift().abort();\n}'],
       },
     },
   }),
@@ -1014,6 +1014,16 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
         { after: 1000, world: { hosts: { 'b.rpc.example': { delay: 100 }, 'c.rpc.example': { delay: 200 }, 'd.rpc.example': { delay: 300 } } }, call: content('alice.eth') },
       ]),
       id: 'deviation-prefetch-set-late-agreement',
+    },
+    {
+      // Both together: B's prefetch finishes before its wave agrees, so
+      // its hand-off keeps nothing and A survives; C's aborts A.
+      ...deviation('prefetch-set', base({ bounds: { prefetches: 1 } }), [
+        { call: content() },
+        { after: 1000, world: { prefetchMs: 10, hosts: { 'b.rpc.example': { delay: 100 }, 'c.rpc.example': { delay: 200 }, 'd.rpc.example': { delay: 300 } } }, call: content('alice.eth') },
+        { after: 1000, world: { prefetchMs: 0, hosts: {} }, call: content('bob.eth') },
+      ]),
+      id: 'deviation-prefetch-set-finished-before-agreement',
     },
   ];
 }
