@@ -146,6 +146,9 @@ pub enum RpcError {
     /// An `error` member that isn't an object (design 0004,
     /// Classification rule 4).
     MalformedError,
+    /// Revert data `spelunkData` found that `getBytes` then refuses (odd
+    /// length): ethers' `INVALID_ARGUMENT`, carrying the value.
+    BadRevert { value: String, node: NodeError },
 }
 
 /// Turns a 2xx body into the result for request `id`, as
@@ -182,9 +185,21 @@ fn node_error(method: &Method, error: JsValue) -> RpcError {
     match method {
         // The node's error stays beside any revert data ethers extracts:
         // classification checks its code first (rule 5, −32603).
-        Method::Call { .. } => RpcError::CallException {
-            data: spelunk_data(&error, 0),
-            node: Some(NodeError { value: error }),
+        Method::Call { .. } => match spelunk_data(&error, 0) {
+            None => RpcError::CallException {
+                data: None,
+                node: Some(NodeError { value: error }),
+            },
+            Some(found) => match hex_string(&found) {
+                Some(bytes) => RpcError::CallException {
+                    data: Some(bytes),
+                    node: Some(NodeError { value: error }),
+                },
+                None => RpcError::BadRevert {
+                    value: found,
+                    node: NodeError { value: error },
+                },
+            },
         },
         _ => RpcError::Coalesce(NodeError { value: error }),
     }
@@ -193,7 +208,7 @@ fn node_error(method: &Method, error: JsValue) -> RpcError {
 /// ethers' `spelunkData`: the first object, depth first in property order,
 /// whose `message` mentions a revert and whose `data` is hex; strings are
 /// tried as JSON. (Its recursion is bounded by the answer's own depth.)
-fn spelunk_data(value: &JsValue, depth: usize) -> Option<Vec<u8>> {
+fn spelunk_data(value: &JsValue, depth: usize) -> Option<String> {
     if depth > jsjson::MAX_DEPTH {
         return None;
     }
@@ -201,11 +216,14 @@ fn spelunk_data(value: &JsValue, depth: usize) -> Option<Vec<u8>> {
         JsValue::Object(members) => {
             let message = value.get("message").and_then(JsValue::as_str);
             let data = value.get("data").and_then(JsValue::as_str);
+            // `isHexString`: a lowercase `0x` and hex digits, any length.
             if let (Some(message), Some(data)) = (message, data)
                 && message.to_ascii_lowercase().contains("revert")
-                && let Some(bytes) = hex_string(data)
+                && data
+                    .strip_prefix("0x")
+                    .is_some_and(|digits| digits.bytes().all(|b| b.is_ascii_hexdigit()))
             {
-                return Some(bytes);
+                return Some(data.to_owned());
             }
             members
                 .iter()

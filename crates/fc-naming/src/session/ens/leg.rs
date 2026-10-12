@@ -125,6 +125,9 @@ impl CallError {
                 RpcError::CallException {
                     node: Some(node), ..
                 } if node.code() == Some(-32603.0) => true,
+                // Rule 5, then revert evidence (code 3 or a revert message,
+                // which is how spelunkData found it): not a failure.
+                RpcError::BadRevert { node, .. } => node.code() == Some(-32603.0),
                 RpcError::CallException { data: Some(_), .. } => false,
                 RpcError::CallException {
                     data: None,
@@ -140,6 +143,11 @@ impl CallError {
         }
     }
 
+    /// Display text: the short message, sanitized (design 0004, Errors).
+    pub(crate) fn display(&self) -> String {
+        crate::ethers::sanitize(&self.short_message())
+    }
+
     pub(crate) fn short_message(&self) -> String {
         match self {
             CallError::Rpc(RpcError::Transport(Transport::Timeout)) | CallError::Timeout => {
@@ -150,6 +158,7 @@ impl CallError {
             CallError::Rpc(RpcError::NotJson) => "response body is not valid JSON".into(),
             CallError::Rpc(RpcError::MissingResponse) => "missing response for request".into(),
             CallError::Rpc(RpcError::MalformedError) => "invalid error response".into(),
+            CallError::Rpc(RpcError::BadRevert { .. }) => "invalid BytesLike value".into(),
             CallError::Rpc(RpcError::BadResult) => "invalid result".into(),
             CallError::Rpc(RpcError::Coalesce(_)) => "could not coalesce error".into(),
             CallError::Rpc(RpcError::CallException { data: None, .. }) => {
@@ -188,6 +197,9 @@ impl Failure {
             }
             // ethers' own message, as the reference's error carries it.
             CallError::Invalid(message) => message.clone(),
+            CallError::Rpc(RpcError::BadRevert { value, .. }) => {
+                crate::ethers::invalid_bytes_like(value)
+            }
             other => other.short_message(),
         }
     }

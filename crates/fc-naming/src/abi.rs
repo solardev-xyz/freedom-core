@@ -110,17 +110,19 @@ impl<'a> Reader<'a> {
     }
 
     fn read_bytes(&mut self, length: usize) -> Result<&'a [u8], Fail> {
-        // In u128, as JavaScript's doubles hold these sums exactly.
         let aligned = (length as u128).div_ceil(WORD as u128) * WORD as u128;
         let end = self.offset as u128 + aligned;
         if end > self.data.len() as u128 {
+            // The offset as ethers computes and prints it: a double.
+            #[allow(clippy::cast_precision_loss)]
+            let offset = self.offset as f64 + (length as f64 / WORD as f64).ceil() * WORD as f64;
             return Err(Fail::Overrun(ethers::make_error(
                 "data out-of-bounds",
                 "BUFFER_OVERRUN",
                 &[
                     ("buffer", ethers::hex(self.data)),
                     ("length", self.data.len().to_string()),
-                    ("offset", end.to_string()),
+                    ("offset", number(offset)),
                 ],
             )));
         }
@@ -135,7 +137,7 @@ impl<'a> Reader<'a> {
                 &[
                     ("buffer", ethers::hex(self.budget.root)),
                     ("offset", self.budget.root_offset.get().to_string()),
-                    ("length", length.to_string()),
+                    ("length", number(length as f64)),
                     (
                         "info",
                         format!(
@@ -217,12 +219,15 @@ impl<'a> Reader<'a> {
                 // ethers: each element needs at least a word.
                 let needed = count as u128 * WORD as u128;
                 if needed > self.data.len() as u128 {
+                    // `count * WordSize`, a double as ethers prints it.
+                    #[allow(clippy::cast_precision_loss)]
+                    let offset = count as f64 * WORD as f64;
                     return Err(Fail::Overrun(ethers::make_error(
                         "insufficient data length",
                         "BUFFER_OVERRUN",
                         &[
                             ("buffer", ethers::hex(self.data)),
-                            ("offset", needed.to_string()),
+                            ("offset", number(offset)),
                             ("length", self.data.len().to_string()),
                         ],
                     )));
@@ -266,6 +271,11 @@ impl<'a> Reader<'a> {
         }
         Ok(fields)
     }
+}
+
+/// A JavaScript number as `String(n)` prints it.
+fn number(n: f64) -> String {
+    crate::jsjson::number_to_string(n)
 }
 
 fn utf8(bytes: &[u8]) -> Result<String, FieldError> {
@@ -373,6 +383,17 @@ mod explained {
             decode_explained(&LOOKUP, &data).err().as_deref(),
             Some(
                 "overflow (argument=\"value\", value=115792089237316195423570985008687907853269984665640564039457584007913129639935, code=INVALID_ARGUMENT, version=6.17.0)"
+            )
+        );
+        // A count of 2^53 - 1: its offset is a double, printed as one.
+        let mut data = word(32);
+        data.extend(word((1 << 53) - 1));
+        assert_eq!(
+            decode_explained(&[Kind::StringArray], &data)
+                .err()
+                .as_deref(),
+            Some(
+                "insufficient data length (buffer=0x000000000000000000000000000000000000000000000000001fffffffffffff, offset=288230376151711700, length=32, code=BUFFER_OVERRUN, version=6.17.0)"
             )
         );
         let mut data = word(32);

@@ -244,7 +244,7 @@ pub(crate) async fn single_source(
             error,
             trust,
         }),
-        Leg::Error(error) => Err(Thrown::new(error.short_message())),
+        Leg::Error(error) => Err(Thrown::new(error.display())),
     }
 }
 
