@@ -43,7 +43,7 @@ All accept caller kinds `chrome` and `shell`. Each resolution carries `private: 
 
 | Method | Params | Result | Replaces |
 |---|---|---|---|
-| `naming.configure` | a [configuration snapshot](#configuration) | `{ ens, tezos }` (the new generations) | registry reads, `invalidateCachedProvider` |
+| `naming.configure` | a [configuration snapshot](#configuration) | `{ ens, tezos, lifecycle }` (the new generations; `reset: "providers"` advances the lifecycle) | registry reads, `invalidateCachedProvider` |
 | `naming.availability` | `{ ready, enabled }` | `{ lifecycle }` | `myotisManager.onAvailabilityTransition` |
 | `naming.resolve_content` | `{ name, private }` | a [resolution reply](#replies) | `resolveEnsContent` |
 | `naming.resolve_address` | `{ name, chain_id, private }` | a resolution reply | `resolveEnsAddress` |
