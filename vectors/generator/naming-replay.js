@@ -10,7 +10,9 @@
 // Each scenario records its input (seed, world, steps), every result with
 // its settlement time, and every I/O request: virtual start time, full
 // params, HTTP batch, end time and outcome (answered, cancelled, or still
-// open when the scenario ends). Present-`undefined` keys are kept as
+// open when the scenario ends), and the answer it got: so a replay serves
+// the recorded answer to the matching request instead of re-creating the
+// world. Present-`undefined` keys are kept as
 // {"$undefined":true}.
 
 const fs = require('node:fs');
@@ -218,18 +220,18 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       setTimeout(() => {
         clearTimeout(inactivity);
         for (const item of entries) close(item, 'answered');
+        const out = answers.map(({ id, result, error }) => (error ? { jsonrpc: '2.0', id, error } : { jsonrpc: '2.0', id, result }));
+        const answer = p.status
+          ? { status: p.status, body: 'unavailable' }
+          : { status: 200, body: JSON.stringify(Array.isArray(body) ? out : out[0]) };
+        for (const item of entries) item.answer = answer;
         if (signal?.cancelled) {
           fail('cancelled', 'CANCELLED');
           return;
         }
         if (settled) return;
         settled = true;
-        if (p.status) {
-          resolve({ statusCode: p.status, statusMessage: 'Unavailable', headers: {}, body: Buffer.from('unavailable') });
-          return;
-        }
-        const out = answers.map(({ id, result, error }) => (error ? { jsonrpc: '2.0', id, error } : { jsonrpc: '2.0', id, result }));
-        resolve({ statusCode: 200, statusMessage: 'OK', headers: { 'content-type': 'application/json' }, body: Buffer.from(JSON.stringify(Array.isArray(body) ? out : out[0])) });
+        resolve({ statusCode: answer.status, statusMessage: p.status ? 'Unavailable' : 'OK', headers: p.status ? {} : { 'content-type': 'application/json' }, body: Buffer.from(answer.body) });
       }, p.delay ?? 10);
     });
   };
@@ -262,15 +264,17 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       if (!g || g.hang) return;
       timer = setTimeout(() => {
         if (g.redirect) {
+          item.answer = { redirect: g.redirect };
           close(item, 'redirected');
           req.emit('redirect', 302, options.method, g.redirect, { location: [g.redirect] });
           return;
         }
+        item.answer = { status: g.status ?? 200, body: g.body ?? JSON.stringify({ data: '0x' }) };
         close(item, 'answered');
         const res = new EventEmitter();
         Object.assign(res, { statusCode: g.status ?? 200, statusMessage: 'OK', headers: {}, pause() {}, resume() {}, destroy() {} });
         req.emit('response', res);
-        res.emit('data', Buffer.from(g.body ?? JSON.stringify({ data: '0x' })));
+        res.emit('data', Buffer.from(item.answer.body));
         res.emit('end');
       }, g.delay ?? 10);
     };
@@ -284,7 +288,11 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     const item = record({ kind: 'verified', host: source, method: 'eth_call', params: [{ to, data }, 'latest'], call: kind });
     const answer = pickAnswer([state.calls], kind);
     if (!answer) violations.push(`unscripted ${kind} call to ${source}`);
-    return new Promise((resolve) => setTimeout(() => { close(item, 'answered'); resolve(answer ?? {}); }, state.delay ?? 10));
+    return new Promise((resolve) => setTimeout(() => {
+      item.answer = answer?.data ? { data: answer.data } : answer?.revert ? { revert: answer.revert } : { unavailable: true };
+      close(item, 'answered');
+      resolve(answer ?? {});
+    }, state.delay ?? 10));
   };
   const myotis = () => world.myotis ?? {};
   const colibri = () => world.colibri ?? {};
@@ -361,10 +369,13 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       if (init.signal?.aborted) return abort();
       init.signal?.addEventListener('abort', abort, { once: true });
       if (p.hang) return;
-      timer = setTimeout(() => {
+      timer = setTimeout(async () => {
         init.signal?.removeEventListener('abort', abort);
+        const response = tezosNode(host, p, method, pathname);
+        const text = await response.clone().text();
+        item.answer = { status: response.status, body: text };
         close(item, 'answered');
-        resolve(tezosNode(host, p, method, pathname));
+        resolve(response);
       }, p.delay ?? 10);
     });
   };
