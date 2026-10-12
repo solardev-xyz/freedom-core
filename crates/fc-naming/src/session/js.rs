@@ -6,7 +6,7 @@ use crate::jsjson::JsValue;
 /// `Number(value)`; `None` is `undefined`.
 pub fn to_number(value: Option<&JsValue>) -> f64 {
     match value {
-        None => f64::NAN,
+        None | Some(JsValue::Undefined) => f64::NAN,
         Some(JsValue::Null) => 0.0,
         Some(JsValue::Bool(b)) => f64::from(u8::from(*b)),
         Some(JsValue::Number(n)) => *n,

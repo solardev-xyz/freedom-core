@@ -43,7 +43,7 @@ fn str_of(value: Option<&JsValue>) -> &str {
 }
 
 /// The configuration main would send for a scenario's world.
-fn config(world: &JsValue) -> Config {
+fn config(world: &JsValue, system: &str) -> Config {
     let endpoints: Vec<String> = world
         .get("endpoints")
         .and_then(JsValue::as_array)
@@ -103,8 +103,14 @@ fn config(world: &JsValue) -> Config {
             network.get("zkProof") != Some(&JsValue::Bool(false)),
         )
     });
+    let (rpc, tezos) = if system == "tezos" {
+        (Vec::new(), endpoints)
+    } else {
+        (endpoints, Vec::new())
+    };
     Config {
-        rpc: endpoints,
+        rpc,
+        tezos,
         direct,
         order,
         prefer_verified: verification.get("preferVerified") == Some(&JsValue::Bool(true)),
@@ -113,6 +119,49 @@ fn config(world: &JsValue) -> Config {
             == Some(&JsValue::Bool(true)),
         prover,
     }
+}
+
+/// Endpoint references back to what main publishes: Tezos' `trust.agreed`
+/// as URLs, everything else as hosts; `undefined` as the vectors' marker.
+fn publish(value: &JsValue, system: &str) -> JsValue {
+    let marked = substitute(value);
+    if system != "tezos" {
+        return marked;
+    }
+    let agreed = value.get("trust").and_then(|t| t.get("agreed")).cloned();
+    let JsValue::Object(members) = &marked else {
+        return marked;
+    };
+    let urls = |refs: &[JsValue]| {
+        JsValue::Array(
+            refs.iter()
+                .map(|r| r.get("ref").cloned().unwrap_or(JsValue::Null))
+                .collect(),
+        )
+    };
+    JsValue::Object(
+        members
+            .iter()
+            .map(|(k, v)| match (k.as_str(), v, &agreed) {
+                ("trust", JsValue::Object(trust), Some(JsValue::Array(refs))) => (
+                    k.clone(),
+                    JsValue::Object(
+                        trust
+                            .iter()
+                            .map(|(tk, tv)| {
+                                if tk == "agreed" {
+                                    (tk.clone(), urls(refs))
+                                } else {
+                                    (tk.clone(), tv.clone())
+                                }
+                            })
+                            .collect(),
+                    ),
+                ),
+                _ => (k.clone(), v.clone()),
+            })
+            .collect(),
+    )
 }
 
 /// Endpoint references back to hosts, as main substitutes them.
@@ -132,6 +181,7 @@ fn substitute(value: &JsValue) -> JsValue {
             )
         }
         JsValue::Array(items) => JsValue::Array(items.iter().map(substitute).collect()),
+        JsValue::Undefined => JsValue::Object(vec![("$undefined".into(), JsValue::Bool(true))]),
         other => other.clone(),
     }
 }
@@ -257,6 +307,7 @@ impl Driver {
             "rpc" => Answer::Rpc { status, body },
             "gateway" if answer.get("redirect").is_some() => Answer::Failed(Transport::Refused),
             "gateway" => Answer::Gateway { status, body },
+            "tezos" => Answer::Tezos { status, body },
             "verified-op" => Answer::Verified(if let Some(result) = answer.get("result") {
                 Verified::Result(result.clone())
             } else if let Some(revert) = answer.get("revert") {
@@ -297,6 +348,19 @@ impl Driver {
                 }
                 Request::Verified(op) => {
                     kind == "verified-op" && num(e.get("t")) == at && verified_matches(op, e)
+                }
+                Request::Tezos {
+                    endpoint,
+                    post,
+                    path,
+                    body,
+                } => {
+                    kind == "tezos"
+                        && str_of(e.get("host")) == host_of(endpoint)
+                        && str_of(e.get("method")) == if *post { "POST" } else { "GET" }
+                        && str_of(e.get("path")) == path
+                        && e.get("body").and_then(JsValue::as_str) == body.as_deref()
+                        && num(e.get("t")) == at
                 }
             }
         })
@@ -358,7 +422,10 @@ fn replay(scenario: &JsValue) -> Result<Vec<String>, String> {
     let world = scenario.get("world").cloned().unwrap_or(JsValue::Null);
     #[allow(clippy::cast_possible_truncation)]
     let seed = num(scenario.get("seed")) as u32;
-    let mut machine = Machine::new(0, config(&world), Box::new(Mulberry32::new(seed)));
+    let system = str_of(scenario.get("system"));
+    let mut machine = Machine::new(0, config(&world, system), Box::new(Mulberry32::new(seed)));
+    // The harness's epoch: Date.now() at virtual time 0.
+    machine.set_wall_clock(1_760_000_000_000.0);
     machine.set_myotis_ready(
         world.get("myotis").and_then(|m| m.get("ready")) == Some(&JsValue::Bool(true)),
     );
@@ -370,7 +437,7 @@ fn replay(scenario: &JsValue) -> Result<Vec<String>, String> {
         .filter(|e| {
             matches!(
                 str_of(e.get("kind")),
-                "rpc" | "gateway" | "prefetch" | "verified-op"
+                "rpc" | "gateway" | "prefetch" | "verified-op" | "tezos"
             )
         })
         // Exchanges inside a verifier operation are main\'s business.
@@ -431,6 +498,7 @@ fn replay(scenario: &JsValue) -> Result<Vec<String>, String> {
                 "resolveEnsReverse" => {
                     callers.push(machine.resolve_reverse(str_of(args.first()), chain))
                 }
+                "resolveTezosDomain" => callers.push(machine.resolve_tezos(str_of(args.first()))),
                 "invalidateCachedProvider" => {
                     machine.invalidate_providers();
                     callers.push(u64::MAX);
@@ -470,7 +538,7 @@ fn replay(scenario: &JsValue) -> Result<Vec<String>, String> {
             }
             match (&reply.outcome, want.get("value"), want.get("thrown")) {
                 (Ok(value), Some(expected), _) => {
-                    let got = substitute(value);
+                    let got = publish(value, system);
                     if !same(&got, expected) {
                         driver.mismatches.push(format!(
                             "{id} step {index}: result\n   got {}\n  want {}",
@@ -554,6 +622,8 @@ const SUPPORTED: &[&str] = &[
     "colibri-verified",
     "colibri-resolver-not-found",
     "colibri-unavailable-falls-to-quorum",
+    "colibri-ccip",
+    "colibri-concurrent",
     "myotis-ccip",
     "prefer-verified-holds-unverified",
     "myotis-ready-mid-flight",
@@ -564,6 +634,24 @@ const SUPPORTED: &[&str] = &[
     "myotis-wns-call-revert",
     "myotis-record-lifecycle-mid-operation",
     "myotis-call-lifecycle-mid-operation",
+    "tezos-agree",
+    "tezos-one-liar",
+    "tezos-head-outlier",
+    "tezos-heads-scattered",
+    "tezos-anchor-split",
+    "tezos-two-down",
+    "tezos-all-down",
+    "tezos-expired",
+    "tezos-expiry-unparseable",
+    "tezos-redirect",
+    "tezos-no-website",
+    "tezos-no-website-no-ttl",
+    "tezos-no-record",
+    "tezos-registry-script-fails",
+    "tezos-invalid-name",
+    "tezos-no-anchor",
+    "tezos-all-lookups-fail",
+    "tezos-cached-discovery-lookup-fails",
 ];
 
 #[test]
