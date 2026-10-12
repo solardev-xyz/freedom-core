@@ -52,7 +52,7 @@ All accept caller kinds `chrome` and `shell`.
 | `chain.availability` | `{ chain_id, ready }` for each Myotis chain | `{}` | the router's live `myotis.isReady()` samples |
 | `chain.request` | `{ chain_id, method, params, include_trust, origin?, background, profile, deadline_ms }` | `{ result, source, verified, trust? }` | `request()` |
 | `chain.fee_quote` | `{ chain_id, deadline_ms }` | today's quote shape | `getFeeQuote()` |
-| `chain.broadcast` | `{ chain_id, raw, deadline_ms }` | `{ hash, source, outcome }` | `broadcastRawTransaction()` |
+| `chain.broadcast` | `{ chain_id, raw, first, deadline_ms }` | `{ hash, source, outcome }` | `broadcastRawTransaction()` |
 
 - **`params`** is the caller's JSON as main serializes it. The core parses it keeping JavaScript's property order, which [normalization](#normalization) depends on.
 - **`origin`** is the router's routing context: the dApp's permission key or the `web3:` page's. It makes the read *interactive*. The core keeps it only in memory, for the [adaptive bypass](#adaptive-bypass), and never logs it.
@@ -82,32 +82,40 @@ All accept caller kinds `chrome` and `shell`.
 
 Chain-data answers routinely exceed 0001's 1 MiB frame: full-history `eth_getLogs` scans, blocks with their transactions, and `html()` documents of up to 8 MiB, which are 16 MiB as hex.
 
-- **Fragment kinds.** Two new frame kinds carry a message too large for one frame:
-  - `0x10`, a fragment with more to follow;
-  - `0x11`, the last fragment.
+- **Only responses fragment.** Requests stay within one frame. A chain request over 1 MiB, such as an `eth_call` with more than about 500 KiB of call data, fails with `too_large` (deviation `request-size`). Request IDs so keep their write order, and a `cancel` always finds its request. Responses are matched to pending requests in whatever order they arrive.
+- **Frame kinds:**
+  - `0x12`, **begin**: a header `{ "id": <the request's ID>, "bytes": <the response's total size> }`;
+  - `0x10`, a **fragment** of the response's bytes;
+  - `0x11`, its **last** fragment;
+  - `0x13`, **credit**, empty: the receiver returns the sender's right to begin another fragmented response.
 
   Kind `0x01` always carries one whole message. Kinds `0x02`–`0x0F` stay reserved for Phase 4's streams.
+- **Bulk credit.** Each side holds one credit for the other direction, granted by the handshake.
+  - A sender begins a fragmented response only while it holds the credit, and beginning spends it.
+  - The receiver returns the credit with a `0x13` frame once the completed response has been handed to its consumer: the pending request's caller in main, the chain thread in the core.
+  - A sender waiting for credit keeps sending whole messages, control messages first (0001's reserved capacity). The `0x13` frame is itself a control message.
 - **Decoding:**
-  - A `0x10` frame starts the partial message, or appends to it. A `0x11` frame appends and completes it. The completed bytes are one JSON message, decoded as a `0x01` payload is.
-  - **One partial message per direction.** Kind `0x01` frames between fragments are whole messages of their own, decoded at once. A `cancel` or a `lock` is never held behind a large message.
-  - **Protocol errors** (0001: the receiver logs and closes): an empty fragment, a `0x11` with no partial message, or a partial message over the message cap.
-  - **EOF** with a partial message is EOF; the partial message is discarded.
-- **Sending:**
-  - A side fragments a message only when it exceeds 1 MiB, and only for a peer that offered fragments.
-  - Once it has written a message's first fragment, it writes the rest of that message before starting another fragmented one. There is no abort.
-  - Whole messages may go between its fragments, control messages first (0001's reserved capacity).
-- **The message cap** is 32 MiB of serialized message. The largest message is a `shell.rpc` reply carrying an 18 MiB answer as base64, about 24 MiB. A message over the cap is never sent: the sender fails the request it belongs to with `too_large`, not the connection.
-- **The core's reader:**
-  - **Credit.** 0001's reader admits at most 256 frames and 16 MiB queued. Fragments don't take that credit: the reader assembles them in one **reassembly reservation** of up to the message cap, outside the queued-frame pool. The completed message moves on holding no frame credit.
-  - **Hand-off.** The reservation is released when the chain thread takes the message and charges it to the request it answers ([Bounds](#bounds)). If that request's budget has no room, the request ends with `budget` and the message is dropped.
-  - **The next fragmented message** starts only once the previous one has been taken. Until then the reader waits for that hand-off, which is backpressure like any full queue. The chain thread takes messages as they arrive.
-- **The core's writer:**
-  - The chain thread has its own writer allowance of one message cap, apart from the vault loop's and naming's.
-  - A fragmented reply is charged at its whole serialized size when handed to the writer, and released as its fragments are written.
-  - Unwritten bytes count in the chain memory total until written (0004's rule).
-- **Main's reader** follows the same rules: one partial message per direction, the same cap.
+  - **A begin frame** must name a pending request (otherwise it is an unsolicited response) and a size within the message cap. The receiver reserves that many bytes outside its queued-frame credit. Fragments append; the last fragment completes the response, which must be exactly `bytes` long and is decoded as a `0x01` payload is.
+  - **One response in reassembly per direction,** which the credit guarantees. Kind `0x01` frames between fragments are whole messages of their own, decoded at once. The reader never waits on a fragment, because room is already reserved for every byte the credit allows.
+  - **Protocol errors** (0001: the receiver logs and closes): a begin while the sender holds no credit, an unknown ID, a size over the cap, an empty fragment, a fragment or last frame with no response in reassembly, and a length mismatch.
+  - **EOF** in reassembly is EOF; the partial response is discarded.
+  - **A `cancel`** for a request whose response has begun changes nothing: the response completes and the request ends with it, as 0001's races between cancels and responses already allow.
+- **Sending:** a side fragments a response only when it exceeds 1 MiB, and only for a peer that offered fragments. Once begun, a response is written to its end; there is no abort.
+- **The message cap** is 32 MiB of serialized message. The largest message is a `shell.rpc` reply carrying an 18 MiB answer as base64, about 24 MiB. A response over the cap is never begun: the sender replaces it with a `too_large` failure.
+- **Consumers never block on the writer.** The chain thread takes every message as it arrives, whatever the writer's state.
+  - When the chain thread's writer allowance is full, its replies wait in its own queue. They count in the chain memory total until written (0004's rule), and new requests are `busy` while that total is full.
+  - So writer backpressure can't stop the core from reading, and credit always comes back.
+- **The core's writer:** the chain thread has its own allowance of one message cap, apart from the vault loop's and naming's. A fragmented reply is charged at its whole size and released as its fragments are written.
+- **Main's side** follows the same rules, and bounds what its executors hold with [its own pool](#mains-pool).
 - **Negotiated** in the handshake. `core.hello`'s capabilities gain `fragments`, and main's hello params gain `frames: ["fragment"]`. A side sends fragments only to a peer that offered them. Main and the core ship together, so neither falls back.
-- **Not streams.** Phase 4's streams (0001) remain separate: stream IDs, credit and protocol version 2. Fragments carry one whole message and are parsed only when complete.
+- **Not streams.** Phase 4's streams (0001) remain separate: stream IDs, credit and protocol version 2. A fragmented response carries one whole message and is parsed only when complete.
+
+### Main's pool
+
+Main holds what its executors produce until it is written: bodies being read, verifier results, and serialized replies waiting for credit or for the writer. One **chain I/O pool** of 192 MiB bounds them:
+- **Charges:** an exchange charges its body as it reads it, and its serialized reply from serialization until written; the body is released once serialized. A verifier operation charges its result the same way.
+- **Exhausted:** an exchange ends with the transport failure `busy`. That is a source failure; for a broadcast it is an ambiguous attempt. A verifier reply becomes `{ failure: "busy" }`.
+- **Exempt:** control messages and replies under 64 KiB never wait for the pool. Main's limit of 256 outstanding requests (0004) bounds them at 16 MiB.
 
 ### Verified operations
 
@@ -122,26 +130,27 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
 | `{ myotis: "estimate_tx", chain_id, tx }` | `estimateGas` at `latest` | likewise |
 | `{ myotis: "fee", chain_id }` | `feeEstimate` | likewise |
 | `{ myotis: "broadcast", chain_id, raw }` | `sendRawTransaction` | `{ hash }`, `{ rejected: { reason } }`, `{ uncertain }` or `{ not_sent }` |
-| `{ colibri: "request", chain_id, method, params, deadline_ms }` | `requestViaColibri` | `{ result }`, `{ node_error: { code, message, data? } }` or `{ failure: class }` |
+| `{ colibri: "request", chain_id, method, params, deadline_ms }` | `requestViaColibri` | `{ result }`, `{ revert: { data } }` or `{ failure: class }` |
 
 #### Myotis read outcomes
 
 - **`{ payload, block_before, block_after }`:** the adapter's JSON with 0004's snake_case keys, and `optimistic_block_number` before and after. The core runs `assertMyotisAnswer`'s classification on it: revert, refusal, infeasible, capability refusal, unavailable.
-- **`{ failure: class }`:** 0004's closed set of classes, which carry no text. Chain data splits `unavailable` in two, because the router can return these texts:
-  - `not_running` and `not_ready` are `runningInstance`'s two errors;
-  - `lifecycle` is `verifiedRequest`'s `MYOTIS_UNAVAILABLE`;
-  - the core rebuilds each one's fixed text, with the chain's display name from configuration and `MYOTIS_UNAVAILABLE`'s code, so it can become the last error as today;
-  - `error` is any other throw; its text isn't forwarded (deviation `adapter-error-text`).
+- **`{ failure: class }`:** chain data's own closed set of classes, which carry no text. Naming's set (0004) is unchanged. The classes:
+  - `not_running` and `not_ready`: `runningInstance`'s two errors;
+  - `state_changed`: `verifiedRequest`'s `MYOTIS_UNAVAILABLE`;
+  - `timeout`, `too_large` and `busy` ([Main's pool](#mains-pool));
+  - `error`: any other throw.
+
+  The core rebuilds the first three's fixed texts, with the chain's display name from configuration, so they can become the last error as today. Only `state_changed` carries a code, `MYOTIS_UNAVAILABLE`, as today. The others' text isn't forwarded (deviation `adapter-error-text`).
 
 #### The rest
 
 - **Broadcast classes** are exactly myotis-process's:
   - `not_sent`: queued and expired, or the client wasn't running;
   - `uncertain`: dispatched, then a deadline, an exit or a stop.
-- **Colibri's errors:**
-  - **`node_error`:** the worker's serialized error carried a `code`, so it is the node's or the prover's JSON-RPC error; it is passed through.
-  - **`{ failure: "error" }`:** the error had no code. It is a client diagnostic, whose text may name the endpoint, and isn't forwarded (deviation `adapter-error-text`). Timeouts are `timeout`, as in 0004.
-  - **Backstop:** main replaces any configured endpoint URL it finds in a `node_error` message with that endpoint's reference.
+- **Colibri's outcomes:**
+  - **`{ revert: { data } }`:** the worker's error carried code 3 and hex `data`, a revert the prover verified. The core rebuilds it as `execution reverted`, with code 3 and that data.
+  - **`{ failure: class }`:** everything else, from the chain set above. Its text isn't forwarded whether or not it had a code (deviation `adapter-error-text`): main can't tell a node's error from the SDK's own.
 - **Admission:** the router's slots stay as the core's admission rules, held until main's terminal reply. Myotis has 1 in flight and 16 waiting per chain, and background callers take only an idle slot. Colibri has 8 in flight, 2 per route.
 - **Physical completion:** main replies only when the adapter's promise settles, never early. Main's per-verifier bound (0004: 8 operations) is shared by naming and chain data.
 - **Reply size:** as 0004, main serializes each reply first; one over the message cap is `{ failure: "too_large" }`.
@@ -153,6 +162,7 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
   - **`undefined`:** a body without `result` answers `undefined`, which JSON can't carry. The reply then omits `result` and lists it in `undefined_keys` (0004's mechanism). Main restores an own `result` property, first in key order, whose value is `undefined`.
   - **`source`** stays on every result, so `chain-data-activity`'s watchdog records still work.
   - **Size:** the core measures the whole serialized reply. One over the message cap fails the request with `too_large`.
+- **Every result and error** of `chain.request` and `chain.fee_quote` carries `generation`: the chain's generation it was computed under ([Generations](#generations)).
 - **Endpoint references** in `trust` (`agreed`, `dissented`, `queried`, `prover`) are substituted by main with the host, as 0004 does. One difference: the router's `endpointHost` gives `''` for a URL that doesn't parse and drops it, where naming keeps the input. Main follows the router here.
 - **An error** is today's thrown error, rebuilt by main from a tagged payload ([Errors](#errors-and-text)).
 
@@ -164,6 +174,11 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
   - **Broadcasts** end as [Broadcast](#broadcast) says: `uncertain` if an attempt may have been sent, otherwise a definite `not_sent` failure. They are never re-sent automatically.
   - **Their I/O:** the core cancels the requests' outstanding `shell.rpc` and `shell.blockscout` requests and makes no new ones. Verifier operations keep their slots until main's terminal reply (parity), and their outcomes are dropped. No result built from the old configuration (an endpoint's answer, a prover's trust label) is published after the change.
 - **Main** answers a `shell.*` request whose generation is no longer current with `not_sent` and performs nothing.
+- **Replies already made aren't recalled:** a read can finish, and its reply be on its way, just before a change. Main's driver therefore fences replies as naming's does (freedom-browser #672):
+  - it sends a chain request only while no chain control is in flight, checked with nothing between the check and the send;
+  - it judges a reply only while none is in flight, re-checking after every wait, so the last check, the judgment and the result are one step;
+  - a read's or fee quote's reply whose `generation` is older than the chain's current one was overtaken. Main sends it again, spending the same single resend as `reconfigured`, within the remaining deadline.
+- **Broadcasts are neither fenced nor re-sent:** an outcome is a fact about the network, whatever configuration produced it.
 - **`chain.availability`** doesn't end requests. It records the readiness the router samples. Myotis's own epoch check still turns a mid-operation change into `state_changed`.
 - **Lifecycle:** none beyond that. The router has no Myotis epoch of its own and no restarts.
 
@@ -188,7 +203,7 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
 
 ### Cancellation
 
-- **A `cancel`** ends the request. Its pending `shell.rpc` and `shell.blockscout` requests are cancelled, quorum members included (deviation `abandoned-exchanges`: today's caller signal doesn't reach the quorum).
+- **A `cancel`** ends the request, unless its response has already begun ([Frames](#frames)). Its pending `shell.rpc` and `shell.blockscout` requests are cancelled, quorum members included (deviation `abandoned-exchanges`: today's caller signal doesn't reach the quorum).
 - **Verifier work** keeps its slot until main's terminal reply (parity: the router holds Myotis and Colibri slots until the operation physically settles).
 - **A broadcast** that is cancelled ends as [Broadcast](#broadcast) says. Today it is an `AbortError`.
 
@@ -297,7 +312,7 @@ The router keeps parsed values; the core keeps **text**.
 | infeasible | geth's `-32000` | yes |
 | a capability refusal | — | no: the next source |
 | unavailable, or no verdict | — | no |
-| `not_running`, `not_ready`, `lifecycle` (the adapter's own errors) | their fixed texts | no; it can become the last error, as today |
+| `not_running`, `not_ready`, `state_changed` (the adapter's own errors) | their fixed texts | no; it can become the last error, as today |
 | an unexpected payload, or `failure: "error"` | a plain error with a fixed text | no; it becomes the last error |
 
 - **Trust:** the block number is recorded only when it was the same before and after.
@@ -305,7 +320,7 @@ The router keeps parsed values; the core keeps **text**.
 ### Colibri
 
 - **One operation per request:** `requestViaColibri` with the source's budget. Main keeps its client cache and its one rebuild-and-retry.
-- **Any error falls through,** a verified revert included. A `node_error` survives as the last error if later sources fail as unavailable; a `failure` survives as a fixed text.
+- **Any error falls through,** a verified revert included. A `revert` survives as the last error, with its data, if later sources fail as unavailable; a `failure` survives as a fixed text.
 - **Trust:** the prover's host, and `ZK sync-committee proof` or `Sync-committee proof`.
 
 ### Adaptive bypass
@@ -362,13 +377,31 @@ Every attempt (a Direct endpoint's `eth_sendRawTransaction`, Myotis's `broadcast
 | Class | When |
 |---|---|
 | **accepted** | a success whose result is the transaction's hash; Myotis `{ hash }` likewise |
-| **refused** | a node error whose code and message are on the **refusal list**; Myotis `{ rejected }` |
+| **refused** | on a **first** broadcast only: a node error matching a [refusal predicate](#refusals), or Myotis `{ rejected }` |
 | **not sent** | main's `not_sent`; Myotis `{ not_sent }`; an attempt the core never sent to main |
-| **ambiguous** | everything else: other node errors (`already known`, `nonce too low`, `replacement transaction underpriced`, unrecognized ones), a success with a different, missing or malformed hash, a non-2xx status, a transport failure, a timeout, a cancel or a deadline after the request reached main, Myotis `{ uncertain }` |
+| **ambiguous** | everything else: other node errors (`already known`, unrecognized ones, and every refusal on a repeat broadcast), a success with a different, missing or malformed hash, a non-2xx status, a transport failure, a timeout, a cancel or a deadline after the request reached main, Myotis `{ uncertain }` |
 
 - **The hash** is computed by the core: keccak-256 of the signed bytes. Hashes compare as 32-byte values, any hex case.
-- **The refusal list** is short and explicit: errors that mean this transaction is invalid and was admitted nowhere, such as insufficient funds, intrinsic gas too low or an invalid signature. Vectors pin it. Anything not on it is ambiguous, so a misclassification can only err towards `uncertain`.
 - **An attempt is possibly sent** from the moment the core sends its request to main until main's reply proves otherwise (`not_sent`).
+
+### Refusals
+
+A node's error can prove only that *these* bytes weren't admitted *now*. It proves that the transaction is absent from the network only when nothing else could have sent the bytes.
+- **`first`** is main's statement that these signed bytes were never handed to a broadcaster before: the wallet's fresh signature, or a raw transaction the Ant bridge hasn't seen. The core also remembers the last 4,096 hashes it has broadcast and treats a repeat as not first, whatever main says.
+- **On a first broadcast,** the bytes can reach the network only through this broadcast's own attempts. A refusal then means the transaction is nowhere, unless an earlier attempt was ambiguous, which the outcome table already covers.
+- **On a repeat** (the wallet re-sending after `uncertain`, a bridge retry), the bytes may already be pending or mined. A state-dependent error (`insufficient funds`, `nonce too low`) can then be caused by that very success. Every refusal is therefore ambiguous on a repeat.
+- **The predicates** are exact. A refusal is a JSON-RPC error whose code is `-32000` (or the client's documented code for it) and whose message starts with one of a fixed list of txpool rejections:
+  - insufficient funds;
+  - nonce too low;
+  - replacement transaction underpriced, and transaction underpriced;
+  - intrinsic gas too low, and exceeds block gas limit;
+  - max fee per gas less than block base fee, and max priority fee per gas higher than max fee per gas;
+  - invalid sender, and invalid chain id;
+  - oversized data, and transaction type not supported.
+
+  Vectors pin each client's wording: geth, Nethermind, Erigon, Besu and the large providers. `already known` is never a refusal, because it says the bytes exist. Anything unmatched is ambiguous, so a misclassification can only lean towards `uncertain`.
+- **Myotis `rejected`** counts as a refusal on the same terms; its reasons include a used nonce.
+- **Order doesn't matter.** A refusal after an ambiguous attempt stops the attempt loop, as Myotis's final verdict does today, but it can't erase that attempt: the outcome table looks at every attempt.
 
 ### Outcome
 
@@ -384,11 +417,12 @@ Every attempt (a Direct endpoint's `eth_sendRawTransaction`, Myotis's `broadcast
   - **The lookup** is `eth_getTransactionByHash(hash)`, run as a non-interactive read through the read order.
   - **A match** is a result object whose `hash` equals the transaction's. A match makes the outcome `sent`.
   - **Anything else** leaves the outcome `uncertain`: `null`, an error, a mismatched or malformed object, or no time left. Absence is never evidence that the transaction wasn't sent, so a lookup never produces `rejected`.
-- **Myotis:** `rejected` stays final, with no other broadcaster, and so does `uncertain`. `not_sent` falls to the next broadcaster, as today.
+- **Myotis:** `rejected` and `uncertain` end the attempt loop, as today, and `not_sent` falls to the next broadcaster. What the loop ended with is then classified like any other attempt.
 
 ### Main's record
 
 The core can die mid-broadcast: an exit, the watchdog, a protocol error. Main therefore keeps its own record of every `chain.broadcast` in flight: the hash, and whether any attempt is possibly sent.
+- **`first`:** main sets it from the record and its callers: the wallet sets it for a fresh signature, and the Ant bridge for a raw transaction it hasn't broadcast before.
 - **Marking:** main's executors mark the record when they start an exchange whose body is an `eth_sendRawTransaction` of that raw transaction, or a Myotis `broadcast` of it.
 - **No reply from the core:** main reports `uncertain` if the record is marked, and a definite `not_sent` failure if not. Main never reports `rejected` on its own.
 - **Main's drivers:**
@@ -415,13 +449,13 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 
 | `data.kind` | Carries | Comes from |
 |---|---|---|
-| `node` | `code`, `message`, and `data` if the node's error had it | a JSON-RPC error object in an answer body, or a verifier's `node_error` |
-| `core` | `message`, and `code` and `data` where today's error has them | the core's own errors, with today's texts: aggregates, truncation (`-32005`), Myotis's reverts and refusals, `Unsupported read method`, unavailable sources, parse failures |
+| `node` | `code`, `message`, and `data` if the node's error had it | a JSON-RPC error object the core itself parsed out of an answer body (`shell.rpc`) |
+| `core` | `message`, and `code` and `data` where today's error has them | the core's own errors, with today's texts: aggregates, truncation (`-32005`), Myotis's and Colibri's reverts and refusals, Myotis's unavailable texts, `Unsupported read method`, parse failures |
 
   Broadcast failures add `outcome`. 0001's own codes stay for what they mean: `deadline`, `cancelled`, `busy`, `budget`, `too_large`, plus `reconfigured`.
 - **Main rebuilds** the error as today's router throws it: an `Error` with that message, with `code` and `data` set only if present, and with the router's extra fields (`directFallback` stays internal to the core).
 - **Node errors pass through** unchanged. The core may return one to the caller of the request it came from, and never logs, caches or places it in another request's reply. Their size is bounded by the answer cap, and the reply by the message cap. There is no separate cap, so revert data is never cut.
-- **Adapter and transport diagnostics,** text that main, an SDK or the network stack produced, never pass through: they get the core's fixed text (deviation `adapter-error-text`). Only an error object a node or prover returned is a node error.
+- **Provenance is structural.** `node` errors come only from bodies the core parsed itself. Verifiers never supply text: the core classifies Myotis's payloads, and Colibri answers with a result, a revert's data or a failure class. Text that main, an SDK or the network stack produced never passes through; it gets the core's fixed text (deviation `adapter-error-text`).
 - **Classification** runs on errors as received, before any reply is built: Myotis's verdicts, the Ant profile's ranking, the truncation check and the broadcast classes.
 - **The core's own texts** reproduce today's. JSON parse failures get a fixed message (deviation `json-parse-text`), where V8's `SyntaxError` embeds a fragment of the body.
 - **Logging:** the core logs request outcomes by chain, method and source only, never origins, addresses or messages.
@@ -447,8 +481,10 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 | one request | 120 s, or the caller's `deadline_ms` | `deadline` (broadcasts: [Outcome](#outcome)) |
 | one answer | 18 MiB | `too_large`: a source failure |
 | one message | 32 MiB, serialized | the request fails with `too_large`; a received one is a protocol error |
-| reassembly | one message cap per direction, outside the reader's 16 MiB | the reader waits for the hand-off |
-| the chain writer | one message cap of unwritten bytes | the chain thread waits |
+| fragmented responses in flight | one per direction (bulk credit); its bytes reserved at begin, outside the reader's 16 MiB | the sender waits for credit, sending whole messages meanwhile |
+| one request message | one frame (1 MiB) | `too_large` |
+| the chain writer | one message cap of unwritten bytes | replies wait in the chain thread's queue, counted in the total |
+| main's chain I/O pool | 192 MiB: bodies being read, verifier results, replies until written; replies under 64 KiB exempt | the exchange fails `busy` |
 | quorum k / endpoints | 9 / 64 | clamped at configuration |
 | JSON depth | 512 | a source failure |
 | memory, per request | 96 MiB: received messages once handed over, answer texts and their indexes, retained texts, replies | the request ends with `budget` (broadcasts: [Outcome](#outcome)) |
@@ -469,6 +505,7 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 | `rpc-redirects` | ≤ 20 hops unchecked, POST→GET on 301/302 | each hop checked, method and body kept | a refused hop is a source failure |
 | `rpc-id` | `id: Date.now()` | a per-request counter | none for nodes; vectors normalize ids |
 | `response-caps` | none | 18 MiB per answer | `too_large`, a source failure |
+| `request-size` | unbounded | one frame (1 MiB) per chain request | `too_large` |
 | `json-depth` | V8's parser, no fixed depth | 512 levels | a source failure |
 | `overall-deadline` | none | 120 s | `deadline` |
 | `admission` | unbounded | 64 running, 256 waiting | `busy` |
@@ -478,10 +515,10 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 | `abandoned-exchanges` | the caller's signal doesn't reach the quorum | a cancel cancels members | |
 | `state-retention` | log-range and pair state never pruned | configured + 64 retired | |
 | `json-parse-text` | V8's message with a body fragment | a fixed message | |
-| `adapter-error-text` | adapter and transport diagnostics' own text | the core's fixed text; node errors pass through | a local diagnostic reads differently |
+| `adapter-error-text` | adapter and transport diagnostics' own text, Colibri's errors included | the core's fixed text; only errors parsed from node bodies pass through | a local diagnostic, or a Colibri revert's message, reads differently |
 | `myotis-readiness` | `isReady()` sampled live | the last `chain.availability` | |
 | `memory-budgets` | unbounded | per request and in total | `budget`, `busy` |
-| `broadcast-outcome` | the last error wins; lost replies look like failures | attempt classes, `sent` / `uncertain` / `rejected` / `not_sent`, reconciliation, main's record | no definite failure for a transaction that may have gone out |
+| `broadcast-outcome` | the last error wins; lost replies look like failures | attempt classes, refusals only on first broadcasts, `sent` / `uncertain` / `rejected` / `not_sent`, reconciliation, main's record | no definite failure for a transaction that may have gone out |
 | `monotonic-time` | cooldowns on `Date.now()` | the monotonic clock | |
 
 ## Replay
@@ -507,6 +544,8 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
   - Direct's lower-index member that answered later;
   - quorum on answers without `result`;
   - truncation probes that fail or come back empty;
+  - refusals on first and repeat broadcasts, and a refusal after an ambiguous attempt;
+  - a read's reply overtaken by a configuration change after it was made;
   - a truncation with Direct still available;
   - nesting at 512 and 513 levels;
   - canonical-equivalence pairs: duplicate keys, number spellings, `__proto__`, lone surrogates.
@@ -523,13 +562,14 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
 2. **The replay harness** (`vectors/chain-replay.json`).
 3. **`fc-chain`:** the machine, replayed.
 4. **`freedom-cored`:**
-   - fragments in `fc-protocol` and the transport;
+   - fragmented responses and bulk credit in `fc-protocol` and the transport;
    - the chain thread and the `chain.*` methods;
    - `shell.rpc`'s new parameters and `not_sent`;
    - the new verified operations.
 5. **freedom-browser:**
    - the executors;
-   - the router, the fee quote and the broadcast become drivers, with main's broadcast record;
+   - main's chain I/O pool and fragment handling;
+   - the router, the fee quote and the broadcast become drivers, with main's broadcast record and reply fencing;
    - the wallet's `uncertain` handling;
    - delete the JS router.
 
