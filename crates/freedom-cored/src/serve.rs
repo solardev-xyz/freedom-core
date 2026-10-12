@@ -15,13 +15,14 @@ use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::frame::{Frame, KIND_JSON};
 use fc_protocol::message::{self, CallerKind, Context, Message, MessageError};
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
 use crate::exit::Exit;
 use crate::transport::{self, Credits};
 use crate::vault::{FileSnapshot, Finished, NodeRecovery, Out, Vault};
 use crate::worker::Worker;
-use crate::{gate, hardening, log};
+use crate::{gate, hardening, log, naming};
 
 /// How long the writer may take to flush on exit.
 const EXIT_DRAIN: Duration = Duration::from_secs(2);
@@ -88,6 +89,14 @@ const CAPABILITIES: &[&str] = &[
     "sign.typed_data",
     "swarm.sign_soc",
     "typed_data.hash",
+    "naming.configure",
+    "naming.availability",
+    "naming.resolve_content",
+    "naming.resolve_address",
+    "naming.resolve_reverse",
+    "naming.resolve_tezos",
+    "naming.invalidate_content",
+    "naming.invalidate_tezos",
 ];
 
 pub fn run(options: &Options) -> Exit {
@@ -122,6 +131,11 @@ pub fn run(options: &Options) -> Exit {
     let Ok(worker) = Worker::spawn(events_tx.clone()) else {
         return Exit::Internal;
     };
+    // Naming runs on its own thread and writes its own frames (design 0004,
+    // Admission: vault control traffic never waits on naming work).
+    let Ok(naming) = naming::spawn(writer.queue.clone(), events_tx.clone()) else {
+        return Exit::Internal;
+    };
     // The status snapshot is read once, on its own thread: the gate makes
     // this process the only writer, so it never needs re-reading, and slow
     // storage can't hold up the loop (deadline, EOF, parent exit). core.hello
@@ -146,6 +160,7 @@ pub fn run(options: &Options) -> Exit {
             fc_vault::state::DEFAULT_AUTO_LOCK_MS,
         ),
         worker,
+        naming,
     };
     let hello_deadline = options.started + options.hello_timeout;
     let exit = loop {
@@ -304,6 +319,7 @@ struct Core {
     last_request_id: u64,
     vault: Vault,
     worker: Worker,
+    naming: naming::Handle,
 }
 
 #[derive(Deserialize)]
@@ -398,17 +414,30 @@ impl Core {
                 );
                 Flow::Exit(Exit::Protocol)
             }
+            // A cancel names a vault request or a naming one; each side
+            // ignores IDs it doesn't hold.
             Message::Cancel { id } => {
+                if !self.naming.send(naming::In::Cancel { id }) {
+                    return Flow::Exit(Exit::Internal);
+                }
                 let outs = self.vault.cancel(id);
                 self.dispatch(outs)
             }
-            // The core sends no requests yet, so any response is unsolicited.
-            Message::Response { id, .. } => {
-                log::error(
-                    "protocol error",
-                    serde_json::json!({ "category": "unsolicited_response", "id": id }),
-                );
-                Flow::Exit(Exit::Protocol)
+            // Only the naming thread sends requests (shell.*): it checks
+            // that a response answers one of them.
+            Message::Response { id, outcome } => {
+                let outcome = match outcome {
+                    Ok(result) => match RawValue::from_string(result.get().to_owned()) {
+                        Ok(result) => Ok(result),
+                        Err(_) => return Flow::Exit(Exit::Internal),
+                    },
+                    Err(error) => Err(error),
+                };
+                if self.naming.send(naming::In::Response { id, outcome }) {
+                    Flow::Continue
+                } else {
+                    Flow::Exit(Exit::Internal)
+                }
             }
             Message::Event { .. } => {
                 log::warn("ignoring an event from main", serde_json::json!({}));
@@ -440,6 +469,22 @@ impl Core {
             method if Vault::handles(method) => {
                 let outs = self.vault.request(id, method, params, context.caller);
                 self.dispatch(outs)
+            }
+            method if naming::handles(method) => {
+                let params = match params.map(|p| RawValue::from_string(p.to_owned())) {
+                    Some(Ok(params)) => Some(params),
+                    Some(Err(_)) => return Flow::Exit(Exit::Internal),
+                    None => None,
+                };
+                if self.naming.send(naming::In::Request {
+                    id,
+                    method: loggable(method),
+                    params,
+                }) {
+                    Flow::Continue
+                } else {
+                    Flow::Exit(Exit::Internal)
+                }
             }
             _ => self.error(
                 id,

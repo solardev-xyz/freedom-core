@@ -29,8 +29,11 @@ name = "freedom-cored"
 path = "src/main.rs"
 
 [dependencies]
+# Response bodies from main's shell.* executors travel as base64.
+base64 = "0.22.1"
 fc-evm = { path = "../fc-evm" }
 fc-keys = { path = "../fc-keys" }
+fc-naming = { path = "../fc-naming" }
 fc-protocol = { path = "../fc-protocol" }
 fc-swarm = { path = "../fc-swarm" }
 fc-vault = { path = "../fc-vault" }
@@ -49,5 +52,4 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 rustix = { version = "1.1", default-features = false, features = ["fs", "process", "std"] }
 
 [dev-dependencies]
-base64 = "0.22.1"
 tempfile = "3"

@@ -12,6 +12,7 @@ mod gate;
 mod hardening;
 mod journal;
 mod log;
+mod naming;
 mod nodes;
 mod rng;
 mod serve;
