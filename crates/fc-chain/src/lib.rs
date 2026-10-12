@@ -13,7 +13,7 @@
 //!
 //! Deviations, each pinned by vectors: `json-depth` (nesting deeper than
 //! 512 levels is refused), `json-parse-text` (a fixed text for a body that
-//! isn't JSON), and `bigint-width` (decimal conversions stop below 2^4096).
+//! isn't JSON), and `bigint-width` (decimal input and gas prices wider than 4096 bits are refused).
 //!
 //! The crate does no I/O.
 

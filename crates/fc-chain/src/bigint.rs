@@ -3,16 +3,19 @@
 //! hex and decimal.
 //!
 //! Hex, octal and binary convert in linear time, at any width. Decimal
-//! conversions take time quadratic in the width, so they stop below
-//! 2^[`MAX_DECIMAL_BITS`] (deviation `bigint-width`): wider decimal input is
-//! [`Parsed::TooWide`], and a wider value is never printed in decimal.
+//! conversions take time quadratic in the width, so they are bounded
+//! (deviation `bigint-width`): decimal input wider than [`MAX_DECIMAL_BITS`]
+//! bits is [`Parsed::TooWide`], and so is a gas price. A fee computed from
+//! an accepted gas price (`2 · baseFee + priority`) can be one bit wider,
+//! and still prints.
 //! Nothing EVM-sized comes near: quantities are at most 256 bits.
 
 use std::cmp::Ordering;
 
 use crate::js::trim;
 
-/// Decimal input and output stop below 2^4096 (deviation `bigint-width`).
+/// The widest decimal input, and gas price, in bits (deviation
+/// `bigint-width`); computed fees print one bit wider.
 pub const MAX_DECIMAL_BITS: usize = 4096;
 
 /// 2^4096 has 1,234 decimal digits: more significant digits are wider.

@@ -261,7 +261,7 @@ fn fee_quotes() {
                 assert_eq!(error.name, "Error");
                 assert_eq!(
                     error.message.to_string_lossy(),
-                    format!("{source} returned a gas price of {MAX_DECIMAL_BITS} bits or more")
+                    format!("{source} returned a gas price wider than {MAX_DECIMAL_BITS} bits")
                 );
             }
             None => match opt_str(js, "quote_json") {

@@ -100,7 +100,7 @@ pub fn fee_quote(
         _ => {
             return Err(JsError::new(
                 "Error",
-                format!("{source} returned a gas price of {MAX_DECIMAL_BITS} bits or more")
+                format!("{source} returned a gas price wider than {MAX_DECIMAL_BITS} bits")
                     .as_str(),
             ));
         }

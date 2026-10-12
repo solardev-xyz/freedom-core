@@ -25,8 +25,10 @@
 //! [`Value::write`] needs, while it runs, the members of the objects it is
 //! inside: at most [`WRITE_SCRATCH_PER_TEXT_BYTE`] `× (n + 1)` bytes for
 //! sorted keys and twice that for property order (each member is at least
-//! four bytes of text, and the scratch grows by doubling), plus a stack of
-//! at most [`MAX_DEPTH`] frames. Every walk is iterative.
+//! four bytes of text, and the scratch grows by doubling), plus
+//! [`WRITE_SCRATCH_FLOOR`] once (the smallest allocation a growing vector
+//! makes), plus a stack of at most [`MAX_DEPTH`] frames. Every walk is
+//! iterative.
 
 use std::cmp::Ordering;
 
@@ -52,8 +54,13 @@ pub const HEAP_PER_TEXT_BYTE: usize = 4;
 
 /// [`Value::write`]'s scratch, with sorted keys, is at most this many bytes
 /// per byte of text, plus this many once; property order needs twice as
-/// much.
+/// much. Both add [`WRITE_SCRATCH_FLOOR`] once.
 pub const WRITE_SCRATCH_PER_TEXT_BYTE: usize = 2;
+
+/// The smallest scratch a write that sees an object allocates: a growing
+/// vector's first allocation holds four members, of at most 8 bytes each.
+/// A tiny text such as `{"":0}` needs it whole.
+pub const WRITE_SCRATCH_FLOOR: usize = 32;
 
 #[derive(Debug, Clone, Copy)]
 struct Node {
@@ -1191,6 +1198,9 @@ mod tests {
             "0".into(),
             "[0]".into(),
             "\"x\"".into(),
+            // Smaller than a growing vector's first allocation.
+            r#"{"":0}"#.into(),
+            r#"{"a":{"":0}}"#.into(),
         ];
         for text in &texts {
             let index = Index::new(text).unwrap();
@@ -1210,7 +1220,7 @@ mod tests {
                 };
                 let mut out = String::new();
                 write_with(index.root(), order, &mut out, &mut arena);
-                let bound = per_byte * (text.len() + 1);
+                let bound = per_byte * (text.len() + 1) + WRITE_SCRATCH_FLOOR;
                 assert!(
                     arena.capacity_bytes() <= bound,
                     "{} > {bound}",
