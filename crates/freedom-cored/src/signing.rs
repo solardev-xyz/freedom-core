@@ -2,10 +2,12 @@
 //! `sign.message`, `sign.typed_data`, `swarm.sign_soc`, and the public
 //! `typed_data.hash`.
 //!
-//! Each does all its public work first (parsing, validation, hashing, within
-//! fc-evm's limits), and only then derives the key and makes one signature,
-//! inline, as `compat.*` does. No secret is held while untrusted input is
-//! processed, and no key byte leaves this module.
+//! Each does all its public work first (parsing, validation, RLP, BMT,
+//! hashing, within fc-evm's limits), then derives the key only to sign one
+//! digest (and, for a chunk, take its address), and assembles the result
+//! after the key is gone. It runs inline, as `compat.*` does. No secret is
+//! held while untrusted input is processed, and no key byte leaves this
+//! module.
 
 use fc_evm::{Transaction, checksum_address, parse_bytes, to_hex};
 use fc_keys::Secp256k1Key;
@@ -111,6 +113,13 @@ fn derive(state: &VaultState, key: KeyRef) -> Result<Secp256k1Key, ErrorBody> {
     derived.map_err(crate::vault::locked_or_internal)
 }
 
+/// Derives the key, signs the 32-byte digest, and drops (wipes) the key:
+/// every public part of a request is done before or after this.
+fn sign_with(state: &VaultState, key: KeyRef, digest: &[u8; 32]) -> Result<[u8; 65], ErrorBody> {
+    let derived = derive(state, key)?;
+    fc_evm::sign_digest(derived.signing_key(), digest).map_err(evm_error)
+}
+
 /// `{ domain, types, message }`, exactly.
 fn typed_data(value: &Value) -> Result<(&Value, &Value, &Value), ErrorBody> {
     let object = object(value, &["domain", "types", "message"], &[])?;
@@ -132,19 +141,18 @@ pub fn handle(state: &VaultState, method: &str, raw: Option<&str>) -> Result<Val
         "sign.transaction" => {
             let fields = object(&params, &["key", "tx"], &[])?;
             let key = key_ref(&fields["key"], Allowed::AccountsOnly)?;
-            let tx = Transaction::from_json(&fields["tx"]).map_err(evm_error)?;
-            let signed = tx
-                .sign(derive(state, key)?.signing_key())
+            let prepared = Transaction::from_json(&fields["tx"])
+                .and_then(|tx| tx.prepare())
                 .map_err(evm_error)?;
+            let signature = sign_with(state, key, &prepared.digest())?;
+            let signed = prepared.finish(&signature).map_err(evm_error)?;
             Ok(json!({ "raw": to_hex(&signed.raw), "hash": to_hex(&signed.hash) }))
         }
         "sign.message" => {
             let fields = object(&params, &["key", "message"], &[])?;
             let key = key_ref(&fields["key"], Allowed::AccountsOnly)?;
             let message = parse_bytes(string(fields, "message")?, "message").map_err(evm_error)?;
-            let digest = fc_evm::eip191_digest(&message);
-            let signature = fc_evm::sign_digest(derive(state, key)?.signing_key(), &digest)
-                .map_err(evm_error)?;
+            let signature = sign_with(state, key, &fc_evm::eip191_digest(&message))?;
             Ok(json!({ "signature": to_hex(&signature) }))
         }
         "sign.typed_data" => {
@@ -152,8 +160,7 @@ pub fn handle(state: &VaultState, method: &str, raw: Option<&str>) -> Result<Val
             let key = key_ref(&fields["key"], Allowed::AccountsOnly)?;
             let (domain, types, message) = typed_data(&fields["typed_data"])?;
             let digest = fc_evm::typed_data_hash(domain, types, message).map_err(evm_error)?;
-            let signature = fc_evm::sign_digest(derive(state, key)?.signing_key(), &digest)
-                .map_err(evm_error)?;
+            let signature = sign_with(state, key, &digest)?;
             Ok(json!({ "signature": to_hex(&signature) }))
         }
         "typed_data.hash" => {
@@ -179,22 +186,16 @@ pub fn handle(state: &VaultState, method: &str, raw: Option<&str>) -> Result<Val
                 ),
                 Some(_) => return Err(invalid("span: expected a quantity string")),
             };
-            if payload.is_empty() || payload.len() > fc_swarm::CHUNK_SIZE {
-                return Err(invalid(format!(
-                    "payload size {} outside 1..=4096",
-                    payload.len()
-                )));
-            }
-            let signed = fc_swarm::sign_soc(
-                derive(state, key)?.signing_key(),
-                &identifier,
-                span,
-                &payload,
-            )
-            .map_err(|e| match e {
-                fc_swarm::Error::Signing => crate::vault::internal(),
-                other => invalid(other.to_string()),
-            })?;
+            let prepared = fc_swarm::prepare_soc(&identifier, span, &payload)
+                .map_err(|e| invalid(e.to_string()))?;
+            let (signature, owner) = {
+                // The key lives only for the signature and its address.
+                let derived = derive(state, key)?;
+                let signature = fc_evm::sign_digest(derived.signing_key(), &prepared.digest())
+                    .map_err(evm_error)?;
+                (signature, fc_evm::address_of(derived.signing_key()))
+            };
+            let signed = prepared.finish(signature, owner);
             Ok(json!({
                 "signature": to_hex(&signed.signature),
                 "owner": checksum_address(&signed.owner),
