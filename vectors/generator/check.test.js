@@ -212,6 +212,8 @@ test('replay transport keeps ethers\' cancel and timeout semantics', async () =>
   assert.equal(sameInstant.io.rejected.code, 'CANCELLED');
   // The inactivity timeout, either side of a 10 ms reply.
   assert.match((await outcome({ timeout: 9 })).thrown, /request timeout/);
+  // Zero turns the timer off.
+  assert.equal((await outcome({ timeout: 0 })).thrown, null);
   const inTime = await outcome({ timeout: 11 });
   assert.equal(inTime.thrown, null);
   assert.equal(inTime.io.rejected, undefined);

@@ -212,7 +212,8 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
         reject(ethers.makeError(message, code));
       };
       signal?.addListener(() => fail('request cancelled', 'CANCELLED'));
-      const inactivity = setTimeout(() => fail('request timeout', 'TIMEOUT'), req.timeout);
+      // Node's socket timer is off at zero.
+      const inactivity = req.timeout > 0 ? setTimeout(() => fail('request timeout', 'TIMEOUT'), req.timeout) : null;
       if (p.hang || answers.some((a) => a.hang)) return;
       setTimeout(() => {
         clearTimeout(inactivity);
