@@ -3,7 +3,7 @@
 **Status:** proposed. Builds on [0001](0001-freedom-cored.md) (process, framing, deadlines), [0002](0002-signing.md) (signing) and [0004](0004-naming-sessions.md) (sessions, `shell.*` requests, verified operations, endpoint references, budgets). It is roadmap item 3.4: freedom-browser's chain-data router moves into the core.
 
 **The reference** is `src/main/networks/chain-data-router.js` at freedom-browser `fb540328`, with `blockscout-logs.js` and the Ant bridge's router options (`swarm/ant-chain-bridge.js`).
-- **Ground truth** will be a replay harness, `vectors/chain-replay.json`, built like 0004's: it runs the pinned router through scripted worlds and records every exchange, verifier operation, timing, result and error. Its scenario IDs are cited below once it exists.
+- **Ground truth** will be a replay harness, `vectors/chain-replay.json`, built like 0004's: it runs the pinned router through scripted worlds and records every exchange, verifier operation, timing, result and error. Its scenario IDs are cited below where a rule depends on them.
 - **Conflicts:** where this document and a vector disagree, the vector wins and the document has a bug.
 
 ## Summary
@@ -142,10 +142,11 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
 - **`{ failure: class }`:** chain data's own closed set of classes, which carry no text. Naming's set (0004) is unchanged. The classes:
   - `not_running` and `not_ready`: `runningInstance`'s two errors;
   - `state_changed`: `verifiedRequest`'s `MYOTIS_UNAVAILABLE`;
-  - `timeout`, `too_large` and `busy` ([Main's pool](#mains-pool));
+  - `queue_full` and `timeout`: myotis-process's queue and deadline rejections;
+  - `too_large` and `busy` ([Main's pool](#mains-pool));
   - `error`: any other throw.
 
-  The core rebuilds the first three's fixed texts, with the chain's display name from configuration, so they can become the last error as today. Only `state_changed` carries a code, `MYOTIS_UNAVAILABLE`, as today. The others' text isn't forwarded (deviation `adapter-error-text`).
+  The core rebuilds the adapter's own errors with their fixed texts, using the chain's display name from configuration: `not_running`, `not_ready`, `state_changed`, `queue_full` and `timeout`. So they can become the last error as today. `state_changed`, `queue_full` and `timeout` carry the code `MYOTIS_UNAVAILABLE`, as today (`boundary-myotis-caller-deadline-last-error`). Any other throw keeps neither its text nor its code (deviation `adapter-error-text`).
 
 #### The rest
 
@@ -167,7 +168,10 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
   - **`source`** stays on every result, so `chain-data-activity`'s watchdog records still work.
   - **Size:** the core measures the whole serialized reply. One over the message cap fails the request with `too_large`.
 - **Every result and error** of `chain.request` and `chain.fee_quote` carries `generation`: the chain's generation it was computed under ([Generations](#generations)).
-- **Endpoint references** in `trust` (`agreed`, `dissented`, `queried`, `prover`) are substituted by main with the host, as 0004 does. One difference: the router's `endpointHost` gives `''` for a URL that doesn't parse and drops it, where naming keeps the input. Main follows the router here.
+- **Endpoint references** in `trust` (`agreed`, `dissented`, `queried`, `prover`) are substituted by main with the host, as 0004 does. One difference: the router's `endpointHost` gives `''` for a URL that doesn't parse, where naming keeps the input. Main follows the router here:
+  - `''` is dropped from `agreed`, `dissented` and `queried`;
+  - Colibri's `prover` keeps `''`;
+  - the quorum's k still counts that URL (`boundary-unparseable-endpoint-host`, `boundary-colibri-trust`).
 - **An error** is today's thrown error, rebuilt by main from a tagged payload ([Errors](#errors-and-text)).
 
 ### Generations
@@ -229,7 +233,12 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
 ```
 
 - **Main computes the inputs as today:** `access.readOrder`/`broadcastOrder` or the defaults, `getEndpoints(chainId, 'rpc')` in registry order, and the first prover.
-- **The core applies today's clamps** (`k ≥ 1`, `1 ≤ m ≤ k`, `timeout ≥ 500 ms`) and adds bounds (deviation `quorum-clamps`): `k ≤ 9`, `timeout ≤ 60 s`, and at most 64 endpoints, as 0004.
+- **The core applies today's defaults and clamps** (`boundary-quorum-clamps`):
+  - a missing value, `0` or a non-number takes the default: k 3, m 2, timeout 5000 ms;
+  - numeric strings count as their numbers;
+  - then `k ≥ 1`, `1 ≤ m ≤ k`, `timeout ≥ 500 ms`.
+
+  It also adds bounds (deviation `quorum-clamps`): `k ≤ 9`, `timeout ≤ 60 s`, and at most 64 endpoints, as 0004.
 - **Orders are cleaned at configuration** (deviation `order-validation`): duplicates are dropped and unknown sources removed. Today a duplicate runs twice and an unknown name fails at run time.
 - **When main sends it:** at startup and from `network-ipc`'s `refreshDownstream`, where today only ENS and provider-manager caches are cleared. Controls queue ahead of later requests, as naming's do.
 
@@ -292,7 +301,7 @@ The router keeps parsed values; the core keeps **text**.
   - it waits for a still-running member when Direct comes next and nothing has answered;
   - **its `directFallback`** is the lowest-index member that answered, not the first to arrive (`chain-data-router.js:1286`). Its agreeing and dissenting hosts are judged against that member's answer.
   - `directUnansweredUrls` is the members that never answered;
-  - the failure kinds are `capacity` and `timeout`.
+  - **the failure kind** comes only from the members' own errors (`capacity`, `timeout`). A round that ends on its own budget has no kind (`boundary-adaptive-quorum-deadline-not-a-timeout`).
 - **A vector** pins the difference. k = m = 3: endpoint 1 answers `{"b":1,"a":2}` first, endpoint 0 answers `{"a":2,"b":1}` later, endpoint 2 fails. Direct returns endpoint 0's text, with key order `a, b`.
 
 ### Direct
@@ -331,7 +340,7 @@ The router keeps parsed values; the core keeps **text**.
 
 For myotis, colibri and quorum, and only on interactive reads:
 - the route key is `[source, chain, origin, method, target]`;
-- **timeouts** open the route for 15, 30 and then 60 s;
+- **a failure of kind `timeout`** opens the route for 15, 30 and then 60 s (`router-colibri-cooldown-escalation`). A quorum has that kind only when its members time out themselves, which they do when Direct comes next and they run on (`router-quorum-carries-past-deadline`). A quorum cut at its own 2 s budget opens nothing, and is asked again on the next read (`boundary-adaptive-quorum-deadline-not-a-timeout`);
 - **a capacity failure** blocks it for the core process's life;
 - **a success** clears it, unless the route is blocked;
 - **at most 1024 routes,** evicting the oldest.
@@ -354,7 +363,13 @@ The origin is browsing data: it stays in core memory, is never logged and dies w
 - **Blockscout pairing,** in the Ant profile, for xBZZ Transfer scans:
   - the RPC half, then Blockscout's pages back from the newest (50 a page, at most 40 pages). The reference caps a page at 8 Mi UTF-16 units, which can be more than 8 MiB of bytes; the core caps it at 8 MiB of bytes (deviation `blockscout-page-bytes`);
   - field-by-field agreement, then a quorum over the newest blocks;
-  - today's cooldowns: the named rate limit clamped to 1–15 min, 5 min after a disagreement, 60 s after an abort, 30 min for a malformed pair.
+  - **today's cooldowns:**
+    - a 429 that names its reset: that time, clamped to 1–15 min;
+    - 5 min for a 429 naming no reset, a throttle in the body, or a disagreement;
+    - 30 min for a malformed pair;
+    - 60 s after an abort, and after every other failure: an HTTP status, non-JSON, a refusal, a page check, a redirect or DNS refusal, a transport failure, a timeout.
+
+    Scenarios: `blockscout-429-cooldown-bounds`, `blockscout-throttle-in-body`, `blockscout-http-500`, `ant-index-*`.
   - **The Ant profile's error ranking and range-cap parsing** (`rankLogScanError`, `logScanRangeCap`) move into the core. They read errors as received, before any reply is built. The bridge keeps its localhost server, its reply rewriting and its receipt grace.
 
 ### Results and trust
@@ -477,6 +492,7 @@ The core can die mid-broadcast: an exit, the watchdog, a protocol error. Main th
 - **Other sources** make two requests.
 - **The quote:**
   - legacy when there's no priority fee, or when it is negative or above the gas price;
+  - a priority fee `BigInt` can't parse (such as `-0x1`) doesn't downgrade: it fails that source's quote, and Direct moves on to its next endpoint (`boundary-fee-direct-priority-unparseable`);
   - otherwise EIP-1559, with `baseFee = gasPrice − priority` and `maxFee = 2·baseFee + priority`;
   - decimal strings, `verified` for myotis, colibri and quorum.
 
@@ -557,7 +573,7 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 | `abandoned-exchanges` | the caller's signal doesn't reach the quorum | a cancel cancels members | |
 | `state-retention` | log-range and pair state never pruned | configured + 64 retired | |
 | `json-parse-text` | V8's message with a body fragment | a fixed message | |
-| `adapter-error-text` | adapter and transport diagnostics' own text, Colibri's errors included | the core's fixed text; only errors parsed from node bodies pass through | a local diagnostic, or a Colibri revert's message, reads differently |
+| `adapter-error-text` | adapter and transport diagnostics' own text and code, Colibri's errors included | the core's fixed text; only errors parsed from node bodies pass through, and the adapter's own known errors keep their texts and codes | another diagnostic loses its text and its code; a Colibri revert's message reads differently |
 | `myotis-readiness` | `isReady()` sampled live | the last `chain.availability` | |
 | `memory-budgets` | unbounded | per request and in total | `budget`, `busy` |
 | `broadcast-outcome` | the last error wins; lost replies look like failures | attempt classes, exact refusals, `sent` / `uncertain` / `rejected` / `not_sent`, reconciliation, main's record | a lost reply is `uncertain`, not a failure |
@@ -593,6 +609,11 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
   - a truncation with Direct still available;
   - nesting at 512 and 513 levels;
   - canonical-equivalence pairs: duplicate keys, number spellings, `__proto__`, lone surrogates.
+- **The harness** (`vectors/generator/chain-replay.js`) has 286 scenarios, each with a stable ID and a `from` field citing its source test or this document. Strings over 64 KiB are stored as a repeat unit plus a SHA-256, which keeps the 8 MiB `html()` answers small.
+- **Not replayed:** these are left to step 3's own tests:
+  - the adaptive table's 1,024-route eviction;
+  - a Myotis slot granted in the same turn as its waiter's deadline;
+  - Blockscout's opaque redirect, which Node's `fetch` can't produce.
 - **Deviation vectors** patch the reference in memory where a deviation has no natural trigger, as 0004's do. Broadcast's classes, outcomes and main's record are deviations, specified by their own vectors.
 
 ## Implementation steps
