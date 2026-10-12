@@ -461,6 +461,22 @@ function patchesOf(scenario) {
   });
 }
 
+/**
+ * The revert data a verifier adapter's error carries, as main sends it:
+ * bytes the core can read (`0x` and whole bytes), checked in constant stack
+ * as main's isHexData does; anything else is a failure, classed as usual
+ * (freedom-browser#670).
+ */
+function revertData(err) {
+  const data = err?.data ?? err?.info?.error?.data;
+  const bytes =
+    typeof data === 'string' &&
+    data.startsWith('0x') &&
+    data.length % 2 === 0 &&
+    !/[^0-9a-fA-F]/.test(data.slice(2));
+  return bytes ? data : null;
+}
+
 function describe(value) {
   return JSON.parse(JSON.stringify(value, (_k, v) => (v === undefined ? { $undefined: true } : v)));
 }
@@ -873,12 +889,7 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     const encodes = (host === 'myotis' && op === 'record' && params.method !== 'reverse') || (host === 'colibri' && op === 'resolve' && !params.nameNft);
     return failure === 'invalid_argument' && overLong && encodes ? err : new Error(`verified call failed: ${failure}`);
   };
-  // Revert data as main sends it: bytes the core can read (`0x` and whole
-  // bytes); anything else is a failure (freedom-browser#670).
-  const revertOf = (err) => {
-    const data = err?.data ?? err?.info?.error?.data;
-    return typeof data === 'string' && /^0x(?:[0-9a-fA-F]{2})*$/.test(data) ? data : null;
-  };
+  const revertOf = revertData;
   // `toAnswer` maps a returned value to the recorded reply (default: the
   // value itself). The reply is the outcome the reference receives: main
   // runs no epoch check of its own, so a success that crossed an
@@ -2036,4 +2047,4 @@ async function buildNamingReplay(checkout, ethers, meta) {
   return { meta, scenarios: out };
 }
 
-module.exports = { buildNamingReplay, runScenario, scenarioDefinitions, loadFakeTimers, PATCHES, __toCore };
+module.exports = { buildNamingReplay, runScenario, scenarioDefinitions, loadFakeTimers, PATCHES, __toCore, revertData };

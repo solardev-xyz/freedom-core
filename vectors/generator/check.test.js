@@ -318,6 +318,20 @@ test('replay\'s memory-budgets patch refuses what it can\'t model', async () => 
   assert.deepEqual(trace(await named(decomposed)), trace(await named(decomposed.normalize('NFC'))));
 });
 
+test('verified revert data is bytes, checked in constant stack', () => {
+  const { revertData } = replay;
+  assert.equal(revertData({ data: '0xABcd' }), '0xABcd');
+  assert.equal(revertData({ info: { error: { data: '0x12' } } }), '0x12');
+  for (const data of ['0x123', '0X12', '0xzz', ' 0x12', 12, undefined]) assert.equal(revertData({ data }), null);
+  // V8's unoptimized regexp tier backtracks on the stack: a 2 MB revert
+  // must still be recognized there.
+  const { execFileSync } = require('node:child_process');
+  const script = `const { revertData } = require(${JSON.stringify(require.resolve('./naming-replay.js'))});
+    const data = '0x' + 'ab'.repeat(2_000_000);
+    process.stdout.write(String(revertData({ data }) === data));`;
+  assert.equal(execFileSync(process.execPath, ['--no-regexp-optimization', '-e', script], { encoding: 'utf8' }), 'true');
+});
+
 test('replay\'s overall-deadline patch refuses what it can\'t model', async () => {
   const ethers = referenceEthers();
   const FakeTimers = replay.loadFakeTimers(REFERENCE);
