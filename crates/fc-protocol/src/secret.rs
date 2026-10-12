@@ -93,7 +93,7 @@ fn decode_token(token: &str) -> Result<SecretBytes, &'static str> {
 /// (or `"0x<hex>"` for [`SecretResponse::secret_hex`]).
 ///
 /// This is the one audited path that writes secrets (AGENTS.md rule 3): the
-/// onboarding phrase, the backup exports and the temporary `compat.*` keys.
+/// onboarding phrase and the backup exports.
 pub struct SecretResponse<'a> {
     id: u64,
     public: Vec<(&'static str, String)>,

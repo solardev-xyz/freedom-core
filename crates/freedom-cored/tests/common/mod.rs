@@ -123,7 +123,7 @@ pub fn request(id: u64, method: &str, params: Value) -> Value {
     json!({ "type": "request", "id": id, "method": method, "params": params, "context": { "caller": "chrome" } })
 }
 
-/// A request from main itself (caller `shell`), e.g. compat.*.
+/// A request from main itself (caller `shell`), e.g. vault.reconcile.
 pub fn shell_request(id: u64, method: &str, params: Value) -> Value {
     json!({ "type": "request", "id": id, "method": method, "params": params, "context": { "caller": "shell" } })
 }
@@ -160,7 +160,7 @@ impl Core {
         self.response(id)
     }
 
-    /// Calls with caller `shell` (main-internal methods such as compat.*).
+    /// Calls with caller `shell` (main-internal methods such as vault.reconcile).
     pub fn call_shell(&mut self, id: u64, method: &str, params: Value) -> Value {
         self.send(&shell_request(id, method, params));
         self.response(id)

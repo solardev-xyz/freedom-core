@@ -105,19 +105,23 @@ fn create_lock_unlock_export_change_delete() {
     assert_eq!(unlocked["result"]["addresses"]["user_wallet"], user_wallet);
     assert_eq!(core.event()["event"], "vault.unlocked");
 
-    // Exports and compat.
+    // The backup export; no raw-key export exists any more (design 0002:
+    // compat.* is gone), and signing happens in the core.
     let exported = core.call(
         9,
         "vault.export_mnemonic",
         json!({ "password_b64": b64("testpass1") }),
     );
     assert_eq!(decoded(&exported["result"]["mnemonic_b64"]), phrase);
-    let forbidden = core.call(10, "compat.private_key", json!({ "account": 0 }));
-    assert_eq!(forbidden["error"]["code"], "forbidden");
-    let key = core.call_shell(11, "compat.private_key", json!({ "account": 0 }));
-    let hex = key["result"]["private_key_hex"].as_str().unwrap();
-    assert_eq!(hex.len(), 66);
-    assert!(hex.starts_with("0x") && hex[2..].bytes().all(|b| b"0123456789abcdef".contains(&b)));
+    let gone = core.call_shell(10, "compat.private_key", json!({ "account": 0 }));
+    assert_eq!(gone["error"]["code"], "unknown_method", "{gone}");
+    let signed = core.call(
+        11,
+        "sign.message",
+        json!({ "key": { "kind": "account", "index": 0 }, "message": "0x01" }),
+    );
+    let signature = signed["result"]["signature"].as_str().unwrap();
+    assert_eq!(signature.len(), 132);
 
     // Change password: the lock state is unchanged (stays unlocked).
     let changed = core.call(
@@ -175,6 +179,40 @@ fn create_lock_unlock_export_change_delete() {
         )["error"]["message"],
         "No vault found"
     );
+}
+
+/// Phase 2 removed the raw-key exports (design 0002): signing happens in the
+/// core. They are unknown to every caller, unlocked or not.
+#[test]
+fn compat_exports_are_gone() {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    core.call(
+        2,
+        "vault.import",
+        json!({ "password_b64": b64("testpass1"), "mnemonic_b64": b64(ABANDON) }),
+    );
+    let mut id = 2;
+    for method in [
+        "compat.private_key",
+        "compat.bee_wallet_key",
+        "compat.publisher_key",
+    ] {
+        let params = json!({ "account": 0, "origin_index": 0 });
+        id += 1;
+        let shell = core.call_shell(id, method, params.clone());
+        assert_eq!(
+            shell["error"]["code"], "unknown_method",
+            "{method}: {shell}"
+        );
+        id += 1;
+        let chrome = core.call(id, method, params);
+        assert_eq!(
+            chrome["error"]["code"], "unknown_method",
+            "{method}: {chrome}"
+        );
+    }
 }
 
 #[test]
@@ -253,8 +291,6 @@ fn import_and_parity_errors() {
     );
     // The well-known key of that address, in ethers' format.
     const KEY: &str = "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727";
-    let compat = core.call_shell(11, "compat.private_key", json!({ "account": 0 }));
-    assert_eq!(compat["result"]["private_key_hex"], KEY);
     let exported = core.call(
         12,
         "vault.export_private_key",
@@ -599,12 +635,12 @@ fn auto_lock_is_not_postponed_by_a_busy_queue() {
     }
     burst.extend(frame(&shell_request(
         1503,
-        "compat.private_key",
-        json!({ "account": 0 }),
+        "sign.message",
+        json!({ "key": { "kind": "account", "index": 0 }, "message": "0x01" }),
     )));
     core.send_raw(&burst);
-    let compat = core.until_response(1503);
-    assert_eq!(compat["error"]["code"], "vault_locked", "{compat}");
+    let signed = core.until_response(1503);
+    assert_eq!(signed["error"]["code"], "vault_locked", "{signed}");
     let events = core.events();
     assert!(
         events.iter().any(|e| e["data"]["reason"] == "auto"),

@@ -335,9 +335,9 @@ Main's proxy has to reproduce each JS handler: argument checks and defaults, the
 | `nodes.write_identity` | `{ op_id, node: "bee", data_dir, api_port, p2p_port }` or `{ op_id, node: "radicle", home, alias }` → `{ address }` or `{ did, node_id }` | [multi-file protocol](#multi-file-writes). Bee generates a fresh keystore password and writes `config.yaml` exactly as `createBeeConfig` does, with main's per-profile ports |
 | `nodes.op_status` | `{ op_id }` → `{ status: "installed" \| "pending_recovery" \| "not_committed" \| "corrupt" }` | reconciliation after a lost reply |
 | `vault.reconcile` | see [Reconciliation](#reconciliation) | after a lost mutation reply |
-| `compat.private_key` | `{ account }` → `{ private_key }` | temporary; see Migration |
-| `compat.bee_wallet_key` | → `{ private_key }` | temporary |
-| `compat.publisher_key` | `{ origin_index }` → `{ private_key }` | temporary |
+| `compat.private_key` | `{ account }` → `{ private_key }` | temporary; removed in Phase 2 ([design 0002](0002-signing.md)) |
+| `compat.bee_wallet_key` | → `{ private_key }` | temporary; removed in Phase 2 |
+| `compat.publisher_key` | `{ origin_index }` → `{ private_key }` | temporary; removed in Phase 2 |
 
 **Events from the core:** `vault.locked { reason: "manual" | "auto" | "delete" | "shutdown", epoch }` and `vault.unlocked { epoch }`.
 
@@ -442,7 +442,7 @@ The password crosses the pipe, which is no worse than today, where it is used in
     - `keys.generate_mnemonic`;
     - `vault.create` and `vault.reconcile` for `create` (the onboarding phrase);
     - `vault.export_*`;
-    - `compat.*`.
+    - `compat.*`, until Phase 2 removed it.
 - **Logging:** log lines carry the method name, request ID, duration and error code. They never include a request or response body, and the core has no body-bearing diagnostics.
 - **Process hardening:**
   - **Linux:** `PR_SET_DUMPABLE=0`.
