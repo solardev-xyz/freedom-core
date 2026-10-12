@@ -32,9 +32,11 @@ const TRANSACTIONS = [
   { id: 'eip1559-chain-above-2-64', tx: { type: 2, chain_id: '18446744073709551617', nonce: '1', gas_limit: '21000', to: ADDRESS, value: '0', data: '0x', max_fee_per_gas: '2', max_priority_fee_per_gas: '1' } },
   // The largest legacy chain id whose v fits for both parities: 2^255 - 19.
   { id: 'legacy-chain-id-limit', tx: { type: 0, chain_id: ((2n ** 255n) - 19n).toString(), nonce: '0', gas_limit: '21000', to: ADDRESS, value: '0', data: '0x', gas_price: '1' } },
-  // Above it, ethers still signs, with a v wider than 256 bits: a transaction
-  // its own Transaction.from can't parse. The core refuses (design 0002).
-  { id: 'deviation-legacy-v-above-256-bits', deviation: 'legacy-chain-id', tx: { type: 0, chain_id: ((2n ** 255n) - 18n).toString(), nonce: '0', gas_limit: '21000', to: ADDRESS, value: '0', data: '0x', gas_price: '1' } },
+  // One above: v fits 256 bits only for parity 0 (then the transaction is
+  // valid), so the core's bound refuses a value ethers can sign correctly
+  // for some keys. Further above, ethers signs with a v wider than 256 bits,
+  // which its own Transaction.from rejects. The core refuses both.
+  { id: 'deviation-legacy-chain-parity-band', deviation: 'legacy-chain-id', tx: { type: 0, chain_id: ((2n ** 255n) - 18n).toString(), nonce: '0', gas_limit: '21000', to: ADDRESS, value: '0', data: '0x', gas_price: '1' } },
   { id: 'deviation-legacy-chain-2-255', deviation: 'legacy-chain-id', tx: { type: 0, chain_id: (2n ** 255n).toString(), nonce: '0', gas_limit: '21000', to: ADDRESS, value: '0', data: '0x', gas_price: '1' } },
   { id: 'eip1559-chain-max-u256', tx: { type: 2, chain_id: MAX_U256, nonce: '0', gas_limit: '21000', to: ADDRESS, value: '0', data: '0x', max_fee_per_gas: '2', max_priority_fee_per_gas: '1' } },
   // ethers rejects these; so does the core.
@@ -91,6 +93,17 @@ const TYPED_DATA = [
   { id: 'safe-message', typed_data: { domain: { chainId: 100, verifyingContract: SAFE }, types: { SafeMessage: [{ name: 'message', type: 'bytes' }] }, message: { message: '0x' + '5e'.repeat(32) } } },
   { id: 'eip3009-transfer-with-authorization', typed_data: { domain: { name: 'USD Coin', version: '2', chainId: 8453, verifyingContract: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' }, types: { TransferWithAuthorization: [{ name: 'from', type: 'address' }, { name: 'to', type: 'address' }, { name: 'value', type: 'uint256' }, { name: 'validAfter', type: 'uint256' }, { name: 'validBefore', type: 'uint256' }, { name: 'nonce', type: 'bytes32' }] }, message: { from: '0x9858EfFD232B4033E47d90003D41EC34EcaEda94', to: ADDRESS, value: '10000', validAfter: '1767225000', validBefore: '1767225600', nonce: '0x' + '42'.repeat(32) } } },
   { id: 'permit2-witness-transfer', typed_data: { domain: { name: 'Permit2', chainId: 8453, verifyingContract: '0x000000000022D473030F116dDEE9F6B43aC78BA3' }, types: { PermitWitnessTransferFrom: [{ name: 'permitted', type: 'TokenPermissions' }, { name: 'spender', type: 'address' }, { name: 'nonce', type: 'uint256' }, { name: 'deadline', type: 'uint256' }, { name: 'witness', type: 'Witness' }], TokenPermissions: [{ name: 'token', type: 'address' }, { name: 'amount', type: 'uint256' }], Witness: [{ name: 'to', type: 'address' }, { name: 'validAfter', type: 'uint256' }] }, message: { permitted: { token: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '10000' }, spender: '0x4020615294c913F045dc10f0a5cdEbd86c280001', nonce: '123456789012345678901234567890', deadline: '1767225600', witness: { to: ADDRESS, validAfter: '1767225000' } } } },
+  ...[8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256].flatMap((bits) => {
+    const umax = ((1n << BigInt(bits)) - 1n).toString();
+    const imax = ((1n << BigInt(bits - 1)) - 1n).toString();
+    const imin = '-' + (1n << BigInt(bits - 1)).toString();
+    const types = { M: [{ name: 'u', type: `uint${bits}` }, { name: 'i', type: `int${bits}` }, { name: 'j', type: `int${bits}` }] };
+    return [
+      { id: `bounds-${bits}`, typed_data: { domain: { name: 'W' }, types, message: { u: umax, i: imax, j: imin } } },
+      { id: `error-uint${bits}-above`, typed_data: { domain: { name: 'W' }, types: ONE(`uint${bits}`), message: { v: ((1n << BigInt(bits))).toString() } } },
+      { id: `error-int${bits}-below`, typed_data: { domain: { name: 'W' }, types: ONE(`int${bits}`), message: { v: '-' + ((1n << BigInt(bits - 1)) + 1n).toString() } } },
+    ];
+  }),
   // ethers rejects these; so does the core.
   { id: 'error-ambiguous-root', typed_data: { domain: { name: 'E' }, types: { A: [{ name: 'a', type: 'uint8' }], B: [{ name: 'b', type: 'uint8' }] }, message: { a: 1 } } },
   { id: 'error-unused-type', typed_data: { domain: { name: 'E' }, types: { M: [{ name: 'a', type: 'uint8' }], U: [{ name: 'x', type: 'uint8' }] }, message: { a: 1 } } },
@@ -126,6 +139,12 @@ const TYPED_DATA = [
   // identifiers only, so encodeType strings can't be forged (design 0002).
   { id: 'deviation-field-name-not-identifier', deviation: 'names-identifiers', typed_data: { domain: { name: 'D' }, types: { M: [{ name: 'a,uint8 b', type: 'uint8' }] }, message: { 'a,uint8 b': 1 } } },
   { id: 'deviation-type-name-not-identifier', deviation: 'names-identifiers', typed_data: { domain: { name: 'D' }, types: { 'Mail Box': [{ name: 'a', type: 'uint8' }] }, message: { a: 1 } } },
+  // ethers has no limits; the core does (design 0002, "Limits").
+  { id: 'deviation-limit-name-length', deviation: 'limits', typed_data: { domain: { name: 'D' }, types: { M: [{ name: 'n'.repeat(257), type: 'uint8' }] }, message: { ['n'.repeat(257)]: 1 } } },
+  { id: 'deviation-limit-types', deviation: 'limits', typed_data: { domain: { name: 'D' }, types: { M: Array.from({ length: 256 }, (_, i) => ({ name: `f${i}`, type: `T${i}` })), ...Object.fromEntries(Array.from({ length: 256 }, (_, i) => [`T${i}`, []])) }, message: Object.fromEntries(Array.from({ length: 256 }, (_, i) => [`f${i}`, {}])) } },
+  { id: 'deviation-limit-fields-per-type', deviation: 'limits', typed_data: { domain: { name: 'D' }, types: { M: Array.from({ length: 257 }, (_, i) => ({ name: `f${i}`, type: 'bool' })) }, message: Object.fromEntries(Array.from({ length: 257 }, (_, i) => [`f${i}`, true])) } },
+  { id: 'deviation-limit-dimensions', deviation: 'limits', typed_data: { domain: { name: 'D' }, types: ONE('uint8' + '[]'.repeat(33)), message: { v: [] } } },
+  { id: 'deviation-limit-depth', deviation: 'limits', typed_data: { domain: { name: 'D' }, types: ONE('uint8' + '[]'.repeat(32)), message: { v: JSON.parse('['.repeat(32) + ']'.repeat(32)) } } },
   // Accepted by both: aliases, null domain fields, chain id 0, empty structs.
   { id: 'uint-int-aliases', typed_data: { domain: { name: 'Alias' }, types: { M: [{ name: 'a', type: 'uint' }, { name: 'b', type: 'int' }] }, message: { a: '7', b: '-7' } } },
   { id: 'domain-null-field-skipped', typed_data: { domain: { name: null, version: '1', chainId: 0 }, types: ONE('uint8'), message: { v: 1 } } },
