@@ -214,6 +214,12 @@ fn same(got: &JsValue, want: &JsValue) -> bool {
 struct Exchange {
     entry: JsValue,
     used: bool,
+    /// The core's request this exchange answers.
+    request: Option<u64>,
+    /// When the core cancelled it, before its answer.
+    cancelled: Option<u64>,
+    /// Whether its answer reached the core.
+    delivered: bool,
 }
 
 const STALL_MS: u64 = 10;
@@ -259,6 +265,15 @@ impl Driver {
                 collected.extend(replies);
             }
             for effect in machine.take_effects() {
+                if let Effect::Cancel { id, at } = effect {
+                    if let Some(exchange) =
+                        self.exchanges.iter_mut().find(|e| e.request == Some(id))
+                        && !exchange.delivered
+                    {
+                        exchange.cancelled = Some(at);
+                    }
+                    continue;
+                }
                 if let Effect::Request { id, at, request } = effect {
                     let Some(index) = self.match_exchange(&request, at) else {
                         self.mismatches
@@ -266,6 +281,7 @@ impl Driver {
                         continue;
                     };
                     self.exchanges[index].used = true;
+                    self.exchanges[index].request = Some(id);
                     if matches!(request, Request::Rpc { .. }) {
                         // ethers' stall: the world sees the request 10 ms later.
                         self.token(machine, at + STALL_MS, Token::Stall(id, index));
@@ -287,6 +303,12 @@ impl Driver {
                 Some(Fired::External(token)) => match self.tokens.remove(&token) {
                     Some(Token::Stall(id, index)) => self.schedule_answer(machine, index, id),
                     Some(Token::Deliver(id, answer)) => {
+                        if let Some(exchange) =
+                            self.exchanges.iter_mut().find(|e| e.request == Some(id))
+                            && exchange.cancelled.is_none()
+                        {
+                            exchange.delivered = true;
+                        }
                         machine.complete(id, answer);
                     }
                     Some(Token::Availability(ready)) => machine.availability(ready),
@@ -445,6 +467,9 @@ fn replay(scenario: &JsValue) -> Result<Vec<String>, String> {
         .map(|e| Exchange {
             entry: e.clone(),
             used: false,
+            request: None,
+            cancelled: None,
+            delivered: false,
         })
         .collect();
     let mut driver = Driver {
@@ -577,6 +602,22 @@ fn replay(scenario: &JsValue) -> Result<Vec<String>, String> {
         })
         .collect();
     driver.mismatches.extend(unused);
+    // Cancellations (design 0004, Replay): one the reference recorded must
+    // happen at the same time in the core, and a prefetch is cancelled only
+    // where the reference cancelled it. Any other exchange the core
+    // cancels is one it stopped waiting for (`abandoned-exchanges`).
+    for exchange in driver.exchanges.iter().filter(|e| e.used) {
+        let e = &exchange.entry;
+        let reference = (str_of(e.get("outcome")) == "cancelled").then(|| num(e.get("end")));
+        let prefetch = str_of(e.get("kind")) == "prefetch";
+        if (reference.is_some() || prefetch) && reference != exchange.cancelled {
+            driver.mismatches.push(format!(
+                "{id}: cancelled at {:?} instead of {reference:?}: {}",
+                exchange.cancelled,
+                e.stringify().chars().take(200).collect::<String>()
+            ));
+        }
+    }
     Ok(driver.mismatches)
 }
 
