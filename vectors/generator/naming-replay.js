@@ -45,9 +45,9 @@ function describe(value) {
  * Colibri adapters) see this same instance. `restore` evicts every checkout
  * module, so no state survives into the next scenario.
  */
-function loadResolver(checkout, stubs) {
+function loadResolver(checkout, stubs, file = 'ens-resolver.js') {
   const main = path.join(checkout, 'src/main');
-  const filename = path.join(main, 'ens-resolver.js');
+  const filename = path.join(main, file);
   const byPath = new Map(Object.entries(stubs).map(([rel, stub]) => [path.join(main, `${rel}.js`), stub]));
   const originalLoad = Module._load;
   Module._load = function load(request, parent, isMain) {
@@ -64,7 +64,7 @@ function loadResolver(checkout, stubs) {
     return originalLoad.call(this, request, parent, isMain);
   };
   const evict = () => {
-    for (const key of Object.keys(Module._cache)) if (key.startsWith(main)) delete Module._cache[key];
+    for (const key of Object.keys(Module._cache)) if (key.startsWith(path.join(checkout, 'src'))) delete Module._cache[key];
   };
   evict();
   const mod = new Module(filename, null);
@@ -281,6 +281,149 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
   }
 }
 
+/**
+ * Runs one Tezos Domains scenario: the pinned tezos-domains-resolver.js
+ * with a scripted Tezos node per endpoint behind its `fetchImpl` parameter.
+ * `world.endpoints` is passed as its `endpoints` parameter (the IPC path
+ * reads TEZOS_RPC and the defaults instead).
+ */
+async function runTezosScenario(checkout, FakeTimers, scenario) {
+  const { world } = scenario;
+  const requests = [];
+  const now = () => Date.now() - EPOCH;
+  const json = (status, body) => new Response(body === undefined ? '' : JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+
+  const node = (plan, method, route) => {
+    if (plan.fail) return json(500, { error: 'down' });
+    const level = plan.level ?? TEZ_HEAD;
+    if (route === '/chains/main/chain_id') return json(200, plan.chain ?? 'NetXdQprcVkpaWU');
+    if (route === '/chains/main/blocks/head/header') return json(200, { level });
+    let m = route.match(/^\/chains\/main\/blocks\/(\d+)\/hash$/);
+    if (m) return json(200, `BL${plan.fork ? 'fork' : 'main'}${m[1]}`);
+    m = route.match(/^\/chains\/main\/blocks\/([^/]+)\/context\/(.*)$/);
+    if (!m) return json(404);
+    const [, , rest] = m;
+    if (method === 'POST' && rest === `contracts/${TEZ_PROXY}/script/normalized`) return json(200, tezProxyScript());
+    if (method === 'POST' && rest === `contracts/${TEZ_REGISTRY}/script/normalized`) {
+      return plan.scriptFail ? json(500, { error: 'script' }) : json(200, tezRegistryScript());
+    }
+    if (rest.startsWith('big_maps/1264/')) {
+      const record = plan.record ?? world.record;
+      return record === null ? json(404) : json(200, record);
+    }
+    if (rest.startsWith('big_maps/1265/')) return json(200, { string: plan.expiry ?? world.expiry });
+    return json(404);
+  };
+
+  const fetchImpl = (url, init = {}) => {
+    const { host, pathname } = new URL(url);
+    const plan = world.hosts?.[host] || {};
+    const method = init.method ?? 'GET';
+    requests.push({ t: now(), host, method, path: pathname });
+    return new Promise((resolve, reject) => {
+      const abort = () => reject(Object.assign(new Error('This operation was aborted'), { name: 'AbortError' }));
+      if (init.signal?.aborted) return abort();
+      init.signal?.addEventListener('abort', abort, { once: true });
+      if (plan.hang) return;
+      setTimeout(() => resolve(node(plan, method, pathname)), plan.delay ?? 10);
+    });
+  };
+
+  const stubs = {
+    electron: { ipcMain: { handle() {} } },
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    'private/private-log-context': { runWithPrivateLogContext: (_p, fn) => fn(), redactForLog: (v) => v },
+    'private/private-windows': { isPrivateWebContents: () => false },
+  };
+  const clock = FakeTimers.install({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'], now: EPOCH });
+  const { resolver, restore } = loadResolver(checkout, stubs, 'tezos-domains-resolver.js');
+  try {
+    const run = async (name) => {
+      let done = false;
+      let outcome;
+      resolver.resolveTezosDomain(name, { fetchImpl, endpoints: world.endpoints }).then(
+        (value) => { done = true; outcome = { value: describe(value) }; },
+        (error) => { done = true; outcome = { thrown: error.message }; }
+      );
+      for (let i = 0; !done && i < 4000; i += 1) await clock.tickAsync(25);
+      return done ? outcome : { pending: true };
+    };
+    const calls = [];
+    const first = await run(scenario.call.args[0]);
+    calls.push({ call: scenario.call, at: 0, requests: requests.splice(0), ...first, elapsed: now() });
+    for (const next of scenario.then ?? []) {
+      await clock.tickAsync(next.after ?? 0);
+      Object.assign(world, next.world ?? {});
+      const start = now();
+      const out = await run(next.call.args[0]);
+      calls.push({ call: next.call, at: start, requests: requests.splice(0), ...out, elapsed: now() - start });
+    }
+    return calls;
+  } finally {
+    clock.uninstall();
+    restore();
+  }
+}
+
+const TEZ_HEAD = 9_000_000;
+const TEZ_PROXY = 'KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ';
+const TEZ_REGISTRY = 'KT1' + 'Rg'.repeat(16) + 'x';
+const tezProxyScript = () => ({
+  code: [
+    { prim: 'parameter', args: [{ prim: 'unit' }] },
+    { prim: 'storage', args: [{ prim: 'pair', args: [{ prim: 'address', annots: ['%contract'] }, { prim: 'address', annots: ['%owner'] }] }] },
+  ],
+  storage: { prim: 'Pair', args: [{ string: TEZ_REGISTRY }, { string: 'tz1' + 'b'.repeat(33) }] },
+});
+const TEZ_RECORD_TYPE = {
+  prim: 'pair',
+  args: [
+    { prim: 'map', args: [{ prim: 'string' }, { prim: 'bytes' }], annots: ['%data'] },
+    { prim: 'option', args: [{ prim: 'bytes' }], annots: ['%expiry_key'] },
+  ],
+};
+const tezRegistryScript = () => ({
+  code: [{
+    prim: 'storage',
+    args: [{ prim: 'pair', args: [
+      { prim: 'big_map', args: [{ prim: 'bytes' }, TEZ_RECORD_TYPE], annots: ['%records'] },
+      { prim: 'big_map', args: [{ prim: 'bytes' }, { prim: 'timestamp' }], annots: ['%expiry_map'] },
+    ] }],
+  }],
+  storage: { prim: 'Pair', args: [{ int: '1264' }, { int: '1265' }] },
+});
+/** A record: `data` maps keys to JSON values (bytes of their JSON text). */
+const tezRecord = (data, expiryKey = 'abcd') => ({
+  prim: 'Pair',
+  args: [
+    Object.entries(data).map(([key, value]) => ({ prim: 'Elt', args: [{ string: key }, { bytes: Buffer.from(JSON.stringify(value)).toString('hex') }] })),
+    expiryKey ? { prim: 'Some', args: [{ bytes: expiryKey }] } : { prim: 'None' },
+  ],
+});
+
+function tezosScenarios() {
+  const T = ['https://t1.tez.example', 'https://t2.tez.example', 'https://t3.tez.example'];
+  const SITE = 'ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/';
+  const base = (extra) => ({ endpoints: T, record: tezRecord({ 'web:content_url': SITE, 'td:ttl': 600 }), expiry: '2030-01-01T00:00:00Z', ...extra });
+  const tez = { fn: 'resolveTezosDomain', args: ['alice.tez'] };
+  return [
+    { id: 'tezos-agree', world: base({}), call: tez, then: [{ after: 1000, call: tez }, { after: 60_000, call: { fn: 'resolveTezosDomain', args: ['bob.tez'] } }] },
+    { id: 'tezos-one-liar', world: base({ hosts: { 't2.tez.example': { record: tezRecord({ 'web:content_url': 'https://evil.example/' }) } } }), call: tez },
+    { id: 'tezos-head-outlier', world: base({ hosts: { 't3.tez.example': { level: TEZ_HEAD - 61 } } }), call: tez },
+    { id: 'tezos-heads-scattered', world: base({ hosts: { 't1.tez.example': { level: TEZ_HEAD - 200 }, 't3.tez.example': { level: TEZ_HEAD + 200 } } }), call: tez },
+    { id: 'tezos-anchor-split', world: base({ hosts: { 't2.tez.example': { fork: true } } }), call: tez },
+    { id: 'tezos-two-down', world: base({ hosts: { 't1.tez.example': { fail: true }, 't2.tez.example': { hang: true } } }), call: tez, then: [{ after: 1000, call: tez }] },
+    { id: 'tezos-all-down', world: base({ hosts: { 't1.tez.example': { fail: true }, 't2.tez.example': { fail: true }, 't3.tez.example': { fail: true } } }), call: tez, then: [{ after: 1000, call: tez }] },
+    { id: 'tezos-expired', world: base({ expiry: '2020-01-01T00:00:00Z' }), call: tez },
+    { id: 'tezos-expiry-unparseable', world: base({ expiry: 'not a date' }), call: tez },
+    { id: 'tezos-redirect', world: base({ record: tezRecord({ 'web:redirect_url': 'https://alice.example/' }) }), call: tez },
+    { id: 'tezos-no-website', world: base({ record: tezRecord({ 'td:ttl': 60 }, null) }), call: tez },
+    { id: 'tezos-no-record', world: base({ record: null }), call: tez, then: [{ after: 31_000, call: tez }] },
+    { id: 'tezos-registry-script-fails-once', world: base({ hosts: { 't1.tez.example': { scriptFail: true } } }), call: tez },
+    { id: 'tezos-invalid-name', world: base({}), call: { fn: 'resolveTezosDomain', args: ['alice.eth'] } },
+  ];
+}
+
 const ENDPOINTS = ['https://a.rpc.example', 'https://b.rpc.example', 'https://c.rpc.example', 'https://d.rpc.example'];
 const QUORUM_NETWORK = { verification: { order: ['quorum'], preferVerified: false }, quorum: { k: 3, m: 2, timeoutMs: 5000, anchor: 'latest', anchorTtlMs: 30000 } };
 
@@ -374,6 +517,9 @@ async function buildNamingReplay(checkout, ethers, meta) {
   const out = [];
   for (const scenario of scenarios(ethers)) {
     out.push({ id: scenario.id, calls: await runScenario(checkout, ethers, FakeTimers, scenario) });
+  }
+  for (const scenario of tezosScenarios()) {
+    out.push({ id: scenario.id, calls: await runTezosScenario(checkout, FakeTimers, scenario) });
   }
   return { meta, scenarios: out };
 }

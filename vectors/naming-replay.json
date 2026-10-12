@@ -2536,6 +2536,2203 @@
           "elapsed": 75
         }
       ]
+    },
+    {
+      "id": "tezos-agree",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveTezosDomain",
+            "args": [
+              "alice.tez"
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 10,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 10,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 10,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 20,
+              "host": "t1.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 20,
+              "host": "t2.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 20,
+              "host": "t3.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t1.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t2.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t3.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 40,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 40,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 40,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 50,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy"
+            },
+            {
+              "t": 50,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy"
+            },
+            {
+              "t": 50,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy"
+            }
+          ],
+          "value": {
+            "type": "ok",
+            "protocol": "ipfs",
+            "uri": "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/",
+            "decoded": "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+            "basePath": "",
+            "redirect": false,
+            "system": "tezos",
+            "expiry": "2030-01-01T00:00:00Z",
+            "ttl": 600,
+            "trust": {
+              "level": "verified",
+              "system": "tezos",
+              "block": {
+                "number": 8999992,
+                "hash": "BLmain8999992"
+              },
+              "k": 3,
+              "m": 3,
+              "agreed": [
+                "https://t1.tez.example",
+                "https://t2.tez.example",
+                "https://t3.tez.example"
+              ]
+            }
+          },
+          "elapsed": 75
+        },
+        {
+          "call": {
+            "fn": "resolveTezosDomain",
+            "args": [
+              "alice.tez"
+            ]
+          },
+          "at": 1075,
+          "requests": [],
+          "value": {
+            "type": "ok",
+            "protocol": "ipfs",
+            "uri": "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/",
+            "decoded": "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+            "basePath": "",
+            "redirect": false,
+            "system": "tezos",
+            "expiry": "2030-01-01T00:00:00Z",
+            "ttl": 600,
+            "trust": {
+              "level": "verified",
+              "system": "tezos",
+              "block": {
+                "number": 8999992,
+                "hash": "BLmain8999992"
+              },
+              "k": 3,
+              "m": 3,
+              "agreed": [
+                "https://t1.tez.example",
+                "https://t2.tez.example",
+                "https://t3.tez.example"
+              ]
+            }
+          },
+          "elapsed": 25
+        },
+        {
+          "call": {
+            "fn": "resolveTezosDomain",
+            "args": [
+              "bob.tez"
+            ]
+          },
+          "at": 61100,
+          "requests": [
+            {
+              "t": 61100,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 61100,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 61100,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 61100,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 61100,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 61100,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 61110,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 61110,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 61110,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 61120,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruBxZZR3idSSmR2rhkqss4siNZnYuPAw3pjicVrnbqRXobPddpd"
+            },
+            {
+              "t": 61120,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruBxZZR3idSSmR2rhkqss4siNZnYuPAw3pjicVrnbqRXobPddpd"
+            },
+            {
+              "t": 61120,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruBxZZR3idSSmR2rhkqss4siNZnYuPAw3pjicVrnbqRXobPddpd"
+            },
+            {
+              "t": 61130,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy"
+            },
+            {
+              "t": 61130,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy"
+            },
+            {
+              "t": 61130,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy"
+            }
+          ],
+          "value": {
+            "type": "ok",
+            "protocol": "ipfs",
+            "uri": "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/",
+            "decoded": "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+            "basePath": "",
+            "redirect": false,
+            "system": "tezos",
+            "expiry": "2030-01-01T00:00:00Z",
+            "ttl": 600,
+            "trust": {
+              "level": "verified",
+              "system": "tezos",
+              "block": {
+                "number": 8999992,
+                "hash": "BLmain8999992"
+              },
+              "k": 3,
+              "m": 3,
+              "agreed": [
+                "https://t1.tez.example",
+                "https://t2.tez.example",
+                "https://t3.tez.example"
+              ]
+            }
+          },
+          "elapsed": 50
+        }
+      ]
+    },
+    {
+      "id": "tezos-one-liar",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveTezosDomain",
+            "args": [
+              "alice.tez"
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 10,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 10,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 10,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 20,
+              "host": "t1.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 20,
+              "host": "t2.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 20,
+              "host": "t3.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t1.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t2.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t3.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 40,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 40,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 40,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 50,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy"
+            },
+            {
+              "t": 50,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy"
+            },
+            {
+              "t": 50,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy"
+            }
+          ],
+          "value": {
+            "type": "ok",
+            "protocol": "ipfs",
+            "uri": "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/",
+            "decoded": "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+            "basePath": "",
+            "redirect": false,
+            "system": "tezos",
+            "expiry": "2030-01-01T00:00:00Z",
+            "ttl": 600,
+            "trust": {
+              "level": "verified",
+              "system": "tezos",
+              "block": {
+                "number": 8999992,
+                "hash": "BLmain8999992"
+              },
+              "k": 3,
+              "m": 2,
+              "agreed": [
+                "https://t1.tez.example",
+                "https://t3.tez.example"
+              ]
+            }
+          },
+          "elapsed": 75
+        }
+      ]
+    },
+    {
+      "id": "tezos-head-outlier",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveTezosDomain",
+            "args": [
+              "alice.tez"
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 10,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 10,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 20,
+              "host": "t1.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 20,
+              "host": "t2.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t1.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t2.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 40,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 40,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 50,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy"
+            },
+            {
+              "t": 50,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy"
+            }
+          ],
+          "value": {
+            "type": "ok",
+            "protocol": "ipfs",
+            "uri": "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/",
+            "decoded": "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+            "basePath": "",
+            "redirect": false,
+            "system": "tezos",
+            "expiry": "2030-01-01T00:00:00Z",
+            "ttl": 600,
+            "trust": {
+              "level": "verified",
+              "system": "tezos",
+              "block": {
+                "number": 8999992,
+                "hash": "BLmain8999992"
+              },
+              "k": 2,
+              "m": 2,
+              "agreed": [
+                "https://t1.tez.example",
+                "https://t2.tez.example"
+              ]
+            }
+          },
+          "elapsed": 75
+        }
+      ]
+    },
+    {
+      "id": "tezos-heads-scattered",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveTezosDomain",
+            "args": [
+              "alice.tez"
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            }
+          ],
+          "value": {
+            "type": "conflict",
+            "reason": "Tezos RPC providers disagree about the chain head",
+            "system": "tezos",
+            "groups": [
+              {
+                "value": "chain head #8999800",
+                "urls": [
+                  "t1.tez.example"
+                ]
+              },
+              {
+                "value": "chain head #9000000",
+                "urls": [
+                  "t2.tez.example"
+                ]
+              },
+              {
+                "value": "chain head #9000200",
+                "urls": [
+                  "t3.tez.example"
+                ]
+              }
+            ],
+            "trust": {
+              "level": "conflict",
+              "system": "tezos",
+              "block": null,
+              "k": 3,
+              "m": 1
+            }
+          },
+          "elapsed": 25
+        }
+      ]
+    },
+    {
+      "id": "tezos-anchor-split",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveTezosDomain",
+            "args": [
+              "alice.tez"
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 10,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 10,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 10,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 20,
+              "host": "t1.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 20,
+              "host": "t3.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t1.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t3.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 40,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 40,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 50,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy"
+            },
+            {
+              "t": 50,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy"
+            }
+          ],
+          "value": {
+            "type": "ok",
+            "protocol": "ipfs",
+            "uri": "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/",
+            "decoded": "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+            "basePath": "",
+            "redirect": false,
+            "system": "tezos",
+            "expiry": "2030-01-01T00:00:00Z",
+            "ttl": 600,
+            "trust": {
+              "level": "verified",
+              "system": "tezos",
+              "block": {
+                "number": 8999992,
+                "hash": "BLmain8999992"
+              },
+              "k": 2,
+              "m": 2,
+              "agreed": [
+                "https://t1.tez.example",
+                "https://t3.tez.example"
+              ]
+            }
+          },
+          "elapsed": 75
+        }
+      ]
+    },
+    {
+      "id": "tezos-two-down",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveTezosDomain",
+            "args": [
+              "alice.tez"
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 8000,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 8010,
+              "host": "t3.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 8020,
+              "host": "t3.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 8030,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 8040,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy"
+            }
+          ],
+          "value": {
+            "type": "ok",
+            "protocol": "ipfs",
+            "uri": "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/",
+            "decoded": "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+            "basePath": "",
+            "redirect": false,
+            "system": "tezos",
+            "expiry": "2030-01-01T00:00:00Z",
+            "ttl": 600,
+            "trust": {
+              "level": "unverified",
+              "system": "tezos",
+              "block": {
+                "number": 8999992,
+                "hash": "BLmain8999992"
+              },
+              "k": 1,
+              "m": 1,
+              "agreed": [
+                "https://t3.tez.example"
+              ]
+            }
+          },
+          "elapsed": 8050
+        },
+        {
+          "call": {
+            "fn": "resolveTezosDomain",
+            "args": [
+              "alice.tez"
+            ]
+          },
+          "at": 9050,
+          "requests": [],
+          "value": {
+            "type": "ok",
+            "protocol": "ipfs",
+            "uri": "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/",
+            "decoded": "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+            "basePath": "",
+            "redirect": false,
+            "system": "tezos",
+            "expiry": "2030-01-01T00:00:00Z",
+            "ttl": 600,
+            "trust": {
+              "level": "unverified",
+              "system": "tezos",
+              "block": {
+                "number": 8999992,
+                "hash": "BLmain8999992"
+              },
+              "k": 1,
+              "m": 1,
+              "agreed": [
+                "https://t3.tez.example"
+              ]
+            }
+          },
+          "elapsed": 25
+        }
+      ]
+    },
+    {
+      "id": "tezos-all-down",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveTezosDomain",
+            "args": [
+              "alice.tez"
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            }
+          ],
+          "value": {
+            "type": "error",
+            "reason": "all Tezos RPC providers failed",
+            "system": "tezos"
+          },
+          "elapsed": 25
+        },
+        {
+          "call": {
+            "fn": "resolveTezosDomain",
+            "args": [
+              "alice.tez"
+            ]
+          },
+          "at": 1025,
+          "requests": [
+            {
+              "t": 1025,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 1025,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 1025,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 1025,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 1025,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 1025,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            }
+          ],
+          "value": {
+            "type": "error",
+            "reason": "all Tezos RPC providers failed",
+            "system": "tezos"
+          },
+          "elapsed": 25
+        }
+      ]
+    },
+    {
+      "id": "tezos-expired",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveTezosDomain",
+            "args": [
+              "alice.tez"
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 10,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 10,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 10,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 20,
+              "host": "t1.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 20,
+              "host": "t2.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 20,
+              "host": "t3.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t1.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t2.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t3.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 40,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 40,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 40,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 50,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy"
+            },
+            {
+              "t": 50,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy"
+            },
+            {
+              "t": 50,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy"
+            }
+          ],
+          "value": {
+            "type": "not_found",
+            "reason": "domain record expired",
+            "expiry": "2020-01-01T00:00:00Z",
+            "system": "tezos",
+            "trust": {
+              "level": "verified",
+              "system": "tezos",
+              "block": {
+                "number": 8999992,
+                "hash": "BLmain8999992"
+              },
+              "k": 3,
+              "m": 3,
+              "agreed": [
+                "https://t1.tez.example",
+                "https://t2.tez.example",
+                "https://t3.tez.example"
+              ]
+            }
+          },
+          "elapsed": 75
+        }
+      ]
+    },
+    {
+      "id": "tezos-expiry-unparseable",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveTezosDomain",
+            "args": [
+              "alice.tez"
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 10,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 10,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 10,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 20,
+              "host": "t1.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 20,
+              "host": "t2.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 20,
+              "host": "t3.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t1.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t2.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t3.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 40,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 40,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 40,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 50,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy"
+            },
+            {
+              "t": 50,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy"
+            },
+            {
+              "t": 50,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy"
+            }
+          ],
+          "value": {
+            "type": "ok",
+            "protocol": "ipfs",
+            "uri": "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/",
+            "decoded": "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+            "basePath": "",
+            "redirect": false,
+            "system": "tezos",
+            "expiry": "not a date",
+            "ttl": 600,
+            "trust": {
+              "level": "verified",
+              "system": "tezos",
+              "block": {
+                "number": 8999992,
+                "hash": "BLmain8999992"
+              },
+              "k": 3,
+              "m": 3,
+              "agreed": [
+                "https://t1.tez.example",
+                "https://t2.tez.example",
+                "https://t3.tez.example"
+              ]
+            }
+          },
+          "elapsed": 75
+        }
+      ]
+    },
+    {
+      "id": "tezos-redirect",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveTezosDomain",
+            "args": [
+              "alice.tez"
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 10,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 10,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 10,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 20,
+              "host": "t1.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 20,
+              "host": "t2.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 20,
+              "host": "t3.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t1.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t2.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t3.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 40,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 40,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 40,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 50,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy"
+            },
+            {
+              "t": 50,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy"
+            },
+            {
+              "t": 50,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy"
+            }
+          ],
+          "value": {
+            "type": "ok",
+            "protocol": "https",
+            "uri": "https://alice.example/",
+            "redirect": true,
+            "system": "tezos",
+            "expiry": "2030-01-01T00:00:00Z",
+            "ttl": {
+              "$undefined": true
+            },
+            "trust": {
+              "level": "verified",
+              "system": "tezos",
+              "block": {
+                "number": 8999992,
+                "hash": "BLmain8999992"
+              },
+              "k": 3,
+              "m": 3,
+              "agreed": [
+                "https://t1.tez.example",
+                "https://t2.tez.example",
+                "https://t3.tez.example"
+              ]
+            }
+          },
+          "elapsed": 75
+        }
+      ]
+    },
+    {
+      "id": "tezos-no-website",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveTezosDomain",
+            "args": [
+              "alice.tez"
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 10,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 10,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 10,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 20,
+              "host": "t1.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 20,
+              "host": "t2.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 20,
+              "host": "t3.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t1.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t2.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t3.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 40,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 40,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 40,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            }
+          ],
+          "value": {
+            "type": "not_found",
+            "reason": "domain has no website record",
+            "expiry": null,
+            "ttl": 60,
+            "system": "tezos",
+            "trust": {
+              "level": "verified",
+              "system": "tezos",
+              "block": {
+                "number": 8999992,
+                "hash": "BLmain8999992"
+              },
+              "k": 3,
+              "m": 3,
+              "agreed": [
+                "https://t1.tez.example",
+                "https://t2.tez.example",
+                "https://t3.tez.example"
+              ]
+            }
+          },
+          "elapsed": 50
+        }
+      ]
+    },
+    {
+      "id": "tezos-no-record",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveTezosDomain",
+            "args": [
+              "alice.tez"
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 10,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 10,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 10,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 20,
+              "host": "t1.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 20,
+              "host": "t2.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 20,
+              "host": "t3.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t1.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t2.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t3.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 40,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 40,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 40,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            }
+          ],
+          "value": {
+            "type": "not_found",
+            "reason": "domain record not found",
+            "system": "tezos",
+            "trust": {
+              "level": "verified",
+              "system": "tezos",
+              "block": {
+                "number": 8999992,
+                "hash": "BLmain8999992"
+              },
+              "k": 3,
+              "m": 3,
+              "agreed": [
+                "https://t1.tez.example",
+                "https://t2.tez.example",
+                "https://t3.tez.example"
+              ]
+            }
+          },
+          "elapsed": 50
+        },
+        {
+          "call": {
+            "fn": "resolveTezosDomain",
+            "args": [
+              "alice.tez"
+            ]
+          },
+          "at": 31050,
+          "requests": [
+            {
+              "t": 31050,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 31050,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 31050,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 31050,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 31050,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 31050,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 31060,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 31060,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 31060,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 31070,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 31070,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 31070,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            }
+          ],
+          "value": {
+            "type": "not_found",
+            "reason": "domain record not found",
+            "system": "tezos",
+            "trust": {
+              "level": "verified",
+              "system": "tezos",
+              "block": {
+                "number": 8999992,
+                "hash": "BLmain8999992"
+              },
+              "k": 3,
+              "m": 3,
+              "agreed": [
+                "https://t1.tez.example",
+                "https://t2.tez.example",
+                "https://t3.tez.example"
+              ]
+            }
+          },
+          "elapsed": 50
+        }
+      ]
+    },
+    {
+      "id": "tezos-registry-script-fails-once",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveTezosDomain",
+            "args": [
+              "alice.tez"
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/chain_id"
+            },
+            {
+              "t": 0,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/head/header"
+            },
+            {
+              "t": 10,
+              "host": "t1.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 10,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 10,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/8999992/hash"
+            },
+            {
+              "t": 20,
+              "host": "t1.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 20,
+              "host": "t2.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 20,
+              "host": "t3.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t1.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t2.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 30,
+              "host": "t3.tez.example",
+              "method": "POST",
+              "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized"
+            },
+            {
+              "t": 40,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 40,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z"
+            },
+            {
+              "t": 50,
+              "host": "t2.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy"
+            },
+            {
+              "t": 50,
+              "host": "t3.tez.example",
+              "method": "GET",
+              "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy"
+            }
+          ],
+          "value": {
+            "type": "ok",
+            "protocol": "ipfs",
+            "uri": "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/",
+            "decoded": "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+            "basePath": "",
+            "redirect": false,
+            "system": "tezos",
+            "expiry": "2030-01-01T00:00:00Z",
+            "ttl": 600,
+            "trust": {
+              "level": "verified",
+              "system": "tezos",
+              "block": {
+                "number": 8999992,
+                "hash": "BLmain8999992"
+              },
+              "k": 2,
+              "m": 2,
+              "agreed": [
+                "https://t2.tez.example",
+                "https://t3.tez.example"
+              ]
+            }
+          },
+          "elapsed": 75
+        }
+      ]
+    },
+    {
+      "id": "tezos-invalid-name",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveTezosDomain",
+            "args": [
+              "alice.eth"
+            ]
+          },
+          "at": 0,
+          "requests": [],
+          "value": {
+            "type": "not_found",
+            "reason": "invalid .tez domain",
+            "system": "tezos"
+          },
+          "elapsed": 25
+        }
+      ]
     }
   ]
 }
