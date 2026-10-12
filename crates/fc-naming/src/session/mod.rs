@@ -5,3 +5,4 @@
 pub mod exec;
 pub mod pool;
 pub mod random;
+pub mod rpc;
