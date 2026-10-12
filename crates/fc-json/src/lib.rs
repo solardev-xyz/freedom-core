@@ -15,6 +15,11 @@
 //!   numeric order, then the others in insertion order;
 //! - only JSON whitespace (tab, LF, CR, space) is allowed around tokens, so
 //!   a byte-order mark is an error, as in V8.
+//!
+//! [`index`] reads the same grammar without building values: a large text
+//! is kept once, with the spans of its values.
+
+pub mod index;
 
 /// A parsed JSON value with JavaScript's semantics.
 #[derive(Debug, Clone, PartialEq)]
