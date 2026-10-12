@@ -166,6 +166,9 @@ fn bounds(world: &JsValue) -> Bounds {
     if let Some(n) = get("callersPerSession") {
         bounds.callers_per_session = n;
     }
+    if let Some(n) = get("retiredEndpoints") {
+        bounds.retired_endpoints = n;
+    }
     if let Some(n) = get("deadlineMs") {
         bounds.deadline_ms = n as u64;
     }
@@ -505,7 +508,7 @@ fn verified_matches(op: &VerifiedOp, e: &JsValue) -> bool {
 
 fn replay(scenario: &JsValue) -> Result<Vec<String>, String> {
     let id = str_of(scenario.get("id"));
-    let world = scenario.get("world").cloned().unwrap_or(JsValue::Null);
+    let mut world = scenario.get("world").cloned().unwrap_or(JsValue::Null);
     #[allow(clippy::cast_possible_truncation)]
     let seed = num(scenario.get("seed")) as u32;
     let system = str_of(scenario.get("system"));
@@ -553,6 +556,21 @@ fn replay(scenario: &JsValue) -> Result<Vec<String>, String> {
         // Time passes before the step, with everything due on the way.
         let until = machine.now() + num(step.get("after"));
         driver.drive(&mut machine, until, None);
+        // A changed world is main's new configuration snapshot, sent before
+        // the step's lookups (`Object.assign` of its top-level keys).
+        if let (Some(JsValue::Object(changes)), JsValue::Object(members)) =
+            (step.get("world"), &world)
+        {
+            let mut members = members.clone();
+            for (key, value) in changes {
+                match members.iter_mut().find(|(k, _)| k == key) {
+                    Some(member) => member.1 = value.clone(),
+                    None => members.push((key.clone(), value.clone())),
+                }
+            }
+            world = JsValue::Object(members);
+            machine.configure(config(&world, system), false);
+        }
         let start = machine.now();
         for event in step
             .get("events")

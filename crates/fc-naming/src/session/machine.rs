@@ -138,6 +138,31 @@ pub struct Machine {
     next_caller: u64,
     ens_generation: u64,
     tezos_generation: u64,
+    /// Retired RPC and Tezos endpoints, oldest first (`endpoint-retention`).
+    retired_rpc: std::collections::VecDeque<String>,
+    retired_tezos: std::collections::VecDeque<String>,
+}
+
+/// Deviation `endpoint-retention`: endpoints that left the configuration
+/// join `retired` (most recent last), re-added ones leave it, and past
+/// `bound` the oldest are returned for their state to be dropped.
+fn retire(
+    retired: &mut std::collections::VecDeque<String>,
+    old: &[String],
+    new: &[String],
+    bound: usize,
+) -> Vec<String> {
+    for endpoint in old {
+        if !new.contains(endpoint) && !retired.contains(endpoint) {
+            retired.push_back(endpoint.clone());
+        }
+    }
+    retired.retain(|endpoint| !new.contains(endpoint));
+    let mut dropped = Vec::new();
+    while retired.len() > bound {
+        dropped.extend(retired.pop_front());
+    }
+    dropped
 }
 
 /// `resolveAcrossStableLifecycle`'s attempts, per caller (design 0004,
@@ -183,6 +208,8 @@ impl Machine {
             next_caller: 1,
             ens_generation: 0,
             tezos_generation: 0,
+            retired_rpc: std::collections::VecDeque::new(),
+            retired_tezos: std::collections::VecDeque::new(),
         }
     }
 
@@ -610,6 +637,22 @@ impl Machine {
         let (ens_changed, tezos_changed) = {
             let mut state = self.ctx.state.borrow_mut();
             config.bounds = state.config.bounds;
+            let bound = config.bounds.retired_endpoints;
+            for endpoint in retire(&mut self.retired_rpc, &state.config.rpc, &config.rpc, bound) {
+                state.pool.forget(&endpoint);
+            }
+            for endpoint in retire(
+                &mut self.retired_tezos,
+                &state.config.tezos,
+                &config.tezos,
+                bound,
+            ) {
+                self.ctx
+                    .tezos
+                    .discovery
+                    .borrow_mut()
+                    .retain(|(e, _, _)| *e != endpoint);
+            }
             let old = &state.config;
             let ens_changed = old.rpc != config.rpc
                 || old.direct != config.direct
@@ -788,5 +831,33 @@ impl Machine {
                 session.key.clear();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn list(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| (*n).to_owned()).collect()
+    }
+
+    #[test]
+    fn retirement_keeps_the_most_recent_and_forgets_the_rest() {
+        let mut retired = std::collections::VecDeque::new();
+        // a leaves, then b: with room for one, a's state goes.
+        assert!(retire(&mut retired, &list(&["a", "b", "c"]), &list(&["b", "c"]), 1).is_empty());
+        assert_eq!(
+            retire(&mut retired, &list(&["b", "c"]), &list(&["c"]), 1),
+            list(&["a"])
+        );
+        assert_eq!(retired, list(&["b"]));
+        // Re-added, b is configured again and no longer retired.
+        assert!(retire(&mut retired, &list(&["c"]), &list(&["b", "c"]), 1).is_empty());
+        assert!(retired.is_empty());
+        // Retired again, it is the most recent.
+        retire(&mut retired, &list(&["b", "c"]), &list(&["c", "d"]), 2);
+        retire(&mut retired, &list(&["c", "d"]), &list(&["d"]), 2);
+        assert_eq!(retired, list(&["b", "c"]));
     }
 }
