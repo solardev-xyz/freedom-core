@@ -115,10 +115,19 @@ pub enum ResultError {
 /// ethers' `Interface.decodeFunctionResult`: the data must be a whole number
 /// of words, then decodes with the strict coder. Field errors stay lazy.
 pub fn decode_result(kinds: &[Kind], data: &[u8]) -> Result<Vec<Field>, ResultError> {
+    decode_result_within(kinds, data, abi::MAX_DECODE_BYTES)
+}
+
+/// [`decode_result`] under a decode budget (deviation `decode-budget`).
+pub fn decode_result_within(
+    kinds: &[Kind],
+    data: &[u8],
+    output_limit: usize,
+) -> Result<Vec<Field>, ResultError> {
     if !data.len().is_multiple_of(32) {
         return Err(ResultError::InvalidLength);
     }
-    abi::decode(kinds, data).map_err(|_| ResultError::Undecodable)
+    abi::decode_within(kinds, data, output_limit).map_err(|_| ResultError::Undecodable)
 }
 
 /// How a Universal Resolver revert is classified, by its data's selector.
@@ -159,8 +168,29 @@ pub struct OffchainLookup {
 /// five fields, so a problem with any of them is an error; single URLs stay
 /// lazy (see `urls`).
 pub fn decode_offchain_lookup(data: &[u8]) -> Option<OffchainLookup> {
-    if data.get(..4)? != OFFCHAIN_LOOKUP {
-        return None;
+    decode_offchain_lookup_explained(data).ok()
+}
+
+/// [`decode_offchain_lookup`] under a decode budget of `output_limit`
+/// bytes (deviation `decode-budget`).
+pub fn decode_offchain_lookup_within(data: &[u8], output_limit: usize) -> Option<OffchainLookup> {
+    decode_offchain_lookup_explained_within(data, output_limit).ok()
+}
+
+/// [`decode_offchain_lookup`], or the message the reference's error
+/// carries: ethers' own for a whole-decode failure, else the deferred error
+/// of the first field the destructuring reads.
+pub fn decode_offchain_lookup_explained(data: &[u8]) -> Result<OffchainLookup, String> {
+    decode_offchain_lookup_explained_within(data, abi::MAX_DECODE_BYTES)
+}
+
+/// [`decode_offchain_lookup_explained`] under a decode budget.
+pub fn decode_offchain_lookup_explained_within(
+    data: &[u8],
+    output_limit: usize,
+) -> Result<OffchainLookup, String> {
+    if data.get(..4) != Some(&OFFCHAIN_LOOKUP[..]) {
+        return Err(String::new());
     }
     let kinds = [
         Kind::Address,
@@ -169,7 +199,11 @@ pub fn decode_offchain_lookup(data: &[u8]) -> Option<OffchainLookup> {
         Kind::Bytes4,
         Kind::Bytes,
     ];
-    let mut fields = abi::decode(&kinds, &data[4..]).ok()?.into_iter();
+    let fields = abi::decode_explained_within(&kinds, &data[4..], output_limit)?;
+    if let Some(index) = fields.iter().position(Result::is_err) {
+        return Err(crate::ethers::deferred(index));
+    }
+    let mut fields = fields.into_iter();
     let (
         Some(Ok(Value::Address(sender))),
         Some(Ok(Value::StringArray(urls))),
@@ -184,9 +218,9 @@ pub fn decode_offchain_lookup(data: &[u8]) -> Option<OffchainLookup> {
         fields.next(),
     )
     else {
-        return None;
+        return Err(String::new());
     };
-    Some(OffchainLookup {
+    Ok(OffchainLookup {
         sender,
         urls,
         call_data,
