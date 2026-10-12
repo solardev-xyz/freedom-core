@@ -584,76 +584,6 @@ fn replay(scenario: &JsValue) -> Result<Vec<String>, String> {
 /// must differ from the reference until their deviation vectors land.
 const DEVIATIONS: &[(&str, &str)] = &[("node-errors-agree", "node-failures")];
 
-/// The scenarios this machine covers so far.
-const SUPPORTED: &[&str] = &[
-    "quorum-agree",
-    "quorum-slow-endpoint-head",
-    "quorum-one-liar",
-    "quorum-two-colluding",
-    "ccip-fast-gateway",
-    "ccip-slow-gateway-then-another-name",
-    "ccip-gateway-errors-fall-through",
-    "ccip-all-gateways-fail",
-    "single-source-two-endpoints",
-    "anchor-hash-split",
-    "anchor-finalized",
-    "node-errors-agree",
-    "cache-boundary-verified",
-    "cache-boundary-unverified",
-    "quarantine-expiry-resets",
-    "settings-invalidation",
-    "direct-user-configured",
-    "direct-builtin",
-    "dedup-concurrent",
-    "quarantine-doubles-on-overlapping-failures",
-    "address-agree",
-    "address-multicoin-base",
-    "address-zero-is-no-address",
-    "reverse-agree",
-    "reverse-mismatch",
-    "reverse-ens-empty-then-wns",
-    "reverse-ens-and-wns-empty-then-gns",
-    "reverse-wns-claim-fails-forward-then-gns-empty",
-    "wns-content",
-    "gns-content",
-    "wns-address-on-l2",
-    "myotis-verified",
-    "myotis-not-ready-falls-to-quorum",
-    "colibri-verified",
-    "colibri-resolver-not-found",
-    "colibri-unavailable-falls-to-quorum",
-    "colibri-ccip",
-    "colibri-concurrent",
-    "myotis-ccip",
-    "prefer-verified-holds-unverified",
-    "myotis-ready-mid-flight",
-    "lifecycle-flapping",
-    "myotis-reverse-then-wns",
-    "myotis-wns-content",
-    "myotis-wns-call-unavailable",
-    "myotis-wns-call-revert",
-    "myotis-record-lifecycle-mid-operation",
-    "myotis-call-lifecycle-mid-operation",
-    "tezos-agree",
-    "tezos-one-liar",
-    "tezos-head-outlier",
-    "tezos-heads-scattered",
-    "tezos-anchor-split",
-    "tezos-two-down",
-    "tezos-all-down",
-    "tezos-expired",
-    "tezos-expiry-unparseable",
-    "tezos-redirect",
-    "tezos-no-website",
-    "tezos-no-website-no-ttl",
-    "tezos-no-record",
-    "tezos-registry-script-fails",
-    "tezos-invalid-name",
-    "tezos-no-anchor",
-    "tezos-all-lookups-fail",
-    "tezos-cached-discovery-lookup-fails",
-];
-
 #[test]
 fn replays_match_the_reference() {
     let vectors = vectors();
@@ -664,10 +594,8 @@ fn replays_match_the_reference() {
     assert!(!scenarios.is_empty(), "no replay vectors");
     let mut report = Vec::new();
     for scenario in scenarios {
+        // Every recorded scenario replays.
         let id = str_of(scenario.get("id"));
-        if !SUPPORTED.contains(&id) {
-            continue;
-        }
         let deviation = DEVIATIONS
             .iter()
             .find(|(d, _)| *d == id)
