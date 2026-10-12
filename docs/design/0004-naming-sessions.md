@@ -28,7 +28,7 @@ Main stays a transport and adapter host:
 - **Parity** with the pinned resolvers, observable through the replay vectors: the requests made, their order and timing, cancellations, cache lifetimes, and results with key presence and order.
 - **Every deviation** is listed in [Deviations](#deviations) with its failure and cache behavior and a boundary vector.
 - **Bounded resources:** every queue, cache, answer, request, decode, session and reply has a byte, count or time bound that sits above every valid case, with a defined result when exhausted.
-- **The core is never given an endpoint URL** (0003 decision 3, [as refined below](#secrets)), and nothing it writes (logs, caches, replies, crash reports) ever contains one.
+- **The core is never given an endpoint URL** (0003 decision 3, [as refined below](#secrets)). Server diagnostics stay out of its logs, replies and crash reports.
 
 **Non-goals**
 - **New trust semantics** (0003's open question 1), and new record types.
@@ -81,7 +81,7 @@ Three counters, each owned by the core and only ever increasing within a core pr
   - **One budget:** a caller has three lifecycle attempts in all (`resolveAcrossStableLifecycle`), whether the core restarts an attempt or main sends the request again.
   - **Overtaken replies:** a reply can still be overtaken in the pipe. When a reply's generation is older than main's current one for that scope, main discards it. It sends the request again only with attempts left, carrying `attempts_used` and the caller's remaining `deadline_ms`. Otherwise it reports today's `Myotis availability changed repeatedly while resolving <name>`.
   - **A resubmitted request:** the core starts it with the remaining attempts and deadline.
-  - **Allowances are per caller,** counted from the point it joins: a caller fails with the "changed repeatedly" error once the restarts since it joined exceed its allowance. Other callers are unaffected. A session restarts while any caller has allowance left; without callers it uses its own three attempts.
+  - **Allowances are per caller.** A caller's attempts are counted from its join point, including the attempt it joined. Before the session starts another attempt, each caller that has used its allowance fails with the "changed repeatedly" error, and other callers are unaffected. The session restarts while any caller has allowance left; without callers it uses its own three attempts from its start.
 - **Late replies:** a `shell.*` reply for a request the core has cancelled is valid, because main sends exactly one terminal reply per request. The core drops it. A second reply for one request is a protocol error (0001).
 - **A core restart** (crash or hang watchdog) loses the attempt accounting, so nothing is resubmitted:
   - every pending naming request fails with today's thrown-resolution shape, message `Name resolution restarted` (deviation `core-restart`);
@@ -95,7 +95,7 @@ Main implements these. Each carries its generations and a `deadline_ms`. The cor
 
 | Method | Params | Main does | Reply |
 |---|---|---|---|
-| `shell.rpc` | `{ endpoint, body }` | one ethers `FetchRequest.send()` of `body` (text) to the endpoint: its redirects, 429 back-off and expiry (see [Transport](#transport)) | `{ status, body, draws }` or a [transport error](#transport-errors) |
+| `shell.rpc` | `{ endpoint, body }` | one exchange with ethers' `FetchRequest` policy: redirects, 429 back-off, expiry (see [Transport](#transport)) | `{ status, body }` or a [transport error](#transport-errors) |
 | `shell.tezos` | `{ endpoint, method, path, body? }` | GET or POST `endpoint URL + path` | `{ status, body }` or a transport error |
 | `shell.gateway` | `{ url, method, body? }` | `netGatewayFetch` with today's flags | `{ status, body }` or a transport error |
 | `shell.verified` | a [verified operation](#verified-operations) | today's adapter, whole | the operation's outcome |
@@ -114,11 +114,11 @@ Myotis and Colibri keep running in main, through today's adapters, **one whole o
 |---|---|---|
 | `{ myotis: "record", method, name?, address?, coin_type }` | `resolveMyotisEnsRecord` (`myotis-resolver.js`: the UR over `MyotisProvider`, with its CCIP) | `{ status: "ok" \| "noRecord", data_hex?, address_hex?, name?, verified, block_number }`, `{ revert }` (the operation's revert data), or `{ failure }` |
 | `{ myotis: "call", to, data }` | `myotisManager.ethCall` at `latest`, then `getStatus()` | `{ result_hex, optimistic_block_number }` or `{ failure }` |
-| `{ colibri: "resolve", name, call_data, name_nft: bool }` | `resolveCallViaColibri(name, callData, callResolver)`, with today's whole-operation client rebuild and retry (`withColibriClientRetry`) and ethers' built-in CCIP | `{ resolved_data, resolver_address }`, `{ revert }` or `{ failure }` |
+| `{ colibri: "resolve", name, call_data, resolver }` | `resolveCallViaColibri(name, callData, callResolver)`, where `resolver` (`ur`, `name_nft` or `name_nft_reverse`) picks the call resolver; with today's whole-operation client rebuild and retry (`withColibriClientRetry`) and ethers' built-in CCIP | `{ resolved_data, resolver_address }`, `{ revert }` or `{ failure }` |
 | `{ colibri: "reverse", address, coin_type }` | `resolveReverseViaColibri` | `{ name }`, `{ revert }` or `{ failure }` |
 
 - **Main checks Myotis' epoch** around each operation, as `tryMyotisPath` does today. A changed epoch is `{ failure: "lifecycle" }`, which the core treats as a lifecycle change.
-- **`failure`** is a closed set of classes (`unavailable`, `lifecycle`, `timeout`, `too_large`, `error`) and carries no text.
+- **`failure`** is a closed set of classes (`unavailable`, `lifecycle`, `timeout`, `too_large`, `error`) and carries no text. As in the reference, a failure is a method error and the order continues, `lifecycle` included: the epoch change itself restarts the lookup ([Sessions](#sessions)).
 - **Reply size:** main serializes each reply first. One over 1 MiB (a large return, revert or name) is replaced by `{ failure: "too_large" }`: a method error, so the order continues (deviation `verified-reply-size`).
 - **Provenance:** a `revert` is the verifier's proven revert data. The core records which verifier produced it.
 - **The adapters' own bounds** are unchanged. Main bounds physical work: at most 8 operations per verifier are running, counted until the adapter's promise actually settles, not when the core cancels. Beyond that, main answers `{ failure: "unavailable" }` at once.
@@ -305,7 +305,7 @@ These follow `doResolveEnsContent`, `doResolveEnsAddress` and `doResolveEnsRever
 
 - **The key** is today's in-flight key, `content|addr|reverse` + the cache key. A same-key lookup joins the running session, and different keys don't share, so content and address of one name each anchor (`dedup-concurrent`).
 - **Lifecycle restarts** (`resolveAcrossStableLifecycle`):
-  - A session runs at most its remaining attempts: three, or fewer for a [resubmitted request](#generations).
+  - Attempts follow the [per-caller allowances](#generations): no caller's allowance caps another's.
   - An attempt that crosses a `lifecycle` change, whether it succeeded or threw, is discarded. Its cached result is removed if it is still the cached one, and the session restarts.
   - Past the last attempt, it throws `Myotis availability changed repeatedly while resolving <name>`.
   - The in-flight table is cleared at each change, so a lookup after the change starts a new session rather than joining the old one.
@@ -428,14 +428,16 @@ How a failed exchange is classified. The core's rules are ordered, and the first
   - `eth_getBlockByNumber [hex or tag, false]`;
   - `eth_call [{ to, data }, blockHashOrTag]`.
 - **Response handling:** the core parses the body as ethers' `JsonRpcProvider` does, including a batch-shaped array answer, and classifies it as [above](#classification).
-- **ethers' `FetchRequest`, run by main:** one `shell.rpc` is one `FetchRequest.send()`. Main uses ethers' own class, with a `getUrlFunc` over the session's network stack, so its policy is exactly today's:
+- **ethers' `FetchRequest` policy, run by main:** one `shell.rpc` is one exchange. Main runs it in its own loop, not ethers' class, because `FetchRequest.redirect()` builds a new request without its `getUrlFunc`, which would send a redirected hop through Node's networking. The loop reproduces `FetchRequest.#send` exactly:
   - up to 12 attempts;
   - 301/302/307/308 followed with method and body kept, and https → http refused;
   - HTTP 429 retried after `250 × trunc(r × 2^attempt)` ms, or after a positive integer `Retry-After` read as milliseconds;
-  - the 300 s `expires` checked before each attempt's back-off, as ethers checks it;
+  - the 300 s expiry checked before each attempt's back-off;
   - 300 s of socket inactivity per attempt.
-- **Main's `getUrlFunc`** checks every hop against the endpoint policy and the onion gate. A refused hop ends the exchange as `refused` (deviation `rpc-redirects`: today hops aren't checked).
-- **Random draws:** in the reference, the 429 back-off draws from the same `Math.random` as the shuffle. The reply's `draws` says how many values main's `FetchRequest` drew, and the core advances its own stream by that many. In production this changes nothing. In replay it keeps the shared stream in step.
+
+  Every hop goes through the session's network stack and is checked against the endpoint policy and the onion gate. A refused hop ends the exchange as `refused` (deviation `rpc-redirects`: today hops aren't checked). Main's own tests run the loop against ethers' `FetchRequest` on the same scripted answers.
+- **Cancellation is prompt:** a back-off wait is abortable. On `cancel` or the request's deadline, main ends the exchange (socket and timer), then sends the one terminal reply. An exchange counts toward the core's 256 outstanding requests until that reply, so nothing outlives the bound.
+- **Random streams:** the shuffle's random source belongs to the core and the back-off's to main. In the reference they are one `Math.random`, so a 429 changes later shuffles; separate streams are deviation `random-streams`. Its vectors give ethers' back-off its own seeded stream in the harness, so replay stays exact.
 - **Tezos:**
   - no 429 retry, as today's `fetch`;
   - **redirects are refused** (deviation `tezos-redirects`: today `fetch` follows them).
@@ -447,9 +449,10 @@ How a failed exchange is classified. The core's rules are ordered, and the first
 
 ### Secrets
 
-This refines 0003 decision 3. **The core is never given an endpoint URL:** it knows endpoints by reference only. A server can still return bytes that contain its own URL or key, for example an error that echoes the request. No scanner can find those reliably: JSON escapes hide them, and short keys collide with ordinary data. So the core treats every server byte as confidential:
-- **Use:** server text is used only for [classification](#classification) and then dropped.
-- **Never written:** it is never logged, cached, compared across requests, or put into a reply.
+This refines 0003 decision 3. That decision's wording, "the core never sees an endpoint URL", is the configuration rule. 0003 now points here.
+- **Configuration:** the core is never given an endpoint URL. It knows endpoints by reference only, and main maps references back.
+- **Diagnostics:** a server can return error text containing its own URL or key, for example by echoing the request. No scanner finds those reliably: JSON escapes hide them, and short keys collide with ordinary data. So diagnostic text is confidential in the core. It is used only for [classification](#classification), then dropped, and never logged, cached, compared across requests or put into a reply.
+- **Published semantic fields:** a record's own data is published as today, even when it happens to equal an endpoint's URL: a Tezos website URI, a contenthash, a name. The reference does the same, and it isn't the core's to filter.
 - **Crashes:** `freedom-cored` disables core dumps, and its crash reports carry no heap contents.
 
 ### Transport errors
@@ -546,6 +549,7 @@ Each deviation gets a boundary vector in the implementation PR, generated from t
 | `memory-budgets` | unbounded | 16 MiB per session, 64 MiB in all, 8 MiB of queued replies | `resolution_failed: budget` or `busy`; not cached |
 | `endpoint-retention` | quarantine and discovery entries live for the process | 64 retired endpoints kept | an endpoint re-added after 64 others were retired has forgotten its quarantine |
 | `socket-failures` | a socket reset is semantic; other socket errors count when their message matches | every socket-level failure is a provider failure | the endpoint is quarantined |
+| `random-streams` | the 429 back-off and the shuffle draw from one `Math.random` | separate streams | later shuffles don't depend on earlier back-offs; vectors seed the back-off apart |
 | `core-restart` | — (no separate process) | pending naming requests fail when the core restarts | `RESOLUTION_ERROR`; nothing cached |
 | `prefetch-set` | unbounded | 32 surviving prefetches | the oldest is cancelled |
 
@@ -557,8 +561,8 @@ The Rust machine runs each scenario of `naming-replay.json`:
 - **Driver:** a test driver that plays main. It answers each request with the recorded `answer` of the reference exchange it matches: endpoint, method and params, at the matching start time. A request the reference never made fails the test.
 
 **The driver reproduces three reference artifacts:**
-- **The ethers stall:** it delays each JSON-RPC request by 10 ms before matching it.
-- **`FetchRequest`:** one `shell.rpc` consumes the reference's exchanges for that request, redirects and 429 retries included, and reports their random draws.
+- **The ethers stall:** it delays a JSON-RPC request's first send by 10 ms before matching it. Retries inside the exchange carry no stall.
+- **The exchange loop:** one `shell.rpc` consumes the reference's exchanges for that request, redirects and 429 retries included.
 - **Verified operations:** the driver plays the adapter. It answers a `shell.verified` operation with the outcome the reference's adapter returned. The harness records each adapter operation (`resolveRecord`, `ethCall`, `resolveCallViaColibri`, `resolveReverseViaColibri`) and its outcome next to the raw exchanges it made, which is an implementation-step change.
 - **Order:** answers are delivered in the reference's timer order, using the executor's external events.
 
@@ -568,7 +572,7 @@ The Rust machine runs each scenario of `naming-replay.json`:
 - every I/O request: endpoint, method, params, start time, and the time it was answered, cancelled or left open.
 
 **Vectors the implementation adds:**
-- a redirect followed by a 429 (the retry goes to the redirect target);
+- a redirect followed by a 429 (the retry goes to the redirect target), and concurrent 429s, shuffles and cancellations under deviation `random-streams`;
 - reverse error outcomes that differ only in callback data (they conflict), legacy envelopes that differ only in `info.error.data` (they agree), and invalid gateway URLs at different indexes;
 - one boundary vector per deviation.
 

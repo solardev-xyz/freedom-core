@@ -104,7 +104,7 @@ These decisions are fixed; design 0004 specifies the protocol that implements th
      - Today's Tor PAC proxies `.onion` hosts and sends clearnet `DIRECT`.
      - The onion gate applies to every shell-HTTP host, RPC endpoints included: no empty or `DIRECT` route, and no `DIRECT` fallback.
    - **Verified calls:** Myotis and Colibri, through their existing adapters, whose own networking (Myotis' P2P, Colibri's worker `fetch`) is unchanged until roadmap 3.3.
-3. **Opaque endpoint references.** The core never sees an endpoint URL, which can carry an API key. Main maps references back to today's hosts and URLs when it publishes a result.
+3. **Opaque endpoint references.** The core never sees an endpoint URL, which can carry an API key. Main maps references back to today's hosts and URLs when it publishes a result. This is the configuration rule: design 0004's [Secrets](0004-naming-sessions.md#secrets) covers server data that happens to contain one.
 4. **The core owns the result cache.** Main keeps no second copy, so invalidation has one place to reach. Before committing to this, the implementation must measure cached subresource fan-out under concurrent vault work.
 5. **Parity is checked by replay.** The generator drives the pinned JS resolvers through a scripted world (requests, clock, randomness, settlement order), and Rust drives its machine through the same script.
 
