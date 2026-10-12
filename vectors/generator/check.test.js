@@ -258,6 +258,22 @@ test('replay\'s size patches refuse a host that two endpoint URLs share', async 
   await assert.rejects(replay.runScenario(REFERENCE, ethers, FakeTimers, scenario), /one host from several endpoint URLs/);
 });
 
+test('a host named like an Object property is declared only when the world lists it', async () => {
+  const ethers = referenceEthers();
+  const FakeTimers = replay.loadFakeTimers(REFERENCE);
+  for (const host of ['constructor', '__proto__', 'unlisted.example']) {
+    const scenario = structuredClone(definition(ethers, 'rpc-redirect-then-429'));
+    scenario.world.hosts['a.rpc.example'].location = `https://${host}/`;
+    await assert.rejects(replay.runScenario(REFERENCE, ethers, FakeTimers, scenario), new RegExp(`undeclared RPC endpoint ${host}`));
+  }
+  // Listed, it is declared and answers.
+  const scenario = structuredClone(definition(ethers, 'rpc-redirect-then-429'));
+  scenario.world.hosts['a.rpc.example'].location = 'https://constructor/';
+  scenario.world.hosts.constructor = {};
+  const result = await replay.runScenario(REFERENCE, ethers, FakeTimers, scenario);
+  assert.ok(result.io.some((item) => item.host === 'constructor'));
+});
+
 test('replay\'s overall-deadline patch refuses what it can\'t model', async () => {
   const ethers = referenceEthers();
   const FakeTimers = replay.loadFakeTimers(REFERENCE);

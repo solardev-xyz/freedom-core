@@ -377,11 +377,11 @@ function __admit(session) {
     harness: ['overall-deadline'],
   }),
   'endpoint-retention': (b) => ({
-    text: `Quarantine state is kept for the ${b.retiredEndpoints} most recently retired endpoints; an older one's is dropped, so re-adding it starts clean.`,
+    text: `Quarantine state is kept for the ${b.retiredEndpoints} most recently retired endpoints; an older one's is dropped, so re-adding it starts clean. Endpoints retire at each configuration (the harness's world changes), as the core's naming.configure does, whether or not a lookup reshuffles the pool.`,
+    harness: ['endpoint-retention'],
     source: {
       'ens-resolver.js': {
-        edits: [['  if (shuffledProviderSourceKey !== sourceKey) {\n    shuffledProviderOrder = shuffleInPlace([...effective]);',
-          `  if (shuffledProviderSourceKey !== sourceKey) {\n    __retire(effective, ${b.retiredEndpoints});\n    shuffledProviderOrder = shuffleInPlace([...effective]);`]],
+        edits: [],
         append: [`var __previous = null;
 var __retired = [];
 function __retire(effective, n) {
@@ -391,7 +391,8 @@ function __retire(effective, n) {
   __retired = __retired.filter((url) => !effective.includes(url));
   while (__retired.length > n) quarantine.delete(__retired.shift());
   __previous = effective;
-}`],
+}
+module.exports.__configure = () => __retire(getEffectiveRpcEndpoints(), ${b.retiredEndpoints});`],
       },
     },
   }),
@@ -579,9 +580,12 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
   let clock = null;
   const now = () => Date.now() - EPOCH;
   const hostOf = (url) => new URL(url).host;
-  const plan = (host) => world.hosts?.[host] || {};
+  // The world's own entries only: a host named like an Object property
+  // (constructor, __proto__) is undeclared unless the world lists it.
+  const listed = (host) => world.hosts != null && Object.hasOwn(world.hosts, host);
+  const plan = (host) => (listed(host) ? world.hosts[host] : {}) || {};
   // An endpoint, or a host a scripted redirect leads to (`world.hosts`).
-  const declared = (host) => (world.endpoints ?? []).some((url) => hostOf(url) === host) || host in (world.hosts ?? {});
+  const declared = (host) => (world.endpoints ?? []).some((url) => hostOf(url) === host) || listed(host);
   // HTTP requests each host has had, for scripted status sequences.
   const sent = new Map();
   // An exchange a verifier operation makes inside main's adapter is that
@@ -1128,6 +1132,8 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       if (step.after) await clock.tickAsync(step.after);
       stepIndex = index;
       if (step.world) Object.assign(world, structuredClone(step.world));
+      // Deviation `endpoint-retention`: each configuration retires.
+      if (harnessPatch('endpoint-retention')) loaded.exports.__configure();
       const at = now();
       for (const event of step.events ?? []) setTimeout(() => fire(event), event.at);
       // A call's `at` starts it that long into the step, as events do.
@@ -1524,6 +1530,20 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
     },
     // Endpoint a fails and is quarantined; a and then e are retired, and a
     // bound of one forgets a's quarantine, so re-adding a tries it again.
+    {
+      // The same with a cache hit between the changes: retirement is the
+      // configuration's, not the next reshuffle's.
+      ...deviation('endpoint-retention', base({
+        bounds: { retiredEndpoints: 1 },
+        hosts: { 'a.rpc.example': { status: 500 } },
+      }), [
+        { call: content() },
+        { after: 1000, world: { endpoints: [ENDPOINTS[1], ENDPOINTS[2], ENDPOINTS[3], 'https://e.rpc.example'] }, call: content() },
+        { after: 1000, world: { endpoints: [ENDPOINTS[1], ENDPOINTS[2], ENDPOINTS[3], 'https://f.rpc.example'] }, call: content('c.eth') },
+        { after: 1000, world: { endpoints: ENDPOINTS }, call: content('d.eth') },
+      ]),
+      id: 'deviation-endpoint-retention-cache-hit',
+    },
     deviation('endpoint-retention', base({
       bounds: { retiredEndpoints: 1 },
       hosts: { 'a.rpc.example': { status: 500 } },
