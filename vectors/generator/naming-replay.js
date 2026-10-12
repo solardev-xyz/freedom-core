@@ -72,6 +72,7 @@ const BOUNDS = {
   callers: 256,
   callersPerSession: 64,
   deadlineMs: 120_000,
+  retiredEndpoints: 64,
 };
 
 // The core's frame check (deviation `request-size`): a request's payload
@@ -375,6 +376,46 @@ function __admit(session) {
     text: `A session ends ${b.deadlineMs} ms after it starts: its callers get deadline, its outstanding I/O is cancelled, and it makes no more. The reference's abandoned work can't be stopped, only cut off from I/O, so the patch holds only for one step with one call (enforced); that nothing is cached is the core's own test.`,
     harness: ['overall-deadline'],
   }),
+  'endpoint-retention': (b) => ({
+    text: `Quarantine state is kept for the ${b.retiredEndpoints} most recently retired endpoints; an older one's is dropped, so re-adding it starts clean. Endpoints retire at each configuration (the harness's world changes), as the core's naming.configure does, whether or not a lookup reshuffles the pool.`,
+    harness: ['endpoint-retention'],
+    source: {
+      'ens-resolver.js': {
+        edits: [],
+        append: [`var __previous = null;
+var __retired = [];
+function __retire(effective, n) {
+  for (const url of __previous ?? []) {
+    if (!effective.includes(url) && !__retired.includes(url)) __retired.push(url);
+  }
+  __retired = __retired.filter((url) => !effective.includes(url));
+  while (__retired.length > n) quarantine.delete(__retired.shift());
+  __previous = effective;
+}
+module.exports.__configure = () => __retire(getEffectiveRpcEndpoints(), ${b.retiredEndpoints});`],
+      },
+    },
+  }),
+  'random-streams': () => ({
+    text: "ethers' 429 back-off draws from its own stream (main's), not the shuffle's.",
+    harness: ['random-streams'],
+  }),
+  'abandoned-exchanges': () => ({
+    text: 'A leg the wave stopped waiting for is cancelled: whatever it settles to afterwards leaves quarantine alone.',
+    source: {
+      'ens-resolver.js': {
+        edits: [
+          ['    for (const fn of cancelToken.cleanups) fn();', '    cancelToken.abandoned = true;\n    for (const fn of cancelToken.cleanups) fn();'],
+          ["    markProviderSuccess(url);\n    return { url, status: 'data'", "    if (!cancelToken?.abandoned) markProviderSuccess(url);\n    return { url, status: 'data'"],
+          ["      markProviderSuccess(url);\n      return { url, status: 'error', error: err };", "      if (!cancelToken?.abandoned) markProviderSuccess(url);\n      return { url, status: 'error', error: err };"],
+          ["      markProviderSuccess(url);\n      return { url, status: 'not_found', reason: 'NO_RESOLVER' };", "      if (!cancelToken?.abandoned) markProviderSuccess(url);\n      return { url, status: 'not_found', reason: 'NO_RESOLVER' };"],
+          ["      markProviderFailure(url);\n      return { url, status: 'error', error: err };", "      if (!cancelToken?.abandoned) markProviderFailure(url);\n      return { url, status: 'error', error: err };"],
+          ["    markProviderSuccess(url);\n    return { url, status: 'not_found', reason: 'NO_CONTENTHASH', error: err };", "    if (!cancelToken?.abandoned) markProviderSuccess(url);\n    return { url, status: 'not_found', reason: 'NO_CONTENTHASH', error: err };"],
+        ],
+        append: [],
+      },
+    },
+  }),
   'null-block-hash': () => ({
     text: 'A null block hash fails like a missing block: out of the hash vote (and quarantined), and the single-source anchor fails.',
     source: {
@@ -539,8 +580,14 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
   let clock = null;
   const now = () => Date.now() - EPOCH;
   const hostOf = (url) => new URL(url).host;
-  const plan = (host) => world.hosts?.[host] || {};
-  const declared = (host) => (world.endpoints ?? []).some((url) => hostOf(url) === host);
+  // The world's own entries only: a host named like an Object property
+  // (constructor, __proto__) is undeclared unless the world lists it.
+  const listed = (host) => world.hosts != null && Object.hasOwn(world.hosts, host);
+  const plan = (host) => (listed(host) ? world.hosts[host] : {}) || {};
+  // An endpoint, or a host a scripted redirect leads to (`world.hosts`).
+  const declared = (host) => (world.endpoints ?? []).some((url) => hostOf(url) === host) || listed(host);
+  // HTTP requests each host has had, for scripted status sequences.
+  const sent = new Map();
   // An exchange a verifier operation makes inside main's adapter is that
   // operation's business: it carries the operation's id as `within`.
   // Steps whose session met its deadline (deviation `overall-deadline`):
@@ -607,9 +654,9 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
         const kind = callKind(to, data);
         const answer = pickAnswer([p.calls, world.calls], kind);
         if (!answer) return unscripted(`${kind} call to ${host}`);
-        if (answer.rpc_error) return { error: answer.rpc_error };
+        if (answer.rpc_error) return { error: answer.rpc_error, delay: answer.delay };
         if (answer.hang) return { hang: true };
-        return { result: answer.data };
+        return { result: answer.data, delay: answer.delay };
       }
       default:
         return unscripted(`${r.method} at ${host}`);
@@ -621,20 +668,36 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
   // that rejects TIMEOUT. Neither stops the HTTP exchange itself (ethers
   // passes its AbortSignal under an option Node ignores), so an entry's
   // outcome follows the exchange and `rejected` records the promise.
+  // One FetchRequest's exchanges (its redirects and 429 retries) share
+  // its cancel signal: `chain` numbers them by it, so a replay consumes a
+  // chain's own exchanges even when chains meet at one host.
+  const chains = new WeakMap();
+  let nextChain = 0;
+  const chainOf = (signal) => {
+    if (!signal) return ++nextChain;
+    if (!chains.has(signal)) chains.set(signal, ++nextChain);
+    return chains.get(signal);
+  };
   const rpcTransport = (req, signal) => {
     if (signal?.cancelled) return Promise.reject(ethers.makeError('request cancelled before sending', 'CANCELLED'));
     const host = hostOf(req.url);
     http += 1;
+    const chain = chainOf(signal);
     const body = JSON.parse(Buffer.from(req.body).toString());
     const batch = Array.isArray(body) ? body : [body];
     const entries = batch.map((r) => record({
-      kind: 'rpc', host, http, method: r.method, params: r.params,
+      kind: 'rpc', host, http, chain, method: r.method, params: r.params,
       ...(r.method === 'eth_call' ? { call: callKind(r.params[0].to, r.params[0].data) } : {}),
     }));
     if (entries.includes(null)) return new Promise(() => {});
     if (!declared(host)) violations.push(`undeclared RPC endpoint ${host}`);
     const p = plan(host);
-    const answers = p.status ? [] : batch.map((r) => ({ id: r.id, ...answerRpc(host, r) }));
+    // `statuses`: this host's first requests get these statuses (a 3xx
+    // redirects to `location`), then answers as usual.
+    const nth = sent.get(host) ?? 0;
+    sent.set(host, nth + 1);
+    const scripted = p.statuses?.[nth];
+    const answers = p.status || scripted ? [] : batch.map((r) => ({ id: r.id, ...answerRpc(host, r) }));
     return new Promise((resolve, reject) => {
       let settled = false;
       const fail = (message, code) => {
@@ -647,6 +710,8 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       // Node's socket timer is off at zero.
       const inactivity = req.timeout > 0 ? setTimeout(() => fail('request timeout', 'TIMEOUT'), req.timeout) : null;
       if (p.hang || answers.some((a) => a.hang)) return;
+      // A scripted answer's own `delay` beats the host's.
+      const delay = Math.max(-1, ...answers.map((a) => a.delay ?? -1));
       setTimeout(() => {
         // Cancelled at a session's deadline: the exchange never answers.
         if (entries.every((item) => item.outcome === 'cancelled')) return;
@@ -655,9 +720,13 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
         // `pad` grows each answer by a member JSON-RPC readers ignore.
         const padding = p.pad ? { pad: 'x'.repeat(p.pad) } : {};
         const out = answers.map(({ id, result, error }) => (error ? { jsonrpc: '2.0', id, error, ...padding } : { jsonrpc: '2.0', id, result, ...padding }));
-        const answer = p.status
-          ? { status: p.status, body: 'unavailable' }
-          : { status: 200, body: JSON.stringify(Array.isArray(body) ? out : out[0]) };
+
+        const redirect = scripted >= 300 && scripted < 400;
+        const answer = scripted
+          ? { status: scripted, body: '', ...(redirect ? { location: p.location } : {}) }
+          : p.status
+            ? { status: p.status, body: 'unavailable' }
+            : { status: 200, body: JSON.stringify(Array.isArray(body) ? out : out[0]) };
         for (const item of entries) item.answer = answer;
         if (signal?.cancelled) {
           fail('cancelled', 'CANCELLED');
@@ -671,8 +740,9 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
         }
         if (settled) return;
         settled = true;
-        resolve({ statusCode: answer.status, statusMessage: p.status ? 'Unavailable' : 'OK', headers: p.status ? {} : { 'content-type': 'application/json' }, body: Buffer.from(answer.body) });
-      }, p.delay ?? 10);
+        const headers = answer.location ? { location: answer.location } : p.status || scripted ? {} : { 'content-type': 'application/json' };
+        resolve({ statusCode: answer.status, statusMessage: answer.status === 200 ? 'OK' : 'Unavailable', headers, body: Buffer.from(answer.body) });
+      }, delay >= 0 ? delay : p.delay ?? 10);
     });
   };
 
@@ -995,7 +1065,12 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
 
     const random = Math.random;
     undo.push(() => { Math.random = random; });
-    Math.random = seeded(scenario.seed ?? 7);
+    const shuffle = seeded(scenario.seed ?? 7);
+    // Deviation `random-streams`: draws from ethers' FetchRequest (its 429
+    // back-off) take a stream of their own.
+    const backoff = seeded((scenario.seed ?? 7) ^ 0x5bd1e995);
+    const fromFetch = () => /utils[\\/]fetch\.js/.test(new Error().stack ?? '');
+    Math.random = harnessPatch('random-streams') ? () => (fromFetch() ? backoff() : shuffle()) : shuffle;
 
     // Colibri's BrowserProvider sends each request from a shared drain
     // timer; note the operation each request was queued under.
@@ -1057,6 +1132,8 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       if (step.after) await clock.tickAsync(step.after);
       stepIndex = index;
       if (step.world) Object.assign(world, structuredClone(step.world));
+      // Deviation `endpoint-retention`: each configuration retires.
+      if (harnessPatch('endpoint-retention')) loaded.exports.__configure();
       const at = now();
       for (const event of step.events ?? []) setTimeout(() => fire(event), event.at);
       // A call's `at` starts it that long into the step, as events do.
@@ -1149,6 +1226,25 @@ function scenarioDefinitions(ethers) {
     one('quorum-one-liar', base({ hosts: { 'c.rpc.example': { calls: { resolve: EVIL } } } })),
     one('quorum-two-colluding', base({ hosts: { 'c.rpc.example': { calls: { resolve: EVIL } }, 'd.rpc.example': { calls: { resolve: EVIL } } } })),
     one('ccip-fast-gateway', base({ calls: { resolve: OFFCHAIN, callback: GOOD }, gateways: GATEWAY(100) })),
+    // FetchRequest's loop: a's first request redirects to r, whose first
+    // answer is a 429; the retry after the back-off goes to r, the redirect
+    // target (design 0004, Transport).
+    one('rpc-redirect-then-429', base({
+      hosts: {
+        'a.rpc.example': { statuses: [302], location: 'https://r.rpc.example/' },
+        'r.rpc.example': { statuses: [429] },
+      },
+    })),
+    // Two chains meet at one host: b's head redirects at 10 ms and a's at
+    // 30 ms, both to t, which answers b a 429, then a a 500, then b's
+    // retry. Each chain's answer is its own.
+    one('rpc-redirect-chains-share-a-host', base({
+      hosts: {
+        'a.rpc.example': { statuses: [302], location: 'https://t.rpc.example/', delay: 30 },
+        'b.rpc.example': { statuses: [302], location: 'https://t.rpc.example/' },
+        't.rpc.example': { statuses: [429, 500] },
+      },
+    })),
     {
       id: 'ccip-slow-gateway-then-another-name',
       world: base({ calls: { resolve: OFFCHAIN, callback: GOOD }, gateways: GATEWAY(6000) }),
@@ -1236,6 +1332,7 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
   };
   const coder = ethers.AbiCoder.defaultAbiCoder();
   const revert = (data) => ({ rpc_error: { code: 3, message: 'execution reverted', data } });
+  const ADDRESS = { data: coder.encode(['bytes', 'address'], [coder.encode(['address'], ['0x' + 'ab'.repeat(20)]), '0x' + '22'.repeat(20)]) };
   const offchain = (urls, callData = '0x0102', extraData = '0x09') => revert('0x556f1830' + coder.encode(
     ['address', 'string[]', 'bytes', 'bytes4', 'bytes'], [UR, urls, callData, '0xdeadbeef', extraData]).slice(2));
   // An OffchainLookup whose URL array points every entry at one string,
@@ -1430,6 +1527,54 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
         hosts: { 'a.rpc.example': { nullHash: true } },
       })),
       id: 'deviation-null-block-hash-direct',
+    },
+    // Endpoint a fails and is quarantined; a and then e are retired, and a
+    // bound of one forgets a's quarantine, so re-adding a tries it again.
+    {
+      // The same with a cache hit between the changes: retirement is the
+      // configuration's, not the next reshuffle's.
+      ...deviation('endpoint-retention', base({
+        bounds: { retiredEndpoints: 1 },
+        hosts: { 'a.rpc.example': { status: 500 } },
+      }), [
+        { call: content() },
+        { after: 1000, world: { endpoints: [ENDPOINTS[1], ENDPOINTS[2], ENDPOINTS[3], 'https://e.rpc.example'] }, call: content() },
+        { after: 1000, world: { endpoints: [ENDPOINTS[1], ENDPOINTS[2], ENDPOINTS[3], 'https://f.rpc.example'] }, call: content('c.eth') },
+        { after: 1000, world: { endpoints: ENDPOINTS }, call: content('d.eth') },
+      ]),
+      id: 'deviation-endpoint-retention-cache-hit',
+    },
+    deviation('endpoint-retention', base({
+      bounds: { retiredEndpoints: 1 },
+      hosts: { 'a.rpc.example': { status: 500 } },
+    }), [
+      { call: content() },
+      { after: 1000, world: { endpoints: [ENDPOINTS[1], ENDPOINTS[2], ENDPOINTS[3], 'https://e.rpc.example'] }, call: content('b.eth') },
+      { after: 1000, world: { endpoints: [ENDPOINTS[1], ENDPOINTS[2], ENDPOINTS[3], 'https://f.rpc.example'] }, call: content('c.eth') },
+      { after: 1000, world: { endpoints: ENDPOINTS }, call: content('d.eth') },
+    ]),
+    // Two endpoints answer their first request with a 429, so the back-off
+    // draws random numbers; then the list changes and the pool reshuffles.
+    // The reference's reshuffle draws after the back-offs' draws; the core's
+    // shuffle has its own stream.
+    deviation('random-streams', base({
+      hosts: { 'b.rpc.example': { statuses: [429] }, 'c.rpc.example': { statuses: [429] } },
+    }), [
+      { call: content() },
+      { after: 1000, world: { endpoints: [...ENDPOINTS, 'https://e.rpc.example'] }, call: content('alice.eth') },
+    ]),
+    // Two lookups at once: c fails the content lookup's leg (quarantined)
+    // while its slow address leg loses that wave. The reference's
+    // abandoned leg settles and clears c's quarantine, so the third lookup
+    // uses c; the core cancelled that leg, and c stays quarantined.
+    {
+      ...deviation('abandoned-exchanges', base({
+        calls: { resolve: GOOD, 'resolve:addr': { ...ADDRESS, delay: 50 } },
+        hosts: { 'c.rpc.example': { calls: { 'resolve:contenthash': { rpc_error: { code: -32603, message: 'internal error' } }, 'resolve:addr': { ...ADDRESS, delay: 500 } } } },
+      }), [
+        { calls: [content(), { fn: 'resolveEnsAddress', args: ['vitalik.eth'] }] },
+        { after: 1000, call: content('alice.eth') },
+      ]),
     },
     // Every endpoint answers after a second; the session ends at 300 ms.
     deviation('overall-deadline', base({
