@@ -620,8 +620,9 @@ mod tests {
             (9007199254740993.0, "9007199254740992"),
             // Of the shortest digit strings, ECMAScript takes the closest.
             (-1221953339504170.3, "-1221953339504170.2"),
-            // An exact midpoint between the two shortest candidates: even.
-            (137839762462415.625, "137839762462415.62"),
+            // 137839762462415.625, an exact midpoint between the two shortest
+            // candidates: the even one.
+            (f64::from_bits(0x42df_5754_84f5_b3e8), "137839762462415.62"),
         ] {
             assert_eq!(number_to_string(n), text, "{n}");
         }
