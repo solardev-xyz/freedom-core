@@ -6,6 +6,7 @@
 //! The crate does no I/O.
 
 pub mod abi;
+pub mod ccip;
 mod contenthash;
 mod ens;
 mod error;

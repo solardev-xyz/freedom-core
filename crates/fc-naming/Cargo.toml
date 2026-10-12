@@ -12,8 +12,10 @@ workspace = true
 
 [dependencies]
 ens-normalize = "=0.1.1"
+serde_json = "1"
 sha3 = "0.12"
 thiserror = "2"
+url = "2"
 
 [dev-dependencies]
 hex = "0.4"
