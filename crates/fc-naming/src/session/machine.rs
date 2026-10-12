@@ -170,11 +170,9 @@ impl Machine {
                     }
                 }
             }
-            Err(Thrown {
-                message: format!(
-                    "Myotis availability changed repeatedly while resolving {subject}"
-                ),
-            })
+            Err(Thrown::new(format!(
+                "Myotis availability changed repeatedly while resolving {subject}"
+            )))
         });
         self.sessions.push(Session {
             key: dedup,
@@ -188,9 +186,7 @@ impl Machine {
     fn normalized(&mut self, name: &str) -> Result<String, u64> {
         let trimmed = crate::js_trim(name);
         if trimmed.is_empty() {
-            return Err(self.reply(Err(Thrown {
-                message: "ENS name is empty".into(),
-            })));
+            return Err(self.reply(Err(Thrown::new("ENS name is empty"))));
         }
         ens::fast_normalize(trimmed).map_err(|error| self.reply(Err(error)))
     }
@@ -333,6 +329,29 @@ impl Machine {
 
     pub fn running(&self) -> usize {
         self.sessions.len()
+    }
+
+    /// `naming.availability`, today's Myotis transition listener: the
+    /// caches and the in-flight table go and the lifecycle advances; the
+    /// anchor, the shuffle and quarantine stay.
+    pub fn availability(&mut self, ready: bool) {
+        {
+            let mut state = self.ctx.state.borrow_mut();
+            state.myotis_ready = ready;
+            state.myotis_epoch += 1;
+            state.content.clear();
+            state.address.clear();
+            state.reverse.clear();
+            state.lifecycle += 1;
+        }
+        for session in &mut self.sessions {
+            session.key.clear();
+        }
+    }
+
+    /// Myotis' readiness when the machine starts.
+    pub fn set_myotis_ready(&mut self, ready: bool) {
+        self.ctx.state.borrow_mut().myotis_ready = ready;
     }
 
     /// `invalidateCachedProvider` (`reset: "providers"`): the pool, the
