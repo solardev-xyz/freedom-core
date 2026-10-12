@@ -15,6 +15,7 @@ Crates:
 - base16ct 1.0.0: Apache-2.0 OR MIT
 - base64 0.22.1: MIT OR Apache-2.0
 - bitflags 2.13.2: MIT OR Apache-2.0
+- blake2 0.11.0: MIT OR Apache-2.0
 - block-buffer 0.12.1: MIT OR Apache-2.0
 - bs58 0.5.1: MIT/Apache-2.0
 - cfg-if 1.0.5: MIT OR Apache-2.0
@@ -34,16 +35,27 @@ Crates:
 - ed25519 3.0.0: Apache-2.0 OR MIT
 - ed25519-dalek 3.0.0: BSD-3-Clause
 - elliptic-curve 0.14.1: Apache-2.0 OR MIT
+- ens-normalize 0.1.1: MIT
 - equivalent 1.0.2: Apache-2.0 OR MIT
 - errno 0.3.14: MIT OR Apache-2.0
 - ff 0.14.0: MIT/Apache-2.0
 - foldhash 0.2.0: Zlib
+- form_urlencoded 1.2.2: MIT OR Apache-2.0
 - getrandom 0.4.3: MIT OR Apache-2.0
 - ghash 0.6.0: Apache-2.0 OR MIT
 - group 0.14.0: MIT/Apache-2.0
 - hashbrown 0.17.1: MIT OR Apache-2.0
 - hmac 0.13.0: MIT OR Apache-2.0
 - hybrid-array 0.4.15: MIT OR Apache-2.0
+- icu_collections 2.3.0: Unicode-3.0
+- icu_locale_core 2.3.0: Unicode-3.0
+- icu_normalizer 2.3.0: Unicode-3.0
+- icu_normalizer_data 2.3.0: Unicode-3.0
+- icu_properties 2.3.0: Unicode-3.0
+- icu_properties_data 2.3.0: Unicode-3.0
+- icu_provider 2.3.1: Unicode-3.0
+- idna 1.1.0: MIT OR Apache-2.0
+- idna_adapter 1.2.2: Apache-2.0 OR MIT
 - indexmap 2.14.0: Apache-2.0 OR MIT
 - inout 0.2.2: MIT OR Apache-2.0
 - itoa 1.0.18: MIT OR Apache-2.0
@@ -51,10 +63,13 @@ Crates:
 - keccak 0.2.2: Apache-2.0 OR MIT
 - libc 0.2.190: MIT OR Apache-2.0
 - linux-raw-sys 0.12.1: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+- litemap 0.8.3: Unicode-3.0
 - memchr 2.8.3: Unlicense OR MIT
 - num-traits 0.2.19: MIT OR Apache-2.0
 - pbkdf2 0.13.0: MIT OR Apache-2.0
+- percent-encoding 2.3.2: MIT OR Apache-2.0
 - polyval 0.7.3: Apache-2.0 OR MIT
+- potential_utf 0.1.6: Unicode-3.0
 - primefield 0.14.0: Apache-2.0 OR MIT
 - primeorder 0.14.0: Apache-2.0 OR MIT
 - rand_core 0.10.1: MIT OR Apache-2.0
@@ -69,17 +84,27 @@ Crates:
 - sha2 0.11.0: MIT OR Apache-2.0
 - sha3 0.12.0: MIT OR Apache-2.0
 - signature 3.0.0: Apache-2.0 OR MIT
+- smallvec 1.16.3: MIT OR Apache-2.0
 - sponge-cursor 0.1.0: MIT OR Apache-2.0
+- stable_deref_trait 1.2.1: MIT OR Apache-2.0
 - subtle 2.6.1: BSD-3-Clause
 - thiserror 2.0.21: MIT OR Apache-2.0
+- tinystr 0.8.4: Unicode-3.0
 - tinyvec 1.13.3: Zlib OR Apache-2.0 OR MIT
 - typenum 1.20.1: MIT OR Apache-2.0
 - unicode-normalization 0.1.25: MIT OR Apache-2.0
 - universal-hash 0.6.1: MIT OR Apache-2.0
+- url 2.5.8: MIT OR Apache-2.0
+- utf8_iter 1.0.4: Apache-2.0 OR MIT
 - windows-link 0.2.1: MIT OR Apache-2.0
 - windows-sys 0.61.2: MIT OR Apache-2.0
 - wnaf 0.14.1: Apache-2.0 OR MIT
+- writeable 0.6.4: Unicode-3.0
+- yoke 0.8.3: Unicode-3.0
+- zerofrom 0.1.8: Unicode-3.0
 - zeroize 1.9.1: Apache-2.0 OR MIT
+- zerotrie 0.2.5: Unicode-3.0
+- zerovec 0.11.8: Unicode-3.0
 - zmij 1.0.23: MIT
 
 Rust 1.99 toolchain runtime:
@@ -979,7 +1004,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 ========================================================================
-Used by: aead 0.6.1 (LICENSE-APACHE), aes 0.9.3 (LICENSE-APACHE), aes-gcm 0.11.1 (LICENSE-APACHE), base16ct 1.0.0 (LICENSE-APACHE), block-buffer 0.12.1 (LICENSE-APACHE), cipher 0.5.2 (LICENSE-APACHE), const-oid 0.10.2 (LICENSE-APACHE), cpubits 0.1.1 (LICENSE-APACHE), cpufeatures 0.3.1 (LICENSE-APACHE), crypto-bigint 0.7.5 (LICENSE-APACHE), crypto-common 0.2.2 (LICENSE-APACHE), ctr 0.10.1 (LICENSE-APACHE), der 0.8.2 (LICENSE-APACHE), digest 0.11.3 (LICENSE-APACHE), elliptic-curve 0.14.1 (LICENSE-APACHE), ghash 0.6.0 (LICENSE-APACHE), hmac 0.13.0 (LICENSE-APACHE), hybrid-array 0.4.15 (LICENSE-APACHE), inout 0.2.2 (LICENSE-APACHE), k256 0.14.0 (LICENSE-APACHE), keccak 0.2.2 (LICENSE-APACHE), pbkdf2 0.13.0 (LICENSE-APACHE), polyval 0.7.3 (LICENSE-APACHE), primefield 0.14.0 (LICENSE-APACHE), primeorder 0.14.0 (LICENSE-APACHE), salsa20 0.11.0 (LICENSE-APACHE), scrypt 0.12.0 (LICENSE-APACHE), sec1 0.8.1 (LICENSE-APACHE), sha2 0.11.0 (LICENSE-APACHE), sha3 0.12.0 (LICENSE-APACHE), signature 3.0.0 (LICENSE-APACHE), sponge-cursor 0.1.0 (LICENSE-APACHE), universal-hash 0.6.1 (LICENSE-APACHE), wnaf 0.14.1 (LICENSE-APACHE)
+Used by: aead 0.6.1 (LICENSE-APACHE), aes 0.9.3 (LICENSE-APACHE), aes-gcm 0.11.1 (LICENSE-APACHE), base16ct 1.0.0 (LICENSE-APACHE), blake2 0.11.0 (LICENSE-APACHE), block-buffer 0.12.1 (LICENSE-APACHE), cipher 0.5.2 (LICENSE-APACHE), const-oid 0.10.2 (LICENSE-APACHE), cpubits 0.1.1 (LICENSE-APACHE), cpufeatures 0.3.1 (LICENSE-APACHE), crypto-bigint 0.7.5 (LICENSE-APACHE), crypto-common 0.2.2 (LICENSE-APACHE), ctr 0.10.1 (LICENSE-APACHE), der 0.8.2 (LICENSE-APACHE), digest 0.11.3 (LICENSE-APACHE), elliptic-curve 0.14.1 (LICENSE-APACHE), ghash 0.6.0 (LICENSE-APACHE), hmac 0.13.0 (LICENSE-APACHE), hybrid-array 0.4.15 (LICENSE-APACHE), inout 0.2.2 (LICENSE-APACHE), k256 0.14.0 (LICENSE-APACHE), keccak 0.2.2 (LICENSE-APACHE), pbkdf2 0.13.0 (LICENSE-APACHE), polyval 0.7.3 (LICENSE-APACHE), primefield 0.14.0 (LICENSE-APACHE), primeorder 0.14.0 (LICENSE-APACHE), salsa20 0.11.0 (LICENSE-APACHE), scrypt 0.12.0 (LICENSE-APACHE), sec1 0.8.1 (LICENSE-APACHE), sha2 0.11.0 (LICENSE-APACHE), sha3 0.12.0 (LICENSE-APACHE), signature 3.0.0 (LICENSE-APACHE), sponge-cursor 0.1.0 (LICENSE-APACHE), universal-hash 0.6.1 (LICENSE-APACHE), wnaf 0.14.1 (LICENSE-APACHE)
 ------------------------------------------------------------------------
 Apache License
                         Version 2.0, January 2004
@@ -1303,7 +1328,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-Used by: base64 0.22.1 (LICENSE-APACHE), bitflags 2.13.2 (LICENSE-APACHE), bs58 0.5.1 (LICENSE-APACHE), cfg-if 1.0.5 (LICENSE-APACHE), equivalent 1.0.2 (LICENSE-APACHE), errno 0.3.14 (LICENSE-APACHE), ff 0.14.0 (LICENSE-APACHE), group 0.14.0 (LICENSE-APACHE), hashbrown 0.17.1 (LICENSE-APACHE), indexmap 2.14.0 (LICENSE-APACHE), linux-raw-sys 0.12.1 (LICENSE-APACHE), num-traits 0.2.19 (LICENSE-APACHE), rustix 1.1.5 (LICENSE-APACHE), unicode-normalization 0.1.25 (LICENSE-APACHE), addr2line 0.27.1 (LICENSE-APACHE), cfg-if 1.0.4 (LICENSE-APACHE), gimli 0.34.0 (LICENSE-APACHE), hashbrown 0.17.1 (LICENSE-APACHE), object 0.39.1 (LICENSE-APACHE), rustc-demangle 0.1.28 (LICENSE-APACHE)
+Used by: base64 0.22.1 (LICENSE-APACHE), bitflags 2.13.2 (LICENSE-APACHE), bs58 0.5.1 (LICENSE-APACHE), cfg-if 1.0.5 (LICENSE-APACHE), equivalent 1.0.2 (LICENSE-APACHE), errno 0.3.14 (LICENSE-APACHE), ff 0.14.0 (LICENSE-APACHE), form_urlencoded 1.2.2 (LICENSE-APACHE), group 0.14.0 (LICENSE-APACHE), hashbrown 0.17.1 (LICENSE-APACHE), idna 1.1.0 (LICENSE-APACHE), idna_adapter 1.2.2 (LICENSE-APACHE), indexmap 2.14.0 (LICENSE-APACHE), linux-raw-sys 0.12.1 (LICENSE-APACHE), num-traits 0.2.19 (LICENSE-APACHE), percent-encoding 2.3.2 (LICENSE-APACHE), rustix 1.1.5 (LICENSE-APACHE), smallvec 1.16.3 (LICENSE-APACHE), stable_deref_trait 1.2.1 (LICENSE-APACHE), unicode-normalization 0.1.25 (LICENSE-APACHE), url 2.5.8 (LICENSE-APACHE), addr2line 0.27.1 (LICENSE-APACHE), cfg-if 1.0.4 (LICENSE-APACHE), gimli 0.34.0 (LICENSE-APACHE), hashbrown 0.17.1 (LICENSE-APACHE), object 0.39.1 (LICENSE-APACHE), rustc-demangle 0.1.28 (LICENSE-APACHE)
 ------------------------------------------------------------------------
 Apache License
                         Version 2.0, January 2004
@@ -1562,6 +1587,37 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ========================================================================
+Used by: blake2 0.11.0 (LICENSE-MIT)
+------------------------------------------------------------------------
+Copyright (c) 2017-2026 The RustCrypto Project Developers
+Copyright (c) 2017 Artyom Pavlov
+Copyright (c) 2015-2016 The blake2-rfc Developers, Cesar Barros
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+========================================================================
 Used by: block-buffer 0.12.1 (LICENSE-MIT)
 ------------------------------------------------------------------------
 Copyright (c) 2018-2025 The RustCrypto Project Developers
@@ -1673,7 +1729,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-Used by: cmov 0.5.4 (LICENSE-APACHE), ctutils 0.4.3 (LICENSE-APACHE), tinyvec 1.13.3 (LICENSE-APACHE.md), zeroize 1.9.1 (LICENSE-APACHE)
+Used by: cmov 0.5.4 (LICENSE-APACHE), ctutils 0.4.3 (LICENSE-APACHE), tinyvec 1.13.3 (LICENSE-APACHE.md), utf8_iter 1.0.4 (LICENSE-APACHE), zeroize 1.9.1 (LICENSE-APACHE)
 ------------------------------------------------------------------------
 Apache License
                            Version 2.0, January 2004
@@ -2719,6 +2775,31 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ========================================================================
+Used by: ens-normalize 0.1.1 (LICENSE)
+------------------------------------------------------------------------
+MIT License
+
+Copyright (c) 2021 Andrew Raffensperger
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+========================================================================
 Used by: equivalent 1.0.2 (LICENSE-MIT)
 ------------------------------------------------------------------------
 Copyright (c) 2016--2023
@@ -2823,6 +2904,35 @@ the following restrictions:
     misrepresented as being the original software.
 
 3. This notice may not be removed or altered from any source distribution.
+
+========================================================================
+Used by: form_urlencoded 1.2.2 (LICENSE-MIT)
+------------------------------------------------------------------------
+Copyright (c) 2013-2016 The rust-url developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 
 ========================================================================
 Used by: getrandom 0.4.3 (LICENSE-APACHE)
@@ -3137,6 +3247,114 @@ DEALINGS IN THE SOFTWARE.
 Used by: hmac 0.13.0 (LICENSE-MIT)
 ------------------------------------------------------------------------
 Copyright (c) 2017 Artyom Pavlov
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+========================================================================
+Used by: icu_collections 2.3.0 (LICENSE), icu_locale_core 2.3.0 (LICENSE), icu_normalizer 2.3.0 (LICENSE), icu_normalizer_data 2.3.0 (LICENSE), icu_properties 2.3.0 (LICENSE), icu_properties_data 2.3.0 (LICENSE), icu_provider 2.3.1 (LICENSE), litemap 0.8.3 (LICENSE), potential_utf 0.1.6 (LICENSE), tinystr 0.8.4 (LICENSE), writeable 0.6.4 (LICENSE), yoke 0.8.3 (LICENSE), zerofrom 0.1.8 (LICENSE), zerotrie 0.2.5 (LICENSE), zerovec 0.11.8 (LICENSE)
+------------------------------------------------------------------------
+UNICODE LICENSE V3
+
+COPYRIGHT AND PERMISSION NOTICE
+
+Copyright © 2020-2024 Unicode, Inc.
+
+NOTICE TO USER: Carefully read the following legal agreement. BY
+DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
+SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE BOUND BY, ALL OF THE
+TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
+DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of data files and any associated documentation (the "Data Files") or
+software and any associated documentation (the "Software") to deal in the
+Data Files or Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, and/or sell
+copies of the Data Files or Software, and to permit persons to whom the
+Data Files or Software are furnished to do so, provided that either (a)
+this copyright and permission notice appear with all copies of the Data
+Files or Software, or (b) this copyright and permission notice appear in
+associated Documentation.
+
+THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+THIRD PARTY RIGHTS.
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE
+BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES,
+OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA
+FILES OR SOFTWARE.
+
+Except as contained in this notice, the name of a copyright holder shall
+not be used in advertising or otherwise to promote the sale, use or other
+dealings in these Data Files or Software without prior written
+authorization of the copyright holder.
+
+SPDX-License-Identifier: Unicode-3.0
+
+—
+
+Portions of ICU4X may have been adapted from ICU4C and/or ICU4J.
+ICU 1.8.1 to ICU 57.1 © 1995-2016 International Business Machines Corporation and others.
+
+========================================================================
+Used by: idna 1.1.0 (LICENSE-MIT), percent-encoding 2.3.2 (LICENSE-MIT), url 2.5.8 (LICENSE-MIT)
+------------------------------------------------------------------------
+Copyright (c) 2013-2025 The rust-url developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+========================================================================
+Used by: idna_adapter 1.2.2 (LICENSE-MIT)
+------------------------------------------------------------------------
+Copyright (c) The rust-url developers
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -4734,9 +4952,67 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ========================================================================
+Used by: smallvec 1.16.3 (LICENSE-MIT)
+------------------------------------------------------------------------
+Copyright (c) 2018 The Servo Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+========================================================================
 Used by: sponge-cursor 0.1.0 (LICENSE-MIT)
 ------------------------------------------------------------------------
 Copyright (c) 2026 The RustCrypto Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+========================================================================
+Used by: stable_deref_trait 1.2.1 (LICENSE-MIT)
+------------------------------------------------------------------------
+Copyright (c) 2017 Robert Grosse
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -5098,6 +5374,81 @@ DEALINGS IN THE SOFTWARE.
 Used by: universal-hash 0.6.1 (LICENSE-MIT)
 ------------------------------------------------------------------------
 Copyright (c) 2019-2025 RustCrypto Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+========================================================================
+Used by: utf8_iter 1.0.4 (COPYRIGHT)
+------------------------------------------------------------------------
+Copyright Mozilla Foundation
+
+Licensed under the Apache License (Version 2.0), or the MIT license,
+(the "Licenses") at your option. You may not use this file except in
+compliance with one of the Licenses. You may obtain copies of the
+Licenses at:
+
+   https://www.apache.org/licenses/LICENSE-2.0
+   https://opensource.org/licenses/MIT
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the Licenses is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the Licenses for the specific language governing permissions and
+limitations under the Licenses.
+
+--
+
+Test code is dedicated to the Public Domain when so designated (see
+the individual files for PD/CC0-dedicated sections).
+
+--
+
+The implementation for Utf8CharIndices was adapted from the
+CharIndices implementation of the Rust standard library at revision
+ab32548539ec38a939c1b58599249f3b54130026
+(https://github.com/rust-lang/rust/blob/ab32548539ec38a939c1b58599249f3b54130026/library/core/src/str/iter.rs).
+
+Excerpt from https://github.com/rust-lang/rust/blob/ab32548539ec38a939c1b58599249f3b54130026/COPYRIGHT ,
+which refers to
+https://github.com/rust-lang/rust/blob/ab32548539ec38a939c1b58599249f3b54130026/LICENSE-APACHE
+and
+https://github.com/rust-lang/rust/blob/ab32548539ec38a939c1b58599249f3b54130026/LICENSE-MIT
+:
+
+For full authorship information, see the version control history or
+https://thanks.rust-lang.org
+
+Except as otherwise noted (below and/or in individual files), Rust is
+licensed under the Apache License, Version 2.0 <LICENSE-APACHE> or
+<http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+<LICENSE-MIT> or <http://opensource.org/licenses/MIT>, at your option.
+
+========================================================================
+Used by: utf8_iter 1.0.4 (LICENSE-MIT)
+------------------------------------------------------------------------
+Copyright Mozilla Foundation
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
