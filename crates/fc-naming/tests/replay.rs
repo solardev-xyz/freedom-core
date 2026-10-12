@@ -195,10 +195,15 @@ fn same(got: &JsValue, want: &JsValue) -> bool {
             g.len() == w.len()
                 && g.iter().zip(w).all(|((gk, gv), (wk, wv))| {
                     gk == wk
+                        // Deviation `error-text`: where the reference shows an
+                        // ethers composed message, the core shows its short
+                        // message, sanitized.
                         && (if gk == "error"
-                            && wv.as_str().is_some_and(|t| t.contains("version=6."))
+                            && let Some(text) = wv.as_str().filter(|t| t.contains("version=6."))
                         {
-                            gv.as_str().is_some()
+                            gv.as_str() == Some(
+                                fc_naming::ethers::sanitize(fc_naming::ethers::short_of(text)).as_str(),
+                            )
                         } else {
                             same(gv, wv)
                         })

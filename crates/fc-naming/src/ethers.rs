@@ -275,12 +275,18 @@ pub fn sanitize(value: &str) -> String {
         } else {
             0
         };
-        let tail_len = rest[scheme..]
-            .find(|c: char| {
-                crate::normalize::is_js_whitespace(c) || matches!(c, '"' | '\'' | '<' | '>')
-            })
-            .unwrap_or(rest.len() - scheme);
-        if scheme > 0 && tail_len > 0 {
+        // The URL's end is looked for only after a scheme, so the scan
+        // stays linear.
+        let tail_len = if scheme > 0 {
+            rest[scheme..]
+                .find(|c: char| {
+                    crate::normalize::is_js_whitespace(c) || matches!(c, '"' | '\'' | '<' | '>')
+                })
+                .unwrap_or(rest.len() - scheme)
+        } else {
+            0
+        };
+        if tail_len > 0 {
             out.push_str("<url>");
             rest = &rest[scheme + tail_len..];
         } else {
@@ -462,6 +468,18 @@ mod tests {
         assert_eq!(sanitize(&long).chars().count(), 240);
         assert!(sanitize(&long).ends_with('…'));
         assert_eq!(sanitize("   "), "");
+    }
+
+    #[test]
+    fn sanitizing_long_text_is_linear() {
+        // A contract's reason can be one long word: a megabyte must not take
+        // quadratic time.
+        let started = std::time::Instant::now();
+        let long = "a".repeat(1 << 20);
+        assert_eq!(sanitize(&long).chars().count(), 240);
+        let urls = "https://x.example/ ".repeat(1 << 16);
+        assert!(sanitize(&urls).starts_with("<url> <url>"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]
