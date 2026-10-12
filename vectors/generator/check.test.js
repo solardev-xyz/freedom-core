@@ -284,6 +284,21 @@ test('replay\'s verified-failure-text patch refuses failures returned as a statu
   await assert.rejects(replay.runScenario(REFERENCE, ethers, FakeTimers, scenario), /failure returned as a status/);
 });
 
+test('replay\'s memory-budgets patch refuses what it can\'t model', async () => {
+  const ethers = referenceEthers();
+  const FakeTimers = replay.loadFakeTimers(REFERENCE);
+  const run = (sessionBytes) => {
+    const scenario = structuredClone(definition(ethers, 'deviation-memory-budgets'));
+    scenario.world.bounds = { sessionBytes };
+    return replay.runScenario(REFERENCE, ethers, FakeTimers, scenario);
+  };
+  // The first probes' requests cross 100 bytes: the core charges a poll's
+  // requests together, which the patch can't model.
+  await assert.rejects(run(100), /a request crossed the budget/);
+  // Nothing crosses a megabyte: no deviation to show.
+  await assert.rejects(run(1 << 20), /finished under its budget/);
+});
+
 test('replay\'s overall-deadline patch refuses what it can\'t model', async () => {
   const ethers = referenceEthers();
   const FakeTimers = replay.loadFakeTimers(REFERENCE);
