@@ -1,12 +1,17 @@
 'use strict';
 
-// Replay vectors for design 0004: the pinned ens-resolver.js, run whole in
-// a scripted world. Every scenario gets a fresh resolver (no shared cache,
-// anchor or quarantine), seeded Math.random, the reference's own fake
-// timers, and a declarative script for every JSON-RPC endpoint and CCIP
-// gateway. Each records the requests made (virtual time, endpoint, method,
-// block pinning, call selector) and the result, with present-`undefined`
-// keys kept as {"$undefined":true}.
+// Replay vectors for design 0004: the pinned resolvers (ens-resolver.js and
+// tezos-domains-resolver.js), run whole in a scripted world. Every scenario
+// gets a fresh module (no shared cache, anchor or quarantine), seeded
+// Math.random, the reference's own fake timers, no ambient resolver
+// environment, and a declarative script for every endpoint, gateway and
+// verifier. Undeclared hosts and unscripted requests fail the generation.
+//
+// Each scenario records its input (seed, world, steps), every result with
+// its settlement time, and every I/O request: virtual start time, full
+// params, HTTP batch, end time and outcome (answered, cancelled, or still
+// open when the scenario ends). Present-`undefined` keys are kept as
+// {"$undefined":true}.
 
 const fs = require('node:fs');
 const Module = require('node:module');
@@ -14,6 +19,10 @@ const path = require('node:path');
 const { EventEmitter } = require('node:events');
 
 const EPOCH = 1_760_000_000_000;
+// Virtual time one step may take before it counts as pending.
+const MAX_STEP_MS = 10 * 60_000;
+// Environment the resolvers read: cleared while a scenario runs.
+const RESOLVER_ENV = ['ETH_RPC', 'TEZOS_RPC', 'C4_DISABLE_NATIVE'];
 const WNS = '0x0000000000696760e15f265e828db644a0c242eb';
 const GNS = '0x9d51d507bc7264d4fe8ad1cf7fe191933a0a81d6';
 // Inner and NameNFT selectors: contenthash(bytes32), addr(bytes32),
@@ -21,6 +30,7 @@ const GNS = '0x9d51d507bc7264d4fe8ad1cf7fe191933a0a81d6';
 const SELECTORS = { '0xbc1c58d1': 'contenthash', '0x3b3b57de': 'addr', '0xf1cb7e06': 'addr-multicoin', '0x9af8b7aa': 'reverse' };
 const HEAD = 20_000_000;
 const UR = '0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe';
+const GATEWAY_FLAGS = ['redirect', 'credentials', 'useSessionCookies', 'cache', 'bypassCustomProtocolHandlers'];
 
 /** mulberry32, the same seeded generator for every run. */
 function seeded(seed) {
@@ -39,17 +49,26 @@ function describe(value) {
 }
 
 /**
- * Loads a fresh ens-resolver.js. `stubs` maps module paths (relative to
- * src/main, without .js) to stand-ins, whoever requires them; the resolver
- * is registered in the module cache so its lazy dependents (the Myotis and
- * Colibri adapters) see this same instance. `restore` evicts every checkout
- * module, so no state survives into the next scenario.
+ * Loads a fresh copy of a src/main module. `stubs` maps module paths
+ * (relative to src/main, without .js) to stand-ins, whoever requires them;
+ * the module is registered in the module cache so lazy dependents (the
+ * Myotis and Colibri adapters) see this same instance. `restore` removes
+ * the hook and evicts every checkout module under src/, so no state
+ * survives into the next scenario; a failed load restores before throwing.
  */
-function loadResolver(checkout, stubs, file = 'ens-resolver.js') {
-  const main = path.join(checkout, 'src/main');
+function loadModule(checkout, stubs, file) {
+  const src = path.join(checkout, 'src');
+  const main = path.join(src, 'main');
   const filename = path.join(main, file);
   const byPath = new Map(Object.entries(stubs).map(([rel, stub]) => [path.join(main, `${rel}.js`), stub]));
+  const evict = () => {
+    for (const key of Object.keys(Module._cache)) if (key.startsWith(src + path.sep)) delete Module._cache[key];
+  };
   const originalLoad = Module._load;
+  const restore = () => {
+    Module._load = originalLoad;
+    evict();
+  };
   Module._load = function load(request, parent, isMain) {
     if (request === 'electron' && parent?.filename?.startsWith(checkout)) return stubs.electron;
     if (parent?.filename?.startsWith(main)) {
@@ -63,34 +82,51 @@ function loadResolver(checkout, stubs, file = 'ens-resolver.js') {
     }
     return originalLoad.call(this, request, parent, isMain);
   };
-  const evict = () => {
-    for (const key of Object.keys(Module._cache)) if (key.startsWith(path.join(checkout, 'src'))) delete Module._cache[key];
-  };
-  evict();
-  const mod = new Module(filename, null);
-  mod.filename = filename;
-  mod.paths = Module._nodeModulePaths(path.dirname(filename));
-  Module._cache[filename] = mod;
-  mod._compile(fs.readFileSync(filename, 'utf8'), filename);
-  mod.loaded = true;
-  return { resolver: mod.exports, restore: () => { Module._load = originalLoad; evict(); } };
+  try {
+    evict();
+    const mod = new Module(filename, null);
+    mod.filename = filename;
+    mod.paths = Module._nodeModulePaths(path.dirname(filename));
+    Module._cache[filename] = mod;
+    mod._compile(fs.readFileSync(filename, 'utf8'), filename);
+    mod.loaded = true;
+    return { exports: mod.exports, restore };
+  } catch (err) {
+    restore();
+    throw err;
+  }
 }
 
 /**
- * Runs one scenario. `world`:
- *   endpoints: registry RPC URLs, in order
- *   network: registry.getNetwork(1) (verification, quorum)
- *   hosts: per host { delay, head, fork, calls: { resolve, callback, reverse, '*' } }
- *     where a call answer is { data } | { rpc_error: { code, message, data? } } | { hang: true }
- *   gateways: per host { delay, status, body }
- *   call: { fn, args }, then: optional second call after `after` virtual ms
+ * Runs one scenario and returns its record. Every global it changes
+ * (environment, Math.random, ethers' transport, timers and Date, the
+ * module loader) is restored on every path, setup failures included. The
+ * scenario object is never modified.
  */
 async function runScenario(checkout, ethers, FakeTimers, scenario) {
-  const { world } = scenario;
-  const requests = [];
+  const system = scenario.system ?? 'ens';
+  const world = structuredClone(scenario.world);
+  const io = [];
+  const violations = [];
+  const listeners = [];
+  let myotisEpoch = 1;
+  let stepIndex = -1;
+  let http = 0;
+  let clock = null;
   const now = () => Date.now() - EPOCH;
   const hostOf = (url) => new URL(url).host;
   const plan = (host) => world.hosts?.[host] || {};
+  const declared = (host) => (world.endpoints ?? []).some((url) => hostOf(url) === host);
+  const record = (entry) => {
+    const item = { id: io.length, step: stepIndex, t: now(), ...entry, end: null, outcome: 'open' };
+    io.push(item);
+    return item;
+  };
+  const close = (item, outcome) => {
+    if (item.outcome !== 'open') return;
+    item.outcome = outcome;
+    item.end = now();
+  };
 
   // A call's kind: the UR's resolve (by its inner call) or reverse, a CCIP
   // callback, or a WNS/GNS NameNFT call ('wns:addr', say).
@@ -111,6 +147,17 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     }
     return null;
   };
+
+  // JSON-RPC endpoints, behind ethers' FetchRequest transport.
+  const block = (n, fork) => ({
+    number: ethers.toQuantity(n), hash: ethers.id(`${fork ? 'fork' : 'block'}${n}`), parentHash: ethers.id(`parent${n}`),
+    timestamp: '0x1', nonce: '0x0000000000000000', difficulty: '0x0', gasLimit: '0x1', gasUsed: '0x0',
+    miner: '0x' + '00'.repeat(20), extraData: '0x', baseFeePerGas: '0x1', transactions: [],
+  });
+  const unscripted = (what) => {
+    violations.push(what);
+    return { error: { code: -32601, message: 'unscripted' } };
+  };
   const answerRpc = (host, r) => {
     const p = plan(host);
     switch (r.method) {
@@ -119,56 +166,85 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       case 'eth_blockNumber':
         return { result: ethers.toQuantity(p.head ?? HEAD) };
       case 'eth_getBlockByNumber': {
-        const n = Number(r.params[0]);
-        return {
-          result: {
-            number: ethers.toQuantity(n), hash: ethers.id(`${p.fork ? 'fork' : 'block'}${n}`), parentHash: ethers.id(`parent${n}`),
-            timestamp: '0x1', nonce: '0x0000000000000000', difficulty: '0x0', gasLimit: '0x1', gasUsed: '0x0',
-            miner: '0x' + '00'.repeat(20), extraData: '0x', baseFeePerGas: '0x1', transactions: [],
-          },
-        };
+        const tag = r.params[0];
+        const n = tag === 'finalized' ? (p.finalized ?? (p.head ?? HEAD) - 64) : Number(tag);
+        if (!Number.isSafeInteger(n)) return unscripted(`block ${tag} at ${host}`);
+        return { result: block(n, p.fork) };
       }
       case 'eth_call': {
         const { to, data } = r.params[0];
         const kind = callKind(to, data);
         const answer = pickAnswer([p.calls, world.calls], kind);
-        if (!answer) throw new Error(`unscripted ${kind} call to ${host}`);
+        if (!answer) return unscripted(`${kind} call to ${host}`);
         if (answer.rpc_error) return { error: answer.rpc_error };
         if (answer.hang) return { hang: true };
         return { result: answer.data };
       }
       default:
-        throw new Error(`unscripted ${r.method}`);
+        return unscripted(`${r.method} at ${host}`);
     }
   };
-
-  ethers.FetchRequest.registerGetUrl(async (req) => {
+  const rpcTransport = (req, signal) => {
     const host = hostOf(req.url);
+    http += 1;
     const body = JSON.parse(Buffer.from(req.body).toString());
     const batch = Array.isArray(body) ? body : [body];
-    const t = now();
-    const answers = batch.map((r) => {
-      const block = r.method === 'eth_call' ? r.params[1] : r.params?.[0];
-      requests.push({ t, host, method: r.method, block: typeof block === 'string' ? block : null, selector: r.params?.[0]?.data?.slice(0, 10) ?? null });
-      return { id: r.id, ...answerRpc(host, r) };
+    const entries = batch.map((r) => record({
+      kind: 'rpc', host, http, method: r.method, params: r.params,
+      ...(r.method === 'eth_call' ? { call: callKind(r.params[0].to, r.params[0].data) } : {}),
+    }));
+    if (!declared(host)) violations.push(`undeclared RPC endpoint ${host}`);
+    const p = plan(host);
+    const answers = p.status ? [] : batch.map((r) => ({ id: r.id, ...answerRpc(host, r) }));
+    return new Promise((resolve, reject) => {
+      let timer = null;
+      signal?.addListener(() => {
+        if (entries.every((item) => item.outcome !== 'open')) return;
+        clearTimeout(timer);
+        for (const item of entries) close(item, 'cancelled');
+        reject(Object.assign(new Error('request cancelled'), { code: 'CANCELLED' }));
+      });
+      if (answers.some((a) => a.hang)) return;
+      timer = setTimeout(() => {
+        for (const item of entries) close(item, 'answered');
+        if (p.status) {
+          resolve({ statusCode: p.status, statusMessage: 'Unavailable', headers: {}, body: Buffer.from('unavailable') });
+          return;
+        }
+        const out = answers.map(({ id, result, error }) => (error ? { jsonrpc: '2.0', id, error } : { jsonrpc: '2.0', id, result }));
+        resolve({ statusCode: 200, statusMessage: 'OK', headers: { 'content-type': 'application/json' }, body: Buffer.from(JSON.stringify(Array.isArray(body) ? out : out[0])) });
+      }, p.delay ?? 10);
     });
-    if (answers.some((a) => a.hang)) await new Promise(() => {});
-    await new Promise((resolve) => setTimeout(resolve, plan(host).delay ?? 10));
-    const out = answers.map(({ id, result, error }) => (error ? { jsonrpc: '2.0', id, error } : { jsonrpc: '2.0', id, result }));
-    return { statusCode: 200, statusMessage: 'OK', headers: { 'content-type': 'application/json' }, body: Buffer.from(JSON.stringify(Array.isArray(body) ? out : out[0])) };
-  });
+  };
 
-  // The gateway transport, through a fake electron.net.
+  // CCIP gateways, through a fake electron.net ClientRequest: abort()
+  // cancels delivery and is recorded; a response arrives whole.
   const netRequest = (options) => {
     const req = new EventEmitter();
-    req.setHeader = () => {};
-    req.write = () => {};
-    req.abort = () => req.emit('abort');
+    const headers = {};
+    let body = null;
+    let item = null;
+    let timer = null;
+    req.setHeader = (name, value) => { headers[name.toLowerCase()] = value; };
+    req.write = (chunk) => { body = String(chunk); };
+    req.abort = () => {
+      if (!item || item.outcome !== 'open') return;
+      clearTimeout(timer);
+      close(item, 'cancelled');
+      req.emit('abort');
+      req.emit('close');
+    };
     req.end = () => {
       const host = hostOf(options.url);
-      const g = world.gateways?.[host] || {};
-      requests.push({ t: now(), host, method: `gateway ${options.method}`, block: null, selector: null });
-      setTimeout(() => {
+      const g = world.gateways?.[host];
+      item = record({
+        kind: 'gateway', host, method: options.method, url: options.url, headers, body,
+        flags: Object.fromEntries(GATEWAY_FLAGS.map((flag) => [flag, options[flag]])),
+      });
+      if (!g) violations.push(`undeclared gateway ${host}`);
+      if (!g || g.hang) return;
+      timer = setTimeout(() => {
+        close(item, 'answered');
         const res = new EventEmitter();
         Object.assign(res, { statusCode: g.status ?? 200, statusMessage: 'OK', headers: {}, pause() {}, resume() {}, destroy() {} });
         req.emit('response', res);
@@ -179,45 +255,43 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     return req;
   };
 
-  const ELECTRON = {
-    ipcMain: { handle() {} },
-    net: { request: netRequest },
-    session: { defaultSession: { resolveProxy: async () => 'DIRECT' } },
+  // Verifiers: { data } is proven return data, { revert } proven revert
+  // data, { unavailable: true } a verifier that cannot answer.
+  const verified = (source, state, to, data) => {
+    const kind = callKind(to, data);
+    const item = record({ kind: 'verified', host: source, method: 'eth_call', params: [{ to, data }, 'latest'], call: kind });
+    const answer = pickAnswer([state.calls], kind);
+    if (!answer) violations.push(`unscripted ${kind} call to ${source}`);
+    return new Promise((resolve) => setTimeout(() => { close(item, 'answered'); resolve(answer ?? {}); }, state.delay ?? 10));
   };
-  // Verified answers: { data } is proven return data, { revert } proven
-  // revert data; anything else is an unavailable verifier.
-  const verifiedAnswer = (source, to, data) => {
-    const answer = pickAnswer([source.calls], callKind(to, data));
-    requests.push({ t: now(), host: source.id, method: 'verified eth_call', block: 'latest', selector: data.slice(0, 10) });
-    return answer;
-  };
-  const myotis = world.myotis ?? { enabled: false, ready: false };
+  const myotis = () => world.myotis ?? {};
+  const colibri = () => world.colibri ?? {};
   const MYOTIS = {
-    onAvailabilityTransition() {},
-    isEnabled: () => myotis.enabled ?? false,
-    isReady: () => myotis.ready ?? false,
-    getAvailabilityEpoch: () => 1,
-    getStatus: () => ({ state: myotis.ready ? 'ready' : 'stopped', optimisticBlockNumber: myotis.block ?? null }),
+    onAvailabilityTransition: (listener) => { listeners.push(listener); },
+    isEnabled: () => myotis().enabled ?? false,
+    isReady: () => myotis().ready ?? false,
+    getAvailabilityEpoch: () => myotisEpoch,
+    getStatus: () => ({ state: myotis().ready ? 'ready' : 'stopped', optimisticBlockNumber: myotis().block ?? null }),
     ethCall: async ({ to, data }) => {
-      const answer = verifiedAnswer({ id: 'myotis', calls: myotis.calls }, to, data);
-      await new Promise((resolve) => setTimeout(resolve, myotis.delay ?? 10));
-      if (answer?.data) return { status: 'ok', resultHex: answer.data };
-      if (answer?.revert) return { status: 'revert', dataHex: answer.revert };
+      const answer = await verified('myotis', myotis(), to, data);
+      if (answer.data) return { status: 'ok', resultHex: answer.data };
+      if (answer.revert) return { status: 'revert', dataHex: answer.revert };
       return { status: 'error' };
     },
   };
-  const colibri = world.colibri ?? {};
   const COLIBRI_HOST = {
     ensureWorker: async () => {},
     createClient: () => ({
       async request({ method, params }) {
+        // The client knows its chain: answered locally, without I/O.
         if (method === 'eth_chainId') return '0x1';
-        if (method !== 'eth_call') throw new Error(`unscripted Colibri ${method}`);
-        const { to, data } = params[0];
-        const answer = verifiedAnswer({ id: 'colibri', calls: colibri.calls }, to, data);
-        await new Promise((resolve) => setTimeout(resolve, colibri.delay ?? 10));
-        if (answer?.data) return answer.data;
-        if (answer?.revert) throw Object.assign(new Error('execution reverted'), { code: 3, data: answer.revert });
+        if (method !== 'eth_call') {
+          violations.push(`Colibri ${method}`);
+          throw new Error(`unscripted Colibri ${method}`);
+        }
+        const answer = await verified('colibri', colibri(), params[0].to, params[0].data);
+        if (answer.data) return answer.data;
+        if (answer.revert) throw Object.assign(new Error('execution reverted'), { code: 3, data: answer.revert });
         throw new Error('Colibri proof unavailable');
       },
       destroy() {},
@@ -225,143 +299,162 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       removeListener() {},
     }),
   };
-  const stubs = {
-    electron: ELECTRON,
+
+  // Tezos nodes, behind the resolver's fetchImpl parameter.
+  const json = (status, value) => new Response(value === undefined ? '' : JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
+  const tezosNode = (host, p, method, route) => {
+    if (p.fail) return json(500, { error: 'down' });
+    const level = p.level ?? TEZ_HEAD;
+    if (route === '/chains/main/chain_id') return json(200, p.chain ?? 'NetXdQprcVkpaWU');
+    if (route === '/chains/main/blocks/head/header') return json(200, { level });
+    let m = route.match(/^\/chains\/main\/blocks\/(\d+)\/hash$/);
+    if (m) return json(200, `BL${p.fork ? 'fork' : 'main'}${m[1]}`);
+    m = route.match(/^\/chains\/main\/blocks\/[^/]+\/context\/(.*)$/);
+    const rest = m?.[1] ?? '';
+    if (method === 'POST' && rest === `contracts/${TEZ_PROXY}/script/normalized`) return json(200, tezProxyScript());
+    if (method === 'POST' && rest === `contracts/${TEZ_REGISTRY}/script/normalized`) {
+      return p.scriptFail ? json(500, { error: 'script' }) : json(200, tezRegistryScript());
+    }
+    if (rest.startsWith('big_maps/1264/')) {
+      const rec = p.record !== undefined ? p.record : world.record;
+      return rec === null ? json(404) : json(200, rec);
+    }
+    if (rest.startsWith('big_maps/1265/')) return json(200, { string: p.expiry ?? world.expiry });
+    violations.push(`unscripted Tezos ${method} ${route} at ${host}`);
+    return json(404);
+  };
+  const fetchImpl = (url, init = {}) => {
+    const { host, pathname } = new URL(url);
+    const method = init.method ?? 'GET';
+    const item = record({ kind: 'tezos', host, method, path: pathname, body: init.body ?? null });
+    if (!declared(host)) violations.push(`undeclared Tezos endpoint ${host}`);
+    const p = plan(host);
+    return new Promise((resolve, reject) => {
+      let timer = null;
+      const abort = () => {
+        clearTimeout(timer);
+        close(item, 'cancelled');
+        reject(Object.assign(new Error('This operation was aborted'), { name: 'AbortError' }));
+      };
+      if (init.signal?.aborted) return abort();
+      init.signal?.addEventListener('abort', abort, { once: true });
+      if (p.hang) return;
+      timer = setTimeout(() => {
+        init.signal?.removeEventListener('abort', abort);
+        close(item, 'answered');
+        resolve(tezosNode(host, p, method, pathname));
+      }, p.delay ?? 10);
+    });
+  };
+
+  const common = {
     logger: { info() {}, warn() {}, error() {}, debug() {} },
+    'private/private-log-context': { runWithPrivateLogContext: (_p, fn) => fn(), redactForLog: (v) => v },
+    'private/private-windows': { isPrivateWebContents: () => false },
+  };
+  const stubs = system === 'tezos' ? { ...common, electron: { ipcMain: { handle() {} } } } : {
+    ...common,
+    electron: {
+      ipcMain: { handle() {} },
+      net: { request: netRequest },
+      session: { defaultSession: { resolveProxy: async () => 'DIRECT' } },
+    },
     'networks/network-registry': {
       getEndpoints: (chain, kind) => {
         if (chain !== 1) return [];
         if (kind === 'rpc') return world.endpoints;
-        if (kind === 'prover') return colibri.prover ? [colibri.prover] : [];
+        if (kind === 'prover') return colibri().prover ? [colibri().prover] : [];
         return [];
       },
       getNetwork: () => world.network,
       getEndpointSources: () => world.sources ?? [],
       getEndpointSourceList: () => world.sourceList ?? [],
+      invalidate() {},
     },
-    'ens-prefetch': { prefetchGatewayUrl: () => ({ abort() {} }), NOOP_HANDLE: { abort() {} } },
+    'ens-prefetch': {
+      prefetchGatewayUrl: (uri) => {
+        const item = record({ kind: 'prefetch', host: null, uri });
+        return { abort: () => close(item, 'cancelled') };
+      },
+      NOOP_HANDLE: { abort() {} },
+    },
     'myotis/myotis-manager': MYOTIS,
     'ens/colibri-worker-host': COLIBRI_HOST,
-    'private/private-log-context': { runWithPrivateLogContext: (_p, fn) => fn(), redactForLog: (v) => v },
-    'private/private-windows': { isPrivateWebContents: () => false },
   };
 
-  const random = Math.random;
-  Math.random = seeded(world.seed ?? 7);
-  const clock = FakeTimers.install({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'], now: EPOCH });
-  const { resolver, restore } = loadResolver(checkout, stubs);
+  // A scripted event during a step: a Myotis availability transition.
+  const fire = (event) => {
+    record({ kind: 'event', host: null, event });
+    if (event.myotis) {
+      world.myotis = { ...myotis(), ...event.myotis };
+      myotisEpoch += 1;
+      for (const listener of listeners) listener({ chainId: 1, ready: myotis().ready ?? false, reason: 'scripted', epoch: myotisEpoch });
+    }
+    for (const item of io) if (item.kind === 'event') close(item, 'fired');
+  };
+
+  // Advances virtual time event by event until every call settles, so a
+  // settlement time is exact and the next step starts from it.
+  const settleAll = async (promises) => {
+    const results = promises.map(() => null);
+    promises.forEach((promise, i) => promise.then(
+      (value) => { results[i] = { value: describe(value), settled: now() }; },
+      (error) => { results[i] = { thrown: String(error?.message ?? error), settled: now() }; }
+    ));
+    const done = () => results.every(Boolean);
+    const limit = Date.now() + MAX_STEP_MS;
+    await clock.tickAsync(0);
+    while (!done() && clock.countTimers() > 0 && Date.now() < limit) await clock.nextAsync();
+    for (let i = 0; i < 10 && !done(); i += 1) await new Promise((resolve) => setImmediate(resolve));
+    return results.map((result) => result ?? { pending: true });
+  };
+
+  const undo = [];
   try {
-    const run = async ({ fn, args }) => {
-      let done = false;
-      let outcome;
-      resolver[fn](...args).then(
-        (value) => { done = true; outcome = { value: describe(value) }; },
-        (error) => { done = true; outcome = { thrown: error.message }; }
-      );
-      // Advance virtual time until the call settles (bounded).
-      for (let i = 0; !done && i < 4000; i += 1) await clock.tickAsync(25);
-      return done ? outcome : { pending: true };
-    };
-    const calls = [];
-    const first = await run(scenario.call);
-    calls.push({ call: scenario.call, at: 0, requests: requests.splice(0), ...first, elapsed: now() });
-    for (const next of scenario.then ?? []) {
-      await clock.tickAsync(next.after ?? 0);
-      // The world can change between calls (a gateway recovering, say).
-      Object.assign(world, next.world ?? {});
-      const start = now();
-      const out = await run(next.call);
-      calls.push({ call: next.call, at: start, requests: requests.splice(0), ...out, elapsed: now() - start });
-    }
-    return calls;
-  } finally {
-    clock.uninstall();
-    Math.random = random;
-    restore();
-  }
-}
-
-/**
- * Runs one Tezos Domains scenario: the pinned tezos-domains-resolver.js
- * with a scripted Tezos node per endpoint behind its `fetchImpl` parameter.
- * `world.endpoints` is passed as its `endpoints` parameter (the IPC path
- * reads TEZOS_RPC and the defaults instead).
- */
-async function runTezosScenario(checkout, FakeTimers, scenario) {
-  const { world } = scenario;
-  const requests = [];
-  const now = () => Date.now() - EPOCH;
-  const json = (status, body) => new Response(body === undefined ? '' : JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
-
-  const node = (plan, method, route) => {
-    if (plan.fail) return json(500, { error: 'down' });
-    const level = plan.level ?? TEZ_HEAD;
-    if (route === '/chains/main/chain_id') return json(200, plan.chain ?? 'NetXdQprcVkpaWU');
-    if (route === '/chains/main/blocks/head/header') return json(200, { level });
-    let m = route.match(/^\/chains\/main\/blocks\/(\d+)\/hash$/);
-    if (m) return json(200, `BL${plan.fork ? 'fork' : 'main'}${m[1]}`);
-    m = route.match(/^\/chains\/main\/blocks\/([^/]+)\/context\/(.*)$/);
-    if (!m) return json(404);
-    const [, , rest] = m;
-    if (method === 'POST' && rest === `contracts/${TEZ_PROXY}/script/normalized`) return json(200, tezProxyScript());
-    if (method === 'POST' && rest === `contracts/${TEZ_REGISTRY}/script/normalized`) {
-      return plan.scriptFail ? json(500, { error: 'script' }) : json(200, tezRegistryScript());
-    }
-    if (rest.startsWith('big_maps/1264/')) {
-      const record = plan.record ?? world.record;
-      return record === null ? json(404) : json(200, record);
-    }
-    if (rest.startsWith('big_maps/1265/')) return json(200, { string: plan.expiry ?? world.expiry });
-    return json(404);
-  };
-
-  const fetchImpl = (url, init = {}) => {
-    const { host, pathname } = new URL(url);
-    const plan = world.hosts?.[host] || {};
-    const method = init.method ?? 'GET';
-    requests.push({ t: now(), host, method, path: pathname });
-    return new Promise((resolve, reject) => {
-      const abort = () => reject(Object.assign(new Error('This operation was aborted'), { name: 'AbortError' }));
-      if (init.signal?.aborted) return abort();
-      init.signal?.addEventListener('abort', abort, { once: true });
-      if (plan.hang) return;
-      setTimeout(() => resolve(node(plan, method, pathname)), plan.delay ?? 10);
+    const env = Object.fromEntries(RESOLVER_ENV.map((key) => [key, process.env[key]]));
+    undo.push(() => {
+      for (const [key, value] of Object.entries(env)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     });
-  };
+    for (const key of RESOLVER_ENV) delete process.env[key];
 
-  const stubs = {
-    electron: { ipcMain: { handle() {} } },
-    logger: { info() {}, warn() {}, error() {}, debug() {} },
-    'private/private-log-context': { runWithPrivateLogContext: (_p, fn) => fn(), redactForLog: (v) => v },
-    'private/private-windows': { isPrivateWebContents: () => false },
-  };
-  const clock = FakeTimers.install({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'], now: EPOCH });
-  const { resolver, restore } = loadResolver(checkout, stubs, 'tezos-domains-resolver.js');
-  try {
-    const run = async (name) => {
-      let done = false;
-      let outcome;
-      resolver.resolveTezosDomain(name, { fetchImpl, endpoints: world.endpoints }).then(
-        (value) => { done = true; outcome = { value: describe(value) }; },
-        (error) => { done = true; outcome = { thrown: error.message }; }
-      );
-      for (let i = 0; !done && i < 4000; i += 1) await clock.tickAsync(25);
-      return done ? outcome : { pending: true };
-    };
-    const calls = [];
-    const first = await run(scenario.call.args[0]);
-    calls.push({ call: scenario.call, at: 0, requests: requests.splice(0), ...first, elapsed: now() });
-    for (const next of scenario.then ?? []) {
-      await clock.tickAsync(next.after ?? 0);
-      Object.assign(world, next.world ?? {});
-      const start = now();
-      const out = await run(next.call.args[0]);
-      calls.push({ call: next.call, at: start, requests: requests.splice(0), ...out, elapsed: now() - start });
+    const random = Math.random;
+    undo.push(() => { Math.random = random; });
+    Math.random = seeded(scenario.seed ?? 7);
+
+    const previousGetUrl = new ethers.FetchRequest('https://snapshot.invalid').getUrlFunc;
+    undo.push(() => ethers.FetchRequest.registerGetUrl(previousGetUrl));
+    ethers.FetchRequest.registerGetUrl(rpcTransport);
+
+    clock = FakeTimers.install({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'], now: EPOCH });
+    undo.push(() => clock.uninstall());
+
+    const loaded = loadModule(checkout, stubs, system === 'tezos' ? 'tezos-domains-resolver.js' : 'ens-resolver.js');
+    undo.push(loaded.restore);
+    const invoke = ({ fn, args = [] }) => Promise.resolve().then(() => (system === 'tezos'
+      ? loaded.exports[fn](...args, { fetchImpl, endpoints: world.endpoints })
+      : loaded.exports[fn](...args)));
+
+    const steps = [];
+    for (const [index, step] of scenario.steps.entries()) {
+      if (step.after) await clock.tickAsync(step.after);
+      stepIndex = index;
+      if (step.world) Object.assign(world, structuredClone(step.world));
+      const at = now();
+      for (const event of step.events ?? []) setTimeout(() => fire(event), event.at);
+      const results = await settleAll((step.calls ?? [step.call]).map(invoke));
+      steps.push(describe({ at, ...step, results }));
     }
-    return calls;
+    // Let stragglers finish, so a late answer nobody waits for is recorded
+    // as answered rather than left open.
+    const limit = Date.now() + MAX_STEP_MS;
+    while (clock.countTimers() > 0 && Date.now() < limit) await clock.nextAsync();
+    if (violations.length > 0) throw new Error(`scenario ${scenario.id}: unscripted I/O: ${[...new Set(violations)].join('; ')}`);
+    return { id: scenario.id, system, seed: scenario.seed ?? 7, world: describe(scenario.world), steps, io: describe(io) };
   } finally {
-    clock.uninstall();
-    restore();
+    for (const fn of undo.reverse()) fn();
   }
 }
 
@@ -401,91 +494,125 @@ const tezRecord = (data, expiryKey = 'abcd') => ({
   ],
 });
 
-function tezosScenarios() {
-  const T = ['https://t1.tez.example', 'https://t2.tez.example', 'https://t3.tez.example'];
-  const SITE = 'ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/';
-  const base = (extra) => ({ endpoints: T, record: tezRecord({ 'web:content_url': SITE, 'td:ttl': 600 }), expiry: '2030-01-01T00:00:00Z', ...extra });
-  const tez = { fn: 'resolveTezosDomain', args: ['alice.tez'] };
-  return [
-    { id: 'tezos-agree', world: base({}), call: tez, then: [{ after: 1000, call: tez }, { after: 60_000, call: { fn: 'resolveTezosDomain', args: ['bob.tez'] } }] },
-    { id: 'tezos-one-liar', world: base({ hosts: { 't2.tez.example': { record: tezRecord({ 'web:content_url': 'https://evil.example/' }) } } }), call: tez },
-    { id: 'tezos-head-outlier', world: base({ hosts: { 't3.tez.example': { level: TEZ_HEAD - 61 } } }), call: tez },
-    { id: 'tezos-heads-scattered', world: base({ hosts: { 't1.tez.example': { level: TEZ_HEAD - 200 }, 't3.tez.example': { level: TEZ_HEAD + 200 } } }), call: tez },
-    { id: 'tezos-anchor-split', world: base({ hosts: { 't2.tez.example': { fork: true } } }), call: tez },
-    { id: 'tezos-two-down', world: base({ hosts: { 't1.tez.example': { fail: true }, 't2.tez.example': { hang: true } } }), call: tez, then: [{ after: 1000, call: tez }] },
-    { id: 'tezos-all-down', world: base({ hosts: { 't1.tez.example': { fail: true }, 't2.tez.example': { fail: true }, 't3.tez.example': { fail: true } } }), call: tez, then: [{ after: 1000, call: tez }] },
-    { id: 'tezos-expired', world: base({ expiry: '2020-01-01T00:00:00Z' }), call: tez },
-    { id: 'tezos-expiry-unparseable', world: base({ expiry: 'not a date' }), call: tez },
-    { id: 'tezos-redirect', world: base({ record: tezRecord({ 'web:redirect_url': 'https://alice.example/' }) }), call: tez },
-    { id: 'tezos-no-website', world: base({ record: tezRecord({ 'td:ttl': 60 }, null) }), call: tez },
-    { id: 'tezos-no-record', world: base({ record: null }), call: tez, then: [{ after: 31_000, call: tez }] },
-    { id: 'tezos-registry-script-fails-once', world: base({ hosts: { 't1.tez.example': { scriptFail: true } } }), call: tez },
-    { id: 'tezos-invalid-name', world: base({}), call: { fn: 'resolveTezosDomain', args: ['alice.eth'] } },
-  ];
-}
-
 const ENDPOINTS = ['https://a.rpc.example', 'https://b.rpc.example', 'https://c.rpc.example', 'https://d.rpc.example'];
 const QUORUM_NETWORK = { verification: { order: ['quorum'], preferVerified: false }, quorum: { k: 3, m: 2, timeoutMs: 5000, anchor: 'latest', anchorTtlMs: 30000 } };
+const content = (name = 'vitalik.eth') => ({ fn: 'resolveEnsContent', args: [name] });
 
-function scenarios(ethers) {
+/** Every scenario, ENS then Tezos. */
+function scenarioDefinitions(ethers) {
   const coder = ethers.AbiCoder.defaultAbiCoder();
   const contentAnswer = (contenthash) => ({ data: coder.encode(['bytes', 'address'], [coder.encode(['bytes'], [contenthash]), '0x' + '22'.repeat(20)]) });
   const GOOD = contentAnswer('0xe3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f');
   const EVIL = contentAnswer('0xe40101fa011b20' + 'ee'.repeat(32));
   const lookup = '0x556f1830' + coder.encode(['address', 'string[]', 'bytes', 'bytes4', 'bytes'], [UR, ['https://gw.example/{sender}/{data}.json'], '0x0102', '0xdeadbeef', '0x09']).slice(2);
   const OFFCHAIN = { rpc_error: { code: 3, message: 'execution reverted', data: lookup } };
+  const ADDRESS = { data: coder.encode(['bytes', 'address'], [coder.encode(['address'], ['0x' + 'ab'.repeat(20)]), '0x' + '22'.repeat(20)]) };
+  const GATEWAY = (delay) => ({ 'gw.example': { delay, body: JSON.stringify({ data: '0xcafe' }) } });
   const base = (extra) => ({ endpoints: ENDPOINTS, network: QUORUM_NETWORK, calls: { resolve: GOOD, callback: GOOD }, ...extra });
-  const content = { fn: 'resolveEnsContent', args: ['vitalik.eth'] };
+  const order = (methods, preferVerified = false) => ({ ...QUORUM_NETWORK, verification: { order: methods, preferVerified } });
+  const one = (id, world, call = content()) => ({ id, world, steps: [{ call }] });
   return [
-    { id: 'quorum-agree', world: base({}), call: content },
-    { id: 'quorum-slow-endpoint-head', world: base({ hosts: { 'b.rpc.example': { delay: 6000 } } }), call: content },
-    { id: 'quorum-one-liar', world: base({ hosts: { 'c.rpc.example': { calls: { resolve: EVIL } } } }), call: content },
-    { id: 'quorum-two-colluding', world: base({ hosts: { 'c.rpc.example': { calls: { resolve: EVIL } }, 'd.rpc.example': { calls: { resolve: EVIL } } } }), call: content },
-    { id: 'ccip-fast-gateway', world: base({ calls: { resolve: OFFCHAIN, callback: GOOD }, gateways: { 'gw.example': { delay: 100, body: JSON.stringify({ data: '0xcafe' }) } } }), call: content },
+    one('quorum-agree', base({})),
+    one('quorum-slow-endpoint-head', base({ hosts: { 'b.rpc.example': { delay: 6000 } } })),
+    one('quorum-one-liar', base({ hosts: { 'c.rpc.example': { calls: { resolve: EVIL } } } })),
+    one('quorum-two-colluding', base({ hosts: { 'c.rpc.example': { calls: { resolve: EVIL } }, 'd.rpc.example': { calls: { resolve: EVIL } } } })),
+    one('ccip-fast-gateway', base({ calls: { resolve: OFFCHAIN, callback: GOOD }, gateways: GATEWAY(100) })),
     {
       id: 'ccip-slow-gateway-then-another-name',
-      world: base({ calls: { resolve: OFFCHAIN, callback: GOOD }, gateways: { 'gw.example': { delay: 6000, body: JSON.stringify({ data: '0xcafe' }) } } }),
-      call: content,
-      // The gateway recovers: does the next name reuse the anchor and the
-      // endpoints (no quarantine after a gateway timeout)?
-      then: [{ after: 100, world: { gateways: { 'gw.example': { delay: 10, body: JSON.stringify({ data: '0xcafe' }) } } }, call: { fn: 'resolveEnsContent', args: ['nick.eth'] } }],
+      world: base({ calls: { resolve: OFFCHAIN, callback: GOOD }, gateways: GATEWAY(6000) }),
+      // The gateway recovers: the next name reuses the anchor and the
+      // endpoints (no quarantine after a gateway timeout).
+      steps: [{ call: content() }, { after: 100, world: { gateways: GATEWAY(10) }, call: content('nick.eth') }],
     },
-    { id: 'single-source-two-endpoints', world: base({ endpoints: ENDPOINTS.slice(0, 2) }), call: content },
-    { id: 'anchor-hash-split', world: base({ hosts: { 'c.rpc.example': { fork: true }, 'd.rpc.example': { fork: true } } }), call: content },
-    { id: 'node-errors-agree', world: base({ calls: { resolve: { rpc_error: { code: -32000, message: 'header not found' } } } }), call: content },
-    ...addressAndReverse(ethers, base),
-    ...verifiedPaths(ethers, base, GOOD, lookup),
+    one('single-source-two-endpoints', base({ endpoints: ENDPOINTS.slice(0, 2) })),
+    one('anchor-hash-split', base({ hosts: { 'c.rpc.example': { fork: true }, 'd.rpc.example': { fork: true } } })),
+    one('anchor-finalized', base({ network: { ...QUORUM_NETWORK, quorum: { ...QUORUM_NETWORK.quorum, anchor: 'finalized' } } })),
+    one('node-errors-agree', base({ calls: { resolve: { rpc_error: { code: -32000, message: 'header not found' } } } })),
+    // A verified answer lives 15 minutes; an unverified one a minute.
+    { id: 'cache-boundary-verified', world: base({}), steps: [{ call: content() }, { call: content() }, { after: 899_999, call: content() }, { after: 1, call: content() }] },
+    { id: 'cache-boundary-unverified', world: base({ endpoints: ENDPOINTS.slice(0, 2) }), steps: [{ call: content() }, { after: 59_999, call: content() }, { after: 1, call: content() }] },
+    {
+      // b answers HTTP 503: quarantined for 60 s. An expired entry is
+      // dropped before b is retried, so each later failure starts again
+      // at 60 s; b rejoins once it recovers.
+      id: 'quarantine-expiry-resets',
+      world: base({ hosts: { 'b.rpc.example': { status: 503 } } }),
+      steps: [
+        { call: content('vitalik.eth') },
+        { after: 30_000, call: content('nick.eth') },
+        { after: 31_000, call: content('brantly.eth') },
+        { after: 61_000, call: content('jesse.eth') },
+        { after: 61_000, world: { hosts: {} }, call: content('luc.eth') },
+        { after: 1_000, call: content('ens.eth') },
+      ],
+    },
+    {
+      // Two concurrent lookups both fail on b within one entry: 120 s.
+      id: 'quarantine-doubles-on-overlapping-failures',
+      world: base({ hosts: { 'b.rpc.example': { status: 503 } }, calls: { resolve: GOOD, 'resolve:addr': ADDRESS, callback: GOOD } }),
+      steps: [
+        { calls: [content(), { fn: 'resolveEnsAddress', args: ['vitalik.eth'] }] },
+        { after: 61_000, call: content('nick.eth') },
+        { after: 60_000, call: content('brantly.eth') },
+      ],
+    },
+    {
+      // Same label and name share one lookup; content and address don't,
+      // and each probes the anchor.
+      id: 'dedup-concurrent',
+      world: base({ calls: { resolve: GOOD, 'resolve:addr': ADDRESS, callback: GOOD } }),
+      steps: [{ calls: [content(), content(), { fn: 'resolveEnsAddress', args: ['vitalik.eth'] }] }],
+    },
+    { id: 'settings-invalidation', world: base({}), steps: [{ call: content() }, { call: { fn: 'invalidateCachedProvider' } }, { call: content() }] },
+    {
+      id: 'direct-user-configured',
+      world: base({ network: order(['direct']), sources: [{ id: 'mine', coverage: { 1: ENDPOINTS[0] } }], sourceList: [{ id: 'mine', builtin: false }] }),
+      steps: [{ call: content() }],
+    },
+    one('direct-builtin', base({ network: order(['direct']), sources: [{ id: 'pub', coverage: { 1: ENDPOINTS[0] } }], sourceList: [{ id: 'pub', builtin: true }] })),
+    ...addressAndReverse(ethers, base, one),
+    ...verifiedPaths(ethers, base, one, order, GOOD, lookup),
+    ...tezosScenarios(),
   ];
 }
 
-/** Myotis and Colibri, alone and in the method order. */
-function verifiedPaths(ethers, base, GOOD, lookup) {
+/** Myotis and Colibri, alone, in the method order, and across transitions. */
+function verifiedPaths(ethers, base, one, order, GOOD, lookup) {
   const coder = ethers.AbiCoder.defaultAbiCoder();
   const notFound = ethers.id('ResolverNotFound(bytes)').slice(0, 10) + coder.encode(['bytes'], ['0x00']).slice(2);
-  const order = (methods, preferVerified = false) => ({ ...QUORUM_NETWORK, verification: { order: methods, preferVerified } });
-  const content = { fn: 'resolveEnsContent', args: ['vitalik.eth'] };
+  const COLIBRI = (calls) => ({ prover: 'https://prover.example', calls });
   return [
-    { id: 'myotis-verified', world: base({ network: order(['myotis', 'colibri', 'quorum']), myotis: { enabled: true, ready: true, calls: { resolve: GOOD } } }), call: content },
-    { id: 'myotis-not-ready-falls-to-quorum', world: base({ network: order(['myotis', 'quorum']), myotis: { enabled: true, ready: false } }), call: content },
-    { id: 'colibri-verified', world: base({ network: order(['colibri', 'quorum']), colibri: { prover: 'https://prover.example', calls: { resolve: GOOD } } }), call: content },
-    { id: 'colibri-resolver-not-found', world: base({ network: order(['colibri', 'quorum']), colibri: { prover: 'https://prover.example', calls: { resolve: { revert: notFound } } } }), call: content },
+    one('myotis-verified', base({ network: order(['myotis', 'colibri', 'quorum']), myotis: { enabled: true, ready: true, calls: { resolve: GOOD } } })),
+    one('myotis-not-ready-falls-to-quorum', base({ network: order(['myotis', 'quorum']), myotis: { enabled: true, ready: false } })),
+    one('colibri-verified', base({ network: order(['colibri', 'quorum']), colibri: COLIBRI({ resolve: GOOD }) })),
+    one('colibri-resolver-not-found', base({ network: order(['colibri', 'quorum']), colibri: COLIBRI({ resolve: { revert: notFound } }) })),
+    one('colibri-unavailable-falls-to-quorum', base({ network: order(['colibri', 'quorum']), colibri: COLIBRI({ resolve: { unavailable: true } }) })),
+    one('myotis-ccip', base({
+      network: order(['myotis', 'quorum']),
+      myotis: { enabled: true, ready: true, calls: { resolve: { revert: lookup }, callback: GOOD } },
+      gateways: { 'gw.example': { delay: 50, body: JSON.stringify({ data: '0xcafe' }) } },
+    })),
+    // Quorum can only reach one source (two endpoints): unverified, held
+    // while Myotis is tried, which then answers verified.
+    one('prefer-verified-holds-unverified', base({ endpoints: ['https://a.rpc.example', 'https://b.rpc.example'], network: order(['quorum', 'myotis'], true), myotis: { enabled: true, ready: true, calls: { resolve: GOOD } } })),
     {
-      id: 'myotis-ccip',
-      world: base({ network: order(['myotis', 'quorum']), myotis: { enabled: true, ready: true, calls: { resolve: { revert: lookup }, callback: GOOD } }, gateways: { 'gw.example': { delay: 50, body: JSON.stringify({ data: '0xcafe' }) } } }),
-      call: content,
+      // Myotis becomes ready while quorum is resolving: the result is
+      // discarded and the lookup restarts, now through Myotis.
+      id: 'myotis-ready-mid-flight',
+      world: base({ network: order(['myotis', 'quorum']), myotis: { enabled: true, ready: false, calls: { resolve: GOOD } } }),
+      steps: [{ call: content(), events: [{ at: 30, myotis: { ready: true } }] }],
     },
     {
-      id: 'prefer-verified-holds-unverified',
-      // Quorum can only reach one source (two endpoints): unverified, held
-      // while Myotis is tried, which then answers verified.
-      world: base({ endpoints: ENDPOINTS.slice(0, 2), network: order(['quorum', 'myotis'], true), myotis: { enabled: true, ready: true, calls: { resolve: GOOD } } }),
-      call: content,
+      // Three transitions, each during an attempt: the lookup gives up.
+      id: 'lifecycle-flapping',
+      world: base({}),
+      steps: [{ call: content(), events: [{ at: 30, myotis: { ready: false } }, { at: 75, myotis: { ready: false } }, { at: 100, myotis: { ready: false } }] }],
     },
   ];
 }
 
 /** Address and reverse lookups, ENS and WNS/GNS. */
-function addressAndReverse(ethers, base) {
+function addressAndReverse(ethers, base, one) {
   const coder = ethers.AbiCoder.defaultAbiCoder();
   const ACCOUNT = '0x' + 'ab'.repeat(20);
   const urAddress = (address) => ({ data: coder.encode(['bytes', 'address'], [coder.encode(['address'], [address]), '0x' + '22'.repeat(20)]) });
@@ -495,33 +622,54 @@ function addressAndReverse(ethers, base) {
   const nftString = (text) => ({ data: coder.encode(['string'], [text]) });
   const nftAddress = (address) => ({ data: coder.encode(['address'], [address]) });
   const nftBytes = (bytes) => ({ data: coder.encode(['bytes'], [bytes]) });
+  const address = (name, chainId) => ({ fn: 'resolveEnsAddress', args: chainId === undefined ? [name] : [name, chainId] });
+  const reverse = { fn: 'resolveEnsReverse', args: [ACCOUNT] };
   return [
-    { id: 'address-agree', world: base({ calls: { resolve: urAddress(ACCOUNT) } }), call: { fn: 'resolveEnsAddress', args: ['vitalik.eth'] } },
-    { id: 'address-multicoin-base', world: base({ calls: { resolve: urMulticoin(ACCOUNT) } }), call: { fn: 'resolveEnsAddress', args: ['vitalik.eth', 8453] } },
-    { id: 'address-zero-is-no-address', world: base({ calls: { resolve: urAddress(ethers.ZeroAddress) } }), call: { fn: 'resolveEnsAddress', args: ['vitalik.eth'] } },
-    { id: 'reverse-agree', world: base({ calls: { reverse: urReverse('vitalik.eth') } }), call: { fn: 'resolveEnsReverse', args: [ACCOUNT] } },
-    { id: 'reverse-mismatch', world: base({ calls: { reverse: { rpc_error: { code: 3, message: 'execution reverted', data: mismatch } } } }), call: { fn: 'resolveEnsReverse', args: [ACCOUNT] } },
-    {
-      id: 'reverse-ens-empty-then-wns',
-      world: base({ calls: { reverse: urReverse(''), 'wns:reverse': nftString('alice.wei'), 'wns:addr': nftAddress(ACCOUNT), 'gns:reverse': nftString('') } }),
-      call: { fn: 'resolveEnsReverse', args: [ACCOUNT] },
-    },
-    { id: 'wns-content', world: base({ calls: { 'wns:contenthash': nftBytes('0xe3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f') } }), call: { fn: 'resolveEnsContent', args: ['alice.wei'] } },
-    { id: 'wns-address-on-l2', world: base({}), call: { fn: 'resolveEnsAddress', args: ['alice.wei', 8453] } },
+    one('address-agree', base({ calls: { resolve: urAddress(ACCOUNT) } }), address('vitalik.eth')),
+    one('address-multicoin-base', base({ calls: { resolve: urMulticoin(ACCOUNT) } }), address('vitalik.eth', 8453)),
+    one('address-zero-is-no-address', base({ calls: { resolve: urAddress(ethers.ZeroAddress) } }), address('vitalik.eth')),
+    one('reverse-agree', base({ calls: { reverse: urReverse('vitalik.eth') } }), reverse),
+    one('reverse-mismatch', base({ calls: { reverse: { rpc_error: { code: 3, message: 'execution reverted', data: mismatch } } } }), reverse),
+    one('reverse-ens-empty-then-wns', base({ calls: { reverse: urReverse(''), 'wns:reverse': nftString('alice.wei'), 'wns:addr': nftAddress(ACCOUNT), 'gns:reverse': nftString('') } }), reverse),
+    one('wns-content', base({ calls: { 'wns:contenthash': nftBytes('0xe3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f') } }), content('alice.wei')),
+    one('wns-address-on-l2', base({}), address('alice.wei', 8453)),
   ];
 }
 
+/** Tezos Domains: the pinned resolver with a scripted node per endpoint. */
+function tezosScenarios() {
+  const T = ['https://t1.tez.example', 'https://t2.tez.example', 'https://t3.tez.example'];
+  const SITE = 'ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/';
+  const base = (extra) => ({ endpoints: T, record: tezRecord({ 'web:content_url': SITE, 'td:ttl': 600 }), expiry: '2030-01-01T00:00:00Z', ...extra });
+  const tez = (name = 'alice.tez') => ({ fn: 'resolveTezosDomain', args: [name] });
+  const one = (id, world, steps = [{ call: tez() }]) => ({ id, system: 'tezos', world, steps });
+  return [
+    one('tezos-agree', base({}), [{ call: tez() }, { after: 1000, call: tez() }, { after: 60_000, call: tez('bob.tez') }]),
+    one('tezos-one-liar', base({ hosts: { 't2.tez.example': { record: tezRecord({ 'web:content_url': 'https://evil.example/' }) } } })),
+    one('tezos-head-outlier', base({ hosts: { 't3.tez.example': { level: TEZ_HEAD - 61 } } })),
+    one('tezos-heads-scattered', base({ hosts: { 't1.tez.example': { level: TEZ_HEAD - 200 }, 't3.tez.example': { level: TEZ_HEAD + 200 } } })),
+    one('tezos-anchor-split', base({ hosts: { 't2.tez.example': { fork: true } } })),
+    one('tezos-two-down', base({ hosts: { 't1.tez.example': { fail: true }, 't2.tez.example': { hang: true } } }), [{ call: tez() }, { after: 1000, call: tez() }]),
+    one('tezos-all-down', base({ hosts: { 't1.tez.example': { fail: true }, 't2.tez.example': { fail: true }, 't3.tez.example': { fail: true } } }), [{ call: tez() }, { after: 1000, call: tez() }]),
+    one('tezos-expired', base({ expiry: '2020-01-01T00:00:00Z' })),
+    one('tezos-expiry-unparseable', base({ expiry: 'not a date' })),
+    one('tezos-redirect', base({ record: tezRecord({ 'web:redirect_url': 'https://alice.example/' }) })),
+    one('tezos-no-website', base({ record: tezRecord({ 'td:ttl': 60 }, null) })),
+    one('tezos-no-record', base({ record: null }), [{ call: tez() }, { after: 29_999, call: tez() }, { after: 1, call: tez() }]),
+    one('tezos-registry-script-fails', base({ hosts: { 't1.tez.example': { scriptFail: true } } })),
+    one('tezos-invalid-name', base({}), [{ call: tez('alice.eth') }]),
+  ];
+}
+
+function loadFakeTimers(checkout) {
+  return Module.createRequire(path.join(checkout, 'package.json'))('@sinonjs/fake-timers');
+}
+
 async function buildNamingReplay(checkout, ethers, meta) {
-  const referenceRequire = Module.createRequire(path.join(checkout, 'package.json'));
-  const FakeTimers = referenceRequire('@sinonjs/fake-timers');
+  const FakeTimers = loadFakeTimers(checkout);
   const out = [];
-  for (const scenario of scenarios(ethers)) {
-    out.push({ id: scenario.id, calls: await runScenario(checkout, ethers, FakeTimers, scenario) });
-  }
-  for (const scenario of tezosScenarios()) {
-    out.push({ id: scenario.id, calls: await runTezosScenario(checkout, FakeTimers, scenario) });
-  }
+  for (const scenario of scenarioDefinitions(ethers)) out.push(await runScenario(checkout, ethers, FakeTimers, scenario));
   return { meta, scenarios: out };
 }
 
-module.exports = { buildNamingReplay, runScenario };
+module.exports = { buildNamingReplay, runScenario, scenarioDefinitions, loadFakeTimers };

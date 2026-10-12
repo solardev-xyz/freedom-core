@@ -115,3 +115,79 @@ test('check parses OpenSSH and rejects unequal check integers', () => {
   assert.match(stderr, /AssertionError/);
   assert.match(stderr, /parseOpenSSH/);
 });
+
+test('check rejects a changed replay request', () => {
+  const stderr = corruptedCheck('naming-replay.json', (contents) => {
+    contents.scenarios[0].io[0].params = ['0x1'];
+  });
+  assert.match(stderr, /Byte mismatch: naming-replay.json/);
+});
+
+// The replay runs in this process: it must not see or leave global state.
+const replay = require('./naming-replay');
+
+function referenceEthers() {
+  return require('node:module').createRequire(path.join(REFERENCE, 'package.json'))('ethers').ethers;
+}
+
+function globalsSnapshot(ethers) {
+  return {
+    random: Math.random,
+    date: Date,
+    setTimeout,
+    load: require('node:module')._load,
+    getUrl: new ethers.FetchRequest('https://snapshot.invalid').getUrlFunc,
+    env: { ETH_RPC: process.env.ETH_RPC, TEZOS_RPC: process.env.TEZOS_RPC },
+  };
+}
+
+function definition(ethers, id) {
+  return replay.scenarioDefinitions(ethers).find((scenario) => scenario.id === id);
+}
+
+test('replay ignores the ambient resolver environment', async () => {
+  const ethers = referenceEthers();
+  const FakeTimers = replay.loadFakeTimers(REFERENCE);
+  const clean = await replay.runScenario(REFERENCE, ethers, FakeTimers, definition(ethers, 'quorum-agree'));
+  process.env.ETH_RPC = 'https://ambient.rpc.example';
+  process.env.TEZOS_RPC = 'https://ambient.tez.example';
+  try {
+    assert.deepEqual(await replay.runScenario(REFERENCE, ethers, FakeTimers, definition(ethers, 'quorum-agree')), clean);
+    assert.equal(process.env.ETH_RPC, 'https://ambient.rpc.example');
+    assert.equal(process.env.TEZOS_RPC, 'https://ambient.tez.example');
+  } finally {
+    delete process.env.ETH_RPC;
+    delete process.env.TEZOS_RPC;
+  }
+});
+
+test('replay leaves its input unchanged and repeats exactly', async () => {
+  const ethers = referenceEthers();
+  const FakeTimers = replay.loadFakeTimers(REFERENCE);
+  const scenario = definition(ethers, 'ccip-slow-gateway-then-another-name');
+  const before = structuredClone(scenario);
+  const first = await replay.runScenario(REFERENCE, ethers, FakeTimers, scenario);
+  assert.deepEqual(scenario, before);
+  assert.deepEqual(await replay.runScenario(REFERENCE, ethers, FakeTimers, scenario), first);
+});
+
+test('replay restores every global, also when setup fails', async () => {
+  const ethers = referenceEthers();
+  const FakeTimers = replay.loadFakeTimers(REFERENCE);
+  const before = globalsSnapshot(ethers);
+  await replay.runScenario(REFERENCE, ethers, FakeTimers, definition(ethers, 'quorum-agree'));
+  assert.deepEqual(globalsSnapshot(ethers), before);
+  await assert.rejects(replay.runScenario(path.join(os.tmpdir(), 'no-such-checkout'), ethers, FakeTimers, definition(ethers, 'quorum-agree')), /ENOENT/);
+  assert.deepEqual(globalsSnapshot(ethers), before);
+});
+
+test('replay fails loudly on unscripted I/O', async () => {
+  const ethers = referenceEthers();
+  const FakeTimers = replay.loadFakeTimers(REFERENCE);
+  const unscriptedCall = structuredClone(definition(ethers, 'quorum-agree'));
+  delete unscriptedCall.world.calls.resolve;
+  await assert.rejects(replay.runScenario(REFERENCE, ethers, FakeTimers, unscriptedCall), /unscripted I\/O: resolve:contenthash call to/);
+  const undeclaredGateway = structuredClone(definition(ethers, 'ccip-fast-gateway'));
+  delete undeclaredGateway.world.gateways;
+  await assert.rejects(replay.runScenario(REFERENCE, ethers, FakeTimers, undeclaredGateway), /undeclared gateway gw\.example/);
+});
