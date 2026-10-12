@@ -31,11 +31,11 @@ Unlike naming, chain data passes **node errors** through to dApps, and its answe
 - **Every deviation** is listed in [Deviations](#deviations) with its behavior and a boundary vector.
 - **Bounded resources:** requests, answers, replies, retained state and time all have bounds, with a defined result when exhausted. Today none exist beyond the verifiers' slots.
 - **The core is never given an endpoint URL** (0004's [Secrets](0004-naming-sessions.md#secrets)).
-- **No lost broadcasts:** nothing reports a failure for a transaction that may have reached the network, on any path, including a lost core ([Broadcast](#broadcast)).
+- **No double payments:** a lost or misread broadcast reply never leads to an intent being paid twice, on any path, including a lost core ([Broadcast](#broadcast)).
 
 **Non-goals**
 - **Pinning chain reads to a block**, and new trust semantics. Today's router reads at the caller's tag and calls m equal answers `verified`. Changing either is roadmap 3.1's decision, not this design's.
-- **Nonce management.** Each send still reads the `pending` count. A per-account nonce floor in the core is an [open question](#open-questions).
+- **Nonce management** stays in main. Main's wallet gains one rule, that an intent keeps its nonce until it settles ([Retrying an intent](#retrying-an-intent)). The core keeps no nonce state.
 - **Paths that bypass the router today:** provider-manager's Safe reads and `wallet:test-provider`. Absorbing them is a follow-up; `wallet:proxy-rpc` has no callers and should be deleted.
 - **The verifiers' own networking** (roadmap 3.3), as in 0004.
 - **Mobile drivers.**
@@ -527,6 +527,7 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 | `response-caps` | none | 18 MiB per answer | `too_large`, a source failure |
 | `request-size` | unbounded | one frame (1 MiB) per chain request | `too_large` |
 | `json-depth` | V8's parser, no fixed depth | 512 levels | a source failure |
+| `bigint-width` | `BigInt` of any decimal width, in time quadratic in its length | decimal conversions stop below 2^4096: a wider call-object quantity is left as sent, and a wider gas price fails its source | no minutes-long conversions on the chain thread; hex, octal and binary stay exact |
 | `overall-deadline` | none | 120 s | `deadline` |
 | `admission` | unbounded | 64 running, 256 waiting | `busy` |
 | `quorum-clamps` | `k ≥ 1`, `timeout ≥ 500`, unbounded above | also `k ≤ 9`, `timeout ≤ 60 s`, ≤ 64 endpoints | clamped |
@@ -599,10 +600,10 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
 
 ## Open questions
 
-2. **Revert agreement.** Today reverts never agree in a quorum, so a dApp loses the revert data unless Myotis or Colibri gave it. Should identical error objects (code and data) count as agreement?
-3. **Colibri's coverage.** Which methods does Colibri's `VerifiedOnly` client actually prove (`eth_gasPrice`, `eth_feeHistory`, `eth_blockNumber`, `pending` reads)? Today any Colibri success is labelled verified.
-4. **Gnosis' Direct after a failed quorum** has nothing to ask without API keys. Intended?
-5. **Myotis' head-of-line wait.** Methods Myotis doesn't serve take a slot before being refused. Checking the method first is a pure improvement, but observable in timing.
-6. **The wallet's `uncertain` text and UI** (step 5): how to show "sent, unconfirmed", and offer the same bytes again or a replacement at the same nonce.
-7. **HTTP statuses on broadcast.** A 401, 403 or 429 is ambiguous here, although a gateway usually answers it before forwarding. Is a misconfigured key showing `uncertain` acceptable, or should these be refusals?
-8. **Pinning and trust** (roadmap 3.1): whether a quorum of unpinned `latest` reads may be called `verified`.
+1. **Revert agreement.** Today reverts never agree in a quorum, so a dApp loses the revert data unless Myotis or Colibri gave it. Should identical error objects (code and data) count as agreement?
+2. **Colibri's coverage.** Which methods does Colibri's `VerifiedOnly` client actually prove (`eth_gasPrice`, `eth_feeHistory`, `eth_blockNumber`, `pending` reads)? Today any Colibri success is labelled verified.
+3. **Gnosis' Direct after a failed quorum** has nothing to ask without API keys. Intended?
+4. **Myotis' head-of-line wait.** Methods Myotis doesn't serve take a slot before being refused. Checking the method first is a pure improvement, but observable in timing.
+5. **The wallet's `uncertain` text and UI** (step 5): how to show "sent, unconfirmed", and offer the same bytes again or a replacement at the same nonce.
+6. **HTTP statuses on broadcast.** A 401, 403 or 429 is ambiguous here, although a gateway usually answers it before forwarding. Is a misconfigured key showing `uncertain` acceptable, or should these be refusals?
+7. **Pinning and trust** (roadmap 3.1): whether a quorum of unpinned `latest` reads may be called `verified`.
