@@ -37,3 +37,8 @@ opt-level = 3
 
 [profile.dev.package.fc-vault]
 opt-level = 3
+
+# Typed-data hashing runs inline in the core; its bounded-time tests hold
+# only for optimized code.
+[profile.dev.package.fc-evm]
+opt-level = 3
