@@ -64,7 +64,21 @@ const BOUNDS = {
   answerBytes: 720 * 1024,
   replyHex: 8192,
   prefetches: 32,
+  messageBytes: 1024 * 1024,
+  replyBytes: 960 * 1024,
+  cacheBytes: 8 * 1024 * 1024,
+  decodeBytes: 4 * 1024 * 1024,
+  sessions: 32,
+  callers: 256,
+  callersPerSession: 64,
+  deadlineMs: 120_000,
 };
+
+// The core's frame check (deviation `request-size`): a request's payload
+// strings, serialized, plus 4 KiB for its envelope, within the frame.
+const FITS = (limit) => `function __fits(parts) {
+  return parts.reduce((n, part) => n + JSON.stringify(part).length, 0) + 4096 <= ${limit};
+}`;
 
 // The core's RFC 3339 reading (deviation `tezos-expiry`), as
 // fc_naming::session::tezos::parse_rfc3339 implements it: a full date, or a
@@ -173,6 +187,111 @@ const PATCHES = {
       'ens-resolver.js': { edits: [[', ccipSignal);', `, ccipSignal, { maxResponseBytes: ${b.answerBytes} });`]], append: [] },
       'tezos-domains-resolver.js': { edits: [['const MAX_RPC_RESPONSE_BYTES = 5 * 1024 * 1024;', `const MAX_RPC_RESPONSE_BYTES = ${b.answerBytes};`]], append: [] },
     },
+  }),
+  'request-size': (b) => ({
+    text: `A gateway request or CCIP callback whose payload, serialized with a 4 KiB envelope, exceeds ${b.messageBytes} bytes is never sent: the gateway is skipped, and a callback fails its leg as CCIP_GATEWAY_FAILED.`,
+    source: {
+      'ens/ccip-fetch.js': {
+        edits: [["      const url = template.replaceAll('{sender}', sender).replaceAll('{data}', data);\n",
+          "      const url = template.replaceAll('{sender}', sender).replaceAll('{data}', data);\n      if (!__fits([url, template.includes('{data}') ? '' : JSON.stringify({ sender, data })])) throw new Error('CCIP request too large');\n"]],
+        append: [FITS(b.messageBytes)],
+      },
+      'ens-resolver.js': {
+        edits: [["        const raw = await provider.call({\n          to: sender,\n          data: callback + abi.encode(['bytes', 'bytes'], [response, extraData]).slice(2),\n",
+          "        if (!__fits([callback + abi.encode(['bytes', 'bytes'], [response, extraData]).slice(2)])) {\n          throw Object.assign(new Error('CCIP gateways unavailable or returned invalid data'), { code: 'CCIP_GATEWAY_FAILED' });\n        }\n        const raw = await provider.call({\n          to: sender,\n          data: callback + abi.encode(['bytes', 'bytes'], [response, extraData]).slice(2),\n"]],
+        append: [FITS(b.messageBytes)],
+      },
+    },
+  }),
+  'reply-size': (b) => ({
+    text: `A result over ${b.replyBytes} bytes, serialized, is never cached, and its callers get "result too large".`,
+    harness: ['reply-size'],
+    source: {
+      'ens-resolver.js': {
+        edits: [['  cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n  capCache(cache);\n',
+          `  if (JSON.stringify(result).length <= ${b.replyBytes}) {\n    cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n    capCache(cache);\n  }\n`]],
+        append: [],
+      },
+    },
+  }),
+  'cache-bytes': (b) => ({
+    text: `Each result cache also holds at most ${b.cacheBytes} bytes (key plus serialized result per entry), evicting as capCache does: expired entries first, then the oldest.`,
+    source: {
+      'ens-resolver.js': {
+        edits: [['  cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n  capCache(cache);\n',
+          `  cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n  capCache(cache);\n  __capBytes(cache, ${b.cacheBytes});\n`]],
+        append: [`function __capBytes(cache, limit) {
+  const size = (key, entry) => key.length + JSON.stringify(entry.result).length;
+  let bytes = 0;
+  for (const [key, entry] of cache) bytes += size(key, entry);
+  const now = Date.now();
+  for (const [key, entry] of cache) {
+    if (bytes <= limit) return;
+    if (entry.expiresAt <= now) {
+      cache.delete(key);
+      bytes -= size(key, entry);
+    }
+  }
+  for (const [key, entry] of cache) {
+    if (bytes <= limit) return;
+    cache.delete(key);
+    bytes -= size(key, entry);
+  }
+}`],
+      },
+    },
+  }),
+  'decode-budget': (b) => ({
+    text: `An OffchainLookup whose decoded strings and bytes exceed ${b.decodeBytes} bytes is malformed, failing as an ABI decode does (BUFFER_OVERRUN).`,
+    source: {
+      'ens-resolver.js': {
+        edits: [["        ['address', 'string[]', 'bytes', 'bytes4', 'bytes'], '0x' + data.slice(10)\n      );\n",
+          `        ['address', 'string[]', 'bytes', 'bytes4', 'bytes'], '0x' + data.slice(10)\n      );\n      __decodeBudget(urls, callData, extraData, ${b.decodeBytes});\n`]],
+        append: [`function __decodeBudget(urls, callData, extraData, limit) {
+  let out = (callData.length - 2) / 2 + (extraData.length - 2) / 2;
+  for (let i = 0; i < urls.length; i += 1) {
+    // A URL that won't decode (bad UTF-8) is unreadable here, so it isn't
+    // counted, though the core counts its bytes; it fails where the
+    // gateway loop reaches it. No vector puts one near the budget.
+    try { out += Buffer.byteLength(urls[i], 'utf8'); } catch { /* see above */ }
+  }
+  if (out > limit) throw ethers.makeError('decode budget exceeded', 'BUFFER_OVERRUN');
+}`],
+      },
+    },
+  }),
+  'admission': (b) => ({
+    text: `Admission: at most ${b.sessions} running sessions, ${b.callers} waiting callers and ${b.callersPerSession} callers per session; a caller over a limit, a cache hit included, is answered busy at once.`,
+    source: {
+      'ens-resolver.js': {
+        edits: [
+          ['  const key = chainCacheKey(normalized, chainId);\n  const cached = cache.get(key);\n',
+            `  if (__admission.callers >= ${b.callers}) throw __busy();\n  const key = chainCacheKey(normalized, chainId);\n  const cached = cache.get(key);\n`],
+          ['    log.info(`[ens] ${label} joining in-flight resolution for ${nameForLog(normalized)}`);\n    return existing;\n',
+            `    log.info(\`[ens] \${label} joining in-flight resolution for \${nameForLog(normalized)}\`);\n    if ((__admission.joined.get(dedupKey) ?? 0) >= ${b.callersPerSession}) throw __busy();\n    return __admit(dedupKey, existing);\n`],
+          ['  let promise;\n  promise = resolveAcrossStableLifecycle(', `  if (inFlightResolves.size >= ${b.sessions}) throw __busy();\n  let promise;\n  promise = resolveAcrossStableLifecycle(`],
+          ['  inFlightResolves.set(dedupKey, promise);\n  return promise;\n', '  inFlightResolves.set(dedupKey, promise);\n  return __admit(dedupKey, promise);\n'],
+        ],
+        append: [`var __admission = { callers: 0, joined: new Map() };
+function __busy() {
+  return Object.assign(new Error('busy'), { protocol: 'busy' });
+}
+function __admit(key, promise) {
+  __admission.callers += 1;
+  __admission.joined.set(key, (__admission.joined.get(key) ?? 0) + 1);
+  const leave = () => {
+    __admission.callers -= 1;
+    __admission.joined.set(key, __admission.joined.get(key) - 1);
+  };
+  promise.then(leave, leave);
+  return promise;
+}`],
+      },
+    },
+  }),
+  'overall-deadline': (b) => ({
+    text: `A session ends ${b.deadlineMs} ms after it starts: its callers get deadline, its outstanding I/O is cancelled, it makes no more, and nothing is cached. The vector has one session per step.`,
+    harness: ['overall-deadline'],
   }),
   'prefetch-set': (b) => ({
     text: `A prefetch is kept after agreed_data in a set of ${b.prefetches}; past that the oldest is aborted.`,
@@ -323,7 +442,11 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
   const declared = (host) => (world.endpoints ?? []).some((url) => hostOf(url) === host);
   // An exchange a verifier operation makes inside main's adapter is that
   // operation's business: it carries the operation's id as `within`.
+  // Steps whose session met its deadline (deviation `overall-deadline`):
+  // their work makes no more I/O.
+  const deadSteps = new Set();
   const record = (entry, op = insideOperation.getStore()?.op) => {
+    if (deadSteps.has(stepIndex)) return null;
     const within = op;
     const item = { id: io.length, step: stepIndex, t: now(), ...entry, ...(within === undefined ? {} : { within }), end: null, outcome: 'open' };
     io.push(item);
@@ -407,6 +530,7 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       kind: 'rpc', host, http, method: r.method, params: r.params,
       ...(r.method === 'eth_call' ? { call: callKind(r.params[0].to, r.params[0].data) } : {}),
     }));
+    if (entries.includes(null)) return new Promise(() => {});
     if (!declared(host)) violations.push(`undeclared RPC endpoint ${host}`);
     const p = plan(host);
     const answers = p.status ? [] : batch.map((r) => ({ id: r.id, ...answerRpc(host, r) }));
@@ -423,6 +547,8 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       const inactivity = req.timeout > 0 ? setTimeout(() => fail('request timeout', 'TIMEOUT'), req.timeout) : null;
       if (p.hang || answers.some((a) => a.hang)) return;
       setTimeout(() => {
+        // Cancelled at a session's deadline: the exchange never answers.
+        if (entries.every((item) => item.outcome === 'cancelled')) return;
         clearTimeout(inactivity);
         for (const item of entries) close(item, 'answered');
         // `pad` grows each answer by a member JSON-RPC readers ignore.
@@ -473,9 +599,11 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
         kind: 'gateway', host, method: options.method, url: options.url, headers, body,
         flags: Object.fromEntries(GATEWAY_FLAGS.map((flag) => [flag, options[flag]])),
       });
+      if (!item) return;
       if (!g) violations.push(`undeclared gateway ${host}`);
       if (!g || g.hang) return;
       timer = setTimeout(() => {
+        if (item.outcome !== 'open') return;
         if (g.redirect) {
           item.answer = { redirect: g.redirect };
           close(item, 'redirected');
@@ -650,6 +778,7 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     const { host, pathname } = new URL(url);
     const method = init.method ?? 'GET';
     const item = record({ kind: 'tezos', host, method, path: pathname, body: init.body ?? null });
+    if (!item) return new Promise(() => {});
     if (!declared(host)) violations.push(`undeclared Tezos endpoint ${host}`);
     const p = plan(host);
     return new Promise((resolve, reject) => {
@@ -663,6 +792,7 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       init.signal?.addEventListener('abort', abort, { once: true });
       if (p.hang) return;
       timer = setTimeout(async () => {
+        if (item.outcome !== 'open') return;
         init.signal?.removeEventListener('abort', abort);
         const response = tezosNode(host, p, method, pathname);
         const text = await response.clone().text();
@@ -700,6 +830,8 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     'ens-prefetch': {
       prefetchGatewayUrl: (uri) => {
         const item = record({ kind: 'prefetch', host: null, uri });
+        // After a session's deadline the step makes no more I/O.
+        if (!item) return { abort() {}, settled: true };
         // `world.prefetchMs` (when set) is how long a prefetch runs before
         // it finishes; otherwise it is still open when the scenario ends.
         if (world.prefetchMs > 0) {
@@ -734,7 +866,11 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     const results = promises.map(() => null);
     promises.forEach((promise, i) => promise.then(
       (value) => { results[i] = { value: describe(value), settled: now() }; },
-      (error) => { results[i] = { thrown: String(error?.message ?? error), settled: now() }; }
+      (error) => {
+        // A protocol error (deviations `admission`, `overall-deadline`) is
+        // not a thrown resolution.
+        results[i] = error?.protocol ? { protocol: error.protocol, settled: now() } : { thrown: String(error?.message ?? error), settled: now() };
+      }
     ));
     const done = () => results.every(Boolean);
     const limit = Date.now() + MAX_STEP_MS;
@@ -789,9 +925,25 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       const response = await req.send();
       return { status: response.statusCode };
     };
-    const invoke = ({ fn, args = [] }) => Promise.resolve().then(() => (fn === '$fetch' ? probeFetch(...args) : system === 'tezos'
+    // Deviation `reply-size`: a result too large to reply with.
+    const replyLimit = (value) => {
+      if (harnessPatch('reply-size') && JSON.stringify(value).length > bounds.replyBytes) throw new Error('result too large');
+      return value;
+    };
+    // Deviation `overall-deadline`: the step's one session ends at its
+    // deadline, cancelling what it has outstanding.
+    const deadline = (promise) => (!harnessPatch('overall-deadline') ? promise : new Promise((resolve, reject) => {
+      const step = stepIndex;
+      const timer = setTimeout(() => {
+        deadSteps.add(step);
+        for (const item of io) if (item.step === step && item.outcome === 'open' && item.kind !== 'event') close(item, 'cancelled');
+        reject(Object.assign(new Error('deadline'), { protocol: 'deadline' }));
+      }, bounds.deadlineMs);
+      promise.then((value) => { clearTimeout(timer); resolve(value); }, (error) => { clearTimeout(timer); reject(error); });
+    }));
+    const invoke = ({ fn, args = [] }) => deadline(Promise.resolve().then(() => (fn === '$fetch' ? probeFetch(...args) : system === 'tezos'
       ? loaded.exports[fn](...args, { fetchImpl, endpoints: world.endpoints })
-      : loaded.exports[fn](...args)));
+      : loaded.exports[fn](...args)))).then(replyLimit);
 
     const steps = [];
     for (const [index, step] of scenario.steps.entries()) {
@@ -851,6 +1003,10 @@ const tezRecord = (data, expiryKey = 'abcd') => ({
   ],
 });
 
+// The cache-bytes vector's budget: a cached content result takes about
+// 510 bytes, so two fit and three don't, each with a wide margin (the core
+// measures its own serialization of the same result).
+const CACHE_BYTES = 1280;
 const ENDPOINTS = ['https://a.rpc.example', 'https://b.rpc.example', 'https://c.rpc.example', 'https://d.rpc.example'];
 const QUORUM_NETWORK = { verification: { order: ['quorum'], preferVerified: false }, quorum: { k: 3, m: 2, timeoutMs: 5000, anchor: 'latest', anchorTtlMs: 30000 } };
 const content = (name = 'vitalik.eth') => ({ fn: 'resolveEnsContent', args: [name] });
@@ -958,6 +1114,22 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
   // A long unsupported contenthash: 8,202 hex characters with its 0x.
   const long = (byte) => contentAnswer('0x' + byte.repeat(4100));
   const twoGateways = (first) => ({ resolve: lookupVia(['gw-big.example', 'gw.example']), callback: GOOD, ...first });
+  const coder = ethers.AbiCoder.defaultAbiCoder();
+  const revert = (data) => ({ rpc_error: { code: 3, message: 'execution reverted', data } });
+  const offchain = (urls, callData = '0x0102', extraData = '0x09') => revert('0x556f1830' + coder.encode(
+    ['address', 'string[]', 'bytes', 'bytes4', 'bytes'], [UR, urls, callData, '0xdeadbeef', extraData]).slice(2));
+  // An OffchainLookup whose URL array points every entry at one string,
+  // which ethers decodes once per entry.
+  const aliasedLookup = (url, copies) => {
+    const word = (n) => n.toString(16).padStart(64, '0');
+    const pad = (hex) => hex + '0'.repeat((64 - (hex.length % 64)) % 64);
+    const urls = word(copies) + word(copies * 32).repeat(copies) + word(url.length) + pad(Buffer.from(url).toString('hex'));
+    const bytes = (hex) => word((hex.length - 2) / 2) + pad(hex.slice(2));
+    const callData = bytes('0x0102');
+    const at = 160 + urls.length / 2;
+    const head = UR.slice(2).toLowerCase().padStart(64, '0') + word(160) + word(at) + 'deadbeef'.padEnd(64, '0') + word(at + callData.length / 2);
+    return revert('0x556f1830' + head + urls + callData + bytes('0x09'));
+  };
   return [
     // Three gateway URLs and a bound of two: the reference reaches the
     // working third gateway, the core gives up after two.
@@ -1025,6 +1197,64 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
       ]),
       id: 'deviation-prefetch-set-finished-before-agreement',
     },
+    // A 3,000-byte callData makes both gateway requests (GET and POST)
+    // too large for an 8 KiB frame.
+    deviation('request-size', base({
+      bounds: { messageBytes: 8192 },
+      calls: { resolve: offchain(['https://gw.example/{sender}/{data}.json', 'https://gw-post.example/lookup'], '0x' + 'ab'.repeat(3000)), callback: GOOD },
+      gateways: { 'gw.example': { body: JSON.stringify({ data: '0xcafe' }) }, 'gw-post.example': { body: JSON.stringify({ data: '0xcafe' }) } },
+    })),
+    {
+      // The gateway's 2,500 bytes and 2,000 of extraData: a callback too
+      // large for the frame.
+      ...deviation('request-size', base({
+        bounds: { messageBytes: 8192 },
+        calls: { resolve: offchain(['https://gw.example/{sender}/{data}.json'], '0x0102', '0x' + '09'.repeat(2000)), callback: GOOD },
+        gateways: { 'gw.example': { body: JSON.stringify({ data: '0x' + 'cd'.repeat(2500) }) } },
+      })),
+      id: 'deviation-request-size-callback',
+    },
+    // A 6,000-character unsupported content hash: the result outgrows a
+    // 4 KiB reply, so it is never cached and the second lookup resolves
+    // again.
+    deviation('reply-size', base({ bounds: { replyBytes: 4096 }, calls: { resolve: contentAnswer('0x' + 'ab'.repeat(3000)), callback: GOOD } }), [
+      { call: content() },
+      { after: 1000, call: content() },
+    ]),
+    // Three cached results outgrow the byte budget: the first is evicted,
+    // so looking it up again resolves anew.
+    deviation('cache-bytes', base({ bounds: { cacheBytes: CACHE_BYTES } }), [
+      { call: content('a.eth') },
+      { after: 1000, call: content('b.eth') },
+      { after: 1000, call: content('c.eth') },
+      { after: 1000, call: content('a.eth') },
+    ]),
+    // One 600-character URL referenced eight times: 4,800 decoded bytes
+    // from a much smaller lookup.
+    deviation('decode-budget', base({
+      bounds: { decodeBytes: 4096 },
+      calls: { resolve: aliasedLookup(`https://gw.example/{sender}/{data}.json?pad=${'x'.repeat(556)}`, 8), callback: GOOD },
+      gateways: { 'gw.example': { body: JSON.stringify({ data: '0xcafe' }) } },
+    })),
+    // One session at a time, two callers per session: the third caller of
+    // a running session and a second session are both busy.
+    deviation('admission', base({ bounds: { sessions: 1, callersPerSession: 2 } }), [
+      { calls: [content(), content(), content(), content('alice.eth')] },
+    ]),
+    {
+      // One waiting caller in all: a cache hit is refused while another
+      // caller waits.
+      ...deviation('admission', base({ bounds: { callers: 1 } }), [
+        { call: content() },
+        { after: 1000, calls: [content('alice.eth'), content()] },
+      ]),
+      id: 'deviation-admission-callers',
+    },
+    // Every endpoint answers after a second; the session ends at 300 ms.
+    deviation('overall-deadline', base({
+      bounds: { deadlineMs: 300 },
+      hosts: Object.fromEntries(ENDPOINTS.map((url) => [new URL(url).host, { delay: 1000 }])),
+    })),
   ];
 }
 
