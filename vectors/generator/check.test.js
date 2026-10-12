@@ -230,6 +230,34 @@ test('replay\'s request-size patch leaves verifier adapters\' CCIP alone', async
   assert.deepEqual(patched.io, plain.io);
 });
 
+test('core sizes substitute endpoint references only where results name endpoints', () => {
+  const refOf = (text) => ({ 'a.rpc.example': 'https://a.rpc.example/x', 'https://t1.tez.example': 'https://t1.tez.example' })[text];
+  const value = {
+    type: 'ok',
+    record: { ttl: { urls: ['https://t1.tez.example'] }, agreed: ['a.rpc.example'] },
+    urls: ['a.rpc.example'],
+    trust: { agreed: ['a.rpc.example', 'myotis-p2p'], dissented: [], queried: ['a.rpc.example'], prover: 'a.rpc.example', block: { hash: 'a.rpc.example' } },
+    groups: [{ value: 'a.rpc.example', urls: ['https://t1.tez.example'] }],
+  };
+  const ref = { ref: 'https://a.rpc.example/x' };
+  assert.deepEqual(replay.__toCore(value, refOf), {
+    ...value,
+    trust: { agreed: [ref, 'myotis-p2p'], dissented: [], queried: [ref], prover: ref, block: { hash: 'a.rpc.example' } },
+    groups: [{ value: 'a.rpc.example', urls: [{ ref: 'https://t1.tez.example' }] }],
+  });
+  assert.equal(replay.__toCore('text', refOf), 'text');
+});
+
+test('replay\'s size patches refuse a host that two endpoint URLs share', async () => {
+  const ethers = referenceEthers();
+  const FakeTimers = replay.loadFakeTimers(REFERENCE);
+  // Three URLs on a.rpc.example: a wave queries more than one, so the
+  // host in its trust lists could name any of them.
+  const scenario = structuredClone(definition(ethers, 'deviation-reply-size'));
+  scenario.world.endpoints = ['x', 'y', 'z'].map((path) => `https://a.rpc.example/${path}`);
+  await assert.rejects(replay.runScenario(REFERENCE, ethers, FakeTimers, scenario), /one host from several endpoint URLs/);
+});
+
 test('replay\'s overall-deadline patch refuses what it can\'t model', async () => {
   const ethers = referenceEthers();
   const FakeTimers = replay.loadFakeTimers(REFERENCE);

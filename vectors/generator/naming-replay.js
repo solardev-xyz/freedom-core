@@ -81,27 +81,59 @@ const FITS = `function __fits(parts, limit) {
   return parts.reduce((n, part) => n + Buffer.byteLength(JSON.stringify(part), 'utf8'), 0) + 4096 <= limit;
 }`;
 
-// A result as the core holds it, for measuring: where it names endpoints
-// (trust.agreed, dissented, queried, groups[].urls, Colibri's prover), the
-// core holds { ref: endpoint } in place of the host or URL main publishes.
-function __toCore(value, urls) {
-  const hostOf = (url) => { try { return new URL(url).host; } catch { return url; } };
-  const byHost = new Map(urls.map((url) => [hostOf(url), url]));
-  const ref = (s) => (typeof s === 'string' && (byHost.has(s) || urls.includes(s)) ? { ref: byHost.get(s) ?? s } : s);
-  const walk = (v, key) => {
-    if (Array.isArray(v)) return ['agreed', 'dissented', 'queried', 'urls'].includes(key) ? v.map(ref) : v.map((x) => walk(x));
-    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, k === 'prover' ? ref(x) : walk(x, k)]));
-    return v;
+// A result as the core holds it, for measuring. Where a result names
+// endpoints (trust.agreed, dissented, queried and prover; groups[].urls),
+// the core holds { ref: endpoint } in place of the host or URL main
+// publishes. Only those paths: record data is left as it is. `refOf` gives
+// the endpoint behind a published string, or undefined.
+function __toCore(value, refOf) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const one = (text) => {
+    const endpoint = typeof text === 'string' ? refOf(text) : undefined;
+    return endpoint === undefined ? text : { ref: endpoint };
   };
-  return walk(value);
+  const list = (items) => (Array.isArray(items) ? items.map(one) : items);
+  const core = { ...value };
+  if (value.trust && typeof value.trust === 'object' && !Array.isArray(value.trust)) {
+    const trust = { ...value.trust };
+    for (const key of ['agreed', 'dissented', 'queried']) if (key in trust) trust[key] = list(trust[key]);
+    if ('prover' in trust) trust.prover = one(trust.prover);
+    core.trust = trust;
+  }
+  if (Array.isArray(value.groups)) {
+    core.groups = value.groups.map((group) => (group && typeof group === 'object' && 'urls' in group ? { ...group, urls: list(group.urls) } : group));
+  }
+  return core;
 }
 
-// The serialized size of a result as the core measures it.
+// The serialized size of an ENS result as the core measures it. ENS
+// publishes hosts, so hostOf records the endpoint URL behind each one: a
+// host that two URLs produced can't be told apart, and the patch refuses
+// to measure it.
 const CORE_SIZE = `${__toCore.toString()}
+var __hostSources = new Map();
+function __noteHost(host, url) {
+  if (!__hostSources.has(host)) __hostSources.set(host, new Set());
+  __hostSources.get(host).add(url);
+}
+var __ambiguousHost = null;
+function __refOf(host) {
+  const urls = __hostSources.get(host);
+  if (!urls) return undefined;
+  if (urls.size > 1) {
+    // Recorded as well as thrown: the resolver may catch the throw.
+    __ambiguousHost = host;
+    throw new Error('core size: one host from several endpoint URLs');
+  }
+  return [...urls][0];
+}
 function __coreSize(value) {
-  const urls = [...registry.getEndpoints(1, 'rpc'), ...registry.getEndpoints(1, 'prover')];
-  return Buffer.byteLength(JSON.stringify(__toCore(value, urls)), 'utf8');
-}`;
+  return Buffer.byteLength(JSON.stringify(__toCore(value, __refOf)), 'utf8');
+}
+module.exports.__coreSize = __coreSize;
+module.exports.__ambiguousHost = () => __ambiguousHost;`;
+const HOST_SOURCES = ['function hostOf(url) {\n  try { return new URL(url).host; }\n  catch { return url; }\n}\n',
+  'function hostOf(url) {\n  const host = __hostOf(url);\n  __noteHost(host, url);\n  return host;\n}\nfunction __hostOf(url) {\n  try { return new URL(url).host; }\n  catch { return url; }\n}\n'];
 // The legs' CCIP deps, shared by the patches that bound it.
 const LEG_DEPS = 'var __legDeps = {};';
 
@@ -238,7 +270,7 @@ const PATCHES = {
     harness: ['reply-size'],
     source: {
       'ens-resolver.js': {
-        edits: [['  cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n  capCache(cache);\n',
+        edits: [HOST_SOURCES, ['  cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n  capCache(cache);\n',
           `  if (__coreSize(result) <= ${b.replyBytes}) {\n    cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n    capCache(cache);\n  }\n`]],
         append: [CORE_SIZE],
       },
@@ -248,7 +280,7 @@ const PATCHES = {
     text: `Each result cache also holds at most ${b.cacheBytes} bytes (UTF-8 key plus the result serialized as the core holds it), evicting as capCache does: expired entries first, then the oldest.`,
     source: {
       'ens-resolver.js': {
-        edits: [['  cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n  capCache(cache);\n',
+        edits: [HOST_SOURCES, ['  cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n  capCache(cache);\n',
           `  cache.set(normalized, { result, expiresAt: Date.now() + ttl });\n  capCache(cache);\n  __capBytes(cache, ${b.cacheBytes});\n`]],
         append: [CORE_SIZE, `function __capBytes(cache, limit) {
   const size = (key, entry) => Buffer.byteLength(key, 'utf8') + __coreSize(entry.result);
@@ -965,8 +997,13 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     // Deviation `reply-size`: a result too large to reply with.
     const replyLimit = (value) => {
       if (harnessPatch('reply-size')) {
-        const urls = [...(world.endpoints ?? []), ...(world.colibri?.prover ? [world.colibri.prover] : [])];
-        if (Buffer.byteLength(JSON.stringify(__toCore(value, urls)), 'utf8') > bounds.replyBytes) throw new Error('result too large');
+        // Tezos publishes its endpoints' URLs; ENS measures with the hosts'
+        // recorded sources (CORE_SIZE).
+        const endpoints = world.endpoints ?? [];
+        const size = system === 'tezos'
+          ? Buffer.byteLength(JSON.stringify(__toCore(value, (url) => (endpoints.includes(url) ? url : undefined))), 'utf8')
+          : loaded.exports.__coreSize(value);
+        if (size > bounds.replyBytes) throw new Error('result too large');
       }
       return value;
     };
@@ -995,6 +1032,9 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       // A call's `at` starts it that long into the step, as events do.
       const start = (call) => (call.at ? new Promise((resolve) => setTimeout(resolve, call.at)).then(() => invoke(call)) : invoke(call));
       const results = await settleAll((step.calls ?? [step.call]).map(start));
+      if (loaded.exports.__ambiguousHost?.()) {
+        throw new Error(`scenario ${scenario.id}: core size: one host from several endpoint URLs`);
+      }
       steps.push(describe({ at, ...step, results }));
     }
     // Let stragglers finish, so a late answer nobody waits for is recorded
@@ -1156,6 +1196,14 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
   // A long unsupported contenthash: 8,202 hex characters with its 0x.
   const long = (byte) => contentAnswer('0x' + byte.repeat(4100));
   const twoGateways = (first) => ({ resolve: lookupVia(['gw-big.example', 'gw.example']), callback: GOOD, ...first });
+  // The direct method on https://a.rpc.example, with another configured
+  // URL on the same host.
+  const SAME_HOST = {
+    endpoints: [...ENDPOINTS, `https://a.rpc.example/${'p'.repeat(1000)}`],
+    network: { ...QUORUM_NETWORK, verification: { order: ['direct'], preferVerified: false } },
+    sources: [{ id: 'pub', coverage: { 1: ENDPOINTS[0] } }],
+    sourceList: [{ id: 'pub', builtin: true }],
+  };
   const coder = ethers.AbiCoder.defaultAbiCoder();
   const revert = (data) => ({ rpc_error: { code: 3, message: 'execution reverted', data } });
   const offchain = (urls, callData = '0x0102', extraData = '0x09') => revert('0x556f1830' + coder.encode(
@@ -1300,6 +1348,30 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
         { after: 1000, call: content('é'.repeat(100) + '.eth') },
       ]),
       id: 'deviation-reply-size-unicode',
+    },
+    {
+      // Two configured URLs on one host: the direct method uses the short
+      // one, so its result is 492 bytes as the core holds it (the other
+      // URL's 1,000-character path doesn't count), and it is cached. A name
+      // of three 100-é labels makes a larger result, which is refused.
+      ...deviation('reply-size', base({ ...SAME_HOST, bounds: { replyBytes: 1000 } }), [
+        { call: content() },
+        { after: 1000, call: content() },
+        { after: 1000, call: content(`${'é'.repeat(100)}.${'é'.repeat(100)}.${'é'.repeat(100)}.eth`) },
+      ]),
+      id: 'deviation-reply-size-same-host',
+    },
+    {
+      // The same world: two 497-byte entries fit 1,000 bytes and a third
+      // evicts the oldest, so b.eth is still cached and a.eth is not.
+      ...deviation('cache-bytes', base({ ...SAME_HOST, bounds: { cacheBytes: 1000 } }), [
+        { call: content('a.eth') },
+        { after: 1000, call: content('b.eth') },
+        { after: 1000, call: content('c.eth') },
+        { after: 1000, call: content('b.eth') },
+        { after: 1000, call: content('a.eth') },
+      ]),
+      id: 'deviation-cache-bytes-same-host',
     },
     {
       // One session at a time. A lifecycle change at 5 ms retires the first
