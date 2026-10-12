@@ -5,7 +5,7 @@
 //! Each does all its public work first (parsing, validation, RLP, BMT,
 //! hashing, within fc-evm's limits), then derives the key only to sign one
 //! digest (and, for a chunk, take its address), and assembles the result
-//! after the key is gone. It runs inline, as `compat.*` does. No secret is
+//! after the key is gone. It runs inline, like the other key reads. No secret is
 //! held while untrusted input is processed, and no key byte leaves this
 //! module.
 
