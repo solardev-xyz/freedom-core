@@ -28,7 +28,7 @@ Main stays a transport and adapter host:
 - **Parity** with the pinned resolvers, observable through the replay vectors: the requests made, their order and timing, cancellations, cache lifetimes, and results with key presence and order.
 - **Every deviation** is listed in [Deviations](#deviations) with its failure and cache behavior and a boundary vector.
 - **Bounded resources:** every queue, cache, answer, request, decode, session and reply has a byte, count or time bound that sits above every valid case, with a defined result when exhausted.
-- **No endpoint URL or server text leaves the core**, so no API key can reach a log, a crash report or a reply (0003 decision 3).
+- **No endpoint URL or key material reaches the core** (0003 decision 3). Main refuses to forward an answer that echoes one ([Transport](#transport)), so no API key can reach the core's memory, logs, crash reports or replies.
 
 **Non-goals**
 - **New trust semantics** (0003's open question 1), and new record types.
@@ -58,9 +58,11 @@ This section amends 0001's admission rules for naming.
 - **A separate pool:** naming requests don't take 0001's 64 vault-work slots. They have their own limits: at most **32 running sessions** and **256 waiting callers** in all, and at most **64 callers per session**.
 - **Every caller counts,** including one answered from the cache or one that joins a running session. The core answers a request over a limit with `busy` at once and keeps nothing for it.
 - **Control-class replies:** `busy` and every terminal naming reply use 0001's reserved control capacity. Main itself holds at most 256 naming requests outstanding, so that capacity bounds the backlog.
-- **One terminal reply per caller:** a result, `resolution_failed`, `cancelled` or `deadline`. The naming thread decides races between `cancel`, the deadline and the result in the order it processes them; the first wins.
-- **Cancel detaches the caller.** The session keeps running and caches its result, as today's shared promise does.
-- **Deadline:** 120 s per resolution method, counted from admission ([deviation](#deviations) `overall-deadline`). Main's hang watchdog is 0001's rule: deadline + 15 s.
+- **One terminal reply per caller:** a result, `resolution_failed`, `cancelled` or `deadline`. The naming thread decides races between `cancel`, the caller's deadline and the result in the order it processes them; the first wins.
+- **Two deadlines:**
+  - **The caller's:** 120 s from its admission, or the `deadline_ms` it carries ([Generations](#generations)). On expiry that caller alone gets `deadline` and is detached.
+  - **The session's:** 120 s from the session's start. On expiry the session ends: its outstanding I/O is cancelled, its remaining callers get `deadline`, and nothing is cached. This is deviation `overall-deadline`; main's hang watchdog follows 0001: deadline + 15 s.
+- **Cancel and caller deadlines detach a caller.** The session keeps running without callers, as today's shared promise does, and caches its result within its own deadline and budget. It still counts as a running session.
 - **Threading:** the naming machine runs on its own thread in `freedom-cored`, so vault control traffic never waits on naming work. 0001's I/O task only forwards frames.
 
 ### Generations
@@ -74,13 +76,15 @@ Three counters, each owned by the core and only ever increasing within a core pr
 | `lifecycle` | `naming.availability`, and `reset: "providers"` (today's `clearEnsResolutionCaches`) | ENS attempts; `shell.verified` |
 
 - **Requests:** every `shell.*` request carries the generations of its scopes. Main answers a request whose generation is no longer current with `stale_generation` and performs nothing. An endpoint removed from the configuration is never contacted again, and a Tezos request is unaffected by an ENS change.
-- **Replies:** every resolution reply carries the generations its result was computed under.
-  - **The core:** it restarts an attempt that crosses a `lifecycle` change, as today (see [Sessions](#sessions)).
-  - **Main:** a reply can still be overtaken in the pipe. When a reply's generation is older than main's current one for that scope, main discards it and sends the request again. This counts toward the same three attempts. After the third, main reports today's `Myotis availability changed repeatedly while resolving <name>`.
+- **Replies:** every resolution reply carries the generations its result was computed under, and `attempts`, the lifecycle attempts it used.
+- **Attempts:**
+  - **One budget:** a caller has three lifecycle attempts in all (`resolveAcrossStableLifecycle`), whether the core restarts an attempt or main sends the request again.
+  - **Overtaken replies:** a reply can still be overtaken in the pipe. When a reply's generation is older than main's current one for that scope, main discards it. It sends the request again only with attempts left, carrying `attempts_used` and the caller's remaining `deadline_ms`. Otherwise it reports today's `Myotis availability changed repeatedly while resolving <name>`.
+  - **A resubmitted request:** the core starts it with the remaining attempts and deadline. If it joins a running session, it waits for that session but fails with the "changed repeatedly" error once the session's restarts exceed its remaining attempts.
 - **Late replies:** a `shell.*` reply for a request the core has cancelled is valid, because main sends exactly one terminal reply per request. The core drops it. A second reply for one request is a protocol error (0001).
-- **A core restart** (crash or hang watchdog):
+- **A core restart** (crash or hang watchdog) counts as one attempt for each pending request:
   - main sends `naming.configure` and `naming.availability` first;
-  - then it sends each naming request that was still pending again, once;
+  - then it sends each pending naming request again, as above, while it has attempts and deadline left;
   - main abandons the dead core's `shell.*` work and cancels it locally.
   - Resolutions are reads, so there is nothing to reconcile.
 
@@ -90,14 +94,14 @@ Main implements these. Each carries its generations and a `deadline_ms`. The cor
 
 | Method | Params | Main does | Reply |
 |---|---|---|---|
-| `shell.rpc` | `{ endpoint, body, attempt }` | POSTs `body` (text), following redirects as ethers' `FetchRequest` does (see [Transport](#transport)) | `{ status, body, retry_after?, attempt }` or a [transport error](#transport-errors) |
+| `shell.rpc` | `{ endpoint \| continuation, body, attempt }` | POSTs `body` (text) to the endpoint, or to a continuation's current target, following redirects (see [Transport](#transport)) | `{ status, body, retry_after?, attempt, continuation? }` or a [transport error](#transport-errors) |
 | `shell.tezos` | `{ endpoint, method, path, body? }` | GET or POST `endpoint URL + path` | `{ status, body }` or a transport error |
 | `shell.gateway` | `{ url, method, body? }` | `netGatewayFetch` with today's flags | `{ status, body }` or a transport error |
 | `shell.verified` | a [verified operation](#verified-operations) | today's adapter, whole | the operation's outcome |
 | `shell.prefetch` | `{ uri }` | `prefetchGatewayUrl(uri)` | `{}` when it ends (finished, failed, its 10 s timer, or cancelled) |
 
 - **Request bodies** travel as text: JSON-RPC and gateway bodies are ASCII JSON.
-- **Response bodies** travel as base64, so the core sees exactly the bytes main received.
+- **Response bodies** travel as base64, so the core sees exactly the bytes main received, apart from main's [echo refusal](#transport).
 - **The serialized message must fit:** the core serializes each request before sending it. One that exceeds 0001's 1 MiB frame is never sent and completes locally as `too_large` (see [Bounds](#bounds)).
 - **Gateway flags:** `redirect: 'error'` at the fetch level, `credentials: 'omit'`, `useSessionCookies: false`, `cache: 'no-store'`, `bypassCustomProtocolHandlers: true`, and `Accept: application/json`. Every gateway request in the vectors records them.
 
@@ -107,23 +111,24 @@ Myotis and Colibri keep running in main, through today's adapters, **one whole o
 
 | Operation | Main runs | Reply |
 |---|---|---|
-| `{ myotis: "record", method, name? , address?, coin_type }` | `resolveMyotisEnsRecord` (`myotis-resolver.js`: the UR over `MyotisProvider`, with its CCIP) | `{ status: "ok" \| "noRecord", data_hex?, address_hex?, name?, verified, block_number }`, `{ revert }` (the operation's revert data), or `{ failure }` |
+| `{ myotis: "record", method, name?, address?, coin_type }` | `resolveMyotisEnsRecord` (`myotis-resolver.js`: the UR over `MyotisProvider`, with its CCIP) | `{ status: "ok" \| "noRecord", data_hex?, address_hex?, name?, verified, block_number }`, `{ revert }` (the operation's revert data), or `{ failure }` |
 | `{ myotis: "call", to, data }` | `myotisManager.ethCall` at `latest`, then `getStatus()` | `{ result_hex, optimistic_block_number }` or `{ failure }` |
 | `{ colibri: "resolve", name, call_data, name_nft: bool }` | `resolveCallViaColibri(name, callData, callResolver)`, with today's whole-operation client rebuild and retry (`withColibriClientRetry`) and ethers' built-in CCIP | `{ resolved_data, resolver_address }`, `{ revert }` or `{ failure }` |
 | `{ colibri: "reverse", address, coin_type }` | `resolveReverseViaColibri` | `{ name }`, `{ revert }` or `{ failure }` |
 
 - **Main checks Myotis' epoch** around each operation, as `tryMyotisPath` does today. A changed epoch is `{ failure: "lifecycle" }`, which the core treats as a lifecycle change.
-- **`failure`** is a closed set of classes (`unavailable`, `lifecycle`, `timeout`, `error`) and carries no text.
+- **`failure`** is a closed set of classes (`unavailable`, `lifecycle`, `timeout`, `too_large`, `error`) and carries no text.
+- **Reply size:** main serializes each reply first. One over 1 MiB (a large return, revert or name) is replaced by `{ failure: "too_large" }`: a method error, so the order continues (deviation `verified-reply-size`).
 - **Provenance:** a `revert` is the verifier's proven revert data. The core records which verifier produced it.
 - **The adapters' own bounds** are unchanged. Main bounds physical work: at most 8 operations per verifier are running, counted until the adapter's promise actually settles, not when the core cancels. Beyond that, main answers `{ failure: "unavailable" }` at once.
 
 ### Replies
 
 A resolution reply is one of:
-- `{ result, undefined_keys, generations }`:
+- `{ result, undefined_keys, generations, attempts }`:
   - `result` is today's result object, keys in today's order.
   - `undefined_keys` lists the top-level keys that are present with the value `undefined` (Tezos `ttl`, an address `error`). They appear in `result` as `null` placeholders, and main sets them back to `undefined`. A marker value inside `result` would be ambiguous, because Tezos `ttl` is arbitrary JSON from the chain.
-- the error `resolution_failed`, with `data: { message, generations }`: today's thrown resolution. Main builds today's IPC error object from it:
+- the error `resolution_failed`, with `data: { message, generations, attempts }`: today's thrown resolution. Main builds today's IPC error object from it:
   - content: `{ type: 'error', name, reason: 'RESOLUTION_ERROR', error }`;
   - address and reverse: the `success: false` shapes;
   - Tezos: `{ type: 'error', reason, system: 'tezos' }`.
@@ -299,48 +304,64 @@ These follow `doResolveEnsContent`, `doResolveEnsAddress` and `doResolveEnsRever
 
 - **The key** is today's in-flight key, `content|addr|reverse` + the cache key. A same-key lookup joins the running session, and different keys don't share, so content and address of one name each anchor (`dedup-concurrent`).
 - **Lifecycle restarts** (`resolveAcrossStableLifecycle`):
-  - A session runs at most 3 attempts.
+  - A session runs at most its remaining attempts: three, or fewer for a [resubmitted request](#generations).
   - An attempt that crosses a `lifecycle` change, whether it succeeded or threw, is discarded. Its cached result is removed if it is still the cached one, and the session restarts.
-  - After 3 attempts, it throws `Myotis availability changed repeatedly while resolving <name>`.
+  - Past the last attempt, it throws `Myotis availability changed repeatedly while resolving <name>`.
   - The in-flight table is cleared at each change, so a lookup after the change starts a new session rather than joining the old one.
-- **Terminal results** cancel what is outstanding, losing legs included.
+- **Termination:** a session ends at its result, its deadline or its budget ([Admission](#admission), [Bounds](#bounds)). Its outstanding I/O is cancelled then, losing legs included. A surviving prefetch is the exception: it is handed out of the session first ([Prefetch](#prefetch)).
+- **Verifier work** keeps counting in main until the adapter settles, whatever the session does.
 - **Timers** run on the daemon's monotonic clock and fire without waiting for a message: deadlines, quarantine, cache expiry, the anchor TTL.
 
 ### Classification
 
-How a leg's outcome is classified. "Ref." is the pinned reference. Rows marked † are deviations (`classification`).
+How a failed exchange is classified. The core's rules are ordered, and the first that matches decides. The reference is freedom-browser `fb540328`, and the node-failure rule is freedom-browser#656 at `e055b4e7`. Rows marked † differ from the reference; they make up deviation `classification`.
 
-| Outcome | Ref. | Core |
+**Is it a provider failure?** (the core's replacement for `isProviderError`)
+
+| # | Core rule | The reference |
 |---|---|---|
-| transport `timeout`, `network`, `refused`, `too_large` (answer), HTTP non-2xx after ethers' retry policy | provider failure | provider failure |
-| transport `stale_generation` | — | the attempt is superseded; no health change |
-| body not JSON, no matching `id`, neither `result` nor `error`, a `result` that isn't hex data | semantic `NO_CONTENTHASH` | provider failure † |
-| JSON-RPC error, code −32603 | provider failure | provider failure |
-| JSON-RPC error with **revert evidence** (code 3 or −32015; revert data as hex, or `Reverted 0x…`; or a message that mentions a revert) | semantic | semantic: `NO_RESOLVER` by selector, else `NO_CONTENTHASH` |
-| JSON-RPC error without revert evidence whose **node message** names a node failure (`no response`, freedom-browser#656's patterns and codes, a relayed HTTP status) | some are semantic | provider failure † |
-| JSON-RPC error without revert evidence, otherwise (`out of gas`, `invalid opcode`, …) | semantic | semantic |
-| `OffchainLookup` from the Universal Resolver | CCIP-Read | CCIP-Read |
-| `OffchainLookup` from another sender | error, `NO_CONTENTHASH` | the same |
-| every gateway failed | `CCIP_GATEWAY_FAILED` | the same |
-| a gateway request over the frame (its URL or POST body) | — | that gateway fails; the next URL is tried † |
-| a callback over the frame | — | `CCIP_GATEWAY_FAILED` for the leg † |
+| 1 | Transport `timeout`, `network`, `refused`, `too_large`, or a socket-level failure: **yes** | yes (codes `TIMEOUT`, `NETWORK_ERROR`; socket errors by message text) |
+| 2 | HTTP non-2xx once ethers' `FetchRequest` policy is done: **yes** | yes (`SERVER_ERROR`) |
+| 3 | Body not UTF-8 or not JSON, no response for the request's id, or an `error` member that isn't an object: **yes** † | no (`UNSUPPORTED_OPERATION`, `BAD_DATA`), unless the composed message matches the text rule below |
+| 4 | A call exception with revert data ethers extracted (`spelunkData`): **no** | no, unless the composed message matches the text rule |
+| 5 | A node error with code −32603: **yes** | yes |
+| 6 | A node error with revert evidence (code 3 or −32015; `data` as even-length hex or `Reverted 0x…`; a message mentioning a revert): **no** † | yes when its message matches `/no response/` (and #656 keeps that) |
+| 7 | A node error whose code is one of #656's node-failure codes, or whose message matches #656's patterns, `/no response/`, or an HTTP status pattern (`502`, `503`, `504`, `429`, `timeout`): **yes** | the pin: only `/no response/` and the text rule; #656: its codes and patterns too |
+| 8 | Any other node error (`out of gas`, `invalid opcode`, …): **no** | no, unless the composed message matches the text rule |
+| 9 | A result ethers' formatting refuses (not hex, missing, a malformed block): **yes** † | the text rule decides, so `"timeout"` or `"0x429"` counts and `"junk"` doesn't |
+| 10 | Anything else: **no** | the text rule decides |
 
-- **Free text is matched only in the node's own error message, and only without revert evidence.** The core never matches text that embeds request data (ethers' composed messages carry the calldata) or contract output (revert reasons).
-- **The anchor** treats every failure of a head or hash request as a failure, as today.
-- **Revert evidence wins:** it takes precedence over every node-failure pattern, as in freedom-browser#656.
+**The reference's text rule:** the pattern `502`, `503`, `504`, `429`, `timeout`, `ECONNREFUSED`, `ENOTFOUND` or `ETIMEDOUT` (case-insensitive) against ethers' composed message, which embeds the request and the offending value. The core matches text only in rules 1 and 7: a socket-level code, and the node's own message when nothing says the call reverted.
+
+**Per operation**, in the reference's order:
+- **Forward legs** (`runQuorumLeg`):
+  1. The deadline after a gateway was used, or `CCIP_GATEWAY_FAILED`: `error` without quarantine.
+  2. A resolver-not-found revert: `NO_RESOLVER`. That is the selector `ResolverNotFound` or `ResolverNotContract` in the revert data ethers extracted, else in the node's `data` string. It is also an `Error(string)` reason naming either, which is what the reference's message match can see.
+  3. A provider failure, or the leg's deadline before any gateway: `error` with quarantine.
+  4. Otherwise `NO_CONTENTHASH`, with the error.
+- **The reverse call** (`universalResolverReverseCall`) checks first, then hands to the leg's rules:
+  1. A provider failure or `CCIP_GATEWAY_FAILED`: rethrown, to the leg's rules.
+  2. A resolver-not-found revert: `noRecord`.
+  3. `ReverseAddressMismatch` (the selector, or an `Error(string)` reason naming it): `mismatch`, with the claimed name.
+  4. Otherwise an `error` outcome, keyed by its [agreement identity](#errors-agreement-and-text).
+- **Anchor requests:** any failure is a failure.
+- **Tezos:** any failed request fails that endpoint's step, as today.
+
+**Revert evidence beats text, never codes:** rule 5 (−32603) precedes it, as in #656.
 
 ### Errors: agreement and text
 
-- **Agreement identity.** Legs agree on bytes. Today a reverse error outcome encodes ethers' full message, which for a call exception is determined by its code and revert data (the call is the same on every leg). The core encodes an identity built from the same inputs:
-  - the error class;
-  - the revert data or the undecodable answer bytes.
+- **Agreement identity.** Legs agree on bytes. Today a reverse `error` outcome encodes ethers' full message. That message is fixed by its inputs, never by the node's text:
+  - **a call exception:** its code and short message, the revert data ethers extracted (`err.data`, not the node's `info.error.data`), and the failing call's `to` and `data`. After CCIP-Read, the failing call is the callback, so legs with different gateway answers differ;
+  - **a decoding error:** the value it refused;
+  - **the resolver's own errors** (`CCIP sender does not match the Universal Resolver`, …): their fixed text.
 
-  Distinct reverts (say `0x12345678` and `0x87654321`) stay distinct, so they still conflict.
+  The core encodes exactly these inputs, so it agrees and disagrees where the reference does. Two failing calls with different data stay distinct. Legacy envelopes that differ only in `info.error.data` agree, as today. Both cases get vectors.
 - **Display text** is separate. Fields that today carry an ethers or node message carry the class's short message instead:
   - sanitized like `sanitizeErrorDetail` (URLs → `<url>`, hex over 64 bytes shortened, 240 characters);
   - never the node's text (deviation `error-text`).
   This applies to `error` on `not_found` and `RESOLUTION_ERROR` results, to reverse `RESOLUTION_ERROR` details, and to `resolution_failed` messages.
-- **Server text is confidential inside the core.** It is used for the patterns above and dropped. It is never logged, cached, compared, or put into a reply.
+- **Server text** reaches the core only after main's [echo refusal](#transport). It is used for rule 7's patterns and then dropped: never logged, cached or put into a reply.
 
 ### CCIP-Read
 
@@ -357,8 +378,8 @@ How a leg's outcome is classified. "Ref." is the pinned reference. Rows marked �
 
 - **Start:** the first `data` of a content wave starts a prefetch of the decoded `ipfs://` or `bzz://` URI (never `ipns://`). A decoding failure starts nothing.
 - **Cancel:** any wave outcome other than `agreed_data` cancels it.
-- **Survival:** it survives an agreed answer, including one the result later rejects. Main bounds it with today's 10 s timer.
-- **Own bound:** at most one per wave. It never blocks the session.
+- **Survival:** after `agreed_data`, the prefetch is handed from the session to the machine's own prefetch set, so it survives the session's end. That includes a result that later rejects the answer, and a session deadline. Main bounds it with today's 10 s timer.
+- **Bounds:** at most one per wave, and at most 32 in the machine's set. Over that, the oldest is cancelled. It never blocks a session.
 
 ## The Tezos machine
 
@@ -404,14 +425,16 @@ How a leg's outcome is classified. "Ref." is the pinned reference. Rows marked �
   - `eth_getBlockByNumber [hex or tag, false]`;
   - `eth_call [{ to, data }, blockHashOrTag]`.
 - **Response handling:** the core parses the body as ethers' `JsonRpcProvider` does, including a batch-shaped array answer, and classifies it as [above](#classification).
-- **ethers' `FetchRequest` policy** applies to every `shell.rpc` exchange; the core and main share it through `attempt`:
-  - **Attempts:** at most 12 per JSON-RPC request.
-  - **HTTP 429:** the core retries after `250 × trunc(r × 2^attempt)` ms, with `r` from the machine's random source, or after the `Retry-After` integer read as milliseconds, as ethers does.
-  - **301/302/307/308:** main follows them with the same method and body. It refuses https → http, and checks each hop against the endpoint policy and the onion gate (deviation `rpc-redirects`: today hops aren't checked).
-  - **No answer within 300 s** of inactivity is `timeout` (ethers' default).
+- **ethers' `FetchRequest` policy:** one JSON-RPC request is one logical exchange. The core drives its attempts; main holds where it currently points.
+  - **Attempts:** at most 12 per exchange, redirects and retries together.
+  - **Expiry:** the exchange expires 300 s after its first attempt, checked before each attempt (ethers' `expires`). Each attempt also has 300 s of socket inactivity.
+  - **Redirects:** main follows 301/302/307/308 with the same method and body. It refuses https → http, and checks each hop against the endpoint policy and the onion gate (deviation `rpc-redirects`: today hops aren't checked).
+  - **Continuation:** when main has followed a redirect, its reply carries an opaque `continuation` naming the current target. A retry is sent with that `continuation` instead of the endpoint, so a redirect to B followed by a 429 retries B, as `FetchRequest` does. Main drops a continuation when its exchange expires or when no retry can follow.
+  - **HTTP 429:** the core waits `250 × trunc(r × 2^attempt)` ms, with `r` drawn from the machine's random source, then retries. A positive integer `Retry-After` replaces the delay, read as milliseconds. The draw happens either way, as ethers draws it.
 - **Tezos:**
   - no 429 retry, as today's `fetch`;
   - **redirects are refused** (deviation `tezos-redirects`: today `fetch` follows them).
+- **Echo refusal:** main never forwards an RPC or Tezos answer whose body contains the endpoint's URL, or any of its path segments or query values of 16 or more characters, compared case-insensitively. Such an answer becomes `refused`, a provider failure, so no key material reaches the core (deviation `secret-echo`).
 - **The session's network stack:** main sends `shell.rpc` and `shell.tezos` through the Electron session's network stack, as 0003 decided:
   - **Clearnet:** `DIRECT` under today's PAC.
   - **Onion:** the onion gate applies to every host and hop. There is no empty or `DIRECT` route and no `DIRECT` fallback.
@@ -423,7 +446,7 @@ How a leg's outcome is classified. "Ref." is the pinned reference. Rows marked �
 Main's terminal reply for an I/O request is a result or one of these:
 - `timeout`: the request's deadline, which the core sets, or 300 s of inactivity;
 - `network`: DNS, connect, TLS or a reset;
-- `refused`: the URL or a redirect hop failed main's policy;
+- `refused`: the URL or a redirect hop failed main's policy, or the answer echoed key material;
 - `too_large`: the answer exceeded the request's byte cap;
 - `cancelled`;
 - `stale_generation`.
@@ -459,10 +482,15 @@ Measured valid answers sit well below the 720 KiB cap:
 |---|---|---|
 | one decode (ABI, JSON, Micheline, base64, hex): output bytes | 4 MiB | the decode fails as malformed: a leg's `NO_CONTENTHASH` as today's decode errors; Tezos `unsupported` or a failed lookup (deviation `decode-budget`) |
 | one decode: reads | 0003's 1024× ABI read cap, JSON depth 512, Micheline depth and node count | as above |
-| one session: retained and in-flight bytes (answers held, decoded values, queued requests) | 16 MiB | the session fails `resolution_failed: budget`, not cached |
-| all sessions | 64 MiB | new sessions get `busy` until usage drops below 48 MiB |
+| one session: retained and in-flight bytes (answers held, decoded values, queued requests, its serialized replies until written) | 16 MiB | the session fails `resolution_failed: budget`, not cached |
+| all sessions | 64 MiB | a running session whose reservation would cross it fails `resolution_failed: budget`, not cached; new sessions get `busy` until usage drops below 48 MiB |
+| the writer: naming replies queued for the pipe | 8 MiB | further replies wait in their sessions, still counted there |
 | caches | 500 entries and 8 MiB each | eviction (deviation `cache-bytes`) |
 | Tezos discovery entries | one per configured endpoint | — |
+| endpoint state (quarantine, discovery) for endpoints no longer configured | the 64 most recently retired | the oldest retired entries are dropped (deviation `endpoint-retention`) |
+| surviving prefetches | 32 | the oldest is cancelled |
+
+**Lifetimes:** a reservation is held from allocation until the bytes are freed. For a serialized reply, that is until the writer has written it. Main drops a reference's mapping once it is no longer configured and no pending request names it.
 
 The 4 MiB decode budget caps aliasing: an `OffchainLookup` whose URL array repeats one 64 KiB string 2,047 times decodes to about 128 MiB today. The core refuses it.
 
@@ -496,13 +524,18 @@ Each deviation gets a boundary vector in the implementation PR, generated from t
 | `ccip-urls` | every URL in the lookup | the first 32 | the rest aren't tried |
 | `monotonic-time` | TTLs, quarantine and deadlines on `Date.now()` | the monotonic clock; Tezos expiry still compares wall time | none unless the wall clock jumps |
 | `error-text` | ethers' full message, which embeds node text and request data | the class's short message, sanitized | same branches; [agreement](#errors-agreement-and-text) unchanged |
-| `classification` | see the † rows of [Classification](#classification) | the core's column | as listed per row |
+| `classification` | rules 3, 6 and 9 of [Classification](#classification), and text matched in composed messages | the core's rules | a malformed answer quarantines; a revert never does |
 | `node-failures` | node errors can agree into a verified not-found (`node-errors-agree`) | freedom-browser#656's rule | until the reference pin includes it |
 | `transport` | Node's HTTP stack | the session's network stack | `.onion` endpoints work under Tor, and a missing route fails closed (`refused`) |
 | `rpc-redirects` | hops followed without checks | each hop checked against the endpoint policy and the onion gate | a refused hop is a provider failure |
 | `tezos-redirects` | `fetch` follows redirects | refused | the endpoint fails for that lookup |
 | `tezos-expiry` | V8's legacy `Date.parse` formats | RFC 3339 only | an unreadable expiry is ignored, as today's `NaN` |
 | `verified-bounds` | no limit on concurrent adapter work | 8 operations per verifier | `{ failure: "unavailable" }`; the order continues |
+| `verified-reply-size` | any size | a verified reply over 1 MiB is `{ failure: "too_large" }` | a method error; the order continues |
+| `memory-budgets` | unbounded | 16 MiB per session, 64 MiB in all, 8 MiB of queued replies | `resolution_failed: budget` or `busy`; not cached |
+| `endpoint-retention` | quarantine and discovery entries live for the process | 64 retired endpoints kept | a re-added endpoint may have forgotten its quarantine |
+| `secret-echo` | a node's text, including an echoed URL or key, can reach results and logs | the answer is refused | a provider failure |
+| `prefetch-set` | unbounded | 32 surviving prefetches | the oldest is cancelled |
 
 ## Replay
 
@@ -520,6 +553,8 @@ The Rust machine runs each scenario of `naming-replay.json`:
 - every result, with key order and present-`undefined` keys;
 - every settlement time;
 - every I/O request: endpoint, method, params, start time, and the time it was answered, cancelled or left open.
+
+**Vectors the implementation adds:** a redirect followed by a 429 (the retry goes to the redirect target); reverse error outcomes that differ only in callback data (they conflict) and legacy envelopes that differ only in `info.error.data` (they agree); one boundary vector per deviation. Main's own behavior (pipe overtakes, restarts, continuations) is tested in the daemon and the browser, since the reference has no such seam.
 
 **Compared by rule:**
 - **Deviations:** the fields a deviation covers are compared under its rule.
