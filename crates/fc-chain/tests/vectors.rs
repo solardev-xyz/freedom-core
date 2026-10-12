@@ -6,7 +6,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use fc_chain::{
-    ANT_EXCLUDE_SOURCES, ANT_INCLUDE_SOURCES, ANT_LOG_SCAN_SHRINK_NEEDLES, AnswerError,
+    ANT_EXCLUDE_SOURCES, ANT_INCLUDE_SOURCES, ANT_LOG_SCAN_SHRINK_NEEDLES, AnswerError, BLOCKSCOUT,
     BLOCKSCOUT_MAX_PAGES, BlockscoutError, ERC20_TRANSFER_TOPIC, ErrorRank, JSON_PARSE_FAILURE,
     JsString, LOG_INDEX_ABORT_COOLDOWN_MS, LOG_INDEX_CHAIN_ID, LOG_INDEX_DISAGREEMENT_COOLDOWN_MS,
     LOG_INDEX_PAIR_MALFORMED_COOLDOWN_MS, LOG_INDEX_TAIL_BLOCKS, LOG_INDEX_TOKEN,
@@ -14,14 +14,15 @@ use fc_chain::{
     LOG_SCAN_QUORUM_TIMEOUT_MS, LOG_TRUNCATION_MIN_SPAN, LOG_TRUNCATION_TAIL_BLOCKS,
     LogIndexFilter, MAX_COOLDOWN_MS, MAX_DECIMAL_BITS, MAX_MYOTIS_REFUSAL_MESSAGE, MAX_PAGE_SIZE,
     MIN_COOLDOWN_MS, MYOTIS_BLOB_FIELDS, MYOTIS_NOT_READY, MyotisFailure, MyotisOperation, Outcome,
-    PageReply, Party, RATE_LIMIT_COOLDOWN_MS, ReceivedError, ScanStep, SourceFailure, StableDigest,
-    TransferScan, TxHash, agreed_rpc_logs, ant_shrinks_log_scan_on, blockscout_transfer,
-    broadcast_failure_text, canonical_log, cooldown_from, decode_answer, fee_quote,
-    fee_quote_failure_text, is_js_whitespace, log_index_filter, log_range_refusal_text,
-    log_scan_range_cap, logs_agree, myotis_answer, myotis_operation, myotis_trust,
+    PageReply, Party, RATE_LIMIT_COOLDOWN_MS, READ_METHODS, ReceivedError, SINGLE_NODE_METHODS,
+    ScanStep, SourceFailure, StableDigest, TransferScan, TxHash, agreed_rpc_logs,
+    ant_shrinks_log_scan_on, blockscout_transfer, broadcast_failure_text, canonical_log,
+    cooldown_from, decode_answer, fee_quote, fee_quote_failure_text, is_js_whitespace,
+    is_read_method, log_index_filter, log_query_span, log_range_refusal_text, log_scan_range_cap,
+    logs_agree, myotis_answer, myotis_operation, myotis_trust, no_source_left_text,
     normalize_params, rank_log_scan_error, request_failure_text, rpc_transfer,
-    rpc_transfer_log_well_formed, safe_error_message, stable_digest, stable_value,
-    transaction_hash, transfers_json,
+    rpc_transfer_log_well_formed, safe_error_message, source_order, source_serves_method,
+    stable_digest, stable_value, transaction_hash, transfers_json, unsupported_read_method_text,
 };
 use fc_json::index::{Index, IndexError, KeyOrder};
 use serde_json::Value as Json;
@@ -411,6 +412,94 @@ fn strings(value: &Json) -> Vec<&str> {
 /// A JSON text recorded as a string, or `null` for none: `None`.
 fn json_text(value: &Json) -> Option<&str> {
     value.as_str()
+}
+
+#[test]
+fn read_methods() {
+    let vectors = vectors();
+    let methods = &vectors["methods"];
+    assert_eq!(strings(&methods["read_methods"]), READ_METHODS);
+    assert_eq!(
+        strings(&methods["single_node_methods"]),
+        SINGLE_NODE_METHODS
+    );
+    let probes = methods["is_read_method"].as_array().unwrap();
+    for probe in probes {
+        let method = str_of(probe, "method");
+        assert_eq!(is_read_method(method), probe["js"] == true, "{method:?}");
+    }
+    let capabilities = methods["source_capabilities"].as_array().unwrap();
+    assert_eq!(capabilities.len(), 5);
+    for capability in capabilities {
+        let source = str_of(capability, "source");
+        let unsupported = strings(&capability["unsupported"]);
+        assert_eq!(capability["opt_in"] == true, source == BLOCKSCOUT);
+        for probe in probes {
+            let method = str_of(probe, "method");
+            assert_eq!(
+                source_serves_method(source, method),
+                !unsupported.contains(&method),
+                "{source} {method:?}"
+            );
+        }
+    }
+    for case in methods["unsupported"].as_array().unwrap() {
+        let text = unsupported_read_method_text(str_of(case, "method"));
+        assert_eq!(
+            JsString::from(text.as_str()).to_json(),
+            str_of(&case["js"], "text_json")
+        );
+    }
+}
+
+#[test]
+fn source_orders() {
+    let vectors = vectors();
+    let cases = vectors["source_orders"].as_array().unwrap();
+    let mut empty = 0;
+    for case in cases {
+        let name = id(case);
+        let (method, params) = (str_of(case, "method"), str_of(case, "params"));
+        let chain_id = case["chain_id"].as_u64().unwrap();
+        let eligible = case["profile"] == "ant"
+            && log_query_span(method, params).is_some()
+            && log_index_filter(chain_id, params).is_some();
+        let read_order = strings(&case["read_order"]);
+        let order = source_order(
+            &read_order,
+            &strings(&case["include_sources"]),
+            &strings(&case["exclude_sources"]),
+            method,
+            eligible,
+        );
+        let js = &case["js"];
+        let tried = js["tried"].as_array().unwrap();
+        let tried_sources: Vec<&str> = tried.iter().map(|t| str_of(t, "source")).collect();
+        assert_eq!(order.order, tried_sources, "{name}");
+        let text = if order.order.is_empty() {
+            empty += 1;
+            JsString::from(
+                no_source_left_text(method, chain_id, &order.configured, &order.dropped).as_str(),
+            )
+        } else {
+            let messages: Vec<Vec<u16>> = tried
+                .iter()
+                .map(|t| js_units(str_of(t, "message_json")))
+                .collect();
+            let failures: Vec<SourceFailure<'_>> = tried
+                .iter()
+                .zip(&messages)
+                .map(|(t, message)| SourceFailure::Failed {
+                    source: str_of(t, "source"),
+                    name: str_of(t, "name"),
+                    message,
+                })
+                .collect();
+            request_failure_text(method, &failures, &order.dropped)
+        };
+        assert_eq!(text.to_json(), str_of(js, "text_json"), "{name}");
+    }
+    assert!(empty > 10 && cases.len() - empty >= 3);
 }
 
 /// Checks a Myotis failure against the router's error.

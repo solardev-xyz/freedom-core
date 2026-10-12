@@ -7,8 +7,11 @@
 //! - Agreement between answers, as SHA-256 of `stableValue`:
 //!   [`stable_digest`].
 //! - `feeQuote`: [`fee_quote`].
-//! - `safeErrorMessage` and the aggregate failure texts:
-//!   [`safe_error_message`], [`request_failure_text`].
+//! - `safeErrorMessage` and the router's failure texts:
+//!   [`safe_error_message`], [`request_failure_text`],
+//!   [`no_source_left_text`], [`unsupported_read_method_text`].
+//! - Read methods and the source order: [`is_read_method`],
+//!   [`source_order`].
 //! - Myotis reads: the gates, the payload classification and the trust
 //!   block: [`myotis_operation`], [`myotis_answer`], [`myotis_trust`].
 //! - The Ant profile's error ranking and range caps:
@@ -32,6 +35,7 @@ mod blockscout;
 mod fee;
 mod js;
 mod logs;
+mod methods;
 mod myotis;
 mod normalize;
 mod pattern;
@@ -63,6 +67,10 @@ pub use logs::{
     LOG_RANGE_CAP_TTL_MS, LOG_RANGE_REFUSAL_CODE, LOG_SCAN_COOLDOWN_MS, LOG_SCAN_QUORUM_ROUNDS,
     LOG_TRUNCATION_MIN_SPAN, LOG_TRUNCATION_TAIL_BLOCKS, log_query_span, log_range_refusal_text,
 };
+pub use methods::{
+    BLOCKSCOUT, READ_METHODS, SINGLE_NODE_METHODS, SourceOrder, is_read_method, source_order,
+    source_serves_method,
+};
 pub use myotis::{
     MAX_MYOTIS_REFUSAL_MESSAGE, MYOTIS_BLOB_FIELDS, MYOTIS_NOT_READY, MYOTIS_PROOF, MyotisFailure,
     MyotisOperation, MyotisRefusal, MyotisVerdict, myotis_answer, myotis_operation, myotis_trust,
@@ -71,7 +79,7 @@ pub use myotis::{
 pub use normalize::{Normalized, normalize_params};
 pub use stable::{StableDigest, stable_digest, stable_value, value_digest};
 pub use text::{
-    SourceFailure, broadcast_failure_text, fee_quote_failure_text, request_failure_text,
-    safe_error_message,
+    SourceFailure, broadcast_failure_text, fee_quote_failure_text, no_source_left_text,
+    request_failure_text, safe_error_message, unsupported_read_method_text,
 };
 pub use txhash::{NotHex, TxHash, transaction_hash};

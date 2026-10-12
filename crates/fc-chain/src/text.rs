@@ -50,6 +50,32 @@ pub fn safe_error_message(name: &str, message: &[u16]) -> JsString {
     JsString::from_units(out)
 }
 
+/// The refusal of a method that isn't a read method, before any I/O.
+pub fn unsupported_read_method_text(method: &str) -> String {
+    format!("Unsupported read method: {method}")
+}
+
+/// A read's error when no source is left for it: `No chain source left for
+/// <method> on chain <id>: read order [<configured>], <excluded>`. With
+/// nothing dropped (an empty read order) the second part is `null`, as the
+/// router's template prints it.
+pub fn no_source_left_text(
+    method: &str,
+    chain_id: u64,
+    configured: &[&str],
+    dropped: &[&str],
+) -> String {
+    let excluded = if dropped.is_empty() {
+        "null".to_owned()
+    } else {
+        format!("excluded for this request: {}", dropped.join(", "))
+    };
+    format!(
+        "No chain source left for {method} on chain {chain_id}: read order [{}], {excluded}",
+        configured.join(", ")
+    )
+}
+
 /// One source's part of a read's aggregate error.
 #[derive(Debug, Clone, Copy)]
 pub enum SourceFailure<'a> {
