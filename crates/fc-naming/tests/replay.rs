@@ -571,26 +571,42 @@ fn replay(scenario: &JsValue) -> Result<Vec<String>, String> {
             Some(calls) => calls.to_vec(),
             None => vec![step.get("call").cloned().unwrap_or(JsValue::Null)],
         };
-        let mut callers = Vec::new();
+        // Calls start at their `at` into the step (in that order), the
+        // clock running to each with every reply kept.
+        let mut order: Vec<usize> = (0..calls.len()).collect();
+        order.sort_by_key(|&i| num(calls[i].get("at")));
+        let mut callers = vec![u64::MAX - 1; calls.len()];
         let mut immediate = Vec::new();
-        for call in &calls {
+        for i in order {
+            let call = &calls[i];
+            let at = start + num(call.get("at"));
+            if at > machine.now() {
+                let started: Vec<u64> = callers
+                    .iter()
+                    .copied()
+                    .filter(|c| *c < u64::MAX - 1)
+                    .collect();
+                driver.drive(&mut machine, at, Some((&started, &mut immediate)));
+                driver.drive(&mut machine, at, None);
+            }
+            let callers = &mut callers[i..=i];
             let args = call.get("args").and_then(JsValue::as_array).unwrap_or(&[]);
             let chain = match args.get(1) {
                 Some(JsValue::Number(n)) => *n,
                 _ => 1.0,
             };
             match str_of(call.get("fn")) {
-                "resolveEnsContent" => callers.push(machine.resolve_content(str_of(args.first()))),
+                "resolveEnsContent" => callers[0] = machine.resolve_content(str_of(args.first())),
                 "resolveEnsAddress" => {
-                    callers.push(machine.resolve_address(str_of(args.first()), chain))
+                    callers[0] = machine.resolve_address(str_of(args.first()), chain)
                 }
                 "resolveEnsReverse" => {
-                    callers.push(machine.resolve_reverse(str_of(args.first()), chain))
+                    callers[0] = machine.resolve_reverse(str_of(args.first()), chain)
                 }
-                "resolveTezosDomain" => callers.push(machine.resolve_tezos(str_of(args.first()))),
+                "resolveTezosDomain" => callers[0] = machine.resolve_tezos(str_of(args.first())),
                 "invalidateCachedProvider" => {
                     machine.invalidate_providers();
-                    callers.push(u64::MAX);
+                    callers[0] = u64::MAX;
                     immediate.push(Reply {
                         caller: u64::MAX,
                         outcome: Ok(JsValue::Object(vec![(
