@@ -44,7 +44,7 @@ Each returns exactly the bytes ethers or bee-js return today, and each signing m
   - read the Bee node's keystore and its config password.
 
   Phase 2 removes routine key *exposure*, not main's authority. No signature can be recalled once delivered. Policy moves with the Chromium work.
-- **Transaction building:** nonces, fee estimation, gas limits, broadcasting and receipts stay in main. The core signs a fully specified transaction.
+- **Transaction building:** nonces, gas limits and receipts stay in main. The core signs a fully specified transaction. Fee quotes, chain reads and broadcast routing move into the core with [0005](0005-chain-data.md); until then they stay in main too.
 - **Other transaction types:** EIP-2930 access lists, blob (EIP-4844) and set-code (EIP-7702) transactions. Freedom doesn't send them today, and the core rejects them.
 - **`eth_sign`** (raw digest signing). Freedom rejects it today and the core doesn't offer it.
 - **Ledger, phone and Safe accounts.** Safe owners that are vault accounts sign through the core like any other account.
