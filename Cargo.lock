@@ -277,6 +277,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ens-normalize"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0122eb65f97557f03a51c5c02ab80f0d8143a96db469b13007f34dd21398c06"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -332,6 +342,16 @@ dependencies = [
  "thiserror",
  "unicode-normalization",
  "zeroize",
+]
+
+[[package]]
+name = "fc-naming"
+version = "0.2.0"
+dependencies = [
+ "ens-normalize",
+ "hex",
+ "sha3",
+ "thiserror",
 ]
 
 [[package]]

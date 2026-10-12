@@ -1,0 +1,19 @@
+[package]
+name = "fc-naming"
+description = "Name resolution for Freedom: ENSIP-15, namehash, the Universal Resolver, contenthash, CCIP-Read and Tezos Domains (design 0003)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ens-normalize = "=0.1.1"
+sha3 = "0.12"
+thiserror = "2"
+
+[dev-dependencies]
+hex = "0.4"
