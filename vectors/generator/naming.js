@@ -15,11 +15,12 @@ const SILENT_LOG = { info() {}, warn() {}, error() {}, debug() {}, log() {} };
 /**
  * Loads `rel` from the checkout with `internals` appended to its exports
  * as `__internals`, and `stubs` (by request string) for its own requires.
+ * `extra` is test-only code appended after that, in the module's scope.
  */
-function loadWithInternals(checkout, rel, internals, stubs) {
+function loadWithInternals(checkout, rel, internals, stubs, extra = '') {
   const filename = path.join(checkout, rel);
   const source = fs.readFileSync(filename, 'utf8');
-  const exposed = `\n;module.exports.__internals = { ${internals.join(', ')} };\n`;
+  const exposed = `\n;module.exports.__internals = { ${internals.join(', ')} };\n${extra}`;
   const originalLoad = Module._load;
   Module._load = function load(request, parent, isMain) {
     if (parent && parent.filename === filename && Object.hasOwn(stubs, request)) return stubs[request];
@@ -548,4 +549,4 @@ async function buildNaming(checkout, ethers, meta) {
   };
 }
 
-module.exports = { buildNaming };
+module.exports = { buildNaming, loadWithInternals };

@@ -1,0 +1,384 @@
+//! Replays vectors/chain.json, generated from the pinned chain-data router.
+//! JavaScript strings that may hold lone surrogates are recorded as their
+//! JSON text (`*_json`); entries marked `deviation` are where the core
+//! differs by design.
+
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use fc_chain::{
+    AnswerError, JSON_PARSE_FAILURE, JsString, MAX_DECIMAL_BITS, Outcome, SourceFailure,
+    StableDigest, TxHash, broadcast_failure_text, decode_answer, fee_quote, fee_quote_failure_text,
+    is_js_whitespace, normalize_params, request_failure_text, safe_error_message, stable_digest,
+    stable_value, transaction_hash,
+};
+use fc_json::index::{Index, IndexError, KeyOrder};
+use serde_json::Value as Json;
+
+fn vectors() -> Json {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../vectors/chain.json");
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+fn str_of<'a>(entry: &'a Json, key: &str) -> &'a str {
+    entry[key]
+        .as_str()
+        .unwrap_or_else(|| panic!("{key} in {entry}"))
+}
+
+fn opt_str<'a>(entry: &'a Json, key: &str) -> Option<&'a str> {
+    entry[key].as_str()
+}
+
+/// A JavaScript string recorded as its JSON text.
+fn js_units(json_text: &str) -> Vec<u16> {
+    Index::new(json_text).unwrap().root().units().collect()
+}
+
+/// `JSON.stringify(JSON.parse(text))`.
+fn stringify(text: &str) -> String {
+    Index::new(text)
+        .unwrap()
+        .root()
+        .stringify(KeyOrder::Property)
+}
+
+fn id(entry: &Json) -> String {
+    entry["id"].as_str().unwrap_or("?").to_owned()
+}
+
+fn deviation(entry: &Json) -> Option<&str> {
+    entry["deviation"].as_str()
+}
+
+#[test]
+fn normalization() {
+    let vectors = vectors();
+    let cases = vectors["normalization"].as_array().unwrap();
+    let mut deviations = 0;
+    for case in cases {
+        let (method, params) = (str_of(case, "method"), str_of(case, "params"));
+        let js = &case["js"];
+        let result = normalize_params(method, params);
+        match deviation(case) {
+            Some("json-depth") => {
+                assert_eq!(result, Err(IndexError::TooDeep), "{}", id(case));
+                deviations += 1;
+            }
+            Some("bigint-width") => {
+                // Left as sent, for the node to refuse.
+                let result = result.unwrap();
+                assert!(!result.changed, "{}", id(case));
+                assert_eq!(result.params, stringify(params), "{}", id(case));
+                assert_ne!(result.params, str_of(js, "params"), "{}", id(case));
+                deviations += 1;
+            }
+            None => {
+                let result = result.unwrap_or_else(|e| panic!("{}: {e}", id(case)));
+                assert_eq!(result.params, str_of(js, "params"), "{}", id(case));
+                assert_eq!(
+                    Some(result.changed),
+                    js["changed"].as_bool(),
+                    "{}",
+                    id(case)
+                );
+            }
+            Some(other) => panic!("unknown deviation {other}"),
+        }
+    }
+    assert!(cases.len() > 100 && deviations == 3, "{deviations}");
+}
+
+#[test]
+fn whitespace_sets() {
+    let vectors = vectors();
+    for key in ["bigint_whitespace", "safe_error_whitespace"] {
+        let units: Vec<u64> = vectors[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u.as_u64().unwrap())
+            .collect();
+        for unit in 0..=u16::MAX {
+            assert_eq!(
+                is_js_whitespace(unit),
+                units.contains(&u64::from(unit)),
+                "{key}: {unit:#x}"
+            );
+        }
+    }
+}
+
+#[test]
+fn stable_values() {
+    let vectors = vectors();
+    let cases = vectors["stable"].as_array().unwrap();
+    let mut digests = Vec::new();
+    for case in cases {
+        let js = &case["js"];
+        let Some(text) = opt_str(case, "text") else {
+            assert!(js["stable"].is_null());
+            assert_eq!(stable_digest(None).unwrap(), StableDigest::undefined());
+            continue;
+        };
+        if deviation(case) == Some("json-depth") {
+            assert_eq!(stable_value(text), Err(IndexError::TooDeep), "{}", id(case));
+            assert_eq!(stable_digest(Some(text)), Err(IndexError::TooDeep));
+            continue;
+        }
+        assert_eq!(deviation(case), None);
+        assert_eq!(
+            stable_value(text).unwrap(),
+            str_of(js, "stable"),
+            "{}",
+            id(case)
+        );
+        let digest = stable_digest(Some(text)).unwrap();
+        assert_eq!(
+            hex::encode(digest.as_bytes()),
+            str_of(js, "sha256"),
+            "{}",
+            id(case)
+        );
+        digests.push(digest);
+    }
+    // No JSON value's digest is undefined's.
+    assert!(digests.len() > 50);
+    assert!(!digests.contains(&StableDigest::undefined()));
+}
+
+#[test]
+fn equivalence_pairs() {
+    let vectors = vectors();
+    let pairs = vectors["equivalence"].as_array().unwrap();
+    for pair in pairs {
+        let a = stable_digest(opt_str(pair, "a")).unwrap();
+        let b = stable_digest(opt_str(pair, "b")).unwrap();
+        assert_eq!(a == b, pair["equal"].as_bool().unwrap(), "{pair}");
+    }
+    let equal = pairs.iter().filter(|p| p["equal"] == true).count();
+    assert!(equal > 10 && pairs.len() - equal > 10);
+}
+
+#[test]
+fn answers() {
+    let vectors = vectors();
+    let cases = vectors["answers"].as_array().unwrap();
+    for case in cases {
+        let body = hex::decode(str_of(case, "body_hex")).unwrap();
+        let status = u16::try_from(case["status"].as_u64().unwrap()).unwrap();
+        let js = &case["js"];
+        let decoded = decode_answer(status, body);
+        let name = id(case);
+        match deviation(case) {
+            Some("json-depth") => {
+                assert_eq!(decoded.unwrap_err(), AnswerError::TooDeep, "{name}");
+                continue;
+            }
+            Some("json-parse-text") => {
+                assert_eq!(str_of(&js["error"], "name"), "SyntaxError", "{name}");
+                let error = decoded.unwrap_err();
+                assert_eq!(error, AnswerError::Syntax, "{name}");
+                assert_eq!(error.to_string(), JSON_PARSE_FAILURE);
+                continue;
+            }
+            None => {}
+            Some(other) => panic!("unknown deviation {other}"),
+        }
+        if js["undefined"] == true {
+            let answer = decoded.unwrap();
+            assert_eq!(answer.outcome(), Outcome::Result(None), "{name}");
+            continue;
+        }
+        if let Some(expected) = opt_str(js, "result_json") {
+            let answer = decoded.unwrap_or_else(|e| panic!("{name}: {e}"));
+            let Outcome::Result(Some(result)) = answer.outcome() else {
+                panic!("{name}: {:?}", answer.outcome());
+            };
+            assert_eq!(stringify(result), expected, "{name}");
+            assert_eq!(
+                stable_value(result).unwrap(),
+                str_of(js, "stable"),
+                "{name}"
+            );
+            continue;
+        }
+        let error = &js["error"];
+        let message = js_units(str_of(error, "message_json"));
+        let error_name = str_of(error, "name");
+        match decoded {
+            Err(failure) => {
+                assert_eq!(failure.name(), error_name, "{name}");
+                assert_eq!(
+                    JsString::from(failure.to_string().as_str()).units(),
+                    message,
+                    "{name}"
+                );
+                assert!(error.get("code_json").is_none(), "{name}");
+            }
+            Ok(answer) => {
+                let Outcome::NodeError(node) = answer.outcome() else {
+                    panic!("{name}: {:?}", answer.outcome());
+                };
+                assert_eq!(error_name, "Error", "{name}");
+                assert_eq!(node.message.units(), message, "{name}");
+                assert_eq!(
+                    node.message.to_json(),
+                    str_of(error, "message_json"),
+                    "{name}"
+                );
+                // The router always sets both; null is undefined.
+                for (key, value) in [("code_json", node.code), ("data_json", node.data)] {
+                    assert_eq!(
+                        value.map(stringify).as_deref(),
+                        opt_str(error, key),
+                        "{name} {key}"
+                    );
+                    assert!(error.get(key).is_some(), "{name} {key}");
+                }
+            }
+        }
+    }
+    assert!(cases.len() > 90);
+}
+
+#[test]
+fn fee_quotes() {
+    let vectors = vectors();
+    let cases = vectors["fee_quotes"].as_array().unwrap();
+    for case in cases {
+        let name = id(case);
+        let source = str_of(case, "source");
+        let quote = fee_quote(
+            source,
+            opt_str(case, "gas_price"),
+            opt_str(case, "priority"),
+        );
+        let js = &case["js"];
+        match deviation(case) {
+            Some("bigint-width") => {
+                assert!(js.get("quote_json").is_some(), "{name}");
+                let error = quote.unwrap_err();
+                assert_eq!(error.name, "Error");
+                assert_eq!(
+                    error.message.to_string_lossy(),
+                    format!("{source} returned a gas price of {MAX_DECIMAL_BITS} bits or more")
+                );
+            }
+            None => match opt_str(js, "quote_json") {
+                Some(expected) => assert_eq!(quote.unwrap().to_json(), expected, "{name}"),
+                None => {
+                    let error = quote.unwrap_err();
+                    assert_eq!(error.name, str_of(&js["error"], "name"), "{name}");
+                    assert_eq!(
+                        error.message.to_json(),
+                        str_of(&js["error"], "message_json"),
+                        "{name}"
+                    );
+                }
+            },
+            Some(other) => panic!("unknown deviation {other}"),
+        }
+    }
+    assert!(cases.len() > 50);
+}
+
+#[test]
+fn safe_error_messages() {
+    let vectors = vectors();
+    for case in vectors["safe_error_message"].as_array().unwrap() {
+        let message = js_units(str_of(case, "message_json"));
+        let text = safe_error_message(str_of(case, "name"), &message);
+        assert_eq!(text.to_json(), str_of(&case["js"], "text_json"), "{case}");
+    }
+}
+
+#[test]
+fn failure_texts() {
+    let vectors = vectors();
+    let texts = &vectors["failure_texts"];
+    for case in texts["request"].as_array().unwrap() {
+        let messages: Vec<Vec<u16>> = case["failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| opt_str(f, "message_json").map(js_units).unwrap_or_default())
+            .collect();
+        let failures: Vec<SourceFailure<'_>> = case["failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(&messages)
+            .map(|(failure, message)| {
+                if failure["bypassed"] == true {
+                    SourceFailure::Bypassed {
+                        source: str_of(failure, "source"),
+                    }
+                } else {
+                    SourceFailure::Failed {
+                        source: str_of(failure, "source"),
+                        name: str_of(failure, "name"),
+                        message,
+                    }
+                }
+            })
+            .collect();
+        let excluded: Vec<&str> = case["excluded"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap())
+            .collect();
+        let text = request_failure_text(str_of(case, "method"), &failures, &excluded);
+        assert_eq!(
+            text.to_json(),
+            str_of(&case["js"], "text_json"),
+            "{}",
+            id(case)
+        );
+    }
+    for (key, build) in [
+        (
+            "fee_quote",
+            fee_quote_failure_text as fn(&[(&str, &[u16])]) -> JsString,
+        ),
+        ("broadcast", broadcast_failure_text),
+    ] {
+        for case in texts[key].as_array().unwrap() {
+            let messages: Vec<(&str, Vec<u16>)> = case["failures"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|f| (str_of(f, "source"), js_units(str_of(f, "message_json"))))
+                .collect();
+            let failures: Vec<(&str, &[u16])> =
+                messages.iter().map(|(s, m)| (*s, m.as_slice())).collect();
+            assert_eq!(
+                build(&failures).to_json(),
+                str_of(&case["js"], "text_json"),
+                "{key} {}",
+                id(case)
+            );
+        }
+    }
+}
+
+#[test]
+fn transaction_hashes() {
+    let vectors = vectors();
+    let cases = vectors["transaction_hashes"].as_array().unwrap();
+    for case in cases {
+        let raw = str_of(case, "raw");
+        let hash = transaction_hash(raw);
+        match opt_str(&case["js"], "hash") {
+            Some(expected) => {
+                let hash = hash.unwrap();
+                assert_eq!(hash.to_hex(), expected, "{raw}");
+                assert_eq!(TxHash::from_hex(expected), Some(hash));
+                assert_eq!(TxHash::from_hex(&expected.to_uppercase()), Some(hash));
+                assert_eq!(TxHash::from_json(&format!("\"{expected}\"")), Some(hash));
+            }
+            None => assert!(hash.is_err(), "{raw}"),
+        }
+    }
+    assert!(cases.iter().filter(|c| c["js"]["invalid"] == true).count() >= 5);
+}
