@@ -507,7 +507,7 @@ Measured valid answers sit well below the 720 KiB cap:
 
 | Budget | Bound | Exhausted |
 |---|---|---|
-| one decode (ABI, JSON, Micheline, base64, hex): output bytes | 4 MiB | the decode fails as malformed: a leg's `NO_CONTENTHASH` as today's decode errors; Tezos `unsupported` or a failed lookup (deviation `decode-budget`) |
+| one ABI decode with an array (an `OffchainLookup`'s URLs): output bytes | 4 MiB | the decode fails as malformed (`BUFFER_OVERRUN`, "decode budget exceeded"): the leg fails as for any lookup that won't decode (deviation `decode-budget`) |
 | one decode: reads | 0003's 1024× ABI read cap, JSON depth 512, Micheline depth and node count | as above |
 | one session: retained and in-flight bytes (answers held, decoded values, queued requests, its serialized replies until written) | 16 MiB | the session fails `resolution_failed: budget`, not cached |
 | all sessions | 64 MiB | a running session whose reservation would cross it fails `resolution_failed: budget`, not cached; new sessions get `busy` until usage drops below 48 MiB |
@@ -519,7 +519,7 @@ Measured valid answers sit well below the 720 KiB cap:
 
 **Lifetimes:** a reservation is held from allocation until the bytes are freed. For a serialized reply, that is until the writer has written it.
 
-The 4 MiB decode budget caps aliasing: an `OffchainLookup` whose URL array repeats one 64 KiB string 2,047 times decodes to about 128 MiB today. The core refuses it.
+The 4 MiB decode budget caps aliasing: an `OffchainLookup` whose URL array repeats one 64 KiB string 2,047 times decodes to about 128 MiB today. The core refuses it. Only an array can alias. Every other decode (an ABI result with one dynamic field, JSON, Micheline, base64, hex) reads its input once, so its output never exceeds its input, which the answer cap bounds.
 
 **Work.**
 - **I/O per session** is bounded by its structure:
@@ -546,7 +546,7 @@ Each deviation gets a boundary vector in the implementation PR, generated from t
 | `response-caps` | none for JSON-RPC; 5 MiB Tezos; 4 MiB gateways | 720 KiB each | `too_large`: a provider failure, a failed endpoint, or the next gateway |
 | `reply-size` | unbounded | 960 KiB | `resolution_failed: result too large`; not cached |
 | `reply-shortening` | full `resolvedData` and `contentHash` | first + last 4,096 hex characters when longer | none in the renderer |
-| `decode-budget` | unbounded | 4 MiB of output per decode | malformed, per the decode's caller |
+| `decode-budget` | unbounded | 4 MiB of output per ABI decode with an array | malformed, per the decode's caller |
 | `cache-bytes` | 500 entries per cache | also 8 MiB per cache | eviction |
 | `ccip-urls` | every URL in the lookup | the first 32 | the rest aren't tried |
 | `monotonic-time` | TTLs, quarantine and deadlines on `Date.now()` | the monotonic clock; Tezos expiry still compares wall time | none unless the wall clock jumps |
