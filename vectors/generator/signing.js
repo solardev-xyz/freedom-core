@@ -145,6 +145,15 @@ const TYPED_DATA = [
   { id: 'deviation-limit-fields-per-type', deviation: 'limits', typed_data: { domain: { name: 'D' }, types: { M: Array.from({ length: 257 }, (_, i) => ({ name: `f${i}`, type: 'bool' })) }, message: Object.fromEntries(Array.from({ length: 257 }, (_, i) => [`f${i}`, true])) } },
   { id: 'deviation-limit-dimensions', deviation: 'limits', typed_data: { domain: { name: 'D' }, types: ONE('uint8' + '[]'.repeat(33)), message: { v: [] } } },
   { id: 'deviation-limit-depth', deviation: 'limits', typed_data: { domain: { name: 'D' }, types: ONE('uint8' + '[]'.repeat(32)), message: { v: JSON.parse('['.repeat(32) + '1' + ']'.repeat(32)) } } },
+  // ethers encodes a type named like a primitive with the primitive's
+  // encoder (a struct "bool" hashes as true); the core refuses such names.
+  { id: 'deviation-primitive-named-primary', deviation: 'names-identifiers', typed_data: { domain: { name: 'D' }, types: { bool: [{ name: 'v', type: 'uint8' }] }, message: { v: 1 } } },
+  { id: 'error-primitive-named-primary-uint', typed_data: { domain: { name: 'D' }, types: { uint256: [{ name: 'b', type: 'bool' }] }, message: { b: true } } },
+  // ethers reads no fields of an empty struct, so any value (or none)
+  // passes; the core wants an object, like every struct.
+  { id: 'deviation-empty-struct-null', deviation: 'struct-object', typed_data: { domain: { name: 'D' }, types: { E: [], M: [{ name: 'e', type: 'E' }] }, message: { e: null } } },
+  { id: 'deviation-empty-struct-string', deviation: 'struct-object', typed_data: { domain: { name: 'D' }, types: { E: [], M: [{ name: 'e', type: 'E' }] }, message: { e: 'x' } } },
+  { id: 'deviation-empty-struct-missing', deviation: 'struct-object', typed_data: { domain: { name: 'D' }, types: { E: [], M: [{ name: 'e', type: 'E' }] }, message: {} } },
   // Accepted by both: aliases, null domain fields, chain id 0, empty structs.
   { id: 'uint-int-aliases', typed_data: { domain: { name: 'Alias' }, types: { M: [{ name: 'a', type: 'uint' }, { name: 'b', type: 'int' }] }, message: { a: '7', b: '-7' } } },
   { id: 'domain-null-field-skipped', typed_data: { domain: { name: null, version: '1', chainId: 0 }, types: ONE('uint8'), message: { v: 1 } } },

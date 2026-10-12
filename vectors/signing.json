@@ -22760,6 +22760,393 @@
       }
     },
     {
+      "id": "deviation-primitive-named-primary/account-0",
+      "keyId": "account-0",
+      "typed_data": {
+        "domain": {
+          "name": "D"
+        },
+        "types": {
+          "bool": [
+            {
+              "name": "v",
+              "type": "uint8"
+            }
+          ]
+        },
+        "message": {
+          "v": 1
+        }
+      },
+      "deviation": "names-identifiers",
+      "result": {
+        "status": "success",
+        "signature": "0x89277d68be9432fbcd993f6e005a1595fe8230e553e59c636f8e8f3c0903d45e1affe963147b9235cd5103e732271d06d90504895d0a7e18e3879cb9aca0a5131b",
+        "hash": "0x11ee82a35f62750fd91b45d7fe37b2a5513a2cff0fd635680d2d14f122d57b73"
+      }
+    },
+    {
+      "id": "deviation-primitive-named-primary/account-max",
+      "keyId": "account-max",
+      "typed_data": {
+        "domain": {
+          "name": "D"
+        },
+        "types": {
+          "bool": [
+            {
+              "name": "v",
+              "type": "uint8"
+            }
+          ]
+        },
+        "message": {
+          "v": 1
+        }
+      },
+      "deviation": "names-identifiers",
+      "result": {
+        "status": "success",
+        "signature": "0xe7a24f67b36892bc07e48d7e0fd3b8933499eef8631623d6336edfe51c176ea716767b2a706a9f502d273c964d4ee09a638217d7b0722851edece4dc63ca2d411b",
+        "hash": "0x11ee82a35f62750fd91b45d7fe37b2a5513a2cff0fd635680d2d14f122d57b73"
+      }
+    },
+    {
+      "id": "deviation-primitive-named-primary/legal-account-1",
+      "keyId": "legal-account-1",
+      "typed_data": {
+        "domain": {
+          "name": "D"
+        },
+        "types": {
+          "bool": [
+            {
+              "name": "v",
+              "type": "uint8"
+            }
+          ]
+        },
+        "message": {
+          "v": 1
+        }
+      },
+      "deviation": "names-identifiers",
+      "result": {
+        "status": "success",
+        "signature": "0x14f25153ecd6b3888a1589739047d8e6c57547f0ca605a0b89855db9ff5327091ebf1519bf830ae96be12db34ab29f14c2dabfce15d9aff72b80ddcb093b9a491c",
+        "hash": "0x11ee82a35f62750fd91b45d7fe37b2a5513a2cff0fd635680d2d14f122d57b73"
+      }
+    },
+    {
+      "id": "error-primitive-named-primary-uint/account-0",
+      "keyId": "account-0",
+      "typed_data": {
+        "domain": {
+          "name": "D"
+        },
+        "types": {
+          "uint256": [
+            {
+              "name": "b",
+              "type": "bool"
+            }
+          ]
+        },
+        "message": {
+          "b": true
+        }
+      },
+      "result": {
+        "status": "error",
+        "message": "invalid BigNumberish value"
+      }
+    },
+    {
+      "id": "error-primitive-named-primary-uint/account-max",
+      "keyId": "account-max",
+      "typed_data": {
+        "domain": {
+          "name": "D"
+        },
+        "types": {
+          "uint256": [
+            {
+              "name": "b",
+              "type": "bool"
+            }
+          ]
+        },
+        "message": {
+          "b": true
+        }
+      },
+      "result": {
+        "status": "error",
+        "message": "invalid BigNumberish value"
+      }
+    },
+    {
+      "id": "error-primitive-named-primary-uint/legal-account-1",
+      "keyId": "legal-account-1",
+      "typed_data": {
+        "domain": {
+          "name": "D"
+        },
+        "types": {
+          "uint256": [
+            {
+              "name": "b",
+              "type": "bool"
+            }
+          ]
+        },
+        "message": {
+          "b": true
+        }
+      },
+      "result": {
+        "status": "error",
+        "message": "invalid BigNumberish value"
+      }
+    },
+    {
+      "id": "deviation-empty-struct-null/account-0",
+      "keyId": "account-0",
+      "typed_data": {
+        "domain": {
+          "name": "D"
+        },
+        "types": {
+          "E": [],
+          "M": [
+            {
+              "name": "e",
+              "type": "E"
+            }
+          ]
+        },
+        "message": {
+          "e": null
+        }
+      },
+      "deviation": "struct-object",
+      "result": {
+        "status": "success",
+        "signature": "0xe679818aefb31794e5635d4e93d5a4b7fd0f8925bdd73f4e86d1621c9f11064122573394584fc7d3e46c010577b4835840c229b370d4451ae7c30095728d197d1c",
+        "hash": "0x1a6a9a889ae2ea357a5ff1f5854acb06f54d2c4990a51d6f21a45536e3c58bfb"
+      }
+    },
+    {
+      "id": "deviation-empty-struct-null/account-max",
+      "keyId": "account-max",
+      "typed_data": {
+        "domain": {
+          "name": "D"
+        },
+        "types": {
+          "E": [],
+          "M": [
+            {
+              "name": "e",
+              "type": "E"
+            }
+          ]
+        },
+        "message": {
+          "e": null
+        }
+      },
+      "deviation": "struct-object",
+      "result": {
+        "status": "success",
+        "signature": "0xc29596e4a467e75d6bc627231f8c717cb8c55a187d726d1e5802f4d72c6a9a1911850cde129d01c5534cb699e9f63140e52813b49a6f393f8ce1b07ff71e47361c",
+        "hash": "0x1a6a9a889ae2ea357a5ff1f5854acb06f54d2c4990a51d6f21a45536e3c58bfb"
+      }
+    },
+    {
+      "id": "deviation-empty-struct-null/legal-account-1",
+      "keyId": "legal-account-1",
+      "typed_data": {
+        "domain": {
+          "name": "D"
+        },
+        "types": {
+          "E": [],
+          "M": [
+            {
+              "name": "e",
+              "type": "E"
+            }
+          ]
+        },
+        "message": {
+          "e": null
+        }
+      },
+      "deviation": "struct-object",
+      "result": {
+        "status": "success",
+        "signature": "0xa65abf6b34e9f00832cd24e7a1deacc814f635493d5e714849789ee2eb11761427f439d0a019d32f2953eac02b39e2aac28a8e2e62567697265ac2afa59459b31b",
+        "hash": "0x1a6a9a889ae2ea357a5ff1f5854acb06f54d2c4990a51d6f21a45536e3c58bfb"
+      }
+    },
+    {
+      "id": "deviation-empty-struct-string/account-0",
+      "keyId": "account-0",
+      "typed_data": {
+        "domain": {
+          "name": "D"
+        },
+        "types": {
+          "E": [],
+          "M": [
+            {
+              "name": "e",
+              "type": "E"
+            }
+          ]
+        },
+        "message": {
+          "e": "x"
+        }
+      },
+      "deviation": "struct-object",
+      "result": {
+        "status": "success",
+        "signature": "0xe679818aefb31794e5635d4e93d5a4b7fd0f8925bdd73f4e86d1621c9f11064122573394584fc7d3e46c010577b4835840c229b370d4451ae7c30095728d197d1c",
+        "hash": "0x1a6a9a889ae2ea357a5ff1f5854acb06f54d2c4990a51d6f21a45536e3c58bfb"
+      }
+    },
+    {
+      "id": "deviation-empty-struct-string/account-max",
+      "keyId": "account-max",
+      "typed_data": {
+        "domain": {
+          "name": "D"
+        },
+        "types": {
+          "E": [],
+          "M": [
+            {
+              "name": "e",
+              "type": "E"
+            }
+          ]
+        },
+        "message": {
+          "e": "x"
+        }
+      },
+      "deviation": "struct-object",
+      "result": {
+        "status": "success",
+        "signature": "0xc29596e4a467e75d6bc627231f8c717cb8c55a187d726d1e5802f4d72c6a9a1911850cde129d01c5534cb699e9f63140e52813b49a6f393f8ce1b07ff71e47361c",
+        "hash": "0x1a6a9a889ae2ea357a5ff1f5854acb06f54d2c4990a51d6f21a45536e3c58bfb"
+      }
+    },
+    {
+      "id": "deviation-empty-struct-string/legal-account-1",
+      "keyId": "legal-account-1",
+      "typed_data": {
+        "domain": {
+          "name": "D"
+        },
+        "types": {
+          "E": [],
+          "M": [
+            {
+              "name": "e",
+              "type": "E"
+            }
+          ]
+        },
+        "message": {
+          "e": "x"
+        }
+      },
+      "deviation": "struct-object",
+      "result": {
+        "status": "success",
+        "signature": "0xa65abf6b34e9f00832cd24e7a1deacc814f635493d5e714849789ee2eb11761427f439d0a019d32f2953eac02b39e2aac28a8e2e62567697265ac2afa59459b31b",
+        "hash": "0x1a6a9a889ae2ea357a5ff1f5854acb06f54d2c4990a51d6f21a45536e3c58bfb"
+      }
+    },
+    {
+      "id": "deviation-empty-struct-missing/account-0",
+      "keyId": "account-0",
+      "typed_data": {
+        "domain": {
+          "name": "D"
+        },
+        "types": {
+          "E": [],
+          "M": [
+            {
+              "name": "e",
+              "type": "E"
+            }
+          ]
+        },
+        "message": {}
+      },
+      "deviation": "struct-object",
+      "result": {
+        "status": "success",
+        "signature": "0xe679818aefb31794e5635d4e93d5a4b7fd0f8925bdd73f4e86d1621c9f11064122573394584fc7d3e46c010577b4835840c229b370d4451ae7c30095728d197d1c",
+        "hash": "0x1a6a9a889ae2ea357a5ff1f5854acb06f54d2c4990a51d6f21a45536e3c58bfb"
+      }
+    },
+    {
+      "id": "deviation-empty-struct-missing/account-max",
+      "keyId": "account-max",
+      "typed_data": {
+        "domain": {
+          "name": "D"
+        },
+        "types": {
+          "E": [],
+          "M": [
+            {
+              "name": "e",
+              "type": "E"
+            }
+          ]
+        },
+        "message": {}
+      },
+      "deviation": "struct-object",
+      "result": {
+        "status": "success",
+        "signature": "0xc29596e4a467e75d6bc627231f8c717cb8c55a187d726d1e5802f4d72c6a9a1911850cde129d01c5534cb699e9f63140e52813b49a6f393f8ce1b07ff71e47361c",
+        "hash": "0x1a6a9a889ae2ea357a5ff1f5854acb06f54d2c4990a51d6f21a45536e3c58bfb"
+      }
+    },
+    {
+      "id": "deviation-empty-struct-missing/legal-account-1",
+      "keyId": "legal-account-1",
+      "typed_data": {
+        "domain": {
+          "name": "D"
+        },
+        "types": {
+          "E": [],
+          "M": [
+            {
+              "name": "e",
+              "type": "E"
+            }
+          ]
+        },
+        "message": {}
+      },
+      "deviation": "struct-object",
+      "result": {
+        "status": "success",
+        "signature": "0xa65abf6b34e9f00832cd24e7a1deacc814f635493d5e714849789ee2eb11761427f439d0a019d32f2953eac02b39e2aac28a8e2e62567697265ac2afa59459b31b",
+        "hash": "0x1a6a9a889ae2ea357a5ff1f5854acb06f54d2c4990a51d6f21a45536e3c58bfb"
+      }
+    },
+    {
       "id": "uint-int-aliases/account-0",
       "keyId": "account-0",
       "typed_data": {
