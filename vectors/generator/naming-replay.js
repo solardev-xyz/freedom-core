@@ -38,20 +38,42 @@ function describe(value) {
   return JSON.parse(JSON.stringify(value, (_k, v) => (v === undefined ? { $undefined: true } : v)));
 }
 
+/**
+ * Loads a fresh ens-resolver.js. `stubs` maps module paths (relative to
+ * src/main, without .js) to stand-ins, whoever requires them; the resolver
+ * is registered in the module cache so its lazy dependents (the Myotis and
+ * Colibri adapters) see this same instance. `restore` evicts every checkout
+ * module, so no state survives into the next scenario.
+ */
 function loadResolver(checkout, stubs) {
-  const filename = path.join(checkout, 'src/main/ens-resolver.js');
-  const source = fs.readFileSync(filename, 'utf8');
+  const main = path.join(checkout, 'src/main');
+  const filename = path.join(main, 'ens-resolver.js');
+  const byPath = new Map(Object.entries(stubs).map(([rel, stub]) => [path.join(main, `${rel}.js`), stub]));
   const originalLoad = Module._load;
   Module._load = function load(request, parent, isMain) {
-    if (parent && parent.filename === filename && Object.hasOwn(stubs, request)) return stubs[request];
     if (request === 'electron' && parent?.filename?.startsWith(checkout)) return stubs.electron;
+    if (parent?.filename?.startsWith(main)) {
+      let resolved = null;
+      try {
+        resolved = Module._resolveFilename(request, parent, isMain);
+      } catch {
+        resolved = null;
+      }
+      if (resolved && byPath.has(resolved)) return byPath.get(resolved);
+    }
     return originalLoad.call(this, request, parent, isMain);
   };
+  const evict = () => {
+    for (const key of Object.keys(Module._cache)) if (key.startsWith(main)) delete Module._cache[key];
+  };
+  evict();
   const mod = new Module(filename, null);
   mod.filename = filename;
   mod.paths = Module._nodeModulePaths(path.dirname(filename));
-  mod._compile(source, filename);
-  return { resolver: mod.exports, restore: () => { Module._load = originalLoad; } };
+  Module._cache[filename] = mod;
+  mod._compile(fs.readFileSync(filename, 'utf8'), filename);
+  mod.loaded = true;
+  return { resolver: mod.exports, restore: () => { Module._load = originalLoad; evict(); } };
 }
 
 /**
@@ -70,6 +92,25 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
   const hostOf = (url) => new URL(url).host;
   const plan = (host) => world.hosts?.[host] || {};
 
+  // A call's kind: the UR's resolve (by its inner call) or reverse, a CCIP
+  // callback, or a WNS/GNS NameNFT call ('wns:addr', say).
+  const callKind = (to, data) => {
+    const target = String(to).toLowerCase();
+    if (target === WNS || target === GNS) return `${target === WNS ? 'wns' : 'gns'}:${SELECTORS[data.slice(0, 10)] ?? 'unknown'}`;
+    if (data.startsWith('0x9061b923')) {
+      const [, inner] = ethers.AbiCoder.defaultAbiCoder().decode(['bytes', 'bytes'], '0x' + data.slice(10));
+      return `resolve:${SELECTORS[inner.slice(0, 10)] ?? 'unknown'}`;
+    }
+    return data.startsWith('0x5d78a217') ? 'reverse' : 'callback';
+  };
+  const pickAnswer = (tables, kind) => {
+    const general = kind.startsWith('resolve:') ? 'resolve' : kind;
+    for (const table of tables) {
+      const answer = table?.[kind] ?? table?.[general] ?? table?.['*'];
+      if (answer) return answer;
+    }
+    return null;
+  };
   const answerRpc = (host, r) => {
     const p = plan(host);
     switch (r.method) {
@@ -89,21 +130,8 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       }
       case 'eth_call': {
         const { to, data } = r.params[0];
-        const target = String(to).toLowerCase();
-        // A call's kind: the UR's resolve (by its inner call) or reverse, a
-        // CCIP callback, or a WNS/GNS NameNFT call ('wns:addr', say).
-        let kind;
-        if (target === WNS || target === GNS) {
-          kind = `${target === WNS ? 'wns' : 'gns'}:${SELECTORS[data.slice(0, 10)] ?? 'unknown'}`;
-        } else if (data.startsWith('0x9061b923')) {
-          const [, inner] = ethers.AbiCoder.defaultAbiCoder().decode(['bytes', 'bytes'], '0x' + data.slice(10));
-          kind = `resolve:${SELECTORS[inner.slice(0, 10)] ?? 'unknown'}`;
-        } else {
-          kind = data.startsWith('0x5d78a217') ? 'reverse' : 'callback';
-        }
-        const general = kind.startsWith('resolve:') ? 'resolve' : kind;
-        const answer = p.calls?.[kind] ?? p.calls?.[general] ?? p.calls?.['*']
-          ?? world.calls?.[kind] ?? world.calls?.[general] ?? world.calls?.['*'];
+        const kind = callKind(to, data);
+        const answer = pickAnswer([p.calls, world.calls], kind);
         if (!answer) throw new Error(`unscripted ${kind} call to ${host}`);
         if (answer.rpc_error) return { error: answer.rpc_error };
         if (answer.hang) return { hang: true };
@@ -156,19 +184,66 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     net: { request: netRequest },
     session: { defaultSession: { resolveProxy: async () => 'DIRECT' } },
   };
+  // Verified answers: { data } is proven return data, { revert } proven
+  // revert data; anything else is an unavailable verifier.
+  const verifiedAnswer = (source, to, data) => {
+    const answer = pickAnswer([source.calls], callKind(to, data));
+    requests.push({ t: now(), host: source.id, method: 'verified eth_call', block: 'latest', selector: data.slice(0, 10) });
+    return answer;
+  };
+  const myotis = world.myotis ?? { enabled: false, ready: false };
+  const MYOTIS = {
+    onAvailabilityTransition() {},
+    isEnabled: () => myotis.enabled ?? false,
+    isReady: () => myotis.ready ?? false,
+    getAvailabilityEpoch: () => 1,
+    getStatus: () => ({ state: myotis.ready ? 'ready' : 'stopped', optimisticBlockNumber: myotis.block ?? null }),
+    ethCall: async ({ to, data }) => {
+      const answer = verifiedAnswer({ id: 'myotis', calls: myotis.calls }, to, data);
+      await new Promise((resolve) => setTimeout(resolve, myotis.delay ?? 10));
+      if (answer?.data) return { status: 'ok', resultHex: answer.data };
+      if (answer?.revert) return { status: 'revert', dataHex: answer.revert };
+      return { status: 'error' };
+    },
+  };
+  const colibri = world.colibri ?? {};
+  const COLIBRI_HOST = {
+    ensureWorker: async () => {},
+    createClient: () => ({
+      async request({ method, params }) {
+        if (method === 'eth_chainId') return '0x1';
+        if (method !== 'eth_call') throw new Error(`unscripted Colibri ${method}`);
+        const { to, data } = params[0];
+        const answer = verifiedAnswer({ id: 'colibri', calls: colibri.calls }, to, data);
+        await new Promise((resolve) => setTimeout(resolve, colibri.delay ?? 10));
+        if (answer?.data) return answer.data;
+        if (answer?.revert) throw Object.assign(new Error('execution reverted'), { code: 3, data: answer.revert });
+        throw new Error('Colibri proof unavailable');
+      },
+      destroy() {},
+      on() {},
+      removeListener() {},
+    }),
+  };
   const stubs = {
     electron: ELECTRON,
-    './logger': { info() {}, warn() {}, error() {}, debug() {} },
-    './networks/network-registry': {
-      getEndpoints: (chain, kind) => (chain === 1 && kind === 'rpc' ? world.endpoints : []),
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    'networks/network-registry': {
+      getEndpoints: (chain, kind) => {
+        if (chain !== 1) return [];
+        if (kind === 'rpc') return world.endpoints;
+        if (kind === 'prover') return colibri.prover ? [colibri.prover] : [];
+        return [];
+      },
       getNetwork: () => world.network,
       getEndpointSources: () => world.sources ?? [],
       getEndpointSourceList: () => world.sourceList ?? [],
     },
-    './ens-prefetch': { prefetchGatewayUrl: () => ({ abort() {} }), NOOP_HANDLE: { abort() {} } },
-    './myotis/myotis-manager': { onAvailabilityTransition() {}, getStatus: () => ({ state: 'stopped' }), isReady: () => false },
-    './private/private-log-context': { runWithPrivateLogContext: (_p, fn) => fn(), redactForLog: (v) => v },
-    './private/private-windows': { isPrivateWebContents: () => false },
+    'ens-prefetch': { prefetchGatewayUrl: () => ({ abort() {} }), NOOP_HANDLE: { abort() {} } },
+    'myotis/myotis-manager': MYOTIS,
+    'ens/colibri-worker-host': COLIBRI_HOST,
+    'private/private-log-context': { runWithPrivateLogContext: (_p, fn) => fn(), redactForLog: (v) => v },
+    'private/private-windows': { isPrivateWebContents: () => false },
   };
 
   const random = Math.random;
@@ -236,6 +311,33 @@ function scenarios(ethers) {
     { id: 'anchor-hash-split', world: base({ hosts: { 'c.rpc.example': { fork: true }, 'd.rpc.example': { fork: true } } }), call: content },
     { id: 'node-errors-agree', world: base({ calls: { resolve: { rpc_error: { code: -32000, message: 'header not found' } } } }), call: content },
     ...addressAndReverse(ethers, base),
+    ...verifiedPaths(ethers, base, GOOD, lookup),
+  ];
+}
+
+/** Myotis and Colibri, alone and in the method order. */
+function verifiedPaths(ethers, base, GOOD, lookup) {
+  const coder = ethers.AbiCoder.defaultAbiCoder();
+  const notFound = ethers.id('ResolverNotFound(bytes)').slice(0, 10) + coder.encode(['bytes'], ['0x00']).slice(2);
+  const order = (methods, preferVerified = false) => ({ ...QUORUM_NETWORK, verification: { order: methods, preferVerified } });
+  const content = { fn: 'resolveEnsContent', args: ['vitalik.eth'] };
+  return [
+    { id: 'myotis-verified', world: base({ network: order(['myotis', 'colibri', 'quorum']), myotis: { enabled: true, ready: true, calls: { resolve: GOOD } } }), call: content },
+    { id: 'myotis-not-ready-falls-to-quorum', world: base({ network: order(['myotis', 'quorum']), myotis: { enabled: true, ready: false } }), call: content },
+    { id: 'colibri-verified', world: base({ network: order(['colibri', 'quorum']), colibri: { prover: 'https://prover.example', calls: { resolve: GOOD } } }), call: content },
+    { id: 'colibri-resolver-not-found', world: base({ network: order(['colibri', 'quorum']), colibri: { prover: 'https://prover.example', calls: { resolve: { revert: notFound } } } }), call: content },
+    {
+      id: 'myotis-ccip',
+      world: base({ network: order(['myotis', 'quorum']), myotis: { enabled: true, ready: true, calls: { resolve: { revert: lookup }, callback: GOOD } }, gateways: { 'gw.example': { delay: 50, body: JSON.stringify({ data: '0xcafe' }) } } }),
+      call: content,
+    },
+    {
+      id: 'prefer-verified-holds-unverified',
+      // Quorum can only reach one source (two endpoints): unverified, held
+      // while Myotis is tried, which then answers verified.
+      world: base({ endpoints: ENDPOINTS.slice(0, 2), network: order(['quorum', 'myotis'], true), myotis: { enabled: true, ready: true, calls: { resolve: GOOD } } }),
+      call: content,
+    },
   ];
 }
 

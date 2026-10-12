@@ -2113,6 +2113,429 @@
           "elapsed": 25
         }
       ]
+    },
+    {
+      "id": "myotis-verified",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveEnsContent",
+            "args": [
+              "vitalik.eth"
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 0,
+              "host": "myotis",
+              "method": "verified eth_call",
+              "block": "latest",
+              "selector": "0x9061b923"
+            }
+          ],
+          "value": {
+            "type": "ok",
+            "name": "vitalik.eth",
+            "system": "ens",
+            "codec": "ipfs-ns",
+            "protocol": "ipfs",
+            "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+            "decoded": "QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+            "trust": {
+              "level": "verified",
+              "system": "ens",
+              "method": "myotis",
+              "finality": "optimistic",
+              "proof": "P2P light client (optimistic beacon root — attested, not finalized)",
+              "block": null,
+              "agreed": [
+                "myotis-p2p"
+              ],
+              "dissented": [],
+              "queried": [
+                "myotis-p2p"
+              ],
+              "quorum": {
+                "k": 1,
+                "m": 1,
+                "achieved": true
+              }
+            }
+          },
+          "elapsed": 25
+        }
+      ]
+    },
+    {
+      "id": "myotis-not-ready-falls-to-quorum",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveEnsContent",
+            "args": [
+              "vitalik.eth"
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 10,
+              "host": "c.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 10,
+              "host": "b.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 10,
+              "host": "d.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 10,
+              "host": "a.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "c.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "b.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "d.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "a.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 50,
+              "host": "c.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x9061b923"
+            },
+            {
+              "t": 50,
+              "host": "b.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x9061b923"
+            },
+            {
+              "t": 50,
+              "host": "d.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x9061b923"
+            }
+          ],
+          "value": {
+            "type": "ok",
+            "name": "vitalik.eth",
+            "system": "ens",
+            "codec": "ipfs-ns",
+            "protocol": "ipfs",
+            "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+            "decoded": "QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+            "trust": {
+              "level": "verified",
+              "system": "ens",
+              "block": {
+                "number": 19999992,
+                "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+              },
+              "agreed": [
+                "c.rpc.example",
+                "b.rpc.example"
+              ],
+              "dissented": [],
+              "queried": [
+                "c.rpc.example",
+                "b.rpc.example",
+                "d.rpc.example"
+              ],
+              "quorum": {
+                "k": 3,
+                "m": 2,
+                "achieved": true
+              }
+            }
+          },
+          "elapsed": 75
+        }
+      ]
+    },
+    {
+      "id": "colibri-verified",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveEnsContent",
+            "args": [
+              "vitalik.eth"
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 0,
+              "host": "colibri",
+              "method": "verified eth_call",
+              "block": "latest",
+              "selector": "0x9061b923"
+            }
+          ],
+          "value": {
+            "type": "ok",
+            "name": "vitalik.eth",
+            "system": "ens",
+            "codec": "ipfs-ns",
+            "protocol": "ipfs",
+            "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+            "decoded": "QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+            "trust": {
+              "level": "verified",
+              "system": "ens",
+              "method": "colibri",
+              "prover": "prover.example",
+              "proof": "ZK sync-committee proof",
+              "block": null,
+              "agreed": [
+                "prover.example"
+              ],
+              "dissented": [],
+              "queried": [
+                "prover.example"
+              ],
+              "quorum": {
+                "k": 1,
+                "m": 1,
+                "achieved": true
+              }
+            }
+          },
+          "elapsed": 25
+        }
+      ]
+    },
+    {
+      "id": "colibri-resolver-not-found",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveEnsContent",
+            "args": [
+              "vitalik.eth"
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 0,
+              "host": "colibri",
+              "method": "verified eth_call",
+              "block": "latest",
+              "selector": "0x9061b923"
+            }
+          ],
+          "value": {
+            "type": "not_found",
+            "reason": "NO_RESOLVER",
+            "name": "vitalik.eth",
+            "system": "ens",
+            "trust": {
+              "level": "verified",
+              "system": "ens",
+              "method": "colibri",
+              "prover": "prover.example",
+              "proof": "ZK sync-committee proof",
+              "block": null,
+              "agreed": [
+                "prover.example"
+              ],
+              "dissented": [],
+              "queried": [
+                "prover.example"
+              ],
+              "quorum": {
+                "k": 1,
+                "m": 1,
+                "achieved": true
+              }
+            }
+          },
+          "elapsed": 25
+        }
+      ]
+    },
+    {
+      "id": "myotis-ccip",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveEnsContent",
+            "args": [
+              "vitalik.eth"
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 0,
+              "host": "myotis",
+              "method": "verified eth_call",
+              "block": "latest",
+              "selector": "0x9061b923"
+            },
+            {
+              "t": 10,
+              "host": "gw.example",
+              "method": "gateway GET",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 60,
+              "host": "myotis",
+              "method": "verified eth_call",
+              "block": "latest",
+              "selector": "0xdeadbeef"
+            }
+          ],
+          "value": {
+            "type": "ok",
+            "name": "vitalik.eth",
+            "system": "ens",
+            "codec": "ipfs-ns",
+            "protocol": "ipfs",
+            "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+            "decoded": "QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+            "trust": {
+              "level": "verified",
+              "system": "ens",
+              "method": "myotis",
+              "finality": "optimistic",
+              "proof": "P2P light client (optimistic beacon root — attested, not finalized)",
+              "block": null,
+              "agreed": [
+                "myotis-p2p"
+              ],
+              "dissented": [],
+              "queried": [
+                "myotis-p2p"
+              ],
+              "quorum": {
+                "k": 1,
+                "m": 1,
+                "achieved": true
+              }
+            }
+          },
+          "elapsed": 75
+        }
+      ]
+    },
+    {
+      "id": "prefer-verified-holds-unverified",
+      "calls": [
+        {
+          "call": {
+            "fn": "resolveEnsContent",
+            "args": [
+              "vitalik.eth"
+            ]
+          },
+          "at": 0,
+          "requests": [
+            {
+              "t": 10,
+              "host": "b.rpc.example",
+              "method": "eth_blockNumber",
+              "block": null,
+              "selector": null
+            },
+            {
+              "t": 30,
+              "host": "b.rpc.example",
+              "method": "eth_getBlockByNumber",
+              "block": "0x1312cf8",
+              "selector": null
+            },
+            {
+              "t": 50,
+              "host": "b.rpc.example",
+              "method": "eth_call",
+              "block": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878",
+              "selector": "0x9061b923"
+            },
+            {
+              "t": 60,
+              "host": "myotis",
+              "method": "verified eth_call",
+              "block": "latest",
+              "selector": "0x9061b923"
+            }
+          ],
+          "value": {
+            "type": "ok",
+            "name": "vitalik.eth",
+            "system": "ens",
+            "codec": "ipfs-ns",
+            "protocol": "ipfs",
+            "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+            "decoded": "QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+            "trust": {
+              "level": "verified",
+              "system": "ens",
+              "method": "myotis",
+              "finality": "optimistic",
+              "proof": "P2P light client (optimistic beacon root — attested, not finalized)",
+              "block": null,
+              "agreed": [
+                "myotis-p2p"
+              ],
+              "dissented": [],
+              "queried": [
+                "myotis-p2p"
+              ],
+              "quorum": {
+                "k": 1,
+                "m": 1,
+                "achieved": true
+              }
+            }
+          },
+          "elapsed": 75
+        }
+      ]
     }
   ]
 }
