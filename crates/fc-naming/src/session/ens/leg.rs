@@ -176,6 +176,15 @@ impl CallError {
                 }
                 None => "execution reverted (unknown custom error)".into(),
             },
+            // ethers' own messages (decode failures, deferred field
+            // errors) show their short part; the core's internal markers
+            // show the class.
+            CallError::Invalid(message)
+                if message.ends_with(&format!(", version={})", crate::ethers::VERSION))
+                    || message.starts_with("deferred error") =>
+            {
+                crate::ethers::short_of(message).to_owned()
+            }
             CallError::Invalid(_) => "could not decode result data".into(),
             CallError::SenderMismatch => "CCIP sender does not match the Universal Resolver".into(),
             CallError::GatewaysFailed => {
