@@ -37977,6 +37977,261 @@
       ]
     },
     {
+      "id": "deviation-memory-budgets",
+      "system": "ens",
+      "seed": 7,
+      "deviation": "memory-budgets",
+      "patches": [
+        {
+          "id": "memory-budgets",
+          "text": "A session is charged for its name's copies (8 per byte of its in-flight key) as it starts, its requests (endpoint and body) as it makes them, and its answers as they arrive, at 32 per byte (their parsed JSON at worst); one an answer takes past 25000 bytes ends at once: its callers get \"budget\", the answer is dropped, its outstanding I/O is cancelled and it makes no more. The patch holds for one step with one content lookup on JSON-RPC alone, without redirects or 429s, ended by an answer crossing (enforced); the core's replies and aliasing decodes are its own tests.",
+          "harness": [
+            "memory-budgets"
+          ]
+        }
+      ],
+      "world": {
+        "endpoints": [
+          "https://a.rpc.example",
+          "https://b.rpc.example",
+          "https://c.rpc.example",
+          "https://d.rpc.example"
+        ],
+        "network": {
+          "verification": {
+            "order": [
+              "quorum"
+            ],
+            "preferVerified": false
+          },
+          "quorum": {
+            "k": 3,
+            "m": 2,
+            "timeoutMs": 5000,
+            "anchor": "latest",
+            "anchorTtlMs": 30000
+          }
+        },
+        "calls": {
+          "resolve": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000"
+          },
+          "callback": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000"
+          }
+        },
+        "bounds": {
+          "sessionBytes": 25000
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "call": {
+            "fn": "resolveEnsContent",
+            "args": [
+              "vitalik.eth"
+            ]
+          },
+          "results": [
+            {
+              "thrown": "budget",
+              "settled": 40
+            }
+          ]
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 1,
+          "chain": 1,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 1,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 2,
+          "chain": 2,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 2,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 3,
+          "chain": 3,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 3,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 4,
+          "chain": 4,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 4,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 5,
+          "chain": 5,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 5,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 6,
+          "chain": 6,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 6,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 7,
+          "chain": 7,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "cancelled",
+          "rejected": {
+            "at": 300030,
+            "code": "TIMEOUT"
+          }
+        },
+        {
+          "id": 7,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 8,
+          "chain": 8,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "cancelled",
+          "rejected": {
+            "at": 300030,
+            "code": "TIMEOUT"
+          }
+        }
+      ],
+      "unpatched": [
+        [
+          {
+            "value": {
+              "type": "ok",
+              "name": "vitalik.eth",
+              "system": "ens",
+              "codec": "ipfs-ns",
+              "protocol": "ipfs",
+              "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+              "decoded": "QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+              "trust": {
+                "level": "verified",
+                "system": "ens",
+                "block": {
+                  "number": 19999992,
+                  "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+                },
+                "agreed": [
+                  "c.rpc.example",
+                  "b.rpc.example"
+                ],
+                "dissented": [],
+                "queried": [
+                  "c.rpc.example",
+                  "b.rpc.example",
+                  "d.rpc.example"
+                ],
+                "quorum": {
+                  "k": 3,
+                  "m": 2,
+                  "achieved": true
+                }
+              }
+            },
+            "settled": 60
+          }
+        ]
+      ]
+    },
+    {
       "id": "deviation-overall-deadline",
       "system": "ens",
       "seed": 7,

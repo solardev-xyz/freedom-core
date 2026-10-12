@@ -37,6 +37,14 @@ pub struct Bounds {
     /// makes reads each dynamic field once, so its output never exceeds its
     /// input, which the answer cap bounds far below the default 4 MiB.
     pub decode_bytes: usize,
+    /// What one session may hold (`memory-budgets`), counted until it
+    /// ends: its requests, its answers, its aliasing decodes' output and
+    /// its replies. Everything it retains derives from those.
+    pub session_bytes: usize,
+    /// What all sessions may hold: a session whose charge crosses it fails,
+    /// and new sessions are busy until the total is under `resume_bytes`.
+    pub total_bytes: usize,
+    pub resume_bytes: usize,
 }
 
 impl Default for Bounds {
@@ -55,6 +63,9 @@ impl Default for Bounds {
             cache_bytes: 8 * 1024 * 1024,
             decode_bytes: crate::abi::MAX_DECODE_BYTES,
             retired_endpoints: 64,
+            session_bytes: 16 * 1024 * 1024,
+            total_bytes: 64 * 1024 * 1024,
+            resume_bytes: 48 * 1024 * 1024,
         }
     }
 }

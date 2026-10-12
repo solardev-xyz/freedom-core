@@ -172,6 +172,9 @@ fn bounds(world: &JsValue) -> Bounds {
     if let Some(n) = get("deadlineMs") {
         bounds.deadline_ms = n as u64;
     }
+    if let Some(n) = get("sessionBytes") {
+        bounds.session_bytes = n;
+    }
     bounds
 }
 

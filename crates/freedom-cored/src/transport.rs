@@ -130,6 +130,11 @@ impl Allowance {
         })
     }
 
+    /// The bytes this producer has queued and the writer hasn't written.
+    pub fn held_bytes(&self) -> usize {
+        self.held.lock().map_or(0, |held| held.1)
+    }
+
     /// Room for a frame however full the share is: for the shutdown drain,
     /// which time bounds instead.
     pub fn force(self: &Arc<Self>, len: usize) -> Hold {

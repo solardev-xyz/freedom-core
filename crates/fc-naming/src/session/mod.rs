@@ -3,6 +3,7 @@
 //! to the I/O the machine asks for.
 
 pub mod bounds;
+pub(crate) mod budget;
 pub mod ens;
 pub mod exec;
 pub mod js;

@@ -52,7 +52,54 @@ fn take_children(value: &mut JsValue, stack: &mut Vec<JsValue>) {
     }
 }
 
+/// What an allocation of `size` bytes takes, as an allocator lays it out:
+/// an 8-byte header, 16-byte steps, 32 bytes at least (`memory-budgets`).
+pub fn allocation(size: usize) -> usize {
+    if size == 0 {
+        0
+    } else {
+        size.saturating_add(8)
+            .div_ceil(16)
+            .saturating_mul(16)
+            .max(32)
+    }
+}
+
 impl JsValue {
+    /// What the value holds on the heap, as an allocator lays it out (an
+    /// 8-byte header, 16-byte steps, 32 bytes at least), not counting its
+    /// own 32-byte slot: what a copy of it costs (`memory-budgets`).
+    pub fn held(&self) -> usize {
+        let block = allocation;
+        // Iterative: a value can be as deep as the parser allows.
+        let mut held = 0usize;
+        let mut stack = vec![self];
+        while let Some(value) = stack.pop() {
+            match value {
+                Self::String(text) => held = held.saturating_add(block(text.capacity())),
+                Self::Array(items) => {
+                    held = held.saturating_add(block(
+                        items.capacity().saturating_mul(std::mem::size_of::<Self>()),
+                    ));
+                    stack.extend(items.iter());
+                }
+                Self::Object(props) => {
+                    held = held.saturating_add(block(
+                        props
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<(String, Self)>()),
+                    ));
+                    for (key, value) in props {
+                        held = held.saturating_add(block(key.capacity()));
+                        stack.push(value);
+                    }
+                }
+                _ => {}
+            }
+        }
+        held
+    }
+
     /// A property, as `object[key]` reads it (`None` when absent or when this
     /// isn't an object).
     pub fn get(&self, key: &str) -> Option<&JsValue> {
@@ -226,9 +273,13 @@ pub fn parse(text: &str) -> Result<JsValue, JsonError> {
                             break;
                         }
                         Some(b']') => {
-                            let Some(Frame::Array(items)) = stack.pop() else {
+                            let Some(Frame::Array(mut items)) = stack.pop() else {
                                 return Err(JsonError::Syntax(p.i));
                             };
+                            // Closed, it keeps only its length: a growing
+                            // vector's spare room never outlives the parse
+                            // (`memory-budgets`).
+                            items.shrink_to_fit();
                             value = JsValue::Array(items);
                         }
                         _ => return Err(JsonError::Syntax(p.i)),
@@ -248,7 +299,9 @@ pub fn parse(text: &str) -> Result<JsValue, JsonError> {
                             let Some(Frame::Object(props, _, _)) = stack.pop() else {
                                 return Err(JsonError::Syntax(p.i));
                             };
-                            value = JsValue::Object(order_properties(props));
+                            let mut props = order_properties(props);
+                            props.shrink_to_fit();
+                            value = JsValue::Object(props);
                         }
                         _ => return Err(JsonError::Syntax(p.i)),
                     }
@@ -417,7 +470,11 @@ impl Parser<'_> {
                 .map_err(|_| JsonError::Syntax(start))?;
             units.extend(run.encode_utf16());
             match self.next() {
-                Some(b'"') => return Ok(String::from_utf16_lossy(&units)),
+                Some(b'"') => {
+                    let mut text = String::from_utf16_lossy(&units);
+                    text.shrink_to_fit();
+                    return Ok(text);
+                }
                 Some(b'\\') => {
                     let unit = match self.next() {
                         Some(b'"') => 0x22,

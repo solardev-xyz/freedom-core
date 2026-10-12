@@ -505,21 +505,29 @@ Measured valid answers sit well below the 720 KiB cap:
 - **Conflict groups:** a `resolvedData` longer than 8,192 hex characters is shortened to its first 4,096 and last 4,096 characters. Today's renderer shows only a value's first 16 and last 10 characters, and its exact matches have fixed short lengths, so nothing it shows changes.
 - **Unsupported results:** the same applies to `contentHash` (deviation `reply-shortening`).
 
-**Memory.** Every allocation that depends on an answer is reserved against a budget before it is made:
+**Memory.** What a session can come to hold is bounded by what it is charged for, conservatively, from the moment each part arrives or is made until the session ends. A session is charged for:
+- **its name and key:** 8 copies of its in-flight key, reserved at admission; a session that can't reserve them doesn't start;
+- **its requests:** their payload strings, as each is made; one whose charge crosses is never made;
+- **its answers:** each body at 32 bytes per byte, more than its parsed JSON can take. The parser shrinks each container and string to its length as it closes, so a value holds its 32-byte slot and its own allocation: at worst a nested array, 2 bytes of input a level, holds about 24 bytes a byte as allocated. A verifier's result is charged likewise, by its serialized size;
+- **its aliasing decodes' output** (an `OffchainLookup`'s URLs and data);
+- **the cached state it copies:** a Tezos discovery taken from the cache, as its tree (the registry's record type is the chain's own JSON), charged before the copy is made;
+- **its replies:** each caller's own copy of the result or error message, as the larger of its tree (as allocated) and its serialized form, including the replies a configuration change or a spent lifecycle allowance makes. A reply stays counted as output after its session ends, until it is written. A reply past the budget is `budget` instead. A session that spends its budget, on a reply or anything else, cancels the prefetches it handed off.
+
+Everything a session retains derives from those: copies of its name, values parsed from its answers, and decodes that can't alias, which never outgrow their input:
 
 | Budget | Bound | Exhausted |
 |---|---|---|
 | one ABI decode with an array (an `OffchainLookup`'s URLs): output bytes | 4 MiB | the decode fails as malformed (`BUFFER_OVERRUN`, "decode budget exceeded"): the leg fails as for any lookup that won't decode (deviation `decode-budget`) |
 | one decode: reads | 0003's 1024× ABI read cap, JSON depth 512, Micheline depth and node count | as above |
-| one session: retained and in-flight bytes (answers held, decoded values, queued requests, its serialized replies until written) | 16 MiB | the session fails `resolution_failed: budget`, not cached |
-| all sessions | 64 MiB | a running session whose reservation would cross it fails `resolution_failed: budget`, not cached; new sessions get `busy` until usage drops below 48 MiB |
+| one session: its charge | 16 MiB | the session ends at once, its I/O cancelled (a request whose charge crosses is never sent; an answer that crosses is dropped): its callers get `resolution_failed: budget`, and nothing is cached (a result whose replies cross is taken back) |
+| all sessions: their charges | 64 MiB | the session whose charge crosses it ends the same way; new sessions get `busy` until the total falls below 48 MiB |
 | the writer: naming frames queued for the pipe | 8 MiB | further frames wait in the naming thread, and `shell.*` requests in their FIFO |
 | caches | 500 entries and 8 MiB each | eviction (deviation `cache-bytes`) |
 | Tezos discovery entries | one per configured endpoint | — |
 | endpoint state (quarantine, discovery) for endpoints no longer configured | the 64 most recently retired | the oldest retired entries are dropped (deviation `endpoint-retention`); a re-added endpoint within that bound keeps its state |
 | surviving prefetches | 32 | the oldest is cancelled |
 
-**Lifetimes:** a reservation is held from allocation until the bytes are freed. For a serialized reply, that is until the writer has written it.
+**Lifetimes:** a session's charge is released when it ends, however it ends, but its replies stay counted in the total until they are written. The machine counts every reply it makes until the naming thread takes it. The naming thread then reports what waits in its share of the writer (8 MiB) and its own queue before every poll and every admission. Sessions so can't fill the room unwritten replies hold: with the total full, new sessions are `busy` and running ones end with `budget`, both small replies. Separately, past 16 MiB waiting, new lookups get `busy` at once.
 
 The 4 MiB decode budget caps aliasing: an `OffchainLookup` whose URL array repeats one 64 KiB string 2,047 times decodes to about 128 MiB today. The core refuses it. Only an array can alias. Every other decode (an ABI result with one dynamic field, JSON, Micheline, base64, hex) reads its input once, so its output never exceeds its input, which the answer cap bounds.
 
@@ -562,7 +570,7 @@ Each deviation gets a boundary vector in the implementation PR, generated from t
 | `tezos-expiry` | V8's legacy `Date.parse` formats | RFC 3339 only | an unreadable expiry is ignored, as today's `NaN` |
 | `verified-bounds` | no limit on concurrent adapter work | 8 operations per verifier | `{ failure: "unavailable" }`; the order continues |
 | `verified-reply-size` | any size | a verified reply over 1 MiB is `{ failure: "too_large" }` | a method error; the order continues |
-| `memory-budgets` | unbounded | 16 MiB per session, 64 MiB in all, 8 MiB of queued replies | `resolution_failed: budget` or `busy`; not cached |
+| `memory-budgets` | unbounded | 16 MiB charged per session, 64 MiB in all (charges as in [Bounds](#bounds)), 8 MiB of queued frames | the session ends with `resolution_failed: budget`, or a new one gets `busy`; not cached |
 | `rpc-endpoints` | every effective endpoint is in the pool | the first 64, in effective order | the rest are never tried; today's builtin pool is far smaller, so only a user adding more sees it |
 | `endpoint-retention` | quarantine and discovery entries live for the process | 64 retired endpoints kept | an endpoint re-added after 64 others were retired has forgotten its quarantine |
 | `socket-failures` | a socket reset is semantic; other socket errors count when their message matches | every socket-level failure is a provider failure | the endpoint is quarantined |

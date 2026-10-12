@@ -284,6 +284,40 @@ test('replay\'s verified-failure-text patch refuses failures returned as a statu
   await assert.rejects(replay.runScenario(REFERENCE, ethers, FakeTimers, scenario), /failure returned as a status/);
 });
 
+test('replay\'s memory-budgets patch refuses what it can\'t model', async () => {
+  const ethers = referenceEthers();
+  const FakeTimers = replay.loadFakeTimers(REFERENCE);
+  const run = (sessionBytes) => {
+    const scenario = structuredClone(definition(ethers, 'deviation-memory-budgets'));
+    scenario.world.bounds = { sessionBytes };
+    return replay.runScenario(REFERENCE, ethers, FakeTimers, scenario);
+  };
+  // The first probes' requests cross 100 bytes: the core charges a poll's
+  // requests together, which the patch can't model.
+  await assert.rejects(run(100), /a request crossed the budget/);
+  // Nothing crosses a megabyte: no deviation to show.
+  await assert.rejects(run(1 << 20), /finished under its budget/);
+  // A redirect is a hop, not an exchange the core charges.
+  const redirected = structuredClone(definition(ethers, 'deviation-memory-budgets'));
+  redirected.world.hosts = { 'a.rpc.example': { statuses: [302], location: 'https://r.rpc.example/' }, 'r.rpc.example': {} };
+  await assert.rejects(replay.runScenario(REFERENCE, ethers, FakeTimers, redirected), /no redirects or 429s/);
+  // An empty name ends at once, with no answer to cross the budget.
+  const empty = structuredClone(definition(ethers, 'deviation-memory-budgets'));
+  empty.steps[0].call = { fn: 'resolveEnsContent', args: [''] };
+  await assert.rejects(replay.runScenario(REFERENCE, ethers, FakeTimers, empty), /ended otherwise/);
+  // A name is charged as the core keys it, normalized: a decomposed name
+  // and its composed form record the same trace.
+  const named = (name) => {
+    const scenario = structuredClone(definition(ethers, 'deviation-memory-budgets'));
+    scenario.steps[0].call = { fn: 'resolveEnsContent', args: [name] };
+    scenario.world.bounds = { sessionBytes: 22_000 };
+    return replay.runScenario(REFERENCE, ethers, FakeTimers, scenario);
+  };
+  const decomposed = `${('e' + String.fromCharCode(0x301)).repeat(100)}.eth`;
+  const trace = (vector) => [vector.steps.map((s) => s.results), vector.io.map((e) => [e.t, e.end, e.host, e.outcome])];
+  assert.deepEqual(trace(await named(decomposed)), trace(await named(decomposed.normalize('NFC'))));
+});
+
 test('replay\'s overall-deadline patch refuses what it can\'t model', async () => {
   const ethers = referenceEthers();
   const FakeTimers = replay.loadFakeTimers(REFERENCE);

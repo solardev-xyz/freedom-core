@@ -372,6 +372,10 @@ function __admit(session) {
       },
     },
   }),
+  'memory-budgets': (b) => ({
+    text: `A session is charged for its name's copies (8 per byte of its in-flight key) as it starts, its requests (endpoint and body) as it makes them, and its answers as they arrive, at 32 per byte (their parsed JSON at worst); one an answer takes past ${b.sessionBytes} bytes ends at once: its callers get "budget", the answer is dropped, its outstanding I/O is cancelled and it makes no more. The patch holds for one step with one content lookup on JSON-RPC alone, without redirects or 429s, ended by an answer crossing (enforced); the core's replies and aliasing decodes are its own tests.`,
+    harness: ['memory-budgets'],
+  }),
   'overall-deadline': (b) => ({
     text: `A session ends ${b.deadlineMs} ms after it starts: its callers get deadline, its outstanding I/O is cancelled, and it makes no more. The reference's abandoned work can't be stopped, only cut off from I/O, so the patch holds only for one step with one call (enforced); that nothing is cached is the core's own test.`,
     harness: ['overall-deadline'],
@@ -556,8 +560,10 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
   const bounds = { ...BOUNDS, ...(world.bounds ?? {}) };
   const patches = patchesOf(scenario);
   const harnessPatch = (name) => patches.some((patch) => patch.harness?.includes(name));
-  if (harnessPatch('overall-deadline') && (scenario.steps.length !== 1 || (scenario.steps[0].calls ?? [null]).length !== 1)) {
-    throw new Error(`scenario ${scenario.id}: overall-deadline holds for one step with one call`);
+  for (const name of ['overall-deadline', 'memory-budgets']) {
+    if (harnessPatch(name) && (scenario.steps.length !== 1 || (scenario.steps[0].calls ?? [null]).length !== 1)) {
+      throw new Error(`scenario ${scenario.id}: ${name} holds for one step with one call`);
+    }
   }
   const sources = {};
   for (const patch of patches) {
@@ -597,8 +603,22 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
   // Steps whose session met its deadline (deviation `overall-deadline`):
   // their work makes no more I/O.
   const deadSteps = new Set();
+  // Deviation `memory-budgets`: the step's one session's charge, and how
+  // to end it.
+  let charged = 0;
+  let endSession = null;
+  // Ends the step's session now: its callers get `error`, its open I/O is
+  // cancelled, and it makes no more.
+  const endStep = (step, error, except = []) => {
+    deadSteps.add(step);
+    for (const item of io) if (item.step === step && item.outcome === 'open' && item.kind !== 'event' && !except.includes(item)) close(item, 'cancelled');
+    endSession?.(error);
+  };
   const record = (entry, op = insideOperation.getStore()?.op) => {
     if (deadSteps.has(stepIndex)) return null;
+    if (harnessPatch('memory-budgets') && !['rpc', 'event'].includes(entry.kind)) {
+      violations.push(`memory-budgets: the patch counts JSON-RPC alone, not ${entry.kind}`);
+    }
     const within = op;
     const item = { id: io.length, step: stepIndex, t: now(), ...entry, ...(within === undefined ? {} : { within }), end: null, outcome: 'open' };
     io.push(item);
@@ -695,6 +715,10 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     }));
     if (entries.includes(null)) return new Promise(() => {});
     if (!declared(host)) violations.push(`undeclared RPC endpoint ${host}`);
+    if (harnessPatch('memory-budgets')) {
+      charged += Buffer.byteLength(req.url) + Buffer.byteLength(Buffer.from(req.body).toString());
+      if (charged > bounds.sessionBytes) violations.push('memory-budgets: a request crossed the budget; pick a bound an answer crosses');
+    }
     const p = plan(host);
     // `statuses`: this host's first requests get these statuses (a 3xx
     // redirects to `location`), then answers as usual.
@@ -735,6 +759,18 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
         if (signal?.cancelled) {
           fail('cancelled', 'CANCELLED');
           return;
+        }
+        // Deviation `memory-budgets`: an answer that crosses the budget is
+        // dropped, and the session ends.
+        if (harnessPatch('memory-budgets')) {
+          // The core charges one exchange's final answer: a hop or a retry
+          // isn't a modelled one.
+          if (redirect || answer.status === 429) violations.push('memory-budgets: the patch models no redirects or 429s');
+          charged += Buffer.byteLength(answer.body) * 32;
+          if (charged > bounds.sessionBytes) {
+            endStep(entries[0].step, new Error('budget'), entries);
+            return;
+          }
         }
         // Deviation `response-caps`: main delivers the body, and the core
         // refuses it as a transport failure.
@@ -1154,9 +1190,48 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       }, bounds.deadlineMs);
       promise.then((value) => { clearTimeout(timer); resolve(value); }, (error) => { clearTimeout(timer); reject(error); });
     }));
-    const invoke = ({ fn, args = [] }) => deadline(Promise.resolve().then(() => (fn === '$fetch' ? probeFetch(...args) : system === 'tezos'
+    // Deviation `memory-budgets`: the step's one session ends when an
+    // answer crosses its budget.
+    const budget = (promise, call) => {
+      if (!harnessPatch('memory-budgets')) return promise;
+      if (call.fn !== 'resolveEnsContent') violations.push('memory-budgets: the patch models content lookups');
+      // The session's name, kept as the core keeps it: 8 copies of its
+      // in-flight key, normalized as fastNormalize does (ENSIP-15 beyond
+      // plain ASCII, with the reference's own normalizer).
+      const trimmed = String(call.args?.[0] ?? '').trim();
+      const lowered = trimmed.toLowerCase();
+      let key = lowered;
+      if (!/^[a-z0-9-.]+$/.test(lowered)) {
+        try {
+          key = Module.createRequire(path.join(checkout, 'package.json'))('@adraffy/ens-normalize').ens_normalize(trimmed);
+        } catch {
+          // Refused by the normalizer: the core never starts the session,
+          // which the patch reports as a call ended otherwise.
+        }
+      }
+      charged += Buffer.byteLength(`content:${key}`) * 8;
+      return new Promise((resolve, reject) => {
+        let ended = false;
+        endSession = (error) => {
+          ended = true;
+          reject(error);
+        };
+        // Only an answer crossing the budget ends it, as the vector shows.
+        promise.then(
+          (value) => {
+            violations.push('memory-budgets: the session finished under its budget; pick a bound an answer crosses');
+            resolve(value);
+          },
+          (error) => {
+            if (!ended) violations.push('memory-budgets: the call ended otherwise; pick a lookup an answer ends');
+            reject(error);
+          }
+        );
+      });
+    };
+    const invoke = ({ fn, args = [] }) => budget(deadline(Promise.resolve().then(() => (fn === '$fetch' ? probeFetch(...args) : system === 'tezos'
       ? loaded.exports[fn](...args, { fetchImpl, endpoints: world.endpoints })
-      : loaded.exports[fn](...args)))).then(replyLimit);
+      : loaded.exports[fn](...args)))), { fn, args }).then(replyLimit);
 
     const steps = [];
     for (const [index, step] of scenario.steps.entries()) {
@@ -1637,6 +1712,11 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
         { after: 1000, call: content('alice.eth') },
       ]),
     },
+    // The session's charge: its name (152), its requests, and its answers at
+    // 32 per byte: 6,664 before the block answers at 40 ms (423 bytes, so
+    // 13,536 each), so the second of them crosses 25,000. The session ends
+    // there: the other two block requests are cancelled.
+    deviation('memory-budgets', base({ bounds: { sessionBytes: 25000 } })),
     // Every endpoint answers after a second; the session ends at 300 ms.
     deviation('overall-deadline', base({
       bounds: { deadlineMs: 300 },

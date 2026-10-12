@@ -17,7 +17,8 @@ use crate::jsjson::JsValue;
 /// prefetches it keeps running.
 pub struct Shared {
     ctx: Rc<Ctx>,
-    prefetches: RefCell<Vec<Io<Request, Answer>>>,
+    /// Each with the session that handed it off.
+    prefetches: RefCell<Vec<(u64, Io<Request, Answer>)>>,
 }
 
 impl Shared {
@@ -38,6 +39,11 @@ impl Shared {
     /// machine's set (design 0004, Prefetch). Deviation `prefetch-set`:
     /// past the bound, the oldest is cancelled.
     pub(crate) fn keep_prefetch(&self, mut io: Io<Request, Answer>) {
+        // A session that spent its budget hands nothing off: dropping the
+        // prefetch cancels it.
+        if self.ctx.over_budget() {
+            return;
+        }
         let limit = self.ctx.bounds().prefetches;
         let mut cx = Context::from_waker(Waker::noop());
         // A prefetch that already finished has nothing left to keep.
@@ -46,8 +52,8 @@ impl Shared {
         }
         let mut prefetches = self.prefetches.borrow_mut();
         // Finished ones have left the set before it is counted.
-        prefetches.retain_mut(|kept| Pin::new(kept).poll(&mut cx).is_pending());
-        prefetches.push(io);
+        prefetches.retain_mut(|(_, kept)| Pin::new(kept).poll(&mut cx).is_pending());
+        prefetches.push((self.ctx.session.get(), io));
         while prefetches.len() > limit {
             prefetches.remove(0);
         }
@@ -57,7 +63,15 @@ impl Shared {
         let mut cx = Context::from_waker(Waker::noop());
         self.prefetches
             .borrow_mut()
-            .retain_mut(|io| Pin::new(io).poll(&mut cx).is_pending());
+            .retain_mut(|(_, io)| Pin::new(io).poll(&mut cx).is_pending());
+    }
+
+    /// A session that spent its budget keeps nothing running: dropping its
+    /// prefetches cancels them.
+    fn cancel_prefetches(&self, session: u64) {
+        self.prefetches
+            .borrow_mut()
+            .retain(|(owner, _)| *owner != session);
     }
 }
 
@@ -138,6 +152,77 @@ struct Session {
     owner: u64,
     /// When its deadline ends it.
     ends: Ms,
+    /// Its budget's key (deviation `memory-budgets`).
+    id: u64,
+    /// Where its result is cached, to take it back.
+    cached: Cached,
+    /// Frees what it holds when it ends, however it ends.
+    _held: Held,
+}
+
+/// A session's result cache and key.
+enum Cached {
+    Ens(Store, String),
+    Tezos(String),
+}
+
+/// A session's place in the budget, released when the session is dropped.
+struct Held {
+    ctx: Rc<Ctx>,
+    session: u64,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.ctx.budget.borrow_mut().release(self.session);
+    }
+}
+
+/// What a session keeps of its name and key: `dedup` is its in-flight key.
+fn input_bytes(dedup: &str) -> usize {
+    dedup.len().saturating_mul(super::budget::INPUT_COPIES)
+}
+
+/// What a request holds while it is made: its payload strings.
+fn request_bytes(request: &Request) -> usize {
+    match request {
+        Request::Rpc { endpoint, body } => endpoint.len() + body.len(),
+        Request::Gateway { url, body } => url.len() + body.as_ref().map_or(0, String::len),
+        Request::Prefetch { uri } => uri.len(),
+        Request::Tezos {
+            endpoint,
+            path,
+            body,
+            ..
+        } => endpoint.len() + path.len() + body.as_ref().map_or(0, String::len),
+        Request::Verified(op) => match op {
+            super::ens::VerifiedOp::MyotisRecord { name, address, .. } => {
+                name.as_ref().map_or(0, String::len) + address.as_ref().map_or(0, String::len)
+            }
+            super::ens::VerifiedOp::MyotisCall { data, .. } => data.len(),
+            super::ens::VerifiedOp::ColibriResolve {
+                name, call_data, ..
+            } => name.len() + call_data.len(),
+            super::ens::VerifiedOp::ColibriReverse { .. } => 0,
+        },
+    }
+}
+
+/// What an answer can come to hold: its body parsed as JSON (its worst-case
+/// tree, `PARSED_FACTOR` per byte), or the verifier's outcome.
+fn answer_bytes(answer: &Answer) -> usize {
+    use super::budget::PARSED_FACTOR;
+    match answer {
+        Answer::Rpc { body, .. } | Answer::Gateway { body, .. } | Answer::Tezos { body, .. } => {
+            body.len().saturating_mul(PARSED_FACTOR)
+        }
+        Answer::Verified(super::ens::Verified::Result(value)) => {
+            value.stringify().len().saturating_mul(PARSED_FACTOR)
+        }
+        Answer::Verified(super::ens::Verified::Revert(data)) => data.len(),
+        Answer::Verified(super::ens::Verified::Failure(class)) => class.len(),
+        Answer::Failed(_) | Answer::Done => 0,
+    }
 }
 
 /// One caller's terminal reply.
@@ -152,11 +237,61 @@ pub struct Reply {
     pub attempts: u32,
 }
 
+/// What a reply costs: its own copy of the outcome (each caller gets one),
+/// or its serialized form, whichever is larger. A result's tree can hold
+/// far more than it serializes to (nested arrays in a Tezos record, say),
+/// so its size on the heap counts, not its length on the wire.
+fn reply_bytes(outcome: &Outcome) -> usize {
+    let (tree, wire) = match outcome {
+        Ok(value) => (value.held(), value.stringify().len()),
+        Err(thrown) => {
+            let message = JsValue::String(thrown.message.clone());
+            (message.held(), message.stringify().len())
+        }
+    };
+    // The copy's own slot, too.
+    tree.saturating_add(32).max(wire)
+}
+
+/// The replies made and not yet taken: each counts in the budget's total
+/// from when it is made until the driver has written it
+/// (`memory-budgets`).
+struct Replies {
+    ctx: Rc<Ctx>,
+    list: Vec<Reply>,
+}
+
+impl Replies {
+    fn push(&mut self, reply: Reply) {
+        self.ctx
+            .budget
+            .borrow_mut()
+            .add_output(reply_bytes(&reply.outcome));
+        self.list.push(reply);
+    }
+
+    fn extend(&mut self, replies: impl IntoIterator<Item = Reply>) {
+        for reply in replies {
+            self.push(reply);
+        }
+    }
+
+    fn sort_by_key<K: Ord>(&mut self, key: impl FnMut(&Reply) -> K) {
+        self.list.sort_by_key(key);
+    }
+
+    /// Handed to the driver, whose backlog counts them from now on.
+    fn take(&mut self) -> Vec<Reply> {
+        self.ctx.budget.borrow_mut().take_output();
+        std::mem::take(&mut self.list)
+    }
+}
+
 pub struct Machine {
     ctx: Rc<Ctx>,
     shared: Rc<Shared>,
     sessions: Vec<Session>,
-    replies: Vec<Reply>,
+    replies: Replies,
     next_caller: u64,
     ens_generation: u64,
     tezos_generation: u64,
@@ -164,8 +299,9 @@ pub struct Machine {
     retired_rpc: std::collections::VecDeque<String>,
     retired_tezos: std::collections::VecDeque<String>,
     /// The generations of each attempt that may still have untaken
-    /// requests, and when its session ends, by owner.
-    origins: std::collections::BTreeMap<u64, (Generations, Ms)>,
+    /// requests, when its session ends, and its session's budget key, by
+    /// owner.
+    origins: std::collections::BTreeMap<u64, (Generations, Ms, u64)>,
     next_owner: u64,
 }
 
@@ -228,15 +364,26 @@ fn ready(sleep: &mut Sleep<Request, Answer>) -> bool {
 impl Machine {
     pub fn new(now: Ms, config: Config, random: Box<dyn Random>) -> Self {
         let ctx = Rc::new(Ctx::new(now, config, random));
+        // A request counts against the session making it as it is made: one
+        // that crosses the budget is never emitted (`memory-budgets`).
+        let weak = Rc::downgrade(&ctx);
+        ctx.rt.set_admit(move |request| {
+            weak.upgrade()
+                .is_none_or(|ctx| ctx.charge(request_bytes(request)))
+        });
         let shared = Rc::new(Shared {
             ctx: Rc::clone(&ctx),
             prefetches: RefCell::new(Vec::new()),
         });
+        let replies = Replies {
+            ctx: Rc::clone(&ctx),
+            list: Vec::new(),
+        };
         Self {
             ctx,
             shared,
             sessions: Vec::new(),
-            replies: Vec::new(),
+            replies,
             next_caller: 1,
             ens_generation: 0,
             tezos_generation: 0,
@@ -249,10 +396,10 @@ impl Machine {
 
     /// A new attempt's owner, under `generations`, in a session that ends
     /// at `ends`.
-    fn owner(&mut self, generations: Generations, ends: Ms) -> u64 {
+    fn owner(&mut self, generations: Generations, ends: Ms, session: u64) -> u64 {
         let owner = self.next_owner;
         self.next_owner += 1;
-        self.origins.insert(owner, (generations, ends));
+        self.origins.insert(owner, (generations, ends, session));
         owner
     }
 
@@ -275,7 +422,15 @@ impl Machine {
         let caller = self.next_caller;
         self.next_caller += 1;
         let settled = self.now();
-        let outcome = sized(outcome, &self.ctx.bounds());
+        let bounds = self.ctx.bounds();
+        let mut outcome = sized(outcome, &bounds);
+        // It is a copy like any reply: with no room for it in the total,
+        // `busy` instead, as for a session that can't start
+        // (`memory-budgets`).
+        let held = self.ctx.budget.borrow().held();
+        if held.saturating_add(reply_bytes(&outcome)) > bounds.total_bytes {
+            outcome = Err(Thrown::protocol("busy"));
+        }
         let generations = self.generations();
         self.replies.push(Reply {
             caller,
@@ -308,15 +463,26 @@ impl Machine {
         start: Start,
         restarts: bool,
         subject: String,
-        scope: Scope,
+        cached: Cached,
     ) -> u64 {
+        let scope = match cached {
+            Cached::Ens(..) => Scope::Ens,
+            Cached::Tezos(_) => Scope::Tezos,
+        };
         let id = caller.id;
         let task = start();
         let deadline_ms = self.ctx.bounds().deadline_ms;
         let deadline = started(self.ctx.rt.sleep(deadline_ms));
         let ends = self.now().saturating_add(deadline_ms);
         let generations = self.generations();
-        let owner = self.owner(generations, ends);
+        let session = self.next_owner;
+        self.next_owner += 1;
+        // Its name's copies, reserved at admission.
+        self.ctx
+            .budget
+            .borrow_mut()
+            .charge(session, input_bytes(&key), &self.ctx.bounds());
+        let owner = self.owner(generations, ends, session);
         self.sessions.push(Session {
             key,
             callers: vec![caller],
@@ -329,8 +495,64 @@ impl Machine {
             scope,
             owner,
             ends,
+            id: session,
+            cached,
+            _held: Held {
+                ctx: Rc::clone(&self.ctx),
+                session,
+            },
         });
         id
+    }
+
+    /// A finished session's replies (results or errors), serialized for each caller, count
+    /// against its budget until written (`memory-budgets`). Over it, the
+    /// callers get `budget` instead, and the result it cached goes.
+    fn charge_replies(&self, i: usize, outcome: Outcome) -> Outcome {
+        let session = &self.sessions[i];
+        // Each caller gets its own copy; an error's message can be as large
+        // as its name, so it counts too.
+        let bytes = reply_bytes(&outcome).saturating_mul(session.callers.len());
+        let bounds = self.ctx.bounds();
+        if self
+            .ctx
+            .budget
+            .borrow_mut()
+            .charge(session.id, bytes, &bounds)
+        {
+            return outcome;
+        }
+        if let Ok(value) = &outcome {
+            self.take_back(i, value);
+        }
+        self.shared.cancel_prefetches(session.id);
+        Err(Thrown::budget())
+    }
+
+    /// Takes a session's result back out of the cache, if it is still the
+    /// cached one.
+    fn take_back(&self, i: usize, value: &JsValue) {
+        let session = &self.sessions[i];
+        let now = self.now();
+        match &session.cached {
+            Cached::Ens(store, key) => {
+                let mut state = self.ctx.state.borrow_mut();
+                let cache = match store {
+                    Store::Content => &mut state.content,
+                    Store::Address => &mut state.address,
+                    Store::Reverse => &mut state.reverse,
+                };
+                if cache.get(key, now) == Some(value) {
+                    cache.delete(key);
+                }
+            }
+            Cached::Tezos(name) => {
+                let mut results = self.ctx.tezos.results.borrow_mut();
+                if results.get(name, now) == Some(value) {
+                    results.delete(name);
+                }
+            }
+        }
     }
 
     fn cached(&self, store: Store, key: &str) -> Option<JsValue> {
@@ -378,6 +600,7 @@ impl Machine {
             session.callers.push(caller);
             return id;
         }
+        let key_for_cache = key.clone();
         let ctx = Rc::clone(&self.ctx);
         let shared = Rc::clone(&self.shared);
         // One attempt of `resolveAcrossStableLifecycle`: a result that
@@ -412,7 +635,8 @@ impl Machine {
                 Attempt::Crossed
             })
         });
-        self.start(dedup, caller, start, true, subject, Scope::Ens)
+        let cached = Cached::Ens(store, key_for_cache);
+        self.start(dedup, caller, start, true, subject, cached)
     }
 
     /// Admission (design 0004): `Some(busy reply)` when joining or starting
@@ -422,7 +646,17 @@ impl Machine {
         let full = match self.sessions.iter().find(|s| s.key == dedup) {
             Some(session) => session.callers.len() >= bounds.callers_per_session,
             // Starting one needs room for its first caller too.
-            None => self.sessions.len() >= bounds.sessions || bounds.callers_per_session == 0,
+            // A new session reserves its name's copies first, and none
+            // starts while the total is saturated (`memory-budgets`).
+            None => {
+                self.sessions.len() >= bounds.sessions
+                    || bounds.callers_per_session == 0
+                    || !self
+                        .ctx
+                        .budget
+                        .borrow_mut()
+                        .admits(input_bytes(dedup), &bounds)
+            }
         };
         full.then(|| self.reply(Err(Thrown::protocol("busy")), attempts))
     }
@@ -562,14 +796,29 @@ impl Machine {
         while i < self.sessions.len() {
             let generations = self.sessions[i].generations;
             // The attempt first: a result that arrives with a deadline wins,
-            // as the race it replaces let it. Its requests carry its owner.
+            // as the race it replaces let it. Its requests carry its owner,
+            // and what it charges goes to its session.
+            let id = self.sessions[i].id;
             self.ctx.rt.set_owner(self.sessions[i].owner);
+            self.ctx.session.set(id);
             let finished = self.sessions[i].task.poll();
             self.ctx.rt.set_owner(0);
+            self.ctx.session.set(0);
+            let spent = self.ctx.budget.borrow().over(id);
             if finished {
                 match self.sessions[i].task.take() {
                     Some(Attempt::Done(outcome)) => {
-                        let outcome = sized(outcome, &bounds);
+                        let outcome = if spent {
+                            // It may have cached, or handed off a
+                            // prefetch, before crossing in this very poll.
+                            if let Ok(value) = &outcome {
+                                self.take_back(i, value);
+                            }
+                            self.shared.cancel_prefetches(id);
+                            Err(Thrown::budget())
+                        } else {
+                            self.charge_replies(i, sized(outcome, &bounds))
+                        };
                         let session = self.sessions.remove(i);
                         self.replies
                             .extend(session.callers.into_iter().map(|caller| Reply {
@@ -581,6 +830,7 @@ impl Machine {
                             }));
                         continue;
                     }
+                    Some(Attempt::Crossed) if spent => {}
                     Some(Attempt::Crossed) => {
                         if self.restart(i, now) {
                             // The new attempt starts in this poll.
@@ -591,6 +841,21 @@ impl Machine {
                     }
                     None => {}
                 }
+            }
+            // Its budget spent, the session ends: dropping the attempt
+            // cancels its I/O, and nothing is cached (`memory-budgets`).
+            if spent {
+                self.shared.cancel_prefetches(id);
+                let session = self.sessions.remove(i);
+                self.replies
+                    .extend(session.callers.into_iter().map(|caller| Reply {
+                        caller: caller.id,
+                        outcome: Err(Thrown::budget()),
+                        settled: now,
+                        generations,
+                        attempts: caller.attempts,
+                    }));
+                continue;
             }
             let session = &mut self.sessions[i];
             // The session's deadline ends it: dropping the attempt cancels
@@ -641,6 +906,29 @@ impl Machine {
             session.subject
         );
         let generations = session.generations;
+        // Sized and charged like any reply: past the budget, `budget`
+        // instead, and the session, now over, ends (at its next poll, or now
+        // if this was its last attempt).
+        let exhausted = session
+            .callers
+            .iter()
+            .filter(|caller| caller.attempts >= MAX_LIFECYCLE_ATTEMPTS)
+            .count();
+        let mut outcome = sized(Err(Thrown::new(message)), &self.ctx.bounds());
+        let bytes = reply_bytes(&outcome).saturating_mul(exhausted);
+        if exhausted > 0
+            && !self
+                .ctx
+                .budget
+                .borrow_mut()
+                .charge(session.id, bytes, &self.ctx.bounds())
+        {
+            // Spent: it keeps nothing running, whether it restarts or ends
+            // here.
+            self.shared.cancel_prefetches(session.id);
+            outcome = Err(Thrown::budget());
+        }
+        let session = &mut self.sessions[i];
         let mut replies = Vec::new();
         session.callers.retain(|caller| {
             if caller.attempts < MAX_LIFECYCLE_ATTEMPTS {
@@ -648,7 +936,7 @@ impl Machine {
             }
             replies.push(Reply {
                 caller: caller.id,
-                outcome: Err(Thrown::new(message.clone())),
+                outcome: outcome.clone(),
                 settled: now,
                 generations,
                 attempts: caller.attempts,
@@ -667,8 +955,8 @@ impl Machine {
             caller.attempts = caller.attempts.saturating_add(1);
         }
         session.generations = current;
-        let ends = session.ends;
-        let owner = self.owner(current, ends);
+        let (ends, id) = (session.ends, session.id);
+        let owner = self.owner(current, ends, id);
         self.sessions[i].owner = owner;
         true
     }
@@ -757,7 +1045,19 @@ impl Machine {
                 "Name resolution configuration changed while resolving {}",
                 session.subject
             );
-            let outcome = sized(Err(Thrown::new(message)), &bounds);
+            let mut outcome = sized(Err(Thrown::new(message)), &bounds);
+            // Charged like any reply: past the budget, `budget` instead.
+            // Either carries the generations main discards it for.
+            let bytes = reply_bytes(&outcome).saturating_mul(session.callers.len());
+            if !self
+                .ctx
+                .budget
+                .borrow_mut()
+                .charge(session.id, bytes, &bounds)
+            {
+                self.shared.cancel_prefetches(session.id);
+                outcome = Err(Thrown::budget());
+            }
             self.replies
                 .extend(session.callers.into_iter().map(|caller| Reply {
                     caller: caller.id,
@@ -786,7 +1086,13 @@ impl Machine {
     }
 
     pub fn take_replies(&mut self) -> Vec<Reply> {
-        std::mem::take(&mut self.replies)
+        self.replies.take()
+    }
+
+    /// The driver's replies not yet written: they count in the sessions'
+    /// total (`memory-budgets`), so sessions can't fill the room they hold.
+    pub fn set_output_backlog(&mut self, bytes: usize) {
+        self.ctx.budget.borrow_mut().set_backlog(bytes);
     }
 
     /// The effects since the last call, each with its attempt's
@@ -795,6 +1101,7 @@ impl Machine {
         let current = (
             self.generations(),
             self.now().saturating_add(self.ctx.bounds().deadline_ms),
+            0,
         );
         let emitted = self
             .ctx
@@ -802,7 +1109,7 @@ impl Machine {
             .take_effects()
             .into_iter()
             .map(|effect| {
-                let (generations, deadline) = match &effect {
+                let (generations, deadline, _) = match &effect {
                     Effect::Request { owner, .. } => {
                         self.origins.get(owner).copied().unwrap_or(current)
                     }
@@ -821,7 +1128,27 @@ impl Machine {
         emitted
     }
 
+    /// Answers request `id`. The answer counts against its session's
+    /// budget (`memory-budgets`); one that crosses it is dropped, and the
+    /// session ends at the next poll.
     pub fn complete(&self, id: u64, answer: Answer) -> bool {
+        let session = self
+            .ctx
+            .rt
+            .owner_of(id)
+            .and_then(|owner| self.origins.get(&owner))
+            .map_or(0, |origin| origin.2);
+        if session != 0 {
+            let bounds = self.ctx.bounds();
+            if !self
+                .ctx
+                .budget
+                .borrow_mut()
+                .charge(session, answer_bytes(&answer), &bounds)
+            {
+                return false;
+            }
+        }
         self.ctx.rt.complete(id, answer)
     }
 
@@ -839,6 +1166,11 @@ impl Machine {
 
     pub fn running(&self) -> usize {
         self.sessions.len()
+    }
+
+    /// The bytes running sessions hold (`memory-budgets`).
+    pub fn held(&self) -> usize {
+        self.ctx.budget.borrow().total()
     }
 
     /// `resolveTezosDomain(name)`: its own cache and in-flight table, and
@@ -886,6 +1218,7 @@ impl Machine {
             session.callers.push(caller);
             return id;
         }
+        let cache_key = normalized.clone();
         let ctx = Rc::clone(&self.ctx);
         let subject = normalized.clone();
         let start: Start = Rc::new(move || {
@@ -894,7 +1227,14 @@ impl Machine {
                 async move { Attempt::Done(super::tezos::resolve(&ctx, &ctx.tezos, &name).await) },
             )
         });
-        self.start(dedup, caller, start, false, subject, Scope::Tezos)
+        self.start(
+            dedup,
+            caller,
+            start,
+            false,
+            subject,
+            Cached::Tezos(cache_key),
+        )
     }
 
     /// `invalidateTezosDomain(name?)`: one result, or every result and
