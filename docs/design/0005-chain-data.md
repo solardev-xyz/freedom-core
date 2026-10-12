@@ -8,7 +8,7 @@
 
 ## Summary
 
-A chain read, a fee quote or a broadcast becomes a **request** in `freedom-cored`, run by a sans-I/O machine in a new crate, `fc-chain`. It reuses `fc-naming`'s executor, its `jsjson` codec and 0004's session machinery:
+A chain read, a fee quote or a broadcast becomes a **request** in `freedom-cored`, run by a sans-I/O machine in a new crate, `fc-chain`, on its own thread (the *chain thread*). It reuses 0004's session machinery:
 - **main → core:** `chain.request`, `chain.fee_quote` and `chain.broadcast` replace the router's three entry points.
 - **core → main:** the request asks main for each I/O it needs:
   - `shell.rpc`: one JSON-RPC exchange with an endpoint, the same executor naming uses;
@@ -31,7 +31,7 @@ Unlike naming, chain data passes **node errors** through to dApps, and its answe
 - **Every deviation** is listed in [Deviations](#deviations) with its behavior and a boundary vector.
 - **Bounded resources:** requests, answers, replies, retained state and time all have bounds, with a defined result when exhausted. Today none exist beyond the verifiers' slots.
 - **The core is never given an endpoint URL** (0004's [Secrets](0004-naming-sessions.md#secrets)).
-- **No lost broadcasts:** no reply reports a failure for a transaction that may have reached the network ([Broadcast](#broadcast)).
+- **No lost broadcasts:** nothing reports a failure for a transaction that may have reached the network, on any path, including a lost core ([Broadcast](#broadcast)).
 
 **Non-goals**
 - **Pinning chain reads to a block**, and new trust semantics. Today's router reads at the caller's tag and calls m equal answers `verified`. Changing either is roadmap 3.1's decision, not this design's.
@@ -48,16 +48,17 @@ All accept caller kinds `chrome` and `shell`.
 
 | Method | Params | Result | Replaces |
 |---|---|---|---|
-| `chain.configure` | a [snapshot](#configuration) for every configured chain | `{ generation }` | the router's registry reads |
+| `chain.configure` | a [snapshot](#configuration) for every configured chain | `{ generations }` | the router's registry reads |
 | `chain.availability` | `{ chain_id, ready }` for each Myotis chain | `{}` | the router's live `myotis.isReady()` samples |
-| `chain.request` | `{ chain_id, method, params, include_trust, origin?, background, profile }` | `{ result, source, verified, trust? }` | `request()` |
-| `chain.fee_quote` | `{ chain_id }` | today's quote shape | `getFeeQuote()` |
-| `chain.broadcast` | `{ chain_id, raw }` | `{ hash, source, outcome }` | `broadcastRawTransaction()` |
+| `chain.request` | `{ chain_id, method, params, include_trust, origin?, background, profile, deadline_ms }` | `{ result, source, verified, trust? }` | `request()` |
+| `chain.fee_quote` | `{ chain_id, deadline_ms }` | today's quote shape | `getFeeQuote()` |
+| `chain.broadcast` | `{ chain_id, raw, deadline_ms }` | `{ hash, source, outcome }` | `broadcastRawTransaction()` |
 
-- **`params`** is the caller's JSON as main serializes it. The core parses it with `jsjson`, keeping JavaScript's property order, which [normalization](#normalization) depends on.
+- **`params`** is the caller's JSON as main serializes it. The core parses it keeping JavaScript's property order, which [normalization](#normalization) depends on.
 - **`origin`** is the router's routing context: the dApp's permission key or the `web3:` page's. It makes the read *interactive*. The core keeps it only in memory, for the [adaptive bypass](#adaptive-bypass), and never logs it.
 - **`profile`** is `default` or `ant_scan`. Callers can't pass functions over the pipe, so the Ant bridge's options (`rankError`, `rangeCapOf`, the exclusions, Blockscout, the widened quorum budget) become one named profile, ported with vectors ([Logs](#logs)).
 - **`background`** is the Ant bridge's flag: never queue for Myotis.
+- **`deadline_ms`** is what is left of the caller's overall deadline when main sends the request, as naming's driver does; at most 120 s ([Deadlines](#deadlines)).
 - **Cancellation** is 0001's `cancel`, which replaces the router's `AbortSignal` ([Cancellation](#cancellation)).
 - **`isReadMethod`** stays in main: it is a constant table, mirrored with a vector.
 
@@ -65,14 +66,15 @@ All accept caller kinds `chrome` and `shell`.
 
 | Method | Params | Main does | Reply |
 |---|---|---|---|
-| `shell.rpc` | `{ endpoint, body, policy: "plain", max_bytes, generations, deadline_ms }` | one exchange through the session's stack | `{ status, body }` or a transport error |
+| `shell.rpc` | `{ endpoint, body, policy: "plain", max_bytes, generation, deadline_ms }` | one exchange through the session's stack | `{ status, body }`, `{ not_sent }` or a transport failure |
 | `shell.verified` | a [verified operation](#verified-operations) | today's adapter, whole | the operation's outcome |
-| `shell.blockscout` | `{ endpoint, query, max_bytes, generations, deadline_ms }` | one page through `blockscout-logs.js`'s redirect and address policy | `{ status, headers, body }` or a transport error |
+| `shell.blockscout` | `{ endpoint, query, max_bytes, generation, deadline_ms }` | one page through `blockscout-logs.js`'s redirect and address policy | `{ status, headers, body }` or a transport failure |
 
 - **`shell.rpc`** is naming's executor, with two parameters added:
   - **`policy: "plain"`**: no 429 back-off and no repeated attempts, as today's router does; naming keeps ethers' loop.
-  - **`max_bytes`**: the answer cap the core accepts, up to 16 MiB for chain data (naming stays at 720 KiB).
+  - **`max_bytes`**: the answer cap the core accepts, 18 MiB for chain data ([Transport](#transport)); naming stays at 720 KiB.
   - Redirects follow naming's rule: each hop is checked against the endpoint policy and the onion gate, and the method and body are kept (deviation `rpc-redirects`).
+- **`not_sent`** is main's reply when it performed nothing: a stale generation, a cancel before the exchange started, or an endpoint refused before connecting. It proves that no byte of the request left main, which [broadcasts](#broadcast) rely on. Any other failure may have followed a send.
 - **The body** is today's `JSON.stringify({ jsonrpc: '2.0', id, method, params })`, with `id` a per-request counter (deviation `rpc-id`).
 - **`shell.blockscout`** keeps main's DNS check: an off-origin redirect must not resolve to a local address. That check needs DNS, which the core doesn't do.
 
@@ -80,9 +82,30 @@ All accept caller kinds `chrome` and `shell`.
 
 Chain-data answers routinely exceed 0001's 1 MiB frame: full-history `eth_getLogs` scans, blocks with their transactions, and `html()` documents of up to 8 MiB, which are 16 MiB as hex.
 
-- **Fragments.** A new frame kind, `0x02`, carries a fragment of one JSON message. A message is any number of `0x02` frames followed by one `0x01` frame with its last part. Every frame stays within 1 MiB.
-- **One fragmented message at a time** per direction. Between its fragments, whole messages may still go, so control traffic and other replies aren't held behind it. That is 0001's reserved capacity, unchanged.
-- **The message cap** is 24 MiB: a 16 MiB answer is 21.3 MiB as base64. The receiver holds the one partial message against its reader bound, and refuses a larger total as a protocol error.
+- **Fragment kinds.** Two new frame kinds carry a message too large for one frame:
+  - `0x10`, a fragment with more to follow;
+  - `0x11`, the last fragment.
+
+  Kind `0x01` always carries one whole message. Kinds `0x02`–`0x0F` stay reserved for Phase 4's streams.
+- **Decoding:**
+  - A `0x10` frame starts the partial message, or appends to it. A `0x11` frame appends and completes it. The completed bytes are one JSON message, decoded as a `0x01` payload is.
+  - **One partial message per direction.** Kind `0x01` frames between fragments are whole messages of their own, decoded at once. A `cancel` or a `lock` is never held behind a large message.
+  - **Protocol errors** (0001: the receiver logs and closes): an empty fragment, a `0x11` with no partial message, or a partial message over the message cap.
+  - **EOF** with a partial message is EOF; the partial message is discarded.
+- **Sending:**
+  - A side fragments a message only when it exceeds 1 MiB, and only for a peer that offered fragments.
+  - Once it has written a message's first fragment, it writes the rest of that message before starting another fragmented one. There is no abort.
+  - Whole messages may go between its fragments, control messages first (0001's reserved capacity).
+- **The message cap** is 32 MiB of serialized message. The largest message is a `shell.rpc` reply carrying an 18 MiB answer as base64, about 24 MiB. A message over the cap is never sent: the sender fails the request it belongs to with `too_large`, not the connection.
+- **The core's reader:**
+  - **Credit.** 0001's reader admits at most 256 frames and 16 MiB queued. Fragments don't take that credit: the reader assembles them in one **reassembly reservation** of up to the message cap, outside the queued-frame pool. The completed message moves on holding no frame credit.
+  - **Hand-off.** The reservation is released when the chain thread takes the message and charges it to the request it answers ([Bounds](#bounds)). If that request's budget has no room, the request ends with `budget` and the message is dropped.
+  - **The next fragmented message** starts only once the previous one has been taken. Until then the reader waits for that hand-off, which is backpressure like any full queue. The chain thread takes messages as they arrive.
+- **The core's writer:**
+  - The chain thread has its own writer allowance of one message cap, apart from the vault loop's and naming's.
+  - A fragmented reply is charged at its whole serialized size when handed to the writer, and released as its fragments are written.
+  - Unwritten bytes count in the chain memory total until written (0004's rule).
+- **Main's reader** follows the same rules: one partial message per direction, the same cap.
 - **Negotiated** in the handshake. `core.hello`'s capabilities gain `fragments`, and main's hello params gain `frames: ["fragment"]`. A side sends fragments only to a peer that offered them. Main and the core ship together, so neither falls back.
 - **Not streams.** Phase 4's streams (0001) remain separate: stream IDs, credit and protocol version 2. Fragments carry one whole message and are parsed only when complete.
 
@@ -92,42 +115,62 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
 
 | Operation | Main runs | Reply |
 |---|---|---|
-| `{ myotis: "account", chain_id, address }` | `myotisManager.getAccount` | the payload, plus `optimistic_block_number` before and after |
+| `{ myotis: "account", chain_id, address }` | `myotisManager.getAccount` | a [Myotis read outcome](#myotis-read-outcomes) |
 | `{ myotis: "code", chain_id, address }` | `getCode` | likewise |
 | `{ myotis: "storage", chain_id, address, slot }` | `getStorageAt` | likewise |
 | `{ myotis: "call_tx", chain_id, tx }` | `ethCallTx` at `latest` | likewise |
 | `{ myotis: "estimate_tx", chain_id, tx }` | `estimateGas` at `latest` | likewise |
 | `{ myotis: "fee", chain_id }` | `feeEstimate` | likewise |
 | `{ myotis: "broadcast", chain_id, raw }` | `sendRawTransaction` | `{ hash }`, `{ rejected: { reason } }`, `{ uncertain }` or `{ not_sent }` |
-| `{ colibri: "request", chain_id, method, params, deadline_ms }` | `requestViaColibri` | `{ result }`, `{ error: { code?, message, data? } }` or `{ failure }` |
+| `{ colibri: "request", chain_id, method, params, deadline_ms }` | `requestViaColibri` | `{ result }`, `{ node_error: { code, message, data? } }` or `{ failure: class }` |
 
-- **Payloads** are the adapters' own JSON, with 0004's snake_case keys. The core runs `assertMyotisAnswer`'s classification: revert, refusal, infeasible, capability refusal, unavailable.
+#### Myotis read outcomes
+
+- **`{ payload, block_before, block_after }`:** the adapter's JSON with 0004's snake_case keys, and `optimistic_block_number` before and after. The core runs `assertMyotisAnswer`'s classification on it: revert, refusal, infeasible, capability refusal, unavailable.
+- **`{ failure: class }`:** 0004's closed set of classes, which carry no text. Chain data splits `unavailable` in two, because the router can return these texts:
+  - `not_running` and `not_ready` are `runningInstance`'s two errors;
+  - `lifecycle` is `verifiedRequest`'s `MYOTIS_UNAVAILABLE`;
+  - the core rebuilds each one's fixed text, with the chain's display name from configuration and `MYOTIS_UNAVAILABLE`'s code, so it can become the last error as today;
+  - `error` is any other throw; its text isn't forwarded (deviation `adapter-error-text`).
+
+#### The rest
+
 - **Broadcast classes** are exactly myotis-process's:
   - `not_sent`: queued and expired, or the client wasn't running;
   - `uncertain`: dispatched, then a deadline, an exit or a stop.
+- **Colibri's errors:**
+  - **`node_error`:** the worker's serialized error carried a `code`, so it is the node's or the prover's JSON-RPC error; it is passed through.
+  - **`{ failure: "error" }`:** the error had no code. It is a client diagnostic, whose text may name the endpoint, and isn't forwarded (deviation `adapter-error-text`). Timeouts are `timeout`, as in 0004.
+  - **Backstop:** main replaces any configured endpoint URL it finds in a `node_error` message with that endpoint's reference.
 - **Admission:** the router's slots stay as the core's admission rules, held until main's terminal reply. Myotis has 1 in flight and 16 waiting per chain, and background callers take only an idle slot. Colibri has 8 in flight, 2 per route.
 - **Physical completion:** main replies only when the adapter's promise settles, never early. Main's per-verifier bound (0004: 8 operations) is shared by naming and chain data.
+- **Reply size:** as 0004, main serializes each reply first; one over the message cap is `{ failure: "too_large" }`.
 
 ### Replies
 
 - **A result** is `{ result, source, verified, trust? }`, keys in today's order.
-  - **`result`** is the answering source's JSON, forwarded as text ([Answers](#answers)). Main parses it with `JSON.parse`, the same parse today's `response.json()` runs.
+  - **`result`** is embedded as **raw JSON**: the core writes the answer's validated `result` text into the reply as is, not as a JSON string. It is never escaped twice, and main's `JSON.parse` of the message yields the value, as today's `response.json()` did.
+  - **`undefined`:** a body without `result` answers `undefined`, which JSON can't carry. The reply then omits `result` and lists it in `undefined_keys` (0004's mechanism). Main restores an own `result` property, first in key order, whose value is `undefined`.
   - **`source`** stays on every result, so `chain-data-activity`'s watchdog records still work.
+  - **Size:** the core measures the whole serialized reply. One over the message cap fails the request with `too_large`.
 - **Endpoint references** in `trust` (`agreed`, `dissented`, `queried`, `prover`) are substituted by main with the host, as 0004 does. One difference: the router's `endpointHost` gives `''` for a URL that doesn't parse and drops it, where naming keeps the input. Main follows the router here.
-- **An error** is today's thrown error, rebuilt by main: `{ code, message, data }` ([Errors](#errors-and-text)).
+- **An error** is today's thrown error, rebuilt by main from a tagged payload ([Errors](#errors-and-text)).
 
 ### Generations
 
-- **Configuration:** a `chain.configure` that changes a chain advances that chain's generation. A request carries the generation it started under, and its `shell.*` requests carry it too.
-  - Main answers a request whose generation is no longer current with `stale_generation` and performs nothing.
-  - A changed chain's running requests aren't ended: today's router runs on with what it read. They do make no further requests to an endpoint that is gone.
-- **Lifecycle:** none. The router has no Myotis epoch and no restarts; `chain.availability` only keeps the readiness the router samples.
+- **Each chain has a generation,** advanced by any `chain.configure` that changes that chain's snapshot. A request runs under the generation it started in, and its `shell.*` requests carry it.
+- **A change ends the chain's running requests at once,** as 0004 ends a scope's sessions:
+  - **Reads and fee quotes** end with `reconfigured`. Main's driver sends them again, once, under the new configuration and within the caller's remaining deadline. The caller sees no error unless the second attempt also ends `reconfigured`.
+  - **Broadcasts** end as [Broadcast](#broadcast) says: `uncertain` if an attempt may have been sent, otherwise a definite `not_sent` failure. They are never re-sent automatically.
+  - **Their I/O:** the core cancels the requests' outstanding `shell.rpc` and `shell.blockscout` requests and makes no new ones. Verifier operations keep their slots until main's terminal reply (parity), and their outcomes are dropped. No result built from the old configuration (an endpoint's answer, a prover's trust label) is published after the change.
+- **Main** answers a `shell.*` request whose generation is no longer current with `not_sent` and performs nothing.
+- **`chain.availability`** doesn't end requests. It records the readiness the router samples. Myotis's own epoch check still turns a mid-operation change into `state_changed`.
+- **Lifecycle:** none beyond that. The router has no Myotis epoch of its own and no restarts.
 
 ### Admission
 
 - **A separate pool** from naming's: at most **64 running and 256 waiting** chain requests. A request over the limit is `busy` at once (deviation `admission`).
 - **No deduplication:** every caller is its own request, as today.
-- **The writer:** chain data shares the naming thread's writer share in the daemon, with its own bound on queued replies.
 
 ### Deadlines
 
@@ -137,14 +180,17 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
   - the quorum's budget is a *verification* budget: when Direct comes next, its members run on to `configured`;
   - Direct gives every endpoint `configured`, walking them one at a time;
   - the Ant profile widens the quorum budget to 30 s.
-- **Overall:** 120 s per request (deviation `overall-deadline`). Today a request has no overall bound: an interactive read on chain 1 can take about 39 s, and more with user settings. Past the deadline, the request ends with `deadline`, its I/O is cancelled, and nothing more is asked.
+- **Overall:** 120 s per request, or the caller's `deadline_ms` if lower (deviation `overall-deadline`).
+  - **Today** a request has no overall bound: an interactive read on chain 1 can take about 39 s, and more with user settings.
+  - **Past the deadline,** a read or a fee quote ends with `deadline`, its I/O is cancelled, and nothing more is asked.
+  - **A broadcast** ends as [Broadcast](#broadcast) says. Its attempts stop 10 s before the deadline, leaving room to [reconcile](#broadcast).
 - **Main's watchdog** is the deadline plus 15 s (0001).
 
 ### Cancellation
 
 - **A `cancel`** ends the request. Its pending `shell.rpc` and `shell.blockscout` requests are cancelled, quorum members included (deviation `abandoned-exchanges`: today's caller signal doesn't reach the quorum).
 - **Verifier work** keeps its slot until main's terminal reply (parity: the router holds Myotis and Colibri slots until the operation physically settles).
-- **A broadcast** cancelled after a `shell.rpc` was sent is `uncertain` ([Broadcast](#broadcast)). Today it is an `AbortError`.
+- **A broadcast** that is cancelled ends as [Broadcast](#broadcast) says. Today it is an `AbortError`.
 
 ## Configuration
 
@@ -153,6 +199,7 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
 ```jsonc
 { "chains": [ {
     "chain_id": 1,
+    "display_name": "Ethereum",                                  // Myotis's error texts
     "read_order": ["myotis", "colibri", "quorum", "direct"],
     "broadcast_order": ["myotis", "direct"],
     "quorum": { "k": 3, "m": 2, "timeout_ms": 5000 },   // raw, as the registry merges it
@@ -165,8 +212,7 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
 - **Main computes the inputs as today:** `access.readOrder`/`broadcastOrder` or the defaults, `getEndpoints(chainId, 'rpc')` in registry order, and the first prover.
 - **The core applies today's clamps** (`k ≥ 1`, `1 ≤ m ≤ k`, `timeout ≥ 500 ms`) and adds bounds (deviation `quorum-clamps`): `k ≤ 9`, `timeout ≤ 60 s`, and at most 64 endpoints, as 0004.
 - **Orders are cleaned at configuration** (deviation `order-validation`): duplicates are dropped and unknown sources removed. Today a duplicate runs twice and an unknown name fails at run time.
-- **One snapshot per request** (deviation `config-snapshot`). Today's router re-reads the registry at a dozen points of one request, so a change mid-request is seen piecemeal.
-- **When main sends it:** at startup and from `network-ipc`'s `refreshDownstream`, where today only ENS and provider-manager caches are cleared.
+- **When main sends it:** at startup and from `network-ipc`'s `refreshDownstream`, where today only ENS and provider-manager caches are cleared. Controls queue ahead of later requests, as naming's do.
 
 ## The router machine
 
@@ -197,30 +243,42 @@ The rules below restate the reference so a reviewer can check them against the c
 - zero-padded hex is canonicalized;
 - an unparseable value is left for the node to refuse.
 
-The `input` alias, field positions and the appended `data` key follow `jsjson`'s property order.
+The `input` alias, field positions and the appended `data` key follow JavaScript's property order.
 
 ### Answers
 
 The router keeps parsed values; the core keeps **text**.
-- **An answer's body** is decoded as UTF-8 with replacement, its BOM stripped, and validated as JSON, as `response.json()` does.
-- **Its `result`** is the last `result` member's text, since `JSON.parse` keeps the last of duplicate keys. A body without `result` answers `undefined`, as today; a JSON `null` body fails as today's `TypeError` does, with a fixed message.
-- **Agreement** compares the canonical form of each answer, the router's `stableValue`: keys sorted by UTF-16 code units, values as `JSON.stringify` writes them. The core computes it in one streaming pass and keeps only its digest, so no answer is held as a tree.
-- **What it retains:** the text of each group's first answer, as the router returns the first-arrived member's value.
+- **Decoding:** an answer's body is decoded as UTF-8 with replacement, its BOM stripped, and validated as JSON, as `response.json()` does.
+- **Depth:** the core's parser refuses nesting deeper than 512 levels, where V8 has no fixed limit. A deeper answer is a source failure (deviation `json-depth`).
+- **Its `result`** is the last `result` member's text, since `JSON.parse` keeps the last of duplicate keys. A body without `result` answers `undefined`, as today. A JSON `null` body fails as today's `TypeError` does, with a fixed message.
+- **Agreement** is equality of the router's `stableValue` string, which the core reproduces and compares by its **SHA-256 digest**:
+  - arrays in order;
+  - an object's own keys sorted by UTF-16 code units (`Object.keys(…).sort()`), the last of duplicate keys kept, `__proto__` an ordinary key;
+  - strings, numbers and `null` as `JSON.stringify` writes the parsed value: numbers as doubles in JavaScript's shortest form (`1e2` → `100`, `-0` → `0`), lone surrogates escaped;
+  - `undefined` (a missing `result`) as a tag that no JSON text produces.
+
+  **The method:** the core indexes the answer's spans within the request's budget, then hashes in canonical order. It is not a single pass. Independent equivalence vectors pin it: pairs that must agree and pairs that must not.
+- **What it retains,** for a quorum ([Quorum](#quorum)):
+  - the text of each group's first-arrived answer, while that group can still reach m;
+  - the text of the lowest-index member that answered, for Direct.
+
+  Each text is retained once, even when it serves both purposes.
 
 ### Quorum
 
-- **Members:** the first k endpoints in registry order; fewer than m endpoints is today's `RPC quorum needs <m> endpoints`. All members start at once.
-- **Agreement:** the first group to reach m wins. Every other member is cancelled, and the first-arrived member's answer is returned with today's trust.
+- **Members:** the first k endpoints in registry order. Fewer than m endpoints is today's `RPC quorum needs <m> endpoints`. All members start at once.
+- **Agreement:** the first group to reach m wins. Every other member is cancelled, and the group's first-arrived answer is returned with today's trust.
 - **Errors are never grouped**, as today: a revert is a member failure. Grouping identical errors is an [open question](#open-questions).
 - **Impossibility, the verification timer and the hand-off to Direct** follow the router exactly:
   - it waits for a still-running member when Direct comes next and nothing has answered;
-  - its `directFallback` evidence is the lowest-index member that answered, with its agreeing and dissenting hosts;
+  - **its `directFallback`** is the lowest-index member that answered, not the first to arrive (`chain-data-router.js:1286`). Its agreeing and dissenting hosts are judged against that member's answer.
   - `directUnansweredUrls` is the members that never answered;
   - the failure kinds are `capacity` and `timeout`.
+- **A vector** pins the difference. k = m = 3: endpoint 1 answers `{"b":1,"a":2}` first, endpoint 0 answers `{"a":2,"b":1}` later, endpoint 2 fails. Direct returns endpoint 0's text, with key order `a, b`.
 
 ### Direct
 
-- **Reuse:** with a quorum member's answer waiting, Direct returns it without a new request, with `user-configured` or `unverified` trust.
+- **Reuse:** with a quorum's `directFallback` waiting, Direct returns its text without a new request, with `user-configured` or `unverified` trust.
 - **Otherwise** it walks the endpoints the quorum didn't ask, one at a time, each at `configured`. Every error falls through to the next. The last error is thrown.
 - **Gnosis without API keys** has no endpoint left after a failed quorum (N = k = 3). Today's `All RPC endpoints failed` stays (parity); whether that is intended is an [open question](#open-questions).
 
@@ -239,14 +297,15 @@ The router keeps parsed values; the core keeps **text**.
 | infeasible | geth's `-32000` | yes |
 | a capability refusal | — | no: the next source |
 | unavailable, or no verdict | — | no |
-| an unexpected payload | a plain error | no; it becomes the last error |
+| `not_running`, `not_ready`, `lifecycle` (the adapter's own errors) | their fixed texts | no; it can become the last error, as today |
+| an unexpected payload, or `failure: "error"` | a plain error with a fixed text | no; it becomes the last error |
 
 - **Trust:** the block number is recorded only when it was the same before and after.
 
 ### Colibri
 
 - **One operation per request:** `requestViaColibri` with the source's budget. Main keeps its client cache and its one rebuild-and-retry.
-- **Any error falls through,** a verified revert included. Its data survives as the last error if later sources fail as unavailable.
+- **Any error falls through,** a verified revert included. A `node_error` survives as the last error if later sources fail as unavailable; a `failure` survives as a fixed text.
 - **Trust:** the prover's host, and `ZK sync-committee proof` or `Sync-committee proof`.
 
 ### Adaptive bypass
@@ -263,7 +322,11 @@ The origin is browsing data: it stays in core memory, is never logged and dies w
 ### Logs
 
 `eth_getLogs` follows the router's three mechanisms, with every regex and constant ported with vectors.
-- **The truncation check** (#496): a suspect answer is checked with the same filter, ending just before its oldest log, asked of the same source. Logs found there give today's `-32005` error.
+- **The truncation check** (#496): a suspect answer is checked once, with the same filter ending just before its oldest log, asked of the same source.
+  - **Logs found** give today's `-32005` error (`TruncatedLogsError`). It ends the request at once: no later source is tried, and later errors can't replace it.
+  - **An empty probe, or a failed one,** accepts the original answer.
+  - **No learning:** a quorum's probe runs with `learn: false`, so its failures don't cool or cap endpoints.
+  - **Vectors** cover a failed probe, the unlearned quorum probe, and a truncation while Direct is still available.
 - **Range learning,** in the Ant profile only:
   - per endpoint: caps, slow spans and cooldowns, with their 30 min and 30 s lifetimes;
   - up to two quorum rounds;
@@ -273,12 +336,13 @@ The origin is browsing data: it stays in core memory, is never logged and dies w
   - the RPC half, then Blockscout's pages back from the newest (50 a page, at most 40 pages, 8 MiB a page);
   - field-by-field agreement, then a quorum over the newest blocks;
   - today's cooldowns: the named rate limit clamped to 1–15 min, 5 min after a disagreement, 60 s after an abort, 30 min for a malformed pair.
-  - **The Ant profile's error ranking and range-cap parsing** (`rankLogScanError`, `logScanRangeCap`) move into the core. The bridge keeps its localhost server, its reply rewriting and its receipt grace.
+  - **The Ant profile's error ranking and range-cap parsing** (`rankLogScanError`, `logScanRangeCap`) move into the core. They read errors as received, before any reply is built. The bridge keeps its localhost server, its reply rewriting and its receipt grace.
 
 ### Results and trust
 
 - **Results:** `{ result, source, verified, trust? }`, where `verified` is true for myotis, colibri, quorum and blockscout. `trust` comes only on request.
 - **Final failure**, in today's order:
+  - a truncation, at once ([Logs](#logs));
   - the Ant profile's best-ranked error;
   - otherwise the last real error (not an unavailable source);
   - otherwise `All chain sources failed for <m> (<src>: <msg>; …)`, with today's `safeErrorMessage` shortening (hex runs over 128 digits, whitespace, 500 characters).
@@ -287,22 +351,49 @@ The origin is browsing data: it stays in core memory, is never logged and dies w
 
 The router's broadcast is the riskiest behavior it has:
 - **Direct re-sends the same bytes** to every endpoint on any error, and reports the *last* error.
-- **A lost reply looks like a failure.** An endpoint that accepted the transaction but answered too slowly, followed by `already known` or `nonce too low` from the next, is reported as a failure. The wallet then says "Transaction failed" while the transaction propagates, and a retry re-signs the intent with a newer nonce: the payment goes twice.
+- **A lost reply looks like a failure.** Say an endpoint accepts the transaction but answers too slowly, and the next one answers `already known` or `nonce too low`. That is reported as a failure. The wallet then says "Transaction failed" while the transaction propagates, and a retry re-signs the intent with a newer nonce: the payment goes twice.
 
-The core keeps the order and the re-sending, which are harmless because the bytes are identical. It replaces the outcome rule (deviation `broadcast-outcome`):
+Re-sending the same signed bytes is always safe, because they can be mined only once. Re-signing is what can pay twice. The core keeps today's order and re-sending, and replaces the outcome rule (deviation `broadcast-outcome`) with one goal: no definite failure unless the transaction was definitely not admitted.
+
+### Attempts
+
+Every attempt (a Direct endpoint's `eth_sendRawTransaction`, Myotis's `broadcast`) gets one class:
+
+| Class | When |
+|---|---|
+| **accepted** | a success whose result is the transaction's hash; Myotis `{ hash }` likewise |
+| **refused** | a node error whose code and message are on the **refusal list**; Myotis `{ rejected }` |
+| **not sent** | main's `not_sent`; Myotis `{ not_sent }`; an attempt the core never sent to main |
+| **ambiguous** | everything else: other node errors (`already known`, `nonce too low`, `replacement transaction underpriced`, unrecognized ones), a success with a different, missing or malformed hash, a non-2xx status, a transport failure, a timeout, a cancel or a deadline after the request reached main, Myotis `{ uncertain }` |
+
+- **The hash** is computed by the core: keccak-256 of the signed bytes. Hashes compare as 32-byte values, any hex case.
+- **The refusal list** is short and explicit: errors that mean this transaction is invalid and was admitted nowhere, such as insufficient funds, intrinsic gas too low or an invalid signature. Vectors pin it. Anything not on it is ambiguous, so a misclassification can only err towards `uncertain`.
+- **An attempt is possibly sent** from the moment the core sends its request to main until main's reply proves otherwise (`not_sent`).
+
+### Outcome
 
 | Outcome | When | Reply |
 |---|---|---|
-| **sent** | any broadcaster returned the transaction's hash | `{ hash, source, outcome: "sent" }` |
-| **uncertain** | no `sent`, and some attempt may have reached the network: a timeout or transport failure after the request went out, Myotis `uncertain`, a cancel after sending | `{ hash, source, outcome: "uncertain" }` |
-| **rejected** | every attempt was definitely refused: a node error before any uncertain attempt, Myotis `rejected` | the error, as today |
+| **sent** | some attempt was accepted, or reconciliation found the transaction | `{ hash, source, outcome: "sent" }`; `source` is `"reconcile"` after a lookup |
+| **rejected** | no attempt accepted or ambiguous, and at least one refused | the last refusal, as today's error, tagged `outcome: "rejected"` |
+| **not sent** | every attempt not sent, or none made | a failure tagged `outcome: "not_sent"`, with today's text, or `deadline` / `cancelled` / `reconfigured` |
+| **uncertain** | otherwise | `{ hash, source, outcome: "uncertain" }` |
 
-- **The hash** is computed by the core from the raw transaction (keccak of the signed bytes). A broadcaster returning a different hash is not `sent`, which brings the wallet's mismatch check into the core.
-- **Reconciliation:** before reporting `uncertain` or `rejected` after an uncertain attempt, the core asks once whether the hash is known (`eth_getTransactionByHash` through the read order, within the request's deadline). If it is known, the outcome is `sent` with `source: "reconcile"`. This replaces text matching on `already known`: the network, not a message, says whether the transaction exists.
+- **Every terminal path** goes through this table: the overall deadline, a `cancel`, a configuration change, a budget exhaustion and core shutdown. An outstanding attempt counts as ambiguous once it is possibly sent, so the outcome is then `uncertain`, never `deadline` or `cancelled`. Only `rejected` and `not sent` are failures; both are safe to sign again.
+- **Reconciliation:** before reporting `uncertain`, the core asks once whether the network knows the hash, within the reconciliation room ([Deadlines](#deadlines)).
+  - **The lookup** is `eth_getTransactionByHash(hash)`, run as a non-interactive read through the read order.
+  - **A match** is a result object whose `hash` equals the transaction's. A match makes the outcome `sent`.
+  - **Anything else** leaves the outcome `uncertain`: `null`, an error, a mismatched or malformed object, or no time left. Absence is never evidence that the transaction wasn't sent, so a lookup never produces `rejected`.
+- **Myotis:** `rejected` stays final, with no other broadcaster, and so does `uncertain`. `not_sent` falls to the next broadcaster, as today.
+
+### Main's record
+
+The core can die mid-broadcast: an exit, the watchdog, a protocol error. Main therefore keeps its own record of every `chain.broadcast` in flight: the hash, and whether any attempt is possibly sent.
+- **Marking:** main's executors mark the record when they start an exchange whose body is an `eth_sendRawTransaction` of that raw transaction, or a Myotis `broadcast` of it.
+- **No reply from the core:** main reports `uncertain` if the record is marked, and a definite `not_sent` failure if not. Main never reports `rejected` on its own.
 - **Main's drivers:**
-  - **The wallet** treats `uncertain` as sent-but-unconfirmed: it records the hash, tracks the receipt as for any send, and must not offer to re-sign the same intent. Its error text for it is a [follow-up](#open-questions).
+  - **The wallet** treats `uncertain` as sent-but-unconfirmed. It records the hash and tracks the receipt as for any send. It may offer to broadcast the same signed bytes again, or to replace them at the same nonce, but never to sign the intent again at a new nonce. Its text and UI are a [follow-up](#open-questions).
   - **The Ant bridge** keeps its `Broadcast outcome uncertain; reconcile the signed transaction` reply.
-- **Myotis:** `rejected` stays final, with no other broadcaster, and `uncertain` stays final. `not_sent` falls to the next broadcaster, as today.
 
 ## Fee quotes
 
@@ -319,13 +410,20 @@ Vectors pin the downgrade boundaries. Whether a derived base fee and a "verified
 
 ## Errors and text
 
-Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain data can't follow it: a node's `{ code, message, data }` (revert data, `nonce too low`) is what dApps and the wallet act on.
-- **Node errors pass through** as an opaque payload, which the core:
-  - caps (message ≤ 1 KiB, data ≤ 256 KiB);
-  - may return to the caller of the request it came from;
-  - never logs, caches or places in another request's reply.
-- **The core's own diagnostics** use the core's text: unavailable sources, aggregates, parse failures. JSON parse failures get a fixed message (deviation `json-parse-text`), where V8's `SyntaxError` embeds a fragment of the body.
-- **Aggregates** keep today's text: they name sources and include member messages shortened as today. They reach the caller exactly as now.
+Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain data can't follow it: a node's `{ code, message, data }`, such as revert data or `nonce too low`, is what dApps and the wallet act on. So errors carry their origin.
+- **The wire form:** a `chain.*` request fails with 0001's fixed error code `chain_error`, whose `data` is tagged:
+
+| `data.kind` | Carries | Comes from |
+|---|---|---|
+| `node` | `code`, `message`, and `data` if the node's error had it | a JSON-RPC error object in an answer body, or a verifier's `node_error` |
+| `core` | `message`, and `code` and `data` where today's error has them | the core's own errors, with today's texts: aggregates, truncation (`-32005`), Myotis's reverts and refusals, `Unsupported read method`, unavailable sources, parse failures |
+
+  Broadcast failures add `outcome`. 0001's own codes stay for what they mean: `deadline`, `cancelled`, `busy`, `budget`, `too_large`, plus `reconfigured`.
+- **Main rebuilds** the error as today's router throws it: an `Error` with that message, with `code` and `data` set only if present, and with the router's extra fields (`directFallback` stays internal to the core).
+- **Node errors pass through** unchanged. The core may return one to the caller of the request it came from, and never logs, caches or places it in another request's reply. Their size is bounded by the answer cap, and the reply by the message cap. There is no separate cap, so revert data is never cut.
+- **Adapter and transport diagnostics,** text that main, an SDK or the network stack produced, never pass through: they get the core's fixed text (deviation `adapter-error-text`). Only an error object a node or prover returned is a node error.
+- **Classification** runs on errors as received, before any reply is built: Myotis's verdicts, the Ant profile's ranking, the truncation check and the broadcast classes.
+- **The core's own texts** reproduce today's. JSON parse failures get a fixed message (deviation `json-parse-text`), where V8's `SyntaxError` embeds a fragment of the body.
 - **Logging:** the core logs request outcomes by chain, method and source only, never origins, addresses or messages.
 
 ## Transport
@@ -333,7 +431,12 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 `shell.rpc` goes through the session's stack: deviation `transport`, as naming. Today the router uses Node's undici `fetch`, which ignores proxy and Tor settings and resolves `.onion` names through the system resolver.
 - **Redirects** follow naming's rule (deviation `rpc-redirects`). Today undici follows up to 20 redirects unchecked, and turns a POST into a GET on 301 and 302.
 - **429** is a failure, as today (`policy: "plain"`).
-- **Answers** are capped at 16 MiB (deviation `response-caps`). Today there is no cap.
+- **Answers** are capped at 18 MiB (deviation `response-caps`; today there is no cap). The largest answer the reference must accept is an `html()` document at its 8 MiB limit:
+  - ABI-encoded and hex, it is 16,777,346 characters;
+  - its minimal JSON-RPC answer is 16,777,382 bytes;
+  - the cap leaves about 2 MiB for envelopes and whitespace.
+
+  A boundary vector pins it. Larger `eth_getLogs` scans fail with `too_large` from that source; providers' own limits usually apply first.
 - **Status:** a non-2xx answer is `HTTP <status>`, its body unread, as today.
 
 ## Bounds
@@ -341,15 +444,22 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 | Budget | Bound | Exhausted |
 |---|---|---|
 | running / waiting chain requests | 64 / 256 | `busy` |
-| one request | 120 s | `deadline` |
-| one answer | 16 MiB | `too_large`: a source failure |
-| one message (fragments) | 24 MiB | protocol error (main and the core never send one) |
+| one request | 120 s, or the caller's `deadline_ms` | `deadline` (broadcasts: [Outcome](#outcome)) |
+| one answer | 18 MiB | `too_large`: a source failure |
+| one message | 32 MiB, serialized | the request fails with `too_large`; a received one is a protocol error |
+| reassembly | one message cap per direction, outside the reader's 16 MiB | the reader waits for the hand-off |
+| the chain writer | one message cap of unwritten bytes | the chain thread waits |
 | quorum k / endpoints | 9 / 64 | clamped at configuration |
-| memory, per request | 64 MiB: answer texts, digests' transient state, replies | the request ends with `budget` |
+| JSON depth | 512 | a source failure |
+| memory, per request | 96 MiB: received messages once handed over, answer texts and their indexes, retained texts, replies | the request ends with `budget` (broadcasts: [Outcome](#outcome)) |
 | memory, all chain requests | 256 MiB, with unwritten replies counted until written (0004's rule) | new requests `busy`, running ones `budget` |
-| node error payload | message 1 KiB, data 256 KiB | cut / `too_large` |
 | adaptive routes | 1024 | the oldest evicted |
 | retired endpoint state | 64 | the oldest dropped |
+
+**At the cap**, an 8 MiB document through a quorum of three peaks at about 78 MiB in its request:
+- one base64 message in hand: 24 MiB;
+- its decoded answer and index: about 22 MiB;
+- two retained texts: 32 MiB.
 
 ## Deviations
 
@@ -358,18 +468,20 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 | `transport` | Node's undici, outside the session | the session's stack | `.onion` RPCs work under Tor; a missing route fails closed |
 | `rpc-redirects` | ≤ 20 hops unchecked, POST→GET on 301/302 | each hop checked, method and body kept | a refused hop is a source failure |
 | `rpc-id` | `id: Date.now()` | a per-request counter | none for nodes; vectors normalize ids |
-| `response-caps` | none | 16 MiB per answer | `too_large`, a source failure |
+| `response-caps` | none | 18 MiB per answer | `too_large`, a source failure |
+| `json-depth` | V8's parser, no fixed depth | 512 levels | a source failure |
 | `overall-deadline` | none | 120 s | `deadline` |
 | `admission` | unbounded | 64 running, 256 waiting | `busy` |
 | `quorum-clamps` | `k ≥ 1`, `timeout ≥ 500`, unbounded above | also `k ≤ 9`, `timeout ≤ 60 s`, ≤ 64 endpoints | clamped |
 | `order-validation` | duplicates run twice; unknown names fail late | dropped at configuration | |
-| `config-snapshot` | registry re-read mid-request | one snapshot per request | a change applies to the next request |
+| `config-change` | the registry re-read mid-request; a change applies piecemeal | a change ends the chain's requests; main sends reads and fee quotes again once | callers see the new configuration whole |
 | `abandoned-exchanges` | the caller's signal doesn't reach the quorum | a cancel cancels members | |
 | `state-retention` | log-range and pair state never pruned | configured + 64 retired | |
 | `json-parse-text` | V8's message with a body fragment | a fixed message | |
+| `adapter-error-text` | adapter and transport diagnostics' own text | the core's fixed text; node errors pass through | a local diagnostic reads differently |
 | `myotis-readiness` | `isReady()` sampled live | the last `chain.availability` | |
 | `memory-budgets` | unbounded | per request and in total | `budget`, `busy` |
-| `broadcast-outcome` | the last error wins; lost replies look like failures | `sent` / `uncertain` / `rejected`, with reconciliation | no reported failure for a transaction that may have gone out |
+| `broadcast-outcome` | the last error wins; lost replies look like failures | attempt classes, `sent` / `uncertain` / `rejected` / `not_sent`, reconciliation, main's record | no definite failure for a transaction that may have gone out |
 | `monotonic-time` | cooldowns on `Date.now()` | the monotonic clock | |
 
 ## Replay
@@ -377,8 +489,8 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 The harness drives the pinned `chain-data-router.js`, with the real `blockscout-logs.js` and the Ant bridge's options, through scripted worlds:
 - **World inputs:**
   - a registry snapshot per chain;
-  - Myotis readiness and status sequences, and its outcomes per operation;
-  - Colibri outcomes;
+  - Myotis readiness and status sequences, and its outcomes per operation, its three thrown errors included;
+  - Colibri outcomes, with and without codes;
   - `fetch` exchanges with their delays, statuses and throws;
   - Blockscout pages and DNS answers;
   - fake timers;
@@ -386,39 +498,50 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
 - **Recorded:**
   - every exchange, with the URL, the body with its `id` normalized, its start, and its end or cancel;
   - every verifier operation;
-  - each result or error with its key order, code, message and data;
+  - each result or error with its key order, code, message and data, `undefined` included;
   - the state tables after each step.
 - **No randomness** to seed.
-- **The existing suites** (`chain-data-router.test.js`, the Ant log-scan and Blockscout suites) define the first scenarios. Deviation vectors patch the reference in memory where a deviation has no natural trigger, as 0004's do.
+- **The existing suites** (`chain-data-router.test.js`, the Ant log-scan and Blockscout suites) define the first scenarios.
+- **Named boundary cases:**
+  - the `html()` limit;
+  - Direct's lower-index member that answered later;
+  - quorum on answers without `result`;
+  - truncation probes that fail or come back empty;
+  - a truncation with Direct still available;
+  - nesting at 512 and 513 levels;
+  - canonical-equivalence pairs: duplicate keys, number spellings, `__proto__`, lone surrogates.
+- **Deviation vectors** patch the reference in memory where a deviation has no natural trigger, as 0004's do. Broadcast's classes, outcomes and main's record are deviations, specified by their own vectors.
 
 ## Implementation steps
 
 1. **Codecs and vectors:**
-   - normalization, `stableValue` over `jsjson` with the streaming canonical digest;
+   - normalization, and the `stableValue` digest with its equivalence vectors;
    - `feeQuote`, Myotis payload classification, `blockscout-logs`' mappers and filters;
    - the Ant profile's ranking and cap parsing;
+   - the broadcast refusal list and transaction hash;
    - byte parity from the pinned JS.
 2. **The replay harness** (`vectors/chain-replay.json`).
-3. **`fc-chain`:** the machine on `fc-naming`'s executor, replayed.
+3. **`fc-chain`:** the machine, replayed.
 4. **`freedom-cored`:**
-   - fragments in `fc-protocol`;
-   - the `chain.*` methods on their own pool;
-   - `shell.rpc`'s new parameters;
+   - fragments in `fc-protocol` and the transport;
+   - the chain thread and the `chain.*` methods;
+   - `shell.rpc`'s new parameters and `not_sent`;
    - the new verified operations.
 5. **freedom-browser:**
    - the executors;
-   - the router, the fee quote and the broadcast become drivers;
+   - the router, the fee quote and the broadcast become drivers, with main's broadcast record;
    - the wallet's `uncertain` handling;
    - delete the JS router.
 
-[0002](0002-signing.md)'s non-goal "nonces, fee estimation, gas limits, broadcasting and receipts stay in main" changes with step 5. Fee quotes, reads and broadcast routing move into the core; nonces and gas limits stay in main.
+[0002](0002-signing.md)'s non-goal on fee estimation and broadcasting is amended there: fee quotes, reads and broadcast routing move into the core with step 5, while nonces and gas limits stay in main.
 
 ## Open questions
 
-1. **Nonce floor.** Should the core keep a per-account floor, the highest nonce it broadcast plus one, so that concurrent sends and a retry after `uncertain` can't reuse or skip a nonce?
+1. **Nonce floor.** Should the core keep a per-account floor, the highest nonce it broadcast plus one, so that concurrent sends and a send after `uncertain` can't reuse or skip a nonce?
 2. **Revert agreement.** Today reverts never agree in a quorum, so a dApp loses the revert data unless Myotis or Colibri gave it. Should identical error objects (code and data) count as agreement?
 3. **Colibri's coverage.** Which methods does Colibri's `VerifiedOnly` client actually prove (`eth_gasPrice`, `eth_feeHistory`, `eth_blockNumber`, `pending` reads)? Today any Colibri success is labelled verified.
 4. **Gnosis' Direct after a failed quorum** has nothing to ask without API keys. Intended?
 5. **Myotis' head-of-line wait.** Methods Myotis doesn't serve take a slot before being refused. Checking the method first is a pure improvement, but observable in timing.
-6. **The wallet's `uncertain` text and UI** (step 5): how to show "sent, unconfirmed" and block a re-sign of the same intent.
-7. **Pinning and trust** (roadmap 3.1): whether a quorum of unpinned `latest` reads may be called `verified`.
+6. **The wallet's `uncertain` text and UI** (step 5): how to show "sent, unconfirmed", offer the same bytes again, and block a new signature for the same intent.
+7. **HTTP statuses on broadcast.** A 401, 403 or 429 is ambiguous here, although a gateway usually answers it before forwarding. Is a misconfigured key showing `uncertain` acceptable, or should these be refusals?
+8. **Pinning and trust** (roadmap 3.1): whether a quorum of unpinned `latest` reads may be called `verified`.
