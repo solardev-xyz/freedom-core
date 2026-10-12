@@ -105,6 +105,8 @@ struct World {
     sent: Vec<Sent>,
     /// When the machine cancelled requests.
     cancelled: Vec<u64>,
+    /// The most the sessions held at once.
+    peak: usize,
 }
 
 impl World {
@@ -124,6 +126,7 @@ impl World {
             failing: Vec::new(),
             sent: Vec::new(),
             cancelled: Vec::new(),
+            peak: 0,
         }
     }
 
@@ -144,6 +147,7 @@ impl World {
         }
         loop {
             self.machine.poll();
+            self.peak = self.peak.max(self.machine.held());
             self.replies.extend(self.machine.take_replies());
             for Emitted {
                 effect,
@@ -184,6 +188,7 @@ impl World {
                 };
                 self.deliver(at + 10, Pending::Answer(id, answer));
             }
+            self.peak = self.peak.max(self.machine.held());
             match self.machine.fire_next(until) {
                 None => return,
                 Some(Fired::Timer) => {}
@@ -194,6 +199,7 @@ impl World {
                     }
                     Some(Pending::Answer(id, answer)) => {
                         self.machine.complete(id, answer);
+                        self.peak = self.peak.max(self.machine.held());
                     }
                     None => {}
                 },
@@ -625,4 +631,159 @@ fn a_thrown_message_too_large_to_reply_is_result_too_large() {
         message(world.reply(under)),
         Some("Myotis availability changed repeatedly while resolving nick.eth")
     );
+}
+
+/// The most a quorum lookup of `name` holds at once, unbounded.
+fn peak_of(name: &str) -> usize {
+    let mut world = World::new(config());
+    world.machine.resolve_content(name);
+    world.run(10_000);
+    world.peak
+}
+
+#[test]
+fn a_session_over_its_budget_ends_and_caches_nothing() {
+    let peak = peak_of("vitalik.eth");
+    assert!(peak > 0);
+    let mut bounded = config();
+    bounded.bounds.session_bytes = peak / 2;
+    let mut world = World::new(bounded);
+    let a = world.machine.resolve_content("vitalik.eth");
+    world.run(10_000);
+    assert_eq!(message(world.reply(a)), Some("budget"));
+    // Its I/O was cancelled and what it held is free.
+    assert!(!world.cancelled.is_empty());
+    assert_eq!(world.machine.held(), 0);
+    // Nothing was cached: the next lookup starts a session.
+    world.machine.resolve_content("vitalik.eth");
+    assert_eq!(world.machine.running(), 1);
+}
+
+#[test]
+fn every_callers_reply_counts_against_the_session() {
+    let peak = peak_of("vitalik.eth");
+    let mut alone = World::new(config());
+    let a = alone.machine.resolve_content("vitalik.eth");
+    alone.run(10_000);
+    let reply = alone.reply(a).outcome.as_ref().unwrap().stringify().len();
+    for (room, outcome) in [(3 * reply, None), (3 * reply - 1, Some("budget"))] {
+        let mut bounded = config();
+        bounded.bounds.session_bytes = peak + room;
+        let mut world = World::new(bounded);
+        let callers: Vec<u64> = (0..3)
+            .map(|_| world.machine.resolve_content("vitalik.eth"))
+            .collect();
+        world.run(10_000);
+        for caller in &callers {
+            assert_eq!(message(world.reply(*caller)), outcome);
+        }
+        // A result whose replies don't fit is taken back from the cache.
+        world.machine.resolve_content("vitalik.eth");
+        assert_eq!(world.machine.running(), usize::from(outcome.is_some()));
+    }
+}
+
+#[test]
+fn crossing_the_total_fails_a_session_and_holds_new_ones_back() {
+    let peak = peak_of("vitalik.eth").max(peak_of("nick.eth"));
+    let mut bounded = config();
+    bounded.bounds.total_bytes = peak + peak / 2;
+    bounded.bounds.resume_bytes = 1;
+    let mut world = World::new(bounded);
+    let a = world.machine.resolve_content("vitalik.eth");
+    let b = world.machine.resolve_content("nick.eth");
+    // Run until one of them has failed on the total.
+    let mut at = 0;
+    while !world.replies.iter().any(|r| message(r) == Some("budget")) {
+        at += 1;
+        world.run(at);
+        assert!(at < 10_000, "neither crossed the total");
+    }
+    // While the other runs, the total stays over the resume mark: a new
+    // session is busy, and only then does one start again.
+    assert_eq!(world.machine.running(), 1, "the other runs on");
+    let c = world.machine.resolve_content("alice.eth");
+    world.run(at);
+    assert_eq!(protocol(world.reply(c)), Some("busy"));
+    world.run(10_000);
+    assert_eq!(world.machine.held(), 0);
+    let outcomes: Vec<Option<&str>> = [a, b].iter().map(|c| message(world.reply(*c))).collect();
+    assert!(outcomes.contains(&Some("budget")));
+    world.machine.resolve_content("alice.eth");
+    assert_eq!(world.machine.running(), 1);
+}
+
+/// A 32-byte ABI word holding `n`.
+fn word(n: usize) -> String {
+    format!("{n:064x}")
+}
+
+/// An `OffchainLookup` from the Universal Resolver whose `count` URLs all
+/// point at one `len`-byte string: it decodes to `count * len` bytes.
+fn aliased_lookup(count: usize, len: usize) -> String {
+    let sender = format!("{:0>64}", "eeeeeeee14d718c2b47d9923deab1335e144eeee");
+    let url = "u".repeat(len);
+    let padded = format!(
+        "{:0<width$}",
+        hex(url.as_bytes()),
+        width = len.div_ceil(32) * 64
+    );
+    // urls: the count, then `count` offsets to one string after them.
+    let mut urls = word(count);
+    for _ in 0..count {
+        urls += &word(count * 32);
+    }
+    urls += &word(len);
+    urls += &padded;
+    let urls_at = 5 * 32;
+    let call_data_at = urls_at + urls.len() / 2;
+    let extra_at = call_data_at + 64;
+    // Left-aligned in its word: the callback selector, and one byte each
+    // of call data and extra data.
+    let left = |hex: &str| format!("{hex:0<64}");
+    let (callback, call_data, extra) = (left("deadbeef"), left("01"), left("09"));
+    let (urls_word, call_data_word, extra_word) =
+        (word(urls_at), word(call_data_at), word(extra_at));
+    let one = word(1);
+    format!(
+        "0x556f1830{sender}{urls_word}{call_data_word}{callback}{extra_word}{urls}{one}{call_data}{one}{extra}"
+    )
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[test]
+fn answers_count_against_the_session() {
+    let mut bounded = config();
+    bounded.bounds.session_bytes = 20_000;
+    let mut world = World::new(bounded);
+    // Every answer grows by 30 KB of a member JSON-RPC readers ignore.
+    let pad = format!(r#","pad":"{}"}}"#, "x".repeat(30_000));
+    for body in world.answers.values_mut() {
+        body.pop();
+        body.push_str(&pad);
+    }
+    let a = world.machine.resolve_content("vitalik.eth");
+    world.run(10_000);
+    assert_eq!(message(world.reply(a)), Some("budget"));
+}
+
+#[test]
+fn an_aliasing_decode_counts_against_the_session() {
+    let mut bounded = config();
+    bounded.bounds.session_bytes = 50_000;
+    let mut world = World::new(bounded);
+    // Each leg's call answers with a lookup that decodes to 100 KB from a
+    // few KB.
+    let revert = aliased_lookup(100, 1000);
+    assert!(revert.len() < 20_000);
+    world.answers.insert(
+        "eth_call".into(),
+        format!(r#"{{"jsonrpc":"2.0","id":1,"error":{{"code":3,"message":"execution reverted","data":"{revert}"}}}}"#),
+    );
+    let a = world.machine.resolve_content("vitalik.eth");
+    world.run(10_000);
+    assert_eq!(message(world.reply(a)), Some("budget"));
 }

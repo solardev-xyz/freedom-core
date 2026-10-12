@@ -61,7 +61,8 @@ struct Inner<Q, A> {
     seq: u64,
     next_id: u64,
     timers: BTreeMap<(Ms, u64), Slot>,
-    io: HashMap<u64, Option<A>>,
+    /// Each outstanding request's owner, and its answer once it has one.
+    io: HashMap<u64, (u64, Option<A>)>,
     effects: Vec<Effect<Q>>,
     owner: u64,
 }
@@ -126,6 +127,21 @@ impl<Q, A> Rt<Q, A> {
         self.inner.borrow_mut().owner = owner;
     }
 
+    /// How many effects are waiting to be taken.
+    pub fn pending_effects(&self) -> usize {
+        self.inner.borrow().effects.len()
+    }
+
+    /// Calls `f` on each request among the waiting effects from index
+    /// `from` on.
+    pub fn each_request_from(&self, from: usize, mut f: impl FnMut(&Q)) {
+        for effect in self.inner.borrow().effects.iter().skip(from) {
+            if let Effect::Request { request, .. } = effect {
+                f(request);
+            }
+        }
+    }
+
     /// The effects emitted since the last call, in order.
     pub fn take_effects(&self) -> Vec<Effect<Q>> {
         std::mem::take(&mut self.inner.borrow_mut().effects)
@@ -135,12 +151,17 @@ impl<Q, A> Rt<Q, A> {
     /// request is unknown, cancelled or already answered.
     pub fn complete(&self, id: u64, answer: A) -> bool {
         match self.inner.borrow_mut().io.get_mut(&id) {
-            Some(slot @ None) => {
+            Some((_, slot @ None)) => {
                 *slot = Some(answer);
                 true
             }
             _ => false,
         }
+    }
+
+    /// The owner of outstanding request `id`.
+    pub fn owner_of(&self, id: u64) -> Option<u64> {
+        self.inner.borrow().io.get(&id).map(|(owner, _)| *owner)
     }
 
     /// Schedules an external event `token` at `at`, ordered after every
@@ -250,8 +271,8 @@ impl<Q: Unpin, A> Future for Io<Q, A> {
             None => {
                 let id = inner.next_id;
                 inner.next_id += 1;
-                inner.io.insert(id, None);
                 let (at, owner) = (inner.now, inner.owner);
+                inner.io.insert(id, (owner, None));
                 if let Some(request) = this.request.take() {
                     inner.effects.push(Effect::Request {
                         id,
@@ -263,7 +284,7 @@ impl<Q: Unpin, A> Future for Io<Q, A> {
                 this.id = Some(id);
                 Poll::Pending
             }
-            Some(id) => match inner.io.get_mut(&id).and_then(Option::take) {
+            Some(id) => match inner.io.get_mut(&id).and_then(|(_, slot)| slot.take()) {
                 Some(answer) => {
                     inner.io.remove(&id);
                     this.done = true;

@@ -327,6 +327,17 @@ pub(crate) async fn ur_call(
                 ));
             }
         };
+        // Its decoded output counts against the session: an aliasing
+        // decode can outgrow its input (`memory-budgets`).
+        ctx.charge(
+            lookup
+                .urls
+                .iter()
+                .map(|url| url.as_ref().map_or(0, String::len))
+                .sum::<usize>()
+                + lookup.call_data.len()
+                + lookup.extra_data.len(),
+        );
         if lookup.sender != ur::UNIVERSAL_RESOLVER {
             return Err(fail(CallError::SenderMismatch, to, &data));
         }

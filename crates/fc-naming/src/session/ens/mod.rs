@@ -157,6 +157,11 @@ impl Thrown {
         Self::new("result too large")
     }
 
+    /// Deviation `memory-budgets`: the session spent its budget.
+    pub fn budget() -> Self {
+        Self::new("budget")
+    }
+
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -286,6 +291,11 @@ pub struct Ctx {
     /// Wall-clock milliseconds at monotonic zero (Tezos expiry reads the
     /// wall clock).
     pub(crate) wall_offset: std::cell::Cell<f64>,
+    /// What sessions hold (deviation `memory-budgets`).
+    pub(crate) budget: RefCell<crate::session::budget::Budget>,
+    /// The session the machine is polling (0 for none): what a future
+    /// charges goes to it.
+    pub(crate) session: std::cell::Cell<u64>,
 }
 
 impl Ctx {
@@ -311,7 +321,25 @@ impl Ctx {
             random: RefCell::new(random),
             tezos: super::tezos::TezosState::default(),
             wall_offset: std::cell::Cell::new(0.0),
+            budget: RefCell::new(crate::session::budget::Budget::default()),
+            session: std::cell::Cell::new(0),
         }
+    }
+
+    /// Charges `bytes` to the session being polled.
+    pub(crate) fn charge(&self, bytes: usize) {
+        let session = self.session.get();
+        if session != 0 {
+            let bounds = self.bounds();
+            self.budget.borrow_mut().charge(session, bytes, &bounds);
+        }
+    }
+
+    /// Whether the session being polled has spent its budget: it ends at
+    /// the poll's end, and caches nothing.
+    pub(crate) fn over_budget(&self) -> bool {
+        let session = self.session.get();
+        session != 0 && self.budget.borrow().over(session)
     }
 
     pub(crate) fn now(&self) -> Ms {
@@ -461,7 +489,7 @@ pub(crate) enum Store {
 pub(crate) fn cache(ctx: &Ctx, store: Store, key: &str, result: JsValue) -> JsValue {
     // Deviation `reply-size`: a result too large to reply with is never
     // cached; the machine replies `result too large`.
-    if !ctx.bounds().reply_fits(result.stringify().len()) {
+    if !ctx.bounds().reply_fits(result.stringify().len()) || ctx.over_budget() {
         return result;
     }
     let expires = ctx.now_f() + ttl_for(&result);
