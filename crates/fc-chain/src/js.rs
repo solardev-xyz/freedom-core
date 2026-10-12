@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use fc_json::index::{Kind, Value, quote_units};
+use fc_json::index::{KeyOrder, Kind, Value, quote_units};
 use fc_json::number_to_string;
 
 /// A JavaScript string: UTF-16 code units. Node errors and the router's
@@ -123,6 +123,11 @@ pub fn is_js_whitespace(unit: u16) -> bool {
     )
 }
 
+/// `Number.isSafeInteger(x)` for a number.
+pub(crate) fn is_safe_integer(x: f64) -> bool {
+    x.is_finite() && x.trunc() == x && x.abs() <= 9_007_199_254_740_991.0
+}
+
 /// `String.prototype.trim`.
 pub(crate) fn trim(units: &[u16]) -> &[u16] {
     let start = units
@@ -134,6 +139,71 @@ pub(crate) fn trim(units: &[u16]) -> &[u16] {
         .rposition(|u| !is_js_whitespace(*u))
         .map_or(start, |i| i + 1);
     units.get(start..end).unwrap_or_default()
+}
+
+/// What `value[i]` gives for a JSON value.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Element<'i, 't> {
+    Undefined,
+    Value(Value<'i, 't>),
+    /// One UTF-16 unit of a string, as a one-unit string.
+    Unit(u16),
+}
+
+impl<'i, 't> Element<'i, 't> {
+    /// `element == null`.
+    pub(crate) fn is_nullish(self) -> bool {
+        match self {
+            Self::Undefined => true,
+            Self::Value(value) => value.kind() == Kind::Null,
+            Self::Unit(_) => false,
+        }
+    }
+
+    /// The value, when the element is a JSON value of `kind`.
+    pub(crate) fn of_kind(self, kind: Kind) -> Option<Value<'i, 't>> {
+        match self {
+            Self::Value(value) if value.kind() == kind => Some(value),
+            _ => None,
+        }
+    }
+
+    /// `JSON.stringify(element)`; `None` for `undefined`.
+    pub(crate) fn to_json(self) -> Option<String> {
+        match self {
+            Self::Undefined => None,
+            Self::Value(value) => Some(value.stringify(KeyOrder::Property)),
+            Self::Unit(unit) => Some(JsString::from_units(vec![unit]).to_json()),
+        }
+    }
+
+    /// `String(element)`.
+    pub(crate) fn js_string(self) -> Result<JsString, JsError> {
+        match self {
+            Self::Undefined => Ok(JsString::from("undefined")),
+            Self::Value(value) => js_string_of(value),
+            Self::Unit(unit) => Ok(JsString::from_units(vec![unit])),
+        }
+    }
+}
+
+/// `value[i]`: an array's element, an object's property `"i"`, a string's
+/// code unit, or `undefined`. `None` for `null`, where JavaScript throws
+/// (and `?.[i]` gives `undefined`).
+pub(crate) fn element<'i, 't>(value: Value<'i, 't>, i: usize) -> Option<Element<'i, 't>> {
+    let found = match value.kind() {
+        Kind::Null => return None,
+        Kind::Array => value.children().nth(i).map(Element::Value),
+        Kind::Object => value.get(&i.to_string()).map(Element::Value),
+        Kind::String => value.units().nth(i).map(Element::Unit),
+        Kind::True | Kind::False | Kind::Number => None,
+    };
+    Some(found.unwrap_or(Element::Undefined))
+}
+
+/// `TypeError`'s message for `null[i]`.
+pub(crate) fn null_index_message(i: usize) -> String {
+    format!("Cannot read properties of null (reading '{i}')")
 }
 
 /// `String(value)` for a JSON value. Arrays join their elements with commas

@@ -135,7 +135,7 @@ fn not_json(_: fc_json::index::IndexError) -> JsError {
 }
 
 /// `BigInt(value)` for a JSON value (`None` is `undefined`).
-fn to_bigint(value: Option<Value<'_, '_>>) -> Result<Parsed, JsError> {
+pub(crate) fn to_bigint(value: Option<Value<'_, '_>>) -> Result<Parsed, JsError> {
     let Some(value) = value else {
         return Err(JsError::new(
             "TypeError",

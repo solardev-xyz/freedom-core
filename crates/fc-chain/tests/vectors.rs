@@ -6,10 +6,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use fc_chain::{
-    AnswerError, JSON_PARSE_FAILURE, JsString, MAX_DECIMAL_BITS, Outcome, SourceFailure,
+    AnswerError, JSON_PARSE_FAILURE, JsString, MAX_DECIMAL_BITS, MAX_MYOTIS_REFUSAL_MESSAGE,
+    MYOTIS_BLOB_FIELDS, MYOTIS_NOT_READY, MyotisFailure, MyotisOperation, Outcome, SourceFailure,
     StableDigest, TxHash, broadcast_failure_text, decode_answer, fee_quote, fee_quote_failure_text,
-    is_js_whitespace, normalize_params, request_failure_text, safe_error_message, stable_digest,
-    stable_value, transaction_hash,
+    is_js_whitespace, myotis_answer, myotis_operation, myotis_trust, normalize_params,
+    request_failure_text, safe_error_message, stable_digest, stable_value, transaction_hash,
 };
 use fc_json::index::{Index, IndexError, KeyOrder};
 use serde_json::Value as Json;
@@ -381,4 +382,154 @@ fn transaction_hashes() {
         }
     }
     assert!(cases.iter().filter(|c| c["js"]["invalid"] == true).count() >= 5);
+}
+
+// ---------------------------------------------------------------------------
+// Read methods, the source order, Myotis, the Ant profile, Blockscout and
+// broadcast refusals.
+
+fn strings(value: &Json) -> Vec<&str> {
+    value
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap())
+        .collect()
+}
+
+/// A JSON text recorded as a string, or `null` for none: `None`.
+fn json_text(value: &Json) -> Option<&str> {
+    value.as_str()
+}
+
+/// Checks a Myotis failure against the router's error.
+fn assert_myotis_failure(failure: &MyotisFailure, error: &Json, name: &str) {
+    match failure {
+        MyotisFailure::Final(refusal) => {
+            assert_eq!(error["final"], true, "{name}");
+            assert_eq!(str_of(error, "name"), "Error", "{name}");
+            assert_eq!(
+                refusal.message.to_json(),
+                str_of(error, "message_json"),
+                "{name}"
+            );
+            assert_eq!(
+                opt_str(error, "code_json"),
+                Some(refusal.code.to_string().as_str()),
+                "{name}"
+            );
+            assert_eq!(
+                opt_str(error, "data_json"),
+                refusal.data.as_ref().map(JsString::to_json).as_deref(),
+                "{name}"
+            );
+            assert_eq!(opt_str(error, "myotis_refusal"), refusal.kind(), "{name}");
+        }
+        MyotisFailure::Unavailable(message) => {
+            assert_eq!(error["unavailable"], true, "{name}");
+            assert_eq!(error["final"], false, "{name}");
+            assert_eq!(message.to_json(), str_of(error, "message_json"), "{name}");
+            assert!(error.get("code_json").is_none(), "{name}");
+        }
+        MyotisFailure::Error(js) => {
+            assert_eq!(error["unavailable"], false, "{name}");
+            assert_eq!(error["final"], false, "{name}");
+            assert_eq!(js.name, str_of(error, "name"), "{name}");
+            assert_eq!(
+                js.message.to_json(),
+                str_of(error, "message_json"),
+                "{name}"
+            );
+            assert!(error.get("code_json").is_none(), "{name}");
+        }
+    }
+}
+
+fn assert_operation(operation: &MyotisOperation, expected: &Json, name: &str) {
+    let address = |key: &str| json_text(&expected[key]);
+    match operation {
+        MyotisOperation::Account { address: a } => {
+            assert_eq!(expected["kind"], "account", "{name}");
+            assert_eq!(a.as_deref(), address("address_json"), "{name}");
+        }
+        MyotisOperation::Code { address: a } => {
+            assert_eq!(expected["kind"], "code", "{name}");
+            assert_eq!(a.as_deref(), address("address_json"), "{name}");
+        }
+        MyotisOperation::Storage { address: a, slot } => {
+            assert_eq!(expected["kind"], "storage", "{name}");
+            assert_eq!(a.as_deref(), address("address_json"), "{name}");
+            assert_eq!(slot.as_deref(), address("slot_json"), "{name}");
+        }
+        MyotisOperation::CallTx { tx } => {
+            assert_eq!(expected["kind"], "call_tx", "{name}");
+            assert_eq!(tx, str_of(expected, "tx_json"), "{name}");
+        }
+        MyotisOperation::EstimateTx { tx } => {
+            assert_eq!(expected["kind"], "estimate_tx", "{name}");
+            assert_eq!(tx, str_of(expected, "tx_json"), "{name}");
+        }
+        MyotisOperation::Fee => assert_eq!(expected["kind"], "fee", "{name}"),
+    }
+}
+
+#[test]
+fn myotis_reads() {
+    let vectors = vectors();
+    let myotis = &vectors["myotis"];
+    assert_eq!(strings(&myotis["blob_fields"]), MYOTIS_BLOB_FIELDS);
+    assert_eq!(
+        myotis["max_refusal_message"].as_u64(),
+        Some(MAX_MYOTIS_REFUSAL_MESSAGE as u64)
+    );
+    assert_eq!(
+        JsString::from(MYOTIS_NOT_READY).to_json(),
+        str_of(&myotis["not_ready"], "message_json")
+    );
+    assert_eq!(myotis["not_ready"]["unavailable"], true);
+    let reads = myotis["reads"].as_array().unwrap();
+    let (mut finals, mut deviations) = (0, 0);
+    for read in reads {
+        let name = id(read);
+        let method = str_of(read, "method");
+        let js = &read["js"];
+        let operation = myotis_operation(method, str_of(read, "params"));
+        if js["operation"].is_null() {
+            let failure = operation.expect_err(&name);
+            assert_myotis_failure(&failure, &js["error"], &name);
+            continue;
+        }
+        let operation = operation.unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        assert_operation(&operation, &js["operation"], &name);
+        let answer = myotis_answer(method, opt_str(read, "wire_json"));
+        if deviation(read) == Some("bigint-width") {
+            // The router converts it; the core refuses it.
+            assert!(opt_str(js, "result_json").is_some(), "{name}");
+            let Err(MyotisFailure::Error(error)) = answer else {
+                panic!("{name}: {answer:?}")
+            };
+            assert_eq!(error.name, "Error");
+            deviations += 1;
+            continue;
+        }
+        assert_eq!(deviation(read), None);
+        match (answer, opt_str(js, "result_json")) {
+            (Ok(result), Some(expected)) => assert_eq!(result, expected, "{name}"),
+            (Err(failure), None) => {
+                finals += usize::from(matches!(failure, MyotisFailure::Final(_)));
+                assert_myotis_failure(&failure, &js["error"], &name);
+            }
+            (answer, _) => panic!("{name}: {answer:?}"),
+        }
+    }
+    assert!(reads.len() > 150 && finals > 15 && deviations == 1);
+    let trust = myotis["trust"].as_array().unwrap();
+    for case in trust {
+        let label = myotis_trust(
+            opt_str(case, "block_before_json"),
+            opt_str(case, "block_after_json"),
+        );
+        assert_eq!(label, str_of(&case["js"], "trust_json"), "{case}");
+    }
+    assert!(trust.len() > 20);
 }
