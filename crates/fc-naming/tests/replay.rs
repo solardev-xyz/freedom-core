@@ -2,10 +2,10 @@
 //! (design 0004, Replay): the driver plays main, answering each request
 //! with the answer the reference's matching exchange got.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 use fc_naming::jsjson::{self, JsValue};
-use fc_naming::session::ens::{Answer, Config, Direct, Request};
+use fc_naming::session::ens::{Answer, Config, Direct, Request, Verified, VerifiedOp};
 use fc_naming::session::exec::{Effect, Fired};
 use fc_naming::session::machine::{Machine, Reply};
 use fc_naming::session::random::Mulberry32;
@@ -96,12 +96,22 @@ fn config(world: &JsValue) -> Config {
             user_configured,
         }
     });
+    let colibri = world.get("colibri").cloned().unwrap_or(JsValue::Null);
+    let prover = colibri.get("prover").and_then(JsValue::as_str).map(|url| {
+        (
+            url.to_owned(),
+            network.get("zkProof") != Some(&JsValue::Bool(false)),
+        )
+    });
     Config {
         rpc: endpoints,
         direct,
         order,
         prefer_verified: verification.get("preferVerified") == Some(&JsValue::Bool(true)),
         quorum: network.get("quorum").cloned().unwrap_or(JsValue::Null),
+        myotis_enabled: world.get("myotis").and_then(|m| m.get("enabled"))
+            == Some(&JsValue::Bool(true)),
+        prover,
     }
 }
 
@@ -158,40 +168,224 @@ struct Exchange {
 
 const STALL_MS: u64 = 10;
 
-/// What a scenario replay found.
-#[derive(Default)]
-struct Mismatches(Vec<String>);
+/// What a driver token stands for when it fires.
+enum Token {
+    /// ethers' stall is over: the world sees request `id` (exchange index).
+    Stall(u64, usize),
+    /// The world answers request `id`.
+    Deliver(u64, Answer),
+    /// A scripted Myotis availability transition.
+    Availability(bool),
+}
 
-impl Mismatches {
-    fn push(&mut self, message: String) {
-        self.0.push(message);
+/// The driver: main, played from the recorded exchanges.
+struct Driver {
+    exchanges: Vec<Exchange>,
+    tokens: BTreeMap<u64, Token>,
+    next_token: u64,
+    mismatches: Vec<String>,
+}
+
+impl Driver {
+    fn token(&mut self, machine: &Machine, at: u64, token: Token) {
+        let id = self.next_token;
+        self.next_token += 1;
+        self.tokens.insert(id, token);
+        machine.schedule(at, id);
+    }
+
+    /// Runs the machine until `until`, or until every caller in `waiting`
+    /// has replied.
+    fn drive(
+        &mut self,
+        machine: &mut Machine,
+        until: u64,
+        mut waiting: Option<(&[u64], &mut Vec<Reply>)>,
+    ) {
+        loop {
+            machine.poll();
+            let replies = machine.take_replies();
+            if let Some((_, collected)) = waiting.as_mut() {
+                collected.extend(replies);
+            }
+            for effect in machine.take_effects() {
+                if let Effect::Request { id, at, request } = effect {
+                    let Some(index) = self.match_exchange(&request, at) else {
+                        self.mismatches
+                            .push(format!("unmatched request at {at}: {request:?}"));
+                        continue;
+                    };
+                    self.exchanges[index].used = true;
+                    if matches!(request, Request::Rpc { .. }) {
+                        // ethers' stall: the world sees the request 10 ms later.
+                        self.token(machine, at + STALL_MS, Token::Stall(id, index));
+                    } else {
+                        self.schedule_answer(machine, index, id);
+                    }
+                }
+            }
+            if let Some((callers, collected)) = waiting.as_ref()
+                && callers
+                    .iter()
+                    .all(|c| collected.iter().any(|r| r.caller == *c))
+            {
+                return;
+            }
+            match machine.fire_next(until) {
+                None => return,
+                Some(Fired::Timer) => {}
+                Some(Fired::External(token)) => match self.tokens.remove(&token) {
+                    Some(Token::Stall(id, index)) => self.schedule_answer(machine, index, id),
+                    Some(Token::Deliver(id, answer)) => {
+                        machine.complete(id, answer);
+                    }
+                    Some(Token::Availability(ready)) => machine.availability(ready),
+                    None => {}
+                },
+            }
+        }
+    }
+
+    fn schedule_answer(&mut self, machine: &Machine, index: usize, id: u64) {
+        let entry = self.exchanges[index].entry.clone();
+        let Some(answer) = entry.get("answer") else {
+            return;
+        };
+        let status = u16::try_from(num(answer.get("status"))).unwrap_or(0);
+        let body = str_of(answer.get("body")).as_bytes().to_vec();
+        let answer = match str_of(entry.get("kind")) {
+            "rpc" => Answer::Rpc { status, body },
+            "gateway" if answer.get("redirect").is_some() => Answer::Failed(Transport::Refused),
+            "gateway" => Answer::Gateway { status, body },
+            "verified-op" => Answer::Verified(if let Some(result) = answer.get("result") {
+                Verified::Result(result.clone())
+            } else if let Some(revert) = answer.get("revert") {
+                Verified::Revert(
+                    fc_naming::session::rpc::hex_string(str_of(Some(revert))).unwrap_or_default(),
+                )
+            } else {
+                Verified::Failure(str_of(answer.get("failure")).to_owned())
+            }),
+            _ => return,
+        };
+        self.token(machine, num(entry.get("end")), Token::Deliver(id, answer));
+    }
+
+    fn match_exchange(&self, request: &Request, at: u64) -> Option<usize> {
+        self.exchanges.iter().position(|exchange| {
+            if exchange.used {
+                return false;
+            }
+            let e = &exchange.entry;
+            let kind = str_of(e.get("kind"));
+            match request {
+                Request::Rpc { endpoint, body } => {
+                    let Ok(sent) = jsjson::parse(body) else {
+                        return false;
+                    };
+                    kind == "rpc"
+                        && str_of(e.get("host")) == host_of(endpoint)
+                        && num(e.get("t")) == at + STALL_MS
+                        && e.get("method") == sent.get("method")
+                        && e.get("params") == sent.get("params")
+                }
+                Request::Gateway { url, .. } => {
+                    kind == "gateway" && str_of(e.get("url")) == url && num(e.get("t")) == at
+                }
+                Request::Prefetch { uri } => {
+                    kind == "prefetch" && str_of(e.get("uri")) == uri && num(e.get("t")) == at
+                }
+                Request::Verified(op) => {
+                    kind == "verified-op" && num(e.get("t")) == at && verified_matches(op, e)
+                }
+            }
+        })
     }
 }
 
-fn replay(scenario: &JsValue) -> Result<Mismatches, String> {
+/// A verifier operation against a recorded one.
+fn verified_matches(op: &VerifiedOp, e: &JsValue) -> bool {
+    let p = e.get("params").cloned().unwrap_or(JsValue::Null);
+    let text = |key: &str| {
+        p.get(key)
+            .and_then(JsValue::as_str)
+            .map(str::to_ascii_lowercase)
+    };
+    let host = str_of(e.get("host"));
+    let op_name = str_of(e.get("op"));
+    match op {
+        VerifiedOp::MyotisRecord {
+            method,
+            name,
+            address,
+            coin_type,
+        } => {
+            host == "myotis"
+                && op_name == "record"
+                && text("method").as_deref() == Some(*method)
+                && text("name") == name.as_ref().map(|n| n.to_ascii_lowercase())
+                && text("address") == address.as_ref().map(|a| a.to_ascii_lowercase())
+                && text("coinType") == Some(coin_type.to_string())
+        }
+        VerifiedOp::MyotisCall { to, data } => {
+            host == "myotis"
+                && op_name == "call"
+                && text("to") == Some(fc_naming::session::rpc::hex(to))
+                && text("data") == Some(fc_naming::session::rpc::hex(data))
+        }
+        VerifiedOp::ColibriResolve {
+            name,
+            call_data,
+            resolver,
+        } => {
+            host == "colibri"
+                && op_name == "resolve"
+                && text("name") == Some(name.to_ascii_lowercase())
+                && text("callData") == Some(fc_naming::session::rpc::hex(call_data))
+                && p.get("nameNft") == Some(&JsValue::Bool(*resolver == "name_nft"))
+        }
+        VerifiedOp::ColibriReverse { address, coin_type } => {
+            host == "colibri"
+                && op_name == "reverse"
+                && text("address") == Some(address.to_ascii_lowercase())
+                && text("coinType") == Some(coin_type.to_string())
+        }
+    }
+}
+
+fn replay(scenario: &JsValue) -> Result<Vec<String>, String> {
     let id = str_of(scenario.get("id"));
     let world = scenario.get("world").cloned().unwrap_or(JsValue::Null);
     #[allow(clippy::cast_possible_truncation)]
     let seed = num(scenario.get("seed")) as u32;
     let mut machine = Machine::new(0, config(&world), Box::new(Mulberry32::new(seed)));
-    let mut exchanges: Vec<Exchange> = scenario
+    machine.set_myotis_ready(
+        world.get("myotis").and_then(|m| m.get("ready")) == Some(&JsValue::Bool(true)),
+    );
+    let exchanges = scenario
         .get("io")
         .and_then(JsValue::as_array)
         .unwrap_or(&[])
         .iter()
-        .filter(|e| matches!(str_of(e.get("kind")), "rpc" | "gateway" | "prefetch"))
+        .filter(|e| {
+            matches!(
+                str_of(e.get("kind")),
+                "rpc" | "gateway" | "prefetch" | "verified-op"
+            )
+        })
+        // Exchanges inside a verifier operation are main\'s business.
+        .filter(|e| e.get("within").is_none())
         .map(|e| Exchange {
             entry: e.clone(),
             used: false,
         })
         .collect();
-    let mut mismatches = Mismatches::default();
-    // Scheduled deliveries: token → (request id, answer); stalls: token →
-    // (request id, exchange index).
-    let mut deliveries: BTreeMap<u64, (u64, Answer)> = BTreeMap::new();
-    let mut stalls: BTreeMap<u64, (u64, usize)> = BTreeMap::new();
-    let mut next_token = 1u64;
-    let mut cancelled: HashSet<u64> = HashSet::new();
+    let mut driver = Driver {
+        exchanges,
+        tokens: BTreeMap::new(),
+        next_token: 1,
+        mismatches: Vec::new(),
+    };
 
     for (index, step) in scenario
         .get("steps")
@@ -201,84 +395,74 @@ fn replay(scenario: &JsValue) -> Result<Mismatches, String> {
         .enumerate()
     {
         // Time passes before the step, with everything due on the way.
-        let after = num(step.get("after"));
-        let until = machine.now() + after;
-        drive(
-            &mut machine,
-            until,
-            &mut exchanges,
-            &mut deliveries,
-            &mut stalls,
-            &mut next_token,
-            &mut cancelled,
-            &mut mismatches,
-            None,
-        );
+        let until = machine.now() + num(step.get("after"));
+        driver.drive(&mut machine, until, None);
+        let start = machine.now();
+        for event in step
+            .get("events")
+            .and_then(JsValue::as_array)
+            .unwrap_or(&[])
+        {
+            let ready =
+                event.get("myotis").and_then(|m| m.get("ready")) == Some(&JsValue::Bool(true));
+            driver.token(
+                &machine,
+                start + num(event.get("at")),
+                Token::Availability(ready),
+            );
+        }
         let calls: Vec<JsValue> = match step.get("calls").and_then(JsValue::as_array) {
             Some(calls) => calls.to_vec(),
             None => vec![step.get("call").cloned().unwrap_or(JsValue::Null)],
         };
         let mut callers = Vec::new();
+        let mut immediate = Vec::new();
         for call in &calls {
             let args = call.get("args").and_then(JsValue::as_array).unwrap_or(&[]);
+            let chain = match args.get(1) {
+                Some(JsValue::Number(n)) => *n,
+                _ => 1.0,
+            };
             match str_of(call.get("fn")) {
                 "resolveEnsContent" => callers.push(machine.resolve_content(str_of(args.first()))),
                 "resolveEnsAddress" => {
-                    let chain = match args.get(1) {
-                        Some(JsValue::Number(n)) => *n,
-                        _ => 1.0,
-                    };
-                    callers.push(machine.resolve_address(str_of(args.first()), chain));
+                    callers.push(machine.resolve_address(str_of(args.first()), chain))
                 }
                 "resolveEnsReverse" => {
-                    let chain = match args.get(1) {
-                        Some(JsValue::Number(n)) => *n,
-                        _ => 1.0,
-                    };
-                    callers.push(machine.resolve_reverse(str_of(args.first()), chain));
+                    callers.push(machine.resolve_reverse(str_of(args.first()), chain))
                 }
                 "invalidateCachedProvider" => {
                     machine.invalidate_providers();
                     callers.push(u64::MAX);
+                    immediate.push(Reply {
+                        caller: u64::MAX,
+                        outcome: Ok(JsValue::Object(vec![(
+                            "$undefined".into(),
+                            JsValue::Bool(true),
+                        )])),
+                        settled: machine.now(),
+                    });
                 }
                 other => return Err(format!("{id}: `{other}` isn't supported yet")),
             }
         }
-        let mut replies: Vec<Reply> = Vec::new();
-        if callers.contains(&u64::MAX) {
-            replies.push(Reply {
-                caller: u64::MAX,
-                outcome: Ok(JsValue::Object(vec![(
-                    "$undefined".into(),
-                    JsValue::Bool(true),
-                )])),
-                settled: machine.now(),
-            });
-        }
+        let mut replies = immediate;
         let horizon = machine.now() + 600_000;
-        drive(
-            &mut machine,
-            horizon,
-            &mut exchanges,
-            &mut deliveries,
-            &mut stalls,
-            &mut next_token,
-            &mut cancelled,
-            &mut mismatches,
-            Some((&callers, &mut replies)),
-        );
+        driver.drive(&mut machine, horizon, Some((&callers, &mut replies)));
         let expected = step
             .get("results")
             .and_then(JsValue::as_array)
             .unwrap_or(&[]);
         for (i, caller) in callers.iter().enumerate() {
             let Some(reply) = replies.iter().find(|r| r.caller == *caller) else {
-                mismatches.push(format!("{id} step {index}: call {i} never settled"));
+                driver
+                    .mismatches
+                    .push(format!("{id} step {index}: call {i} never settled"));
                 continue;
             };
             let want = &expected[i];
             if num(want.get("settled")) != reply.settled {
-                mismatches.push(format!(
+                driver.mismatches.push(format!(
                     "{id} step {index}: settled at {} instead of {}",
                     reply.settled,
                     num(want.get("settled"))
@@ -288,7 +472,7 @@ fn replay(scenario: &JsValue) -> Result<Mismatches, String> {
                 (Ok(value), Some(expected), _) => {
                     let got = substitute(value);
                     if !same(&got, expected) {
-                        mismatches.push(format!(
+                        driver.mismatches.push(format!(
                             "{id} step {index}: result\n   got {}\n  want {}",
                             got.stringify(),
                             expected.stringify()
@@ -297,14 +481,14 @@ fn replay(scenario: &JsValue) -> Result<Mismatches, String> {
                 }
                 (Err(thrown), _, Some(expected)) => {
                     if thrown.message != str_of(Some(expected)) {
-                        mismatches.push(format!(
+                        driver.mismatches.push(format!(
                             "{id} step {index}: thrown {:?} instead of {:?}",
                             thrown.message,
                             str_of(Some(expected))
                         ));
                     }
                 }
-                (outcome, _, _) => mismatches.push(format!(
+                (outcome, _, _) => driver.mismatches.push(format!(
                     "{id} step {index}: {outcome:?} instead of {}",
                     want.stringify()
                 )),
@@ -312,153 +496,20 @@ fn replay(scenario: &JsValue) -> Result<Mismatches, String> {
         }
     }
     let horizon = machine.now() + 600_000;
-    drive(
-        &mut machine,
-        horizon,
-        &mut exchanges,
-        &mut deliveries,
-        &mut stalls,
-        &mut next_token,
-        &mut cancelled,
-        &mut mismatches,
-        None,
-    );
-    for exchange in exchanges.iter().filter(|e| !e.used) {
-        mismatches.push(format!(
-            "{id}: the reference's request was never made: {}",
-            exchange
-                .entry
-                .stringify()
-                .chars()
-                .take(220)
-                .collect::<String>()
-        ));
-    }
-    Ok(mismatches)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn drive(
-    machine: &mut Machine,
-    until: u64,
-    exchanges: &mut [Exchange],
-    deliveries: &mut BTreeMap<u64, (u64, Answer)>,
-    stalls: &mut BTreeMap<u64, (u64, usize)>,
-    next_token: &mut u64,
-    cancelled: &mut HashSet<u64>,
-    mismatches: &mut Mismatches,
-    mut waiting: Option<(&[u64], &mut Vec<Reply>)>,
-) {
-    loop {
-        machine.poll();
-        let replies = machine.take_replies();
-        if let Some((_, collected)) = waiting.as_mut() {
-            collected.extend(replies);
-        }
-        for effect in machine.take_effects() {
-            match effect {
-                Effect::Request { id, at, request } => {
-                    let Some(index) = match_exchange(exchanges, &request, at) else {
-                        mismatches.push(format!("unmatched request at {at}: {request:?}"));
-                        continue;
-                    };
-                    exchanges[index].used = true;
-                    let token = *next_token;
-                    *next_token += 1;
-                    if matches!(request, Request::Rpc { .. }) {
-                        // ethers' stall: the world sees the request 10 ms later.
-                        stalls.insert(token, (id, index));
-                        machine.schedule(at + STALL_MS, token);
-                    } else {
-                        schedule_answer(machine, exchanges, index, id, token, deliveries);
-                    }
-                }
-                Effect::Cancel { id, .. } => {
-                    cancelled.insert(id);
-                }
-            }
-        }
-        if let Some((callers, collected)) = waiting.as_ref()
-            && callers
-                .iter()
-                .all(|c| collected.iter().any(|r| r.caller == *c))
-        {
-            return;
-        }
-        match machine.fire_next(until) {
-            None => return,
-            Some(Fired::Timer) => {}
-            Some(Fired::External(token)) => {
-                if let Some((id, index)) = stalls.remove(&token) {
-                    let next = *next_token;
-                    *next_token += 1;
-                    schedule_answer(machine, exchanges, index, id, next, deliveries);
-                } else if let Some((id, answer)) = deliveries.remove(&token) {
-                    machine.complete(id, answer);
-                }
-            }
-        }
-    }
-}
-
-fn schedule_answer(
-    machine: &Machine,
-    exchanges: &[Exchange],
-    index: usize,
-    id: u64,
-    token: u64,
-    deliveries: &mut BTreeMap<u64, (u64, Answer)>,
-) {
-    let entry = &exchanges[index].entry;
-    let Some(answer) = entry.get("answer") else {
-        return;
-    };
-    let status = u16::try_from(num(answer.get("status"))).unwrap_or(0);
-    let body = str_of(answer.get("body")).as_bytes().to_vec();
-    let answer = match str_of(entry.get("kind")) {
-        // No scenario retries yet: one exchange, no back-off draws.
-        "rpc" => Answer::Rpc {
-            status,
-            body,
-            draws: 0,
-        },
-        "gateway" if answer.get("redirect").is_some() => Answer::Failed(Transport::Refused),
-        "gateway" => Answer::Gateway { status, body },
-        _ => return,
-    };
-    deliveries.insert(token, (id, answer));
-    machine.schedule(num(entry.get("end")), token);
-}
-
-fn match_exchange(exchanges: &[Exchange], request: &Request, at: u64) -> Option<usize> {
-    exchanges.iter().position(|exchange| {
-        if exchange.used {
-            return false;
-        }
-        let e = &exchange.entry;
-        match request {
-            Request::Rpc { endpoint, body, .. } => {
-                let Ok(sent) = jsjson::parse(body) else {
-                    return false;
-                };
-                str_of(e.get("kind")) == "rpc"
-                    && str_of(e.get("host")) == host_of(endpoint)
-                    && num(e.get("t")) == at + STALL_MS
-                    && e.get("method") == sent.get("method")
-                    && e.get("params") == sent.get("params")
-            }
-            Request::Gateway { url, .. } => {
-                str_of(e.get("kind")) == "gateway"
-                    && str_of(e.get("url")) == url
-                    && num(e.get("t")) == at
-            }
-            Request::Prefetch { uri } => {
-                str_of(e.get("kind")) == "prefetch"
-                    && str_of(e.get("uri")) == uri
-                    && num(e.get("t")) == at
-            }
-        }
-    })
+    driver.drive(&mut machine, horizon, None);
+    let unused: Vec<String> = driver
+        .exchanges
+        .iter()
+        .filter(|e| !e.used)
+        .map(|e| {
+            format!(
+                "{id}: the reference's request was never made: {}",
+                e.entry.stringify().chars().take(220).collect::<String>()
+            )
+        })
+        .collect();
+    driver.mismatches.extend(unused);
+    Ok(driver.mismatches)
 }
 
 /// Scenarios a declared deviation changes (design 0004, Deviations). They
@@ -498,6 +549,21 @@ const SUPPORTED: &[&str] = &[
     "wns-content",
     "gns-content",
     "wns-address-on-l2",
+    "myotis-verified",
+    "myotis-not-ready-falls-to-quorum",
+    "colibri-verified",
+    "colibri-resolver-not-found",
+    "colibri-unavailable-falls-to-quorum",
+    "myotis-ccip",
+    "prefer-verified-holds-unverified",
+    "myotis-ready-mid-flight",
+    "lifecycle-flapping",
+    "myotis-reverse-then-wns",
+    "myotis-wns-content",
+    "myotis-wns-call-unavailable",
+    "myotis-wns-call-revert",
+    "myotis-record-lifecycle-mid-operation",
+    "myotis-call-lifecycle-mid-operation",
 ];
 
 #[test]
@@ -519,12 +585,12 @@ fn replays_match_the_reference() {
             .find(|(d, _)| *d == id)
             .map(|(_, why)| *why);
         match (replay(scenario), deviation) {
-            (Ok(mismatches), None) if mismatches.0.is_empty() => {}
-            (Ok(mismatches), Some(_)) if !mismatches.0.is_empty() => {}
+            (Ok(mismatches), None) if mismatches.is_empty() => {}
+            (Ok(mismatches), Some(_)) if !mismatches.is_empty() => {}
             (Ok(_), Some(why)) => report.push(format!(
                 "== {id}: matches the reference despite deviation `{why}`"
             )),
-            (Ok(mismatches), None) => report.push(format!("== {id}\n{}", mismatches.0.join("\n"))),
+            (Ok(mismatches), None) => report.push(format!("== {id}\n{}", mismatches.join("\n"))),
             (Err(error), _) => report.push(format!("== {id}: {error}")),
         }
     }
