@@ -294,24 +294,6 @@ impl Ctx {
         self.state.borrow().config.bounds
     }
 
-    /// An ABI decode of an answer, within the decode budget.
-    pub(crate) fn abi_decode(
-        &self,
-        kinds: &[Kind],
-        data: &[u8],
-    ) -> Result<Vec<crate::abi::Field>, crate::abi::DecodeError> {
-        crate::abi::decode_within(kinds, data, self.bounds().decode_bytes)
-    }
-
-    /// [`ur::decode_result`] within the decode budget.
-    pub(crate) fn decode_result(
-        &self,
-        kinds: &[Kind],
-        data: &[u8],
-    ) -> Result<Vec<crate::abi::Field>, ur::ResultError> {
-        ur::decode_result_within(kinds, data, self.bounds().decode_bytes)
-    }
-
     pub fn new(now: Ms, config: Config, random: Box<dyn Random>) -> Self {
         Self {
             rt: Rt::new(now),

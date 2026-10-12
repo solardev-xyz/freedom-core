@@ -739,10 +739,11 @@ fn replays_match_the_reference() {
     assert!(report.is_empty(), "{}", report.join("\n"));
 }
 
-/// The decode budget reaches every session decode of an answer, not only
-/// an OffchainLookup's: with none, `quorum-agree`'s record can't decode.
+/// The decode budget is for decodes that can alias (an OffchainLookup's
+/// URL array); a decode that reads each field once is bounded by its input,
+/// so even a budget of 0 leaves `quorum-agree` as the reference has it.
 #[test]
-fn a_lowered_decode_budget_reaches_ordinary_decodes() {
+fn the_decode_budget_is_for_aliasing_decodes() {
     let vectors = vectors();
     let scenario = vectors
         .get("scenarios")
@@ -766,7 +767,9 @@ fn a_lowered_decode_budget_reaches_ordinary_decodes() {
             ));
         }
     }
-    let lowered = replay(&JsValue::Object(members)).unwrap_or_default();
-    assert!(!lowered.is_empty(), "a budget of 0 must change the outcome");
-    assert!(replay(&scenario).unwrap_or_default().is_empty());
+    assert!(
+        replay(&JsValue::Object(members))
+            .unwrap_or_default()
+            .is_empty()
+    );
 }

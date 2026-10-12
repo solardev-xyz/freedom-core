@@ -287,7 +287,7 @@ pub(crate) async fn ur_call(
 ) -> Result<Vec<u8>, Failure> {
     let decoded = |result: &JsValue| -> Result<Vec<u8>, CallError> {
         let raw = rpc::call_result(result).map_err(CallError::Rpc)?;
-        ctx.decode_result(kinds, &raw)
+        ur::decode_result(kinds, &raw)
             .map_err(|_| CallError::Invalid(crate::ethers::bad_result(&raw, method, signature)))?;
         Ok(raw)
     };
@@ -431,8 +431,7 @@ pub(crate) async fn contract_call(
     };
     let result = provider.send(ctx, &method).await.map_err(CallError::Rpc)?;
     let raw = rpc::call_result(&result).map_err(CallError::Rpc)?;
-    let fields = ctx
-        .decode_result(&[kind], &raw)
+    let fields = ur::decode_result(&[kind], &raw)
         .map_err(|_| CallError::Invalid(format!("result|{}", rpc::hex(&raw))))?;
     match fields.into_iter().next() {
         Some(Ok(value)) => Ok(value),
@@ -471,8 +470,7 @@ pub(crate) async fn resolver_call(
             )
             .await
             .map_err(|f| f.error)?;
-            match ctx
-                .decode_result(&[Kind::Bytes, Kind::Address], &raw)
+            match ur::decode_result(&[Kind::Bytes, Kind::Address], &raw)
                 .ok()
                 .as_deref()
             {
@@ -498,8 +496,7 @@ pub(crate) async fn resolver_call(
             )
             .await;
             match outcome {
-                Ok(raw) => match ctx
-                    .decode_result(&kinds, &raw)
+                Ok(raw) => match ur::decode_result(&kinds, &raw)
                     .ok()
                     .and_then(|f| f.into_iter().next())
                 {

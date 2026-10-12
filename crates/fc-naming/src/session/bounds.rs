@@ -28,10 +28,11 @@ pub struct Bounds {
     pub deadline_ms: u64,
     /// Bytes each cache may hold (`cache-bytes`).
     pub cache_bytes: usize,
-    /// Output bytes (strings and bytes) one ABI decode of an answer may
-    /// produce (`decode-budget`). The session's decodes all take it, except
-    /// reading a revert reason or a prefetch URI: each reads one field once,
-    /// so its output is bounded by its input, which the answer cap bounds.
+    /// Output bytes (strings and bytes) one ABI decode with an array may
+    /// produce (`decode-budget`): an `OffchainLookup`'s URLs, whose offsets
+    /// can point many entries at one string. Every other decode the session
+    /// makes reads each dynamic field once, so its output never exceeds its
+    /// input, which the answer cap bounds far below the default 4 MiB.
     pub decode_bytes: usize,
 }
 

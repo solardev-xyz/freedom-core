@@ -241,10 +241,16 @@ impl<'a> Reader<'a> {
                 self.charge(bytes.len())?;
                 Value::Bytes(bytes.to_vec())
             }
+            // Validated borrowed, charged, then allocated: an over-budget
+            // string is refused before it is copied. Rust and ethers' strict
+            // `toUtf8String` refuse the same sequences: overlong forms,
+            // surrogates, code points above U+10FFFF, and stray or missing
+            // continuation bytes.
             Kind::String => {
-                let text = utf8(self.read_dynamic_bytes()?)?;
+                let text = std::str::from_utf8(self.read_dynamic_bytes()?)
+                    .map_err(|_| FieldError::InvalidUtf8)?;
                 self.charge(text.len())?;
-                Value::String(text)
+                Value::String(text.to_owned())
             }
             Kind::StringArray => {
                 let count = self.read_index()?;
@@ -308,15 +314,6 @@ impl<'a> Reader<'a> {
 /// A JavaScript number as `String(n)` prints it.
 fn number(n: f64) -> String {
     crate::jsjson::number_to_string(n)
-}
-
-fn utf8(bytes: &[u8]) -> Result<String, FieldError> {
-    // Rust and ethers' strict `toUtf8String` refuse the same sequences:
-    // overlong forms, surrogates, code points above U+10FFFF, and stray or
-    // missing continuation bytes.
-    std::str::from_utf8(bytes)
-        .map(str::to_owned)
-        .map_err(|_| FieldError::InvalidUtf8)
 }
 
 /// `AbiCoder.defaultAbiCoder().decode(kinds, data)`.

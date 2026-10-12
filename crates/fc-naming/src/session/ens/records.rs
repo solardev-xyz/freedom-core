@@ -71,8 +71,7 @@ pub(crate) async fn content(
                     ("trust", trust),
                 ])
             };
-            let inner = match ctx
-                .abi_decode(&[Kind::Bytes], &resolved)
+            let inner = match crate::abi::decode(&[Kind::Bytes], &resolved)
                 .ok()
                 .and_then(|f| f.into_iter().next())
             {
@@ -225,8 +224,7 @@ pub(crate) async fn address(
             } else {
                 Kind::Address
             };
-            let decoded = ctx
-                .abi_decode(&[kind], &resolved)
+            let decoded = crate::abi::decode(&[kind], &resolved)
                 .ok()
                 .and_then(|f| f.into_iter().next());
             let address: Option<[u8; 20]> = match decoded {
@@ -364,9 +362,7 @@ pub(crate) async fn ens_reverse_with(
         }
         Consensus::NotFound { trust, .. } => no_reverse(address, Some(trust)),
         Consensus::Data { resolved, trust } => {
-            let decoded = ctx
-                .abi_decode(&[Kind::Uint256, Kind::String], &resolved)
-                .ok();
+            let decoded = crate::abi::decode(&[Kind::Uint256, Kind::String], &resolved).ok();
             let (status, detail) = match decoded.as_deref() {
                 Some([Ok(Value::Uint256(word)), Ok(Value::String(detail))]) => {
                     (word[31], detail.clone())
@@ -447,8 +443,7 @@ pub(crate) async fn contract_backed_reverse(
             Consensus::NotFound { .. } => continue,
             Consensus::Data { resolved, trust } => (resolved, trust),
         };
-        let claimed = match ctx
-            .abi_decode(&[Kind::String], &resolved)
+        let claimed = match crate::abi::decode(&[Kind::String], &resolved)
             .ok()
             .and_then(|f| f.into_iter().next())
         {
@@ -493,10 +488,10 @@ pub(crate) async fn contract_backed_reverse(
             if let Ok(Some(outcome)) = with_method(ctx, machine, method, &forward).await {
                 forward_trust = Some(outcome.trust().clone());
                 if let Consensus::Data { resolved, trust } = outcome
-                    && let Some(Ok(Value::Address(found))) = ctx
-                        .abi_decode(&[Kind::Address], &resolved)
-                        .ok()
-                        .and_then(|f| f.into_iter().next())
+                    && let Some(Ok(Value::Address(found))) =
+                        crate::abi::decode(&[Kind::Address], &resolved)
+                            .ok()
+                            .and_then(|f| f.into_iter().next())
                     && rpc::hex(&found) == address
                 {
                     return Ok(Some(obj(vec![

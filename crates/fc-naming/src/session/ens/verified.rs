@@ -443,8 +443,7 @@ pub(crate) async fn read_myotis_reverse(
             continue;
         };
         last_trust = reverse_trust.clone();
-        let claimed = match ctx
-            .abi_decode(&[Kind::String], &resolved)
+        let claimed = match crate::abi::decode(&[Kind::String], &resolved)
             .ok()
             .and_then(|f| f.into_iter().next())
         {
@@ -481,8 +480,7 @@ pub(crate) async fn read_myotis_reverse(
                 myotis_contract(ctx, &ur::addr_call(&node), system).await
         {
             forward_trust = Some(trust.clone());
-            if let Some(Ok(Value::Address(found))) = ctx
-                .abi_decode(&[Kind::Address], &data)
+            if let Some(Ok(Value::Address(found))) = crate::abi::decode(&[Kind::Address], &data)
                 .ok()
                 .and_then(|f| f.into_iter().next())
                 && rpc::hex(&found) == address
