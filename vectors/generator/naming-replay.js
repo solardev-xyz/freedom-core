@@ -208,7 +208,9 @@ const PARSE_RFC3339 = `function __parseRfc3339(text) {
     if (!/^[0-9]+$/.test(fraction)) return Number.NaN;
     millis = Number((fraction + '000').slice(0, 3));
   }
-  if (h > 24 || mi > 59 || sec > 59 || (h === 24 && (mi > 0 || sec > 0 || millis > 0))) return Number.NaN;
+  // 24:00:00 only exactly: any nonzero fraction there is NaN, as in V8.
+  const fractional = dot >= 0 && /[1-9]/.test(clock.slice(dot + 1));
+  if (h > 24 || mi > 59 || sec > 59 || (h === 24 && (mi > 0 || sec > 0 || fractional))) return Number.NaN;
   ms += (h * 3600 + mi * 60 + sec) * 1000 + millis;
   return ms - offset;
 }`;
@@ -1516,6 +1518,12 @@ function addressAndReverse(ethers, base, one) {
     ['address', 'string[]', 'bytes', 'bytes4', 'bytes'], [UR, urls, '0x0102', '0xdeadbeef', extraData]).slice(2));
   const GOOD_URL = Buffer.from('https://gw.example/{sender}/{data}.json').toString('hex');
   const FAIL_URL = Buffer.from('https://gw-fail.example/{sender}/{data}.json').toString('hex');
+  // An OffchainLookup whose URL array claims `count` entries and holds none.
+  const hugeCountLookup = (count) => {
+    const word = (n) => BigInt(n).toString(16).padStart(64, '0');
+    const head = UR.slice(2).toLowerCase().padStart(64, '0') + word(160) + word(192) + 'deadbeef'.padEnd(64, '0') + word(256);
+    return revert('0x556f1830' + head + word(count) + word(2) + '0102'.padEnd(64, '0') + word(1) + '09'.padEnd(64, '0'));
+  };
   // An OffchainLookup whose URLs are raw bytes (hex), so one can be
   // invalid UTF-8.
   const rawReverseLookup = (urls) => {
@@ -1562,6 +1570,16 @@ function addressAndReverse(ethers, base, one) {
     }), reverse),
     one('reverse-legacy-envelopes-agree', base({
       hosts: Object.fromEntries(ENDPOINTS.map((url, i) => [new URL(url).host, { calls: { reverse: { rpc_error: { code: 3, message: 'execution reverted', data: { legacy: `envelope ${i}` } } } } }])),
+    }), reverse),
+    // Odd-length revert data: spelunkData accepts it, getBytes refuses it,
+    // and each node's error carries its own value, so the votes conflict.
+    one('reverse-odd-revert-data-conflicts', base({
+      hosts: Object.fromEntries(ENDPOINTS.map((url, i) => [new URL(url).host, { calls: { reverse: { rpc_error: { code: 3, message: 'execution reverted', data: `0x${String(i + 1).repeat(3)}` } } } }])),
+    }), reverse),
+    // OffchainLookups whose URL count is near 2^53: ethers' message prints
+    // the offset as a double, and the counts differ, so the votes conflict.
+    one('reverse-huge-lookup-counts-conflict', base({
+      hosts: Object.fromEntries(ENDPOINTS.map((url, i) => [new URL(url).host, { calls: { reverse: hugeCountLookup(2n ** 53n - 1n - BigInt(2 * i)) } }])),
     }), reverse),
     one('reverse-invalid-urls-at-different-indexes', base({
       hosts: Object.fromEntries(ENDPOINTS.map((url, i) => [new URL(url).host, { calls: { reverse: rawReverseLookup(i % 2 === 0 ? ['ffff', GOOD_URL] : [FAIL_URL, 'ffff']) } }])),
@@ -1645,6 +1663,8 @@ function tezosScenarios() {
     one('tezos-two-down', base({ hosts: { 't1.tez.example': { fail: true }, 't2.tez.example': { hang: true } } }), [{ call: tez() }, { after: 1000, call: tez() }]),
     one('tezos-all-down', base({ hosts: { 't1.tez.example': { fail: true }, 't2.tez.example': { fail: true }, 't3.tez.example': { fail: true } } }), [{ call: tez() }, { after: 1000, call: tez() }]),
     one('tezos-expired', base({ expiry: '2020-01-01T00:00:00Z' })),
+    // 24:00 with a nonzero fraction, however small, is NaN in V8: ignored.
+    one('tezos-expiry-midnight-fraction', base({ expiry: '2020-01-01T24:00:00.0001Z' })),
     one('tezos-expiry-unparseable', base({ expiry: 'not a date' })),
     one('tezos-redirect', base({ record: tezRecord({ 'web:redirect_url': 'https://alice.example/' }) })),
     one('tezos-no-website', base({ record: tezRecord({ 'td:ttl': 60 }, null) })),
