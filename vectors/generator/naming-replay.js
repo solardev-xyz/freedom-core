@@ -26,6 +26,7 @@
 const fs = require('node:fs');
 const Module = require('node:module');
 const path = require('node:path');
+const vm = require('node:vm');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const { EventEmitter } = require('node:events');
 
@@ -128,8 +129,7 @@ const PATCHES = {
     text: `A quorum leg's CCIP-Read round tries the first ${b.ccipUrls} gateway URLs.`,
     source: {
       'ens-resolver.js': {
-        edits: [['response = await ccipReadFetch({ to: sender }, callData, urls, ccipSignal);',
-          `response = await ccipReadFetch({ to: sender }, callData, __firstUrls(urls, ${b.ccipUrls}), ccipSignal);`]],
+        edits: [['ccipReadFetch({ to: sender }, callData, urls, ccipSignal', `ccipReadFetch({ to: sender }, callData, __firstUrls(urls, ${b.ccipUrls}), ccipSignal`]],
         append: ['function __firstUrls(urls, n) {\n  return { *[Symbol.iterator]() { for (let i = 0; i < Math.min(urls.length, n); i += 1) yield urls[i]; } };\n}'],
       },
     },
@@ -160,10 +160,17 @@ const PATCHES = {
     },
   }),
   'response-caps': (b) => ({
-    text: `Answer bodies over ${b.answerBytes} bytes fail: an RPC answer as a network error (a provider failure), a gateway's as too large (the next gateway), a Tezos node's as over the size limit (a failed endpoint).`,
+    text: `Answer bodies over ${b.answerBytes} bytes fail: an RPC answer as a network error (a provider failure), a quorum leg's gateway answer as too large (the next gateway), a Tezos node's as over the size limit (a failed endpoint). Verifier adapters' own CCIP keeps its 4 MiB cap.`,
     harness: ['rpc-answer-cap'],
     source: {
-      'ens/ccip-fetch.js': { edits: [['const CCIP_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;', `const CCIP_MAX_RESPONSE_BYTES = ${b.answerBytes};`]], append: [] },
+      'ens/ccip-fetch.js': {
+        edits: [
+          ["if (Number(response.headers.get('content-length')) > CCIP_MAX_RESPONSE_BYTES) {", "if (Number(response.headers.get('content-length')) > (deps.maxResponseBytes ?? CCIP_MAX_RESPONSE_BYTES)) {"],
+          ['if (size > CCIP_MAX_RESPONSE_BYTES) {', 'if (size > (deps.maxResponseBytes ?? CCIP_MAX_RESPONSE_BYTES)) {'],
+        ],
+        append: [],
+      },
+      'ens-resolver.js': { edits: [[', ccipSignal);', `, ccipSignal, { maxResponseBytes: ${b.answerBytes} });`]], append: [] },
       'tezos-domains-resolver.js': { edits: [['const MAX_RPC_RESPONSE_BYTES = 5 * 1024 * 1024;', `const MAX_RPC_RESPONSE_BYTES = ${b.answerBytes};`]], append: [] },
     },
   }),
@@ -173,7 +180,9 @@ const PATCHES = {
       'ens-resolver.js': {
         edits: [["  if (outcome.kind !== 'agreed_data' && prefetchHandle) {\n    try { prefetchHandle.abort(); } catch { /* never propagate */ }\n  }\n",
           `  if (outcome.kind !== 'agreed_data' && prefetchHandle) {\n    try { prefetchHandle.abort(); } catch { /* never propagate */ }\n  } else if (prefetchHandle && prefetchHandle !== NOOP_PREFETCH) __keepPrefetch(prefetchHandle, ${b.prefetches});\n`]],
-        append: ['var __kept = [];\nfunction __keepPrefetch(handle, n) {\n  __kept.push(handle);\n  while (__kept.length > n) __kept.shift().abort();\n}'],
+        // `settled` is the harness handle's: a prefetch that finished
+        // leaves the set, as its request completes in the core.
+        append: ['var __kept = [];\nfunction __keepPrefetch(handle, n) {\n  __kept = __kept.filter((kept) => !kept.settled);\n  __kept.push(handle);\n  while (__kept.length > n) __kept.shift().abort();\n}'],
       },
     },
   }),
@@ -208,15 +217,9 @@ function loadModule(checkout, stubs, file, wrappers = {}, sources = {}) {
   // PATCHES): each edit's text must occur exactly once.
   const patchBy = new Map(Object.entries(sources).map(([rel, patch]) => [path.join(main, rel), patch]));
   const sourceOf = (name) => {
-    let text = fs.readFileSync(name, 'utf8');
+    const text = fs.readFileSync(name, 'utf8');
     const patch = patchBy.get(name);
-    if (!patch) return text;
-    for (const [find, replace] of patch.edits) {
-      const count = text.split(find).length - 1;
-      if (count !== 1) throw new Error(`patch for ${path.relative(main, name)}: ${count} matches for ${JSON.stringify(find)}`);
-      text = text.replace(find, () => replace);
-    }
-    return patch.append.length > 0 ? `${text}\n${patch.append.join('\n')}\n` : text;
+    return patch ? patchedSource(text, patch, path.relative(main, name)) : text;
   };
   const compiled = (name, parent) => {
     if (!Module._cache[name]) {
@@ -270,6 +273,17 @@ function loadModule(checkout, stubs, file, wrappers = {}, sources = {}) {
   }
 }
 
+/** A module's source with a deviation's edits applied (see PATCHES). */
+function patchedSource(source, patch, file) {
+  let text = source;
+  for (const [find, replace] of patch.edits) {
+    const count = text.split(find).length - 1;
+    if (count !== 1) throw new Error(`patch for ${file}: ${count} matches for ${JSON.stringify(find)}`);
+    text = text.replace(find, () => replace);
+  }
+  return patch.append.length > 0 ? `${text}\n${patch.append.join('\n')}\n` : text;
+}
+
 /**
  * Runs one scenario and returns its record. Every global it changes
  * (environment, Math.random, ethers' transport, timers and Date, the
@@ -289,6 +303,12 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       sources[file].edits.push(...edits);
       sources[file].append.push(...append);
     }
+  }
+  // Every patch applies and compiles before the scenario runs: a module
+  // the resolver loads lazily would otherwise fail inside a fallback path.
+  for (const [file, patch] of Object.entries(sources)) {
+    const name = path.join(checkout, 'src', 'main', file);
+    vm.compileFunction(patchedSource(fs.readFileSync(name, 'utf8'), patch, file), ['exports', 'require', 'module', '__filename', '__dirname'], { filename: name });
   }
   const io = [];
   const violations = [];
@@ -680,7 +700,16 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     'ens-prefetch': {
       prefetchGatewayUrl: (uri) => {
         const item = record({ kind: 'prefetch', host: null, uri });
-        return { abort: () => close(item, 'cancelled') };
+        // `world.prefetchMs` (when set) is how long a prefetch runs before
+        // it finishes; otherwise it is still open when the scenario ends.
+        if (world.prefetchMs > 0) {
+          setTimeout(() => {
+            if (item.outcome !== 'open') return;
+            item.answer = {};
+            close(item, 'answered');
+          }, world.prefetchMs);
+        }
+        return { abort: () => close(item, 'cancelled'), get settled() { return item.outcome !== 'open'; } };
       },
       NOOP_HANDLE: { abort() {} },
     },
@@ -965,6 +994,27 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
       { call: content() },
       { after: 1000, call: content('alice.eth') },
     ]),
+    {
+      // A set of two. B's prefetch finishes, so C's hand-off still fits
+      // beside A; D's then aborts A.
+      ...deviation('prefetch-set', base({ bounds: { prefetches: 2 } }), [
+        { call: content('a.eth') },
+        { after: 1000, world: { prefetchMs: 10 }, call: content('b.eth') },
+        { after: 1000, world: { prefetchMs: 0 }, call: content('c.eth') },
+        { after: 1000, call: content('d.eth') },
+      ]),
+      id: 'deviation-prefetch-set-finished',
+    },
+    {
+      // Every endpoint answers at its own pace, so the second lookup's
+      // first answer comes before its agreement: the hand-off, and the
+      // abort, wait for the agreement.
+      ...deviation('prefetch-set', base({ bounds: { prefetches: 1 } }), [
+        { call: content() },
+        { after: 1000, world: { hosts: { 'b.rpc.example': { delay: 100 }, 'c.rpc.example': { delay: 200 }, 'd.rpc.example': { delay: 300 } } }, call: content('alice.eth') },
+      ]),
+      id: 'deviation-prefetch-set-late-agreement',
+    },
   ];
 }
 
