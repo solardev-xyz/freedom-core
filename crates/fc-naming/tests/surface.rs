@@ -1265,3 +1265,111 @@ fn an_immediate_reply_needs_room_in_the_total_too() {
             .all(|id| protocol(world.reply(*id)) == Some("busy"))
     );
 }
+
+/// Applies `edit` to the value at `path` (keys and indices) in `value`.
+fn edit_at(value: &mut JsValue, path: &[Result<usize, &str>], edit: &mut dyn FnMut(&mut JsValue)) {
+    match path.split_first() {
+        None => edit(value),
+        Some((Err(key), rest)) => match value {
+            JsValue::Object(props) => {
+                let (_, child) = props.iter_mut().find(|(k, _)| k == key).unwrap();
+                edit_at(child, rest, edit);
+            }
+            _ => panic!("no object at {key}"),
+        },
+        Some((Ok(index), rest)) => match value {
+            JsValue::Array(items) => edit_at(&mut items[*index], rest, edit),
+            _ => panic!("no array at {index}"),
+        },
+    }
+}
+
+/// Answers every Tezos request from `answers` until nothing is left to
+/// answer: the replies, how many registry scripts were fetched, and the
+/// most the sessions held.
+fn drive_tezos(
+    machine: &mut Machine,
+    answers: &BTreeMap<String, String>,
+) -> (Vec<Reply>, usize, usize) {
+    let (mut replies, mut scripts, mut peak) = (Vec::new(), 0, 0);
+    for _ in 0..16 {
+        machine.poll();
+        peak = peak.max(machine.held());
+        replies.extend(machine.take_replies());
+        for emitted in machine.take_effects() {
+            if let Effect::Request {
+                id,
+                request: Request::Tezos { path, .. },
+                ..
+            } = emitted.effect
+            {
+                if path.contains("/contracts/") {
+                    scripts += 1;
+                }
+                machine.complete(
+                    id,
+                    Answer::Tezos {
+                        status: 200,
+                        body: answers[&path].clone().into_bytes(),
+                    },
+                );
+                peak = peak.max(machine.held());
+            }
+        }
+    }
+    (replies, scripts, peak)
+}
+
+#[test]
+fn a_cached_discoverys_copy_counts_against_the_session_that_takes_it() {
+    // The registry's record type carries an extra tree: 600 chains of 100
+    // nested arrays, kept in the discovery each session copies.
+    let mut answers = tezos_answers();
+    let registry = answers
+        .keys()
+        .find(|p| p.contains("/contracts/KT1RgRg"))
+        .unwrap()
+        .clone();
+    let mut script = jsjson::parse(&answers[&registry]).unwrap();
+    let chain = format!("{}0{}", "[".repeat(100), "]".repeat(100));
+    let extra = jsjson::parse(&format!("[{}]", vec![chain; 600].join(","))).unwrap();
+    let copy = extra.held();
+    let mut extra = Some(extra);
+    // code[0].args[0].args[0].args[1]
+    let path = [
+        Err("code"),
+        Ok(0),
+        Err("args"),
+        Ok(0),
+        Err("args"),
+        Ok(0),
+        Err("args"),
+        Ok(1),
+    ];
+    edit_at(&mut script, &path, &mut |record_type| match record_type {
+        JsValue::Object(props) => props.push(("extra".into(), extra.take().unwrap())),
+        _ => panic!("the record type is an object"),
+    });
+    answers.insert(registry, script.stringify());
+    let run = |backlog: usize| {
+        let mut config = config();
+        config.tezos = vec!["t1".into()];
+        let mut machine = Machine::new(0, config, Box::new(Mulberry32::new(7)));
+        machine.resolve_tezos("alice.tez");
+        let (primed, scripts, _) = drive_tezos(&mut machine, &answers);
+        assert!(primed[0].outcome.is_ok(), "{:?}", primed[0].outcome);
+        assert!(scripts > 0, "the first lookup discovers");
+        machine.set_output_backlog(backlog);
+        machine.resolve_tezos("bob.tez");
+        drive_tezos(&mut machine, &answers)
+    };
+    // With room, the discovery comes from the cache, and its copy counts.
+    let (replies, scripts, peak) = run(0);
+    assert!(replies[0].outcome.is_ok(), "{:?}", replies[0].outcome);
+    assert_eq!(scripts, 0, "the discovery comes from the cache");
+    assert!(peak >= copy, "held {peak} for a copy of {copy}");
+    // Without room for the copy, the session ends with `budget`.
+    let total = Bounds::default().total_bytes;
+    let (replies, _, _) = run(total - copy / 2);
+    assert_eq!(message(&replies[0]), Some("budget"));
+}

@@ -31,6 +31,17 @@ pub(crate) struct Discovery {
     record_type: JsValue,
 }
 
+impl Discovery {
+    /// What a copy of it holds: its record type is the registry's own JSON,
+    /// whose tree can be large (`memory-budgets`).
+    fn held(&self) -> usize {
+        std::mem::size_of::<Self>()
+            .saturating_add(crate::jsjson::allocation(self.records.capacity()))
+            .saturating_add(crate::jsjson::allocation(self.expiry_map.capacity()))
+            .saturating_add(self.record_type.held())
+    }
+}
+
 /// The Tezos machine's own state: its result and discovery caches.
 #[derive(Debug, Default)]
 pub(crate) struct TezosState {
@@ -229,11 +240,27 @@ async fn resolve_at_block(
     name: &str,
 ) -> Result<JsValue, Failed> {
     let now = ctx.now_f();
+    let fresh = |(e, _, expires): &&(Endpoint, Discovery, f64)| e == endpoint && *expires > now;
+    // The copy this session keeps across its lookup counts against it,
+    // before it is made: the answer it came from was another session's
+    // (`memory-budgets`).
+    let size = state
+        .discovery
+        .borrow()
+        .iter()
+        .find(fresh)
+        .map(|(_, d, _)| d.held());
+    if let Some(size) = size
+        && !ctx.charge(size)
+    {
+        // Spent: the machine ends the session with `budget` this poll.
+        return std::future::pending().await;
+    }
     let cached = state
         .discovery
         .borrow()
         .iter()
-        .find(|(e, _, expires)| e == endpoint && *expires > now)
+        .find(fresh)
         .map(|(_, d, _)| d.clone());
     if let Some(discovery) = cached {
         match lookup(ctx, endpoint, block, name, &discovery).await {

@@ -52,21 +52,25 @@ fn take_children(value: &mut JsValue, stack: &mut Vec<JsValue>) {
     }
 }
 
+/// What an allocation of `size` bytes takes, as an allocator lays it out:
+/// an 8-byte header, 16-byte steps, 32 bytes at least (`memory-budgets`).
+pub fn allocation(size: usize) -> usize {
+    if size == 0 {
+        0
+    } else {
+        size.saturating_add(8)
+            .div_ceil(16)
+            .saturating_mul(16)
+            .max(32)
+    }
+}
+
 impl JsValue {
     /// What the value holds on the heap, as an allocator lays it out (an
     /// 8-byte header, 16-byte steps, 32 bytes at least), not counting its
     /// own 32-byte slot: what a copy of it costs (`memory-budgets`).
     pub fn held(&self) -> usize {
-        fn block(size: usize) -> usize {
-            if size == 0 {
-                0
-            } else {
-                size.saturating_add(8)
-                    .div_ceil(16)
-                    .saturating_mul(16)
-                    .max(32)
-            }
-        }
+        let block = allocation;
         // Iterative: a value can be as deep as the parser allows.
         let mut held = 0usize;
         let mut stack = vec![self];
