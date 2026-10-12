@@ -184,6 +184,9 @@ pub fn storage_type_from_script(script: &JsValue) -> Result<Option<JsValue>, Mic
 /// kept; a later duplicate wins, as in a JS `Map`.
 pub fn map_entries(value: &JsValue) -> Vec<(String, Option<JsValue>)> {
     let mut out: Vec<(String, Option<JsValue>)> = Vec::new();
+    // Indexed, so a map of many records stays linear.
+    let mut positions: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
     for entry in value.as_array().unwrap_or(&[]) {
         if entry.get("prim").and_then(JsValue::as_str) != Some("Elt") {
             continue;
@@ -196,9 +199,10 @@ pub fn map_entries(value: &JsValue) -> Vec<(String, Option<JsValue>)> {
         };
         let bytes = index(args, "1").and_then(|v| v.get("bytes").cloned());
         let JsValue::String(key) = key else { continue };
-        if let Some(slot) = out.iter_mut().find(|(k, _)| *k == key) {
-            slot.1 = bytes;
+        if let Some(&i) = positions.get(&key) {
+            out[i].1 = bytes;
         } else {
+            positions.insert(key.clone(), out.len());
             out.push((key, bytes));
         }
     }
@@ -210,10 +214,7 @@ pub fn bytes_from_hex(value: &str) -> Option<Vec<u8>> {
     if !value.len().is_multiple_of(2) {
         return None;
     }
-    (0..value.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(value.get(i..i + 2)?, 16).ok())
-        .collect()
+    value.as_bytes().chunks(2).map(crate::hex_byte).collect()
 }
 
 /// Why record metadata couldn't be read (`invalid Tezos Domains metadata: …`).
@@ -329,8 +330,7 @@ fn decode_uri_component(text: &str) -> Option<String> {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
-            let hex = text.get(i + 1..i + 3)?;
-            out.push(u8::from_str_radix(hex, 16).ok()?);
+            out.push(crate::hex_byte(bytes.get(i + 1..i + 3)?)?);
             i += 3;
         } else {
             out.push(bytes[i]);
@@ -458,6 +458,19 @@ mod tests {
             decode_json_bytes(Some(&big)).unwrap(),
             JsValue::Number(9007199254740992.0)
         );
+    }
+
+    #[test]
+    fn many_records_stay_linear() {
+        // 32,000 distinct keys fit a Tezos answer; a quadratic map took
+        // seconds on them.
+        let items: Vec<String> = (0..32_000)
+            .map(|i| format!(r#"{{"prim":"Elt","args":[{{"string":"k{i}"}},{{"bytes":"00"}}]}}"#))
+            .collect();
+        let map = js(&format!("[{}]", items.join(",")));
+        let started = std::time::Instant::now();
+        assert_eq!(map_entries(&map).len(), 32_000);
+        assert!(started.elapsed().as_secs() < 2, "{:?}", started.elapsed());
     }
 
     #[test]

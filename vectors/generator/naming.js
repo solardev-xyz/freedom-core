@@ -209,6 +209,12 @@ function abiCases({ ethers }) {
     // a recipe (aliasedStrings) that the replay rebuilds.
     ...[2047, 2048].map((count) => ({ types: ['string[]'], recipe: { aliased_strings: count, string_length: 65536 } })),
     { types: ['bytes'], data: '0x' },
+    // A string[] item's offset above 2^53 - 1: ethers keeps it the array
+    // field's error; the uint256 next to it still reads.
+    { types: ['string[]', 'uint256'], data: (() => {
+      const good = enc(['string[]', 'uint256'], [['hello'], 42]);
+      return good.slice(0, 2 + 2 * 96) + '01' + '00'.repeat(30) + '20' + good.slice(2 + 2 * 128);
+    })() },
     { types: ['address'], data: '0x' + word('ff'.repeat(20)) },
   ].map(({ types, data: given, recipe }) => {
     const data = recipe ? aliasedStrings(recipe.aliased_strings, recipe.string_length) : given;
@@ -248,13 +254,23 @@ function offchainLayouts({ ethers }) {
     ['urls-offset-out-of-range', at(canonical, 32 + 30, 'ffff')],
     ['short', canonical.slice(0, 2 + 2 * 100)],
     ['two-urls', coder.encode(['address', 'string[]', 'bytes', 'bytes4', 'bytes'], ['0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe', ['https://a.example', 'https://b.example/{data}'], '0x', '0x00000000', '0x'])],
+    // A good first URL and invalid UTF-8 in the second: the JS reads URLs
+    // lazily, so the lookup decodes and only the second URL fails.
+    ['bad-later-url', (() => {
+      const good = coder.encode(['address', 'string[]', 'bytes', 'bytes4', 'bytes'], ['0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe', ['https://gw.example/{data}', 'https://b.example/xy'], '0x', '0x00000000', '0x']);
+      const marker = Buffer.from('xy').toString('hex');
+      const at = good.lastIndexOf(marker);
+      return good.slice(0, at) + 'c080' + good.slice(at + 4);
+    })()],
   ];
 }
 
 function describeLookup(decode) {
   try {
     const r = decode();
-    return { value: { sender: r.sender.toLowerCase(), urls: [...r.urls], call_data: r.calldata, callback: r.selector, extra_data: r.extraData } };
+    // URLs one by one: the strict path's are lazy (ethers' Result).
+    const urls = Array.from({ length: r.urls.length }, (_, i) => describeField('string', () => r.urls[i]));
+    return { value: { sender: r.sender.toLowerCase(), urls, call_data: r.calldata, callback: r.selector, extra_data: r.extraData } };
   } catch (error) {
     return { error: error.code || error.message };
   }
@@ -368,6 +384,8 @@ async function buildCcip(checkout) {
     'https://node.localhost/query', 'https://node.local/query', 'https://node.internal/query', 'https://node/query',
     'https://user:password@gateway.example/query', 'https://user@gateway.example/query', 'https://0x7f.1/q', 'https://127.1/q',
     'https://0300.0250.0.1/q', 'not a url', 'https://xn--nxasmq6b.example/{data}', 'https://bücher.example/{data}',
+    // One trailing dot is stripped before the checks, not two.
+    'https://node.local../q', 'https://node.internal../q', 'https://node.localhost../q',
   ];
   const policy = [];
   for (const template of templates) policy.push({ template, data: '0x0102', ...(await run([template], '0x0102', JSON.stringify({ data: '0x00' }))) });
@@ -379,6 +397,8 @@ async function buildCcip(checkout) {
     '{"data":"0x01","ignored":1e400}', '{"x":"\\ud800","data":"0x01"}',
     '{"data":"0x01","deep":' + '['.repeat(130) + ']'.repeat(130) + '}', '{"data":"0x01","data":5}', '{"data":"0x01"} ',
     '{"data":"0x01",}', '{"data":"\\u0030x01"}',
+    // Signs aren't hex digits.
+    '{"data":"0x+1"}', '{"data":"0x-1"}', '{"x":"\\u+041","data":"0x01"}',
   ];
   const answers = [];
   for (const body of bodies) answers.push({ body, ...(await run(['https://gw.example/{data}'], '0x01', body)) });
@@ -403,6 +423,7 @@ function buildTezos({ tezos }) {
     ['ipns://%zz%2Etez/', false], ['ipfs://cid:8080/', false], ['ipfs://user@cid/', false], ['https://user@example.org/', false],
     ['ftp://example.org/', false], ['not a url', false], [42, false], [null, false], ['https://' + 'a'.repeat(8200), false],
     ['ipfs://bafy/', false], ['ipfs://BAFY/x', false], ['https:///nohost', false], ['ipns://name.eth/', false],
+    ['ipns://%+aself%2Etez/', false], ['ipns://self%2etez/', false],
   ].map(([raw, redirect]) => ({ raw, redirect, js: tezos.parsePublishedUri(raw, { redirect }) }));
   const contentUrl = Buffer.from('"https://example.org"').toString('hex');
   const maps = [
@@ -415,6 +436,7 @@ function buildTezos({ tezos }) {
     contentUrl, '7b', '0', 'zz', hexOf('3600'), hexOf('{"a":1}'), Buffer.from('\xff"x"', 'latin1').toString('hex'),
     hexOf('9007199254740993'), hexOf('1e400'), hexOf('-0'), hexOf('"\\ud800"'), hexOf('{"b":1,"2":0,"a":3,"1":4,"01":5,"a":6}'),
     hexOf('[' .repeat(200) + ']'.repeat(200)), hexOf('1.5e-7'), hexOf('123456789012345680000'),
+    '+a7b7d', '-a7b7d',
   ].map((hex) => {
     const result = attempt(() => ti.decodeJsonBytes(hex));
     // A lone surrogate survives in a JS string; a Rust string holds U+FFFD

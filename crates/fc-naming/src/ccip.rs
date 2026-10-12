@@ -43,7 +43,8 @@ pub fn gateway_request(
         // `isIP` on the normalized host: WHATWG already turned numeric and
         // hex IPv4 forms into dotted quads.
         Host::Ipv4(_) | Host::Ipv6(_) => return None,
-        Host::Domain(domain) => domain.trim_end_matches('.').to_lowercase(),
+        // One trailing dot, as `.replace(/\.$/, '')`.
+        Host::Domain(domain) => domain.strip_suffix('.').unwrap_or(domain).to_lowercase(),
     };
     if !host.contains('.')
         || host.ends_with(".localhost")
@@ -72,10 +73,7 @@ pub fn parse_gateway_response(body: &[u8]) -> Option<Vec<u8>> {
     if hex.len() % 2 != 0 {
         return None;
     }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
-        .collect()
+    hex.as_bytes().chunks(2).map(crate::hex_byte).collect()
 }
 
 fn to_hex(bytes: &[u8]) -> String {

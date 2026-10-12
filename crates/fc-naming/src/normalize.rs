@@ -49,7 +49,7 @@ pub fn normalize_ens(name: &str) -> Result<String, Error> {
         return Err(Error::NameTooLong(MAX_NAME_BYTES));
     }
     let normalized =
-        ens_normalize::ens_normalize(trimmed).map_err(|e| Error::InvalidName(e.to_string()))?;
+        ens_normalize::ens_normalize(trimmed).map_err(|e| Error::Normalize(e.to_string()))?;
     if normalized.len() > MAX_NAME_BYTES {
         return Err(Error::NameTooLong(MAX_NAME_BYTES));
     }
@@ -92,15 +92,15 @@ mod tests {
         assert_eq!(normalize_ens("\u{216B}.eth").as_deref(), Ok("xii.eth"));
         assert_eq!(normalize_ens("   "), Err(Error::EmptyName));
         assert!(
-            matches!(normalize_ens("a_b.eth"), Err(Error::InvalidName(m)) if m.contains("underscore"))
+            matches!(normalize_ens("a_b.eth"), Err(Error::Normalize(m)) if m.contains("underscore"))
         );
         assert!(matches!(
             normalize_ens("ab--cd.eth"),
-            Err(Error::InvalidName(_))
+            Err(Error::Normalize(_))
         ));
         assert!(matches!(
             normalize_ens("foo..eth"),
-            Err(Error::InvalidName(_))
+            Err(Error::Normalize(_))
         ));
     }
 

@@ -13,8 +13,8 @@
 
 use std::cell::Cell;
 
-/// The whole decode failed (ethers' `BUFFER_OVERRUN`, or an offset word
-/// above 2^53 - 1, which ethers reads outside its per-field guard).
+/// The whole decode failed (ethers' `BUFFER_OVERRUN`, or a top-level offset
+/// word above 2^53 - 1, which ethers reads outside its per-field guard).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecodeError;
 
@@ -190,11 +190,11 @@ impl<'a> Reader<'a> {
         let mut fields = Vec::with_capacity(kinds.len());
         for &kind in kinds {
             let result = if kind.dynamic() {
-                // The offset itself is read outside the per-field guard.
-                let offset = self.read_index().map_err(|e| match e {
-                    Fail::Field(_) => Fail::Overrun,
-                    other => other,
-                })?;
+                // The offset is read outside this tuple's per-field guard, so
+                // its failure leaves the tuple: inside an enclosing field (a
+                // string[] item) that field catches it; at the top it ends
+                // the decode (see `decode`).
+                let offset = self.read_index()?;
                 base.sub(offset).decode(kind)
             } else {
                 self.decode(kind)

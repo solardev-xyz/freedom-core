@@ -15,6 +15,17 @@ mod normalize;
 pub mod tezos;
 pub mod ur;
 
+/// Two ASCII hex digits as a byte. (`u8::from_str_radix` would also take a
+/// sign, which no JavaScript check here allows.)
+pub(crate) fn hex_byte(pair: &[u8]) -> Option<u8> {
+    match pair {
+        [hi, lo] if hi.is_ascii_hexdigit() && lo.is_ascii_hexdigit() => {
+            u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()
+        }
+        _ => None,
+    }
+}
+
 pub use contenthash::{Content, cid_v1_bytes_to_base32, encode_base58, parse_contenthash};
 pub use ens::{ETH_COIN_TYPE, coin_type, dns_encode, namehash};
 pub use error::Error;

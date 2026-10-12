@@ -71,11 +71,12 @@ fn names() {
         match js["stage"].as_str() {
             Some("empty") => assert_eq!(ours, Err(Error::EmptyName), "{input:?}"),
             Some("normalize") => {
-                // The same normalizer, so the same reason.
-                let reason = js["error"].as_str().unwrap();
+                // The same normalizer and the same displayed message, as
+                // fastNormalize throws it.
+                let shown = ours.map_err(|e| e.to_string());
                 assert_eq!(
-                    ours,
-                    Err(Error::InvalidName(reason.to_owned())),
+                    shown,
+                    Err(js["error"].as_str().unwrap().to_owned()),
                     "{input:?}"
                 );
             }
@@ -310,8 +311,8 @@ fn universal_resolver() {
     assert_eq!(
         lookup.urls,
         [
-            "https://gw.example/{sender}/{data}.json",
-            "https://gw2.example"
+            Ok("https://gw.example/{sender}/{data}.json".to_owned()),
+            Ok("https://gw2.example".to_owned())
         ]
     );
     assert_eq!(
@@ -339,7 +340,25 @@ fn offchain_lookups() {
                 let ours =
                     ours.unwrap_or_else(|| panic!("{}: the strict path accepts it", case["id"]));
                 assert_eq!(hex0x(&ours.sender), js["sender"], "{}", case["id"]);
-                assert_eq!(json!(ours.urls), js["urls"], "{}", case["id"]);
+                // Each URL on its own, as the JS reads them lazily.
+                let urls: Vec<Value> = ours
+                    .urls
+                    .iter()
+                    .map(|u| match u {
+                        Ok(url) => json!({ "value": url }),
+                        Err(_) => json!({ "error": true }),
+                    })
+                    .collect();
+                let expected: Vec<Value> = js["urls"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|u| match u.get("value") {
+                        Some(v) => json!({ "value": v }),
+                        None => json!({ "error": true }),
+                    })
+                    .collect();
+                assert_eq!(urls, expected, "{}", case["id"]);
                 assert_eq!(hex0x(&ours.call_data), js["call_data"], "{}", case["id"]);
                 assert_eq!(hex0x(&ours.callback), js["callback"], "{}", case["id"]);
                 assert_eq!(hex0x(&ours.extra_data), js["extra_data"], "{}", case["id"]);

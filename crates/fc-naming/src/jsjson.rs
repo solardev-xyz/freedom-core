@@ -99,7 +99,12 @@ pub struct JsonError(pub usize);
 
 enum Frame {
     Array(Vec<JsValue>),
-    Object(Vec<(String, JsValue)>, Option<String>),
+    /// Properties, their index by key, and the key awaiting its value.
+    Object(
+        Vec<(String, JsValue)>,
+        std::collections::BTreeMap<String, usize>,
+        Option<String>,
+    ),
 }
 
 /// `JSON.parse(text)`.
@@ -121,7 +126,7 @@ pub fn parse(text: &str) -> Result<JsValue, JsonError> {
                     JsValue::Object(Vec::new())
                 } else {
                     let key = p.key()?;
-                    stack.push(Frame::Object(Vec::new(), Some(key)));
+                    stack.push(Frame::Object(Vec::new(), Default::default(), Some(key)));
                     p.ws();
                     continue;
                 }
@@ -166,9 +171,9 @@ pub fn parse(text: &str) -> Result<JsValue, JsonError> {
                         _ => return Err(JsonError(p.i)),
                     }
                 }
-                Some(Frame::Object(props, pending)) => {
+                Some(Frame::Object(props, index, pending)) => {
                     let key = pending.take().ok_or(JsonError(p.i))?;
-                    set_property(props, key, value);
+                    set_property(props, index, key, value);
                     match p.next() {
                         Some(b',') => {
                             p.ws();
@@ -177,7 +182,7 @@ pub fn parse(text: &str) -> Result<JsValue, JsonError> {
                             break;
                         }
                         Some(b'}') => {
-                            let Some(Frame::Object(props, _)) = stack.pop() else {
+                            let Some(Frame::Object(props, _, _)) = stack.pop() else {
                                 return Err(JsonError(p.i));
                             };
                             value = JsValue::Object(order_properties(props));
@@ -190,11 +195,18 @@ pub fn parse(text: &str) -> Result<JsValue, JsonError> {
     }
 }
 
-/// `CreateDataProperty`: a repeated key keeps its place, takes the value.
-fn set_property(props: &mut Vec<(String, JsValue)>, key: String, value: JsValue) {
-    if let Some(slot) = props.iter_mut().find(|(k, _)| *k == key) {
-        slot.1 = value;
+/// `CreateDataProperty` (a repeated key keeps its place and takes the
+/// value), indexed so many keys stay linear.
+fn set_property(
+    props: &mut Vec<(String, JsValue)>,
+    index: &mut std::collections::BTreeMap<String, usize>,
+    key: String,
+    value: JsValue,
+) {
+    if let Some(&i) = index.get(&key) {
+        props[i].1 = value;
     } else {
+        index.insert(key.clone(), props.len());
         props.push((key, value));
     }
 }
@@ -314,8 +326,10 @@ impl Parser<'_> {
 
     fn hex4(&mut self) -> Result<u16, JsonError> {
         let hex = self.s.get(self.i..self.i + 4).ok_or(JsonError(self.i))?;
-        let text = std::str::from_utf8(hex).map_err(|_| JsonError(self.i))?;
-        let unit = u16::from_str_radix(text, 16).map_err(|_| JsonError(self.i))?;
+        let (Some(hi), Some(lo)) = (crate::hex_byte(&hex[..2]), crate::hex_byte(&hex[2..])) else {
+            return Err(JsonError(self.i));
+        };
+        let unit = u16::from_be_bytes([hi, lo]);
         self.i += 4;
         Ok(unit)
     }
@@ -502,6 +516,24 @@ mod tests {
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn many_keys_stay_linear() {
+        let keys: Vec<String> = (0..50_000).map(|i| format!(r#""k{i}":{i}"#)).collect();
+        let started = std::time::Instant::now();
+        let JsValue::Object(props) = parse(&format!("{{{}}}", keys.join(","))).unwrap() else {
+            panic!()
+        };
+        assert_eq!(props.len(), 50_000);
+        assert!(started.elapsed().as_secs() < 2, "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn hex_escapes_have_no_sign() {
+        assert!(parse(r#""\u+041""#).is_err());
+        assert!(parse(r#""\u-041""#).is_err());
+        assert_eq!(parse(r#""\u0041""#).unwrap(), JsValue::String("A".into()));
     }
 
     #[test]

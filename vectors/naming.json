@@ -748,6 +748,23 @@
     },
     {
       "types": [
+        "string[]",
+        "uint256"
+      ],
+      "data": "0x0000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000002a00000000000000000000000000000000000000000000000000000000000000010100000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000568656c6c6f000000000000000000000000000000000000000000000000000000",
+      "js": {
+        "fields": [
+          {
+            "error": "deferred error during ABI decoding triggered accessing index 0"
+          },
+          {
+            "value": "42"
+          }
+        ]
+      }
+    },
+    {
+      "types": [
         "address"
       ],
       "data": "0x000000000000000000000000ffffffffffffffffffffffffffffffffffffffff",
@@ -1099,6 +1116,42 @@
           }
         ],
         "result": "0x00"
+      },
+      {
+        "template": "https://node.local../q",
+        "data": "0x0102",
+        "requests": [
+          {
+            "url": "https://node.local../q",
+            "method": "POST",
+            "body": "{\"sender\":\"0xeeeeeeee14d718c2b47d9923deab1335e144eeee\",\"data\":\"0x0102\"}"
+          }
+        ],
+        "result": "0x00"
+      },
+      {
+        "template": "https://node.internal../q",
+        "data": "0x0102",
+        "requests": [
+          {
+            "url": "https://node.internal../q",
+            "method": "POST",
+            "body": "{\"sender\":\"0xeeeeeeee14d718c2b47d9923deab1335e144eeee\",\"data\":\"0x0102\"}"
+          }
+        ],
+        "result": "0x00"
+      },
+      {
+        "template": "https://node.localhost../q",
+        "data": "0x0102",
+        "requests": [
+          {
+            "url": "https://node.localhost../q",
+            "method": "POST",
+            "body": "{\"sender\":\"0xeeeeeeee14d718c2b47d9923deab1335e144eeee\",\"data\":\"0x0102\"}"
+          }
+        ],
+        "result": "0x00"
       }
     ],
     "answers": [
@@ -1312,6 +1365,39 @@
         "result": "0x01"
       },
       {
+        "body": "{\"data\":\"0x+1\"}",
+        "requests": [
+          {
+            "url": "https://gw.example/0x01",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "body": "{\"data\":\"0x-1\"}",
+        "requests": [
+          {
+            "url": "https://gw.example/0x01",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
+        "body": "{\"x\":\"\\u+041\",\"data\":\"0x01\"}",
+        "requests": [
+          {
+            "url": "https://gw.example/0x01",
+            "method": "GET",
+            "body": null
+          }
+        ],
+        "error": "CCIP_GATEWAY_FAILED"
+      },
+      {
         "body_hex": "7b2278223a22ff222c2264617461223a2230783031227d",
         "requests": [
           {
@@ -1344,7 +1430,9 @@
         "value": {
           "sender": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
           "urls": [
-            "https://gw.example/{data}"
+            {
+              "value": "https://gw.example/{data}"
+            }
           ],
           "call_data": "0x0102",
           "callback": "0xdeadbeef",
@@ -1355,7 +1443,9 @@
         "value": {
           "sender": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
           "urls": [
-            "https://gw.example/{data}"
+            {
+              "value": "https://gw.example/{data}"
+            }
           ],
           "call_data": "0x0102",
           "callback": "0xdeadbeef",
@@ -1370,7 +1460,9 @@
         "value": {
           "sender": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
           "urls": [
-            "https://gw.example/{data}"
+            {
+              "value": "https://gw.example/{data}"
+            }
           ],
           "call_data": "0x0102",
           "callback": "0xdeadbeef",
@@ -1388,7 +1480,9 @@
         "value": {
           "sender": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
           "urls": [
-            "https://gw.example/{data}"
+            {
+              "value": "https://gw.example/{data}"
+            }
           ],
           "call_data": "0x0102",
           "callback": "0xdeadbeef",
@@ -1399,7 +1493,9 @@
         "value": {
           "sender": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
           "urls": [
-            "https://gw.example/{data}"
+            {
+              "value": "https://gw.example/{data}"
+            }
           ],
           "call_data": "0x0102",
           "callback": "0xdeadbeef",
@@ -1444,8 +1540,12 @@
         "value": {
           "sender": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
           "urls": [
-            "https://a.example",
-            "https://b.example/{data}"
+            {
+              "value": "https://a.example"
+            },
+            {
+              "value": "https://b.example/{data}"
+            }
           ],
           "call_data": "0x",
           "callback": "0x00000000",
@@ -1456,13 +1556,40 @@
         "value": {
           "sender": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
           "urls": [
-            "https://a.example",
-            "https://b.example/{data}"
+            {
+              "value": "https://a.example"
+            },
+            {
+              "value": "https://b.example/{data}"
+            }
           ],
           "call_data": "0x",
           "callback": "0x00000000",
           "extra_data": "0x"
         }
+      }
+    },
+    {
+      "id": "bad-later-url",
+      "data": "0x556f1830000000000000000000000000eeeeeeee14d718c2b47d9923deab1335e144eeee00000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000180000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001a0000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000001968747470733a2f2f67772e6578616d706c652f7b646174617d00000000000000000000000000000000000000000000000000000000000000000000000000001468747470733a2f2f622e6578616d706c652fc08000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "strict": {
+        "value": {
+          "sender": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+          "urls": [
+            {
+              "value": "https://gw.example/{data}"
+            },
+            {
+              "error": "deferred error during ABI decoding triggered accessing index 1"
+            }
+          ],
+          "call_data": "0x",
+          "callback": "0x00000000",
+          "extra_data": "0x"
+        }
+      },
+      "builtin": {
+        "error": "OFFCHAIN_FAULT"
       }
     }
   ],
@@ -1758,6 +1885,28 @@
           "reason": "IPNS website URI must reference content, not a name",
           "system": "tezos"
         }
+      },
+      {
+        "raw": "ipns://%+aself%2Etez/",
+        "redirect": false,
+        "js": {
+          "type": "ok",
+          "protocol": "ipns",
+          "uri": "ipns://%+aself%2Etez/",
+          "decoded": "%+aself%2Etez",
+          "basePath": "",
+          "redirect": false,
+          "system": "tezos"
+        }
+      },
+      {
+        "raw": "ipns://self%2etez/",
+        "redirect": false,
+        "js": {
+          "type": "unsupported",
+          "reason": "IPNS website URI must reference content, not a name",
+          "system": "tezos"
+        }
       }
     ],
     "maps": [
@@ -1917,6 +2066,18 @@
         "hex": "313233343536373839303132333435363830303030",
         "js": {
           "stringified": "123456789012345680000"
+        }
+      },
+      {
+        "hex": "+a7b7d",
+        "js": {
+          "error": "Invalid Micheline bytes value"
+        }
+      },
+      {
+        "hex": "-a7b7d",
+        "js": {
+          "error": "Invalid Micheline bytes value"
         }
       }
     ],

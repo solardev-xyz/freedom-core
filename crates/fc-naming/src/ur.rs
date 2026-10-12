@@ -147,15 +147,17 @@ pub fn classify_revert(data: &[u8]) -> Option<Revert> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffchainLookup {
     pub sender: [u8; 20],
-    pub urls: Vec<String>,
+    /// Each URL decoded on its own: the JS reads them in order and only
+    /// fails on reaching a bad one, after trying every gateway before it.
+    pub urls: Vec<Result<String, crate::abi::FieldError>>,
     pub call_data: Vec<u8>,
     pub callback: [u8; 4],
     pub extra_data: Vec<u8>,
 }
 
 /// Decodes the revert data (selector included). The JS destructures all
-/// five fields, so a problem with any of them is an error, as is any
-/// unreadable URL.
+/// five fields, so a problem with any of them is an error; single URLs stay
+/// lazy (see `urls`).
 pub fn decode_offchain_lookup(data: &[u8]) -> Option<OffchainLookup> {
     if data.get(..4)? != OFFCHAIN_LOOKUP {
         return None;
@@ -184,7 +186,6 @@ pub fn decode_offchain_lookup(data: &[u8]) -> Option<OffchainLookup> {
     else {
         return None;
     };
-    let urls = urls.into_iter().collect::<Result<Vec<_>, _>>().ok()?;
     Some(OffchainLookup {
         sender,
         urls,
@@ -351,7 +352,7 @@ mod tests {
         assert_eq!(classify_revert(&data), Some(Revert::OffchainLookup));
         let lookup = decode_offchain_lookup(&data).unwrap();
         assert_eq!(lookup.sender, UNIVERSAL_RESOLVER);
-        assert_eq!(lookup.urls, urls);
+        assert_eq!(lookup.urls, urls.map(|u| Ok(u.to_owned())));
         assert_eq!(lookup.call_data, call_data);
         assert_eq!(lookup.callback, [0xde, 0xad, 0xbe, 0xef]);
         assert_eq!(lookup.extra_data, extra);
