@@ -184,7 +184,14 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
         return unscripted(`${r.method} at ${host}`);
     }
   };
+  // ethers' native getUrl, observably: a cancel rejects CANCELLED on the
+  // next tick (its listeners run from setTimeout 0) and a reply that finds
+  // the signal cancelled rejects too; req.timeout is an inactivity timer
+  // that rejects TIMEOUT. Neither stops the HTTP exchange itself (ethers
+  // passes its AbortSignal under an option Node ignores), so an entry's
+  // outcome follows the exchange and `rejected` records the promise.
   const rpcTransport = (req, signal) => {
+    if (signal?.cancelled) return Promise.reject(ethers.makeError('request cancelled before sending', 'CANCELLED'));
     const host = hostOf(req.url);
     http += 1;
     const body = JSON.parse(Buffer.from(req.body).toString());
@@ -197,16 +204,25 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     const p = plan(host);
     const answers = p.status ? [] : batch.map((r) => ({ id: r.id, ...answerRpc(host, r) }));
     return new Promise((resolve, reject) => {
-      let timer = null;
-      signal?.addListener(() => {
-        if (entries.every((item) => item.outcome !== 'open')) return;
-        clearTimeout(timer);
-        for (const item of entries) close(item, 'cancelled');
-        reject(Object.assign(new Error('request cancelled'), { code: 'CANCELLED' }));
-      });
-      if (answers.some((a) => a.hang)) return;
-      timer = setTimeout(() => {
+      let settled = false;
+      const fail = (message, code) => {
+        if (settled) return;
+        settled = true;
+        for (const item of entries) item.rejected = { at: now(), code };
+        reject(ethers.makeError(message, code));
+      };
+      signal?.addListener(() => fail('request cancelled', 'CANCELLED'));
+      const inactivity = setTimeout(() => fail('request timeout', 'TIMEOUT'), req.timeout);
+      if (p.hang || answers.some((a) => a.hang)) return;
+      setTimeout(() => {
+        clearTimeout(inactivity);
         for (const item of entries) close(item, 'answered');
+        if (signal?.cancelled) {
+          fail('cancelled', 'CANCELLED');
+          return;
+        }
+        if (settled) return;
+        settled = true;
         if (p.status) {
           resolve({ statusCode: p.status, statusMessage: 'Unavailable', headers: {}, body: Buffer.from('unavailable') });
           return;
@@ -244,6 +260,11 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
       if (!g) violations.push(`undeclared gateway ${host}`);
       if (!g || g.hang) return;
       timer = setTimeout(() => {
+        if (g.redirect) {
+          close(item, 'redirected');
+          req.emit('redirect', 302, options.method, g.redirect, { location: [g.redirect] });
+          return;
+        }
         close(item, 'answered');
         const res = new EventEmitter();
         Object.assign(res, { statusCode: g.status ?? 200, statusMessage: 'OK', headers: {}, pause() {}, resume() {}, destroy() {} });
@@ -433,7 +454,17 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
 
     const loaded = loadModule(checkout, stubs, system === 'tezos' ? 'tezos-domains-resolver.js' : 'ens-resolver.js');
     undo.push(loaded.restore);
-    const invoke = ({ fn, args = [] }) => Promise.resolve().then(() => (system === 'tezos'
+    // `$fetch` drives one FetchRequest through the RPC transport, with its
+    // real cancel signal: self-tests use it for the transport's semantics.
+    const probeFetch = async (url, { timeout, cancelAt } = {}) => {
+      const req = new ethers.FetchRequest(url);
+      req.body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] });
+      if (timeout !== undefined) req.timeout = timeout;
+      if (cancelAt !== undefined) setTimeout(() => req.cancel(), cancelAt);
+      const response = await req.send();
+      return { status: response.statusCode };
+    };
+    const invoke = ({ fn, args = [] }) => Promise.resolve().then(() => (fn === '$fetch' ? probeFetch(...args) : system === 'tezos'
       ? loaded.exports[fn](...args, { fetchImpl, endpoints: world.endpoints })
       : loaded.exports[fn](...args)));
 
@@ -508,6 +539,13 @@ function scenarioDefinitions(ethers) {
   const OFFCHAIN = { rpc_error: { code: 3, message: 'execution reverted', data: lookup } };
   const ADDRESS = { data: coder.encode(['bytes', 'address'], [coder.encode(['address'], ['0x' + 'ab'.repeat(20)]), '0x' + '22'.repeat(20)]) };
   const GATEWAY = (delay) => ({ 'gw.example': { delay, body: JSON.stringify({ data: '0xcafe' }) } });
+  const lookupVia = (hosts) => ({
+    rpc_error: {
+      code: 3,
+      message: 'execution reverted',
+      data: '0x556f1830' + coder.encode(['address', 'string[]', 'bytes', 'bytes4', 'bytes'], [UR, hosts.map((host) => `https://${host}/{sender}/{data}.json`), '0x0102', '0xdeadbeef', '0x09']).slice(2),
+    },
+  });
   const base = (extra) => ({ endpoints: ENDPOINTS, network: QUORUM_NETWORK, calls: { resolve: GOOD, callback: GOOD }, ...extra });
   const order = (methods, preferVerified = false) => ({ ...QUORUM_NETWORK, verification: { order: methods, preferVerified } });
   const one = (id, world, call = content()) => ({ id, world, steps: [{ call }] });
@@ -524,6 +562,13 @@ function scenarioDefinitions(ethers) {
       // endpoints (no quarantine after a gateway timeout).
       steps: [{ call: content() }, { after: 100, world: { gateways: GATEWAY(10) }, call: content('nick.eth') }],
     },
+    // Gateways in list order: an HTTP error and a redirect fall through.
+    one('ccip-gateway-errors-fall-through', base({
+      calls: { resolve: lookupVia(['gw1.example', 'gw2.example', 'gw3.example']), callback: GOOD },
+      gateways: { 'gw1.example': { status: 500 }, 'gw2.example': { redirect: 'https://elsewhere.example/x' }, 'gw3.example': { body: JSON.stringify({ data: '0xcafe' }) } },
+    })),
+    // Every gateway fails: an error leg, without quarantine.
+    one('ccip-all-gateways-fail', base({ calls: { resolve: lookupVia(['gw1.example']), callback: GOOD }, gateways: { 'gw1.example': { status: 500 } } })),
     one('single-source-two-endpoints', base({ endpoints: ENDPOINTS.slice(0, 2) })),
     one('anchor-hash-split', base({ hosts: { 'c.rpc.example': { fork: true }, 'd.rpc.example': { fork: true } } })),
     one('anchor-finalized', base({ network: { ...QUORUM_NETWORK, quorum: { ...QUORUM_NETWORK.quorum, anchor: 'finalized' } } })),
@@ -631,6 +676,9 @@ function addressAndReverse(ethers, base, one) {
     one('reverse-agree', base({ calls: { reverse: urReverse('vitalik.eth') } }), reverse),
     one('reverse-mismatch', base({ calls: { reverse: { rpc_error: { code: 3, message: 'execution reverted', data: mismatch } } } }), reverse),
     one('reverse-ens-empty-then-wns', base({ calls: { reverse: urReverse(''), 'wns:reverse': nftString('alice.wei'), 'wns:addr': nftAddress(ACCOUNT), 'gns:reverse': nftString('') } }), reverse),
+    one('reverse-ens-and-wns-empty-then-gns', base({ calls: { reverse: urReverse(''), 'wns:reverse': nftString(''), 'gns:reverse': nftString('bob.gwei'), 'gns:addr': nftAddress(ACCOUNT) } }), reverse),
+    one('reverse-wns-claim-fails-forward-then-gns-empty', base({ calls: { reverse: urReverse(''), 'wns:reverse': nftString('alice.wei'), 'wns:addr': nftAddress('0x' + 'cd'.repeat(20)), 'gns:reverse': nftString('') } }), reverse),
+    one('gns-content', base({ calls: { 'gns:contenthash': nftBytes('0xe3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f') } }), content('bob.gwei')),
     one('wns-content', base({ calls: { 'wns:contenthash': nftBytes('0xe3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f') } }), content('alice.wei')),
     one('wns-address-on-l2', base({}), address('alice.wei', 8453)),
   ];
@@ -655,6 +703,8 @@ function tezosScenarios() {
     one('tezos-expiry-unparseable', base({ expiry: 'not a date' })),
     one('tezos-redirect', base({ record: tezRecord({ 'web:redirect_url': 'https://alice.example/' }) })),
     one('tezos-no-website', base({ record: tezRecord({ 'td:ttl': 60 }, null) })),
+    // No td:ttl: the result has `ttl` present and undefined.
+    one('tezos-no-website-no-ttl', base({ record: tezRecord({}) })),
     one('tezos-no-record', base({ record: null }), [{ call: tez() }, { after: 29_999, call: tez() }, { after: 1, call: tez() }]),
     one('tezos-registry-script-fails', base({ hosts: { 't1.tez.example': { scriptFail: true } } })),
     one('tezos-invalid-name', base({}), [{ call: tez('alice.eth') }]),

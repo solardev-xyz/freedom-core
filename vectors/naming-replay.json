@@ -2049,6 +2049,873 @@
       ]
     },
     {
+      "id": "ccip-gateway-errors-fall-through",
+      "system": "ens",
+      "seed": 7,
+      "world": {
+        "endpoints": [
+          "https://a.rpc.example",
+          "https://b.rpc.example",
+          "https://c.rpc.example",
+          "https://d.rpc.example"
+        ],
+        "network": {
+          "verification": {
+            "order": [
+              "quorum"
+            ],
+            "preferVerified": false
+          },
+          "quorum": {
+            "k": 3,
+            "m": 2,
+            "timeoutMs": 5000,
+            "anchor": "latest",
+            "anchorTtlMs": 30000
+          }
+        },
+        "calls": {
+          "resolve": {
+            "rpc_error": {
+              "code": 3,
+              "message": "execution reverted",
+              "data": "0x556f1830000000000000000000000000eeeeeeee14d718c2b47d9923deab1335e144eeee00000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000240deadbeef0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002800000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000c00000000000000000000000000000000000000000000000000000000000000120000000000000000000000000000000000000000000000000000000000000002868747470733a2f2f6777312e6578616d706c652f7b73656e6465727d2f7b646174617d2e6a736f6e000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002868747470733a2f2f6777322e6578616d706c652f7b73656e6465727d2f7b646174617d2e6a736f6e000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002868747470733a2f2f6777332e6578616d706c652f7b73656e6465727d2f7b646174617d2e6a736f6e0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002010200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010900000000000000000000000000000000000000000000000000000000000000"
+            }
+          },
+          "callback": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000"
+          }
+        },
+        "gateways": {
+          "gw1.example": {
+            "status": 500
+          },
+          "gw2.example": {
+            "redirect": "https://elsewhere.example/x"
+          },
+          "gw3.example": {
+            "body": "{\"data\":\"0xcafe\"}"
+          }
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "call": {
+            "fn": "resolveEnsContent",
+            "args": [
+              "vitalik.eth"
+            ]
+          },
+          "results": [
+            {
+              "value": {
+                "type": "ok",
+                "name": "vitalik.eth",
+                "system": "ens",
+                "codec": "ipfs-ns",
+                "protocol": "ipfs",
+                "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+                "decoded": "QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+                "trust": {
+                  "level": "verified",
+                  "system": "ens",
+                  "block": {
+                    "number": 19999992,
+                    "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+                  },
+                  "agreed": [
+                    "c.rpc.example",
+                    "b.rpc.example"
+                  ],
+                  "dissented": [],
+                  "queried": [
+                    "c.rpc.example",
+                    "b.rpc.example",
+                    "d.rpc.example"
+                  ],
+                  "quorum": {
+                    "k": 3,
+                    "m": 2,
+                    "achieved": true
+                  }
+                }
+              },
+              "settled": 110
+            }
+          ]
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 1,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered"
+        },
+        {
+          "id": 1,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 2,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered"
+        },
+        {
+          "id": 2,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 3,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered"
+        },
+        {
+          "id": 3,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 4,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered"
+        },
+        {
+          "id": 4,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 5,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered"
+        },
+        {
+          "id": 5,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 6,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered"
+        },
+        {
+          "id": 6,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 7,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered"
+        },
+        {
+          "id": 7,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 8,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered"
+        },
+        {
+          "id": 8,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 9,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b92300000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000d07766974616c696b0365746800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1ee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a5347583500000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 60,
+          "outcome": "answered"
+        },
+        {
+          "id": 9,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 10,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b92300000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000d07766974616c696b0365746800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1ee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a5347583500000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 60,
+          "outcome": "answered"
+        },
+        {
+          "id": 10,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 11,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b92300000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000d07766974616c696b0365746800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1ee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a5347583500000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 60,
+          "outcome": "answered"
+        },
+        {
+          "id": 11,
+          "step": 0,
+          "t": 60,
+          "kind": "gateway",
+          "host": "gw1.example",
+          "method": "GET",
+          "url": "https://gw1.example/0xeeeeeeee14d718c2b47d9923deab1335e144eeee/0x0102.json",
+          "headers": {
+            "accept": "application/json"
+          },
+          "body": null,
+          "flags": {
+            "redirect": "manual",
+            "credentials": "omit",
+            "useSessionCookies": false,
+            "cache": "no-store",
+            "bypassCustomProtocolHandlers": true
+          },
+          "end": 70,
+          "outcome": "answered"
+        },
+        {
+          "id": 12,
+          "step": 0,
+          "t": 60,
+          "kind": "gateway",
+          "host": "gw1.example",
+          "method": "GET",
+          "url": "https://gw1.example/0xeeeeeeee14d718c2b47d9923deab1335e144eeee/0x0102.json",
+          "headers": {
+            "accept": "application/json"
+          },
+          "body": null,
+          "flags": {
+            "redirect": "manual",
+            "credentials": "omit",
+            "useSessionCookies": false,
+            "cache": "no-store",
+            "bypassCustomProtocolHandlers": true
+          },
+          "end": 70,
+          "outcome": "answered"
+        },
+        {
+          "id": 13,
+          "step": 0,
+          "t": 60,
+          "kind": "gateway",
+          "host": "gw1.example",
+          "method": "GET",
+          "url": "https://gw1.example/0xeeeeeeee14d718c2b47d9923deab1335e144eeee/0x0102.json",
+          "headers": {
+            "accept": "application/json"
+          },
+          "body": null,
+          "flags": {
+            "redirect": "manual",
+            "credentials": "omit",
+            "useSessionCookies": false,
+            "cache": "no-store",
+            "bypassCustomProtocolHandlers": true
+          },
+          "end": 70,
+          "outcome": "answered"
+        },
+        {
+          "id": 14,
+          "step": 0,
+          "t": 70,
+          "kind": "gateway",
+          "host": "gw2.example",
+          "method": "GET",
+          "url": "https://gw2.example/0xeeeeeeee14d718c2b47d9923deab1335e144eeee/0x0102.json",
+          "headers": {
+            "accept": "application/json"
+          },
+          "body": null,
+          "flags": {
+            "redirect": "manual",
+            "credentials": "omit",
+            "useSessionCookies": false,
+            "cache": "no-store",
+            "bypassCustomProtocolHandlers": true
+          },
+          "end": 80,
+          "outcome": "redirected"
+        },
+        {
+          "id": 15,
+          "step": 0,
+          "t": 70,
+          "kind": "gateway",
+          "host": "gw2.example",
+          "method": "GET",
+          "url": "https://gw2.example/0xeeeeeeee14d718c2b47d9923deab1335e144eeee/0x0102.json",
+          "headers": {
+            "accept": "application/json"
+          },
+          "body": null,
+          "flags": {
+            "redirect": "manual",
+            "credentials": "omit",
+            "useSessionCookies": false,
+            "cache": "no-store",
+            "bypassCustomProtocolHandlers": true
+          },
+          "end": 80,
+          "outcome": "redirected"
+        },
+        {
+          "id": 16,
+          "step": 0,
+          "t": 70,
+          "kind": "gateway",
+          "host": "gw2.example",
+          "method": "GET",
+          "url": "https://gw2.example/0xeeeeeeee14d718c2b47d9923deab1335e144eeee/0x0102.json",
+          "headers": {
+            "accept": "application/json"
+          },
+          "body": null,
+          "flags": {
+            "redirect": "manual",
+            "credentials": "omit",
+            "useSessionCookies": false,
+            "cache": "no-store",
+            "bypassCustomProtocolHandlers": true
+          },
+          "end": 80,
+          "outcome": "redirected"
+        },
+        {
+          "id": 17,
+          "step": 0,
+          "t": 80,
+          "kind": "gateway",
+          "host": "gw3.example",
+          "method": "GET",
+          "url": "https://gw3.example/0xeeeeeeee14d718c2b47d9923deab1335e144eeee/0x0102.json",
+          "headers": {
+            "accept": "application/json"
+          },
+          "body": null,
+          "flags": {
+            "redirect": "manual",
+            "credentials": "omit",
+            "useSessionCookies": false,
+            "cache": "no-store",
+            "bypassCustomProtocolHandlers": true
+          },
+          "end": 90,
+          "outcome": "answered"
+        },
+        {
+          "id": 18,
+          "step": 0,
+          "t": 80,
+          "kind": "gateway",
+          "host": "gw3.example",
+          "method": "GET",
+          "url": "https://gw3.example/0xeeeeeeee14d718c2b47d9923deab1335e144eeee/0x0102.json",
+          "headers": {
+            "accept": "application/json"
+          },
+          "body": null,
+          "flags": {
+            "redirect": "manual",
+            "credentials": "omit",
+            "useSessionCookies": false,
+            "cache": "no-store",
+            "bypassCustomProtocolHandlers": true
+          },
+          "end": 90,
+          "outcome": "answered"
+        },
+        {
+          "id": 19,
+          "step": 0,
+          "t": 80,
+          "kind": "gateway",
+          "host": "gw3.example",
+          "method": "GET",
+          "url": "https://gw3.example/0xeeeeeeee14d718c2b47d9923deab1335e144eeee/0x0102.json",
+          "headers": {
+            "accept": "application/json"
+          },
+          "body": null,
+          "flags": {
+            "redirect": "manual",
+            "credentials": "omit",
+            "useSessionCookies": false,
+            "cache": "no-store",
+            "bypassCustomProtocolHandlers": true
+          },
+          "end": 90,
+          "outcome": "answered"
+        },
+        {
+          "id": 20,
+          "step": 0,
+          "t": 100,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 12,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0xdeadbeef000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000800000000000000000000000000000000000000000000000000000000000000002cafe00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010900000000000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "callback",
+          "end": 110,
+          "outcome": "answered"
+        },
+        {
+          "id": 21,
+          "step": 0,
+          "t": 100,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 13,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0xdeadbeef000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000800000000000000000000000000000000000000000000000000000000000000002cafe00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010900000000000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "callback",
+          "end": 110,
+          "outcome": "answered"
+        },
+        {
+          "id": 22,
+          "step": 0,
+          "t": 100,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 14,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0xdeadbeef000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000800000000000000000000000000000000000000000000000000000000000000002cafe00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010900000000000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "callback",
+          "end": 110,
+          "outcome": "answered"
+        },
+        {
+          "id": 23,
+          "step": 0,
+          "t": 110,
+          "kind": "prefetch",
+          "host": null,
+          "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+          "end": null,
+          "outcome": "open"
+        }
+      ]
+    },
+    {
+      "id": "ccip-all-gateways-fail",
+      "system": "ens",
+      "seed": 7,
+      "world": {
+        "endpoints": [
+          "https://a.rpc.example",
+          "https://b.rpc.example",
+          "https://c.rpc.example",
+          "https://d.rpc.example"
+        ],
+        "network": {
+          "verification": {
+            "order": [
+              "quorum"
+            ],
+            "preferVerified": false
+          },
+          "quorum": {
+            "k": 3,
+            "m": 2,
+            "timeoutMs": 5000,
+            "anchor": "latest",
+            "anchorTtlMs": 30000
+          }
+        },
+        "calls": {
+          "resolve": {
+            "rpc_error": {
+              "code": 3,
+              "message": "execution reverted",
+              "data": "0x556f1830000000000000000000000000eeeeeeee14d718c2b47d9923deab1335e144eeee00000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000140deadbeef00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000018000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000002868747470733a2f2f6777312e6578616d706c652f7b73656e6465727d2f7b646174617d2e6a736f6e0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002010200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010900000000000000000000000000000000000000000000000000000000000000"
+            }
+          },
+          "callback": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000"
+          }
+        },
+        "gateways": {
+          "gw1.example": {
+            "status": 500
+          }
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "call": {
+            "fn": "resolveEnsContent",
+            "args": [
+              "vitalik.eth"
+            ]
+          },
+          "results": [
+            {
+              "thrown": "All 1 RPC providers failed for vitalik.eth",
+              "settled": 100
+            }
+          ]
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 1,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered"
+        },
+        {
+          "id": 1,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 2,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered"
+        },
+        {
+          "id": 2,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 3,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered"
+        },
+        {
+          "id": 3,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 4,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered"
+        },
+        {
+          "id": 4,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 5,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered"
+        },
+        {
+          "id": 5,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 6,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered"
+        },
+        {
+          "id": 6,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 7,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered"
+        },
+        {
+          "id": 7,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 8,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered"
+        },
+        {
+          "id": 8,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 9,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b92300000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000d07766974616c696b0365746800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1ee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a5347583500000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 60,
+          "outcome": "answered"
+        },
+        {
+          "id": 9,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 10,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b92300000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000d07766974616c696b0365746800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1ee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a5347583500000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 60,
+          "outcome": "answered"
+        },
+        {
+          "id": 10,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 11,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b92300000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000d07766974616c696b0365746800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1ee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a5347583500000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 60,
+          "outcome": "answered"
+        },
+        {
+          "id": 11,
+          "step": 0,
+          "t": 60,
+          "kind": "gateway",
+          "host": "gw1.example",
+          "method": "GET",
+          "url": "https://gw1.example/0xeeeeeeee14d718c2b47d9923deab1335e144eeee/0x0102.json",
+          "headers": {
+            "accept": "application/json"
+          },
+          "body": null,
+          "flags": {
+            "redirect": "manual",
+            "credentials": "omit",
+            "useSessionCookies": false,
+            "cache": "no-store",
+            "bypassCustomProtocolHandlers": true
+          },
+          "end": 70,
+          "outcome": "answered"
+        },
+        {
+          "id": 12,
+          "step": 0,
+          "t": 60,
+          "kind": "gateway",
+          "host": "gw1.example",
+          "method": "GET",
+          "url": "https://gw1.example/0xeeeeeeee14d718c2b47d9923deab1335e144eeee/0x0102.json",
+          "headers": {
+            "accept": "application/json"
+          },
+          "body": null,
+          "flags": {
+            "redirect": "manual",
+            "credentials": "omit",
+            "useSessionCookies": false,
+            "cache": "no-store",
+            "bypassCustomProtocolHandlers": true
+          },
+          "end": 70,
+          "outcome": "answered"
+        },
+        {
+          "id": 13,
+          "step": 0,
+          "t": 60,
+          "kind": "gateway",
+          "host": "gw1.example",
+          "method": "GET",
+          "url": "https://gw1.example/0xeeeeeeee14d718c2b47d9923deab1335e144eeee/0x0102.json",
+          "headers": {
+            "accept": "application/json"
+          },
+          "body": null,
+          "flags": {
+            "redirect": "manual",
+            "credentials": "omit",
+            "useSessionCookies": false,
+            "cache": "no-store",
+            "bypassCustomProtocolHandlers": true
+          },
+          "end": 70,
+          "outcome": "answered"
+        },
+        {
+          "id": 14,
+          "step": 0,
+          "t": 80,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 12,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b92300000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000d07766974616c696b0365746800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d1ee6c4522aab0003e8d14cd40a6af439055fd2577951148c14b6cea9a5347583500000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 90,
+          "outcome": "answered"
+        },
+        {
+          "id": 15,
+          "step": 0,
+          "t": 90,
+          "kind": "gateway",
+          "host": "gw1.example",
+          "method": "GET",
+          "url": "https://gw1.example/0xeeeeeeee14d718c2b47d9923deab1335e144eeee/0x0102.json",
+          "headers": {
+            "accept": "application/json"
+          },
+          "body": null,
+          "flags": {
+            "redirect": "manual",
+            "credentials": "omit",
+            "useSessionCookies": false,
+            "cache": "no-store",
+            "bypassCustomProtocolHandlers": true
+          },
+          "end": 100,
+          "outcome": "answered"
+        }
+      ]
+    },
+    {
       "id": "single-source-two-endpoints",
       "system": "ens",
       "seed": 7,
@@ -8644,6 +9511,1116 @@
       ]
     },
     {
+      "id": "reverse-ens-and-wns-empty-then-gns",
+      "system": "ens",
+      "seed": 7,
+      "world": {
+        "endpoints": [
+          "https://a.rpc.example",
+          "https://b.rpc.example",
+          "https://c.rpc.example",
+          "https://d.rpc.example"
+        ],
+        "network": {
+          "verification": {
+            "order": [
+              "quorum"
+            ],
+            "preferVerified": false
+          },
+          "quorum": {
+            "k": 3,
+            "m": 2,
+            "timeoutMs": 5000,
+            "anchor": "latest",
+            "anchorTtlMs": 30000
+          }
+        },
+        "calls": {
+          "reverse": {
+            "data": "0x0000000000000000000000000000000000000000000000000000000000000060000000000000000000000000222222222222222222222222222222222222222200000000000000000000000033333333333333333333333333333333333333330000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "wns:reverse": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "gns:reverse": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000008626f622e67776569000000000000000000000000000000000000000000000000"
+          },
+          "gns:addr": {
+            "data": "0x000000000000000000000000abababababababababababababababababababab"
+          }
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "call": {
+            "fn": "resolveEnsReverse",
+            "args": [
+              "0xabababababababababababababababababababab"
+            ]
+          },
+          "results": [
+            {
+              "value": {
+                "success": true,
+                "address": "0xabababababababababababababababababababab",
+                "name": "bob.gwei",
+                "system": "gns",
+                "trust": {
+                  "level": "verified",
+                  "system": "gns",
+                  "block": {
+                    "number": 19999992,
+                    "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+                  },
+                  "agreed": [
+                    "c.rpc.example",
+                    "b.rpc.example"
+                  ],
+                  "dissented": [],
+                  "queried": [
+                    "c.rpc.example",
+                    "b.rpc.example",
+                    "d.rpc.example"
+                  ],
+                  "quorum": {
+                    "k": 3,
+                    "m": 2,
+                    "achieved": true
+                  }
+                }
+              },
+              "settled": 120
+            }
+          ]
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 1,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered"
+        },
+        {
+          "id": 1,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 2,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered"
+        },
+        {
+          "id": 2,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 3,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered"
+        },
+        {
+          "id": 3,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 4,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered"
+        },
+        {
+          "id": 4,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 5,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered"
+        },
+        {
+          "id": 5,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 6,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered"
+        },
+        {
+          "id": 6,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 7,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered"
+        },
+        {
+          "id": 7,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 8,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered"
+        },
+        {
+          "id": 8,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 9,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x5d78a2170000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000003c0000000000000000000000000000000000000000000000000000000000000014abababababababababababababababababababab000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "reverse",
+          "end": 60,
+          "outcome": "answered"
+        },
+        {
+          "id": 9,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 10,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x5d78a2170000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000003c0000000000000000000000000000000000000000000000000000000000000014abababababababababababababababababababab000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "reverse",
+          "end": 60,
+          "outcome": "answered"
+        },
+        {
+          "id": 10,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 11,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x5d78a2170000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000003c0000000000000000000000000000000000000000000000000000000000000014abababababababababababababababababababab000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "reverse",
+          "end": 60,
+          "outcome": "answered"
+        },
+        {
+          "id": 11,
+          "step": 0,
+          "t": 70,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 12,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x0000000000696760e15f265e828db644a0c242eb",
+              "data": "0x9af8b7aa000000000000000000000000abababababababababababababababababababab"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "wns:reverse",
+          "end": 80,
+          "outcome": "answered"
+        },
+        {
+          "id": 12,
+          "step": 0,
+          "t": 70,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 13,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x0000000000696760e15f265e828db644a0c242eb",
+              "data": "0x9af8b7aa000000000000000000000000abababababababababababababababababababab"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "wns:reverse",
+          "end": 80,
+          "outcome": "answered"
+        },
+        {
+          "id": 13,
+          "step": 0,
+          "t": 70,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 14,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x0000000000696760e15f265e828db644a0c242eb",
+              "data": "0x9af8b7aa000000000000000000000000abababababababababababababababababababab"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "wns:reverse",
+          "end": 80,
+          "outcome": "answered"
+        },
+        {
+          "id": 14,
+          "step": 0,
+          "t": 90,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 15,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x9d51d507bc7264d4fe8ad1cf7fe191933a0a81d6",
+              "data": "0x9af8b7aa000000000000000000000000abababababababababababababababababababab"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "gns:reverse",
+          "end": 100,
+          "outcome": "answered"
+        },
+        {
+          "id": 15,
+          "step": 0,
+          "t": 90,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 16,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x9d51d507bc7264d4fe8ad1cf7fe191933a0a81d6",
+              "data": "0x9af8b7aa000000000000000000000000abababababababababababababababababababab"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "gns:reverse",
+          "end": 100,
+          "outcome": "answered"
+        },
+        {
+          "id": 16,
+          "step": 0,
+          "t": 90,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 17,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x9d51d507bc7264d4fe8ad1cf7fe191933a0a81d6",
+              "data": "0x9af8b7aa000000000000000000000000abababababababababababababababababababab"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "gns:reverse",
+          "end": 100,
+          "outcome": "answered"
+        },
+        {
+          "id": 17,
+          "step": 0,
+          "t": 110,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 18,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x9d51d507bc7264d4fe8ad1cf7fe191933a0a81d6",
+              "data": "0x3b3b57de716e6680be488eb370f824171839c36f81e183fedf5c6565eec7114f6c29123e"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "gns:addr",
+          "end": 120,
+          "outcome": "answered"
+        },
+        {
+          "id": 18,
+          "step": 0,
+          "t": 110,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 19,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x9d51d507bc7264d4fe8ad1cf7fe191933a0a81d6",
+              "data": "0x3b3b57de716e6680be488eb370f824171839c36f81e183fedf5c6565eec7114f6c29123e"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "gns:addr",
+          "end": 120,
+          "outcome": "answered"
+        },
+        {
+          "id": 19,
+          "step": 0,
+          "t": 110,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 20,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x9d51d507bc7264d4fe8ad1cf7fe191933a0a81d6",
+              "data": "0x3b3b57de716e6680be488eb370f824171839c36f81e183fedf5c6565eec7114f6c29123e"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "gns:addr",
+          "end": 120,
+          "outcome": "answered"
+        }
+      ]
+    },
+    {
+      "id": "reverse-wns-claim-fails-forward-then-gns-empty",
+      "system": "ens",
+      "seed": 7,
+      "world": {
+        "endpoints": [
+          "https://a.rpc.example",
+          "https://b.rpc.example",
+          "https://c.rpc.example",
+          "https://d.rpc.example"
+        ],
+        "network": {
+          "verification": {
+            "order": [
+              "quorum"
+            ],
+            "preferVerified": false
+          },
+          "quorum": {
+            "k": 3,
+            "m": 2,
+            "timeoutMs": 5000,
+            "anchor": "latest",
+            "anchorTtlMs": 30000
+          }
+        },
+        "calls": {
+          "reverse": {
+            "data": "0x0000000000000000000000000000000000000000000000000000000000000060000000000000000000000000222222222222222222222222222222222222222200000000000000000000000033333333333333333333333333333333333333330000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "wns:reverse": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000009616c6963652e7765690000000000000000000000000000000000000000000000"
+          },
+          "wns:addr": {
+            "data": "0x000000000000000000000000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+          },
+          "gns:reverse": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000"
+          }
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "call": {
+            "fn": "resolveEnsReverse",
+            "args": [
+              "0xabababababababababababababababababababab"
+            ]
+          },
+          "results": [
+            {
+              "value": {
+                "success": false,
+                "address": "0xabababababababababababababababababababab",
+                "system": "wns",
+                "reason": "UNVERIFIED",
+                "claimedName": "alice.wei",
+                "error": "Reverse record for 0xabababababababababababababababababababab does not forward-verify",
+                "trust": {
+                  "level": "verified",
+                  "system": "wns",
+                  "block": {
+                    "number": 19999992,
+                    "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+                  },
+                  "agreed": [
+                    "c.rpc.example",
+                    "b.rpc.example"
+                  ],
+                  "dissented": [],
+                  "queried": [
+                    "c.rpc.example",
+                    "b.rpc.example",
+                    "d.rpc.example"
+                  ],
+                  "quorum": {
+                    "k": 3,
+                    "m": 2,
+                    "achieved": true
+                  }
+                }
+              },
+              "settled": 120
+            }
+          ]
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 1,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered"
+        },
+        {
+          "id": 1,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 2,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered"
+        },
+        {
+          "id": 2,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 3,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered"
+        },
+        {
+          "id": 3,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 4,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered"
+        },
+        {
+          "id": 4,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 5,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered"
+        },
+        {
+          "id": 5,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 6,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered"
+        },
+        {
+          "id": 6,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 7,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered"
+        },
+        {
+          "id": 7,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 8,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered"
+        },
+        {
+          "id": 8,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 9,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x5d78a2170000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000003c0000000000000000000000000000000000000000000000000000000000000014abababababababababababababababababababab000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "reverse",
+          "end": 60,
+          "outcome": "answered"
+        },
+        {
+          "id": 9,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 10,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x5d78a2170000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000003c0000000000000000000000000000000000000000000000000000000000000014abababababababababababababababababababab000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "reverse",
+          "end": 60,
+          "outcome": "answered"
+        },
+        {
+          "id": 10,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 11,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x5d78a2170000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000003c0000000000000000000000000000000000000000000000000000000000000014abababababababababababababababababababab000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "reverse",
+          "end": 60,
+          "outcome": "answered"
+        },
+        {
+          "id": 11,
+          "step": 0,
+          "t": 70,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 12,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x0000000000696760e15f265e828db644a0c242eb",
+              "data": "0x9af8b7aa000000000000000000000000abababababababababababababababababababab"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "wns:reverse",
+          "end": 80,
+          "outcome": "answered"
+        },
+        {
+          "id": 12,
+          "step": 0,
+          "t": 70,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 13,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x0000000000696760e15f265e828db644a0c242eb",
+              "data": "0x9af8b7aa000000000000000000000000abababababababababababababababababababab"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "wns:reverse",
+          "end": 80,
+          "outcome": "answered"
+        },
+        {
+          "id": 13,
+          "step": 0,
+          "t": 70,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 14,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x0000000000696760e15f265e828db644a0c242eb",
+              "data": "0x9af8b7aa000000000000000000000000abababababababababababababababababababab"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "wns:reverse",
+          "end": 80,
+          "outcome": "answered"
+        },
+        {
+          "id": 14,
+          "step": 0,
+          "t": 90,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 15,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x0000000000696760e15f265e828db644a0c242eb",
+              "data": "0x3b3b57deab8b935a479940b3bfb3690f7fa08a8ed1cfecc06dd69662d9b6f7cdcbdbed66"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "wns:addr",
+          "end": 100,
+          "outcome": "answered"
+        },
+        {
+          "id": 15,
+          "step": 0,
+          "t": 90,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 16,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x0000000000696760e15f265e828db644a0c242eb",
+              "data": "0x3b3b57deab8b935a479940b3bfb3690f7fa08a8ed1cfecc06dd69662d9b6f7cdcbdbed66"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "wns:addr",
+          "end": 100,
+          "outcome": "answered"
+        },
+        {
+          "id": 16,
+          "step": 0,
+          "t": 90,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 17,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x0000000000696760e15f265e828db644a0c242eb",
+              "data": "0x3b3b57deab8b935a479940b3bfb3690f7fa08a8ed1cfecc06dd69662d9b6f7cdcbdbed66"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "wns:addr",
+          "end": 100,
+          "outcome": "answered"
+        },
+        {
+          "id": 17,
+          "step": 0,
+          "t": 110,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 18,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x9d51d507bc7264d4fe8ad1cf7fe191933a0a81d6",
+              "data": "0x9af8b7aa000000000000000000000000abababababababababababababababababababab"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "gns:reverse",
+          "end": 120,
+          "outcome": "answered"
+        },
+        {
+          "id": 18,
+          "step": 0,
+          "t": 110,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 19,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x9d51d507bc7264d4fe8ad1cf7fe191933a0a81d6",
+              "data": "0x9af8b7aa000000000000000000000000abababababababababababababababababababab"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "gns:reverse",
+          "end": 120,
+          "outcome": "answered"
+        },
+        {
+          "id": 19,
+          "step": 0,
+          "t": 110,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 20,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x9d51d507bc7264d4fe8ad1cf7fe191933a0a81d6",
+              "data": "0x9af8b7aa000000000000000000000000abababababababababababababababababababab"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "gns:reverse",
+          "end": 120,
+          "outcome": "answered"
+        }
+      ]
+    },
+    {
+      "id": "gns-content",
+      "system": "ens",
+      "seed": 7,
+      "world": {
+        "endpoints": [
+          "https://a.rpc.example",
+          "https://b.rpc.example",
+          "https://c.rpc.example",
+          "https://d.rpc.example"
+        ],
+        "network": {
+          "verification": {
+            "order": [
+              "quorum"
+            ],
+            "preferVerified": false
+          },
+          "quorum": {
+            "k": 3,
+            "m": 2,
+            "timeoutMs": 5000,
+            "anchor": "latest",
+            "anchorTtlMs": 30000
+          }
+        },
+        "calls": {
+          "gns:contenthash": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000"
+          }
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "call": {
+            "fn": "resolveEnsContent",
+            "args": [
+              "bob.gwei"
+            ]
+          },
+          "results": [
+            {
+              "value": {
+                "type": "ok",
+                "name": "bob.gwei",
+                "system": "gns",
+                "codec": "ipfs-ns",
+                "protocol": "ipfs",
+                "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+                "decoded": "QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+                "trust": {
+                  "level": "verified",
+                  "system": "gns",
+                  "block": {
+                    "number": 19999992,
+                    "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+                  },
+                  "agreed": [
+                    "c.rpc.example",
+                    "b.rpc.example"
+                  ],
+                  "dissented": [],
+                  "queried": [
+                    "c.rpc.example",
+                    "b.rpc.example",
+                    "d.rpc.example"
+                  ],
+                  "quorum": {
+                    "k": 3,
+                    "m": 2,
+                    "achieved": true
+                  }
+                }
+              },
+              "settled": 60
+            }
+          ]
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 1,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered"
+        },
+        {
+          "id": 1,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 2,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered"
+        },
+        {
+          "id": 2,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 3,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered"
+        },
+        {
+          "id": 3,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 4,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered"
+        },
+        {
+          "id": 4,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 5,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered"
+        },
+        {
+          "id": 5,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 6,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered"
+        },
+        {
+          "id": 6,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 7,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered"
+        },
+        {
+          "id": 7,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 8,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered"
+        },
+        {
+          "id": 8,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 9,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x9d51d507bc7264d4fe8ad1cf7fe191933a0a81d6",
+              "data": "0xbc1c58d1716e6680be488eb370f824171839c36f81e183fedf5c6565eec7114f6c29123e"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "gns:contenthash",
+          "end": 60,
+          "outcome": "answered"
+        },
+        {
+          "id": 9,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 10,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x9d51d507bc7264d4fe8ad1cf7fe191933a0a81d6",
+              "data": "0xbc1c58d1716e6680be488eb370f824171839c36f81e183fedf5c6565eec7114f6c29123e"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "gns:contenthash",
+          "end": 60,
+          "outcome": "answered"
+        },
+        {
+          "id": 10,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 11,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0x9d51d507bc7264d4fe8ad1cf7fe191933a0a81d6",
+              "data": "0xbc1c58d1716e6680be488eb370f824171839c36f81e183fedf5c6565eec7114f6c29123e"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "gns:contenthash",
+          "end": 60,
+          "outcome": "answered"
+        },
+        {
+          "id": 11,
+          "step": 0,
+          "t": 60,
+          "kind": "prefetch",
+          "host": null,
+          "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+          "end": null,
+          "outcome": "open"
+        }
+      ]
+    },
+    {
       "id": "wns-content",
       "system": "ens",
       "seed": 7,
@@ -14498,6 +16475,327 @@
           "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z",
           "body": null,
           "end": 50,
+          "outcome": "answered"
+        }
+      ]
+    },
+    {
+      "id": "tezos-no-website-no-ttl",
+      "system": "tezos",
+      "seed": 7,
+      "world": {
+        "endpoints": [
+          "https://t1.tez.example",
+          "https://t2.tez.example",
+          "https://t3.tez.example"
+        ],
+        "record": {
+          "prim": "Pair",
+          "args": [
+            [],
+            {
+              "prim": "Some",
+              "args": [
+                {
+                  "bytes": "abcd"
+                }
+              ]
+            }
+          ]
+        },
+        "expiry": "2030-01-01T00:00:00Z"
+      },
+      "steps": [
+        {
+          "at": 0,
+          "call": {
+            "fn": "resolveTezosDomain",
+            "args": [
+              "alice.tez"
+            ]
+          },
+          "results": [
+            {
+              "value": {
+                "type": "not_found",
+                "reason": "domain has no website record",
+                "expiry": "2030-01-01T00:00:00Z",
+                "ttl": {
+                  "$undefined": true
+                },
+                "system": "tezos",
+                "trust": {
+                  "level": "verified",
+                  "system": "tezos",
+                  "block": {
+                    "number": 8999992,
+                    "hash": "BLmain8999992"
+                  },
+                  "k": 3,
+                  "m": 3,
+                  "agreed": [
+                    "https://t1.tez.example",
+                    "https://t2.tez.example",
+                    "https://t3.tez.example"
+                  ]
+                }
+              },
+              "settled": 60
+            }
+          ]
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "t": 0,
+          "kind": "tezos",
+          "host": "t1.tez.example",
+          "method": "GET",
+          "path": "/chains/main/chain_id",
+          "body": null,
+          "end": 10,
+          "outcome": "answered"
+        },
+        {
+          "id": 1,
+          "step": 0,
+          "t": 0,
+          "kind": "tezos",
+          "host": "t1.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/head/header",
+          "body": null,
+          "end": 10,
+          "outcome": "answered"
+        },
+        {
+          "id": 2,
+          "step": 0,
+          "t": 0,
+          "kind": "tezos",
+          "host": "t2.tez.example",
+          "method": "GET",
+          "path": "/chains/main/chain_id",
+          "body": null,
+          "end": 10,
+          "outcome": "answered"
+        },
+        {
+          "id": 3,
+          "step": 0,
+          "t": 0,
+          "kind": "tezos",
+          "host": "t2.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/head/header",
+          "body": null,
+          "end": 10,
+          "outcome": "answered"
+        },
+        {
+          "id": 4,
+          "step": 0,
+          "t": 0,
+          "kind": "tezos",
+          "host": "t3.tez.example",
+          "method": "GET",
+          "path": "/chains/main/chain_id",
+          "body": null,
+          "end": 10,
+          "outcome": "answered"
+        },
+        {
+          "id": 5,
+          "step": 0,
+          "t": 0,
+          "kind": "tezos",
+          "host": "t3.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/head/header",
+          "body": null,
+          "end": 10,
+          "outcome": "answered"
+        },
+        {
+          "id": 6,
+          "step": 0,
+          "t": 10,
+          "kind": "tezos",
+          "host": "t1.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/8999992/hash",
+          "body": null,
+          "end": 20,
+          "outcome": "answered"
+        },
+        {
+          "id": 7,
+          "step": 0,
+          "t": 10,
+          "kind": "tezos",
+          "host": "t2.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/8999992/hash",
+          "body": null,
+          "end": 20,
+          "outcome": "answered"
+        },
+        {
+          "id": 8,
+          "step": 0,
+          "t": 10,
+          "kind": "tezos",
+          "host": "t3.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/8999992/hash",
+          "body": null,
+          "end": 20,
+          "outcome": "answered"
+        },
+        {
+          "id": 9,
+          "step": 0,
+          "t": 20,
+          "kind": "tezos",
+          "host": "t1.tez.example",
+          "method": "POST",
+          "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized",
+          "body": "{\"unparsing_mode\":\"Readable\"}",
+          "end": 30,
+          "outcome": "answered"
+        },
+        {
+          "id": 10,
+          "step": 0,
+          "t": 20,
+          "kind": "tezos",
+          "host": "t2.tez.example",
+          "method": "POST",
+          "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized",
+          "body": "{\"unparsing_mode\":\"Readable\"}",
+          "end": 30,
+          "outcome": "answered"
+        },
+        {
+          "id": 11,
+          "step": 0,
+          "t": 20,
+          "kind": "tezos",
+          "host": "t3.tez.example",
+          "method": "POST",
+          "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized",
+          "body": "{\"unparsing_mode\":\"Readable\"}",
+          "end": 30,
+          "outcome": "answered"
+        },
+        {
+          "id": 12,
+          "step": 0,
+          "t": 30,
+          "kind": "tezos",
+          "host": "t1.tez.example",
+          "method": "POST",
+          "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized",
+          "body": "{\"unparsing_mode\":\"Readable\"}",
+          "end": 40,
+          "outcome": "answered"
+        },
+        {
+          "id": 13,
+          "step": 0,
+          "t": 30,
+          "kind": "tezos",
+          "host": "t2.tez.example",
+          "method": "POST",
+          "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized",
+          "body": "{\"unparsing_mode\":\"Readable\"}",
+          "end": 40,
+          "outcome": "answered"
+        },
+        {
+          "id": 14,
+          "step": 0,
+          "t": 30,
+          "kind": "tezos",
+          "host": "t3.tez.example",
+          "method": "POST",
+          "path": "/chains/main/blocks/BLmain8999992/context/contracts/KT1RgRgRgRgRgRgRgRgRgRgRgRgRgRgRgRgx/script/normalized",
+          "body": "{\"unparsing_mode\":\"Readable\"}",
+          "end": 40,
+          "outcome": "answered"
+        },
+        {
+          "id": 15,
+          "step": 0,
+          "t": 40,
+          "kind": "tezos",
+          "host": "t1.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z",
+          "body": null,
+          "end": 50,
+          "outcome": "answered"
+        },
+        {
+          "id": 16,
+          "step": 0,
+          "t": 40,
+          "kind": "tezos",
+          "host": "t2.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z",
+          "body": null,
+          "end": 50,
+          "outcome": "answered"
+        },
+        {
+          "id": 17,
+          "step": 0,
+          "t": 40,
+          "kind": "tezos",
+          "host": "t3.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1264/expruPD9qfJMgyjCg9EMzzfwtQyvJ2DJ4aCse14WqWtYY333sh8Z5Z",
+          "body": null,
+          "end": 50,
+          "outcome": "answered"
+        },
+        {
+          "id": 18,
+          "step": 0,
+          "t": 50,
+          "kind": "tezos",
+          "host": "t1.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy",
+          "body": null,
+          "end": 60,
+          "outcome": "answered"
+        },
+        {
+          "id": 19,
+          "step": 0,
+          "t": 50,
+          "kind": "tezos",
+          "host": "t2.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy",
+          "body": null,
+          "end": 60,
+          "outcome": "answered"
+        },
+        {
+          "id": 20,
+          "step": 0,
+          "t": 50,
+          "kind": "tezos",
+          "host": "t3.tez.example",
+          "method": "GET",
+          "path": "/chains/main/blocks/BLmain8999992/context/big_maps/1265/expruQLCQHNsCERK41Jj49aS3WFUmAB1iYSoebWtPZso2WLpj7PCEy",
+          "body": null,
+          "end": 60,
           "outcome": "answered"
         }
       ]

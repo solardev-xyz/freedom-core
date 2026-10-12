@@ -191,3 +191,33 @@ test('replay fails loudly on unscripted I/O', async () => {
   delete undeclaredGateway.world.gateways;
   await assert.rejects(replay.runScenario(REFERENCE, ethers, FakeTimers, undeclaredGateway), /undeclared gateway gw\.example/);
 });
+
+test('replay transport keeps ethers\' cancel and timeout semantics', async () => {
+  const ethers = referenceEthers();
+  const FakeTimers = replay.loadFakeTimers(REFERENCE);
+  const probe = (options, hosts = {}) => replay.runScenario(REFERENCE, ethers, FakeTimers, {
+    id: 'transport-probe',
+    world: { endpoints: ['https://a.rpc.example'], hosts: { 'a.rpc.example': { delay: 10, ...hosts } } },
+    steps: [{ call: { fn: '$fetch', args: ['https://a.rpc.example', options] } }],
+  });
+  const outcome = async (options, hosts) => {
+    const run = await probe(options, hosts);
+    const [result] = run.steps[0].results;
+    return { thrown: result.thrown ?? null, settled: result.settled, io: run.io[0] };
+  };
+  // A cancel at the reply's own instant wins, as checkSignal() does natively.
+  const sameInstant = await outcome({ cancelAt: 10 });
+  assert.match(sameInstant.thrown, /cancelled/);
+  assert.equal(sameInstant.io.outcome, 'answered');
+  assert.equal(sameInstant.io.rejected.code, 'CANCELLED');
+  // The inactivity timeout, either side of a 10 ms reply.
+  assert.match((await outcome({ timeout: 9 })).thrown, /request timeout/);
+  const inTime = await outcome({ timeout: 11 });
+  assert.equal(inTime.thrown, null);
+  assert.equal(inTime.io.rejected, undefined);
+  // A hang rejects at ethers' default 300 s and the exchange stays open.
+  const hang = await outcome({}, { hang: true });
+  assert.match(hang.thrown, /request timeout/);
+  assert.equal(hang.settled, 300_000);
+  assert.equal(hang.io.outcome, 'open');
+});
