@@ -4,6 +4,23 @@ Freedom Browser ships `freedom-cored` inside the app. Each freedom-browser
 change that needs a newer core pins a freedom-core release (design 0001,
 "Migration in freedom-browser").
 
+0. **Notices.** The archives ship two notice files next to the binary.
+   - `THIRD-PARTY-NOTICES` is generated and committed. It holds the licenses
+     and notices of every crate statically linked into `freedom-cored` on any
+     release target, plus the toolchain's runtime: the standard library's
+     out-of-tree crates and compiler-builtins, and, on Linux, musl and LLVM's
+     libunwind and crt objects (texts in `notices/`).
+   - `THIRD-PARTY-NOTICES-rust-std.html` is the Rust project's notice file for
+     the standard library, which the release workflow copies from the
+     toolchain.
+
+   CI fails when `THIRD-PARTY-NOTICES` is stale. After a dependency change,
+   run `cargo fetch --locked && python3 scripts/third-party-notices.py` and
+   commit the result. When `rust-toolchain.toml` moves, the script refuses to
+   run until the runtime list is re-checked: the musl version Rust bundles,
+   the LLVM commit and the std crates. Then update `TOOLCHAIN` in the script.
+   Anything that ships the binary, such as Freedom Browser, must ship both
+   files with it.
 1. **Bump the version** in a PR: `version` under `[workspace.package]` in
    `Cargo.toml`, **and** the lockfile, which records every workspace package's
    version: run `cargo check --workspace` and commit the updated `Cargo.lock`.

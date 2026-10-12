@@ -81,3 +81,10 @@ jobs:
           echo "${CARGO_DENY_SHA256}  ${tarball}" | sha256sum --check
           tar -xzf "$tarball" --strip-components=1 -C "$HOME/.cargo/bin" "cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl/cargo-deny"
       - run: cargo deny --locked check
+      - name: THIRD-PARTY-NOTICES is current
+        # The release archives ship it next to the binary (statically linked
+        # crates' licenses require their notices).
+        run: |
+          cargo fetch --locked
+          python3 scripts/third-party-notices.py --check
+          python3 -m unittest discover -s scripts -p 'test_*.py'
