@@ -118,7 +118,7 @@ Myotis and Colibri keep running in main, through today's adapters, **one whole o
 | `{ colibri: "reverse", address, coin_type }` | `resolveReverseViaColibri` | `{ name }`, `{ revert }` or `{ failure }` |
 
 - **Main checks Myotis' epoch** around each operation, as `tryMyotisPath` does today. A changed epoch is `{ failure: "lifecycle" }`, which the core treats as a lifecycle change.
-- **`failure`** is a closed set of classes (`unavailable`, `lifecycle`, `timeout`, `too_large`, `error`) and carries no text. As in the reference, a failure is a method error and the order continues, `lifecycle` included: the epoch change itself restarts the lookup ([Sessions](#sessions)).
+- **`failure`** is a closed set of classes (`unavailable`, `lifecycle`, `timeout`, `too_large`, `error`) and carries no text. A failure is a method error, and the order continues. That includes `lifecycle`, which is today's `MYOTIS_UNAVAILABLE` from `verifiedRequest`; the epoch change itself restarts the lookup ([Sessions](#sessions)).
 - **Reply size:** main serializes each reply first. One over 1 MiB (a large return, revert or name) is replaced by `{ failure: "too_large" }`: a method error, so the order continues (deviation `verified-reply-size`).
 - **Provenance:** a `revert` is the verifier's proven revert data. The core records which verifier produced it.
 - **The adapters' own bounds** are unchanged. Main bounds physical work: at most 8 operations per verifier are running, counted until the adapter's promise actually settles, not when the core cancels. Beyond that, main answers `{ failure: "unavailable" }` at once.
@@ -216,7 +216,7 @@ The rules below restate the reference, so a reviewer can check them against the 
 
 **A wave** runs its legs at once.
 - **Early agreement:** after each leg settles, a data bucket of size ≥ M ends the wave as `agreed_data`; otherwise a negative bucket (by reason) of size ≥ M ends it as `agreed_not_found`.
-- **Losing legs** are cancelled, and their HTTP requests with them (a [deviation](#deviations), `losing-legs`; today they run on).
+- **Losing legs** are cancelled, and their HTTP requests with them (deviation `abandoned-exchanges`; today they run on).
 - **Prefetch:** the first `data` of a wave starts a [prefetch](#prefetch). Any outcome other than `agreed_data` cancels it.
 
 **Without agreement**, the settled wave classifies:
@@ -254,7 +254,9 @@ The rules below restate the reference, so a reviewer can check them against the 
   - **Calls:** through `{ colibri: … }`, whose single client rebuild and retry wraps the whole operation (`colibri-unavailable-falls-to-quorum`: two verified attempts, then quorum).
   - **Results:** a proven `ResolverNotFound` is a verified `NO_RESOLVER` (`colibri-resolver-not-found`). Any other failure is a method error, and the order continues.
   - **Trust:** `prover` is the prover's host, and `proof` is `ZK sync-committee proof` or `Sync-committee proof` (from `zk`).
-- **Lifecycle:** a `{ failure: "lifecycle" }` reply aborts the attempt like today's `MYOTIS_LIFECYCLE_CHANGED`.
+- **Lifecycle, two outcomes, as in the reference:**
+  - **The operation fails** (`{ failure: "lifecycle" }`, today's `MYOTIS_UNAVAILABLE`): a method error, and the order continues (`myotis-record-lifecycle-mid-operation`, `myotis-call-lifecycle-mid-operation`).
+  - **The operation succeeds, but the core's own epoch check after it fails** (today's `MYOTIS_LIFECYCLE_CHANGED` in `tryMyotisPath` and `tryMyotisReverse`): the method order is aborted at once and the session restarts. Neither the reference nor the core can reach this through timers, because the check runs in the same turn as the answer. Unit tests in the core cover it.
 
 ### Method order
 
@@ -310,6 +312,7 @@ These follow `doResolveEnsContent`, `doResolveEnsAddress` and `doResolveEnsRever
   - Past the last attempt, it throws `Myotis availability changed repeatedly while resolving <name>`.
   - The in-flight table is cleared at each change, so a lookup after the change starts a new session rather than joining the old one.
 - **Termination:** a session ends at its result, its deadline or its budget ([Admission](#admission), [Bounds](#bounds)). Its outstanding I/O is cancelled then, losing legs included. A surviving prefetch is the exception: it is handed out of the session first ([Prefetch](#prefetch)).
+- **Abandoned exchanges:** whenever the core stops waiting for an exchange (agreement, a leg's or a gateway's deadline, the session's end), it cancels it, and main ends it promptly. In the reference, an abandoned ethers request runs on: it can even retry after a 429, after its leg has timed out (deviation `abandoned-exchanges`).
 - **Verifier work** keeps counting in main until the adapter settles, whatever the session does.
 - **Timers** run on the daemon's monotonic clock and fire without waiting for a message: deadlines, quarantine, cache expiry, the anchor TTL.
 
@@ -527,7 +530,7 @@ Each deviation gets a boundary vector in the implementation PR, generated from t
 |---|---|---|---|
 | `overall-deadline` | no overall bound; a stalled Colibri worker can take minutes (a 60 s liveness check, 60 s more before abandonment, then one retry) | 120 s per resolution method | `deadline`; nothing cached |
 | `admission` | unbounded callers and lookups | 32 sessions, 256 callers, 64 per session | `busy`; nothing retained |
-| `losing-legs` | their HTTP finishes after agreement, and its late settlement still clears or marks quarantine | cancelled at agreement, with no late health change | later lookups can see a different quarantine set. The vector replays a slow losing leg across three lookups |
+| `abandoned-exchanges` | an exchange nobody waits for (a losing leg, a timed-out leg) runs on: it finishes, can retry after a 429, and its late settlement still clears or marks quarantine | cancelled when the core stops waiting, with no late requests or health changes | later lookups can see a different quarantine set; requests the reference made after the cancellation don't happen. Vectors: a slow losing leg across three lookups, and a leg timing out during a 429 back-off |
 | `rpc-stall` | ethers holds every JSON-RPC request 10 ms (its batch stall) | sent at once | none; replay adds the 10 ms back |
 | `request-size` | requests of any size are sent | a request over the frame completes locally as `too_large` | the next gateway, or the leg fails as `CCIP_GATEWAY_FAILED`; not cached |
 | `response-caps` | none for JSON-RPC; 5 MiB Tezos; 4 MiB gateways | 720 KiB each | `too_large`: a provider failure, a failed endpoint, or the next gateway |
@@ -580,7 +583,7 @@ Main's own behavior (pipe overtakes, crashes, per-caller allowances, `FetchReque
 
 **Compared by rule:**
 - **Deviations:** the fields a deviation covers are compared under its rule.
-- **Losing legs:** their end times and rejection records are excluded. A scenario where a losing leg would change later quarantine is a `losing-legs` vector with expected values of its own.
+- **Abandoned exchanges:** the end times and rejection records of exchanges the core cancelled are excluded. So are the reference's requests that belong to an exchange the core had already cancelled, such as a 429 retry after a leg's deadline. A scenario where such an exchange would change later quarantine is an `abandoned-exchanges` vector with expected values of its own.
 - **Prefetch:** start and the machine's cancellation are compared. End times are main's (the 10 s timer) and are not compared.
 
 ## Traceability
