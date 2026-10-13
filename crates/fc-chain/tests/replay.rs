@@ -513,6 +513,8 @@ struct Slot {
 }
 
 struct Driver {
+    /// Every record of the scenario's I/O, Blockscout's hops included.
+    records: Vec<Json>,
     machine: Machine,
     world: Json,
     io: Vec<Exchange>,
@@ -793,7 +795,12 @@ impl Driver {
                             && text_field(entry, "params_json")
                                 .is_some_and(|recorded| same_json(&recorded, &params))
                     }
-                    Request::Blockscout { .. } => false,
+                    Request::Blockscout {
+                        endpoint, query, ..
+                    } => {
+                        str_of(entry, "kind") == "blockscout-page"
+                            && str_of(entry, "url") == format!("{endpoint}{query}")
+                    }
                 }
         };
         let found = self.io.iter().position(|e| !e.used && matches(&e.entry));
@@ -857,6 +864,7 @@ impl Driver {
         let entry = self.io[index].entry.clone();
         let end = entry.get("end").and_then(Json::as_u64);
         let answer = match str_of(&entry, "kind") {
+            "blockscout-page" => self.page_answer(&entry),
             "rpc" => match str_of(&entry, "outcome") {
                 "answered" => entry.get("answer").map(|answer| Answer::Rpc {
                     status: u16::try_from(num(answer, "status")).unwrap_or(0),
@@ -888,6 +896,52 @@ impl Driver {
             self.now_answer(depth, id, answer);
         } else {
             self.token(end, Token::Deliver(id, answer));
+        }
+    }
+
+    /// Main's reply for a Blockscout page: the last hop's answer, after the
+    /// redirects it followed; or the failure that ended the page before an
+    /// answer (`None` for one that ended on the page's own deadline or the
+    /// caller's abort, which the machine sees on its own).
+    fn page_answer(&self, page: &Json) -> Option<Answer> {
+        let id = num(page, "id");
+        let hop = self
+            .records
+            .iter()
+            .rfind(|r| {
+                str_of(r, "kind") == "blockscout"
+                    && r.get("within").and_then(Json::as_u64) == Some(id)
+                    && str_of(r, "outcome") == "answered"
+            })
+            .filter(|r| {
+                let status = r.get("answer").map_or(0, |a| num(a, "status"));
+                ![301, 302, 303, 307, 308].contains(&status)
+            });
+        if let Some(hop) = hop {
+            let answer = hop.get("answer")?;
+            let headers = answer
+                .get("headers")
+                .and_then(Json::as_object)
+                .map(|h| {
+                    h.iter()
+                        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_owned()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            return Some(Answer::Blockscout {
+                status: u16::try_from(num(answer, "status")).unwrap_or(0),
+                headers,
+                body: text_field(answer, "body").unwrap_or_default().into_bytes(),
+            });
+        }
+        let thrown = page.get("answer")?.get("thrown")?;
+        let message = thrown_message(thrown);
+        if message == "unreachable" {
+            Some(Answer::Failed(Transport::Network))
+        } else if message.starts_with("redirected") {
+            Some(Answer::Failed(Transport::Refused))
+        } else {
+            None
         }
     }
 
@@ -1154,6 +1208,10 @@ fn compare(reply: &Reply, expected: &Json) -> Option<String> {
                 problems.push(problem);
             }
         }
+        // The caller's abort is 0001's `cancel`: the machine replies
+        // `cancelled` where today's request throws its `AbortError`.
+        (Err(ChainError::Protocol(Protocol::Cancelled)), _, Some(want))
+            if str_of(want, "class") == "DOMException" && str_of(want, "name") == "AbortError" => {}
         (result, _, _) => problems.push(format!(
             "{} instead of {}",
             describe(result),
@@ -1352,8 +1410,13 @@ fn replay(scenario: &Json, expect: Option<&'static Expected>) -> Outcome {
         .and_then(Json::as_array)
         .into_iter()
         .flatten()
-        .filter(|e| matches!(str_of(e, "kind"), "rpc" | "verified-op"))
-        .filter(|e| e.get("within").is_none())
+        .filter(|e| match str_of(e, "kind") {
+            "rpc" | "verified-op" => e.get("within").is_none(),
+            // A Blockscout page is one `shell.blockscout`; its hops and DNS
+            // lookups are main's.
+            "blockscout-page" => true,
+            _ => false,
+        })
         .map(|e| Exchange {
             entry: e.clone(),
             used: false,
@@ -1370,7 +1433,13 @@ fn replay(scenario: &Json, expect: Option<&'static Expected>) -> Outcome {
         .filter(|e| str_of(e, "kind") == "myotis-status")
         .map(|e| (e.clone(), false))
         .collect();
+    let records = scenario
+        .get("io")
+        .and_then(Json::as_array)
+        .cloned()
+        .unwrap_or_default();
     let mut driver = Driver {
+        records,
         machine: Machine::new(0, Bounds::default()),
         world,
         io,
@@ -1648,16 +1717,7 @@ const EXPECTED: Expected = Expected {
 // The scenarios.
 
 /// Scenarios not replayed yet, by ID prefix, with what they need.
-const NOT_YET: &[(&str, &str)] = &[
-    (
-        "ant-index-",
-        "Blockscout pairing (requestLogIndex) and shell.blockscout pages",
-    ),
-    (
-        "blockscout-",
-        "Blockscout's pages, page checks, cooldowns and redirects",
-    ),
-];
+const NOT_YET: &[(&str, &str)] = &[];
 
 /// Scenarios a deviation changes (design 0005, Deviations), each with the
 /// difference it must show. The design's broadcast outcomes answer
@@ -1828,8 +1888,8 @@ const DEVIATIONS: &[Expected] = &[
 
 /// The score: scenarios replayed exactly (deviation scenarios with their
 /// asserted difference included), and those not replayed yet.
-const PASSING: usize = 234;
-const NOT_REPLAYED: usize = 63;
+const PASSING: usize = 297;
+const NOT_REPLAYED: usize = 0;
 
 #[test]
 // The score is the test's report, printed with `--nocapture`.

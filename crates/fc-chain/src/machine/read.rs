@@ -747,35 +747,7 @@ pub(crate) fn truncation_probe(method: &str, params: &str, result: &ResultText) 
         Some(block) => format!("\"0x{block:x}\""),
         None => "\"0x-1\"".to_owned(),
     };
-    let mut first = String::from("{");
-    let mut replaced = false;
-    for (n, (key, value)) in filter.properties().into_iter().enumerate() {
-        if n > 0 {
-            first.push(',');
-        }
-        first.push_str(&key.stringify(KeyOrder::Property));
-        first.push(':');
-        if key.is_str("toBlock") {
-            first.push_str(&to_block);
-            replaced = true;
-        } else {
-            first.push_str(&value.stringify(KeyOrder::Property));
-        }
-    }
-    if !replaced {
-        if first.len() > 1 {
-            first.push(',');
-        }
-        first.push_str("\"toBlock\":");
-        first.push_str(&to_block);
-    }
-    first.push('}');
-    let mut out = format!("[{first}");
-    for rest in params_index.root().children().skip(1) {
-        out.push(',');
-        out.push_str(&rest.stringify(KeyOrder::Property));
-    }
-    out.push(']');
+    let out = with_member(params, "toBlock", &to_block, true)?;
     Some(Probe {
         params: out,
         span: oldest.saturating_sub(from),
@@ -784,6 +756,52 @@ pub(crate) fn truncation_probe(method: &str, params: &str, result: &ResultText) 
         to,
         full,
     })
+}
+
+/// `[{ ...params[0], [key]: value }, ...params.slice(1)]` (the rest only
+/// with `rest`), as JSON: the filter's properties in order, `key` replaced
+/// in its place or appended.
+pub(crate) fn with_member(params: &str, key: &str, value: &str, rest: bool) -> Option<String> {
+    let index = Index::new(params).ok()?;
+    let Some(Element::Value(filter)) = element(index.root(), 0) else {
+        return None;
+    };
+    if filter.kind() != Kind::Object {
+        return None;
+    }
+    let mut first = String::from("{");
+    let mut replaced = false;
+    for (n, (name, item)) in filter.properties().into_iter().enumerate() {
+        if n > 0 {
+            first.push(',');
+        }
+        first.push_str(&name.stringify(KeyOrder::Property));
+        first.push(':');
+        if name.is_str(key) {
+            first.push_str(value);
+            replaced = true;
+        } else {
+            first.push_str(&item.stringify(KeyOrder::Property));
+        }
+    }
+    if !replaced {
+        if first.len() > 1 {
+            first.push(',');
+        }
+        first.push_str(&super::config::quote(key));
+        first.push(':');
+        first.push_str(value);
+    }
+    first.push('}');
+    let mut out = format!("[{first}");
+    if rest {
+        for item in index.root().children().skip(1) {
+            out.push(',');
+            out.push_str(&item.stringify(KeyOrder::Property));
+        }
+    }
+    out.push(']');
+    Some(out)
 }
 
 /// `checkLogTruncation`: asks the same source for the blocks before a

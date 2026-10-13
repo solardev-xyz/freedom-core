@@ -171,6 +171,11 @@ pub(crate) fn range_key(chain_id: u64, url: &str) -> String {
     format!("{chain_id} {url}")
 }
 
+/// `logIndexPairKey`.
+pub(crate) fn pair_key(chain_id: u64, url: &str) -> String {
+    format!("{chain_id}|{url}")
+}
+
 impl LogState {
     fn entry(&self, key: &str) -> Option<&RangeEntry> {
         self.range.iter().find(|(k, _)| k == key).map(|(_, e)| e)
@@ -277,6 +282,41 @@ impl LogState {
         match self.range.iter_mut().find(|(k, _)| *k == key) {
             Some(slot) => slot.1 = entry,
             None => self.range.push((key, entry)),
+        }
+    }
+
+    /// When Blockscout is left alone until, for a chain.
+    pub(crate) fn index_cool_until(&self, chain_id: u64) -> Ms {
+        self.index_cool_until
+            .iter()
+            .find(|(c, _)| *c == chain_id)
+            .map_or(0, |(_, t)| *t)
+    }
+
+    pub(crate) fn set_index_cool_until(&mut self, chain_id: u64, until: Ms) {
+        match self
+            .index_cool_until
+            .iter_mut()
+            .find(|(c, _)| *c == chain_id)
+        {
+            Some(slot) => slot.1 = until,
+            None => self.index_cool_until.push((chain_id, until)),
+        }
+    }
+
+    pub(crate) fn pair_cool_until(&self, chain_id: u64, url: &str) -> Ms {
+        let key = pair_key(chain_id, url);
+        self.pair_cool_until
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map_or(0, |(_, t)| *t)
+    }
+
+    pub(crate) fn set_pair_cool_until(&mut self, chain_id: u64, url: &str, until: Ms) {
+        let key = pair_key(chain_id, url);
+        match self.pair_cool_until.iter_mut().find(|(k, _)| *k == key) {
+            Some(slot) => slot.1 = until,
+            None => self.pair_cool_until.push((key, until)),
         }
     }
 

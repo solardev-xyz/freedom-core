@@ -97,3 +97,12 @@ pub(crate) fn colibri_trust(prover: Option<&Prover>) -> String {
         quorum_label(1, 1.0, true)
     )
 }
+
+/// Blockscout's pairing: the log index and the RPC endpoint that agreed.
+pub(crate) fn blockscout_trust(index: &str, rpc: &str) -> String {
+    let both = refs(&[index.to_owned(), rpc.to_owned()]);
+    format!(
+        "{{\"level\":\"verified\",\"method\":\"blockscout\",\"block\":null,\"agreed\":{both},\"dissented\":[],\"queried\":{both},\"quorum\":{}}}",
+        quorum_label(2, 2.0, true)
+    )
+}
