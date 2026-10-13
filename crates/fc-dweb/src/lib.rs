@@ -16,6 +16,8 @@
 //! - **`html()`** ([`decode_html`], [`classify`]): the size precheck, ethers'
 //!   ABI string rules, the UTF-8 check, the 8 MiB cap, the hash and the
 //!   gate's class.
+//! - **Validation** ([`validate_plan`]): what main checks before it dials.
+//!   It has no reference; its vectors are the design's.
 //!
 //! Where the core differs from today by design (each pinned by vectors):
 //! `body-idle` (a 60 s bound on a pending read, in every plan) and
@@ -36,6 +38,7 @@ mod open;
 mod plan;
 mod response;
 mod url;
+mod validate;
 
 pub use bzz::{
     FORWARDED_REQUEST_HEADERS, SWARM_HEADERS, is_reference as is_swarm_reference,
@@ -68,3 +71,4 @@ pub use response::{
     relabel, respond, rewrite_gateway_location, same_segment, small_text_length,
     strip_decoded_encoding, strip_page_state,
 };
+pub use validate::{ERROR_STATUSES, MAX_MESSAGE_UNITS, PlanRequest, Refusal, validate_plan};

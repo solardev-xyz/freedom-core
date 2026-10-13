@@ -613,3 +613,69 @@ fn html_class() {
         assert_eq!(class, expected, "{}", id(entry));
     }
 }
+
+#[test]
+fn validation() {
+    use std::collections::HashMap;
+
+    use fc_dweb::{PlanRequest, validate_plan};
+
+    /// `{ "$repeat": [text, count] }` stands for the text repeated.
+    fn expand(value: &Json) -> Json {
+        match value {
+            Json::Object(map) if map.contains_key("$repeat") => {
+                let spec = map["$repeat"].as_array().unwrap();
+                Json::String(
+                    spec[0]
+                        .as_str()
+                        .unwrap()
+                        .repeat(spec[1].as_u64().unwrap() as usize),
+                )
+            }
+            Json::Object(map) => {
+                Json::Object(map.iter().map(|(k, v)| (k.clone(), expand(v))).collect())
+            }
+            Json::Array(items) => Json::Array(items.iter().map(expand).collect()),
+            other => other.clone(),
+        }
+    }
+
+    let vectors = vectors();
+    assert_eq!(
+        vectors["constants"]["design"]["max_message_units"].as_u64(),
+        Some(fc_dweb::MAX_MESSAGE_UNITS as u64)
+    );
+    let requests: HashMap<&str, &Json> = arr(&vectors, "requests")
+        .iter()
+        .map(|e| (id(e), e))
+        .collect();
+    let mut refused = HashMap::new();
+    for entry in arr(&vectors, "validation") {
+        assert_eq!(s(entry, "source"), "design");
+        let (request, plan) = match entry["request_id"].as_str() {
+            Some(rid) => (&requests[rid]["request"], requests[rid]["plan"].clone()),
+            None => (&entry["request"], expand(&entry["plan"])),
+        };
+        let outcome = validate_plan(
+            &js_value(&plan),
+            &PlanRequest {
+                url: s(request, "url"),
+                method: s(request, "method"),
+                backend: backend(request),
+            },
+        );
+        let got = match outcome {
+            Ok(()) => "valid",
+            Err(refusal) => refusal.as_str(),
+        };
+        assert_eq!(got, s(entry, "expect"), "{}", id(entry));
+        *refused.entry(got).or_insert(0) += 1;
+    }
+    // Every reason is exercised.
+    for reason in [
+        "valid", "shape", "method", "node", "path", "header", "retry", "timers", "response",
+        "trust", "redirect", "error",
+    ] {
+        assert!(refused.contains_key(reason), "no vector for {reason}");
+    }
+}
