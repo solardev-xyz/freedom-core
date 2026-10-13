@@ -237,7 +237,8 @@ Electron main (profile P)
   - **Request work** runs on tasks marked as request tasks, built with `panic = "unwind"`. A panic there is caught at its join handle, after the hook's fixed line:
     - before the head, it becomes that request's `internal` error;
     - after the head, the stream's `internal` abort.
-  - **Every other task** (swarms, background retrieval, the instance's own tasks) belongs to an instance's task set or to the process ([Instances](#instances-and-their-teardown)). The service observes every such task's end. A panic, or an unexpected end, of a non-request task exits the process with 70, so it is a crash and main restarts it.
+  - **Every other task the service spawns itself** (the Bitswap swarm's task, background retrieval, the instance's own tasks, the reader and writer) belongs to an instance's task set or to the process ([Instances](#instances-and-their-teardown)). The service observes each of these tasks' end. A panic, or an unexpected end, of one exits the process with 70, so it is a crash and main restarts it.
+  - **Tasks the libraries spawn on an instance's runtime** (hyper's and libp2p's connection tasks) have no join handle the service holds, so their ordinary completion isn't observed. Their lifetime ends with the instance's runtime, whose shutdown is proven ([teardown](#instances-and-their-teardown)). A panic in one is still caught by the hook, and the hook exits the process with 70: any panic outside a request task is fatal, whether or not its task is tracked.
   - **A panic on any non-runtime thread** exits with 70 from the hook.
   - The service's own code is under the workspace lints: no `unsafe`, `unwrap`, `expect` or `panic!`.
 
@@ -282,9 +283,13 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
      - the root token is cancelled and the task set aborted;
      - the swarms are dropped, which closes their connections;
      - in-flight heads are answered `stopped`, and open streams aborted with `stopped`.
-  4. **Wait for quiescence:** the task set is empty and the blocking-region count is zero. Then the instance's runtime is shut down, ending the connection tasks its libraries spawned, and the store is closed (`close`, waiting at most 2 s for a statement in progress, as upstream's `close_or_close_later` does).
+  4. **Wait for quiescence:** the task set is empty and the blocking-region count is zero. Then:
+     - **The instance's runtime is dropped and joined** on a dedicated teardown thread, never on the process runtime's workers. Dropping a tokio runtime waits for its workers and every blocking-pool thread to exit, including blocking jobs the libraries spawned that no counter sees. A timed shutdown (`shutdown_timeout`, `shutdown_background`) is not used, because it may return while that work is still running.
+     - **The store is closed** after the join (`close`, waiting at most 2 s for a statement in progress, as upstream's `close_or_close_later` does).
+     - **Quiescence is proven** only when the join has returned and the store is closed. The managed counters reaching zero are necessary, not sufficient.
+     - **No uncancellable blocking work:** the service's resolver ([The resolver contract](#the-resolver-contract)) is async and cancellable, and replaces reqwest's default blocking resolver (`getaddrinfo` on a blocking thread). So in normal operation the join waits only for work that cancellation already ended.
   5. **Acknowledge:** only then does `ipfs.stop` reply, a replacement start, an eviction count as done, or `ipfs.shutdown` exit.
-- **The bound:** the teardown has 5 s. If quiescence isn't proven by then, the service doesn't proceed: it writes `teardown_unproven` and exits 70.
+- **The bound:** the teardown has 5 s, enforced by an independent watchdog thread, not by the teardown thread itself. If the runtime join and store close haven't both returned by then, the service doesn't proceed: it writes `teardown_unproven` and exits 70. Reservations, the instance ID and any replacement stay blocked until quiescence is proven, so a timeout never releases them.
   - Main treats that as a crash and restarts the process.
   - So no surviving work of an old instance can resume after a boundary, and its budget share isn't handed to a new instance while it might still be in use.
 - **Charges stay until the end:** a stopping instance keeps its [budget](#budgets) charges until quiescence. A new instance starts only within what is free.
@@ -864,7 +869,7 @@ Each is a pull request to freedom-ipfs, and none changes mobile's behavior by de
 7. **Owned instances and cancellation:**
    - **A root cancellation token per instance,** with a child per request. Cancelling a request's token drops its future, which ends every await inside it. The blocking regions (`rv:5448`, `rv:5500`, `rv:5535`) and the spawned tasks hold the token explicitly, so a fetch blocked inside `block_on` ends too.
    - **A spawner handle** in the builder: every task the instance starts goes into its task set, including the shared Bitswap swarm's task (spawned at `rv:7390`, which keeps only a command sender today) and background preconnects.
-   - **A runtime per instance,** built by the builder and shut down last by `Instance::shutdown`, which returns a quiescence report.
+   - **A runtime per instance,** built by the builder. `Instance::shutdown` drains the task set and blocking regions, then hands the runtime back to its caller for dropping and joining on a teardown thread, and closes the store after. Its quiescence report counts as proof only once that join has returned; a timed runtime shutdown is never reported as quiescent.
    - **A blocking-region counter** around each `block_in_place`.
    - **`Instance::shutdown()`,** which runs steps 2–4 of the [teardown](#instances-and-their-teardown) and reports whether quiescence was reached.
 8. **Shared limiters and accounting:**
