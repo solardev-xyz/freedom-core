@@ -299,6 +299,26 @@ pub fn myotis_answer(method: &str, payload: Option<&str>) -> Result<String, Myot
     }
 }
 
+/// `getFeeQuote`'s Myotis half, from the `fee` operation's payload: the
+/// gas price as `nativeResult(result, 'gasPriceWei', 'gasPrice')` reads it
+/// (the payload must be an answer) and the priority fee as
+/// `optionalNativeResult(result, 'maxPriorityFeePerGasWei',
+/// 'maxPriorityFeePerGas')` does (`None` when neither is set), each as the
+/// JSON text `feeQuote` converts.
+pub fn myotis_fee_values(payload: Option<&str>) -> Result<(String, Option<String>), MyotisFailure> {
+    let index = payload
+        .map(Index::new)
+        .transpose()
+        .map_err(|_| plain(UNEXPECTED_RESPONSE))?;
+    let payload = index.as_ref().map(Index::root);
+    let gas = native_result(payload, &["gas_price_wei", "gas_price"])?;
+    let priority = ["max_priority_fee_per_gas_wei", "max_priority_fee_per_gas"]
+        .iter()
+        .find_map(|key| payload?.get(key).filter(|v| v.kind() != Kind::Null))
+        .map(|v| v.stringify(KeyOrder::Property));
+    Ok((gas.stringify(KeyOrder::Property), priority))
+}
+
 /// `assertMyotisAnswer`: every payload that isn't a served answer fails.
 fn assert_answer(payload: Option<Value<'_, '_>>) -> Result<(), MyotisFailure> {
     let get = |key: &str| payload.and_then(|p| p.get(key));

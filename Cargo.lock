@@ -342,12 +342,14 @@ name = "fc-chain"
 version = "0.3.0"
 dependencies = [
  "fc-json",
+ "fc-naming",
  "hex",
  "regex",
  "serde_json",
  "sha2",
  "sha3",
  "thiserror",
+ "url",
 ]
 
 [[package]]

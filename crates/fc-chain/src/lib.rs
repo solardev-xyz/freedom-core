@@ -38,6 +38,7 @@ mod broadcast;
 mod fee;
 mod js;
 mod logs;
+pub mod machine;
 mod methods;
 mod myotis;
 mod normalize;
@@ -77,8 +78,8 @@ pub use methods::{
 };
 pub use myotis::{
     MAX_MYOTIS_REFUSAL_MESSAGE, MYOTIS_BLOB_FIELDS, MYOTIS_NOT_READY, MYOTIS_PROOF, MyotisFailure,
-    MyotisOperation, MyotisRefusal, MyotisVerdict, myotis_answer, myotis_operation, myotis_trust,
-    myotis_trust_block,
+    MyotisOperation, MyotisRefusal, MyotisVerdict, myotis_answer, myotis_fee_values,
+    myotis_operation, myotis_trust, myotis_trust_block,
 };
 pub use normalize::{Normalized, normalize_params};
 pub use stable::{StableDigest, stable_digest, stable_value, value_digest};

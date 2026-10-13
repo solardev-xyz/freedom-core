@@ -90,6 +90,8 @@ pub struct Answer {
     /// The body as `TextDecoder` gives it, BOMs dropped.
     text: String,
     reply: Reply,
+    /// The heap the body's index took while it was read.
+    index_bytes: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +129,26 @@ impl Answer {
         &self.text
     }
 
+    /// The heap the body's index took while it was read (memory budgets
+    /// charge it).
+    pub fn index_bytes(&self) -> usize {
+        self.index_bytes
+    }
+
+    /// The result's span in [`Answer::text`]: `Some(None)` for `undefined`,
+    /// `None` for a node error.
+    pub fn result_span(&self) -> Option<Option<Range<usize>>> {
+        match &self.reply {
+            Reply::Result(range) => Some(range.clone()),
+            Reply::NodeError { .. } => None,
+        }
+    }
+
+    /// The decoded body, kept whole.
+    pub fn into_text(self) -> String {
+        self.text
+    }
+
     pub fn outcome(&self) -> Outcome<'_> {
         let span = |range: &Option<Range<usize>>| {
             range
@@ -154,8 +176,12 @@ pub fn decode_answer(status: u16, body: Vec<u8>) -> Result<Answer, AnswerError> 
         return Err(AnswerError::Status(status));
     }
     let text = decode_text(body);
-    let reply = read(&text)?;
-    Ok(Answer { text, reply })
+    let (reply, index_bytes) = read(&text)?;
+    Ok(Answer {
+        text,
+        reply,
+        index_bytes,
+    })
 }
 
 /// A body as undici's `text()` and `json()` decode it: UTF-8 with
@@ -173,8 +199,13 @@ pub(crate) fn decode_text(body: Vec<u8>) -> String {
     text
 }
 
-fn read(text: &str) -> Result<Reply, AnswerError> {
+fn read(text: &str) -> Result<(Reply, usize), AnswerError> {
     let index = Index::new(text)?;
+    let reply = reply(&index)?;
+    Ok((reply, index.heap_bytes()))
+}
+
+fn reply(index: &Index<'_>) -> Result<Reply, AnswerError> {
     let root = index.root();
     let span = |value: Value<'_, '_>| value.start()..value.end();
     match root.kind() {
