@@ -126,10 +126,10 @@ impl<'t> Index<'t> {
         }
         // The first pass validates and counts, so the nodes are allocated
         // once, exactly, and nothing is allocated for a text that fails.
-        let mut count = Count(0);
+        let mut count = Count::default();
         scan(text, &mut count)?;
         let mut fill = Fill {
-            nodes: Vec::with_capacity(count.0),
+            nodes: Vec::with_capacity(count.nodes),
             open: Vec::new(),
         };
         scan(text, &mut fill)?;
@@ -137,6 +137,22 @@ impl<'t> Index<'t> {
             text,
             nodes: fill.nodes,
         })
+    }
+
+    /// What [`Index::new`] allocates for `text`, found by its first pass
+    /// alone (which allocates nothing): the nodes, and the stack of open
+    /// containers while it fills them. A caller can so reserve an index
+    /// before it is built. The errors are [`Index::new`]'s.
+    pub fn heap_needed(text: &str) -> Result<usize, IndexError> {
+        if text.len() > MAX_TEXT {
+            return Err(IndexError::TooLong(text.len()));
+        }
+        let mut count = Count::default();
+        scan(text, &mut count)?;
+        Ok(count
+            .nodes
+            .saturating_mul(std::mem::size_of::<Node>())
+            .saturating_add(grown_capacity(count.max_depth).saturating_mul(4)))
     }
 
     /// The indexed text.
@@ -428,6 +444,49 @@ impl<'i, 't> Value<'i, 't> {
         }
     }
 
+    /// What [`Self::write`] allocates while it runs for this value, at most:
+    /// the members of the objects it is inside (all of each object's keys,
+    /// before duplicates go) and its stack of open containers, each a
+    /// vector grown by doubling. Found by one walk of the index, without
+    /// allocating more than a stack of open containers' ends; a caller can
+    /// so reserve the scratch before writing.
+    pub fn write_scratch(self, order: KeyOrder) -> usize {
+        let per_member = match order {
+            KeyOrder::Sorted => std::mem::size_of::<u32>(),
+            KeyOrder::Property => 2 * std::mem::size_of::<u32>(),
+        };
+        let index = self.index;
+        let end = index.next(self.id).max(self.id + 1);
+        // Open containers: where each ends, and the members it holds.
+        let mut open: Vec<(usize, usize)> = Vec::new();
+        let (mut members, mut max_members, mut max_depth) = (0usize, 0usize, 0usize);
+        let mut id = self.id;
+        while id < end {
+            while let Some(&(close, held)) = open.last() {
+                if id < close {
+                    break;
+                }
+                open.pop();
+                members -= held;
+            }
+            match index.kind(id) {
+                Kind::Object => {
+                    let held = index.children(id).count() / 2;
+                    members += held;
+                    max_members = max_members.max(members);
+                    open.push((index.next(id), held));
+                }
+                Kind::Array => open.push((index.next(id), 0)),
+                _ => {}
+            }
+            max_depth = max_depth.max(open.len());
+            id += 1;
+        }
+        grown_capacity(max_members)
+            .saturating_mul(per_member)
+            .saturating_add(grown_capacity(max_depth).saturating_mul(std::mem::size_of::<Frame>()))
+    }
+
     /// An object's own properties in JavaScript's property order, each key
     /// once: the key where it first appeared, the value it last had.
     pub fn properties(self) -> Vec<(Value<'i, 't>, Value<'i, 't>)> {
@@ -637,18 +696,20 @@ fn write_value(value: Value<'_, '_>, order: KeyOrder, out: &mut impl Sink) {
     write_with(value, order, out, &mut arena);
 }
 
+/// An open container while [`Value::write`] runs.
+enum Frame {
+    Array {
+        first: usize,
+        next: usize,
+        end: usize,
+    },
+    Object {
+        base: usize,
+        pos: usize,
+    },
+}
+
 fn write_with(value: Value<'_, '_>, order: KeyOrder, out: &mut impl Sink, arena: &mut Arena) {
-    enum Frame {
-        Array {
-            first: usize,
-            next: usize,
-            end: usize,
-        },
-        Object {
-            base: usize,
-            pos: usize,
-        },
-    }
     let index = value.index;
     let mut stack: Vec<Frame> = Vec::new();
     let mut current = Some(value.id);
@@ -744,14 +805,35 @@ trait Events {
     fn close(&mut self);
 }
 
-struct Count(usize);
+/// The first pass: how many nodes, and how deep the containers go.
+#[derive(Default)]
+struct Count {
+    nodes: usize,
+    depth: usize,
+    max_depth: usize,
+}
 
 impl Events for Count {
     fn value(&mut self, _: usize) {
-        self.0 += 1;
+        self.nodes += 1;
     }
-    fn open(&mut self) {}
-    fn close(&mut self) {}
+    fn open(&mut self) {
+        self.depth += 1;
+        self.max_depth = self.max_depth.max(self.depth);
+    }
+    fn close(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
+    }
+}
+
+/// What a vector grown one push at a time, from empty, can hold for
+/// `len` items: Rust's doubling, from four.
+fn grown_capacity(len: usize) -> usize {
+    if len == 0 {
+        0
+    } else {
+        len.next_power_of_two().max(4)
+    }
 }
 
 struct Fill {
@@ -1204,6 +1286,9 @@ mod tests {
         ];
         for text in &texts {
             let index = Index::new(text).unwrap();
+            // The first pass alone finds what the index takes.
+            assert!(index.heap_bytes() <= Index::heap_needed(text).unwrap());
+            assert!(Index::heap_needed(text).unwrap() <= index.heap_bytes() + 4 * 1024);
             let bound = HEAP_PER_TEXT_BYTE * (text.len() + 1);
             assert!(
                 index.heap_bytes() <= bound,
@@ -1220,6 +1305,13 @@ mod tests {
                 };
                 let mut out = String::new();
                 write_with(index.root(), order, &mut out, &mut arena);
+                // The reservation a caller makes covers what was used.
+                assert!(
+                    arena.capacity_bytes() <= index.root().write_scratch(order),
+                    "{} > {}",
+                    arena.capacity_bytes(),
+                    index.root().write_scratch(order)
+                );
                 let bound = per_byte * (text.len() + 1) + WRITE_SCRATCH_FLOOR;
                 assert!(
                     arena.capacity_bytes() <= bound,
