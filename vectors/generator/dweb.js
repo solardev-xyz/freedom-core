@@ -413,6 +413,9 @@ function bzzCases() {
     ['hash-double-encoded-slash', `bzz://${h}/a%252Fb`],
     ['hash-backslash', `bzz://${h}/a\\b`],
     ['hash-backslash-escape', `bzz://${h}/a/..\\..\\..\\stamps`, 'path'],
+    ['hash-encoded-climb', `bzz://${h}/..%2f..%2fstamps`],
+    ['hash-encoded-climb-backslash', `bzz://${h}/..%5C..%5Cstamps`],
+    ['hash-encoded-dot-segments-in-name', `bzz://${h}/x%2e%2e/..%2e/y`],
     ['hash-unicode-path', `bzz://${h}/caf${ch(0xe9)}/${ch(0x65e5, 0x672c)}?q=${ch(0xe9)}`],
     ['hash-odd-escapes', `bzz://${h}/%zz/%/%G0/%e9`],
     ['hash-special-characters', `bzz://${h}/^|\`{}<>"'!()*[]$&+,;=@:~?^|\`{}'"`],
@@ -493,6 +496,7 @@ function bzzCases() {
     named(`name-base-path-${id}-root`, 'bzz://site.eth/', okBzz({ basePath }), { validation });
   }
   named('name-base-path-escape', 'bzz://site.eth/x', okBzz({ basePath: '/../../..' }), { validation: 'path' });
+  named('name-base-path-encoded-climb', 'bzz://site.eth/x', okBzz({ basePath: '/a/..%2F..%2F..' }), { validation: 'path' });
   named('name-decoded-escape', 'bzz://site.eth/x', okBzz({ decoded: '../../stamps' }), { validation: 'path' });
   named('name-decoded-not-hex', 'bzz://site.eth/x', okBzz({ decoded: 'not-a-reference' }), { validation: 'path' });
   named('name-decoded-number', 'bzz://site.eth/x', okBzz({ decoded: 12 }), { validation: 'path' });
@@ -555,6 +559,25 @@ function ipfsCases() {
   add('ipfs', 'cid-path-unicode', `ipfs://${v1}/caf${ch(0xe9)}/${ch(0x1f600)}?${ch(0xe9)}=${ch(0x3000)}`);
   add('ipfs', 'cid-path-special', `ipfs://${v1}/^|\`{}<>"'?^'"`);
   add('ipfs', 'cid-path-backslash-escape', `ipfs://${v1}/a/..\\..\\..\\ipns\\evil.example`, { validation: 'path' });
+  // Encoded separators: those that climb are refused once decoded; those
+  // that don't still pass to the node.
+  for (const [id, suffix, validation] of [
+    ['encoded-climb', '/..%2f..%2fipns/example.com', 'path'],
+    ['encoded-climb-upper', '/..%2F..%2Fipns/example.com', 'path'],
+    ['encoded-dots-climb', '/%2e%2e%2f%2e%2e%2fapi/v0/id', 'path'],
+    ['encoded-dots-climb-upper', '/%2E%2E%2F%2E%2E%2Fapi/v0/id', 'path'],
+    ['encoded-dots-climb-mixed', '/%2e%2E%2F..%2fapi/v0/id', 'path'],
+    ['encoded-backslash-climb', '/..%5c..%5cipns%5cexample.com', 'path'],
+    ['encoded-backslash-climb-upper', '/%2E%2E%5C%2E%2E%5Capi/v0/id', 'path'],
+    ['encoded-climb-inside', '/a%2f..%2fb', 'path'],
+    ['encoded-dot', '/.%2Fa', 'path'],
+    ['encoded-trailing-dot-dot', '/a/b%2F..', 'path'],
+    ['encoded-separator-name', '/a%2Fb.txt', undefined],
+    ['encoded-backslash-name', '/a%5Cb%5cc', undefined],
+    ['encoded-dots-in-name', '/..%2e/x%2e%2e/...%2F', undefined],
+    ['double-encoded-climb', '/%252e%252e%252fapi/v0/id', undefined],
+    ['encoded-climb-in-query', '/x?..%2f..%2fipns', undefined],
+  ]) add('ipfs', `cid-path-${id}`, `ipfs://${v1}${suffix}`, { validation });
   add('ipfs', 'cid-path-dot-segments', `ipfs://${v1}/a/../../b/./c`);
   add('ipfs', 'cid-port-userinfo', `ipfs://u:p@${v1}:5001/x`);
   add('ipfs', 'cid-empty-query', `ipfs://${v1}/x?`);
@@ -575,6 +598,10 @@ function ipfsCases() {
   add('ipns', 'key-base58-cid-lowercased', `ipns://${zcid(CID_BYTES.libp2pKey).toLowerCase()}/`);
   add('ipns', 'key-base32-cid', `ipns://${b32cid(CID_BYTES.libp2pKey)}/`);
   add('ipns', 'dnslink', 'ipns://docs.ipfs.tech/install/');
+  add('ipns', 'dnslink-encoded-climb', 'ipns://docs.ipfs.tech/..%2F..%2Fipfs/x', { validation: 'path' });
+  add('ipns', 'dnslink-encoded-backslash-climb', 'ipns://docs.ipfs.tech/%2E%2E%5Capi/v0/id', { validation: 'path' });
+  add('ipns', 'dnslink-encoded-separator', 'ipns://docs.ipfs.tech/a%2Fb/c%5Cd', {});
+  add('ipns', 'key-encoded-climb', `ipns://${key36}/..%2f..%2fipfs/${v1}`, { validation: 'path' });
   add('ipns', 'dnslink-underscore', 'ipns://a_b.example/');
   add('ipns', 'dnslink-hyphen-start', 'ipns://-a.example/');
   add('ipns', 'dnslink-long', `ipns://${'a'.repeat(250)}.com/`);
@@ -1426,6 +1453,10 @@ function validationCases(requests) {
     ['bzz-unencoded-caret', `/bzz/${h}/a^b`, 'path'],
     ['bzz-unencoded-unicode', `/bzz/${h}/caf${ch(0xe9)}`, 'path'],
     ['bzz-not-string', 12, 'shape'],
+    ['bzz-encoded-climb', `/bzz/${h}/..%2f..%2fstamps`, 'path'],
+    ['bzz-encoded-climb-upper', `/bzz/${h}/..%2F..%2Fstamps`, 'path'],
+    ['bzz-encoded-backslash-climb', `/bzz/${h}/%2E%2E%5Cstamps`, 'path'],
+    ['bzz-encoded-dots-in-name', `/bzz/${h}/x%2e%2e/..%2E/y`, 'valid'],
   ]) mutate(`path-${id}`, base, (p) => { f(p).path = path; }, expect);
   const v1 = b32cid(CID_BYTES.dagPb);
   for (const [id, path, expect] of [
@@ -1441,12 +1472,31 @@ function validationCases(requests) {
     ['ipfs-backslash', `/ipfs/${v1}/a\\b`, 'path'],
     ['ipfs-ref-dot-dot', '/ipfs/../x', 'path'],
     ['ipfs-uppercase-namespace', `/IPFS/${v1}`, 'path'],
+    // Judged as decoded: %2E, %2F and %5C in any case, then dot segments.
+    ['ipfs-encoded-climb', `/ipfs/${v1}/..%2f..%2fipns/example.com`, 'path'],
+    ['ipfs-encoded-climb-upper', `/ipfs/${v1}/..%2F..%2Fapi/v0/id`, 'path'],
+    ['ipfs-encoded-dots-climb', `/ipfs/${v1}/%2e%2e%2f%2e%2e%2fapi/v0/id`, 'path'],
+    ['ipfs-encoded-backslash-climb', `/ipfs/${v1}/%2E%2E%5C%2E%2E%5Cipns%5Cx`, 'path'],
+    ['ipfs-encoded-backslash-climb-lower', `/ipfs/${v1}/..%5c..%5capi`, 'path'],
+    ['ipfs-encoded-climb-inside', `/ipfs/${v1}/a%2F..%2Fb`, 'path'],
+    ['ipfs-encoded-dot', `/ipfs/${v1}/a%2F.%2Fb`, 'path'],
+    ['ipfs-encoded-dot-dot-last', `/ipfs/${v1}/a%2F..`, 'path'],
+    ['ipfs-encoded-ref-dot-dot', `/ipfs/..%2F..%2Fapi`, 'path'],
+    ['ipfs-encoded-separator', `/ipfs/${v1}/a%2Fb/c%5Cd.txt`, 'valid'],
+    ['ipfs-encoded-dots-in-name', `/ipfs/${v1}/..%2e/x%2E%2E/...%2F`, 'valid'],
+    ['ipfs-double-encoded', `/ipfs/${v1}/%252e%252e%252fapi/v0/id`, 'valid'],
+    ['ipfs-encoded-climb-in-query', `/ipfs/${v1}/x?..%2F..%2Fapi`, 'valid'],
+    ['ipfs-lone-percent', `/ipfs/${v1}/a%2/%`, 'valid'],
   ]) mutate(`path-${id}`, ipfsBase, (p) => { f(p).path = path; }, expect);
   const ipnsBase = requests.find((e) => e.id === 'ipns-dnslink');
   for (const [id, path, expect] of [
     ['ipns-ok', '/ipns/docs.ipfs.tech/install', 'valid'],
     ['ipns-key', '/ipns/k51qzi5uqu5dlvj2baxnqndepeb86cbk3ng7n3i46uzyxzyqj2xjonzllnv0v8/', 'valid'],
     ['ipfs-for-ipns', `/ipfs/${v1}/`, 'path'],
+    ['ipns-encoded-climb', '/ipns/docs.ipfs.tech/..%2F..%2Fipfs/x', 'path'],
+    ['ipns-encoded-dots-climb', '/ipns/docs.ipfs.tech/%2e%2e%2fapi/v0/id', 'path'],
+    ['ipns-encoded-backslash-climb', '/ipns/docs.ipfs.tech/%2E%2E%5Capi', 'path'],
+    ['ipns-encoded-separator', '/ipns/docs.ipfs.tech/a%2Fb%5Cc', 'valid'],
   ]) mutate(`path-${id}`, ipnsBase, (p) => { f(p).path = path; }, expect);
   // Headers.
   mutate('headers-bzz-not-allowed', base, (p) => { f(p).headers.push(['cookie', 'a=1']); }, 'header');

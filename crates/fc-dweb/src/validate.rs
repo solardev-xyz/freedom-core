@@ -208,7 +208,58 @@ fn check_path(path: &str, scheme: Scheme) -> Result<(), Refusal> {
                     .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
         }
     };
-    if ok { Ok(()) } else { Err(Refusal::Path) }
+    if ok && stays_beneath(pathname, namespace, reference) {
+        Ok(())
+    } else {
+        Err(Refusal::Path)
+    }
+}
+
+/// The path judged as decoded, not only as serialized: once `%2E`, `%2F`
+/// and `%5C` are decoded (in any case, a single pass) and `/` and `\` both
+/// separate, no segment is `.` or `..`, and the path still begins with
+/// `/<namespace>/<reference>`. A normalized path has no literal dot
+/// segments, so any found here came from escapes. Encoded separators that
+/// don't climb, such as `a%2Fb` in a file name, pass.
+fn stays_beneath(pathname: &str, namespace: &str, reference: &str) -> bool {
+    let decoded = decode_dots_and_separators(pathname);
+    let mut segments = decoded.split(['/', '\\']);
+    let prefix_ok = segments.next() == Some("")
+        && segments.next() == Some(namespace)
+        && segments.next() == Some(reference);
+    prefix_ok
+        && !decoded
+            .split(['/', '\\'])
+            .any(|segment| segment == "." || segment == "..")
+}
+
+/// `%2E`, `%2F` and `%5C`, in any case, decoded in one pass; every other
+/// escape left as it is (`%252F` stays `%252F`).
+fn decode_dots_and_separators(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    let mut rest = path;
+    while let Some(at) = rest.find('%') {
+        out.push_str(&rest[..at]);
+        let escape = rest.get(at..at + 3).unwrap_or("");
+        let decoded = match escape.to_ascii_lowercase().as_str() {
+            "%2e" => Some('.'),
+            "%2f" => Some('/'),
+            "%5c" => Some('\\'),
+            _ => None,
+        };
+        match decoded {
+            Some(c) => {
+                out.push(c);
+                rest = &rest[at + 3..];
+            }
+            None => {
+                out.push('%');
+                rest = &rest[at + 1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// RFC 9110 `tchar`, lowercase letters only.
@@ -414,5 +465,27 @@ fn error(body: &JsValue) -> Result<(), Refusal> {
         Ok(())
     } else {
         Err(Refusal::Error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decoding_dots_and_separators() {
+        for (path, decoded) in [
+            ("/a%2Fb%2f%5C%5c%2E%2e", "/a/b/\\\\.."),
+            ("/%252F%2", "/%252F%2"),
+            ("/%", "/%"),
+            ("/%zz%2F", "/%zz/"),
+            ("/caf%C3%A9", "/caf%C3%A9"),
+        ] {
+            assert_eq!(decode_dots_and_separators(path), decoded, "{path}");
+        }
+        assert!(stays_beneath("/ipfs/c/a%2Fb", "ipfs", "c"));
+        assert!(stays_beneath("/ipfs/c", "ipfs", "c"));
+        assert!(!stays_beneath("/ipfs/c/a%2F..%2F..", "ipfs", "c"));
+        assert!(!stays_beneath("/ipfs/c/%2E%5Cx", "ipfs", "c"));
     }
 }

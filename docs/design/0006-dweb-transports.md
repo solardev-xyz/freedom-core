@@ -193,8 +193,14 @@ The plan is checked as the JSON main receives, against the request main admitted
   - **`path`:** normalized, and in the request's own namespace. That rules out any `..` escape, scheme or authority:
     - the path is unchanged when read back as an HTTP client would send it: dot segments resolved, `\` read as `/`, and the path and query sets percent-encoded;
     - for `bzz:`, `/bzz/<64 or 128 hex>` and below, with no encoded `/` or `\` anywhere before the query (`bzz:`'s rule today, applied to the node's path, published base path included);
-    - for `ipfs:`, `/ipfs/<ref>` and below; for `ipns:`, `/ipns/<ref>` and below. The reference is letters, digits, `.`, `_` and `-`. Encoded separators after it pass to the node as today.
-    - A base path that changes which IPFS reference is asked can't be told from the path; the namespace can.
+    - for `ipfs:`, `/ipfs/<ref>` and below; for `ipns:`, `/ipns/<ref>` and below. The reference is letters, digits, `.`, `_` and `-`;
+    - **the path also stays within the namespace once decoded:**
+      - decode `%2E`, `%2F` and `%5C`, in any case, in a single pass;
+      - read both `/` and `\` as separators;
+      - no segment may then be `.` or `..`, so the decoded path stays beneath `/<namespace>/<ref>`.
+
+      A normalized path has no literal dot segments, so any found here come from escapes. An encoded separator that doesn't climb, such as `a%2Fb` in a file name, still passes to the IPFS node as today. The query isn't judged;
+    - a base path that changes which IPFS reference is asked can't be told from the path; the namespace can.
   - **`header`:**
     - names are lowercase tokens;
     - values are Latin-1, with no NUL, CR or LF, and no space or tab at either end;
@@ -230,6 +236,7 @@ Validation is stricter than today's dialing (deviation `plan-paths`). Today the 
 - **For either scheme:**
   - literal-backslash dot segments, such as `bzz://<ref>/a/..\..\..\stamps`, dialled today as `/stamps`, or `ipfs://<cid>/a/..\..\..\ipns\x`, dialled today as `/ipns/x`. Node's URL parser keeps a `\` in a path whose scheme isn't special, and the HTTP client then resolves it;
   - a target outside the request's own namespace, including a resolver `decoded` of `../ipns/…`.
+- **For IPFS:** an encoded separator that forms a `.` or `..` segment once decoded, such as `..%2F`, `%2E%2E%2F` or `%2E%2E%5C`, in any case. That holds even when the result would stay beneath the reference, as in `a%2F..%2Fb`. (`bzz:` already refuses any encoded separator.)
 
 Pages can't produce the backslash forms, because Chromium canonicalizes standard-scheme URLs first.
 
@@ -368,7 +375,7 @@ Before step 4 moves a handler:
 | `web3-decode` | ethers in a worker | the core | the same document, hash and 413s; the worker goes |
 | `hash-host-hop` | hash hosts need no lookup | one planning round trip | measured ([Latency](#latency)) |
 | `native-page-state` | the native IPFS node's answers pass with `Set-Cookie`, `Set-Cookie2` and `Service-Worker-Allowed` | stripped, as from Ant and the external gateway | the native node can't set cookies or widen a service worker's scope on the `ipfs://` origin |
-| `plan-paths` | dialled: a `bzz:` published base path with an encoded separator, a relative one, or a climbing one; a `bzz:` resolver `decoded` that isn't a 64- or 128-hex reference, `..` included; literal-backslash dot segments; a target outside the request's own namespace, such as a `decoded` of `../ipns/…` ([Validation](#validation-before-any-dial)) | refused by validation | such plans get 502 where today they are dialled. Pages can't produce the backslash forms, because Chromium canonicalizes standard-scheme URLs first |
+| `plan-paths` | dialled: a `bzz:` published base path with an encoded separator, a relative one, or a climbing one; a `bzz:` resolver `decoded` that isn't a 64- or 128-hex reference, `..` included; literal-backslash dot segments; a target outside the request's own namespace, such as a `decoded` of `../ipns/…`; an IPFS path with an encoded separator that forms a `.` or `..` segment once decoded ([Validation](#validation-before-any-dial)) | refused by validation, which judges the path as decoded too | such plans get 502 where today they are dialled. Pages can't produce the backslash forms, because Chromium canonicalizes standard-scheme URLs first |
 
 ## Implementation steps
 

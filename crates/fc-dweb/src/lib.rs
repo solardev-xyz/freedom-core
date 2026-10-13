@@ -23,7 +23,8 @@
 //! `body-idle` (a 60 s bound on a pending read, in every plan),
 //! `native-page-state` (`strip_page_state` runs on the native IPFS node's
 //! answers too, which today pass unstripped) and `plan-paths` (validation
-//! refuses some targets today's handlers dial).
+//! refuses some targets today's handlers dial, judging paths as decoded
+//! too).
 //!
 //! The crate does no I/O: names are resolved, and bytes moved, by the caller.
 

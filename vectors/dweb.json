@@ -3593,6 +3593,204 @@
       "validation": "path"
     },
     {
+      "id": "bzz-hash-encoded-climb",
+      "request": {
+        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/..%2f..%2fstamps",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "js": {
+        "resolve": [],
+        "error": {
+          "status": 400,
+          "headers": [
+            [
+              "content-type",
+              "application/json; charset=utf-8"
+            ]
+          ],
+          "body": "{\"code\":400,\"message\":\"invalid bzz path\"}"
+        }
+      },
+      "plan": {
+        "error": {
+          "status": 400,
+          "code": 400,
+          "message": "invalid bzz path"
+        }
+      },
+      "validation": "valid"
+    },
+    {
+      "id": "bzz-hash-encoded-climb-backslash",
+      "request": {
+        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/..%5C..%5Cstamps",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "js": {
+        "resolve": [],
+        "error": {
+          "status": 400,
+          "headers": [
+            [
+              "content-type",
+              "application/json; charset=utf-8"
+            ]
+          ],
+          "body": "{\"code\":400,\"message\":\"invalid bzz path\"}"
+        }
+      },
+      "plan": {
+        "error": {
+          "status": 400,
+          "code": 400,
+          "message": "invalid bzz path"
+        }
+      },
+      "validation": "valid"
+    },
+    {
+      "id": "bzz-hash-encoded-dot-segments-in-name",
+      "request": {
+        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/x%2e%2e/..%2e/y",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "js": {
+        "resolve": [],
+        "fetch": {
+          "gateway_url": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/x%2e%2e/..%2e/y",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/x%2e%2e/..%2e/y",
+          "method": "GET",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ]
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/x%2e%2e/..%2e/y",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "validation": "valid"
+    },
+    {
       "id": "bzz-hash-unicode-path",
       "request": {
         "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/café/日本?q=é",
@@ -11392,6 +11590,134 @@
       "validation": "path"
     },
     {
+      "id": "bzz-name-base-path-encoded-climb",
+      "request": {
+        "url": "bzz://site.eth/x",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "resolution": {
+        "value": {
+          "type": "ok",
+          "protocol": "bzz",
+          "decoded": "c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef",
+          "basePath": "/a/..%2F..%2F.."
+        }
+      },
+      "deviation": "plan-paths",
+      "js": {
+        "resolve": [
+          {
+            "fn": "resolveEnsContent",
+            "name": "site.eth"
+          }
+        ],
+        "fetch": {
+          "gateway_url": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/..%2F..%2F../x",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/..%2F..%2F../x",
+          "method": "GET",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ]
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/..%2F..%2F../x",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "validation": "path"
+    },
+    {
       "id": "bzz-name-decoded-escape",
       "request": {
         "url": "bzz://site.eth/x",
@@ -15006,6 +15332,1111 @@
       "validation": "path"
     },
     {
+      "id": "ipfs-cid-path-encoded-climb",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/..%2f..%2fipns/example.com",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "deviation": "plan-paths",
+      "js": {
+        "resolve": [],
+        "fetch": {
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/..%2f..%2fipns/example.com",
+          "method": "GET",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ]
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/..%2f..%2fipns/example.com",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "validation": "path"
+    },
+    {
+      "id": "ipfs-cid-path-encoded-climb-upper",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/..%2F..%2Fipns/example.com",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "deviation": "plan-paths",
+      "js": {
+        "resolve": [],
+        "fetch": {
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/..%2F..%2Fipns/example.com",
+          "method": "GET",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ]
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/..%2F..%2Fipns/example.com",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "validation": "path"
+    },
+    {
+      "id": "ipfs-cid-path-encoded-dots-climb",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/%2e%2e%2f%2e%2e%2fapi/v0/id",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "deviation": "plan-paths",
+      "js": {
+        "resolve": [],
+        "fetch": {
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/%2e%2e%2f%2e%2e%2fapi/v0/id",
+          "method": "GET",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ]
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/%2e%2e%2f%2e%2e%2fapi/v0/id",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "validation": "path"
+    },
+    {
+      "id": "ipfs-cid-path-encoded-dots-climb-upper",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/%2E%2E%2F%2E%2E%2Fapi/v0/id",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "deviation": "plan-paths",
+      "js": {
+        "resolve": [],
+        "fetch": {
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/%2E%2E%2F%2E%2E%2Fapi/v0/id",
+          "method": "GET",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ]
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/%2E%2E%2F%2E%2E%2Fapi/v0/id",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "validation": "path"
+    },
+    {
+      "id": "ipfs-cid-path-encoded-dots-climb-mixed",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/%2e%2E%2F..%2fapi/v0/id",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "deviation": "plan-paths",
+      "js": {
+        "resolve": [],
+        "fetch": {
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/%2e%2E%2F..%2fapi/v0/id",
+          "method": "GET",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ]
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/%2e%2E%2F..%2fapi/v0/id",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "validation": "path"
+    },
+    {
+      "id": "ipfs-cid-path-encoded-backslash-climb",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/..%5c..%5cipns%5cexample.com",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "deviation": "plan-paths",
+      "js": {
+        "resolve": [],
+        "fetch": {
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/..%5c..%5cipns%5cexample.com",
+          "method": "GET",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ]
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/..%5c..%5cipns%5cexample.com",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "validation": "path"
+    },
+    {
+      "id": "ipfs-cid-path-encoded-backslash-climb-upper",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/%2E%2E%5C%2E%2E%5Capi/v0/id",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "deviation": "plan-paths",
+      "js": {
+        "resolve": [],
+        "fetch": {
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/%2E%2E%5C%2E%2E%5Capi/v0/id",
+          "method": "GET",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ]
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/%2E%2E%5C%2E%2E%5Capi/v0/id",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "validation": "path"
+    },
+    {
+      "id": "ipfs-cid-path-encoded-climb-inside",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/a%2f..%2fb",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "deviation": "plan-paths",
+      "js": {
+        "resolve": [],
+        "fetch": {
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/a%2f..%2fb",
+          "method": "GET",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ]
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/a%2f..%2fb",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "validation": "path"
+    },
+    {
+      "id": "ipfs-cid-path-encoded-dot",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/.%2Fa",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "deviation": "plan-paths",
+      "js": {
+        "resolve": [],
+        "fetch": {
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/.%2Fa",
+          "method": "GET",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ]
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/.%2Fa",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "validation": "path"
+    },
+    {
+      "id": "ipfs-cid-path-encoded-trailing-dot-dot",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/a/b%2F..",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "deviation": "plan-paths",
+      "js": {
+        "resolve": [],
+        "fetch": {
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/a/b%2F..",
+          "method": "GET",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ]
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/a/b%2F..",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "validation": "path"
+    },
+    {
+      "id": "ipfs-cid-path-encoded-separator-name",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/a%2Fb.txt",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "js": {
+        "resolve": [],
+        "fetch": {
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/a%2Fb.txt",
+          "method": "GET",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ]
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/a%2Fb.txt",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "validation": "valid"
+    },
+    {
+      "id": "ipfs-cid-path-encoded-backslash-name",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/a%5Cb%5cc",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "js": {
+        "resolve": [],
+        "fetch": {
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/a%5Cb%5cc",
+          "method": "GET",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ]
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/a%5Cb%5cc",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "validation": "valid"
+    },
+    {
+      "id": "ipfs-cid-path-encoded-dots-in-name",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/..%2e/x%2e%2e/...%2F",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "js": {
+        "resolve": [],
+        "fetch": {
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/..%2e/x%2e%2e/...%2F",
+          "method": "GET",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ]
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/..%2e/x%2e%2e/...%2F",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "validation": "valid"
+    },
+    {
+      "id": "ipfs-cid-path-double-encoded-climb",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/%252e%252e%252fapi/v0/id",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "js": {
+        "resolve": [],
+        "fetch": {
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/%252e%252e%252fapi/v0/id",
+          "method": "GET",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ]
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/%252e%252e%252fapi/v0/id",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "validation": "valid"
+    },
+    {
+      "id": "ipfs-cid-path-encoded-climb-in-query",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/x?..%2f..%2fipns",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "js": {
+        "resolve": [],
+        "fetch": {
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/x?..%2f..%2fipns",
+          "method": "GET",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ]
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/x?..%2f..%2fipns",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "validation": "valid"
+    },
+    {
       "id": "ipfs-cid-path-dot-segments",
       "request": {
         "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/a/../../b/./c",
@@ -16174,6 +17605,301 @@
         }
       },
       "validation": "valid"
+    },
+    {
+      "id": "ipns-dnslink-encoded-climb",
+      "request": {
+        "url": "ipns://docs.ipfs.tech/..%2F..%2Fipfs/x",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "deviation": "plan-paths",
+      "js": {
+        "resolve": [],
+        "fetch": {
+          "path": "/ipns/docs.ipfs.tech/..%2F..%2Fipfs/x",
+          "method": "GET",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ]
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipns/docs.ipfs.tech/..%2F..%2Fipfs/x",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "validation": "path"
+    },
+    {
+      "id": "ipns-dnslink-encoded-backslash-climb",
+      "request": {
+        "url": "ipns://docs.ipfs.tech/%2E%2E%5Capi/v0/id",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "deviation": "plan-paths",
+      "js": {
+        "resolve": [],
+        "fetch": {
+          "path": "/ipns/docs.ipfs.tech/%2E%2E%5Capi/v0/id",
+          "method": "GET",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ]
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipns/docs.ipfs.tech/%2E%2E%5Capi/v0/id",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "validation": "path"
+    },
+    {
+      "id": "ipns-dnslink-encoded-separator",
+      "request": {
+        "url": "ipns://docs.ipfs.tech/a%2Fb/c%5Cd",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "js": {
+        "resolve": [],
+        "fetch": {
+          "path": "/ipns/docs.ipfs.tech/a%2Fb/c%5Cd",
+          "method": "GET",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ]
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipns/docs.ipfs.tech/a%2Fb/c%5Cd",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "validation": "valid"
+    },
+    {
+      "id": "ipns-key-encoded-climb",
+      "request": {
+        "url": "ipns://k51qzi5uqu5dlvj2baxnqndepeb86cbk3ng7n3i46uzyxzyqj2xjonzllnv0v8/..%2f..%2fipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "deviation": "plan-paths",
+      "js": {
+        "resolve": [],
+        "fetch": {
+          "path": "/ipns/k51qzi5uqu5dlvj2baxnqndepeb86cbk3ng7n3i46uzyxzyqj2xjonzllnv0v8/..%2f..%2fipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su",
+          "method": "GET",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ]
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipns/k51qzi5uqu5dlvj2baxnqndepeb86cbk3ng7n3i46uzyxzyqj2xjonzllnv0v8/..%2f..%2fipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "validation": "path"
     },
     {
       "id": "ipns-dnslink-underscore",
@@ -36155,6 +37881,24 @@
       "expect": "path"
     },
     {
+      "id": "plan-bzz-hash-encoded-climb",
+      "source": "design",
+      "request_id": "bzz-hash-encoded-climb",
+      "expect": "valid"
+    },
+    {
+      "id": "plan-bzz-hash-encoded-climb-backslash",
+      "source": "design",
+      "request_id": "bzz-hash-encoded-climb-backslash",
+      "expect": "valid"
+    },
+    {
+      "id": "plan-bzz-hash-encoded-dot-segments-in-name",
+      "source": "design",
+      "request_id": "bzz-hash-encoded-dot-segments-in-name",
+      "expect": "valid"
+    },
+    {
       "id": "plan-bzz-hash-unicode-path",
       "source": "design",
       "request_id": "bzz-hash-unicode-path",
@@ -36635,6 +38379,12 @@
       "expect": "path"
     },
     {
+      "id": "plan-bzz-name-base-path-encoded-climb",
+      "source": "design",
+      "request_id": "bzz-name-base-path-encoded-climb",
+      "expect": "path"
+    },
+    {
       "id": "plan-bzz-name-decoded-escape",
       "source": "design",
       "request_id": "bzz-name-decoded-escape",
@@ -37013,6 +38763,96 @@
       "expect": "path"
     },
     {
+      "id": "plan-ipfs-cid-path-encoded-climb",
+      "source": "design",
+      "request_id": "ipfs-cid-path-encoded-climb",
+      "expect": "path"
+    },
+    {
+      "id": "plan-ipfs-cid-path-encoded-climb-upper",
+      "source": "design",
+      "request_id": "ipfs-cid-path-encoded-climb-upper",
+      "expect": "path"
+    },
+    {
+      "id": "plan-ipfs-cid-path-encoded-dots-climb",
+      "source": "design",
+      "request_id": "ipfs-cid-path-encoded-dots-climb",
+      "expect": "path"
+    },
+    {
+      "id": "plan-ipfs-cid-path-encoded-dots-climb-upper",
+      "source": "design",
+      "request_id": "ipfs-cid-path-encoded-dots-climb-upper",
+      "expect": "path"
+    },
+    {
+      "id": "plan-ipfs-cid-path-encoded-dots-climb-mixed",
+      "source": "design",
+      "request_id": "ipfs-cid-path-encoded-dots-climb-mixed",
+      "expect": "path"
+    },
+    {
+      "id": "plan-ipfs-cid-path-encoded-backslash-climb",
+      "source": "design",
+      "request_id": "ipfs-cid-path-encoded-backslash-climb",
+      "expect": "path"
+    },
+    {
+      "id": "plan-ipfs-cid-path-encoded-backslash-climb-upper",
+      "source": "design",
+      "request_id": "ipfs-cid-path-encoded-backslash-climb-upper",
+      "expect": "path"
+    },
+    {
+      "id": "plan-ipfs-cid-path-encoded-climb-inside",
+      "source": "design",
+      "request_id": "ipfs-cid-path-encoded-climb-inside",
+      "expect": "path"
+    },
+    {
+      "id": "plan-ipfs-cid-path-encoded-dot",
+      "source": "design",
+      "request_id": "ipfs-cid-path-encoded-dot",
+      "expect": "path"
+    },
+    {
+      "id": "plan-ipfs-cid-path-encoded-trailing-dot-dot",
+      "source": "design",
+      "request_id": "ipfs-cid-path-encoded-trailing-dot-dot",
+      "expect": "path"
+    },
+    {
+      "id": "plan-ipfs-cid-path-encoded-separator-name",
+      "source": "design",
+      "request_id": "ipfs-cid-path-encoded-separator-name",
+      "expect": "valid"
+    },
+    {
+      "id": "plan-ipfs-cid-path-encoded-backslash-name",
+      "source": "design",
+      "request_id": "ipfs-cid-path-encoded-backslash-name",
+      "expect": "valid"
+    },
+    {
+      "id": "plan-ipfs-cid-path-encoded-dots-in-name",
+      "source": "design",
+      "request_id": "ipfs-cid-path-encoded-dots-in-name",
+      "expect": "valid"
+    },
+    {
+      "id": "plan-ipfs-cid-path-double-encoded-climb",
+      "source": "design",
+      "request_id": "ipfs-cid-path-double-encoded-climb",
+      "expect": "valid"
+    },
+    {
+      "id": "plan-ipfs-cid-path-encoded-climb-in-query",
+      "source": "design",
+      "request_id": "ipfs-cid-path-encoded-climb-in-query",
+      "expect": "valid"
+    },
+    {
       "id": "plan-ipfs-cid-path-dot-segments",
       "source": "design",
       "request_id": "ipfs-cid-path-dot-segments",
@@ -37125,6 +38965,30 @@
       "source": "design",
       "request_id": "ipns-dnslink",
       "expect": "valid"
+    },
+    {
+      "id": "plan-ipns-dnslink-encoded-climb",
+      "source": "design",
+      "request_id": "ipns-dnslink-encoded-climb",
+      "expect": "path"
+    },
+    {
+      "id": "plan-ipns-dnslink-encoded-backslash-climb",
+      "source": "design",
+      "request_id": "ipns-dnslink-encoded-backslash-climb",
+      "expect": "path"
+    },
+    {
+      "id": "plan-ipns-dnslink-encoded-separator",
+      "source": "design",
+      "request_id": "ipns-dnslink-encoded-separator",
+      "expect": "valid"
+    },
+    {
+      "id": "plan-ipns-key-encoded-climb",
+      "source": "design",
+      "request_id": "ipns-key-encoded-climb",
+      "expect": "path"
     },
     {
       "id": "plan-ipns-dnslink-underscore",
@@ -41185,6 +43049,346 @@
       "expect": "shape"
     },
     {
+      "id": "path-bzz-encoded-climb",
+      "source": "design",
+      "request": {
+        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/..%2f..%2fstamps",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "path-bzz-encoded-climb-upper",
+      "source": "design",
+      "request": {
+        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/..%2F..%2Fstamps",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "path-bzz-encoded-backslash-climb",
+      "source": "design",
+      "request": {
+        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/%2E%2E%5Cstamps",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "path-bzz-encoded-dots-in-name",
+      "source": "design",
+      "request": {
+        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/x%2e%2e/..%2E/y",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "valid"
+    },
+    {
       "id": "path-ipfs-ok",
       "source": "design",
       "request": {
@@ -41785,6 +43989,706 @@
       "expect": "path"
     },
     {
+      "id": "path-ipfs-encoded-climb",
+      "source": "design",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/..%2f..%2fipns/example.com",
+          "headers": [
+            [
+              "accept",
+              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state",
+            "small_text"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "path-ipfs-encoded-climb-upper",
+      "source": "design",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/..%2F..%2Fapi/v0/id",
+          "headers": [
+            [
+              "accept",
+              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state",
+            "small_text"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "path-ipfs-encoded-dots-climb",
+      "source": "design",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/%2e%2e%2f%2e%2e%2fapi/v0/id",
+          "headers": [
+            [
+              "accept",
+              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state",
+            "small_text"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "path-ipfs-encoded-backslash-climb",
+      "source": "design",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/%2E%2E%5C%2E%2E%5Cipns%5Cx",
+          "headers": [
+            [
+              "accept",
+              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state",
+            "small_text"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "path-ipfs-encoded-backslash-climb-lower",
+      "source": "design",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/..%5c..%5capi",
+          "headers": [
+            [
+              "accept",
+              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state",
+            "small_text"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "path-ipfs-encoded-climb-inside",
+      "source": "design",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/a%2F..%2Fb",
+          "headers": [
+            [
+              "accept",
+              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state",
+            "small_text"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "path-ipfs-encoded-dot",
+      "source": "design",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/a%2F.%2Fb",
+          "headers": [
+            [
+              "accept",
+              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state",
+            "small_text"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "path-ipfs-encoded-dot-dot-last",
+      "source": "design",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/a%2F..",
+          "headers": [
+            [
+              "accept",
+              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state",
+            "small_text"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "path-ipfs-encoded-ref-dot-dot",
+      "source": "design",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/..%2F..%2Fapi",
+          "headers": [
+            [
+              "accept",
+              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state",
+            "small_text"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "path-ipfs-encoded-separator",
+      "source": "design",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/a%2Fb/c%5Cd.txt",
+          "headers": [
+            [
+              "accept",
+              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state",
+            "small_text"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "valid"
+    },
+    {
+      "id": "path-ipfs-encoded-dots-in-name",
+      "source": "design",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/..%2e/x%2E%2E/...%2F",
+          "headers": [
+            [
+              "accept",
+              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state",
+            "small_text"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "valid"
+    },
+    {
+      "id": "path-ipfs-double-encoded",
+      "source": "design",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/%252e%252e%252fapi/v0/id",
+          "headers": [
+            [
+              "accept",
+              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state",
+            "small_text"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "valid"
+    },
+    {
+      "id": "path-ipfs-encoded-climb-in-query",
+      "source": "design",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/x?..%2F..%2Fapi",
+          "headers": [
+            [
+              "accept",
+              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state",
+            "small_text"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "valid"
+    },
+    {
+      "id": "path-ipfs-lone-percent",
+      "source": "design",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/a%2/%",
+          "headers": [
+            [
+              "accept",
+              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state",
+            "small_text"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "valid"
+    },
+    {
       "id": "path-ipns-ok",
       "source": "design",
       "request": {
@@ -41954,6 +44858,234 @@
         }
       },
       "expect": "path"
+    },
+    {
+      "id": "path-ipns-encoded-climb",
+      "source": "design",
+      "request": {
+        "url": "ipns://docs.ipfs.tech/install/",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipns/docs.ipfs.tech/..%2F..%2Fipfs/x",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "path-ipns-encoded-dots-climb",
+      "source": "design",
+      "request": {
+        "url": "ipns://docs.ipfs.tech/install/",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipns/docs.ipfs.tech/%2e%2e%2fapi/v0/id",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "path-ipns-encoded-backslash-climb",
+      "source": "design",
+      "request": {
+        "url": "ipns://docs.ipfs.tech/install/",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipns/docs.ipfs.tech/%2E%2E%5Capi",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "path-ipns-encoded-separator",
+      "source": "design",
+      "request": {
+        "url": "ipns://docs.ipfs.tech/install/",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipns/docs.ipfs.tech/a%2Fb%5Cc",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "valid"
     },
     {
       "id": "headers-bzz-not-allowed",
