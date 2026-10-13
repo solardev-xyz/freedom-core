@@ -6,7 +6,6 @@
 
 mod common;
 
-use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -205,57 +204,35 @@ fn a_burst_beyond_the_decoder_budget_is_fully_served() {
     assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
 }
 
-/// Kills and reaps a bare child on every exit path.
-struct KillOnDrop(std::process::Child);
-
-impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
 #[test]
-fn a_peer_that_stops_reading_makes_the_core_exit() {
-    // Replies pile up past the pipe and the bounded queue: the core exits
-    // instead of buffering without limit, and releases its gate.
+fn a_peer_that_stops_reading_gets_backpressure_then_an_exit() {
+    // Replies pile up past the pipe and the loop's allowance: the core stops
+    // taking requests, so its reader stops reading and main's writes back
+    // up. Only once the writer has written nothing for the stall bound
+    // (30 s, 3 s here) does it exit, and release its gate.
     let (_root, data, locks) = dirs();
-    let mut core = KillOnDrop(
-        Command::new(BIN)
-            .args(["serve", "--data-dir"])
-            .arg(&data)
-            .arg("--lock-dir")
-            .arg(&locks)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
+    let mut core = spawn_env(
+        "serve",
+        &data,
+        &locks,
+        &[],
+        &[("FREEDOM_CORED_TEST_STALL_MS", "3000")],
     );
-    let mut stdin = core.0.stdin.take().unwrap();
-    let hello = frame(&request(
-        1,
-        "core.hello",
-        json!({ "protocol": 1, "shell_version": "t", "auto_lock_ms": 0 }),
-    ));
-    let burst: Vec<u8> = hello
-        .into_iter()
-        .chain((2..5002u64).flat_map(|id| frame(&request(id, "vault.status", json!({})))))
+    core.hello();
+    core.pause_reading();
+    let burst: Vec<u8> = (2..5002u64)
+        .flat_map(|id| frame(&request(id, "vault.status", json!({}))))
         .collect();
-    let writer = std::thread::spawn(move || {
-        let _ = stdin.write_all(&burst);
-        stdin
-    });
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let code = loop {
-        if let Some(status) = core.0.try_wait().unwrap() {
-            break status.code();
-        }
-        assert!(Instant::now() < deadline, "core kept buffering");
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    assert_eq!(code, Some(76));
-    drop(writer);
+    let started = Instant::now();
+    let writer = core.send_in_background(burst);
+    // Within the bound: alive, and not reading what main writes.
+    std::thread::sleep(Duration::from_millis(1000));
+    assert!(core.child.try_wait().unwrap().is_none(), "exited early");
+    assert!(!writer.is_finished(), "the core kept reading");
+    assert_eq!(core.exit_code(Duration::from_secs(20)), 76);
+    assert!(started.elapsed() >= Duration::from_secs(3));
+    assert!(core.stderr().contains("main is not reading replies"));
+    drop(writer.join().unwrap());
     let mut next = spawn("serve", &data, &locks, &[]);
     assert_eq!(next.hello()["result"]["protocol"], 1);
 }

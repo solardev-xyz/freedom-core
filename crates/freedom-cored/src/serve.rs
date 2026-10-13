@@ -5,11 +5,51 @@
 //! threads behind bounded queues, so neither a slow peer nor a slow job can
 //! keep the loop from handling EOF, shutdown or lock. KDF work will run on
 //! worker threads and report back here.
+//!
+//! **Backpressure** (design 0001, Transport and framing). The loop's
+//! replies and events go to the writer within its allowance
+//! ([`transport::MAX_QUEUED_REPLIES`] frames). Past it they wait here, in
+//! order ([`Outbox`]), and the loop takes no new request until they have
+//! gone:
+//!
+//! - **Requests wait** in order, each with its reader credit, so once the
+//!   credits are spent the reader stops reading stdin. Main's writes back
+//!   up, not the core's memory.
+//! - **The loop never blocks on the writer, nor polls it.** Freed room
+//!   wakes it ([`Event::Room`]). Meanwhile it runs its timers and handles
+//!   its worker's results, lifecycle events, and whatever else main sends:
+//!   responses (for naming and chain), cancels and events.
+//! - **The auto-lock fires on time,** whatever the room: it wipes the
+//!   secrets and revokes admitted work at once. Only its event and the
+//!   revoked requests' replies wait, and they carry no secret.
+//! - **Requests that waited go one per turn of the loop** once there is
+//!   room, each as if it had just been read: after the timers, so an
+//!   auto-lock that comes due while they drain locks before the next one,
+//!   and before a `vault.touch` could postpone it; and with whatever main
+//!   sends meanwhile handled between them. The loop doesn't wait while one
+//!   can go.
+//! - **Control requests don't wait:**
+//!   - **`core.shutdown`** among the waiting requests is handled at once.
+//!     The requests before it are dropped: none of them ran, and main is
+//!     closing the core.
+//!   - **A `vault.lock`** locks at once and keeps its place, where it is
+//!     handled again and acknowledged. Until then, whatever the requests
+//!     before it admit is revoked at once, so nothing main sent before a
+//!     lock outlives it.
+//!   - **A `cancel`** reaches queued and running work at once, or waits
+//!     behind its request if that request waits too.
+//! - **What waits is bounded** by the work admitted before the wait: for
+//!   each vault request (one running, 32 queued), its reply and at most one
+//!   event. Lock events don't pile up: after a lock nothing can unlock
+//!   until requests are taken again.
+//! - **A stall ends the core:** once frames have waited [`STALL`] with the
+//!   writer writing nothing, main has stopped reading, and the core exits.
 
+use std::collections::VecDeque;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
@@ -21,7 +61,7 @@ use zeroize::Zeroizing;
 
 use crate::exit::Exit;
 use crate::requests::{self, Owner, Requests};
-use crate::transport::{self, Credits, Link, Pending};
+use crate::transport::{self, Allowance, Credits, Link, Pending};
 use crate::vault::{FileSnapshot, Finished, NodeRecovery, Out, Vault};
 use crate::worker::Worker;
 use crate::{chain, gate, hardening, log, naming};
@@ -34,6 +74,18 @@ const EXIT_DRAIN: Duration = Duration::from_secs(2);
 /// and reply. A commit is a rename or unlink plus a directory flush; main's
 /// hang watchdog and reconciliation cover anything slower.
 const COMMIT_DRAIN: Duration = Duration::from_secs(5);
+/// How long the loop's frames may wait with the writer writing nothing
+/// before the core decides main has stopped reading, and exits (design
+/// 0001, Transport and framing):
+/// - **Far above a healthy main's pauses:** a GC pause or a busy main
+///   thread lasts milliseconds to seconds. Waiting costs nothing meanwhile:
+///   no buffer grows, and the auto-lock still fires.
+/// - **Between main's hang watchdogs** (deadline + 15 s): it is the longest
+///   deadline the core gives a request (the KDF methods'), whose reply main
+///   waits 45 s for. The core never gives up sooner than main does on a
+///   short request (20 s), and a main that can no longer run its timers
+///   keeps it waiting no longer than main would wait for a KDF reply.
+const STALL: Duration = Duration::from_secs(30);
 
 pub struct Options {
     pub data_dir: PathBuf,
@@ -70,6 +122,9 @@ pub enum Event {
     Snapshot(FileSnapshot, NodeRecovery),
     /// A vault worker job finished.
     JobDone(u64, Finished),
+    /// The writer has room again in the loop's share: the frames waiting
+    /// here can go, then the requests that waited for them.
+    Room,
 }
 
 /// The methods `core.hello`'s capabilities name: every method this build
@@ -156,6 +211,13 @@ pub fn run(options: &Options) -> Exit {
         Ok(writer) => writer,
         Err(_) => return Exit::Internal,
     };
+    // The loop's own share of the writer: room freed after a refusal wakes
+    // the loop to send what waits.
+    let allowance = Allowance::new(transport::MAX_QUEUED_REPLIES, usize::MAX);
+    let room = events_tx.clone();
+    allowance.on_room(move || {
+        let _ = room.send(Event::Room);
+    });
     let Ok(worker) = Worker::spawn(events_tx.clone()) else {
         return Exit::Internal;
     };
@@ -209,8 +271,14 @@ pub fn run(options: &Options) -> Exit {
         snapshot_ready: false,
         node_recovery: None,
         pending_hello: None,
-        out: writer.queue,
-        allowance: transport::Allowance::new(transport::MAX_QUEUED_REPLIES, usize::MAX),
+        outbox: Outbox::new(
+            writer.queue,
+            allowance,
+            Arc::clone(&link),
+            crate::testhooks::stall(STALL),
+        ),
+        parked: VecDeque::new(),
+        locks_ahead: 0,
         link: Arc::clone(&link),
         credit: None,
         hello_done: false,
@@ -233,17 +301,29 @@ pub fn run(options: &Options) -> Exit {
             break Exit::Protocol;
         }
         let timeout = if core.hello_done {
-            core.vault
-                .next_wakeup()
+            // The vault's timers, and the stall bound while frames wait.
+            [core.vault.next_wakeup(), core.outbox.deadline()]
+                .into_iter()
+                .flatten()
+                .min()
                 .map_or(Duration::from_secs(3600), |at| {
                     at.saturating_duration_since(Instant::now())
                 })
         } else {
             hello_deadline.saturating_duration_since(Instant::now())
         };
-        let received = events.recv_timeout(timeout);
+        // While a request that waited can go, the loop doesn't wait: it
+        // takes an event if one is there, then that request (`resume`).
+        let received = if core.resumable() {
+            events.try_recv().map_err(|e| match e {
+                TryRecvError::Empty => RecvTimeoutError::Timeout,
+                TryRecvError::Disconnected => RecvTimeoutError::Disconnected,
+            })
+        } else {
+            events.recv_timeout(timeout)
+        };
         // Whatever arrived, first apply what is due (auto-lock, deadlines):
-        // a busy queue must not postpone either.
+        // a busy queue must not postpone either, nor a writer without room.
         if core.hello_done {
             let outs = core.vault.tick();
             if let Flow::Exit(exit) = core.dispatch(outs) {
@@ -252,12 +332,7 @@ pub fn run(options: &Options) -> Exit {
         }
         match received {
             Ok(Event::Frame(frame, credit)) => {
-                // A message forwarded to the naming thread takes the credit
-                // along; otherwise it goes once the frame is handled.
-                core.credit = Some(credit);
-                let flow = core.handle_frame(frame);
-                core.credit = None;
-                if let Flow::Exit(exit) = flow {
+                if let Flow::Exit(exit) = core.arrived(frame, credit) {
                     break exit;
                 }
             }
@@ -327,8 +402,22 @@ pub fn run(options: &Options) -> Exit {
                     break exit;
                 }
             }
+            Ok(Event::Room) => {
+                if let Flow::Exit(exit) = core.outbox.pump(Instant::now()) {
+                    break exit;
+                }
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break Exit::Ok,
+        }
+        // Then the next request that waited, if the loop's frames have room;
+        // and a writer that has written nothing for the stall bound means
+        // main has stopped reading.
+        if let Flow::Exit(exit) = core.resume() {
+            break exit;
+        }
+        if let Flow::Exit(exit) = core.outbox.check(Instant::now()) {
+            break exit;
         }
     };
     // No more requests to main, whatever ended the loop.
@@ -336,7 +425,8 @@ pub fn run(options: &Options) -> Exit {
     // Wipe the vault and revoke pre-commit work. Work past its commit point
     // finishes and replies before exit (bounded). Then let the writer flush
     // what's queued, but never wait on a peer that stopped reading: exiting
-    // releases the gate.
+    // releases the gate. Requests still waiting their turn are dropped with
+    // the loop: none of them ran.
     let outs = core.vault.shutdown();
     let _ = core.dispatch(outs);
     let until = Instant::now() + COMMIT_DRAIN;
@@ -357,6 +447,9 @@ pub fn run(options: &Options) -> Exit {
             Err(_) => break,
         }
     }
+    // What waits for room goes past the allowance: the drain below bounds it
+    // by time instead.
+    core.outbox.drain();
     // The writer ends once the producers' queues close; the transport's own
     // frames (main's credit) stop here.
     link.detach();
@@ -407,10 +500,12 @@ struct Core {
     node_recovery: NodeRecovery,
     /// A valid core.hello received before the snapshot was ready.
     pending_hello: Option<u64>,
-    out: mpsc::Sender<transport::Out>,
-    /// The loop's own share of the writer: 0001's reserved capacity, which
-    /// naming traffic can't take.
-    allowance: Arc<transport::Allowance>,
+    /// The loop's share of the writer, and its frames waiting past it.
+    outbox: Outbox,
+    /// Requests from main waiting, in order, for the loop's frames to go.
+    parked: VecDeque<Parked>,
+    /// The `vault.lock`s among them, applied already and still to come.
+    locks_ahead: usize,
     /// Bulk credit: main's hello says whether it takes fragments.
     link: Arc<Link>,
     /// The credit of the frame being handled.
@@ -484,7 +579,161 @@ fn message_category(error: &MessageError) -> &'static str {
     }
 }
 
+/// A message from main that waits, with its reader credit, for the loop's
+/// frames to go.
+struct Parked {
+    frame: Frame,
+    credit: transport::Credit,
+    /// Its request ID; `None` for a cancel waiting behind its request.
+    request: Option<u64>,
+    /// A `vault.lock` the loop has applied already; its turn acknowledges
+    /// it.
+    lock: bool,
+}
+
+/// What a message that arrives while requests wait asks of the loop before
+/// its turn.
+enum Ahead {
+    /// `core.shutdown`: handled at once.
+    Shutdown,
+    /// `vault.lock`: locks at once, and waits for its turn.
+    Lock(u64),
+    /// Any other request: waits for its turn.
+    Request(u64),
+    /// A cancel: reaches admitted work at once, unless its request waits.
+    Cancel(u64),
+    /// Anything else is handled at once, as it adds nothing to the loop's
+    /// frames: responses go to naming and chain, events are ignored, and a
+    /// malformed message ends the connection.
+    Other,
+}
+
+impl Ahead {
+    fn of(frame: &Frame) -> Self {
+        if frame.kind != KIND_JSON {
+            return Ahead::Other;
+        }
+        match Message::decode(&frame.payload) {
+            // Refused in its turn: web content can't lock or shut down.
+            Ok(Message::Request { id, context, .. }) if context.caller == CallerKind::Page => {
+                Ahead::Request(id)
+            }
+            Ok(Message::Request { id, method, .. }) => match &*method {
+                "core.shutdown" => Ahead::Shutdown,
+                "vault.lock" => Ahead::Lock(id),
+                _ => Ahead::Request(id),
+            },
+            Ok(Message::Cancel { id }) => Ahead::Cancel(id),
+            _ => Ahead::Other,
+        }
+    }
+}
+
 impl Core {
+    /// A frame from main. While requests wait (the loop's frames have no
+    /// room in the writer), requests wait too, in order, and keep their
+    /// credits: once those are spent, the reader stops reading stdin.
+    /// Control traffic doesn't wait ([`Ahead`]).
+    fn arrived(&mut self, frame: Frame, credit: transport::Credit) -> Flow {
+        if self.waiting() {
+            match Ahead::of(&frame) {
+                // What waits before it never ran, and main is closing the
+                // core: dropped.
+                Ahead::Shutdown => {
+                    self.parked.clear();
+                    self.locks_ahead = 0;
+                }
+                // Locks now, as the auto-lock would: the secrets go and
+                // admitted work is revoked. Its acknowledgement waits for its
+                // turn, and until then holds the lock (`resume`).
+                Ahead::Lock(id) => {
+                    self.park(frame, credit, Some(id), true);
+                    let outs = self.vault.lock();
+                    return self.dispatch(outs);
+                }
+                Ahead::Request(id) => {
+                    self.park(frame, credit, Some(id), false);
+                    return Flow::Continue;
+                }
+                // Its request hasn't been handled yet: it follows it.
+                Ahead::Cancel(id) if self.parked.iter().any(|p| p.request == Some(id)) => {
+                    self.park(frame, credit, None, false);
+                    return Flow::Continue;
+                }
+                Ahead::Cancel(_) | Ahead::Other => {}
+            }
+        }
+        self.handle(frame, credit)
+    }
+
+    /// Whether requests wait: the loop's frames wait for room, or requests
+    /// taken meanwhile still wait for their turn.
+    fn waiting(&self) -> bool {
+        self.outbox.is_waiting() || !self.parked.is_empty()
+    }
+
+    fn park(&mut self, frame: Frame, credit: transport::Credit, request: Option<u64>, lock: bool) {
+        if lock {
+            self.locks_ahead += 1;
+        }
+        self.parked.push_back(Parked {
+            frame,
+            credit,
+            request,
+            lock,
+        });
+    }
+
+    /// Whether a request that waited can go: the loop's frames have room.
+    fn resumable(&self) -> bool {
+        !self.parked.is_empty() && !self.outbox.is_waiting()
+    }
+
+    /// Handles the next request that waited, if it can go: one per turn of
+    /// the loop, as if it had just been read, so whatever main sends
+    /// meanwhile (a cancel, a shutdown) and the loop's timers come between
+    /// them.
+    fn resume(&mut self) -> Flow {
+        if !self.resumable() {
+            return Flow::Continue;
+        }
+        // What is due first, right before the request: an auto-lock that
+        // came due while the backlog drained locks before it, and before a
+        // `vault.touch` could postpone it.
+        let outs = self.vault.tick();
+        if let Flow::Exit(exit) = self.dispatch(outs) {
+            return Flow::Exit(exit);
+        }
+        if self.outbox.is_waiting() {
+            return Flow::Continue;
+        }
+        let Some(parked) = self.parked.pop_front() else {
+            return Flow::Continue;
+        };
+        if parked.lock {
+            self.locks_ahead = self.locks_ahead.saturating_sub(1);
+        }
+        if let Flow::Exit(exit) = self.handle(parked.frame, parked.credit) {
+            return Flow::Exit(exit);
+        }
+        // A lock still to come holds meanwhile: what this request admitted
+        // is revoked, as that lock's turn would have done.
+        if self.locks_ahead > 0 {
+            let outs = self.vault.lock();
+            return self.dispatch(outs);
+        }
+        Flow::Continue
+    }
+
+    /// Handles a frame. A message forwarded to another thread takes its
+    /// credit along; otherwise the credit goes once the frame is handled.
+    fn handle(&mut self, frame: Frame, credit: transport::Credit) -> Flow {
+        self.credit = Some(credit);
+        let flow = self.handle_frame(frame);
+        self.credit = None;
+        flow
+    }
+
     fn handle_frame(&mut self, frame: Frame) -> Flow {
         if frame.kind != KIND_JSON {
             log::error(
@@ -799,7 +1048,9 @@ impl Core {
 
     fn hello_reply(&mut self, id: u64) -> Flow {
         self.hello_done = true;
-        self.result(
+        let mut payload = Zeroizing::new(Vec::with_capacity(1024));
+        let written = message::write_result(
+            &mut *payload,
             id,
             &HelloResult {
                 protocol: fc_protocol::PROTOCOL_VERSION,
@@ -807,11 +1058,15 @@ impl Core {
                 capabilities: CAPABILITIES.iter().chain(FEATURES).copied().collect(),
                 node_recovery: &self.node_recovery,
             },
-        )
+        );
+        match written {
+            Ok(()) => self.send(&payload),
+            Err(_) => Flow::Exit(Exit::Internal),
+        }
     }
 
     /// Sends the vault's payloads and submits its jobs.
-    fn dispatch(&self, outs: Vec<Out>) -> Flow {
+    fn dispatch(&mut self, outs: Vec<Out>) -> Flow {
         for out in outs {
             let flow = match out {
                 Out::Send(payload) => self.send(&payload),
@@ -830,7 +1085,7 @@ impl Core {
         Flow::Continue
     }
 
-    fn result<R: Serialize>(&self, id: u64, result: &R) -> Flow {
+    fn result<R: Serialize>(&mut self, id: u64, result: &R) -> Flow {
         let mut payload = Zeroizing::new(Vec::with_capacity(256));
         match message::write_result(&mut *payload, id, result) {
             Ok(()) => self.send(&payload),
@@ -838,7 +1093,7 @@ impl Core {
         }
     }
 
-    fn error(&self, id: u64, error: ErrorBody) -> Flow {
+    fn error(&mut self, id: u64, error: ErrorBody) -> Flow {
         let mut payload = Zeroizing::new(Vec::with_capacity(256));
         match message::write_error(&mut *payload, id, &error) {
             Ok(()) => self.send(&payload),
@@ -846,20 +1101,296 @@ impl Core {
         }
     }
 
-    /// Queues a reply: one frame, as every vault reply fits one. A full
-    /// allowance means main stopped reading stdout: exit rather than buffer
-    /// without limit.
-    fn send(&self, payload: &[u8]) -> Flow {
+    /// Queues a reply or an event: one frame, as every vault reply fits
+    /// one. Past the loop's allowance it waits in the outbox, and requests
+    /// wait with it.
+    fn send(&mut self, payload: &[u8]) -> Flow {
         let Some(frame) = transport::frame(payload) else {
             return Flow::Exit(Exit::Internal);
         };
-        let Some(hold) = self.allowance.take(frame.len()) else {
-            log::error("main is not reading replies", serde_json::json!({}));
-            return Flow::Exit(Exit::Protocol);
-        };
-        match self.out.send(transport::Out::Frame { frame, hold }) {
-            Ok(()) => Flow::Continue,
-            Err(_) => Flow::Exit(Exit::Protocol),
+        self.outbox.send(frame, Instant::now())
+    }
+}
+
+/// The loop's share of the writer (0001's reserved capacity, which naming
+/// and chain traffic can't take), and its frames waiting past it, in the
+/// order they were made. It never blocks, and never buffers past the work
+/// the loop has taken (see the module documentation).
+struct Outbox {
+    out: Sender<transport::Out>,
+    allowance: Arc<Allowance>,
+    link: Arc<Link>,
+    waiting: VecDeque<Zeroizing<Vec<u8>>>,
+    /// Since when frames have waited.
+    since: Option<Instant>,
+    /// [`STALL`], or a test's.
+    stall: Duration,
+}
+
+impl Outbox {
+    fn new(
+        out: Sender<transport::Out>,
+        allowance: Arc<Allowance>,
+        link: Arc<Link>,
+        stall: Duration,
+    ) -> Self {
+        Outbox {
+            out,
+            allowance,
+            link,
+            waiting: VecDeque::new(),
+            since: None,
+            stall,
         }
+    }
+
+    /// Queues `frame` behind the frames that wait, and hands the writer
+    /// what fits.
+    fn send(&mut self, frame: Zeroizing<Vec<u8>>, now: Instant) -> Flow {
+        self.waiting.push_back(frame);
+        self.pump(now)
+    }
+
+    /// Hands waiting frames to the writer, in order, while the allowance
+    /// has room. A refusal arms the allowance's wake-up ([`Event::Room`]).
+    fn pump(&mut self, now: Instant) -> Flow {
+        while let Some(frame) = self.waiting.front() {
+            let Some(hold) = self.allowance.take(frame.len()) else {
+                break;
+            };
+            let Some(frame) = self.waiting.pop_front() else {
+                break;
+            };
+            if self
+                .out
+                .send(transport::Out::Frame { frame, hold })
+                .is_err()
+            {
+                return Flow::Exit(Exit::Protocol);
+            }
+        }
+        if self.waiting.is_empty() {
+            self.since = None;
+        } else if self.since.is_none() {
+            self.since = Some(now);
+        }
+        Flow::Continue
+    }
+
+    /// Whether frames wait for room.
+    fn is_waiting(&self) -> bool {
+        !self.waiting.is_empty()
+    }
+
+    /// While frames wait, since when the writer has written nothing: since
+    /// they started waiting, or since its last write if later.
+    fn still(&self) -> Option<Instant> {
+        let since = self.since?;
+        Some(self.link.last_write().map_or(since, |at| at.max(since)))
+    }
+
+    /// When the stall bound passes unless the writer moves: the loop wakes
+    /// then to look.
+    fn deadline(&self) -> Option<Instant> {
+        self.still()?.checked_add(self.stall)
+    }
+
+    /// Ends the core once frames have waited for the stall bound with the
+    /// writer writing nothing: main has stopped reading.
+    fn check(&self, now: Instant) -> Flow {
+        let Some(still) = self.still() else {
+            return Flow::Continue;
+        };
+        let waited = now.saturating_duration_since(still);
+        if waited < self.stall {
+            return Flow::Continue;
+        }
+        log::error(
+            "main is not reading replies",
+            serde_json::json!({ "ms": u64::try_from(waited.as_millis()).unwrap_or(u64::MAX) }),
+        );
+        Flow::Exit(Exit::Protocol)
+    }
+
+    /// Hands every waiting frame to the writer, past the allowance: on
+    /// exit, where the writer's drain is bounded by time instead.
+    fn drain(&mut self) {
+        for frame in self.waiting.drain(..) {
+            let hold = self.allowance.force(frame.len());
+            let _ = self.out.send(transport::Out::Frame { frame, hold });
+        }
+        self.since = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use std::sync::mpsc::Receiver;
+
+    /// An outbox with room for `frames` frames in the writer, the writer's
+    /// end of its queue, the link whose count the writer moves, and how
+    /// often freed room woke the loop.
+    fn outbox(
+        frames: usize,
+    ) -> (
+        Outbox,
+        Receiver<transport::Out>,
+        Arc<Link>,
+        Arc<Mutex<usize>>,
+    ) {
+        let (out, queue) = mpsc::channel();
+        let allowance = Allowance::new(frames, usize::MAX);
+        let woken = Arc::new(Mutex::new(0));
+        let count = Arc::clone(&woken);
+        allowance.on_room(move || *count.lock().unwrap() += 1);
+        let link = Link::new();
+        let outbox = Outbox::new(out, allowance, Arc::clone(&link), STALL);
+        (outbox, queue, link, woken)
+    }
+
+    fn reply(id: u64) -> Zeroizing<Vec<u8>> {
+        let json = format!(r#"{{"type":"response","id":{id},"result":{{}}}}"#);
+        transport::frame(json.as_bytes()).unwrap()
+    }
+
+    /// The writer writes the next frame queued `at` then, which frees its
+    /// place: the ID of the response it was.
+    fn write_one(queue: &Receiver<transport::Out>, link: &Link, at: Instant) -> u64 {
+        let Ok(transport::Out::Frame { frame, hold }) = queue.try_recv() else {
+            panic!("nothing for the writer");
+        };
+        link.wrote(at);
+        drop(hold);
+        let message: serde_json::Value = serde_json::from_slice(&frame[5..]).unwrap();
+        message["id"].as_u64().unwrap()
+    }
+
+    #[test]
+    fn frames_past_the_allowance_wait_in_order_and_go_as_room_frees() {
+        let (mut outbox, queue, link, woken) = outbox(2);
+        let now = Instant::now();
+        for id in 1..=5 {
+            assert!(matches!(outbox.send(reply(id), now), Flow::Continue));
+        }
+        // Two went to the writer; three wait here.
+        assert_eq!(outbox.waiting.len(), 3);
+        // Each frame written wakes the loop, which sends the next, in order.
+        let mut written = Vec::new();
+        while outbox.is_waiting() || written.len() < 5 {
+            written.push(write_one(&queue, &link, now));
+            assert!(matches!(outbox.pump(now), Flow::Continue));
+        }
+        assert_eq!(written, [1, 2, 3, 4, 5]);
+        assert_eq!(*woken.lock().unwrap(), 3);
+        // Nothing waits: no stall clock runs, however long.
+        assert_eq!(outbox.deadline(), None);
+        assert!(matches!(outbox.check(now + 10 * STALL), Flow::Continue));
+    }
+
+    #[test]
+    fn a_stall_exits_only_after_the_bound_without_writer_progress() {
+        // The clock is injected: the bound passes without a 30 s wait.
+        let (mut outbox, queue, link, _) = outbox(1);
+        let start = Instant::now();
+        for id in 1..=3 {
+            assert!(matches!(outbox.send(reply(id), start), Flow::Continue));
+        }
+        assert_eq!(outbox.deadline(), Some(start + STALL));
+        let short = STALL - Duration::from_millis(1);
+        assert!(matches!(outbox.check(start + short), Flow::Continue));
+        // Main reads one of the loop's frames 20 s in: room wakes the loop,
+        // the next frame goes, and the bound counts from that write.
+        let read = start + Duration::from_secs(20);
+        assert_eq!(write_one(&queue, &link, read), 1);
+        assert!(matches!(outbox.pump(read), Flow::Continue));
+        assert!(outbox.is_waiting());
+        assert_eq!(outbox.deadline(), Some(read + STALL));
+        // Then it reads only other producers' frames (naming's, chain's),
+        // which wake nothing here: the writer still moved, and the bound
+        // counts from there too.
+        let other = read + Duration::from_secs(25);
+        link.wrote(other);
+        assert_eq!(outbox.deadline(), Some(other + STALL));
+        assert!(matches!(outbox.check(other + short), Flow::Continue));
+        // Then nothing for the whole bound: main has stopped reading, and
+        // the core exits 76.
+        let Flow::Exit(exit) = outbox.check(other + STALL) else {
+            panic!("no exit once the bound passed");
+        };
+        assert_eq!(exit, Exit::Protocol);
+        assert_eq!(exit.code(), 76);
+    }
+
+    #[test]
+    fn exiting_hands_the_writer_what_waits() {
+        let (mut outbox, queue, _link, _) = outbox(1);
+        let now = Instant::now();
+        for id in 1..=3 {
+            assert!(matches!(outbox.send(reply(id), now), Flow::Continue));
+        }
+        outbox.drain();
+        assert!(!outbox.is_waiting());
+        assert_eq!(outbox.deadline(), None);
+        let ids: Vec<u64> = std::iter::from_fn(|| match queue.try_recv() {
+            Ok(transport::Out::Frame { frame, .. }) => {
+                let message: serde_json::Value = serde_json::from_slice(&frame[5..]).unwrap();
+                message["id"].as_u64()
+            }
+            _ => None,
+        })
+        .collect();
+        assert_eq!(ids, [1, 2, 3]);
+    }
+
+    #[test]
+    fn only_requests_wait_and_shutdown_and_lock_are_seen_ahead() {
+        let ahead = |message: serde_json::Value| {
+            Ahead::of(&Frame {
+                kind: KIND_JSON,
+                payload: Zeroizing::new(message.to_string().into_bytes()),
+            })
+        };
+        let request = |id: u64, method: &str, caller: &str| {
+            serde_json::json!({
+                "type": "request", "id": id, "method": method, "context": { "caller": caller },
+            })
+        };
+        assert!(matches!(
+            ahead(request(7, "core.shutdown", "shell")),
+            Ahead::Shutdown
+        ));
+        assert!(matches!(
+            ahead(request(7, "vault.lock", "chrome")),
+            Ahead::Lock(7)
+        ));
+        assert!(matches!(
+            ahead(request(7, "vault.status", "chrome")),
+            Ahead::Request(7)
+        ));
+        // Web content can't lock or shut down: refused in its turn.
+        let page = serde_json::json!({
+            "type": "request", "id": 8, "method": "vault.lock",
+            "context": { "caller": "page", "page": {
+                "origin": "https://a.example", "top_origin": "https://a.example",
+                "frame": 1, "navigation": 1,
+            } },
+        });
+        assert!(matches!(ahead(page), Ahead::Request(8)));
+        assert!(matches!(
+            ahead(serde_json::json!({ "type": "cancel", "id": 9 })),
+            Ahead::Cancel(9)
+        ));
+        // Handled at once: a response, an event, a malformed message.
+        assert!(matches!(
+            ahead(serde_json::json!({ "type": "response", "id": 9, "result": {} })),
+            Ahead::Other
+        ));
+        assert!(matches!(
+            ahead(serde_json::json!({ "type": "event", "event": "x" })),
+            Ahead::Other
+        ));
+        assert!(matches!(ahead(serde_json::json!([1])), Ahead::Other));
     }
 }

@@ -1,6 +1,6 @@
 # 0001: `freedom-cored`, the desktop core process
 
-**Status:** draft, revision 5. It incorporates Codex's four reviews on PR #1. **Scope:** Phase 1 of [freedom-browser#644](https://github.com/solardev-xyz/freedom-browser/issues/644), plus the protocol contract that Phases 2–5 extend.
+**Status:** draft, revision 6. It incorporates Codex's four reviews on PR #1. Revision 6 replaces the core's exit on a full reply queue with backpressure ([Transport and framing](#transport-and-framing)). **Scope:** Phase 1 of [freedom-browser#644](https://github.com/solardev-xyz/freedom-browser/issues/644), plus the protocol contract that Phases 2–5 extend.
 
 ## Summary
 
@@ -112,7 +112,7 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
 ### Shutdown, crashes and parent death
 
 - **Shutdown:**
-  1. Main sends `core.shutdown`, then closes stdin.
+  1. Main sends `core.shutdown`, then closes stdin. The core finds it even behind requests that wait for main to read replies ([Transport](#transport-and-framing)).
   2. The core revokes the vault epoch (see [Concurrency](#concurrency-epochs-and-revocation)) and finishes or abandons in-flight work according to its commit state.
   3. It exits 0.
 
@@ -139,6 +139,20 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   - **Kind `0x01`:** one JSON message, at most 1 MiB.
   - **Kinds `0x02`–`0x0F`:** reserved for Phase 4 streams.
 - **Writer:** each side has one serialized frame writer with a bounded queue. Control messages (`response`, `event`, `cancel`, `core.shutdown`) have reserved capacity, so bulk traffic can't starve them.
+- **Backpressure, not exit.** The core's reader holds at most 256 frames and 16 MiB that aren't handled yet, and stops reading beyond them. The vault loop has its own share of the writer, 256 frames. Main can stop reading for a moment, in a GC pause or on a busy main thread, so a full share is no error:
+  - **The loop's replies and events wait in the loop, and it takes no new request.** Requests wait in order, each holding its place in the reader, so the reader soon stops reading stdin: main's writes back up, not the core's memory. Freed room wakes the loop; it never polls.
+  - **Everything else goes on.** The loop runs its timers, takes its worker's results, and handles lifecycle events, responses (for naming and chain) and main's events.
+  - **The auto-lock fires on time.** It wipes the secrets and revokes admitted work at once. Only its event and the revoked requests' `vault_locked` replies wait, and they carry no secret. They are few: after a lock nothing can unlock until requests are taken again, so one lock event at most waits. Replies made before the lock keep their copy until written, as replies being serialized do ([Concurrency](#concurrency-epochs-and-revocation)).
+  - **Control requests don't wait:**
+    - **`core.shutdown`** among the waiting requests is handled at once. The requests before it are dropped unanswered: none of them was admitted, so none ran, and main is closing the core. A shutdown still in main's own backed-up writes arrives once main reads again; main's kill after 3 s covers a main that doesn't.
+    - **`vault.lock`** locks at once, and is acknowledged in its turn. Until then, whatever the requests before it admit is revoked at once: they are answered as if they came after the lock, so nothing main sent before a lock outlives it.
+    - **`cancel`** reaches admitted work at once. One whose request waits too waits behind it.
+  - **Requests that waited go one at a time** once there is room, each as if it had just arrived: after the loop's timers, and with whatever main sends meanwhile handled between them. An auto-lock that comes due while they drain therefore locks before the next one, and a `vault.touch` among them can't postpone a lock already due. A cancel or `core.shutdown` sent meanwhile is handled within one request's time, not behind the whole backlog.
+  - **Memory stays bounded:** what waits is the frames the reader holds, and for each vault request admitted before the wait (one running, 32 queued) its reply and at most one event.
+  - **The core exits only on a stall.** If its frames wait while the writer writes nothing for **30 s**, main has stopped reading: the core logs "main is not reading replies" and exits 76 (`protocol`). Writer progress is any frame written, whoever made it: the 30 s count from the later of the writer's last write and the moment the frames began to wait.
+    - **Why 30 s:** it is far above a healthy main's pauses, which last milliseconds to seconds, and waiting costs nothing meanwhile. It is also the longest deadline the core gives a request (the KDF methods'), which puts it between main's [hang watchdogs](#deadlines-cancellation-and-commit): 20 s for a 5 s method, 45 s for a KDF method. So the core never gives up on main sooner than main gives up on a short request, and a main that can no longer run its timers keeps it waiting no longer than main would wait for a KDF reply.
+    - **Why not exit at once,** as the core first did: a burst of requests, then a fraction of a second without reading (about 256 small replies), killed the core and locked the vault.
+  - **Main must keep reading** whatever the state of its own writes, as 0005 requires of both sides ("consumers never block on the writer"). Otherwise each side's writer could wait on the other.
 - **Protocol errors** are an unknown kind, an oversized frame, invalid JSON, a response that has both or neither of `result` and `error`, or an unsolicited or duplicate response. They mean a bug in main or the core: the receiver logs it and closes the connection.
 - **Renderer input never causes a protocol error.** Main validates sizes and argument bounds before sending (see [Input validation](#input-validation)).
 - **Phase 4:** streams add stream IDs, open/data/end/error frames, per-stream and global credit, and an aggregate memory bound. Phase 4 negotiates them as protocol version 2. This doc doesn't claim they can be added without a version bump.
@@ -193,7 +207,7 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   - cancel marks the target request;
   - status answers from a snapshot.
 
-  None of them takes a slot, so nothing can crowd them out.
+  None of them takes a slot, so nothing can crowd them out. Nor can replies main hasn't read: while the loop's replies wait for main to read them, `vault.lock`, `core.shutdown` and `cancel` are still found among the waiting requests ([Transport](#transport-and-framing)). `vault.status` waits for its turn, since its reply needs the room.
 - **Limits for everything else:**
   - At most 64 admitted requests; beyond that, `busy`.
   - At most 2 concurrent KDF jobs.
@@ -485,6 +499,13 @@ The password crosses the pipe, which is no worse than today, where it is used in
     - parent death before and after the handshake;
     - no `core.hello` within 10 s.
   - **Control path:** lock and shutdown still work with all 64 slots and a burst of status and cancel messages in flight.
+  - **Backpressure:**
+    - a 1,500-request burst while main reads nothing for 2 s, all answered in order once it reads, with the core taking in stdin only as main reads and its peak memory bounded;
+    - the auto-lock landing on time while replies wait: it revokes an export whose job finishes before main reads again;
+    - the auto-lock coming due while waiting requests drain, after main reads again: a key request among them gets `vault_locked`, and a `vault.touch` among them doesn't postpone the lock;
+    - a cancel and a `core.shutdown` sent while a long backlog drains, each handled before the backlog ends;
+    - `core.shutdown`, `vault.lock` and a `cancel` for queued work, each honored behind requests that wait;
+    - the stall exit, with an injected clock and, in the binary, with a shortened bound.
   - **Reconciliation:**
     - a lost reply for every mutation, including create and delete, then `vault.reconcile` in each state;
     - an acknowledged lock between commit and the lost reply, after which the vault stays locked;
