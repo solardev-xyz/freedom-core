@@ -118,6 +118,11 @@ impl Test {
     }
 }
 
+/// A JSON `\\u` escape of `hex`, made at run time.
+fn u(hex: &str) -> String {
+    format!("{}u{hex}", '\\')
+}
+
 /// A response message as the reader hands it over, with its result's span.
 fn shell_result(id: u64, result: &str) -> Shell {
     let prefix = format!(r#"{{"type":"response","id":{id},"result":"#);
@@ -1249,20 +1254,30 @@ fn cancels_and_small_replies_never_wait_behind_bulk_replies() {
 
 #[test]
 fn strings_decode_in_one_pass_within_their_length() {
-    for (raw, text) in [
-        (r#""plain""#, "plain"),
-        (r#""a\"b\\c\/d\b\f\n\r\t""#, "a\"b\\c/d\u{8}\u{c}\n\r\t"),
-        (r#""é€😀""#, "é€😀"),
+    let cases = [
+        (r#""plain""#.to_owned(), "plain"),
         (
-            r#""lone \ud800 and \udc00 end""#,
+            r#""a\"b\\c\/d\b\f\n\r\t""#.to_owned(),
+            "a\"b\\c/d\u{8}\u{c}\n\r\t",
+        ),
+        (
+            format!("\"{}{}{}{}\"", u("00e9"), u("20ac"), u("d83d"), u("de00")),
+            "\u{e9}\u{20ac}\u{1f600}",
+        ),
+        (
+            format!("\"lone {} and {} end\"", u("d800"), u("dc00")),
             "lone \u{fffd} and \u{fffd} end",
         ),
-        (r#""lead then other \ud800A""#, "lead then other \u{fffd}A"),
-        ("\"r\u{e9}sum\u{e9}\"", "résumé"),
-        (r#""""#, ""),
-    ] {
+        (
+            format!("\"lead then other {}{}\"", u("d800"), u("0041")),
+            "lead then other \u{fffd}A",
+        ),
+        ("\"r\u{e9}sum\u{e9}\"".to_owned(), "r\u{e9}sum\u{e9}"),
+        (r#""""#.to_owned(), ""),
+    ];
+    for (raw, text) in &cases {
         let decoded = decode_string(raw).unwrap();
-        assert_eq!(decoded, text, "{raw}");
+        assert_eq!(decoded, *text, "{raw}");
         assert!(decoded.capacity() <= raw.len(), "{raw}");
     }
     for bad in [
@@ -1511,4 +1526,106 @@ fn nothing_is_dispatched_against_a_clock_handling_left_behind() {
     assert_eq!(reply["error"]["data"]["outcome"], "not_sent", "{reply}");
     assert!(t.chain.queued.is_empty());
     assert_eq!(t.chain.requests.answered(replacement), Some(Owner::Naming));
+}
+
+#[test]
+fn replies_are_checked_in_place() {
+    // R3-M2: names and values stay raw JSON; an escaped name, which
+    // JSON.stringify never writes for these, is malformed, and only the
+    // headers the core keeps are unescaped.
+    for (kind, text) in [
+        (
+            Kind::Rpc,
+            format!(r#"{{"st{}tus":200,"body":""}}"#, u("0061")),
+        ),
+        (
+            Kind::Rpc,
+            format!(r#"{{"status":200,"body":"e3{}="}}"#, u("0030")),
+        ),
+        (
+            Kind::MyotisBroadcast,
+            format!(r#"{{"f{}ilure":"error"}}"#, u("0061")),
+        ),
+        (
+            Kind::MyotisBroadcast,
+            format!(r#"{{"failure":"err{}r"}}"#, u("006f")),
+        ),
+        (
+            Kind::MyotisBroadcast,
+            r#"{"not_sent":true,"not_sent":true}"#.to_owned(),
+        ),
+        (
+            Kind::Colibri,
+            r#"{"revert":{"data":"0x","data":"0x"}}"#.to_owned(),
+        ),
+    ] {
+        assert_eq!(answer(kind, raw(&text)), None, "{text}");
+    }
+    let page = format!(
+        r#"{{"status":429,"headers":{{"Retry-After":"{}","x":"{}{}","content-length":"5"}},"body":""}}"#,
+        u("0033"),
+        "\\".repeat(4),
+        u("0041"),
+    );
+    let Some(Answer::Blockscout { headers, .. }) = answer(Kind::Blockscout, raw(&page)) else {
+        panic!("not a page: {page}");
+    };
+    assert_eq!(
+        headers,
+        [
+            ("Retry-After".to_owned(), "3".to_owned()),
+            ("content-length".to_owned(), "5".to_owned()),
+        ]
+    );
+    // What serde_json keeps on its scratch stack for a raw value.
+    for (text, depth) in [
+        ("1", 0),
+        ("[]", 1),
+        (r#"{"a":[[{}]],"b":"[[[{"}"#, 4),
+        (r#""\"[""#, 0),
+        (r#"[[],[[]]]"#, 3),
+    ] {
+        assert_eq!(nesting(text), depth, "{text}");
+    }
+}
+
+#[test]
+fn a_deep_reply_nobody_reads_is_not_parsed_and_frees_its_slot() {
+    // R3-M2: past the bound, even the scratch of a check would be
+    // unreserved; the reply completes unread, so a verifier's slot frees.
+    let mut t = test();
+    let mut config = chain_snapshot(&["myotis"], &[]);
+    config["myotis"] = json!(true);
+    t.configure(json!([config]));
+    t.call(
+        2,
+        "chain.availability",
+        &json!({ "chain_id": 1, "ready": true }),
+    );
+    let address = "0x1111111111111111111111111111111111111111";
+    let (id, params) = read(3, "eth_getBalance", json!([address, "latest"]));
+    t.call(id, "chain.request", &params);
+    let op = verified(&t.written())[0]["id"].as_u64().unwrap();
+    assert!(t.chain.handle(In::Cancel { id: 3 }).is_ok());
+    assert!(t.chain.flush().is_ok());
+    t.written();
+    let deep = format!(
+        r#"{{"payload":{}{}}}"#,
+        "[".repeat(UNRESERVED_NESTING + 1),
+        "]".repeat(UNRESERVED_NESTING + 1)
+    );
+    assert_eq!(t.chain.requests.answered(op), Some(Owner::Chain));
+    assert!(
+        t.chain
+            .handle(In::Response {
+                id: op,
+                reply: shell_result(op, &deep),
+            })
+            .is_ok()
+    );
+    assert!(t.chain.flush().is_ok());
+    // The slot is free: the next read's operation goes at once.
+    let (id, params) = read(4, "eth_getBalance", json!([address, "latest"]));
+    t.call(id, "chain.request", &params);
+    assert_eq!(verified(&t.written()).len(), 1);
 }

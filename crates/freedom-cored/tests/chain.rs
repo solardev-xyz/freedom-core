@@ -1701,10 +1701,11 @@ fn a_shell_errors_message_counts_against_its_request() {
 }
 
 /// Plays main for the replay's `ant-index-first-wallet-scan` (design 0005,
-/// Logs: Blockscout pairing), its recorded answers for every `shell.rpc`,
-/// up to its first `shell.blockscout`; `page` gives main's reply to that,
-/// from the recorded hop's answer. Returns the core, and what it read.
-fn blockscout_scan(page: impl Fn(&Value) -> Value) -> (tempfile::TempDir, Core, Option<Value>) {
+/// Logs: Blockscout pairing), a core started with `env`: its recorded
+/// answers for every `shell.rpc` of its first call, and of its second up
+/// to its first `shell.blockscout`. Returns the core, that request, and
+/// the page main's recorded hop answered.
+fn blockscout_scan_to(env: &[(&str, &str)]) -> (tempfile::TempDir, Core, Value, Value) {
     let text = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../vectors/chain-replay.json"
@@ -1729,7 +1730,9 @@ fn blockscout_scan(page: impl Fn(&Value) -> Value) -> (tempfile::TempDir, Core, 
     chain["chain_id"] = json!(100);
     chain["display_name"] = json!("Gnosis");
     chain["blockscout"] = json!({ "endpoint": "https://gnosis.blockscout.com/api" });
-    let (root, mut core) = core();
+    let (root, data, locks) = dirs();
+    let mut core = common::spawn_env("serve", &data, &locks, &[], env);
+    core.hello_fragments();
     configure(&mut core, 2, &[chain]);
     for index in 0..2u64 {
         let call = &scenario["steps"][0]["calls"][index as usize];
@@ -1743,23 +1746,13 @@ fn blockscout_scan(page: impl Fn(&Value) -> Value) -> (tempfile::TempDir, Core, 
         loop {
             let message = core.recv();
             if message["type"] == "response" && message["id"] == id {
-                if index == 1 {
-                    return (root, core, Some(message));
-                }
                 break;
             }
             if message["type"] != "request" {
                 continue;
             }
             if message["method"] == "shell.blockscout" {
-                reply(&mut core, &message, page(&hop));
-                if page(&hop)["result"]["headers"]
-                    .as_object()
-                    .is_some_and(|h| h.len() > 8)
-                {
-                    return (root, core, None);
-                }
-                continue;
+                return (root, core, message, hop);
             }
             let sent = body(&message);
             let record = records
@@ -1786,6 +1779,69 @@ fn blockscout_scan(page: impl Fn(&Value) -> Value) -> (tempfile::TempDir, Core, 
         }
     }
     panic!("the scan never reached Blockscout");
+}
+
+/// As [`blockscout_scan_to`], main answering the page with `page` (from
+/// the recorded hop) and the rest of the scan from the recordings: the
+/// core, and its reply to the scan's second call, `None` once a malformed
+/// page ended the connection.
+fn blockscout_scan(page: impl Fn(&Value) -> Value) -> (tempfile::TempDir, Core, Option<Value>) {
+    let (root, mut core, request, hop) = blockscout_scan_to(&[]);
+    let answer = page(&hop);
+    let malformed = answer["result"]["headers"]
+        .as_object()
+        .is_some_and(|h| h.len() > 8);
+    reply(&mut core, &request, answer);
+    if malformed {
+        return (root, core, None);
+    }
+    // The rest of the second call: its Direct and quorum reads of the
+    // newest blocks, from the recordings.
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../vectors/chain-replay.json"
+    ))
+    .unwrap();
+    let vectors: Value = serde_json::from_str(&text).unwrap();
+    let records = vectors["scenarios"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "ant-index-first-wallet-scan")
+        .unwrap()["io"]
+        .as_array()
+        .unwrap()
+        .clone();
+    loop {
+        let message = core.recv();
+        if message["type"] == "response" && message["id"] == 4 {
+            return (root, core, Some(message));
+        }
+        if message["type"] != "request" {
+            continue;
+        }
+        let sent = body(&message);
+        let record = records
+            .iter()
+            .find(|r| {
+                r["kind"] == "rpc"
+                    && r["call"] == 1
+                    && r["url"] == message["params"]["endpoint"]
+                    && serde_json::from_str::<Value>(r["body"].as_str().unwrap()).unwrap()["params"]
+                        == sent["params"]
+            })
+            .unwrap();
+        let answer = &record["answer"];
+        reply(
+            &mut core,
+            &message,
+            json!({ "result": {
+                "status": answer["status"],
+                "body": base64::engine::general_purpose::STANDARD
+                    .encode(answer["body"].as_str().unwrap()),
+            } }),
+        );
+    }
 }
 
 /// Main's reply to a Blockscout page: the recorded hop, with `headers`.
@@ -1836,4 +1892,57 @@ fn a_blockscout_page_carries_a_few_headers() {
                 .contains(r#""category":"malformed_shell_reply""#)
         );
     }
+}
+
+/// The core's next message that isn't a returned credit.
+fn next_message(core: &mut Core) -> Value {
+    loop {
+        match core.recv_wire() {
+            Wire::Credit => {}
+            Wire::Message(message) => return message,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_page_is_checked_without_unescaping_anything_first() {
+    // Round 3, R3-M2: with the chain total at 4 MiB, the scan's page comes
+    // with one unknown header of 16 MiB of JSON: 8 Mi escaped backslashes,
+    // or (the control) 16 Mi letters. The reply is charged before any of
+    // it is parsed, and its check unescapes nothing: both end the scan with
+    // `budget`, and the escaped one costs the core no more than the plain
+    // one (before the fix, serde_json's scratch took 8 MiB more).
+    let mut grown = Vec::new();
+    for escaped in [false, true] {
+        let (_root, mut core, page, _) =
+            blockscout_scan_to(&[("FREEDOM_CORED_TEST_CHAIN_TOTAL_BYTES", "4194304")]);
+        let value = if escaped {
+            "\\".repeat(8 * MIB)
+        } else {
+            "x".repeat(16 * MIB)
+        };
+        let answer = json!({ "result": {
+            "status": 200,
+            "headers": { "x": value },
+            "body": "",
+        } });
+        let (before, _) = memory(&core);
+        reply(&mut core, &page, answer);
+        let ended = loop {
+            let message = next_message(&mut core);
+            if message["type"] == "response" && message["id"] == 4 {
+                break message;
+            }
+        };
+        let (_, peak) = memory(&core);
+        assert_eq!(ended["error"]["code"], "budget", "{escaped}: {ended}");
+        grown.push(peak.saturating_sub(before) / 1024);
+    }
+    let (plain, escaped) = (grown[0], grown[1]);
+    assert!(
+        escaped <= plain + 4,
+        "the escaped header cost {escaped} MiB, the plain one {plain} MiB"
+    );
 }

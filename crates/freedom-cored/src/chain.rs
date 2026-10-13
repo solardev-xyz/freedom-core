@@ -499,21 +499,28 @@ impl Chain {
     }
 
     /// Main's reply to a `shell.*` request, which the event loop routed
-    /// here. It must be one of its request's shapes, or it is a protocol
-    /// error, even when nobody waits for it any more. One for a request the
-    /// machine cancelled is then dropped, and one whose chain request has
-    /// ended completes unread. Otherwise it is read for good with every
-    /// allocation reserved first against the request that asked, the
-    /// message itself included (57-M4); a reservation refused ends that
-    /// request with `budget` (a broadcast through its outcome table) and
-    /// the reply completes unread, so a verifier's slot is still freed.
+    /// here, its message moved rather than copied.
+    ///
+    /// - **Charged first:** when a running request still reads it, the
+    ///   message is reserved against that request before any of it is
+    ///   parsed, with the pass's own scratch, a byte a level of nesting
+    ///   (57-M4; round 3, R3-M2).
+    /// - **Checked in place:** it must be one of its request's shapes, or
+    ///   it is a protocol error, even when nobody waits for it any more.
+    ///   The check unescapes and copies nothing ([`RawObject`]); only a
+    ///   reply nobody reads that nests past [`UNRESERVED_NESTING`] goes
+    ///   unchecked, since even its scratch would be unreserved.
+    /// - **Read for good** with every allocation reserved first. A
+    ///   reservation refused ends that request with `budget` (a broadcast
+    ///   through its outcome table) and the reply completes unread, so a
+    ///   verifier's slot is still freed; so does one whose request has
+    ///   ended. One for a request the machine cancelled is dropped.
     fn response(&mut self, id: u64, reply: Shell) -> Flow {
         let Some(outgoing) = self.outgoing.remove(&id) else {
             return Err(Stop::Protocol("unsolicited_response"));
         };
         let malformed = Stop::Protocol("malformed_shell_reply");
-        // An error is a reply like a result: its message is charged before
-        // any of it is read (round 2, daemon review).
+        // An error is a reply like a result (round 2, daemon review).
         let (message, span, failed) = match reply {
             Shell::Failed { message, error } => (message, error, true),
             Shell::Result { message, result } => (message, result, false),
@@ -524,6 +531,24 @@ impl Chain {
         else {
             return Err(malformed);
         };
+        let nested = nesting(text);
+        let held = match outgoing.io {
+            Some(io) if self.machine.wants(io) => Some(
+                self.machine
+                    .reserve_reply(io, message.capacity().saturating_add(2 * nested)),
+            ),
+            _ => None,
+        };
+        let reserved = matches!(held, Some(Ok(_)));
+        if !reserved && nested > UNRESERVED_NESTING {
+            // Unread whatever its shape; a verifier's slot is still freed.
+            if let Some(io) = outgoing.io {
+                self.by_io.remove(&io);
+                self.machine.complete_unread(io);
+                self.poll();
+            }
+            return Ok(());
+        }
         let shape = if failed {
             Shape::failed(text)
         } else {
@@ -536,13 +561,9 @@ impl Chain {
         self.by_io.remove(&io);
         // Nobody reads a reply whose request has ended: it completes
         // unread, as one past the budget does.
-        let read = if self.machine.wants(io) {
-            match self.machine.reserve_reply(io, message.capacity()) {
-                Ok(held) => shape.read(&self.machine, io).map(|read| (read, held)),
-                Err(_) => Err(Unread::Over),
-            }
-        } else {
-            Err(Unread::Over)
+        let read = match held {
+            Some(Ok(held)) => shape.read(&self.machine, io).map(|read| (read, held)),
+            Some(Err(_)) | None => Err(Unread::Over),
         };
         // The message goes before its charge does.
         drop(message);
@@ -1034,20 +1055,24 @@ fn colibri_class(class: &str) -> Option<ColibriClass> {
     }
 }
 
-/// The most members a verified reply has: a Myotis read's `payload`,
-/// `block_before` and `block_after`.
-const MAX_VERIFIED_MEMBERS: usize = 3;
-
-/// A verified reply's members, borrowed in order, each present whatever
-/// its value: a member set to `null` is still there (PR #57 review, round
-/// 2, R2-M1). A member given twice, or more members than any shape has,
-/// is refused as it is read, before anything is allocated.
-struct Members<'a> {
+/// A JSON object's members, read in place: each name and value is its
+/// raw JSON, so nothing is unescaped and serde_json takes no scratch for a
+/// string (PR #57 review, round 3, R3-M2). A member is present whatever its
+/// value, `null` included (R2-M1). A name with an escape (JSON.stringify
+/// writes none for the names here), a member given twice, or more than `N`
+/// members is refused as it is read, before anything is allocated: the
+/// members sit in a fixed array.
+struct RawObject<'a, const N: usize> {
     len: usize,
-    items: [(&'a str, Option<&'a RawValue>); MAX_VERIFIED_MEMBERS],
+    items: [(&'a str, Option<&'a RawValue>); N],
 }
 
-impl<'a> Members<'a> {
+impl<'a, const N: usize> RawObject<'a, N> {
+    /// `text` as such an object; `None` for anything else.
+    fn parse(text: &'a str) -> Option<Self> {
+        serde_json::from_str::<Self>(text).ok()
+    }
+
     fn iter(&self) -> impl Iterator<Item = (&'a str, &'a RawValue)> + '_ {
         self.items[..self.len]
             .iter()
@@ -1071,57 +1096,85 @@ impl<'a> Members<'a> {
     }
 }
 
-impl<'de> Deserialize<'de> for Members<'de> {
+impl<'de, const N: usize> Deserialize<'de> for RawObject<'de, N> {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Visit;
+        struct Visit<const N: usize>;
 
-        impl<'de> serde::de::Visitor<'de> for Visit {
-            type Value = Members<'de>;
+        impl<'de, const N: usize> serde::de::Visitor<'de> for Visit<N> {
+            type Value = RawObject<'de, N>;
 
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("a JSON object of at most three members")
+                write!(f, "a JSON object of at most {N} members")
             }
 
             fn visit_map<A: serde::de::MapAccess<'de>>(
                 self,
                 mut map: A,
-            ) -> Result<Members<'de>, A::Error> {
+            ) -> Result<RawObject<'de, N>, A::Error> {
                 use serde::de::Error as _;
-                let mut members = Members {
+                let mut object = RawObject {
                     len: 0,
-                    items: [("", None); MAX_VERIFIED_MEMBERS],
+                    items: [("", None); N],
                 };
-                while let Some(name) = map.next_key::<&'de str>()? {
-                    if members.get(name).is_some() {
+                while let Some(name) = map.next_key::<&'de RawValue>()? {
+                    let name = plain(name).ok_or_else(|| A::Error::custom("an escaped name"))?;
+                    if object.get(name).is_some() {
                         return Err(A::Error::custom("a member given twice"));
                     }
-                    let Some(slot) = members.items.get_mut(members.len) else {
+                    let Some(slot) = object.items.get_mut(object.len) else {
                         return Err(A::Error::custom("too many members"));
                     };
                     *slot = (name, Some(map.next_value::<&'de RawValue>()?));
-                    members.len += 1;
+                    object.len += 1;
                 }
-                Ok(members)
+                Ok(object)
             }
         }
 
-        d.deserialize_map(Visit)
+        d.deserialize_map(Visit::<N>)
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Rejected<'a> {
-    #[serde(borrow)]
-    reason: &'a RawValue,
+/// A JSON string with no escape, as its text; `None` for anything else.
+/// Codes, classes, names and base64 bodies need no escape, and
+/// JSON.stringify writes them with none.
+fn plain(raw: &RawValue) -> Option<&str> {
+    let text = raw.get().strip_prefix('"')?.strip_suffix('"')?;
+    (!text.contains('\\')).then_some(text)
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Revert<'a> {
-    #[serde(borrow)]
-    data: &'a RawValue,
+/// How deep `text`'s arrays and objects nest: what serde_json's pass over a
+/// raw value keeps on its scratch stack, a byte a level. Counted in place.
+fn nesting(text: &str) -> usize {
+    let (mut depth, mut deepest) = (0usize, 0usize);
+    let (mut string, mut escaped) = (false, false);
+    for byte in text.bytes() {
+        if string {
+            match byte {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match byte {
+            b'"' => string = true,
+            b'[' | b'{' => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    deepest
 }
+
+/// Past this nesting, a reply nobody reads (or whose reading crossed its
+/// budget) isn't parsed at all: its scratch would be unreserved. It is
+/// dropped unread, as it would be after the parse.
+const UNRESERVED_NESTING: usize = 512;
 
 /// A present member stays `Some`, even when its value is `null`.
 fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<&'de RawValue>, D::Error> {
@@ -1189,126 +1242,30 @@ const MAX_BLOCKSCOUT_HEADERS: usize = 8;
 /// cooldown (design 0005, Logs).
 const BLOCKSCOUT_HEADERS: [&str; 3] = ["content-length", "x-ratelimit-reset", "retry-after"];
 
-/// A Blockscout page's headers, checked in place: an object of at most
-/// [`MAX_BLOCKSCOUT_HEADERS`] strings. Nothing is kept or allocated; they
-/// are read for good once their room is reserved.
-struct Headers;
-
-impl<'de> Deserialize<'de> for Headers {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Map;
-
-        impl<'de> serde::de::Visitor<'de> for Map {
-            type Value = Headers;
-
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("an object of at most eight strings")
-            }
-
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> Result<Headers, A::Error> {
-                use serde::de::Error as _;
-                let mut count = 0;
-                while map.next_entry::<Text, Text>()?.is_some() {
-                    count += 1;
-                    if count > MAX_BLOCKSCOUT_HEADERS {
-                        return Err(A::Error::custom("too many headers"));
-                    }
-                }
-                Ok(Headers)
-            }
-        }
-
-        d.deserialize_map(Map)
-    }
+/// A page's headers, checked in place: an object of at most
+/// [`MAX_BLOCKSCOUT_HEADERS`] strings, none unescaped.
+fn headers_of(raw: &RawValue) -> Option<RawObject<'_, MAX_BLOCKSCOUT_HEADERS>> {
+    let headers = RawObject::<MAX_BLOCKSCOUT_HEADERS>::parse(raw.get())?;
+    let strings = headers.iter().all(|(_, value)| is_string(value));
+    strings.then_some(headers)
 }
 
-/// A JSON string, checked and not kept.
-struct Text;
-
-impl<'de> Deserialize<'de> for Text {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Any;
-
-        impl serde::de::Visitor<'_> for Any {
-            type Value = Text;
-
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("a string")
-            }
-
-            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Text, E> {
-                Ok(Text)
-            }
-        }
-
-        d.deserialize_str(Any)
-    }
-}
-
-/// The headers the core reads, out of a checked headers object, into a
-/// vector of [`MAX_BLOCKSCOUT_HEADERS`] places: the caller has reserved
-/// room for those places and for every string the object holds.
+/// The headers the core reads, unescaped into a vector of
+/// [`MAX_BLOCKSCOUT_HEADERS`] places: the caller has reserved room for
+/// those places and for every string the object holds. Only these three
+/// are unescaped; `None` when one is no valid string.
 fn kept_headers(raw: &RawValue) -> Option<Vec<(String, String)>> {
-    struct Keep;
-
-    impl<'de> serde::de::Visitor<'de> for Keep {
-        type Value = Vec<(String, String)>;
-
-        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("an object of strings")
-        }
-
-        fn visit_map<A: serde::de::MapAccess<'de>>(
-            self,
-            mut map: A,
-        ) -> Result<Self::Value, A::Error> {
-            let mut kept = Vec::with_capacity(MAX_BLOCKSCOUT_HEADERS);
-            while let Some((name, value)) = map.next_entry::<String, String>()? {
-                if kept.len() < MAX_BLOCKSCOUT_HEADERS
-                    && BLOCKSCOUT_HEADERS
-                        .iter()
-                        .any(|known| known.eq_ignore_ascii_case(&name))
-                {
-                    kept.push((name, value));
-                }
-            }
-            Ok(kept)
+    let headers = headers_of(raw)?;
+    let mut kept = Vec::with_capacity(MAX_BLOCKSCOUT_HEADERS);
+    for (name, value) in headers.iter() {
+        if BLOCKSCOUT_HEADERS
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(name))
+        {
+            kept.push((name.to_owned(), decode_string(value.get())?));
         }
     }
-
-    struct Kept(Vec<(String, String)>);
-
-    impl<'de> Deserialize<'de> for Kept {
-        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-            d.deserialize_map(Keep).map(Kept)
-        }
-    }
-
-    serde_json::from_str::<Kept>(raw.get())
-        .ok()
-        .map(|kept| kept.0)
-}
-
-/// `{ "not_sent": true }`: main performed nothing (design 0005, Requests
-/// the core makes).
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct NotSent {
-    not_sent: bool,
-}
-
-/// A `shell.*` error, read in place: a code, a message, and no other
-/// member.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WireError<'a> {
-    #[serde(borrow)]
-    code: &'a str,
-    #[serde(borrow)]
-    message: &'a RawValue,
+    Some(kept)
 }
 
 /// A transport failure: one of the closed set, with no text and no data
@@ -1383,67 +1340,52 @@ fn unless_null(raw: Option<&RawValue>) -> Option<&RawValue> {
 }
 
 impl<'a> Shape<'a> {
-    /// Main's `error`, as a transport failure; `None` when it is malformed.
+    /// Main's `error`, as a transport failure: a code of the closed set, a
+    /// string message, no other member; `None` when it is malformed.
     fn failed(text: &'a str) -> Option<Self> {
-        let error = serde_json::from_str::<ObjectOf<WireError>>(text)
-            .ok()?
-            .into_inner();
-        if !is_string(error.message) {
+        let error = RawObject::<2>::parse(text)?;
+        if !error.are(&["code", "message"]) || !is_string(error.get("message")?) {
             return None;
         }
-        transport_failure(error.code).map(Shape::Failed)
+        transport_failure(plain(error.get("code")?)?).map(Shape::Failed)
     }
 
     /// Main's terminal reply to a request of `kind`; `None` when it is
-    /// malformed.
+    /// malformed. Read in place: nothing is unescaped or copied.
     fn parse(kind: Kind, text: &'a str) -> Option<Self> {
-        if let Ok(not_sent) = serde_json::from_str::<ObjectOf<NotSent>>(text) {
-            // Only `true` says it.
-            return not_sent.not_sent.then_some(Shape::NotSent {
+        let reply = RawObject::<3>::parse(text)?;
+        if reply.get("not_sent").is_some() {
+            // `{ "not_sent": true }`, alone; only `true` says it.
+            let alone = reply.are(&["not_sent"]) && reply.get("not_sent")?.get() == "true";
+            return alone.then_some(Shape::NotSent {
                 broadcast: kind == Kind::MyotisBroadcast,
             });
         }
+        let status = |raw: &RawValue| serde_json::from_str::<u16>(raw.get()).ok();
         match kind {
             Kind::Rpc => {
-                #[derive(Deserialize)]
-                #[serde(deny_unknown_fields)]
-                struct Http<'a> {
-                    status: u16,
-                    /// Base64, which JSON never escapes.
-                    #[serde(borrow)]
-                    body: &'a str,
+                if !reply.are(&["status", "body"]) {
+                    return None;
                 }
-                let http = serde_json::from_str::<ObjectOf<Http>>(text)
-                    .ok()?
-                    .into_inner();
                 Some(Shape::Http {
-                    status: http.status,
-                    body: http.body,
+                    status: status(reply.get("status")?)?,
+                    body: plain(reply.get("body")?)?,
                 })
             }
             Kind::Blockscout => {
-                #[derive(Deserialize)]
-                #[serde(deny_unknown_fields)]
-                struct Page<'a> {
-                    status: u16,
-                    #[serde(borrow)]
-                    headers: &'a RawValue,
-                    #[serde(borrow)]
-                    body: &'a str,
+                if !reply.are(&["status", "headers", "body"]) {
+                    return None;
                 }
-                let page = serde_json::from_str::<ObjectOf<Page>>(text)
-                    .ok()?
-                    .into_inner();
-                serde_json::from_str::<Headers>(page.headers.get()).ok()?;
+                let headers = reply.get("headers")?;
+                headers_of(headers)?;
                 Some(Shape::Page {
-                    status: page.status,
-                    headers: page.headers,
-                    body: page.body,
+                    status: status(reply.get("status")?)?,
+                    headers,
+                    body: plain(reply.get("body")?)?,
                 })
             }
             Kind::MyotisRead | Kind::MyotisBroadcast | Kind::Colibri => {
-                let members = serde_json::from_str::<Members>(text).ok()?;
-                Self::verified(kind, &members)
+                Self::verified(kind, &reply)
             }
         }
     }
@@ -1454,11 +1396,13 @@ impl<'a> Shape<'a> {
     /// to another shape is malformed whatever its value, `null` included.
     /// Only a Myotis read's `block_before` and `block_after` may be `null`
     /// or absent.
-    fn verified(kind: Kind, members: &Members<'a>) -> Option<Self> {
-        let class = || {
-            members
-                .get("failure")
-                .and_then(|raw| serde_json::from_str::<&str>(raw.get()).ok())
+    fn verified(kind: Kind, members: &RawObject<'a, 3>) -> Option<Self> {
+        let class = || plain(members.get("failure")?);
+        // `{ <name>: <a JSON string> }`, in place.
+        let wrapped = |member: &str, name: &str| {
+            let object = RawObject::<1>::parse(members.get(member)?.get())?;
+            let value = object.get(name)?;
+            (object.are(&[name]) && is_string(value)).then_some(value)
         };
         match kind {
             Kind::MyotisRead => {
@@ -1480,16 +1424,9 @@ impl<'a> Shape<'a> {
                 } else if members.are(&["hash"]) {
                     members.get("hash").map(Shape::Sent)
                 } else if members.are(&["rejected"]) {
-                    let rejected = members.get("rejected")?;
-                    let reason = serde_json::from_str::<ObjectOf<Rejected>>(rejected.get())
-                        .ok()?
-                        .into_inner()
-                        .reason;
-                    is_string(reason).then_some(Shape::Rejected(reason))
+                    wrapped("rejected", "reason").map(Shape::Rejected)
                 } else if members.are(&["uncertain"]) {
-                    let uncertain = members.get("uncertain")?;
-                    (serde_json::from_str::<bool>(uncertain.get()).ok() == Some(true))
-                        .then_some(Shape::Uncertain)
+                    (members.get("uncertain")?.get() == "true").then_some(Shape::Uncertain)
                 } else {
                     None
                 }
@@ -1500,12 +1437,7 @@ impl<'a> Shape<'a> {
                 } else if members.are(&["result"]) {
                     members.get("result").map(Shape::ColibriResult)
                 } else if members.are(&["revert"]) {
-                    let revert = members.get("revert")?;
-                    let data = serde_json::from_str::<ObjectOf<Revert>>(revert.get())
-                        .ok()?
-                        .into_inner()
-                        .data;
-                    is_string(data).then_some(Shape::Revert(data))
+                    wrapped("revert", "data").map(Shape::Revert)
                 } else {
                     None
                 }
