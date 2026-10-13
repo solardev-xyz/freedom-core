@@ -96,7 +96,7 @@ pub enum Message<'a> {
     },
     Response {
         id: u64,
-        outcome: Result<&'a RawValue, ErrorBody>,
+        outcome: Result<&'a RawValue, RawError<'a>>,
     },
     Event {
         event: Cow<'a, str>,
@@ -107,8 +107,35 @@ pub enum Message<'a> {
     },
 }
 
+/// A response's `error` member, a JSON object, kept as it was read: nothing
+/// of it is allocated until its consumer reads it ([`RawError::parse`]),
+/// so a consumer that charges what it holds can charge it first.
+#[derive(Clone, Copy)]
+pub struct RawError<'a>(&'a RawValue);
+
+impl<'a> RawError<'a> {
+    /// The error's JSON text.
+    pub fn raw(&self) -> &'a RawValue {
+        self.0
+    }
+
+    /// The error as an [`ErrorBody`]: a code, a message and, maybe, data,
+    /// and no other member.
+    pub fn parse(&self) -> Result<ErrorBody, MessageError> {
+        ErrorBody::from_raw(self.0)
+    }
+}
+
+impl ErrorBody {
+    /// An `error` member's JSON, read whole: a code, a message and, maybe,
+    /// data, and no other member.
+    pub fn from_raw(raw: &RawValue) -> Result<Self, MessageError> {
+        object(raw).map_err(MessageError::Malformed)
+    }
+}
+
 /// Bodies (params, results, event data, error text) can carry secrets, so
-/// `Debug` shows only the kind, ID, method or event name, and error code.
+/// `Debug` shows only the kind, ID, method or event name.
 impl fmt::Debug for Message<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -126,7 +153,7 @@ impl fmt::Debug for Message<'_> {
             Message::Response { id, outcome } => f
                 .debug_struct("Response")
                 .field("id", id)
-                .field("error_code", &outcome.as_ref().err().map(|e| e.code))
+                .field("error", &outcome.is_err())
                 .finish_non_exhaustive(),
             Message::Event { event, .. } => f
                 .debug_struct("Event")
@@ -221,8 +248,14 @@ impl<'a> Message<'a> {
             "response" => {
                 let outcome = match (envelope.result, envelope.error) {
                     (Some(result), None) => Ok(result),
-                    (None, Some(error)) => {
-                        Err(object::<ErrorBody>(error).map_err(MessageError::Malformed)?)
+                    // An object, read by its consumer.
+                    (None, Some(error)) if error.get().trim_start().starts_with('{') => {
+                        Err(RawError(error))
+                    }
+                    (None, Some(_)) => {
+                        return Err(MessageError::Malformed(
+                            "an error must be a JSON object".into(),
+                        ));
                     }
                     _ => return Err(MessageError::ResultAndError),
                 };
@@ -378,7 +411,7 @@ mod tests {
             }
         ));
         match Message::decode(br#"{"type":"response","id":7,"error":{"code":"throttled","message":"x","data":{"retry_after_ms":10}}}"#).unwrap() {
-            Message::Response { outcome: Err(error), .. } => assert_eq!(error.code, ErrorCode::Throttled),
+            Message::Response { outcome: Err(error), .. } => assert_eq!(error.parse().unwrap().code, ErrorCode::Throttled),
             other => panic!("{other:?}"),
         }
         assert!(matches!(
@@ -456,6 +489,41 @@ mod tests {
             br#"{"type":"response","id":1,"error":["busy","b"]}"#,
         ] {
             assert!(matches!(Message::decode(input), Err(MessageError::Malformed(_))), "{}", String::from_utf8_lossy(input));
+        }
+    }
+
+    #[test]
+    fn an_error_is_read_by_its_consumer() {
+        // Decoding keeps it raw; reading it checks its whole shape.
+        for (input, ok) in [
+            (
+                &br#"{"type":"response","id":1,"error":{"code":"busy","message":"b"}}"#[..],
+                true,
+            ),
+            (
+                br#"{"type":"response","id":1,"error":{"code":"busy","message":"b","extra":1}}"#,
+                false,
+            ),
+            (
+                br#"{"type":"response","id":1,"error":{"code":"nope","message":"b"}}"#,
+                false,
+            ),
+            (br#"{"type":"response","id":1,"error":{}}"#, false),
+        ] {
+            match Message::decode(input).unwrap() {
+                Message::Response {
+                    outcome: Err(error),
+                    ..
+                } => {
+                    assert_eq!(
+                        error.parse().is_ok(),
+                        ok,
+                        "{}",
+                        String::from_utf8_lossy(input)
+                    );
+                }
+                other => panic!("{other:?}"),
+            }
         }
     }
 

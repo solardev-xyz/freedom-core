@@ -77,6 +77,10 @@ All accept caller kinds `chrome` and `shell`.
 - **`not_sent`** is main's reply when it performed nothing: a stale generation, a cancel before the exchange started, or an endpoint refused before connecting. It proves that no byte of the request left main, which [broadcasts](#broadcast) rely on. Any other failure may have followed a send.
 - **The body** is today's `JSON.stringify({ jsonrpc: '2.0', id, method, params })`, with `id` a per-request counter (deviation `rpc-id`).
 - **`shell.blockscout`** keeps main's DNS check: an off-origin redirect must not resolve to a local address. That check needs DNS, which the core doesn't do.
+  - **Its `headers`** are an object of strings. The core reads three of them, by name with ASCII case ignored: `content-length`, `x-ratelimit-reset` and `retry-after`.
+  - **Main sends those three** when the page has them.
+  - **The bound:** a reply may carry at most 8 headers. A reply with more is malformed.
+  - **Why:** a page's header map is otherwise unbounded, and each header costs the core a vector place and two strings before its reply is charged.
 
 ### Frames
 
@@ -552,6 +556,7 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 | one message | 32 MiB, serialized | the request fails with `too_large`; a received one is a protocol error |
 | fragmented responses in flight | one per direction (bulk credit); its bytes reserved at begin, outside the reader's 16 MiB | the sender waits for credit, sending whole messages meanwhile |
 | one request message | one frame (1 MiB) | `too_large` |
+| Blockscout page headers | 8 | a malformed reply |
 | the chain writer | one message cap of unwritten bytes | replies wait in the chain thread's queue, counted in the total |
 | main's chain I/O pool | 192 MiB: bodies being read, verifier results, replies until written; replies under 64 KiB exempt | the exchange fails `busy` |
 | quorum k / endpoints | 9 / 64 | clamped at configuration |

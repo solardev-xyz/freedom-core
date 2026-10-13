@@ -342,12 +342,14 @@ impl Core {
         )
     }
 
-    /// Every frame left, until the core closes stdout.
+    /// Every whole message left, until the core closes stdout; a bulk
+    /// credit returned meanwhile is passed over.
     pub fn rest(&mut self) -> Vec<Value> {
         let mut frames = Vec::new();
         loop {
             match self.output.recv_timeout(READ_TIMEOUT) {
                 Ok(Output::Frame(value)) => frames.push(value),
+                Ok(Output::Wire(Wire::Credit)) => {}
                 Ok(Output::Wire(wire)) => panic!("expected a whole message, got {wire:?}"),
                 Ok(Output::Line(line)) => panic!("expected a frame, got line {line:?}"),
                 Ok(Output::Malformed(what)) => panic!("malformed frame: {what}"),

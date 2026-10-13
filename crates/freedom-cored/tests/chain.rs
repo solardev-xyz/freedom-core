@@ -141,13 +141,21 @@ fn serve(
     }
 }
 
-/// Main's terminal reply to one of the core's requests.
+/// Main's terminal reply to one of the core's requests: in fragments of
+/// half a frame when it is over one (design 0005, Frames).
 fn reply(core: &mut Core, request: &Value, outcome: Value) {
     let mut message = json!({ "type": "response", "id": request["id"] });
     for (key, value) in outcome.as_object().unwrap() {
         message[key] = value.clone();
     }
-    core.send(&message);
+    let len = message.to_string().len();
+    if len < MIB {
+        core.send(&message);
+    } else {
+        for frame in fragmented(&message, len.div_ceil(MIB / 2)) {
+            core.send_raw(&frame);
+        }
+    }
 }
 
 /// The core's next `count` requests, other messages set aside.
@@ -247,7 +255,8 @@ fn direct_after_a_quorum_timeout() {
     let (reply, seen) = serve(&mut core, 3, |request| {
         (request["params"]["endpoint"] == "d").then(|| rpc_result(r#""0x10""#))
     });
-    assert!(started.elapsed() >= Duration::from_millis(500));
+    // Whole milliseconds on the core's clock.
+    assert!(started.elapsed() >= Duration::from_millis(499));
     let endpoints: Vec<&str> = seen
         .requests
         .iter()
@@ -634,7 +643,9 @@ fn the_overall_deadline() {
     assert_eq!(reply["id"], 3, "{reply}");
     assert_eq!(reply["error"]["code"], "deadline");
     assert_eq!(reply["error"]["data"], json!({ "generation": 1 }));
-    assert!(elapsed >= Duration::from_millis(300), "{elapsed:?}");
+    // The core's clock counts whole milliseconds: its 300 can be 299.x of
+    // ours.
+    assert!(elapsed >= Duration::from_millis(299), "{elapsed:?}");
     assert_eq!(cancel, json!({ "type": "cancel", "id": held["id"] }));
     // No time left: `deadline` before any I/O.
     params["deadline_ms"] = json!(0);
@@ -1052,10 +1063,10 @@ fn shell_errors_outside_the_transport_set_end_the_connection() {
             json!({ "code": "network", "message": "Network error", "data": {} }),
             "malformed_shell_reply",
         ),
-        // A member an error body doesn't have: the envelope is malformed.
+        // A member an error body doesn't have.
         (
             json!({ "code": "network", "message": "Network error", "unexpected": 1 }),
-            "malformed",
+            "malformed_shell_reply",
         ),
     ] {
         let (_root, mut core) = configured(snapshot(&["direct"], &["a"], 5000));
@@ -1582,6 +1593,247 @@ fn naming_gets_a_slot_while_chain_holds_main_busy() {
         assert!(
             released < 64,
             "naming waited behind {released} chain requests"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PR #57's second round of reviews.
+
+#[test]
+fn a_null_member_of_another_shape_is_malformed() {
+    // R2-M1: a member that belongs to another shape is there whatever its
+    // value; `{ failure, uncertain: null }` is no standalone failure, and
+    // never lowers a handed-off broadcast to not sent.
+    let colibri = {
+        let mut chain = snapshot(&["colibri"], &[], 5000);
+        chain["prover"] = json!({ "endpoint": "p1", "zk": true });
+        chain
+    };
+    let myotis_reader = {
+        let mut chain = snapshot(&["myotis"], &[], 5000);
+        chain["myotis"] = json!(true);
+        chain
+    };
+    let call_read = request(
+        4,
+        "chain.request",
+        read("eth_call", json!([{ "to": ADDRESS }, "latest"])),
+    );
+    let mut cases = Vec::new();
+    for extra in [
+        "uncertain",
+        "rejected",
+        "revert",
+        "block_before",
+        "block_after",
+        "hash",
+        "result",
+        "payload",
+        "not_sent",
+    ] {
+        let mut shape = json!({ "failure": "not_running" });
+        shape[extra] = Value::Null;
+        cases.push((myotis_broadcaster(), broadcast(4), shape));
+    }
+    for shape in [
+        json!({ "hash": HASH, "rejected": null }),
+        json!({ "rejected": null }),
+        json!({ "uncertain": null }),
+    ] {
+        cases.push((myotis_broadcaster(), broadcast(4), shape));
+    }
+    for shape in [
+        json!({ "failure": "error", "payload": null }),
+        json!({ "failure": "not_ready", "block_before": null }),
+        json!({ "payload": { "verify_method": "proof" }, "hash": null }),
+    ] {
+        cases.push((myotis_reader.clone(), call_read.clone(), shape));
+    }
+    for shape in [
+        json!({ "failure": "capacity", "revert": null }),
+        json!({ "result": "0x01", "revert": null }),
+        json!({ "revert": null }),
+    ] {
+        cases.push((colibri.clone(), call_read.clone(), shape));
+    }
+    for (chain, call, shape) in cases {
+        let (_root, mut core) = configured(chain);
+        core.send(&call);
+        malformed(
+            &mut core,
+            4,
+            json!({ "result": shape }),
+            "malformed_shell_reply",
+        );
+    }
+}
+
+#[test]
+fn a_shell_errors_message_counts_against_its_request() {
+    // Round 2, daemon review: an error is charged before it is read, like
+    // a result: with the chain total at 512 KiB, a 900 KB `network`
+    // message ends its read with `budget`, a short one as today's error.
+    for (message, code) in [
+        ("x".to_owned(), "chain_error"),
+        ("x".repeat(900_000), "budget"),
+    ] {
+        let (_root, data, locks) = dirs();
+        let mut core = common::spawn_env(
+            "serve",
+            &data,
+            &locks,
+            &[],
+            &[("FREEDOM_CORED_TEST_CHAIN_TOTAL_BYTES", "524288")],
+        );
+        core.hello_fragments();
+        configure(&mut core, 2, &[snapshot(&["direct"], &["a"], 5000)]);
+        core.send(&request(
+            3,
+            "chain.request",
+            read("eth_blockNumber", json!([])),
+        ));
+        let (reply, _) = serve(&mut core, 3, |_| {
+            Some(json!({ "error": { "code": "network", "message": message } }))
+        });
+        assert_eq!(reply["error"]["code"], code, "{reply}");
+    }
+}
+
+/// Plays main for the replay's `ant-index-first-wallet-scan` (design 0005,
+/// Logs: Blockscout pairing), its recorded answers for every `shell.rpc`,
+/// up to its first `shell.blockscout`; `page` gives main's reply to that,
+/// from the recorded hop's answer. Returns the core, and what it read.
+fn blockscout_scan(page: impl Fn(&Value) -> Value) -> (tempfile::TempDir, Core, Option<Value>) {
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../vectors/chain-replay.json"
+    ))
+    .unwrap();
+    let vectors: Value = serde_json::from_str(&text).unwrap();
+    let scenario = vectors["scenarios"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "ant-index-first-wallet-scan")
+        .unwrap()
+        .clone();
+    let records = scenario["io"].as_array().unwrap();
+    let hop = records.iter().find(|r| r["kind"] == "blockscout").unwrap()["answer"].clone();
+    let urls = [
+        "https://gnosischain.example",
+        "https://publicnode.example",
+        "https://drpc.example",
+    ];
+    let mut chain = snapshot(&["quorum", "direct"], &urls, 5000);
+    chain["chain_id"] = json!(100);
+    chain["display_name"] = json!("Gnosis");
+    chain["blockscout"] = json!({ "endpoint": "https://gnosis.blockscout.com/api" });
+    let (root, mut core) = core();
+    configure(&mut core, 2, &[chain]);
+    for index in 0..2u64 {
+        let call = &scenario["steps"][0]["calls"][index as usize];
+        let params: Value = serde_json::from_str(call["params_json"].as_str().unwrap()).unwrap();
+        let mut scan = read("eth_getLogs", params);
+        scan["chain_id"] = json!(100);
+        scan["background"] = json!(true);
+        scan["profile"] = json!("ant_scan");
+        let id = 3 + index;
+        core.send(&request(id, "chain.request", scan));
+        loop {
+            let message = core.recv();
+            if message["type"] == "response" && message["id"] == id {
+                if index == 1 {
+                    return (root, core, Some(message));
+                }
+                break;
+            }
+            if message["type"] != "request" {
+                continue;
+            }
+            if message["method"] == "shell.blockscout" {
+                reply(&mut core, &message, page(&hop));
+                if page(&hop)["result"]["headers"]
+                    .as_object()
+                    .is_some_and(|h| h.len() > 8)
+                {
+                    return (root, core, None);
+                }
+                continue;
+            }
+            let sent = body(&message);
+            let record = records
+                .iter()
+                .find(|r| {
+                    r["kind"] == "rpc"
+                        && r["call"] == index
+                        && r["url"] == message["params"]["endpoint"]
+                        && serde_json::from_str::<Value>(r["body"].as_str().unwrap()).unwrap()
+                            ["params"]
+                            == sent["params"]
+                })
+                .unwrap();
+            let answer = &record["answer"];
+            reply(
+                &mut core,
+                &message,
+                json!({ "result": {
+                    "status": answer["status"],
+                    "body": base64::engine::general_purpose::STANDARD
+                        .encode(answer["body"].as_str().unwrap()),
+                } }),
+            );
+        }
+    }
+    panic!("the scan never reached Blockscout");
+}
+
+/// Main's reply to a Blockscout page: the recorded hop, with `headers`.
+fn page_with(hop: &Value, headers: Value) -> Value {
+    json!({ "result": {
+        "status": hop["status"],
+        "headers": headers,
+        "body": base64::engine::general_purpose::STANDARD.encode(hop["body"].as_str().unwrap()),
+    } })
+}
+
+#[test]
+fn a_blockscout_page_carries_a_few_headers() {
+    // R2-M3, through the replay's Ant scan: the recorded page, with the
+    // headers the core reads and a few it doesn't, is read and paired.
+    let (_root, _core, reply) = blockscout_scan(|hop| {
+        page_with(
+            hop,
+            json!({
+                "content-type": "application/json",
+                "Content-Length": "100000",
+                "x-ratelimit-reset": "1000",
+                "Retry-After": "1",
+                "date": "Tue, 13 Oct 2026 06:00:00 GMT",
+            }),
+        )
+    });
+    let reply = reply.unwrap();
+    assert!(reply["result"]["result"].is_array(), "{reply}");
+    // Many more headers than a page needs are a malformed reply, refused
+    // before anything of them is allocated: 200,000 empty ones (the
+    // reviewer's probe) as well as nine.
+    for count in [9usize, 200_000] {
+        let headers: serde_json::Map<String, Value> = (0..count)
+            .map(|i| (format!("x{i:06}"), json!("")))
+            .collect();
+        let headers = Value::Object(headers);
+        let (_root, mut core, reply) = blockscout_scan(|hop| page_with(hop, headers.clone()));
+        assert!(reply.is_none());
+        let rest = core.rest();
+        assert!(
+            !rest.iter().any(|m| m["type"] == "response" && m["id"] == 4),
+            "{count}"
+        );
+        assert_eq!(core.exit_code(Duration::from_secs(10)), 76);
+        assert!(
+            core.stderr()
+                .contains(r#""category":"malformed_shell_reply""#)
         );
     }
 }

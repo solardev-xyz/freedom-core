@@ -550,7 +550,10 @@ impl Core {
                 self.dispatch(outs)
             }
             Message::Response { id, outcome } => {
-                let outcome = outcome.map(|result| span(&frame.payload, result));
+                let outcome = match outcome {
+                    Ok(result) => Ok(span(&frame.payload, result)),
+                    Err(error) => Err(span(&frame.payload, error.raw())),
+                };
                 self.response(id, outcome, frame.payload)
             }
             Message::Event { .. } => {
@@ -568,7 +571,10 @@ impl Core {
                 id: answered,
                 outcome,
             }) if answered == id && self.hello_done => {
-                let outcome = outcome.map(|result| span(&payload, result));
+                let outcome = match outcome {
+                    Ok(result) => Ok(span(&payload, result)),
+                    Err(error) => Err(span(&payload, error.raw())),
+                };
                 return self.response(id, outcome, payload);
             }
             Ok(_) if !self.hello_done => "not_hello_first",
@@ -583,13 +589,13 @@ impl Core {
     }
 
     /// Main's response to one of the core's requests (`shell.*`), routed
-    /// to the thread that made it: its error, or the span of its `result`
+    /// to the thread that made it: the span of its `result` or its `error`
     /// in `message`, the response as it was read. One that answers no
     /// request is unsolicited, a protocol error (0001).
     fn response(
         &mut self,
         id: u64,
-        outcome: Result<Range<usize>, ErrorBody>,
+        outcome: Result<Range<usize>, Range<usize>>,
         message: Zeroizing<Vec<u8>>,
     ) -> Flow {
         let Some(owner) = self.requests.answered(id) else {
@@ -600,26 +606,45 @@ impl Core {
             return Flow::Exit(Exit::Protocol);
         };
         let sent = match (owner, outcome) {
-            // Naming copies its result out of the message.
+            // Naming copies its result out of the message, and reads its
+            // error whole.
             (Owner::Naming, outcome) => {
+                let span = match &outcome {
+                    Ok(span) | Err(span) => span.clone(),
+                };
+                let Some(text) = message
+                    .get(span)
+                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                else {
+                    return Flow::Exit(Exit::Internal);
+                };
                 let outcome = match outcome {
-                    Ok(result) => {
-                        let copied = message
-                            .get(result)
-                            .and_then(|bytes| std::str::from_utf8(bytes).ok())
-                            .and_then(|text| RawValue::from_string(text.to_owned()).ok());
-                        match copied {
-                            Some(result) => Ok(result),
-                            None => return Flow::Exit(Exit::Internal),
+                    Ok(_) => match RawValue::from_string(text.to_owned()) {
+                        Ok(result) => Ok(result),
+                        Err(_) => return Flow::Exit(Exit::Internal),
+                    },
+                    Err(_) => {
+                        let error = serde_json::from_str::<&RawValue>(text)
+                            .map_err(|e| MessageError::Malformed(e.to_string()))
+                            .and_then(ErrorBody::from_raw);
+                        match error {
+                            Ok(error) => Err(error),
+                            Err(e) => {
+                                log::error(
+                                    "protocol error",
+                                    serde_json::json!({ "category": message_category(&e) }),
+                                );
+                                return Flow::Exit(Exit::Protocol);
+                            }
                         }
                     }
-                    Err(error) => Err(error),
                 };
                 self.naming
                     .send(naming::In::Response { id, outcome }, self.credit.take())
             }
             // The chain thread takes the message itself, uncopied, and
-            // charges it to the request that asked (57-M4).
+            // charges it to the request that asked before reading any of it,
+            // its result or its error (57-M4; round 2).
             (Owner::Chain, Ok(result)) => self.chain.send(
                 chain::In::Response {
                     id,
@@ -630,7 +655,7 @@ impl Core {
             (Owner::Chain, Err(error)) => self.chain.send(
                 chain::In::Response {
                     id,
-                    reply: chain::Shell::Failed(error),
+                    reply: chain::Shell::Failed { message, error },
                 },
                 self.credit.take(),
             ),

@@ -88,10 +88,14 @@ pub enum In {
 /// Main's terminal reply to one of the chain thread's requests, as the
 /// event loop hands it over.
 pub enum Shell {
-    /// A transport failure.
-    Failed(ErrorBody),
     /// The response message as it was read, moved here rather than copied,
-    /// and where its `result` lies in it.
+    /// and where its `error` lies in it.
+    Failed {
+        message: Zeroizing<Vec<u8>>,
+        error: Range<usize>,
+    },
+    /// The response message as it was read, and where its `result` lies in
+    /// it.
     Result {
         message: Zeroizing<Vec<u8>>,
         result: Range<usize>,
@@ -489,25 +493,24 @@ impl Chain {
             return Err(Stop::Protocol("unsolicited_response"));
         };
         let malformed = Stop::Protocol("malformed_shell_reply");
-        let (message, result) = match reply {
-            Shell::Failed(error) => {
-                let failure = transport_failure(&error).ok_or(malformed)?;
-                if let Some(io) = outgoing.io {
-                    self.by_io.remove(&io);
-                    self.machine.complete(io, Answer::Failed(failure));
-                    self.poll();
-                }
-                return Ok(());
-            }
-            Shell::Result { message, result } => (message, result),
+        // An error is a reply like a result: its message is charged before
+        // any of it is read (round 2, daemon review).
+        let (message, span, failed) = match reply {
+            Shell::Failed { message, error } => (message, error, true),
+            Shell::Result { message, result } => (message, result, false),
         };
         let Some(text) = message
-            .get(result)
+            .get(span)
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
         else {
             return Err(malformed);
         };
-        let shape = Shape::parse(outgoing.kind, text).ok_or(malformed)?;
+        let shape = if failed {
+            Shape::failed(text)
+        } else {
+            Shape::parse(outgoing.kind, text)
+        }
+        .ok_or(malformed)?;
         let Some(io) = outgoing.io else {
             return Ok(());
         };
@@ -1002,34 +1005,79 @@ fn colibri_class(class: &str) -> Option<ColibriClass> {
     }
 }
 
-/// Every member main's verified replies can have (design 0005, Verified
-/// operations), borrowed from the reply; which may appear together depends
-/// on the operation.
-#[derive(Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct VerifiedReply<'a> {
-    #[serde(borrow, default, deserialize_with = "present")]
-    payload: Option<&'a RawValue>,
-    /// `null` or absent when the status had none.
-    #[serde(borrow, default)]
-    block_before: Option<&'a RawValue>,
-    #[serde(borrow, default)]
-    block_after: Option<&'a RawValue>,
-    /// A class: one of the closed set's names, which need no escapes.
-    #[serde(borrow, default)]
-    failure: Option<&'a str>,
-    #[serde(borrow, default, deserialize_with = "present")]
-    hash: Option<&'a RawValue>,
-    #[serde(borrow, default)]
-    rejected: Option<ObjectOf<Rejected<'a>>>,
-    #[serde(default)]
-    uncertain: Option<bool>,
-    #[serde(default)]
-    not_sent: Option<bool>,
-    #[serde(borrow, default, deserialize_with = "present")]
-    result: Option<&'a RawValue>,
-    #[serde(borrow, default)]
-    revert: Option<ObjectOf<Revert<'a>>>,
+/// The most members a verified reply has: a Myotis read's `payload`,
+/// `block_before` and `block_after`.
+const MAX_VERIFIED_MEMBERS: usize = 3;
+
+/// A verified reply's members, borrowed in order, each present whatever
+/// its value: a member set to `null` is still there (PR #57 review, round
+/// 2, R2-M1). A member given twice, or more members than any shape has,
+/// is refused as it is read, before anything is allocated.
+struct Members<'a> {
+    len: usize,
+    items: [(&'a str, Option<&'a RawValue>); MAX_VERIFIED_MEMBERS],
+}
+
+impl<'a> Members<'a> {
+    fn iter(&self) -> impl Iterator<Item = (&'a str, &'a RawValue)> + '_ {
+        self.items[..self.len]
+            .iter()
+            .filter_map(|(name, value)| value.map(|value| (*name, value)))
+    }
+
+    fn get(&self, name: &str) -> Option<&'a RawValue> {
+        self.iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, value)| value)
+    }
+
+    /// Whether its members are exactly `names`.
+    fn are(&self, names: &[&str]) -> bool {
+        self.len == names.len() && names.iter().all(|name| self.get(name).is_some())
+    }
+
+    /// Whether it has `required`, and no member outside `allowed`.
+    fn within(&self, required: &str, allowed: &[&str]) -> bool {
+        self.get(required).is_some() && self.iter().all(|(name, _)| allowed.contains(&name))
+    }
+}
+
+impl<'de> Deserialize<'de> for Members<'de> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Visit;
+
+        impl<'de> serde::de::Visitor<'de> for Visit {
+            type Value = Members<'de>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a JSON object of at most three members")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Members<'de>, A::Error> {
+                use serde::de::Error as _;
+                let mut members = Members {
+                    len: 0,
+                    items: [("", None); MAX_VERIFIED_MEMBERS],
+                };
+                while let Some(name) = map.next_key::<&'de str>()? {
+                    if members.get(name).is_some() {
+                        return Err(A::Error::custom("a member given twice"));
+                    }
+                    let Some(slot) = members.items.get_mut(members.len) else {
+                        return Err(A::Error::custom("too many members"));
+                    };
+                    *slot = (name, Some(map.next_value::<&'de RawValue>()?));
+                    members.len += 1;
+                }
+                Ok(members)
+            }
+        }
+
+        d.deserialize_map(Visit)
+    }
 }
 
 #[derive(Deserialize)]
@@ -1101,54 +1149,118 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for ObjectOf<T> {
     }
 }
 
-/// A Blockscout page's headers, checked in place: an object of strings.
-/// Nothing is kept; they are read for good once their room is reserved.
+/// The most headers a Blockscout page's reply carries. The core reads
+/// three ([`BLOCKSCOUT_HEADERS`]), so main sends those it has; a few more
+/// are tolerated, any more is a malformed reply (design 0005, Requests the
+/// core makes; PR #57 review, round 2, R2-M3).
+const MAX_BLOCKSCOUT_HEADERS: usize = 8;
+
+/// The headers the core reads from a Blockscout page, by name, as
+/// `Headers#get` does (ASCII case ignored): the size check and the
+/// cooldown (design 0005, Logs).
+const BLOCKSCOUT_HEADERS: [&str; 3] = ["content-length", "x-ratelimit-reset", "retry-after"];
+
+/// A Blockscout page's headers, checked in place: an object of at most
+/// [`MAX_BLOCKSCOUT_HEADERS`] strings. Nothing is kept or allocated; they
+/// are read for good once their room is reserved.
 struct Headers;
 
 impl<'de> Deserialize<'de> for Headers {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Text;
-
-        impl<'de> Deserialize<'de> for Text {
-            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-                struct Any;
-
-                impl serde::de::Visitor<'_> for Any {
-                    type Value = Text;
-
-                    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                        f.write_str("a string")
-                    }
-
-                    fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Text, E> {
-                        Ok(Text)
-                    }
-                }
-
-                d.deserialize_str(Any)
-            }
-        }
-
         struct Map;
 
         impl<'de> serde::de::Visitor<'de> for Map {
             type Value = Headers;
 
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("an object of strings")
+                f.write_str("an object of at most eight strings")
             }
 
             fn visit_map<A: serde::de::MapAccess<'de>>(
                 self,
                 mut map: A,
             ) -> Result<Headers, A::Error> {
-                while map.next_entry::<Text, Text>()?.is_some() {}
+                use serde::de::Error as _;
+                let mut count = 0;
+                while map.next_entry::<Text, Text>()?.is_some() {
+                    count += 1;
+                    if count > MAX_BLOCKSCOUT_HEADERS {
+                        return Err(A::Error::custom("too many headers"));
+                    }
+                }
                 Ok(Headers)
             }
         }
 
         d.deserialize_map(Map)
     }
+}
+
+/// A JSON string, checked and not kept.
+struct Text;
+
+impl<'de> Deserialize<'de> for Text {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Any;
+
+        impl serde::de::Visitor<'_> for Any {
+            type Value = Text;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Text, E> {
+                Ok(Text)
+            }
+        }
+
+        d.deserialize_str(Any)
+    }
+}
+
+/// The headers the core reads, out of a checked headers object, into a
+/// vector of [`MAX_BLOCKSCOUT_HEADERS`] places: the caller has reserved
+/// room for those places and for every string the object holds.
+fn kept_headers(raw: &RawValue) -> Option<Vec<(String, String)>> {
+    struct Keep;
+
+    impl<'de> serde::de::Visitor<'de> for Keep {
+        type Value = Vec<(String, String)>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("an object of strings")
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut kept = Vec::with_capacity(MAX_BLOCKSCOUT_HEADERS);
+            while let Some((name, value)) = map.next_entry::<String, String>()? {
+                if kept.len() < MAX_BLOCKSCOUT_HEADERS
+                    && BLOCKSCOUT_HEADERS
+                        .iter()
+                        .any(|known| known.eq_ignore_ascii_case(&name))
+                {
+                    kept.push((name, value));
+                }
+            }
+            Ok(kept)
+        }
+    }
+
+    struct Kept(Vec<(String, String)>);
+
+    impl<'de> Deserialize<'de> for Kept {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            d.deserialize_map(Keep).map(Kept)
+        }
+    }
+
+    serde_json::from_str::<Kept>(raw.get())
+        .ok()
+        .map(|kept| kept.0)
 }
 
 /// `{ "not_sent": true }`: main performed nothing (design 0005, Requests
@@ -1159,31 +1271,40 @@ struct NotSent {
     not_sent: bool,
 }
 
+/// A `shell.*` error, read in place: a code, a message, and no other
+/// member.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireError<'a> {
+    #[serde(borrow)]
+    code: &'a str,
+    #[serde(borrow)]
+    message: &'a RawValue,
+}
+
 /// A transport failure: one of the closed set, with no text and no data
 /// (design 0004, Transport errors); `None` for anything else, which is
 /// malformed. Only `not_sent` proves nothing was sent, so every failure may
 /// have followed a send.
-fn transport_failure(error: &ErrorBody) -> Option<Transport> {
-    if error.data.is_some() {
-        return None;
-    }
-    Some(match error.code {
-        ErrorCode::Timeout | ErrorCode::Deadline => Transport::Timeout,
-        ErrorCode::Network | ErrorCode::Cancelled | ErrorCode::StaleGeneration => {
-            Transport::Network
-        }
-        ErrorCode::Refused => Transport::Refused,
-        ErrorCode::TooLarge => Transport::TooLarge,
-        ErrorCode::Busy => Transport::Busy,
+fn transport_failure(code: &str) -> Option<Transport> {
+    Some(match code {
+        "timeout" | "deadline" => Transport::Timeout,
+        "network" | "cancelled" | "stale_generation" => Transport::Network,
+        "refused" => Transport::Refused,
+        "too_large" => Transport::TooLarge,
+        "busy" => Transport::Busy,
         _ => return None,
     })
 }
 
 /// Main's reply, read in place: borrowed from its message, with nothing
-/// allocated, every structural boundary a JSON object (57-M1). Reading it
-/// for good ([`Shape::read`]) reserves each allocation first (57-M4).
+/// allocated, every structural boundary a JSON object (57-M1) and every
+/// shape's members exact, a `null` member included (R2-M1). Reading it for
+/// good ([`Shape::read`]) reserves each allocation first (57-M4).
 #[derive(Debug)]
 enum Shape<'a> {
+    /// A transport failure.
+    Failed(Transport),
     /// `{ "not_sent": true }`; for a Myotis broadcast, its own form.
     NotSent {
         broadcast: bool,
@@ -1227,7 +1348,23 @@ fn is_string(raw: &RawValue) -> bool {
     raw.get().starts_with('"')
 }
 
+/// A raw value's text, or `None` for `null`.
+fn unless_null(raw: Option<&RawValue>) -> Option<&RawValue> {
+    raw.filter(|raw| raw.get() != "null")
+}
+
 impl<'a> Shape<'a> {
+    /// Main's `error`, as a transport failure; `None` when it is malformed.
+    fn failed(text: &'a str) -> Option<Self> {
+        let error = serde_json::from_str::<ObjectOf<WireError>>(text)
+            .ok()?
+            .into_inner();
+        if !is_string(error.message) {
+            return None;
+        }
+        transport_failure(error.code).map(Shape::Failed)
+    }
+
     /// Main's terminal reply to a request of `kind`; `None` when it is
     /// malformed.
     fn parse(kind: Kind, text: &'a str) -> Option<Self> {
@@ -1276,91 +1413,73 @@ impl<'a> Shape<'a> {
                 })
             }
             Kind::MyotisRead | Kind::MyotisBroadcast | Kind::Colibri => {
-                let reply = serde_json::from_str::<ObjectOf<VerifiedReply>>(text)
-                    .ok()?
-                    .into_inner();
-                Self::verified(kind, reply)
+                let members = serde_json::from_str::<Members>(text).ok()?;
+                Self::verified(kind, &members)
             }
         }
     }
 
-    /// A verified operation's reply, which must be one of its operation's
-    /// shapes: a failure stands alone and carries only its class.
-    fn verified(kind: Kind, reply: VerifiedReply<'a>) -> Option<Self> {
-        let VerifiedReply {
-            payload,
-            block_before,
-            block_after,
-            failure,
-            hash,
-            rejected,
-            uncertain,
-            not_sent,
-            result,
-            revert,
-        } = reply;
-        // Members that belong to no shape of the operation.
-        let read_members = payload.is_some() || block_before.is_some() || block_after.is_some();
-        let broadcast_members = hash.is_some() || rejected.is_some() || uncertain.is_some();
-        let colibri_members = result.is_some() || revert.is_some();
-        if not_sent.is_some() {
-            return None;
-        }
-        let shapes = usize::from(failure.is_some())
-            + usize::from(payload.is_some())
-            + usize::from(hash.is_some())
-            + usize::from(rejected.is_some())
-            + usize::from(uncertain.is_some())
-            + usize::from(result.is_some())
-            + usize::from(revert.is_some());
-        if shapes != 1 {
-            return None;
-        }
+    /// A verified operation's reply, which must be exactly one of its
+    /// operation's shapes (design 0005, Verified operations): a failure
+    /// stands alone and carries only its class, and a member that belongs
+    /// to another shape is malformed whatever its value, `null` included.
+    /// Only a Myotis read's `block_before` and `block_after` may be `null`
+    /// or absent.
+    fn verified(kind: Kind, members: &Members<'a>) -> Option<Self> {
+        let class = || {
+            members
+                .get("failure")
+                .and_then(|raw| serde_json::from_str::<&str>(raw.get()).ok())
+        };
         match kind {
             Kind::MyotisRead => {
-                if broadcast_members || colibri_members {
+                if members.are(&["failure"]) {
+                    return myotis_class(class()?).map(Shape::MyotisFailure);
+                }
+                if !members.within("payload", &["payload", "block_before", "block_after"]) {
                     return None;
                 }
-                if let Some(class) = failure {
-                    return (!read_members)
-                        .then(|| myotis_class(class))
-                        .flatten()
-                        .map(Shape::MyotisFailure);
-                }
                 Some(Shape::Read {
-                    payload: payload?,
-                    before: block_before,
-                    after: block_after,
+                    payload: members.get("payload")?,
+                    before: unless_null(members.get("block_before")),
+                    after: unless_null(members.get("block_after")),
                 })
             }
             Kind::MyotisBroadcast => {
-                if read_members || colibri_members {
-                    return None;
+                if members.are(&["failure"]) {
+                    myotis_class(class()?).map(Shape::MyotisFailure)
+                } else if members.are(&["hash"]) {
+                    members.get("hash").map(Shape::Sent)
+                } else if members.are(&["rejected"]) {
+                    let rejected = members.get("rejected")?;
+                    let reason = serde_json::from_str::<ObjectOf<Rejected>>(rejected.get())
+                        .ok()?
+                        .into_inner()
+                        .reason;
+                    is_string(reason).then_some(Shape::Rejected(reason))
+                } else if members.are(&["uncertain"]) {
+                    let uncertain = members.get("uncertain")?;
+                    (serde_json::from_str::<bool>(uncertain.get()).ok() == Some(true))
+                        .then_some(Shape::Uncertain)
+                } else {
+                    None
                 }
-                if let Some(class) = failure {
-                    return myotis_class(class).map(Shape::MyotisFailure);
-                }
-                if let Some(hash) = hash {
-                    return Some(Shape::Sent(hash));
-                }
-                if let Some(rejected) = rejected {
-                    let reason = rejected.into_inner().reason;
-                    return is_string(reason).then_some(Shape::Rejected(reason));
-                }
-                (uncertain == Some(true)).then_some(Shape::Uncertain)
             }
             Kind::Colibri => {
-                if read_members || broadcast_members {
-                    return None;
+                if members.are(&["failure"]) {
+                    colibri_class(class()?).map(Shape::ColibriFailure)
+                } else if members.are(&["result"]) {
+                    members.get("result").map(Shape::ColibriResult)
+                } else if members.are(&["revert"]) {
+                    let revert = members.get("revert")?;
+                    let data = serde_json::from_str::<ObjectOf<Revert>>(revert.get())
+                        .ok()?
+                        .into_inner()
+                        .data;
+                    is_string(data).then_some(Shape::Revert(data))
+                } else {
+                    None
                 }
-                if let Some(class) = failure {
-                    return colibri_class(class).map(Shape::ColibriFailure);
-                }
-                if let Some(result) = result {
-                    return Some(Shape::ColibriResult(result));
-                }
-                let data = revert?.into_inner().data;
-                is_string(data).then_some(Shape::Revert(data))
             }
             Kind::Rpc | Kind::Blockscout => None,
         }
@@ -1373,6 +1492,7 @@ impl<'a> Shape<'a> {
         let reserve = |bytes: usize| machine.reserve_reply(io, bytes).map_err(|_| Unread::Over);
         let copy = |raw: &RawValue| raw.get().to_owned();
         Ok(match self {
+            Shape::Failed(transport) => (Answer::Failed(transport), reserve(0)?),
             Shape::NotSent { broadcast } => {
                 let answer = if broadcast {
                     Answer::Myotis(MyotisReply::NotSent)
@@ -1391,15 +1511,17 @@ impl<'a> Shape<'a> {
                 headers,
                 body,
             } => {
-                // Each name and value is at most its JSON text.
-                let mut reservation = reserve(headers.get().len())?;
-                let headers: BTreeMap<String, String> =
-                    serde_json::from_str(headers.get()).map_err(|_| Unread::Malformed)?;
+                // The vector's places, and every string the object holds,
+                // each at most its JSON text, all of them at once while the
+                // object is read (R2-M3).
+                let places = MAX_BLOCKSCOUT_HEADERS * std::mem::size_of::<(String, String)>();
+                let mut reservation = reserve(places.saturating_add(headers.get().len()))?;
+                let headers = kept_headers(headers).ok_or(Unread::Malformed)?;
                 let body = decode_base64(body, &mut reservation)?;
                 (
                     Answer::Blockscout {
                         status,
-                        headers: headers.into_iter().collect(),
+                        headers,
                         body,
                     },
                     reservation,

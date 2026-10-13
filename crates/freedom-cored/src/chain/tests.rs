@@ -85,7 +85,7 @@ impl Test {
         assert_eq!(self.chain.requests.answered(id), Some(Owner::Chain));
         let reply = match outcome {
             Ok(result) => shell_result(id, &result.to_string()),
-            Err(error) => Shell::Failed(error),
+            Err(error) => shell_error(id, &serde_json::to_string(&error).unwrap()),
         };
         self.chain.handle(In::Response { id, reply })?;
         self.chain.flush()
@@ -118,19 +118,31 @@ fn shell_result(id: u64, result: &str) -> Shell {
     }
 }
 
+/// A response message carrying `error`, as the reader hands it over.
+fn shell_error(id: u64, error: &str) -> Shell {
+    let prefix = format!(r#"{{"type":"response","id":{id},"error":"#);
+    let mut message = Zeroizing::new(prefix.clone().into_bytes());
+    message.extend_from_slice(error.as_bytes());
+    message.push(b'}');
+    Shell::Failed {
+        message,
+        error: prefix.len()..prefix.len() + error.len(),
+    }
+}
+
 /// Main's terminal reply as the machine's answer, for a request nobody
 /// owns (so nothing is charged); `None` when it is malformed.
 fn answer(kind: Kind, outcome: Result<Box<RawValue>, ErrorBody>) -> Option<Answer> {
-    match outcome {
-        Err(error) => transport_failure(&error).map(Answer::Failed),
-        Ok(raw) => {
-            let machine = Machine::new(0, Bounds::default());
-            Shape::parse(kind, raw.get())?
-                .read(&machine, 1)
-                .ok()
-                .map(|(answer, _)| answer)
+    let error;
+    let shape = match &outcome {
+        Err(body) => {
+            error = serde_json::to_string(body).unwrap();
+            Shape::failed(&error)?
         }
-    }
+        Ok(raw) => Shape::parse(kind, raw.get())?,
+    };
+    let machine = Machine::new(0, Bounds::default());
+    shape.read(&machine, 1).ok().map(|(answer, _)| answer)
 }
 
 fn chain_snapshot(read: &[&str], rpc: &[&str]) -> Value {
@@ -952,6 +964,68 @@ fn mains_answers_take_one_closed_shape() {
         (Kind::MyotisBroadcast, r#"{"rejected":["no"]}"#),
         (Kind::Colibri, "[true]"),
         (Kind::Colibri, r#"{"revert":["0x12"]}"#),
+        // A member of another shape is there whatever its value, `null`
+        // included (R2-M1).
+        (
+            Kind::MyotisBroadcast,
+            r#"{"failure":"not_running","uncertain":null}"#,
+        ),
+        (
+            Kind::MyotisBroadcast,
+            r#"{"failure":"not_running","rejected":null}"#,
+        ),
+        (
+            Kind::MyotisBroadcast,
+            r#"{"failure":"not_running","revert":null}"#,
+        ),
+        (
+            Kind::MyotisBroadcast,
+            r#"{"failure":"not_running","block_before":null}"#,
+        ),
+        (
+            Kind::MyotisBroadcast,
+            r#"{"failure":"not_running","block_after":null}"#,
+        ),
+        (
+            Kind::MyotisBroadcast,
+            r#"{"failure":"not_running","not_sent":null}"#,
+        ),
+        (Kind::MyotisBroadcast, r#"{"hash":"0xab","rejected":null}"#),
+        (Kind::MyotisBroadcast, r#"{"rejected":null}"#),
+        (Kind::MyotisBroadcast, r#"{"uncertain":null}"#),
+        (Kind::MyotisBroadcast, r#"{"not_sent":null}"#),
+        (Kind::MyotisBroadcast, r#"{"failure":null}"#),
+        (
+            Kind::MyotisBroadcast,
+            r#"{"failure":"error","failure":"not_running"}"#,
+        ),
+        (Kind::MyotisRead, r#"{"failure":"error","payload":null}"#),
+        (
+            Kind::MyotisRead,
+            r#"{"failure":"error","block_before":null}"#,
+        ),
+        (Kind::MyotisRead, r#"{"payload":{},"hash":null}"#),
+        (
+            Kind::MyotisRead,
+            r#"{"payload":{},"block_before":1,"block_after":1,"x":1}"#,
+        ),
+        (Kind::MyotisRead, r#"{"block_before":null}"#),
+        (Kind::Colibri, r#"{"failure":"capacity","revert":null}"#),
+        (Kind::Colibri, r#"{"result":1,"revert":null}"#),
+        (Kind::Colibri, r#"{"revert":null}"#),
+        // A Blockscout page with more headers than any page needs (R2-M3).
+        (
+            Kind::Blockscout,
+            r#"{"status":200,"headers":{"a":"","b":"","c":"","d":"","e":"","f":"","g":"","h":"","i":""},"body":""}"#,
+        ),
+        (
+            Kind::Blockscout,
+            r#"{"status":200,"headers":{"a":1},"body":""}"#,
+        ),
+        (
+            Kind::Blockscout,
+            r#"{"status":200,"headers":null,"body":""}"#,
+        ),
     ] {
         assert_eq!(answer(kind, raw(text)), None, "{kind:?} {text}");
     }
@@ -1248,6 +1322,81 @@ fn a_broadcast_whose_reply_cannot_be_read_stays_uncertain() {
     assert_eq!(reply["result"]["outcome"], "uncertain", "{reply}");
     // Nothing more was sent.
     assert!(requests(&frames).is_empty(), "{frames:?}");
+}
+
+#[test]
+fn a_read_may_carry_null_blocks_and_a_colibri_result_may_be_null() {
+    // R2-M1: `null` only where the protocol has it.
+    assert_eq!(
+        answer(
+            Kind::MyotisRead,
+            raw(r#"{"payload":null,"block_before":null,"block_after":7}"#)
+        ),
+        Some(Answer::Myotis(MyotisReply::Read {
+            payload: "null".into(),
+            block_before: None,
+            block_after: Some("7".into()),
+        }))
+    );
+    assert_eq!(
+        answer(Kind::Colibri, raw(r#"{"result":null}"#)),
+        Some(Answer::Colibri(ColibriReply::Result("null".into())))
+    );
+}
+
+#[test]
+fn a_page_keeps_the_headers_the_core_reads() {
+    // R2-M3: at most eight headers; the three the core reads are kept, in
+    // a vector whose places the answer counts.
+    let page = r#"{"status":429,"headers":{"Retry-After":"3","content-type":"application/json","x-ratelimit-reset":"1000","date":"x"},"body":""}"#;
+    let Some(Answer::Blockscout {
+        status, headers, ..
+    }) = answer(Kind::Blockscout, raw(page))
+    else {
+        panic!("not a page");
+    };
+    assert_eq!(status, 429);
+    assert_eq!(
+        headers,
+        [
+            ("Retry-After".to_owned(), "3".to_owned()),
+            ("x-ratelimit-reset".to_owned(), "1000".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn a_shell_error_is_read_in_place_and_charged_like_a_result() {
+    // Round 2, daemon review: a transport failure's message counts against
+    // its request before any of it is read, as a result's does.
+    let bounds = Bounds {
+        total_bytes: 512 * 1024,
+        ..Bounds::default()
+    };
+    let mut t = test_with(bounds, usize::MAX, 256, true);
+    t.configure(json!([chain_snapshot(&["direct"], &["a"])]));
+    for (id, text, code) in [
+        (3, "x".to_owned(), "chain_error"),
+        (4, "x".repeat(900_000), "budget"),
+    ] {
+        let (id, params) = read(id, "eth_blockNumber", json!([]));
+        t.call(id, "chain.request", &params);
+        let rpc = requests(&t.written())[0]["id"].as_u64().unwrap();
+        let error = json!({ "code": "network", "message": text }).to_string();
+        assert_eq!(t.chain.requests.answered(rpc), Some(Owner::Chain));
+        assert!(
+            t.chain
+                .handle(In::Response {
+                    id: rpc,
+                    reply: shell_error(rpc, &error),
+                })
+                .is_ok()
+        );
+        assert!(t.chain.flush().is_ok());
+        t.at(id);
+        let reply = t.written().into_iter().find(|f| f["id"] == id).unwrap();
+        assert_eq!(reply["error"]["code"], code, "{reply}");
+    }
 }
 
 #[test]
