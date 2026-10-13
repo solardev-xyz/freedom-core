@@ -85,21 +85,23 @@ impl Headers {
 
     /// `[...headers]`: sorted by name, repeated names combined with `", "`,
     /// except `set-cookie`, whose values stay separate.
+    ///
+    /// One sort, then one pass: the sort is stable, so each name's values
+    /// stay in list order, and a run of equal names is one group. Planning
+    /// so costs n log n in a request's headers, which arrive by the
+    /// thousand within its size bound, never a scan of the list per name
+    /// (PR #62 review, M1).
     pub fn entries(&self) -> Vec<(String, String)> {
-        let mut names: Vec<&str> = self.list.iter().map(|(n, _)| n.as_str()).collect();
-        names.sort_unstable();
-        names.dedup();
-        let mut out = Vec::new();
-        for name in names {
-            if name == "set-cookie" {
-                out.extend(
-                    self.list
-                        .iter()
-                        .filter(|(n, _)| n == name)
-                        .map(|(n, v)| (n.clone(), v.clone())),
-                );
-            } else if let Some(value) = self.get(name) {
-                out.push((name.to_owned(), value));
+        let mut sorted: Vec<&(String, String)> = self.list.iter().collect();
+        sorted.sort_by(|(a, _), (b, _)| a.cmp(b));
+        let mut out: Vec<(String, String)> = Vec::new();
+        for (name, value) in sorted {
+            match out.last_mut() {
+                Some((last, joined)) if last == name && name != "set-cookie" => {
+                    joined.push_str(", ");
+                    joined.push_str(value);
+                }
+                _ => out.push((name.clone(), value.clone())),
             }
         }
         out

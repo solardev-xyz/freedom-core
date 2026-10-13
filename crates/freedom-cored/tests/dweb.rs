@@ -483,6 +483,68 @@ fn dweb_open_is_mains_own() {
     assert!(ok["result"]["plan"]["fetch"].is_object(), "{ok}");
 }
 
+/// PR #62 security review, M1, measured: a hash host's plan with 7,000
+/// distinct headers (63,000 units with their overhead, within the 64 KiB
+/// bound), asked for while an unrelated lookup waits for its 50 ms
+/// deadline. Grouping the headers by rescanning them per name took about
+/// 135 ms of the naming thread in release and held that deadline back by
+/// as much. Timing-based, so ignored; run it in release:
+/// `cargo test --release -p freedom-cored --test dweb -- --ignored --nocapture many_headers`.
+#[test]
+#[ignore]
+// The measurements are the test's report, printed with `--nocapture`.
+#[allow(clippy::print_stderr)]
+fn many_headers_dont_hold_up_another_lookups_deadline() {
+    let (_root, mut core) = naming_core();
+    let headers: Vec<[String; 2]> = (0..7_000)
+        .map(|i| [format!("h{i:04}"), String::new()])
+        .collect();
+    let plan = open_params(&format!("bzz://{REFERENCE}/"), bundled(), json!(headers));
+    // The lookup, waiting for main, which never answers.
+    let lookup = Instant::now();
+    core.send(&shell_request(
+        3,
+        "naming.resolve_content",
+        json!({ "name": "vitalik.eth", "deadline_ms": 50 }),
+    ));
+    let first = core.recv();
+    assert_eq!(first["method"], "shell.rpc", "{first}");
+    open(&mut core, 4, plan.clone());
+    let (mut deadline, mut planned) = (None, None);
+    while deadline.is_none() || planned.is_none() {
+        let message = core.recv();
+        if message["type"] != "response" {
+            continue;
+        }
+        if message["id"] == 3 {
+            assert_eq!(message["error"]["code"], "deadline", "{message}");
+            deadline = Some(lookup.elapsed());
+        } else if message["id"] == 4 {
+            assert!(message["result"]["plan"]["fetch"].is_object());
+            planned = Some(lookup.elapsed());
+        }
+    }
+    // The core's own CPU time for ten such plans.
+    #[cfg(target_os = "linux")]
+    let (ticks, start) = (core.cpu_ticks(), Instant::now());
+    for id in 10..20 {
+        open(&mut core, id, plan.clone());
+        response_to(&mut core, id);
+    }
+    #[cfg(target_os = "linux")]
+    eprintln!(
+        "ten 7,000-header plans: {:?} wall, {} ms of the core's CPU",
+        start.elapsed(),
+        (core.cpu_ticks() - ticks) * 10
+    );
+    let (deadline, planned) = (deadline.unwrap(), planned.unwrap());
+    eprintln!("the 50 ms lookup's deadline came at {deadline:?}; the plan at {planned:?}");
+    assert!(
+        deadline < Duration::from_millis(100),
+        "the lookup's 50 ms deadline came at {deadline:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // chain.html
 
