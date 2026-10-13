@@ -76,6 +76,7 @@ All accept caller kinds `chrome` and `shell`.
   - Redirects follow naming's rule: each hop is checked against the endpoint policy and the onion gate, and the method and body are kept (deviation `rpc-redirects`).
 - **`not_sent`** is main's reply when it performed nothing: a stale generation, a cancel before the exchange started, or an endpoint refused before connecting. It proves that no byte of the request left main, which [broadcasts](#broadcast) rely on. Any other failure may have followed a send.
 - **The body** is today's `JSON.stringify({ jsonrpc: '2.0', id, method, params })`, with `id` a per-request counter (deviation `rpc-id`).
+- **Fixed-width numbers.** The core makes a request's frame before the request takes its slot at main ([Deadlines](#deadlines)). Its message `id` and its `deadline_ms` are then written into that frame as 20 characters each: spaces, then the digits (`"deadline_ms":                4850`). JSON allows whitespace before a value, so `JSON.parse` reads them as it reads any number.
 - **`shell.blockscout`** keeps main's DNS check: an off-origin redirect must not resolve to a local address. That check needs DNS, which the core doesn't do.
   - **Its `headers`** are an object of strings. The core reads three of them, by name with ASCII case ignored: `content-length`, `x-ratelimit-reset` and `retry-after`.
   - **Main sends those three** when the page has them.
@@ -219,6 +220,10 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
   - **Today** a request has no overall bound: an interactive read on chain 1 can take about 39 s, and more with user settings.
   - **Past the deadline,** a read or a fee quote ends with `deadline`, its I/O is cancelled, and nothing more is asked. A call that arrives with no time left (`deadline_ms` 0) replies `deadline` before any I/O, under its chain's current generation.
   - **A broadcast** ends as [Broadcast](#broadcast) says. Its attempts stop 10 s before the deadline, leaving room to [reconcile](#broadcast).
+- **A request's latest start** is a broadcast attempt's cutoff, 10 s before the deadline, or the end of a request's own `deadline_ms`. It is checked as the last step before the request is handed to the writer.
+  - **The check** runs under the gate the core's requests share, once the request's frame is made. Its clock reading is the one that also writes the request's `deadline_ms`.
+  - **A request past it** never goes, and is not sent.
+  - **Not covered:** the time a request then spends in the writer's queue and in the pipe. The 10 s reserve covers that. A request is a whole frame, written in the order it comes, and never waits behind a fragmented reply or for main's credit ([Frames](#frames)).
 - **Main's watchdog** is the deadline plus 15 s (0001).
 
 ### Cancellation
