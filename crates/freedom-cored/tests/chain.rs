@@ -1411,3 +1411,177 @@ fn reading_a_reply_reserves_before_it_allocates() {
         "the peak grew by {grown} MiB reading a 17 MiB reply"
     );
 }
+
+#[test]
+fn a_handed_off_broadcast_stays_uncertain_however_it_ends() {
+    // The safety review's control: once an attempt went to main, a cancel,
+    // a configuration change or the deadline leaves the broadcast
+    // uncertain, under the generation it ran in.
+    for myotis in [false, true] {
+        for end in ["cancel", "configure", "deadline"] {
+            let mut chain = snapshot(&[], &["a"], 5000);
+            if myotis {
+                chain["myotis"] = json!(true);
+                chain["broadcast_order"] = json!(["myotis"]);
+            }
+            let (_root, mut core) = configured(chain.clone());
+            let mut send = broadcast(4);
+            if end == "deadline" {
+                send["params"]["deadline_ms"] = json!(10_200);
+            }
+            core.send(&send);
+            let attempt = requests_only(&mut core, 1).pop().unwrap();
+            assert!(sends_raw(&attempt), "{attempt}");
+            match end {
+                "cancel" => core.send(&json!({ "type": "cancel", "id": 4 })),
+                "configure" => {
+                    chain["display_name"] = json!("changed");
+                    core.send(&request(5, "chain.configure", json!({ "chains": [chain] })));
+                }
+                _ => {}
+            }
+            let (ended, _) = serve(&mut core, 4, |request| {
+                assert!(!sends_raw(request), "{request}");
+                Some(rpc_result("null"))
+            });
+            assert_eq!(
+                ended["result"]["outcome"], "uncertain",
+                "{myotis}/{end}: {ended}"
+            );
+            assert_eq!(ended["result"]["generation"], 1);
+        }
+    }
+}
+
+#[test]
+fn every_transport_failure_of_an_attempt_keeps_it_possibly_sent() {
+    // The safety review's control: only not_sent proves nothing went.
+    for code in [
+        "cancelled",
+        "stale_generation",
+        "refused",
+        "busy",
+        "too_large",
+        "deadline",
+        "timeout",
+        "network",
+    ] {
+        let (_root, mut core) = configured(snapshot(&["direct"], &["a"], 5000));
+        core.send(&broadcast(3));
+        let (ended, seen) = serve(&mut core, 3, |request| {
+            Some(if sends_raw(request) {
+                failure(code)
+            } else {
+                rpc_result("null")
+            })
+        });
+        assert_eq!(ended["result"]["outcome"], "uncertain", "{code}: {ended}");
+        assert_eq!(ended["result"]["generation"], 1);
+        assert!(
+            seen.requests
+                .iter()
+                .any(|r| rpc_method(r) == "eth_getTransactionByHash")
+        );
+    }
+}
+
+#[test]
+fn myotis_broadcast_failure_classes_say_whether_it_was_sent() {
+    // The safety review's control (design 0005, The rest): four classes
+    // count as not sent, every other may have dispatched.
+    for class in [
+        "not_running",
+        "not_ready",
+        "queue_full",
+        "queue_deadline",
+        "state_changed",
+        "caller_deadline",
+        "too_large",
+        "busy",
+        "error",
+    ] {
+        let (_root, mut core) = configured(myotis_broadcaster());
+        core.send(&broadcast(4));
+        let (ended, _) = serve(&mut core, 4, |_| {
+            Some(json!({ "result": { "failure": class } }))
+        });
+        if ["not_running", "not_ready", "queue_full", "queue_deadline"].contains(&class) {
+            assert_eq!(
+                ended["error"]["data"]["outcome"], "not_sent",
+                "{class}: {ended}"
+            );
+            assert_eq!(ended["error"]["data"]["generation"], 1);
+        } else {
+            assert_eq!(ended["result"]["outcome"], "uncertain", "{class}: {ended}");
+            assert_eq!(ended["result"]["generation"], 1);
+        }
+    }
+}
+
+#[test]
+fn other_malformed_replies_to_an_attempt_end_the_connection() {
+    // The safety review's control: bad base64, not_sent beside another
+    // member, not_sent false.
+    for result in [
+        json!({ "status": 200, "body": "!" }),
+        json!({ "not_sent": true, "status": 200 }),
+        json!({ "not_sent": false }),
+    ] {
+        let (_root, mut core) = configured(snapshot(&["direct"], &["a"], 5000));
+        core.send(&broadcast(3));
+        malformed(
+            &mut core,
+            3,
+            json!({ "result": result }),
+            "malformed_shell_reply",
+        );
+    }
+}
+
+#[test]
+fn naming_gets_a_slot_while_chain_holds_main_busy() {
+    // The daemon review's fairness probe: chain fills main's 256 slots
+    // (reads of nine members each); a naming lookup still gets one of the
+    // slots answers free, rather than waiting behind chain's queue.
+    let (_root, mut core) = core();
+    let mut nine = snapshot(
+        &["quorum"],
+        &["c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"],
+        60_000,
+    );
+    nine["quorum"] = json!({ "k": 9, "m": 9, "timeout_ms": 60_000 });
+    call(&mut core, 2, "naming.configure", common::naming_snapshot());
+    configure(&mut core, 3, &[nine]);
+    for i in 0..64 {
+        let mut params = read("eth_blockNumber", json!([]));
+        params["deadline_ms"] = json!(120_000);
+        core.send(&request(100 + i, "chain.request", params));
+    }
+    let mut outstanding = requests_only(&mut core, 256);
+    assert!(outstanding.iter().all(|r| r["params"]["policy"] == "plain"));
+    core.send(&request(
+        500,
+        "naming.resolve_content",
+        json!({ "name": "vitalik.eth", "private": false }),
+    ));
+    let mut released = 0;
+    loop {
+        let held = outstanding.remove(0);
+        reply(&mut core, &held, failure("network"));
+        released += 1;
+        let next = loop {
+            let message = core.recv();
+            if message["type"] == "request" {
+                break message;
+            }
+        };
+        if next["params"]["generations"].is_object() {
+            break;
+        }
+        outstanding.push(next);
+        assert!(
+            released < 64,
+            "naming waited behind {released} chain requests"
+        );
+    }
+}
