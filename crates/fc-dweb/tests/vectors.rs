@@ -673,6 +673,11 @@ fn validation() {
             Err(refusal) => refusal.as_str(),
         };
         assert_eq!(got, s(entry, "expect"), "{}", id(entry));
+        // A request whose plan is refused is a deviation from today's dial.
+        if let Some(rid) = entry["request_id"].as_str() {
+            let marked = requests[rid]["deviation"].as_str() == Some("plan-paths");
+            assert_eq!(marked, got != "valid", "{rid}");
+        }
         *refused.entry(got).or_insert(0) += 1;
     }
     // Every reason is exercised.

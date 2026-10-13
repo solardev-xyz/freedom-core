@@ -864,6 +864,8 @@ async function buildRequests(ref, table) {
     const plan = planOf(c, run.request, js, run, ref, table);
     const entry = { id: `${c.scheme}-${c.id}`, request: run.request };
     if (c.resolution) entry.resolution = c.resolution;
+    // Today's handler dials these; design 0006 refuses them (plan-paths).
+    if (c.validation) entry.deviation = 'plan-paths';
     entry.js = js;
     entry.plan = plan;
     entry.validation = c.validation ?? 'valid';

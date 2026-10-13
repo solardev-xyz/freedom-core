@@ -20,9 +20,10 @@
 //!   It has no reference; its vectors are the design's.
 //!
 //! Where the core differs from today by design (each pinned by vectors):
-//! `body-idle` (a 60 s bound on a pending read, in every plan) and
+//! `body-idle` (a 60 s bound on a pending read, in every plan),
 //! `native-page-state` (`strip_page_state` runs on the native IPFS node's
-//! answers too, which today pass unstripped).
+//! answers too, which today pass unstripped) and `plan-paths` (validation
+//! refuses some targets today's handlers dial).
 //!
 //! The crate does no I/O: names are resolved, and bytes moved, by the caller.
 

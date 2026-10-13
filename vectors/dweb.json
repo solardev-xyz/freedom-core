@@ -3497,6 +3497,7 @@
           "up": true
         }
       },
+      "deviation": "plan-paths",
       "js": {
         "resolve": [],
         "fetch": {
@@ -10014,6 +10015,7 @@
           "basePath": "docs"
         }
       },
+      "deviation": "plan-paths",
       "js": {
         "resolve": [
           {
@@ -10141,6 +10143,7 @@
           "basePath": "docs"
         }
       },
+      "deviation": "plan-paths",
       "js": {
         "resolve": [
           {
@@ -10776,6 +10779,7 @@
           "basePath": "/a/../.."
         }
       },
+      "deviation": "plan-paths",
       "js": {
         "resolve": [
           {
@@ -10903,6 +10907,7 @@
           "basePath": "/a/../.."
         }
       },
+      "deviation": "plan-paths",
       "js": {
         "resolve": [
           {
@@ -11030,6 +11035,7 @@
           "basePath": "/a%2Fb"
         }
       },
+      "deviation": "plan-paths",
       "js": {
         "resolve": [
           {
@@ -11157,6 +11163,7 @@
           "basePath": "/a%2Fb"
         }
       },
+      "deviation": "plan-paths",
       "js": {
         "resolve": [
           {
@@ -11284,6 +11291,7 @@
           "basePath": "/../../.."
         }
       },
+      "deviation": "plan-paths",
       "js": {
         "resolve": [
           {
@@ -11410,6 +11418,7 @@
           "decoded": "../../stamps"
         }
       },
+      "deviation": "plan-paths",
       "js": {
         "resolve": [
           {
@@ -11536,6 +11545,7 @@
           "decoded": "not-a-reference"
         }
       },
+      "deviation": "plan-paths",
       "js": {
         "resolve": [
           {
@@ -11662,6 +11672,7 @@
           "decoded": 12
         }
       },
+      "deviation": "plan-paths",
       "js": {
         "resolve": [
           {
@@ -14940,6 +14951,7 @@
           "up": true
         }
       },
+      "deviation": "plan-paths",
       "js": {
         "resolve": [],
         "fetch": {
@@ -20611,6 +20623,7 @@
           "decoded": "../ipns/evil.example"
         }
       },
+      "deviation": "plan-paths",
       "js": {
         "resolve": [
           {
