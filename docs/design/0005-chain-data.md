@@ -508,12 +508,20 @@ Main's wallet chooses nonces for the sends it controls (0002). The guarantee cov
   - **What else it holds:** each hash's signed bytes, and the intent's unsigned fields and origin. Then "send again" needs neither the vault nor a device after a restart, and a replacement at N reuses the confirmed content. They are written with the record (mode 0600), never logged, and deleted when the intent settles.
   - **Committed first:** the record, with each new hash, is committed (written atomically, with fsync) before those bytes are handed to a broadcaster.
   - **Kept** until the intent is paid, failed or taken at finality, and never removed by clearing the history.
-  - **Void, the one exception:** an intent may be voided when every broadcast of every one of its hashes ended `not_sent`, so no byte of it ever left main (main's `not_sent`, Myotis's `{ not_sent }`, or an attempt the core never sent). Voiding frees N and forgets the bytes. Since nothing was sent, no copy can be mined, and a later intent at N can't pay twice. Any other outcome, `rejected` included, keeps the record: a refusal proves only that the nodes it reached refused it ([Refusals](#refusals)).
+  - **Handoffs are recorded too.** Before main hands an intent's bytes to a broadcaster, it commits a handoff line naming that broadcast, and later its outcome. A handoff with no recorded outcome (a lost reply, a crash, the core dying) stays possibly sent for good: no later result can clear it.
+  - **Void, the one exception:** the user may void an intent only when all of these hold.
+    - **Every handoff closed `not_sent`:** every handoff of every one of its hashes has a recorded outcome of `not_sent` (main's `not_sent`, Myotis's `{ not_sent }`, or an attempt the core never sent).
+    - **All in this process:** all of those handoffs and outcomes happened in this run of main. An intent recovered at startup is never eligible, because a crash or a restored older copy of the records can hide a handoff. A recovered intent is sent again instead.
+    - **The highest nonce:** no other held intent of the account has a higher nonce. Freeing N below a held N+1 would strand N+1, which can't be mined until N is used.
+  - **What voiding does:** frees N and forgets the bytes. Nothing was sent, so no copy can be mined, and a later intent at N can't pay twice.
+  - **What keeps the record:** any other outcome, `rejected` included, since a refusal proves only that the nodes it reached refused it ([Refusals](#refusals)).
+  - **Fencing:** voiding takes the account's reservation lock and is final. A send-again or replacement of that intent takes the same lock, and refuses a voided intent. So a retry already under way can't revive it, and a void can't race a retry.
   - **Identity:** `intent_id` is created when the user confirms a send, and retries carry it.
   - **After a restore,** a profile without records has nothing to retry. A request that arrives again (the same dApp call) is a new intent, for the user to confirm.
 - **Reservations.** Nonces are reserved per `(chain_id, sender)` under one lock in main, from reading the `pending` count to committing the record. That includes a pending device approval, so two callers can't take the same nonce.
   - **The first free nonce:** a new intent takes the `pending` count, as today, but at least one above every nonce a held intent of that account has.
-  - **The floor's cost:** a held intent that never reached the network (a crash before its broadcast, or a refusal) leaves a gap, and later sends wait behind it until it is sent again, replaced, voided or taken. Main therefore shows held intents, offers "send again" for each, and warns on a new send that would sit behind one.
+  - **The floor's cost:** a held intent that never reached the network (a crash before its broadcast, or a refusal) leaves a gap. Later sends wait behind it until it is sent again, replaced or taken, or, within the narrow conditions above, voided. Main therefore shows held intents, offers "send again" for each, and warns on a new send that would sit behind one.
+  - **Send again and replacements** take the account's lock too, but never read `pending`: they keep the intent's N.
   - **Release:** a reservation whose signature never happened (the user rejected it on the device) is released, since no bytes exist.
 
 ### Main's record
