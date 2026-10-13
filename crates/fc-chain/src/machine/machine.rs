@@ -194,24 +194,37 @@ fn ready(sleep: &mut Sleep<Request, Delivered>) -> bool {
     Pin::new(sleep).poll(&mut cx).is_ready()
 }
 
-/// What a reply takes, serialized: its result or message and an envelope.
-fn reply_bytes(result: &Result<Success, ChainError>) -> usize {
-    const ENVELOPE: usize = 256;
+/// A reply's frame around its result or message.
+const ENVELOPE: usize = 256;
+
+/// What a reply takes on the wire, serialized: its result or message and
+/// an envelope. Measured, never written.
+fn reply_wire_bytes(result: &Result<Success, ChainError>) -> usize {
     ENVELOPE
         + match result {
             Ok(Success::Read { result, trust, .. }) => {
                 result.as_ref().map_or(0, String::len) + trust.as_ref().map_or(0, String::len)
             }
-            Ok(Success::FeeQuote(quote)) => quote.to_json().len(),
-            Ok(Success::Broadcast { .. }) | Err(ChainError::Protocol(_)) => 0,
-            Err(ChainError::Thrown(thrown)) => {
-                thrown.message.to_json().len()
-                    + thrown
-                        .props
-                        .iter()
-                        .map(|(k, v)| k.len() + v.json().map_or(0, str::len))
-                        .sum::<usize>()
+            Ok(Success::FeeQuote(quote)) => quote.json_len(),
+            Ok(Success::Broadcast { hash, .. }) => hash.as_ref().map_or(0, String::len),
+            Err(ChainError::Protocol(_)) => 0,
+            Err(ChainError::Thrown(thrown)) => thrown.json_len(),
+        }
+}
+
+/// What a queued reply holds on the heap until the driver takes it: the
+/// output it is counted as (`memory-budgets`).
+fn reply_heap_bytes(result: &Result<Success, ChainError>) -> usize {
+    ENVELOPE
+        + match result {
+            Ok(Success::Read { result, trust, .. }) => {
+                result.as_ref().map_or(0, String::capacity)
+                    + trust.as_ref().map_or(0, String::capacity)
             }
+            Ok(Success::FeeQuote(quote)) => quote.heap_bytes(),
+            Ok(Success::Broadcast { hash, .. }) => hash.as_ref().map_or(0, String::capacity),
+            Err(ChainError::Protocol(_)) => 0,
+            Err(ChainError::Thrown(thrown)) => thrown.heap_bytes(),
         }
 }
 
@@ -444,23 +457,26 @@ impl Machine {
         generation: u64,
     ) {
         let bounds = self.ctx.bounds;
-        // The reply's error leaves its request's charge behind: the reply
-        // counts as output from here on.
+        // The reply's error leaves its request's charge, and the quorum's
+        // evidence, behind: the reply counts as output from here on, at
+        // what it holds (its message's UTF-16 units included).
         let result = match result {
             Err(ChainError::Thrown(mut thrown)) => {
                 thrown.charge = None;
+                thrown.quorum = None;
                 Err(ChainError::Thrown(thrown))
             }
             other => other,
         };
-        let bytes = reply_bytes(&result);
-        let (result, outcome) = if bytes > bounds.message_bytes {
-            (Err(ChainError::Protocol(Protocol::TooLarge)), outcome)
+        let result = if reply_wire_bytes(&result) > bounds.message_bytes {
+            Err(ChainError::Protocol(Protocol::TooLarge))
         } else {
-            (result, outcome)
+            result
         };
-        let bytes = reply_bytes(&result);
-        self.ctx.budget.borrow_mut().add_output(bytes);
+        self.ctx
+            .budget
+            .borrow_mut()
+            .add_output(reply_heap_bytes(&result));
         self.replies.push(Reply {
             id,
             result,
@@ -731,8 +747,10 @@ impl Machine {
 
     /// Main's terminal reply to I/O request `id`. It counts against its
     /// request's budget (`memory-budgets`); one that crosses it is dropped,
-    /// and the request ends at the next poll. False when nothing waits for
-    /// it (cancelled, or unknown).
+    /// and the request ends at the next poll. One whose request has ended
+    /// is dropped at once. Either way a verifier operation still completes,
+    /// freeing its slot. False when nothing waits for it (cancelled, or
+    /// unknown), or when it crossed the budget.
     pub fn complete(&mut self, id: u64, answer: Answer) -> bool {
         // Main enforces `max_bytes`; an answer over the cap anyway is the
         // `too_large` failure it should have been (`response-caps`).
@@ -743,11 +761,22 @@ impl Machine {
             answer => answer,
         };
         let owner = self.ctx.rt.owner_of(id).unwrap_or(0);
-        let request = if self.running.iter().any(|r| r.id == owner) {
-            owner
-        } else {
-            0
-        };
+        if !self.running.iter().any(|r| r.id == owner) {
+            // Its caller has ended: nobody will read the payload, which is
+            // dropped now rather than held uncharged. Main's terminal reply
+            // still completes the operation, so a verifier's slot is freed
+            // at the next poll.
+            drop(answer);
+            return self.ctx.rt.complete(
+                id,
+                Delivered {
+                    answer: Answer::NotSent,
+                    charge: Charge::none(),
+                    discarded: true,
+                },
+            );
+        }
+        let request = owner;
         match budget::charge(&self.ctx.budget, request, answer.bytes()) {
             Ok(charge) => self.ctx.rt.complete(
                 id,

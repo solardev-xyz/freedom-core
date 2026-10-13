@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use fc_json::index::{KeyOrder, Kind, Value, quote_units};
+use fc_json::index::{KeyOrder, Kind, Value, quote_units, quoted_len};
 use fc_json::number_to_string;
 
 /// A JavaScript string: UTF-16 code units. Node errors and the router's
@@ -44,6 +44,17 @@ impl JsString {
 
     /// `JSON.stringify(string)`: lone surrogates escaped, so the result is
     /// always well-formed.
+    /// The length of [`Self::to_json`]'s text, measured without writing
+    /// it.
+    pub fn json_len(&self) -> usize {
+        quoted_len(self.0.iter().copied())
+    }
+
+    /// What its units hold on the heap.
+    pub fn heap_bytes(&self) -> usize {
+        self.0.capacity().saturating_mul(2)
+    }
+
     pub fn to_json(&self) -> String {
         let mut out = String::with_capacity(self.0.len() + 2);
         quote_units(self.0.iter().copied(), &mut out);
@@ -306,7 +317,15 @@ pub(crate) fn null_index_message(i: usize) -> String {
 /// (nested arrays too, null elements empty); an object is `[object Object]`
 /// unless it has its own `toString` key, which makes `ToPrimitive` throw.
 pub(crate) fn js_string_of(value: Value<'_, '_>) -> Result<JsString, JsError> {
-    let mut out = JsString::new();
+    js_string_of_into(value, JsString::new())
+}
+
+/// [`js_string_of`], appended to `out`: a caller gives it a buffer sized
+/// by [`js_string_len`].
+pub(crate) fn js_string_of_into(
+    value: Value<'_, '_>,
+    mut out: JsString,
+) -> Result<JsString, JsError> {
     if value.kind() != Kind::Array {
         push_scalar(value, &mut out)?;
         return Ok(out);

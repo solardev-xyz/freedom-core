@@ -10,7 +10,7 @@ use fc_naming::session::exec::{Either, race};
 
 use super::budget::Charge;
 use super::config::{Chain, ms};
-use super::ctx::{Over, reserve, stall, within};
+use super::ctx::{Over, reserve, within};
 use super::ctx::{Release, Req, reply, started};
 use super::error::{ErrorClass, Fallback, Prop, Thrown};
 use super::exchange::{ResultText, exchange, indexed, owned};
@@ -435,7 +435,9 @@ async fn via_myotis(
     let ctx = &req.ctx;
     let chain_id = req.chain.chain_id;
     let budget = deadline.filter(|d| *d != 0.0).unwrap_or(req.chain.timeout);
-    let waiter = ctx.acquire_myotis(chain_id, !background).map_err(|()| {
+    // The claim gives the slot up on every way out before the operation
+    // is dispatched, a dropped request's included.
+    let mut claim = ctx.claim_myotis(chain_id, !background).map_err(|()| {
         Thrown::unavailable(if background {
             "Myotis is busy with interactive reads"
         } else {
@@ -443,17 +445,9 @@ async fn via_myotis(
         })
     })?;
     let started_at = req.now();
-    if let Some(waiter) = waiter {
+    if claim.waiting() {
         let timer = started(ctx.rt.sleep(ms(budget)));
-        let granted = std::future::poll_fn(|_| {
-            if ctx.granted(chain_id, waiter) {
-                std::task::Poll::Ready(())
-            } else {
-                std::task::Poll::Pending
-            }
-        });
-        if let Either::Right(()) = race(granted, timer).await {
-            ctx.abandon_myotis(chain_id, waiter);
+        if let Either::Right(()) = race(claim.granted(), timer).await {
             return Err(Thrown::source_deadline("Myotis", budget));
         }
     }
@@ -464,35 +458,19 @@ async fn via_myotis(
     // `requestMyotis`'s checks, then the operation, which keeps the slot
     // until main's terminal reply.
     if !ctx.ready(chain_id) {
-        ctx.release_myotis(chain_id);
         return Err(Thrown::unavailable(MYOTIS_NOT_READY));
     }
     // The operation's copy of the call (at most the params, which are
     // already JSON.stringify's), reserved before it is made.
-    let mut made = match ctx.reserve(params.len() + 256) {
-        Ok(made) => made,
-        Err(Over) => {
-            ctx.release_myotis(chain_id);
-            return stall().await;
-        }
-    };
-    let operation = match myotis_operation(method, params) {
-        Ok(operation) => operation,
-        Err(failure) => {
-            ctx.release_myotis(chain_id);
-            return Err(myotis_failure(failure));
-        }
-    };
+    let mut made = reserve!(ctx, params.len() + 256);
+    let operation = myotis_operation(method, params).map_err(myotis_failure)?;
     let request = Request::Verified(VerifiedOp::MyotisRead {
         chain_id,
         operation,
     });
-    if made.settle(request.bytes()).is_err() {
-        ctx.release_myotis(chain_id);
-        return stall().await;
-    }
+    within!(made.settle(request.bytes()).map_err(|()| Over));
     ctx.pend(made);
-    let cell = ctx.hold(request, Release::Myotis(chain_id));
+    let cell = claim.dispatch(request);
     match race(reply(&cell), timer).await {
         Either::Left(delivered) => myotis_result(req, method, include_trust, delivered).await,
         Either::Right(()) => Err(Thrown::source_deadline("Myotis", remaining)),

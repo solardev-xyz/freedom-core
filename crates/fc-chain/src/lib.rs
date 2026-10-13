@@ -6,7 +6,8 @@
 //! - An RPC answer as `requestRpcUrl` reads it: [`decode_answer`].
 //! - Agreement between answers, as SHA-256 of `stableValue`:
 //!   [`stable_digest`].
-//! - `feeQuote`: [`fee_quote`].
+//! - `feeQuote`: [`fee_quote`], and [`fee_quote_reserving`] for a caller that
+//!   reserves its allocations first.
 //! - `safeErrorMessage` and the router's failure texts:
 //!   [`safe_error_message`], [`request_failure_text`],
 //!   [`no_source_left_text`], [`unsupported_read_method_text`].
@@ -66,7 +67,7 @@ pub use blockscout::{
     rpc_transfer_log_well_formed, rpc_transfer_logs_well_formed, transfers_json,
 };
 pub use broadcast::{AttemptClass, RefusalReason, broadcast_refusal, classify_broadcast_answer};
-pub use fee::{FeeQuote, fee_quote};
+pub use fee::{FeeQuote, fee_quote, fee_quote_reserving};
 pub use js::{JsError, JsString, is_js_whitespace};
 pub use logs::{
     LOG_RANGE_CAP_TTL_MS, LOG_RANGE_REFUSAL_CODE, LOG_SCAN_COOLDOWN_MS, LOG_SCAN_QUORUM_ROUNDS,

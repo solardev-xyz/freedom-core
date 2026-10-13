@@ -1479,3 +1479,175 @@ fn reconciliation_never_refuses() {
         assert_eq!(outcome(world.reply(id)).0, BroadcastOutcome::Uncertain);
     }
 }
+
+// ---------------------------------------------------------------------------
+// The safety review's second round (PR #55).
+
+#[test]
+fn a_myotis_waiter_that_ends_gives_its_place_up() {
+    // A waiter dropped with its request leaves the queue at once, and the
+    // slot passes on when the read in flight ends.
+    for reason in ["cancel", "configure", "deadline"] {
+        let config = chain(1, &["myotis"], &["a"], ("3", "2", "5000"));
+        let mut world = World::new(Bounds::default(), std::slice::from_ref(&config));
+        world.machine.availability(1, true);
+        world.submit(read(1, "eth_call", CALL), None);
+        let io = world.requests[0].0;
+        let waiter = world.submit(read(1, "eth_call", CALL), Some(1_000));
+        assert_eq!(world.machine.state_tables().myotis_slots, vec![(1, 1, 1)]);
+        match reason {
+            "cancel" => {
+                world.machine.cancel(waiter);
+                world.collect();
+            }
+            "configure" => {
+                let mut next = config;
+                next.display_name = "Changed".into();
+                world.machine.configure(&[next]);
+                world.collect();
+            }
+            _ => world.run(1_000),
+        }
+        assert!(world.replied(waiter), "{reason}");
+        assert_eq!(
+            world.machine.state_tables().myotis_slots,
+            vec![(1, 1, 0)],
+            "{reason}"
+        );
+        world.answer(io, Answer::Myotis(MyotisReply::Failure(MyotisClass::Error)));
+        assert!(
+            world.machine.state_tables().myotis_slots.is_empty(),
+            "{reason}"
+        );
+        // The next read takes the slot at once.
+        let before = world.requests.len();
+        world.submit(read(1, "eth_call", CALL), None);
+        assert!(
+            matches!(
+                world.requests.get(before),
+                Some((_, _, Request::Verified(VerifiedOp::MyotisRead { .. }), _))
+            ),
+            "{reason}"
+        );
+    }
+}
+
+#[test]
+fn a_myotis_slot_granted_to_a_request_over_its_budget_passes_on() {
+    // The waiter is granted the slot, then crosses the total budget
+    // reserving its operation's copy of its call: the slot is freed with
+    // it, never dispatched.
+    let bounds = Bounds::default();
+    let mut world = World::new(bounds, &[chain(1, &["myotis"], &["a"], ("3", "2", "5000"))]);
+    world.machine.availability(1, true);
+    let first = world.submit(read(1, "eth_call", CALL), None);
+    let io = world.requests[0].0;
+    let large = format!(
+        r#"[{{"to":"0xabc","data":"0x{}"}},"latest"]"#,
+        "ab".repeat(2_000)
+    );
+    let waiter = world.submit(read(1, "eth_call", &large), None);
+    assert_eq!(world.machine.state_tables().myotis_slots, vec![(1, 1, 1)]);
+    // Unwritten output leaves 3,000 bytes of the total: room for the first
+    // read's answer and its work, not for the waiter's 4 KB call copy.
+    world
+        .machine
+        .set_output_backlog(bounds.total_bytes - world.machine.held() - 3_000);
+    world.answer(
+        io,
+        Answer::Myotis(MyotisReply::Read {
+            payload: r#"{"result_hex":"0x1"}"#.into(),
+            block_before: None,
+            block_after: None,
+        }),
+    );
+    assert_eq!(result(world.reply(first)), Some(r#""0x1""#));
+    assert_eq!(protocol(world.reply(waiter)), Some(Protocol::Budget));
+    assert_eq!(world.requests.len(), 1);
+    assert!(world.machine.state_tables().myotis_slots.is_empty());
+}
+
+#[test]
+fn a_broadcast_answer_stays_charged_while_its_error_is_copied() {
+    // The body and the copy of its error's 3,000-byte data coexist: over
+    // 5,000 together, though each fits. The attempt is outstanding, so the
+    // outcome is uncertain, never a refusal.
+    let bounds = Bounds {
+        request_bytes: 5_000,
+        ..Bounds::default()
+    };
+    let mut world = World::new(bounds, &[broadcaster(&["direct"], &["a"])]);
+    let id = world.submit(send(), None);
+    let data = format!("\"0x{}\"", "ab".repeat(1_500));
+    let body = format!(r#"{{"error":{{"code":-32000,"message":"nonce too low","data":{data}}}}}"#);
+    assert!(body.len() < 5_000);
+    world.answer(
+        world.rpcs()[0].0,
+        Answer::Rpc {
+            status: 200,
+            body: exact(body),
+        },
+    );
+    assert_eq!(outcome(world.reply(id)).0, BroadcastOutcome::Uncertain);
+    assert_eq!(world.reply(id).settled, 0);
+    assert_eq!(world.rpcs().len(), 1);
+}
+
+#[test]
+fn a_fee_quotes_codec_work_counts_against_the_budget() {
+    // Two answers kept (a gas price of 1,000 nulls, a 9,000-character
+    // priority fee) fit; the codec's index of the first does not.
+    let gas = format!("[{}]", vec!["null"; 1_000].join(","));
+    let priority = format!("\"{}\"", "a".repeat(9_000));
+    let quote = |bounds: Bounds| {
+        let mut world = World::new(bounds, &[chain(1, &["direct"], &["a"], ("3", "2", "5000"))]);
+        let id = world.submit(Call::FeeQuote { chain_id: 1 }, None);
+        world.answer(world.rpcs()[0].0, ok(&gas));
+        assert!(!world.replied(id));
+        world.answer(world.rpcs()[1].0, ok(&priority));
+        world.reply(id).clone()
+    };
+    let bounded = quote(Bounds {
+        request_bytes: 15_000,
+        ..Bounds::default()
+    });
+    assert_eq!(protocol(&bounded), Some(Protocol::Budget));
+    // Within the default budget the codec's answer is today's.
+    match quote(Bounds::default()).result {
+        Err(ChainError::Thrown(error)) => assert!(
+            error
+                .message
+                .to_string_lossy()
+                .contains("Cannot convert ,,,"),
+            "{:?}",
+            error.message
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_queued_error_reply_counts_its_utf16_message() {
+    let mut world = World::new(
+        Bounds::default(),
+        &[chain(1, &["direct"], &["a"], ("3", "2", "5000"))],
+    );
+    let id = world.submit(read(1, "eth_call", CALL), None);
+    let io = world.rpcs()[0].0;
+    assert!(
+        world
+            .machine
+            .complete(io, node_error(-32000, &"a".repeat(3_000)))
+    );
+    world.machine.poll();
+    assert_eq!(world.machine.running(), 0);
+    // 3,000 units of UTF-16 in the queue: at least 6,000 bytes.
+    assert!(world.machine.held() >= 6_000, "{}", world.machine.held());
+    let replies = world.machine.take_replies();
+    match &replies.iter().find(|r| r.id == id).unwrap().result {
+        Err(ChainError::Thrown(error)) => assert_eq!(error.message.len(), 3_000),
+        other => panic!("{other:?}"),
+    }
+    world.machine.set_output_backlog(0);
+    assert_eq!(world.machine.held(), 0);
+}

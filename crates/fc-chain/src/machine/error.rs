@@ -272,6 +272,35 @@ impl Thrown {
         )
     }
 
+    /// What it holds on the heap: its message's units and its
+    /// properties' texts, with their shared headers.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        const RC: usize = 2 * std::mem::size_of::<usize>();
+        let props = self
+            .props
+            .capacity()
+            .saturating_mul(std::mem::size_of::<(&'static str, Prop)>());
+        RC + std::mem::size_of::<JsString>()
+            + self.message.heap_bytes()
+            + props
+            + self
+                .props
+                .iter()
+                .map(|(_, v)| v.json().map_or(0, |json| RC + json.len()))
+                .sum::<usize>()
+    }
+
+    /// The length of its message's JSON and its properties' texts, measured
+    /// without writing them.
+    pub(crate) fn json_len(&self) -> usize {
+        self.message.json_len()
+            + self
+                .props
+                .iter()
+                .map(|(k, v)| k.len() + v.json().map_or(0, str::len))
+                .sum::<usize>()
+    }
+
     /// `instanceof SourceUnavailableError`.
     pub(crate) fn is_unavailable(&self) -> bool {
         matches!(

@@ -451,9 +451,13 @@ async fn attempt(
 ) -> (Class, Option<Thrown>) {
     match answer {
         Answer::Rpc { status, body } => {
-            let decoded = decode(req, status, body, charge)
-                .await
-                .map(|(answer, _held)| answer);
+            // The decoded answer keeps its charge through classification
+            // and the error's copies; it is dropped first, its charge with
+            // it.
+            let (_held, decoded) = match decode(req, status, body, charge).await {
+                Ok((answer, held)) => (Some(held), Ok(answer)),
+                Err(error) => (None, Err(error)),
+            };
             let hash = state.borrow().hash;
             let class = match hash {
                 Some(hash) => crate::broadcast::classify_broadcast_answer(&hash, &decoded),

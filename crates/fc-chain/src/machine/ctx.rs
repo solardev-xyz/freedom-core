@@ -269,6 +269,24 @@ impl Ctx {
         }
     }
 
+    /// `acquireMyotisSlot` as a claim that gives the slot up when dropped
+    /// before its operation is dispatched ([`MyotisClaim`]).
+    pub(crate) fn claim_myotis(
+        self: &Rc<Self>,
+        chain_id: u64,
+        queue: bool,
+    ) -> Result<MyotisClaim, ()> {
+        let state = match self.acquire_myotis(chain_id, queue)? {
+            None => Claim::Held,
+            Some(waiter) => Claim::Waiting(waiter),
+        };
+        Ok(MyotisClaim {
+            ctx: Rc::clone(self),
+            chain_id,
+            state,
+        })
+    }
+
     /// Takes a Colibri slot for `key`.
     pub(crate) fn add_colibri(&self, key: &str) {
         self.state.borrow_mut().colibri.add(key);
@@ -339,6 +357,66 @@ impl Ctx {
 
     pub(crate) fn progress(&self) -> u64 {
         self.state.borrow().progress
+    }
+}
+
+/// A request's claim on a chain's Myotis slot: queued, holding the slot,
+/// or handed to the operation it dispatched. Dropped before that hand-off
+/// (its request cancelled, retired by a configuration change, past its
+/// deadline or over its budget; or the read gave up), it gives the slot
+/// up: a waiter leaves the queue, a slot granted or held passes on. A
+/// dispatched operation keeps the slot until main's terminal reply.
+pub(crate) struct MyotisClaim {
+    ctx: Rc<Ctx>,
+    chain_id: u64,
+    state: Claim,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Claim {
+    Waiting(u64),
+    Held,
+    Dispatched,
+}
+
+impl MyotisClaim {
+    /// Whether it is queued, not yet granted the slot.
+    pub(crate) fn waiting(&self) -> bool {
+        matches!(self.state, Claim::Waiting(_))
+    }
+
+    /// Waits until the slot is this claim's.
+    pub(crate) async fn granted(&mut self) {
+        let Claim::Waiting(waiter) = self.state else {
+            return;
+        };
+        let (ctx, chain_id) = (&self.ctx, self.chain_id);
+        std::future::poll_fn(|_| {
+            if ctx.granted(chain_id, waiter) {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+        self.state = Claim::Held;
+    }
+
+    /// Dispatches the operation, which keeps the slot until main's
+    /// terminal reply.
+    pub(crate) fn dispatch(mut self, request: Request) -> ReplyCell {
+        self.state = Claim::Dispatched;
+        self.ctx.hold(request, Release::Myotis(self.chain_id))
+    }
+}
+
+impl Drop for MyotisClaim {
+    fn drop(&mut self) {
+        match self.state {
+            Claim::Waiting(waiter) => self.ctx.abandon_myotis(self.chain_id, waiter),
+            Claim::Held => self.ctx.release_myotis(self.chain_id),
+            Claim::Dispatched => {}
+        }
     }
 }
 

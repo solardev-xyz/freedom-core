@@ -6,7 +6,7 @@ use std::cell::RefCell;
 
 use fc_json::index::Index;
 
-use super::ctx::{Release, Req, reply, reserve, within};
+use super::ctx::{Over, Release, Req, reply, reserve, within};
 use super::error::{ErrorClass, Thrown};
 use super::exchange::{ResultText, exchange};
 use super::io::{Answer, Delivered, MyotisReply, Request, VerifiedOp};
@@ -14,13 +14,34 @@ use super::logs::Keeper;
 use super::read::{
     MYOTIS_FAILED, SourceOptions, charged, myotis_adapter_error, myotis_failure, request_source,
 };
-use crate::fee::{FeeQuote, fee_quote as quote};
+use crate::fee::{FeeQuote, fee_quote_reserving};
 use crate::js::JsError;
 use crate::myotis::{MYOTIS_NOT_READY, MyotisOperation, myotis_fee_values};
 use crate::text::fee_quote_failure_text;
 
 fn js(error: JsError) -> Thrown {
     Thrown::of_class(ErrorClass::from_name(error.name), error.message)
+}
+
+/// `feeQuote` with every allocation the codec makes reserved first
+/// (`memory-budgets`): its indexes, conversions, limbs, messages and the
+/// quote. A refused reservation stops the request; an error keeps the
+/// work's charge, settled to its size, while any copy of it lives.
+async fn quote_within(
+    req: &Req,
+    source: &str,
+    gas_price: Option<&str>,
+    priority: Option<&str>,
+) -> Result<FeeQuote, Thrown> {
+    let mut work = reserve!(req.ctx, 0);
+    let quoted = fee_quote_reserving(source, gas_price, priority, |bytes| {
+        work.settle(work.bytes().saturating_add(bytes))
+            .map_err(|()| Over)
+    });
+    match within!(quoted) {
+        Ok(quote) => Ok(quote),
+        Err(error) => Err(within!(charged(js(error), work))),
+    }
 }
 
 fn json(result: &ResultText) -> Option<&str> {
@@ -89,7 +110,7 @@ async fn myotis(req: &Req) -> Result<FeeQuote, Thrown> {
                 Ok(values) => values,
                 Err(failure) => return Err(within!(charged(myotis_failure(failure), copies))),
             };
-            quote("myotis", Some(&gas), priority.as_deref()).map_err(js)
+            quote_within(req, "myotis", Some(&gas), priority.as_deref()).await
         }
         Answer::Myotis(MyotisReply::Failure(class)) => Err(myotis_adapter_error(req, class)),
         _ => Err(Thrown::error(MYOTIS_FAILED)),
@@ -112,7 +133,7 @@ async fn direct(req: &Req) -> Result<FeeQuote, Thrown> {
             let priority = exchange(req, url, "eth_maxPriorityFeePerGas", "[]", timeout)
                 .await
                 .unwrap_or(None);
-            quote("direct", json(&gas), json(&priority)).map_err(js)
+            quote_within(req, "direct", json(&gas), json(&priority)).await
         };
         match attempt.await {
             Ok(quote) => return Ok(quote),
@@ -152,5 +173,5 @@ async fn other(req: &Req, source: &str) -> Result<FeeQuote, Thrown> {
     ))
     .await
     .map_or(None, |answer| answer.result);
-    quote(source, json(&gas.result), json(&priority)).map_err(js)
+    quote_within(req, source, json(&gas.result), json(&priority)).await
 }
