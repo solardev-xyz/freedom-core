@@ -1281,22 +1281,17 @@ fn plain(raw: &RawValue) -> Option<&str> {
 }
 
 /// How deep `text`'s arrays and objects nest: what serde_json's pass over a
-/// raw value keeps on its scratch stack, a byte a level. Counted in place.
+/// raw value keeps on its scratch stack, a byte a level. Counted in place,
+/// a string's contents skipped ([`string_close`]): a large reply is almost
+/// all one string (a base64 body), so this is a pass at several GB/s.
 fn nesting(text: &str) -> usize {
+    let s = text.as_bytes();
     let (mut depth, mut deepest) = (0usize, 0usize);
-    let (mut string, mut escaped) = (false, false);
-    for byte in text.bytes() {
-        if string {
-            match byte {
-                _ if escaped => escaped = false,
-                b'\\' => escaped = true,
-                b'"' => string = false,
-                _ => {}
-            }
-            continue;
-        }
+    let mut i = 0usize;
+    while let Some(&byte) = s.get(i) {
+        i += 1;
         match byte {
-            b'"' => string = true,
+            b'"' => i = string_close(s, i),
             b'[' | b'{' => {
                 depth += 1;
                 deepest = deepest.max(depth);
@@ -1306,6 +1301,32 @@ fn nesting(text: &str) -> usize {
         }
     }
     deepest
+}
+
+/// Just past the quote that closes the string whose contents start at `i`
+/// (or the end of `s`): a backslash and the byte after it are skipped, so
+/// an escaped quote doesn't close it. Whole 16-byte chunks holding neither
+/// a quote nor a backslash go a chunk at a time: the fold has no early
+/// exit, so it vectorizes.
+fn string_close(s: &[u8], mut i: usize) -> usize {
+    const CHUNK: usize = 16;
+    let special = |b: u8| (b == b'"') | (b == b'\\');
+    loop {
+        while let Some(chunk) = s.get(i..i + CHUNK) {
+            if chunk.iter().fold(false, |hit, &b| hit | special(b)) {
+                break;
+            }
+            i += CHUNK;
+        }
+        while s.get(i).is_some_and(|&b| !special(b)) {
+            i += 1;
+        }
+        match s.get(i) {
+            Some(b'"') => return i + 1,
+            Some(_) => i += 2,
+            None => return s.len(),
+        }
+    }
 }
 
 /// Past this nesting, a reply nobody reads (or whose reading crossed its

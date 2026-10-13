@@ -2463,3 +2463,86 @@ fn an_html_document_that_isnt_served_is_todays_error() {
         assert_eq!(error["data"]["generation"], 1);
     }
 }
+
+/// The byte-at-a-time count `nesting` replaced, kept as the oracle.
+fn reference_nesting(text: &str) -> usize {
+    let (mut depth, mut deepest) = (0usize, 0usize);
+    let (mut string, mut escaped) = (false, false);
+    for byte in text.bytes() {
+        if string {
+            match byte {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match byte {
+            b'"' => string = true,
+            b'[' | b'{' => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    deepest
+}
+
+/// `nesting` against the count it replaced, on random texts over the bytes
+/// it treats differently (brackets inside and outside strings, quotes,
+/// backslash runs, multi-byte characters) and on each of them at every
+/// offset around the chunk boundaries of a long string. It counts any
+/// text, valid JSON or not, as the old loop did.
+#[test]
+fn nesting_counts_as_the_byte_scan_did() {
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut below = |n: usize| {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        usize::try_from(state.wrapping_mul(0x9e37_79b9_7f4a_7c15) % n as u64).unwrap()
+    };
+    const PIECES: &[&str] = &[
+        "\"",
+        "\\",
+        "\\\"",
+        "\\\\",
+        "[",
+        "]",
+        "{",
+        "}",
+        ",",
+        ":",
+        "a",
+        "0",
+        " ",
+        "\u{e9}",
+        "\u{1f510}",
+        "\n",
+    ];
+    for _ in 0..100_000 {
+        let text: String = (0..below(60))
+            .map(|_| PIECES[below(PIECES.len())])
+            .collect();
+        assert_eq!(nesting(&text), reference_nesting(&text), "{text:?}");
+    }
+    for run in 0..70 {
+        for special in ["\"", "\\\"", "\\\\", "\\", "[", "\\[", "\u{e9}", ""] {
+            for tail in ["", "\"", "\"[[]", "\\\"[{", "]]"] {
+                let text = format!("[{{\"k\":\"{}{special}{tail}", "x".repeat(run));
+                assert_eq!(nesting(&text), reference_nesting(&text), "{text:?}");
+            }
+        }
+    }
+    // Deep, and a large reply's shape: one long string beside the brackets.
+    let deep = format!("{}{}", "[".repeat(10_000), "]".repeat(10_000));
+    assert_eq!(nesting(&deep), 10_000);
+    let body = "A".repeat(1 << 20);
+    let reply =
+        format!(r#"{{"type":"response","id":7,"result":{{"status":200,"body":"{body}"}}}}"#);
+    assert_eq!(nesting(&reply), reference_nesting(&reply));
+    assert_eq!(nesting(&reply), 2);
+}
