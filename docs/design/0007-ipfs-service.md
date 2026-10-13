@@ -237,16 +237,23 @@ Electron main (profile P)
   - **Request work** runs on tasks marked as request tasks, built with `panic = "unwind"`. A panic there is caught at its join handle, after the hook's fixed line:
     - before the head, it becomes that request's `internal` error;
     - after the head, the stream's `internal` abort.
-  - **Every other task** (swarms, background retrieval, the instance's own tasks) belongs to an instance's task set or to the process ([Instances](#instances-and-their-teardown)). The service observes every such task's end. A panic, or an unexpected end, of a non-request task exits the process with 70, so it is a crash and main restarts it.
+  - **Every other task the service spawns itself** (the Bitswap swarm's task, background retrieval, the instance's own tasks, the reader and writer) belongs to an instance's task set or to the process ([Instances](#instances-and-their-teardown)). The service observes each of these tasks' end. A panic, or an unexpected end, of one exits the process with 70, so it is a crash and main restarts it.
+  - **Tasks the libraries spawn on an instance's runtime** (hyper's and libp2p's connection tasks) have no join handle the service holds, so their ordinary completion isn't observed. Their lifetime ends with the instance's runtime, whose shutdown is proven ([teardown](#instances-and-their-teardown)). A panic in one is still caught by the hook, and the hook exits the process with 70: any panic outside a request task is fatal, whether or not its task is tracked.
   - **A panic on any non-runtime thread** exits with 70 from the hook.
   - The service's own code is under the workspace lints: no `unsafe`, `unwrap`, `expect` or `panic!`.
 
 ### Inside the process
 
-- **Runtime:**
-  - tokio, multi-threaded. freedom-ipfs requires it: its block provider calls `block_in_place` (`rv:5447`, `rv:5499`, `rv:5534`), which panics on a current-thread runtime.
-  - Worker threads: the core count, capped at 8.
-  - The blocking pool's thread cap is 512, stated explicitly. Every in-flight block fetch holds a thread. What bounds that work is the process-wide [retrieval admission](#budgets), not this cap or upstream's constants.
+- **Runtimes: one for the process, and one per instance.**
+  - All are tokio, multi-threaded. freedom-ipfs requires it: its block provider calls `block_in_place` (`rv:5448`, `rv:5500`, `rv:5535`), which panics on a current-thread runtime.
+  - **The process runtime** runs the reader, the writer, admission and the control methods. It has 2 worker threads.
+  - **Each instance gets its own runtime,** which its [teardown](#instances-and-their-teardown) shuts down last.
+    - This is needed because hyper (through reqwest, which has no executor hook) and libp2p spawn connection tasks on whatever runtime is current. No task set can track those tasks.
+    - Upstream's implementation showed that with every request cancelled and the task set empty, connection sockets stayed open until the instance's runtime was shut down. Shutting the runtime down is what proves no socket survives.
+  - **Per-instance bounds:**
+    - The persistent process's one instance gets the core count of worker threads, capped at 8, and a blocking cap of 512.
+    - Each of the ephemeral process's up to 8 instances gets 2 worker threads and a blocking cap of 64. That makes at most 16 workers and 512 blocking threads in total.
+    - Every in-flight block fetch holds a blocking thread. What bounds that work is the process-wide [retrieval admission](#budgets), not these caps or upstream's constants.
 - **Tasks,** as in `freedom-cored`:
   - one reader and one writer ([Frames](#frames));
   - one task per request;
@@ -265,7 +272,8 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 
 - **The group:** upstream's builder returns an `Instance` that owns:
   - **a root cancellation token,** which every operation observes: HTTP requests, DoH and DNS lookups, DHT queries, Bitswap requests, and each `block_on` inside a blocking region;
-  - **a task set,** with every task the instance spawns: request work, the shared Bitswap swarm's task (`rv:7390` spawns it today), DHT query swarms, and any background retrieval;
+  - **a task set,** with every task the instance spawns: request work, the shared Bitswap swarm's task (`rv:7390` spawns it today), and any background retrieval, such as provider preconnects. DHT lookups build their swarm and drive it inside the lookup's own future, so they end with the request;
+  - **its runtime,** on which every task the instance or its libraries spawn runs;
   - **a blocking-region count,** raised and lowered around every `block_in_place`;
   - **a network capability:** the instance's handle on [the gate](#the-gate). Every socket, HTTP attempt and redirect hop asks it first, and revoking it makes every later ask fail.
 - **The teardown,** for a stop, an eviction, a policy change and shutdown alike:
@@ -275,9 +283,13 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
      - the root token is cancelled and the task set aborted;
      - the swarms are dropped, which closes their connections;
      - in-flight heads are answered `stopped`, and open streams aborted with `stopped`.
-  4. **Wait for quiescence:** the task set is empty, the blocking-region count is zero, and the store is closed (`close`, waiting at most 2 s for a statement in progress, as upstream's `close_or_close_later` does).
+  4. **Wait for quiescence:** the task set is empty and the blocking-region count is zero. Then:
+     - **The instance's runtime is dropped and joined** on a dedicated teardown thread, never on the process runtime's workers. Dropping a tokio runtime waits for its workers and every blocking-pool thread to exit, including blocking jobs the libraries spawned that no counter sees. A timed shutdown (`shutdown_timeout`, `shutdown_background`) is not used, because it may return while that work is still running.
+     - **The store is closed** after the join (`close`, waiting at most 2 s for a statement in progress, as upstream's `close_or_close_later` does).
+     - **Quiescence is proven** only when the join has returned and the store is closed. The managed counters reaching zero are necessary, not sufficient.
+     - **No uncancellable blocking work:** the service's resolver ([The resolver contract](#the-resolver-contract)) is async and cancellable, and replaces reqwest's default blocking resolver (`getaddrinfo` on a blocking thread). So in normal operation the join waits only for work that cancellation already ended.
   5. **Acknowledge:** only then does `ipfs.stop` reply, a replacement start, an eviction count as done, or `ipfs.shutdown` exit.
-- **The bound:** the teardown has 5 s. If quiescence isn't proven by then, the service doesn't proceed: it writes `teardown_unproven` and exits 70.
+- **The bound:** the teardown has 5 s, enforced by an independent watchdog thread, not by the teardown thread itself. If the runtime join and store close haven't both returned by then, the service doesn't proceed: it writes `teardown_unproven` and exits 70. Reservations, the instance ID and any replacement stay blocked until quiescence is proven, so a timeout never releases them.
   - Main treats that as a crash and restarts the process.
   - So no surviving work of an old instance can resume after a boundary, and its budget share isn't handed to a new instance while it might still be in use.
 - **Charges stay until the end:** a stopping instance keeps its [budget](#budgets) charges until quiescence. A new instance starts only within what is free.
@@ -855,8 +867,9 @@ Each is a pull request to freedom-ipfs, and none changes mobile's behavior by de
    - `buildInfoJson` reads `FREEDOM_IPFS_GIT_COMMIT` and `FREEDOM_IPFS_GIT_DESCRIBE` (`mob:1333`), but the packaging script sets `FREEDOM_IPFS_BUILD_GIT_*`, so both fields are always null.
    - Move the function to a library crate and fix the names. `ipfs.hello` reports it.
 7. **Owned instances and cancellation:**
-   - **A root cancellation token per instance,** with a child per request, observed by every await in routing, retrieval, namesys and the gateway, including the futures run by `block_on` inside the blocking regions (`rv:5447`, `rv:5499`, `rv:5534`).
-   - **A spawner handle** in the builder: every task the instance starts goes into its task set, including the shared Bitswap swarm's task (spawned at `rv:7390`, which keeps only a command sender today) and DHT query swarms.
+   - **A root cancellation token per instance,** with a child per request. Cancelling a request's token drops its future, which ends every await inside it. The blocking regions (`rv:5448`, `rv:5500`, `rv:5535`) and the spawned tasks hold the token explicitly, so a fetch blocked inside `block_on` ends too.
+   - **A spawner handle** in the builder: every task the instance starts goes into its task set, including the shared Bitswap swarm's task (spawned at `rv:7390`, which keeps only a command sender today) and background preconnects.
+   - **A runtime per instance,** built by the builder. `Instance::shutdown` drains the task set and blocking regions, then hands the runtime back to its caller for dropping and joining on a teardown thread, and closes the store after. Its quiescence report counts as proof only once that join has returned; a timed runtime shutdown is never reported as quiescent.
    - **A blocking-region counter** around each `block_in_place`.
    - **`Instance::shutdown()`,** which runs steps 2–4 of the [teardown](#instances-and-their-teardown) and reports whether quiescence was reached.
 8. **Shared limiters and accounting:**
@@ -1080,7 +1093,7 @@ Every body already passes through main today, so the pipe adds one copy into the
 | persistent cache | 256 MiB of block data on disk (a target), 16 MiB hot | upstream's LRU eviction |
 | private instances | 8 per ephemeral process; a 36 MiB page cap (32 MiB block target) and 4 MiB hot each | a new partition evicts an unpinned instance, else 503 `busy`; existing partitions are unaffected |
 | gateway | 8 header permits, 15 s queue (today) | 503 `gateway_busy` |
-| runtime | ≤ 8 workers; a 512-thread blocking cap | tasks wait |
+| runtimes | the process: 2 workers. The persistent instance: ≤ 8 workers and a 512-thread blocking cap. Each ephemeral instance: 2 workers and a 64-thread blocking cap (≤ 16 and 512 in total) | tasks wait |
 
 ## Deviations
 
