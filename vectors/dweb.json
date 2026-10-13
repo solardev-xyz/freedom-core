@@ -20589,6 +20589,7 @@
           "up": true
         }
       },
+      "deviation": "plan-headers",
       "js": {
         "resolve": [],
         "fetch": {
@@ -20633,7 +20634,7 @@
           }
         }
       },
-      "validation": "valid"
+      "validation": "header"
     },
     {
       "id": "ipfs-small-text-nav-parameter",
@@ -39282,7 +39283,7 @@
       "id": "plan-ipfs-small-text-nav-vertical-tab",
       "source": "design",
       "request_id": "ipfs-small-text-nav-vertical-tab",
-      "expect": "valid"
+      "expect": "header"
     },
     {
       "id": "plan-ipfs-small-text-nav-parameter",
@@ -45944,6 +45945,1026 @@
         }
       },
       "expect": "header"
+    },
+    {
+      "id": "headers-value-vertical-tab",
+      "source": "design",
+      "request": {
+        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F",
+          "headers": [
+            [
+              "accept",
+              "bytes=0-\u000b1"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "header"
+    },
+    {
+      "id": "headers-value-form-feed",
+      "source": "design",
+      "request": {
+        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F",
+          "headers": [
+            [
+              "accept",
+              "a\fb"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "header"
+    },
+    {
+      "id": "headers-value-bell",
+      "source": "design",
+      "request": {
+        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F",
+          "headers": [
+            [
+              "accept",
+              "a\u0007"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "header"
+    },
+    {
+      "id": "headers-value-escape",
+      "source": "design",
+      "request": {
+        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F",
+          "headers": [
+            [
+              "accept",
+              "\u001b[0m"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "header"
+    },
+    {
+      "id": "headers-value-unit-separator",
+      "source": "design",
+      "request": {
+        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F",
+          "headers": [
+            [
+              "accept",
+              "a\u001fb"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "header"
+    },
+    {
+      "id": "headers-value-delete",
+      "source": "design",
+      "request": {
+        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F",
+          "headers": [
+            [
+              "accept",
+              "ab"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "header"
+    },
+    {
+      "id": "headers-value-leading-tab",
+      "source": "design",
+      "request": {
+        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F",
+          "headers": [
+            [
+              "accept",
+              "\tx"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "header"
+    },
+    {
+      "id": "headers-value-trailing-tab",
+      "source": "design",
+      "request": {
+        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F",
+          "headers": [
+            [
+              "accept",
+              "x\t"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "header"
+    },
+    {
+      "id": "headers-value-interior-tab",
+      "source": "design",
+      "request": {
+        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F",
+          "headers": [
+            [
+              "accept",
+              "a\tb"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "valid"
+    },
+    {
+      "id": "headers-value-interior-space",
+      "source": "design",
+      "request": {
+        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F",
+          "headers": [
+            [
+              "accept",
+              "a b"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "valid"
+    },
+    {
+      "id": "headers-value-obs-text",
+      "source": "design",
+      "request": {
+        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F",
+          "headers": [
+            [
+              "accept",
+              "caféÿ"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "valid"
+    },
+    {
+      "id": "headers-value-visible-ascii",
+      "source": "design",
+      "request": {
+        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F",
+          "headers": [
+            [
+              "accept",
+              "!\"#$%&()*+,-./:;<=>?@[\\]^_`{|}~"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "valid"
     },
     {
       "id": "headers-bzz-name-empty",

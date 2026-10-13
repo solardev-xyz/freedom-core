@@ -673,11 +673,13 @@ fn validation() {
             Err(refusal) => refusal.as_str(),
         };
         assert_eq!(got, s(entry, "expect"), "{}", id(entry));
-        // A request whose plan is refused is a deviation from today's dial.
+        // A request whose plan is refused is a deviation from today's dial:
+        // `plan-paths` for its path, `plan-headers` for a header value.
         if let Some(rid) = entry["request_id"].as_str() {
             let expected = match got {
                 "valid" => None,
                 "path" => Some("plan-paths"),
+                "header" => Some("plan-headers"),
                 other => panic!("{rid}: a request plan refused for {other}"),
             };
             assert_eq!(requests[rid]["deviation"].as_str(), expected, "{rid}");

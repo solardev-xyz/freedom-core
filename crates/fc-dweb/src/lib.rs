@@ -22,9 +22,10 @@
 //! Where the core differs from today by design (each pinned by vectors):
 //! `body-idle` (a 60 s bound on a pending read, in every plan),
 //! `native-page-state` (`strip_page_state` runs on the native IPFS node's
-//! answers too, which today pass unstripped) and `plan-paths` (validation
+//! answers too, which today pass unstripped), `plan-paths` (validation
 //! refuses some targets today's handlers dial, judging paths as decoded
-//! too).
+//! too) and `plan-headers` (validation refuses header values that aren't
+//! RFC 9110 field values).
 //!
 //! The crate does no I/O: names are resolved, and bytes moved, by the caller.
 

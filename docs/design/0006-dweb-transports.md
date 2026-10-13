@@ -203,7 +203,7 @@ The plan is checked as the JSON main receives, against the request main admitted
     - a base path that changes which IPFS reference is asked can't be told from the path; the namespace can.
   - **`header`:**
     - names are lowercase tokens;
-    - values are Latin-1, with no NUL, CR or LF, and no space or tab at either end;
+    - values are RFC 9110 field values (section 5.5): visible ASCII, spaces, tabs and `obs-text` (0x80 to 0xFF). No other control character is allowed (C0, including NUL, CR and LF, or DEL), and no space or tab at either end;
     - the names are within the scheme's policy: `bzz:`'s allowlist plus Swarm's three headers, each exactly once at its fixed value; anything off IPFS's strip-list.
   - **`retry`:** within today's values:
     - at most 10 attempts;
@@ -239,6 +239,8 @@ Validation is stricter than today's dialing (deviation `plan-paths`). Today the 
 - **For IPFS:** an encoded separator that forms a `.` or `..` segment once decoded, such as `..%2F`, `%2E%2E%2F` or `%2E%2E%5C`, in any case. That holds even when the result would stay beneath the reference, as in `a%2F..%2Fb`. (`bzz:` already refuses any encoded separator.)
 
 Pages can't produce the backslash forms, because Chromium canonicalizes standard-scheme URLs first.
+
+Field values are stricter than `Headers` too (deviation `plan-headers`). A request header whose value holds a control character other than an interior tab, such as a vertical tab in `Accept`, is passed on today; validation refuses the plan with a 502.
 
 ### Transport
 
@@ -376,6 +378,7 @@ Before step 4 moves a handler:
 | `hash-host-hop` | hash hosts need no lookup | one planning round trip | measured ([Latency](#latency)) |
 | `native-page-state` | the native IPFS node's answers pass with `Set-Cookie`, `Set-Cookie2` and `Service-Worker-Allowed` | stripped, as from Ant and the external gateway | the native node can't set cookies or widen a service worker's scope on the `ipfs://` origin |
 | `plan-paths` | dialled: a `bzz:` published base path with an encoded separator, a relative one, or a climbing one; a `bzz:` resolver `decoded` that isn't a 64- or 128-hex reference, `..` included; literal-backslash dot segments; a target outside the request's own namespace, such as a `decoded` of `../ipns/…`; an IPFS path with an encoded separator that forms a `.` or `..` segment once decoded ([Validation](#validation-before-any-dial)) | refused by validation, which judges the path as decoded too | such plans get 502 where today they are dialled. Pages can't produce the backslash forms, because Chromium canonicalizes standard-scheme URLs first |
+| `plan-headers` | a header value with a control character other than an interior tab, which `Headers` accepts, is passed on | refused by validation (RFC 9110 field values) | such plans get 502 where today the header is sent |
 
 ## Implementation steps
 

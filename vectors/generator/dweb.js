@@ -664,7 +664,11 @@ function ipfsCases() {
     ['nav-space-parameter', ['text/html ;q=0.9']], ['nav-second', ['*/*,text/html']], ['nav-two-headers', ['text/html', 'image/png']],
     ['nav-two-headers-second', ['image/png', 'text/html']], ['nav-none', []], ['nav-empty', ['']], ['nav-star', ['*/*']],
     ['nav-xhtml', ['application/xhtml+xml']], ['nav-head', [NAV], 'HEAD'], ['nav-lowercase-get', [NAV], 'get'],
-  ]) add('ipfs', `small-text-${id}`, `ipfs://${v1}/file`, { headers: values.map((v) => ['Accept', v]), method });
+  ]) {
+    // A vertical tab isn't a field-value character (RFC 9110): refused.
+    const validation = id === 'nav-vertical-tab' ? 'header' : undefined;
+    add('ipfs', `small-text-${id}`, `ipfs://${v1}/file`, { headers: values.map((v) => ['Accept', v]), method, validation });
+  }
   add('ipfs', 'small-text-gateway', `ipfs://${v1}/file`, { headers: [['Accept', NAV]], backend: 'gateway' });
   // Backends.
   add('ipfs', 'gateway', `ipfs://${v1}/x`, { backend: 'gateway' });
@@ -892,7 +896,7 @@ async function buildRequests(ref, table) {
     const entry = { id: `${c.scheme}-${c.id}`, request: run.request };
     if (c.resolution) entry.resolution = c.resolution;
     // Today's handler dials these; design 0006 refuses them (plan-paths).
-    if (c.validation) entry.deviation = 'plan-paths';
+    if (c.validation) entry.deviation = { path: 'plan-paths', header: 'plan-headers' }[c.validation];
     entry.js = js;
     entry.plan = plan;
     entry.validation = c.validation ?? 'valid';
@@ -1509,6 +1513,21 @@ function validationCases(requests) {
   mutate('headers-bzz-value-nul', base, (p) => { f(p).headers[0][1] = 'a' + ch(0) + 'b'; }, 'header');
   mutate('headers-bzz-value-not-latin1', base, (p) => { f(p).headers[0][1] = ch(0x3042); }, 'header');
   mutate('headers-bzz-value-padded', base, (p) => { f(p).headers[0][1] = ' a'; }, 'header');
+  // RFC 9110 section 5.5: no control character but an interior tab.
+  for (const [id, value, expect] of [
+    ['vertical-tab', 'bytes=0-' + ch(0x0b) + '1', 'header'],
+    ['form-feed', 'a' + ch(0x0c) + 'b', 'header'],
+    ['bell', 'a' + ch(0x07), 'header'],
+    ['escape', ch(0x1b) + '[0m', 'header'],
+    ['unit-separator', 'a' + ch(0x1f) + 'b', 'header'],
+    ['delete', 'a' + ch(0x7f) + 'b', 'header'],
+    ['leading-tab', '\tx', 'header'],
+    ['trailing-tab', 'x\t', 'header'],
+    ['interior-tab', 'a\tb', 'valid'],
+    ['interior-space', 'a b', 'valid'],
+    ['obs-text', 'caf' + ch(0xe9) + ch(0x80) + ch(0xff), 'valid'],
+    ['visible-ascii', '!"#$%&()*+,-./:;<=>?@[\\]^_`{|}~', 'valid'],
+  ]) mutate(`headers-value-${id}`, base, (p) => { f(p).headers.find(([n]) => n === 'accept')[1] = value; }, expect);
   mutate('headers-bzz-name-empty', base, (p) => { f(p).headers.push(['', 'x']); }, 'header');
   mutate('headers-bzz-not-pair', base, (p) => { f(p).headers.push(['accept']); }, 'shape');
   mutate('headers-bzz-not-list', base, (p) => { f(p).headers = {}; }, 'shape');

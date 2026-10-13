@@ -270,13 +270,14 @@ fn is_header_name(name: &str) -> bool {
         })
 }
 
-/// A value `Headers` would hold: Latin-1, no NUL, CR or LF, and no HTTP
-/// whitespace at either end.
+/// An RFC 9110 field value (section 5.5): visible ASCII, spaces and tabs,
+/// and `obs-text` (0x80 to 0xFF), with no other control character (C0 or
+/// DEL) and no space or tab at either end.
 fn is_header_value(value: &str) -> bool {
-    value
-        .chars()
-        .all(|c| u32::from(c) <= 0xff && !matches!(c, '\0' | '\r' | '\n'))
-        && !value.starts_with([' ', '\t'])
+    value.chars().all(|c| {
+        let code = u32::from(c);
+        c == '\t' || ((0x20..=0xff).contains(&code) && code != 0x7f)
+    }) && !value.starts_with([' ', '\t'])
         && !value.ends_with([' ', '\t'])
 }
 
@@ -487,5 +488,17 @@ mod tests {
         assert!(stays_beneath("/ipfs/c", "ipfs", "c"));
         assert!(!stays_beneath("/ipfs/c/a%2F..%2F..", "ipfs", "c"));
         assert!(!stays_beneath("/ipfs/c/%2E%5Cx", "ipfs", "c"));
+    }
+
+    #[test]
+    fn field_values() {
+        for value in ["", "a\tb", "a b", "caf\u{e9}\u{80}\u{ff}"] {
+            assert!(is_header_value(value), "{value:?}");
+        }
+        for value in [
+            "\tx", "x ", "a\u{b}b", "a\u{7f}", "a\u{1f}", "\u{0}", "a\u{100}",
+        ] {
+            assert!(!is_header_value(value), "{value:?}");
+        }
     }
 }
