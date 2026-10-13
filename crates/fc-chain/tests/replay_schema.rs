@@ -2,11 +2,17 @@
 //! scripted worlds (design 0005, step 2): its schema, its encodings and its
 //! scenario IDs, which the design cites. Replaying the scenarios through the
 //! machine is step 3.
+//!
+//! The file's frame is plain JSON, read with serde_json. Every value the
+//! reference produced or was given is JSON text in a string field, read
+//! with fc-json's index, which keeps strings as UTF-16 (lone surrogates
+//! included) and nesting up to 512 levels, as the core does.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use fc_json::index::{Index, IndexError, Kind};
 use serde_json::{Map, Value as Json};
 use sha2::{Digest as _, Sha256};
 
@@ -285,6 +291,8 @@ const SCENARIO_IDS: &[&str] = &[
     "boundary-myotis-unsupported-method-holds-slot",
     "boundary-myotis-not-running-last-error",
     "boundary-myotis-state-changed-last-error",
+    "boundary-myotis-queue-full-last-error",
+    "boundary-myotis-queue-deadline-last-error",
     "boundary-myotis-caller-deadline-last-error",
     "boundary-myotis-unexpected-response-last-error",
     "boundary-myotis-readiness-sampled-live",
@@ -297,6 +305,15 @@ const SCENARIO_IDS: &[&str] = &[
     "boundary-direct-user-configured-trust",
     "boundary-unparseable-endpoint-host",
     "boundary-colibri-trust",
+    "boundary-result-literal-undefined-tag",
+    "boundary-result-literal-repeat-tag",
+    "boundary-result-empty-body",
+    "boundary-json-depth-512",
+    "boundary-json-depth-513",
+    "boundary-agreement-duplicate-keys",
+    "boundary-agreement-number-spellings",
+    "boundary-agreement-proto-key",
+    "boundary-agreement-lone-surrogates",
     "boundary-unsupported-requests",
 ];
 
@@ -312,6 +329,7 @@ const KINDS: &[&str] = &[
     "event",
 ];
 const OUTCOMES: &[&str] = &["answered", "failed", "aborted", "refused", "open", "fired"];
+const DEVIATIONS: &[&str] = &["json-depth"];
 
 fn vectors() -> Json {
     let path = concat!(
@@ -319,6 +337,13 @@ fn vectors() -> Json {
         "/../../vectors/chain-replay.json"
     );
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+fn scenario<'a>(vectors: &'a Json, id: &str) -> &'a Json {
+    array(&vectors["scenarios"], "scenarios")
+        .iter()
+        .find(|scenario| scenario["id"] == id)
+        .unwrap_or_else(|| panic!("no scenario {id}"))
 }
 
 fn object<'a>(value: &'a Json, what: &str) -> &'a Map<String, Json> {
@@ -355,61 +380,85 @@ fn kebab(id: &str) -> bool {
         })
 }
 
-/// The SHA-256 of `head + unit × count + tail`, hashed in chunks.
-fn repeat_digest(head: &str, unit: &str, count: u64, tail: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(head.as_bytes());
-    let chunk = unit.repeat(4096);
-    let mut left = count;
-    while left >= 4096 {
-        hasher.update(chunk.as_bytes());
-        left -= 4096;
-    }
-    for _ in 0..left {
-        hasher.update(unit.as_bytes());
-    }
-    hasher.update(tail.as_bytes());
-    hex::encode(hasher.finalize())
+/// A repeat form's text, checked against its length and SHA-256.
+fn expand(repeat: &Json, at: &str) -> String {
+    let head = text(&repeat["head"], at);
+    let unit = text(&repeat["unit"], at);
+    let tail = text(&repeat["tail"], at);
+    let count = usize::try_from(time(&repeat["count"], at)).unwrap();
+    assert!(!unit.is_empty() && count > 0, "{at}: an empty repeat");
+    let expanded = format!("{head}{}{tail}", unit.repeat(count));
+    let length = expanded.encode_utf16().count() as u64;
+    assert_eq!(length, time(&repeat["length"], at), "{at}: repeat length");
+    assert_eq!(
+        hex::encode(Sha256::digest(expanded.as_bytes())),
+        text(&repeat["sha256"], at),
+        "{at}: repeat digest"
+    );
+    expanded
 }
 
-/// Checks every `$repeat` and `$undefined` under `value`; returns each
-/// `$repeat`'s length by where it is.
-fn check_encodings(value: &Json, at: &str, repeats: &mut BTreeMap<String, u64>) {
+/// Reads every value text under `value` (`json`, `*_json` and their repeat
+/// forms) with fc-json, checks every other repeat form, and refuses keys
+/// that look like encodings. Returns each value text by where it is.
+fn values(value: &Json, at: &str, found: &mut BTreeMap<String, String>) {
     match value {
         Json::Object(map) => {
-            if let Some(repeat) = map.get("$repeat") {
-                assert_eq!(map.len(), 1, "{at}: $repeat has company");
-                let head = text(&repeat["head"], at);
-                let unit = text(&repeat["unit"], at);
-                let tail = text(&repeat["tail"], at);
-                let count = time(&repeat["count"], at);
-                assert!(!unit.is_empty() && count > 0, "{at}: an empty $repeat");
-                let units = |s: &str| s.encode_utf16().count() as u64;
-                let length = units(head) + units(unit) * count + units(tail);
-                assert_eq!(length, time(&repeat["length"], at), "{at}: $repeat length");
-                assert_eq!(
-                    repeat_digest(head, unit, count, tail),
-                    text(&repeat["sha256"], at),
-                    "{at}: $repeat digest"
-                );
-                repeats.insert(at.to_owned(), length);
-                return;
-            }
-            if let Some(flag) = map.get("$undefined") {
-                assert_eq!(map.len(), 1, "{at}: $undefined has company");
-                assert_eq!(flag, &Json::Bool(true), "{at}");
-                return;
-            }
             for (key, item) in map {
-                check_encodings(item, &format!("{at}.{key}"), repeats);
+                let here = format!("{at}.{key}");
+                assert!(
+                    !key.starts_with('$'),
+                    "{here}: a key that looks like an encoding"
+                );
+                if key == "json" || key.ends_with("_json") {
+                    let source = text(item, &here);
+                    Index::new(source).unwrap_or_else(|err| panic!("{here}: {err}"));
+                    found.insert(here, source.to_owned());
+                } else if key == "json_repeat" || key.ends_with("_json_repeat") {
+                    let source = expand(item, &here);
+                    Index::new(&source).unwrap_or_else(|err| panic!("{here}: {err}"));
+                    found.insert(here, source);
+                } else if key.ends_with("_repeat") && key != "result_repeat" {
+                    expand(item, &here);
+                } else if key == "undefined" || key.ends_with("_undefined") {
+                    assert_eq!(item, &Json::Bool(true), "{here}");
+                } else {
+                    values(item, &here, found);
+                }
             }
         }
         Json::Array(items) => {
             for (index, item) in items.iter().enumerate() {
-                check_encodings(item, &format!("{at}[{index}]"), repeats);
+                values(item, &format!("{at}[{index}]"), found);
             }
         }
         _ => {}
+    }
+}
+
+/// An entry of an object the router returned or threw.
+fn check_entry(entry: &Json, at: &str) {
+    let entry = object(entry, at);
+    text(&entry["key"], at);
+    let shapes = ["json", "json_repeat", "undefined"]
+        .iter()
+        .filter(|key| entry.contains_key(**key))
+        .count();
+    assert_eq!(entry.len(), 2, "{at}: an entry is a key and one value");
+    assert_eq!(shapes, 1, "{at}: one of json, json_repeat or undefined");
+}
+
+fn check_error(thrown: &Json, at: &str) {
+    text(&thrown["class"], at);
+    text(&thrown["name"], at);
+    let message = text(&thrown["message_json"], at);
+    assert_eq!(
+        Index::new(message).unwrap().root().kind(),
+        Kind::String,
+        "{at}: message"
+    );
+    for entry in array(&thrown["props"], at) {
+        check_entry(entry, at);
     }
 }
 
@@ -437,7 +486,16 @@ fn meta_and_encodings() {
     );
     assert!(vectors["meta"]["packages"]["@sinonjs/fake-timers"].is_string());
     let encodings = object(&vectors["encodings"], "encodings");
-    for key in ["undefined", "repeat", "times", "rpc_body"] {
+    for key in [
+        "json",
+        "undefined",
+        "entries",
+        "repeat",
+        "plain",
+        "times",
+        "rpc_body",
+        "expect_settle_ms",
+    ] {
         assert!(encodings.contains_key(key), "encodings.{key}");
     }
 }
@@ -448,6 +506,9 @@ fn scenarios_follow_the_schema() {
     for scenario in array(&vectors["scenarios"], "scenarios") {
         let id = text(&scenario["id"], "id");
         assert!(!text(&scenario["from"], id).is_empty(), "{id}: from");
+        if let Some(deviation) = scenario.get("deviation") {
+            assert!(DEVIATIONS.contains(&text(deviation, id)), "{id}: deviation");
+        }
         object(&scenario["world"], id);
         let steps = array(&scenario["steps"], id);
         assert!(!steps.is_empty(), "{id}: no steps");
@@ -466,26 +527,35 @@ fn scenarios_follow_the_schema() {
                 assert!(call["chain"].is_u64(), "{at}: chain");
                 if call["fn"] == "request" {
                     text(&call["method"], &at);
+                    assert!(call.get("params").is_none(), "{at}: params as a value");
                 }
                 let started = time(&call["started"], &at);
                 assert!(started >= start, "{at}: a call before its step");
                 let result = object(result, &at);
-                let shapes = ["value", "thrown", "pending"]
+                let shapes = ["value", "value_json", "thrown", "pending"]
                     .iter()
                     .filter(|key| result.contains_key(**key))
                     .count();
-                assert_eq!(shapes, 1, "{at}: one of value, thrown or pending");
-                if let Some(thrown) = result.get("thrown") {
-                    for key in ["class", "name", "message"] {
-                        text(&thrown[key], &at);
+                assert_eq!(
+                    shapes, 1,
+                    "{at}: one of value, value_json, thrown or pending"
+                );
+                if let Some(value) = result.get("value") {
+                    for entry in array(value, &at) {
+                        check_entry(entry, &at);
                     }
-                    object(&thrown["props"], &at);
+                }
+                if let Some(thrown) = result.get("thrown") {
+                    check_error(thrown, &at);
                 }
                 if !result.contains_key("pending") {
-                    assert!(
-                        time(&result["settled"], &at) >= started,
-                        "{at}: settled before it started"
-                    );
+                    let took = time(&result["settled"], &at) - started;
+                    if let Some(expected) = call.get("expect_settle_ms") {
+                        assert_eq!(took, time(expected, &at), "{at}: settle time");
+                    }
+                    if let Some(bound) = call.get("expect_settle_max_ms") {
+                        assert!(took <= time(bound, &at), "{at}: settle bound");
+                    }
                 }
                 previous = previous.max(started);
             }
@@ -525,6 +595,9 @@ fn scenarios_follow_the_schema() {
                 };
                 assert_eq!(kinds.get(&owner), Some(&expected), "{at}: within");
             }
+            if let Some(thrown) = entry.get("answer").and_then(|answer| answer.get("thrown")) {
+                check_error(thrown, &at);
+            }
             match kind {
                 "rpc" => {
                     let method = text(&entry["method"], &at);
@@ -537,7 +610,7 @@ fn scenarios_follow_the_schema() {
                 "verified-op" => {
                     let host = text(&entry["host"], &at);
                     assert!(host == "myotis" || host == "colibri", "{at}: host");
-                    object(&entry["params"], &at);
+                    text(&entry["params_json"], &at);
                 }
                 "blockscout" | "blockscout-page" | "dns" => {
                     assert!(entry.get("within").is_some(), "{at}: within nothing");
@@ -549,23 +622,81 @@ fn scenarios_follow_the_schema() {
 }
 
 #[test]
-fn encodings_check_out() {
+fn every_value_reads_back() {
     let vectors = vectors();
-    let mut repeats = BTreeMap::new();
-    check_encodings(&vectors, "", &mut repeats);
+    let mut found = BTreeMap::new();
+    values(&vectors["scenarios"], ".scenarios", &mut found);
+    assert!(found.len() > 1000, "only {} value texts", found.len());
+}
+
+/// The text of the `result` entry of a step's first call.
+fn result_text(scenario: &Json, step: usize) -> String {
+    let entry = array(&scenario["steps"][step]["results"][0]["value"], "value")
+        .iter()
+        .find(|entry| entry["key"] == "result")
+        .unwrap();
+    match entry.get("json") {
+        Some(json) => text(json, "result").to_owned(),
+        None => expand(&entry["json_repeat"], "result"),
+    }
+}
+
+#[test]
+fn boundaries_read_as_the_reference_made_them() {
+    let vectors = vectors();
     // An html() document at its 8 MiB limit: 16,777,346 hex characters, and
     // a minimal JSON-RPC answer of 16,777,382 bytes (design 0005, Transport).
-    let html = array(&vectors["scenarios"], "scenarios")
-        .iter()
-        .position(|scenario| scenario["id"] == "boundary-html-8mib-through-quorum")
-        .unwrap();
-    let base = format!(".scenarios[{html}]");
-    assert_eq!(
-        repeats.get(&format!("{base}.steps[0].results[0].value.result")),
-        Some(&16_777_346)
+    let html = scenario(&vectors, "boundary-html-8mib-through-quorum");
+    let result = result_text(html, 0);
+    let index = Index::new(&result).unwrap();
+    assert_eq!(index.root().units().count(), 16_777_346);
+    let body = &html["io"][0]["answer"]["body_repeat"];
+    assert_eq!(time(&body["length"], "body"), 16_777_382);
+    // Nesting: a body of 512 levels is read; one of 513 is refused (deviation
+    // json-depth), though the reference read it and agreed on it.
+    for (id, refused) in [
+        ("boundary-json-depth-512", false),
+        ("boundary-json-depth-513", true),
+    ] {
+        let scenario = scenario(&vectors, id);
+        assert_eq!(scenario.get("deviation").is_some(), refused, "{id}");
+        for entry in array(&scenario["io"], id) {
+            let body = text(&entry["answer"]["body"], id);
+            match Index::new(body) {
+                Ok(_) => assert!(!refused, "{id}: read a body over 512 levels"),
+                Err(IndexError::TooDeep) => assert!(refused, "{id}: refused 512 levels"),
+                Err(err) => panic!("{id}: {err}"),
+            }
+        }
+        assert!(
+            Index::new(&result_text(scenario, 0)).is_ok(),
+            "{id}: its result"
+        );
+    }
+    // Agreed values keep what JSON.parse made: a lone surrogate, -0, an
+    // infinity, and an own __proto__ property.
+    let surrogate = result_text(scenario(&vectors, "boundary-agreement-lone-surrogates"), 0);
+    let index = Index::new(&surrogate).unwrap();
+    assert_eq!(index.root().units().collect::<Vec<u16>>(), [0xD800]);
+    let numbers = scenario(&vectors, "boundary-agreement-number-spellings");
+    let zero = result_text(numbers, 2);
+    let zero = Index::new(&zero).unwrap().root().number();
+    assert!(zero == 0.0 && zero.is_sign_negative(), "-0");
+    let infinite = result_text(numbers, 5);
+    assert!(Index::new(&infinite).unwrap().root().number().is_infinite());
+    let proto = result_text(scenario(&vectors, "boundary-agreement-proto-key"), 0);
+    assert!(
+        Index::new(&proto)
+            .unwrap()
+            .root()
+            .get("__proto__")
+            .is_some()
     );
-    assert_eq!(
-        repeats.get(&format!("{base}.io[0].answer.body")),
-        Some(&16_777_382)
-    );
+    // A missing result is its own field, and literal tags are values.
+    let empty = scenario(&vectors, "boundary-result-empty-body");
+    let first = &array(&empty["steps"][0]["results"][0]["value"], "value")[0];
+    assert_eq!(first["key"], "result");
+    assert_eq!(first["undefined"], Json::Bool(true));
+    let tag = scenario(&vectors, "boundary-result-literal-undefined-tag");
+    assert_eq!(result_text(tag, 0), r#"{"$undefined":true}"#);
 }
