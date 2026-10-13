@@ -709,6 +709,70 @@ fn cooldowns_run_on_the_machines_clock() {
     assert_eq!(colibri(&world), 2);
 }
 
+#[test]
+fn the_adaptive_table_evicts_its_oldest_route() {
+    // The design leaves the 1,024-route eviction to the machine's own
+    // tests: with room for two routes, a third app's evicts the first's.
+    let bounds = Bounds {
+        adaptive_routes: 2,
+        ..Bounds::default()
+    };
+    let mut config = chain(1, &["colibri", "direct"], &["a"], ("3", "2", "5000"));
+    config.prover = Some(Prover {
+        endpoint: "p".into(),
+        zk: true,
+    });
+    let mut world = World::new(bounds, &[config]);
+    for (i, origin) in [
+        "https://one.example",
+        "https://two.example",
+        "https://three.example",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let call = Call::Read {
+            chain_id: 1,
+            method: "eth_call".into(),
+            params: CALL.into(),
+            options: ReadOptions {
+                origin: Some((*origin).into()),
+                ..ReadOptions::default()
+            },
+        };
+        let id = world.submit(call, None);
+        let op = world
+            .requests
+            .iter()
+            .rev()
+            .find(|(_, _, r, _)| matches!(r, Request::Verified(_)))
+            .map(|(id, ..)| *id)
+            .unwrap();
+        // Colibri hits its execution limit: the route is blocked.
+        world.answer(
+            op,
+            Answer::Colibri(ColibriReply::Failure(
+                fc_chain::machine::ColibriClass::Capacity,
+            )),
+        );
+        let rpc = world.rpcs()[i].0;
+        world.answer(rpc, ok("\"0x1\""));
+        assert!(world.replied(id));
+    }
+    let routes: Vec<String> = world
+        .machine
+        .state_tables()
+        .adaptive
+        .into_iter()
+        .map(|(key, state)| {
+            assert!(state.session_blocked);
+            key
+        })
+        .collect();
+    assert_eq!(routes.len(), 2);
+    assert!(routes[0].contains("two.example") && routes[1].contains("three.example"));
+}
+
 // ---------------------------------------------------------------------------
 // broadcast-outcome
 

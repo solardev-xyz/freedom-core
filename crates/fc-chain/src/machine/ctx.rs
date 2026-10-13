@@ -336,3 +336,66 @@ impl Req {
         self.ctx.now()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slots(ctx: &Ctx, chain_id: u64) -> (usize, usize) {
+        ctx.state
+            .borrow()
+            .myotis
+            .get(&chain_id)
+            .map_or((0, 0), |s| (s.in_flight, s.waiters.len()))
+    }
+
+    #[test]
+    fn the_slot_is_handed_straight_to_the_next_waiter() {
+        let ctx = Ctx::new(0, Bounds::default());
+        assert_eq!(ctx.acquire_myotis(1, true), Ok(None));
+        let waiter = ctx.acquire_myotis(1, true).unwrap().unwrap();
+        // A background caller never queues.
+        assert_eq!(ctx.acquire_myotis(1, false), Err(()));
+        assert_eq!(slots(&ctx, 1), (1, 1));
+        ctx.release_myotis(1);
+        // Handed over, not counted down and up.
+        assert_eq!(slots(&ctx, 1), (1, 0));
+        assert!(ctx.granted(1, waiter));
+        ctx.release_myotis(1);
+        assert_eq!(slots(&ctx, 1), (0, 0));
+    }
+
+    #[test]
+    fn a_slot_granted_as_its_waiter_gives_up_passes_on() {
+        // The design leaves this case to the machine's own tests: the slot
+        // is handed to a waiter in the very turn its deadline fires. The
+        // waiter, gone, passes the slot along rather than leaking it.
+        let ctx = Ctx::new(0, Bounds::default());
+        ctx.acquire_myotis(1, true).unwrap();
+        let first = ctx.acquire_myotis(1, true).unwrap().unwrap();
+        let second = ctx.acquire_myotis(1, true).unwrap().unwrap();
+        ctx.release_myotis(1);
+        // `first` was granted the slot, and abandons it.
+        ctx.abandon_myotis(1, first);
+        assert!(ctx.granted(1, second));
+        assert_eq!(slots(&ctx, 1), (1, 0));
+        // A waiter still queued just leaves the queue.
+        let third = ctx.acquire_myotis(1, true).unwrap().unwrap();
+        ctx.abandon_myotis(1, third);
+        assert_eq!(slots(&ctx, 1), (1, 0));
+        ctx.release_myotis(1);
+        assert_eq!(slots(&ctx, 1), (0, 0));
+    }
+
+    #[test]
+    fn at_most_sixteen_wait() {
+        let ctx = Ctx::new(0, Bounds::default());
+        ctx.acquire_myotis(1, true).unwrap();
+        for _ in 0..MYOTIS_QUEUED {
+            assert!(ctx.acquire_myotis(1, true).unwrap().is_some());
+        }
+        assert_eq!(ctx.acquire_myotis(1, true), Err(()));
+        // Another chain has its own slot.
+        assert_eq!(ctx.acquire_myotis(100, true), Ok(None));
+    }
+}
