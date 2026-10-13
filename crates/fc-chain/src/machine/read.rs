@@ -624,17 +624,23 @@ async fn colibri(
         Either::Left(Delivered { answer, charge, .. }) => match answer {
             // The answer's own buffer is the result: no copy.
             Answer::Colibri(ColibriReply::Result(json)) => Ok(within!(owned(json, charge))),
+            // `undefined`, as the adapter resolved it.
+            Answer::Colibri(ColibriReply::Undefined) => Ok(None),
             // A revert the prover verified, rebuilt: `execution reverted`,
             // code 3, its data. Main sends only hex data, so its JSON is the
             // data quoted; the copies are reserved first, and the error holds
-            // their charge while any copy of it lives.
-            Answer::Colibri(ColibriReply::Revert { data }) if is_hex_data(&data) => {
+            // their charge while any copy of it lives. One that is also a
+            // capacity failure is still the revert the read rejects with, and
+            // blocks the app's Colibri route as the router's
+            // `recordAdaptiveFailure` does.
+            Answer::Colibri(ColibriReply::Revert { data, capacity }) if is_hex_data(&data) => {
                 let copies = reserve!(req.ctx, (data.len() + 2) * 2);
                 drop(charge);
                 let quoted: Rc<str> = Rc::from(format!("\"{data}\"").as_str());
-                let error = Thrown::error("execution reverted")
+                let mut error = Thrown::error("execution reverted")
                     .with("code", Prop::Json("3".into()))
                     .with("data", Prop::Json(quoted));
+                error.capacity = capacity;
                 Err(within!(charged(error, copies)))
             }
             Answer::Colibri(ColibriReply::Failure(class)) => {

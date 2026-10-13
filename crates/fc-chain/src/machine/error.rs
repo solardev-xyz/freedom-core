@@ -132,8 +132,9 @@ pub struct Thrown {
     pub origin: Origin,
     /// A failed quorum's evidence for Direct; never in a reply.
     pub(crate) quorum: Option<Rc<QuorumMiss>>,
-    /// Main classed a Colibri failure as a capacity limit: the one bit of
-    /// the adapter's text the adaptive bypass needs; never in a reply.
+    /// Main classed a Colibri failure, or a verified revert, as a capacity
+    /// limit: the one bit of the adapter's text the adaptive bypass needs;
+    /// never in a reply.
     pub(crate) capacity: bool,
     /// A node error's charge against its request's budget, held while any
     /// copy of it lives (`memory-budgets`).

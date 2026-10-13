@@ -370,6 +370,10 @@ fn verified_answer(record: &Json, before: Option<String>, after: Option<String>)
         if let Some(result) = text_field(answer, "result_json") {
             return Some(Answer::Colibri(ColibriReply::Result(result)));
         }
+        // `{ undefined_keys: ["result"] }`: the adapter resolved `undefined`.
+        if answer.get("result_undefined").and_then(Json::as_bool) == Some(true) {
+            return Some(Answer::Colibri(ColibriReply::Undefined));
+        }
         let thrown = answer.get("thrown")?;
         let code = thrown_prop(thrown, "code")
             .and_then(|e| e.get("json"))
@@ -378,10 +382,15 @@ fn verified_answer(record: &Json, before: Option<String>, after: Option<String>)
             .and_then(|e| e.get("json"))
             .and_then(Json::as_str)
             .and_then(|t| serde_json::from_str::<String>(t).ok());
+        // A verified revert, with `capacity: true` when main's
+        // `isCapacityFailure` also holds for the error.
         if code == Some("3")
             && let Some(data) = data.filter(|d| is_hex_data(d))
         {
-            return Some(Answer::Colibri(ColibriReply::Revert { data }));
+            return Some(Answer::Colibri(ColibriReply::Revert {
+                data,
+                capacity: capacity(thrown),
+            }));
         }
         let class = if capacity(thrown) {
             ColibriClass::Capacity

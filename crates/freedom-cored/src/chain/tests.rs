@@ -826,6 +826,149 @@ fn raw(text: &str) -> Result<Box<RawValue>, ErrorBody> {
 }
 
 #[test]
+fn colibri_answers_carry_a_revert_with_capacity_and_an_undefined_result() {
+    // A verified revert that is also a capacity failure, and a result of
+    // `undefined` (design 0005, Verified operations): each in exactly one
+    // form.
+    let colibri = |text: &str| answer(Kind::Colibri, raw(text));
+    let revert = |capacity| {
+        Some(Answer::Colibri(ColibriReply::Revert {
+            data: "0x12".into(),
+            capacity,
+        }))
+    };
+    assert_eq!(
+        colibri(r#"{"revert":{"data":"0x12"},"capacity":true}"#),
+        revert(true)
+    );
+    // Members in either order.
+    assert_eq!(
+        colibri(r#"{"capacity":true,"revert":{"data":"0x12"}}"#),
+        revert(true)
+    );
+    assert_eq!(colibri(r#"{"revert":{"data":"0x12"}}"#), revert(false));
+    let undefined = Some(Answer::Colibri(ColibriReply::Undefined));
+    assert_eq!(colibri(r#"{"undefined_keys":["result"]}"#), undefined);
+    // The same array, whitespace and all.
+    assert_eq!(colibri(r#"{"undefined_keys":[ "result" ]}"#), undefined);
+    // `capacity` only ever `true`, beside a revert alone; `undefined_keys`
+    // only ever `["result"]`, alone.
+    let escaped = format!(r#"{{"undefined_keys":["res{}lt"]}}"#, u("0075"));
+    for text in [
+        r#"{"revert":{"data":"0x12"},"capacity":false}"#,
+        r#"{"revert":{"data":"0x12"},"capacity":null}"#,
+        r#"{"revert":{"data":"0x12"},"capacity":1}"#,
+        r#"{"revert":{"data":"0x12"},"capacity":"true"}"#,
+        r#"{"revert":{"data":"0x12"},"capacity":[true]}"#,
+        r#"{"revert":{"data":"0x12","capacity":true}}"#,
+        r#"{"revert":{"data":"0x12"},"capacity":true,"result":"0x1"}"#,
+        r#"{"revert":{"data":3},"capacity":true}"#,
+        r#"{"revert":null,"capacity":true}"#,
+        r#"{"capacity":true}"#,
+        r#"{"failure":"capacity","capacity":true}"#,
+        r#"{"result":"0x1","capacity":true}"#,
+        r#"{"undefined_keys":[]}"#,
+        r#"{"undefined_keys":["result","result"]}"#,
+        r#"{"undefined_keys":["result","source"]}"#,
+        r#"{"undefined_keys":["source"]}"#,
+        r#"{"undefined_keys":["Result"]}"#,
+        r#"{"undefined_keys":[["result"]]}"#,
+        r#"{"undefined_keys":[null]}"#,
+        r#"{"undefined_keys":"result"}"#,
+        r#"{"undefined_keys":{"0":"result"}}"#,
+        r#"{"undefined_keys":null}"#,
+        r#"{"undefined_keys":["result"],"result":null}"#,
+        r#"{"undefined_keys":["result"],"result":"0x1"}"#,
+        r#"{"undefined_keys":["result"],"extra":1}"#,
+        r#"{"undefined_keys":["result"],"failure":"error"}"#,
+        r#"{"undefined_keys":["result"],"revert":{"data":"0x12"}}"#,
+        &escaped,
+    ] {
+        assert_eq!(colibri(text), None, "{text}");
+    }
+    // Neither shape belongs to another operation.
+    for kind in [Kind::MyotisRead, Kind::MyotisBroadcast, Kind::Rpc] {
+        for text in [
+            r#"{"undefined_keys":["result"]}"#,
+            r#"{"revert":{"data":"0x12"},"capacity":true}"#,
+        ] {
+            assert_eq!(answer(kind, raw(text)), None, "{kind:?} {text}");
+        }
+    }
+}
+
+#[test]
+fn a_colibri_result_of_undefined_replies_without_result() {
+    // Main restores an own `result: undefined` from `undefined_keys`.
+    let mut t = test();
+    let mut config = chain_snapshot(&["colibri"], &[]);
+    config["prover"] = json!({ "endpoint": "p", "zk": false });
+    t.configure(json!([config]));
+    let (id, params) = read(3, "eth_blockNumber", json!([]));
+    t.call(id, "chain.request", &params);
+    let op = verified(&t.written())[0].clone();
+    assert_eq!(op["params"]["colibri"], "request");
+    assert!(
+        t.answer(
+            op["id"].as_u64().unwrap(),
+            Ok(json!({ "undefined_keys": ["result"] }))
+        )
+        .is_ok()
+    );
+    let reply = t.written().into_iter().find(|f| f["id"] == 3).unwrap();
+    assert_eq!(
+        reply["result"],
+        json!({
+            "source": "colibri",
+            "verified": true,
+            "generation": 1,
+            "undefined_keys": ["result"],
+        }),
+        "{reply}"
+    );
+}
+
+#[test]
+fn a_colibri_revert_with_capacity_blocks_the_apps_route() {
+    // The read rejects with the revert, and the same call from the same app
+    // never asks Colibri again: it is bypassed.
+    let mut t = test();
+    let mut config = chain_snapshot(&["colibri"], &[]);
+    config["prover"] = json!({ "endpoint": "p", "zk": false });
+    t.configure(json!([config]));
+    let call = |id| {
+        let (id, mut params) = read(id, "eth_call", json!([{ "to": "0xabc" }, "latest"]));
+        params["origin"] = json!("https://swap.example");
+        (id, params)
+    };
+    let (id, params) = call(3);
+    t.call(id, "chain.request", &params);
+    let op = verified(&t.written())[0].clone();
+    assert!(
+        t.answer(
+            op["id"].as_u64().unwrap(),
+            Ok(json!({ "revert": { "data": "0x" }, "capacity": true }))
+        )
+        .is_ok()
+    );
+    let reply = t.written().into_iter().find(|f| f["id"] == 3).unwrap();
+    assert_eq!(
+        reply["error"]["data"]["message"], "execution reverted",
+        "{reply}"
+    );
+    let (id, params) = call(4);
+    t.call(id, "chain.request", &params);
+    let frames = t.written();
+    assert!(verified(&frames).is_empty(), "{frames:?}");
+    let reply = frames.iter().find(|f| f["id"] == 4).unwrap();
+    let message = reply["error"]["data"]["message"].as_str().unwrap();
+    assert!(
+        message.ends_with("(colibri: temporarily bypassed for this app workload)"),
+        "{reply}"
+    );
+}
+
+#[test]
 fn mains_answers_take_one_closed_shape() {
     // Transport failures are a closed set and carry no text; only
     // `not_sent` says nothing went.
@@ -931,7 +1074,8 @@ fn mains_answers_take_one_closed_shape() {
     assert_eq!(
         colibri(r#"{"revert":{"data":"0x12"}}"#),
         Some(Answer::Colibri(ColibriReply::Revert {
-            data: "0x12".into()
+            data: "0x12".into(),
+            capacity: false,
         }))
     );
     for (class, expected) in [

@@ -1450,8 +1450,14 @@ enum Shape<'a> {
     Rejected(&'a RawValue),
     Uncertain,
     ColibriResult(&'a RawValue),
-    /// The data, a JSON string.
-    Revert(&'a RawValue),
+    /// `{ undefined_keys: ["result"] }`: Colibri's result was `undefined`.
+    ColibriUndefined,
+    /// The data, a JSON string, and whether main also classed the error a
+    /// capacity failure.
+    Revert {
+        data: &'a RawValue,
+        capacity: bool,
+    },
     ColibriFailure(ColibriClass),
 }
 
@@ -1571,8 +1577,26 @@ impl<'a> Shape<'a> {
                     colibri_class(class()?).map(Shape::ColibriFailure)
                 } else if members.are(&["result"]) {
                     members.get("result").map(Shape::ColibriResult)
+                } else if members.are(&["undefined_keys"]) {
+                    // Exactly `["result"]`: nothing else is ever undefined.
+                    let (key,) =
+                        serde_json::from_str::<(&RawValue,)>(members.get("undefined_keys")?.get())
+                            .ok()?;
+                    (plain(key)? == "result").then_some(Shape::ColibriUndefined)
                 } else if members.are(&["revert"]) {
-                    wrapped("revert", "data").map(Shape::Revert)
+                    wrapped("revert", "data").map(|data| Shape::Revert {
+                        data,
+                        capacity: false,
+                    })
+                } else if members.are(&["revert", "capacity"]) {
+                    // `capacity` is sent only when it is `true`.
+                    if members.get("capacity")?.get() != "true" {
+                        return None;
+                    }
+                    wrapped("revert", "data").map(|data| Shape::Revert {
+                        data,
+                        capacity: true,
+                    })
                 } else {
                     None
                 }
@@ -1665,10 +1689,14 @@ impl<'a> Shape<'a> {
                     reservation,
                 )
             }
-            Shape::Revert(data) => {
+            Shape::ColibriUndefined => (Answer::Colibri(ColibriReply::Undefined), reserve(0)?),
+            Shape::Revert { data, capacity } => {
                 let reservation = reserve(data.get().len())?;
                 let data = decode_string(data.get()).ok_or(Unread::Malformed)?;
-                (Answer::Colibri(ColibriReply::Revert { data }), reservation)
+                (
+                    Answer::Colibri(ColibriReply::Revert { data, capacity }),
+                    reservation,
+                )
             }
             Shape::ColibriFailure(class) => {
                 (Answer::Colibri(ColibriReply::Failure(class)), reserve(0)?)

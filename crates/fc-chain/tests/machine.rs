@@ -1162,6 +1162,7 @@ fn colibri_reverts_and_failures_carry_no_adapter_text() {
         op,
         Answer::Colibri(ColibriReply::Revert {
             data: "0x08c379a0".into(),
+            capacity: false,
         }),
     );
     match &world.reply(id).result {
@@ -1282,7 +1283,10 @@ fn a_kept_colibri_revert_is_charged_while_it_lives() {
     let data = format!("0x{}", "ab".repeat(400));
     world.answer(
         world.requests[0].0,
-        Answer::Colibri(ColibriReply::Revert { data }),
+        Answer::Colibri(ColibriReply::Revert {
+            data,
+            capacity: false,
+        }),
     );
     assert!(!world.replied(id));
     assert_eq!(world.rpcs().len(), 1);
