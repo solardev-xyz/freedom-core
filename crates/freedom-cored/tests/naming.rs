@@ -6,10 +6,14 @@
 
 mod common;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
-use common::{dirs, naming_recorded as recorded, naming_snapshot as snapshot, request, spawn};
+use common::{
+    dirs, naming_recorded as recorded, naming_snapshot as snapshot, request, spawn, spawn_env,
+};
 use serde_json::{Value, json};
 
 /// Plays main until the response to `id`: answers every `shell.rpc` from
@@ -177,13 +181,27 @@ fn an_unsolicited_shell_response_ends_the_core() {
 
 #[test]
 fn a_burst_while_main_is_not_reading_backs_up_rather_than_exiting() {
-    let (_root, data, locks) = dirs();
-    let mut core = spawn("serve", &data, &locks, &[]);
+    let (root, data, locks) = dirs();
+    let marker = root.path().join("naming-marks");
+    let marker_path = marker.display().to_string();
+    let mut core = spawn_env(
+        "serve",
+        &data,
+        &locks,
+        &[],
+        &[("FREEDOM_CORED_TEST_NAMING_MARKER", &marker_path)],
+    );
     core.hello();
     let mut many = snapshot();
     many["rpc"] = (1..=64)
         .map(|i| json!({ "endpoint": format!("e{i}") }))
         .collect();
+    // No probe times out while the test runs (sessions end at 120 s
+    // anyway), so the 32 sessions admitted first keep running however
+    // long the burst takes to arrive. With 5 s, a burst slower than that
+    // outlived them: their timeouts freed admission and quarantined every
+    // endpoint, and later lookups failed at once instead of being busy.
+    many["quorum"]["timeout_ms"] = json!(600_000);
     core.call(2, "naming.configure", many);
     // Main stalls: 2,048 lookups and then a vault request arrive while it
     // reads nothing. The core's shell requests and busy replies back up
@@ -197,25 +215,37 @@ fn a_burst_while_main_is_not_reading_backs_up_rather_than_exiting() {
         ));
     }
     core.send(&request(10_000, "vault.status", json!({})));
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    // Main reads again once the naming thread has made every busy reply
+    // (and, before them, the configure reply).
+    wait_for_marks(&marker, "made the busy replies", |marks| {
+        marks.iter().filter(|mark| *mark == "reply").count() >= 1 + 2048 - 32
+    });
     core.resume_reading();
     // Reading again, the vault's reply arrives (its share of the writer
-    // is its own) and every lookup was taken in.
-    let (mut status, mut busy, mut shell) = (false, 0, 0);
-    while !(status && busy == 2048 - 32 && shell == 256) {
+    // is its own) and every lookup was taken in: the first 32 run, with
+    // main holding 256 of their probes (its limit), and every later one is
+    // busy, once.
+    let mut busy = BTreeSet::new();
+    let (mut status, mut shell) = (false, 0);
+    while !(status && busy.len() == 2048 - 32 && shell == 256) {
         let message = core.recv();
         match (message["type"].as_str(), message["id"].as_u64()) {
             (Some("response"), Some(10_000)) => {
                 assert!(message["result"].is_object(), "{message}");
                 status = true;
             }
-            (Some("response"), _) if message["error"]["code"] == "busy" => busy += 1,
-            (Some("request"), _) => shell += 1,
-            // Unanswered, the probes time out and are cancelled.
-            _ => {}
+            (Some("response"), Some(id @ 132..2148)) if message["error"]["code"] == "busy" => {
+                assert!(busy.insert(id), "a second reply: {message}");
+            }
+            (Some("request"), _) => {
+                assert_eq!(message["method"], "shell.rpc", "{message}");
+                shell += 1;
+                assert!(shell <= 256, "past main's limit: {message}");
+            }
+            _ => panic!("unexpected {message}"),
         }
     }
-    // The core is alive.
+    // The core is alive, and nothing else came meanwhile.
     assert!(core.call(10_001, "vault.status", json!({}))["result"].is_object());
 }
 
@@ -238,10 +268,41 @@ fn an_error_that_echoes_a_huge_name_still_fits_a_frame() {
     assert!(core.call(3, "vault.status", json!({}))["result"].is_object());
 }
 
+/// The lines the naming thread has appended to its marker so far
+/// (`FREEDOM_CORED_TEST_NAMING_MARKER`), whole lines only.
+fn naming_marks(marker: &Path) -> Vec<String> {
+    let text = std::fs::read_to_string(marker).unwrap_or_default();
+    text.split_inclusive('\n')
+        .filter_map(|line| line.strip_suffix('\n'))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Waits until the naming thread's marks show `what`, and returns them.
+fn wait_for_marks(marker: &Path, what: &str, done: impl Fn(&[String]) -> bool) -> Vec<String> {
+    let deadline = Instant::now() + common::READ_TIMEOUT;
+    loop {
+        let marks = naming_marks(marker);
+        if done(&marks) {
+            return marks;
+        }
+        assert!(Instant::now() < deadline, "never {what}: {marks:?}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn replies_waiting_for_the_writer_survive_shutdown() {
-    let (_root, data, locks) = dirs();
-    let mut core = spawn("serve", &data, &locks, &[]);
+    let (root, data, locks) = dirs();
+    let marker = root.path().join("naming-marks");
+    let marker_path = marker.display().to_string();
+    let mut core = spawn_env(
+        "serve",
+        &data,
+        &locks,
+        &[],
+        &[("FREEDOM_CORED_TEST_NAMING_MARKER", &marker_path)],
+    );
     core.hello();
     // Main stalls while 16 lookups fail at once, each reply carrying a
     // 600 KB name: more than naming's 8 MiB share, so some wait in the
@@ -255,10 +316,29 @@ fn replies_waiting_for_the_writer_survive_shutdown() {
             json!({ "name": name, "private": false }),
         ));
     }
-    // Long names take a while to normalize: let it finish them all.
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    // Long names take a while to normalize: seconds for the 16, in a debug
+    // build under load. Shutdown comes once the naming thread has made all
+    // 16 replies. (A lookup still running at shutdown may get no reply, as
+    // 0001's drain is bounded, which this test isn't about.)
+    wait_for_marks(&marker, "made 16 replies", |marks| {
+        marks.iter().filter(|mark| *mark == "reply").count() >= 16
+    });
     core.send(&request(100, "core.shutdown", json!({})));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    // Main reads again only after shutdown has ended the naming thread,
+    // which hands the replies still waiting in it to the writer.
+    let marks = wait_for_marks(&marker, "drained", |marks| {
+        marks.iter().any(|mark| mark.starts_with("drain "))
+    });
+    let drained: usize = marks
+        .iter()
+        .find_map(|mark| mark.strip_prefix("drain "))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        drained > 0,
+        "no reply waited in the naming thread: {marks:?}"
+    );
     core.resume_reading();
     let (mut replies, mut shutdown) = (0, false);
     while !(shutdown && replies == 16) {
@@ -269,7 +349,7 @@ fn replies_waiting_for_the_writer_survive_shutdown() {
             _ => panic!("unexpected {message}"),
         }
     }
-    assert_eq!(core.exit_code(std::time::Duration::from_secs(5)), 0);
+    assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
 }
 
 #[test]
@@ -392,8 +472,6 @@ fn configure_reports_every_generation() {
 // It reports what it measured.
 #[allow(clippy::print_stdout)]
 fn cached_fanout_under_vault_work() {
-    use std::time::{Duration, Instant};
-
     const BURST: u64 = 50;
     const ROUNDS: u64 = 20;
     let (_root, data, locks) = dirs();

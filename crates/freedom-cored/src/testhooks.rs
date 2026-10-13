@@ -14,6 +14,10 @@
 //!   claims its commit point (before that stall), so tests can wait for it.
 //! - `FREEDOM_CORED_TEST_CHAIN_TOTAL_BYTES` replaces the chain total's
 //!   256 MiB (design 0005, Bounds), so a test can bring it near full.
+//! - `FREEDOM_CORED_TEST_NAMING_MARKER` names a file the naming thread
+//!   appends a line to for each reply it makes (`reply`), and at its end
+//!   for the waiting frames it hands to the writer (`drain <count>`), so
+//!   tests can wait for both while main isn't reading.
 //! - `FREEDOM_CORED_TEST_METHODS` enables the `test.*` methods
 //!   (`testmethods`), which make responses of any size. Release builds
 //!   don't compile them, nor this hook.
@@ -68,6 +72,29 @@ pub fn chain_bounds(mut bounds: fc_chain::machine::Bounds) -> fc_chain::machine:
 }
 
 #[cfg(debug_assertions)]
+fn naming_mark(line: &str) {
+    use std::io::Write as _;
+    if let Some(marker) = std::env::var_os("FREEDOM_CORED_TEST_NAMING_MARKER") {
+        // One write per line: the test reads the file while this appends.
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(marker)
+            .and_then(|mut file| file.write_all(format!("{line}\n").as_bytes()));
+    }
+}
+
+#[cfg(debug_assertions)]
+pub fn naming_reply() {
+    naming_mark("reply");
+}
+
+#[cfg(debug_assertions)]
+pub fn naming_drain(frames: usize) {
+    naming_mark(&format!("drain {frames}"));
+}
+
+#[cfg(debug_assertions)]
 pub fn test_methods() -> bool {
     std::env::var_os("FREEDOM_CORED_TEST_METHODS").is_some()
 }
@@ -90,6 +117,12 @@ pub fn kdf_deadline(default: Duration) -> Duration {
 pub fn stall(default: Duration) -> Duration {
     default
 }
+
+#[cfg(not(debug_assertions))]
+pub fn naming_reply() {}
+
+#[cfg(not(debug_assertions))]
+pub fn naming_drain(_frames: usize) {}
 
 #[cfg(not(debug_assertions))]
 pub fn chain_bounds(bounds: fc_chain::machine::Bounds) -> fc_chain::machine::Bounds {
