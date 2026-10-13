@@ -269,11 +269,13 @@ Every potentially long step is a **unit**. Each unit has a work limit and a time
 
 - `rad.reconcile` has 300 s from admission, owned by the service. Main's watchdog is at 315 s: 0001's deadline plus 15 s.
 - It is checked between units: between batches, between COBs within a batch, and between namespace checks.
-- At the deadline, the service does all of these:
-  - stops after the current unit;
+- **No unit starts after 240 s.** That reserves the worst case after the cutoff: one unit already running (at most 30 s) and the partial batch's commit (one unit, at most 30 s). So the reply is sent by 300 s, before main's watchdog at 315 s.
+- At the cutoff, the service does all of these:
+  - lets the current unit finish;
   - commits the partial batch with its checkpoint;
   - keeps the marker and the progress state;
   - answers `deadline`.
+- **A cutoff is not an overrun.** `deadline` is a normal reply, and Retry continues. A unit that exceeds its own 30 s is a [unit overrun](#the-unit-watchdog): the process ends with 70, and the next attempt treats that unit as interrupted.
 - Main shows "Radicle is still repairing its data" with **Retry**. A retry spawns a new process, which continues from the checkpoints. There is no automatic restart loop.
 - **Shutdown and kill:** `rad.shutdown` stops after the current unit. A kill is safe at any point, since every unit is idempotent and is recorded only once it is durable.
 
@@ -307,11 +309,15 @@ A unit that can't finish is not retried forever.
   It stays on disk, untouched beyond its staging, and the [repository gate](#the-repository-gate) shuts it.
 - **Unseed doesn't clear it:**
   - Unseeding changes the seeding policy, not the record. While `storage/<rid>` exists, the record stays and the gate stays shut. A later seed or clone of the same repository is refused with `quarantined`.
-  - **Remove** (`rad.remove_repo`) is the only way out. It does these in order, durably:
-    1. unseeds the repository;
-    2. deletes `storage/<rid>`, following no symlinks;
-    3. deletes the repository's cache rows;
-    4. clears the record.
+  - **Remove** (`rad.remove_repo`) is the only way out, and only for a quarantined repository.
+    - **Each record has its own `qid`,** a random 128-bit ID created with the record. Every quarantine entry carries it, and main passes back the `qid` of the entry the user saw in the warning.
+    - **The precondition:** when the writer starts the removal, it checks under the repository gate that the record for `rid` exists and has that `qid`. If the record is missing or has another `qid`, nothing is deleted, and the answer is `not_quarantined`. A delayed or duplicate removal can therefore never act on a repository that was cloned again after an earlier removal.
+    - It then does these in order, durably, with the gate shut throughout:
+      1. unseeds the repository;
+      2. deletes `storage/<rid>`, following no symlinks;
+      3. deletes the repository's cache rows;
+      4. clears the record.
+    - **Partial failure or cancel:** the record, and its `qid`, stay until step 4. A retry with the same `qid` repeats the steps, each of which is idempotent.
 
     Main warns first that this deletes the local copy, including the user's own issues and comments in it that haven't been shared.
 - **The diagnosis isn't retryable:** the repository stays quarantined until it is removed, or until a later service version clears the record.
@@ -402,8 +408,8 @@ The rules this design relies on, as 0007 specifies them:
 |---|---|---|---|
 | `rad.hello` | `protocol`, `shell_version`, `frames` | `protocol`, `service_version`, `libradicle` build info | 10 s after spawn |
 | `rad.reconcile` | none | `{ was_dirty, repaired, quarantined: { count, first } }`: counts per step, and up to 16 quarantine entries | 300 s ([the bound](#reconciliation)); on failure or deadline, the process exits |
-| `rad.quarantine_list` | `page` | `{ entries, next_page }`: up to 64 entries `{ rid, kind, step, unit, since }` per page | read pool; 60 s |
-| `rad.remove_repo` | `rid` | `{ removed }` | write queue; 60 s |
+| `rad.quarantine_list` | `page` | `{ entries, next_page }`: up to 64 entries `{ rid, qid, kind, step, unit, since }` per page | read pool; 60 s |
+| `rad.remove_repo` | `rid`, `qid` | `{ removed }`, or `not_quarantined` when no record with that `qid` exists ([the escape](#the-escape)) | write queue; 60 s |
 | `rad.start` | `alias`, `network` | `did`, `nid`, `alias` | 30 s; on failure, the process exits |
 | `rad.stats` | none | `connected_peers`, `node_alive`, the repair unit in progress and its elapsed time, `quarantined_count`, pool and budget use | inline; 5 s |
 | `rad.shutdown` | none | none: the process exits | main kills after 10 s |
@@ -978,6 +984,8 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
   - a clean run: the marker is cleared, and the next start skips the full repair.
 - **The bound:**
   - **one repository whose cache rebuild alone takes longer than 315 s:** each attempt advances its checkpoint, and a retry completes;
+  - **a healthy unit near the cutoff:** a unit starting at 239 s and taking 29 s, then the partial batch's commit. The reply is `deadline` before 300 s, main doesn't kill, and the retry treats nothing as interrupted;
+  - **removal bound to its record:** remove quarantine A, clone the same RID again and add local work, then deliver A's delayed removal. It answers `not_quarantined`, and the new data survives. A cancel or failure between each pair of removal steps keeps the record, and a retry with the same `qid` completes;
   - **a repository with a COB that never finishes loading:** after two attempts end during it, the repository is quarantined. The node reaches `RUNNING`, its COB reads answer `quarantined`, and its file reads still work;
   - **a kill between a batch's work and its commit:** the progress state doesn't claim the batch, and the retry redoes it;
   - **at `RUNNING`:** no progress state is left;
