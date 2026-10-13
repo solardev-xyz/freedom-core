@@ -339,6 +339,37 @@ These stay in main, because they depend on the bytes. Each is today's code.
   - planned versus today.
 
   If hash hosts regress noticeably, main plans them locally from the same vectors (above).
+- **Measured** (freedom-browser `scripts/bench-dweb-latency.js`; a release build of freedom-core main at aed7ba7; a 4-core dev server shared with other agents' builds, load 1.3–3.9; 2026-10-13). Setup:
+  - **Handlers:** each tree's real handlers, driven as the real-handler tests drive them: planned (#704, freedom-browser f78230b0) against today (dca4a4ef).
+  - **Nodes:** a fake Ant API and a fake IPFS gateway on loopback, in their own process, answering in well under a millisecond. The numbers are main's handlers plus the core's planning, without a node's own retrieval time.
+  - **Names:** looked up from the core's cache, which a recorded quorum lookup warms. No measured request reached RPC.
+  - **Statistics:** the median of three runs. Each run rotates the order of the trees and sends 30–2,000 requests per case.
+
+  Time to first byte, p50, in ms:
+
+  | Case | Today | Planned | Hash hosts planned in main |
+  |---|---|---|---|
+  | Ant, hash host, 1 KB: one at a time / 50 / 200 at once | 0.57 / 9.4 / 22.7 | 1.55 / 16.5 / 46.0 | 0.92 / 13.3 / 36.2 |
+  | Gateway, hash host, 1 KB: one / 50 / 200 | 0.37 / 3.6 / 16.1 | 0.99 / 9.8 / 22.7 | 0.40 / 5.2 / 19.2 |
+  | Ant, hash host, 100 KB: one / 50 / 200 | 0.43 / 6.7 / 32.1 | 1.03 / 11.8 / 40.9 | 0.60 / 10.1 / 35.1 |
+  | Ant, named host, 1 KB: one / 50 / 200 | 1.12 / 7.9 / 20.4 | 1.11 / 7.8 / 28.9 | (as planned) |
+  | Gateway, named host, 1 KB: one / 50 / 200 | 0.80 / 6.4 / 19.8 | 0.97 / 6.4 / 24.5 | (as planned) |
+  | Seek (1 MiB Range into 10 MiB), hash host: Ant / gateway, 200 at once | 109 / 105 | 122 / 116 | 127 / 122 |
+
+  - **A hash host, one at a time:** the round trip costs 0.4–1.0 ms at p50 for every body size, and up to about 5 ms at p99 (seeks). Planning in main recovers most of it.
+  - **Small hash-host bodies in a burst:** the p50 rises by up to 23 ms at 50 or 200 at once, as much as 2× (the Ant, 1 KB, 200 at once). Planning in main recovers about half of that, between a third and two thirds. The rest is main's own new per-request work: validating and executing the plan, and admission. Main's CPU per request in that case went from 0.26 ms today to 0.48 ms planned, and 0.41 ms planned in main.
+  - **A named host:** no change one at a time, since it is one core round trip either way. In 200-request bursts it gains 5–10 ms at p50, from the same per-request work in main.
+  - **10 MiB bodies:** first byte and total stay within the runs' spread (first byte −13% to +19%, total within ±7%, no consistent direction).
+  - **Seeks on hash hosts:** 2–6 ms later at 50 at once and 11–13 ms (about 10%) later at 200. Seeks on named hosts stay within the spread.
+  - **Two earlier three-run sessions** ran the fake nodes inside main's process. They gave the same picture for small bodies. They also showed 10 MiB first bytes 30–50% later when planned, but that went away once the nodes ran in their own process, as real nodes do.
+- **Verdict: hash hosts regress measurably, not noticeably.** One at a time, a hash host pays about half a millisecond to a millisecond for its plan. That is small next to any real node's retrieval time, which this measurement leaves out on purpose. Under bursts of small requests, about half of the added cost is main's own per-request plan execution, which planning in main would not remove either.
+  - **So step 4 keeps the round trip,** and main does not plan hash hosts locally.
+  - **If burst latency matters later,** main's per-request work in the executor is the first target.
+  - **What local planning would take:**
+    - move the hash-host half of the JS planner the real-handler tests already use (freedom-browser `test/helpers/fake-dweb-core.js`, held to `vectors/dweb.json`'s `requests` by `dweb-vectors.test.js`) into main;
+    - route requests with no name host to it. Its plans carry no generations, so no fence is needed;
+    - keep it in CI against the vectors.
+  - **Its cost:** a second planner to keep in step with fc-dweb, and the loss of "one place for dweb request logic" for hash hosts in Electron. The Chromium build would still call fc-dweb in process.
 
 ## Service processes (4.2, 4.4)
 
