@@ -25,11 +25,25 @@
 // and the answer it got, so a replay serves the recorded answer to the
 // matching request instead of re-creating the world.
 //
-// Encodings: a present `undefined` is {"$undefined":true}; a string longer
-// than 64 KiB is {"$repeat":{head,unit,count,tail,length,sha256}}, which
-// expands to head + unit repeated count times + tail. Instants inside the
-// state tables are virtual milliseconds (the reference's Date.now() minus
-// EPOCH); 0 stays 0, the reference's "unset".
+// Scripted answers come at once unless they name a delay, as the suites'
+// mocks do. A ported call carries the settle time its test asserts
+// (`expect_settle_ms`, or a bound), and a fixture that drifts from it fails
+// the generation.
+//
+// Encodings. Every value the reference produced or was given, and every
+// call's params, is JSON text in a string field (`*_json`), never a JSON
+// value in the file: so no value can pass for an encoding, and every value
+// JSON.parse can make survives, lone surrogates (as escapes), any nesting,
+// -0 (written "-0") and ±Infinity (written ±1e400, which JSON.parse reads
+// back as such) included. A present `undefined` is a field of its own
+// (`*_undefined: true`), never a value. A text over 64 KiB is written in
+// its field's repeat form (`*_json_repeat`, `body_repeat`): { head, unit,
+// count, tail, length, sha256 }, the text being head + unit × count + tail.
+// An object the router returned or threw is a list of entries in property
+// order, each { key, json | json_repeat | undefined }. Worlds, steps and
+// state tables are plain JSON the harness writes itself. Instants inside
+// the state tables are virtual milliseconds (the reference's Date.now()
+// minus EPOCH); 0 stays 0, the reference's "unset".
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
@@ -41,13 +55,16 @@ const { AsyncLocalStorage } = require('node:async_hooks');
 const EPOCH = 1_760_000_000_000;
 // Virtual time one step may take before its calls count as pending.
 const MAX_STEP_MS = 10 * 60_000;
-// How long a scripted answer takes unless it names a delay.
-const DEFAULT_DELAY_MS = 10;
-// Strings longer than this are recorded as $repeat.
-const LARGE_STRING = 64 * 1024;
+// How long a scripted answer takes unless it names a delay: none, as the
+// suites' mocks resolve at once.
+const DEFAULT_DELAY_MS = 0;
+// Texts longer than this are written in their repeat form.
+const LARGE_TEXT = 64 * 1024;
+// The nesting plain JSON the harness writes may have.
+const PLAIN_DEPTH = 32;
 const MYOTIS_NAMES = { 1: 'Ethereum', 100: 'Gnosis' };
 
-/** A string as head + unit × count + tail, verified, or null. */
+/** A text as head + unit × count + tail, verified, or null. */
 function repeatOf(text) {
   let best = null;
   for (let unit = 1; unit <= 16; unit += 1) {
@@ -70,59 +87,107 @@ function repeatOf(text) {
     if (best.head.length + best.tail.length < 1024) break;
   }
   if (!best || best.head.length + best.tail.length > 4096) return null;
-  if (best.head + best.unit.repeat(best.count) + best.tail !== text) throw new Error('$repeat: expansion mismatch');
+  if (best.head + best.unit.repeat(best.count) + best.tail !== text) throw new Error('repeat form: expansion mismatch');
   return { ...best, length: text.length, sha256: crypto.createHash('sha256').update(text, 'utf8').digest('hex') };
 }
 
-/** Long strings as $repeat; generation fails for one with no compact form. */
-function compact(value) {
-  if (typeof value === 'string') {
-    if (value.length <= LARGE_STRING) return value;
-    const repeat = repeatOf(value);
-    if (!repeat) throw new Error(`a ${value.length}-character string has no $repeat form`);
-    return { $repeat: repeat };
-  }
-  if (Array.isArray(value)) return value.map(compact);
-  if (value && typeof value === 'object') {
-    // A world's own $repeat is recorded in full form, with its length and digest.
-    const keys = Object.keys(value);
-    if (keys.length === 1 && keys[0] === '$repeat') return compact(expand(value));
-    return Object.fromEntries(keys.map((key) => [key, compact(value[key])]));
-  }
-  return value;
+/** A world's repeat macro ({ head, unit, count, tail }) as its text. */
+function repeated({ head = '', unit, count, tail = '' }) {
+  return head + unit.repeat(count) + tail;
 }
 
-/** A world value with every {$repeat} expanded. */
-function expand(value) {
-  if (Array.isArray(value)) return value.map(expand);
-  if (value && typeof value === 'object') {
-    const keys = Object.keys(value);
-    if (keys.length === 1 && keys[0] === '$repeat') {
-      const { head = '', unit, count, tail = '' } = value.$repeat;
-      return head + unit.repeat(count) + tail;
+/**
+ * The JSON text of a value JSON.parse could have made, as JSON.stringify
+ * writes it (keys in property order, strings escaped, lone surrogates as
+ * \uXXXX), except that -0 is "-0" and ±Infinity ±1e400, which JSON.parse
+ * reads back as such. A nested undefined, NaN or anything but JSON data
+ * fails the generation: no record could keep it.
+ */
+function jsonText(value, at = 'value') {
+  if (value === null) return 'null';
+  switch (typeof value) {
+    case 'string':
+      return JSON.stringify(value);
+    case 'boolean':
+      return value ? 'true' : 'false';
+    case 'number':
+      if (Object.is(value, -0)) return '-0';
+      if (value === Infinity) return '1e400';
+      if (value === -Infinity) return '-1e400';
+      if (Number.isNaN(value)) throw new Error(`${at}: NaN has no JSON text`);
+      return JSON.stringify(value);
+    case 'object': {
+      const item = (child, where) => {
+        if (child === undefined) throw new Error(`${where}: a nested undefined has no record`);
+        return jsonText(child, where);
+      };
+      if (Array.isArray(value)) return `[${value.map((child, i) => item(child, `${at}[${i}]`)).join(',')}]`;
+      return `{${Object.keys(value).map((key) => `${JSON.stringify(key)}:${item(value[key], `${at}.${key}`)}`).join(',')}}`;
     }
-    return Object.fromEntries(keys.map((key) => [key, expand(value[key])]));
+    default:
+      throw new Error(`${at}: a ${typeof value} has no JSON text`);
   }
-  return value;
 }
 
-/** JSON with present-undefined kept, non-finite numbers refused, long strings compact. */
-function describe(value) {
-  const text = JSON.stringify(value, (_key, item) => {
-    if (item === undefined) return { $undefined: true };
-    if (typeof item === 'number' && (!Number.isFinite(item) || Object.is(item, -0))) throw new Error(`describe: ${item} has no JSON form`);
-    if (typeof item === 'bigint' || typeof item === 'function') throw new Error(`describe: a ${typeof item}`);
-    return item;
-  });
-  return compact(JSON.parse(text));
+/** A text field, or its repeat form when it is over 64 KiB. */
+function textField(name, text) {
+  if (text.length <= LARGE_TEXT) return { [name]: text };
+  const repeat = repeatOf(text);
+  if (!repeat) throw new Error(`${name}: a ${text.length}-character text has no repeat form`);
+  return { [`${name}_repeat`]: repeat };
+}
+
+/** A value as `<name>_json` (its text), `<name>_json_repeat`, or `<name>_undefined: true`. */
+function jsonField(name, value) {
+  const prefix = name ? `${name}_` : '';
+  if (value === undefined) return { [`${prefix}undefined`]: true };
+  return textField(`${prefix}json`, jsonText(value, name || 'value'));
+}
+
+/** An object's own enumerable properties, in order: { key, json | json_repeat | undefined }. */
+function entriesOf(object) {
+  return Object.keys(object).map((key) => ({ key, ...jsonField('', object[key]) }));
+}
+
+/** A call's value: an object as its entries, anything else as `value_json`. */
+function recordValue(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? { value: entriesOf(value) } : jsonField('value', value);
 }
 
 /** A thrown value: its class, name, message and own enumerable properties, in order. */
-function describeError(error) {
-  if (!(error instanceof Error) && error?.constructor?.name !== 'DOMException') return { class: typeof error, value: describe(error) };
-  const props = {};
-  for (const key of Object.keys(error)) props[key] = error[key];
-  return describe({ class: error.constructor?.name ?? 'Error', name: error.name, message: error.message, props });
+function recordError(error) {
+  if (!(error instanceof Error) && error?.constructor?.name !== 'DOMException') return { class: typeof error, ...jsonField('value', error) };
+  return { class: error.constructor?.name ?? 'Error', name: error.name, ...jsonField('message', error.message), props: entriesOf(error) };
+}
+
+/**
+ * Plain JSON the harness writes (worlds, steps, state tables, the I/O
+ * records' frames), copied and checked: well-formed strings of at most
+ * 64 KiB, finite numbers other than -0, shallow nesting. Keys whose value
+ * is undefined are left out, as JSON.stringify leaves them.
+ */
+function plain(value, at = 'value', depth = 0) {
+  if (depth > PLAIN_DEPTH) throw new Error(`${at}: nested too deep for plain JSON`);
+  if (value === null || typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    if (!value.isWellFormed() || value.length > LARGE_TEXT) throw new Error(`${at}: not a plain string`);
+    return value;
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || Object.is(value, -0)) throw new Error(`${at}: ${value} is not a plain number`);
+    return value;
+  }
+  if (Array.isArray(value)) return value.map((item, i) => plain(item, `${at}[${i}]`, depth + 1));
+  if (typeof value === 'object') {
+    const out = {};
+    for (const key of Object.keys(value)) {
+      if (value[key] === undefined) continue;
+      if (!key.isWellFormed()) throw new Error(`${at}: a key that is not well formed`);
+      out[key] = plain(value[key], `${at}.${key}`, depth + 1);
+    }
+    return out;
+  }
+  throw new Error(`${at}: a ${typeof value} is not plain JSON`);
 }
 
 // Read-only accessors appended to the pinned sources (as chain.js's
@@ -195,15 +260,15 @@ function loadReference(checkout, stubs, dns) {
 // The Myotis manager's and child process's own errors, by class, with
 // their texts (myotis-manager.js runningInstance, verifiedRequest,
 // broadcastRejected and sendRawTransaction; myotis-process.js unavailable).
-// `immediate` ones are thrown before any await.
+// The classes are design 0005's ("Myotis read outcomes"), and the
+// broadcast's; a scenario names one with `throws`, and the record keeps it.
 const MYOTIS_ERRORS = {
-  not_running: { immediate: true, make: (chain) => new Error(`${MYOTIS_NAMES[chain]} Myotis client is not running`) },
-  not_ready: { immediate: true, make: (chain) => new Error(`${MYOTIS_NAMES[chain]} Myotis verified reader is not ready`) },
+  not_running: { make: (chain) => new Error(`${MYOTIS_NAMES[chain]} Myotis client is not running`) },
+  not_ready: { make: (chain) => new Error(`${MYOTIS_NAMES[chain]} Myotis verified reader is not ready`) },
   state_changed: { make: () => Object.assign(new Error('Myotis state changed while the request was running'), { code: 'MYOTIS_UNAVAILABLE' }) },
-  queue_full: { immediate: true, make: () => Object.assign(new Error('Myotis request queue is full'), { code: 'MYOTIS_UNAVAILABLE' }) },
+  queue_full: { make: () => Object.assign(new Error('Myotis request queue is full'), { code: 'MYOTIS_UNAVAILABLE' }) },
   queue_deadline: { make: () => Object.assign(new Error('Myotis queue deadline exceeded'), { code: 'MYOTIS_UNAVAILABLE' }) },
   caller_deadline: { make: () => Object.assign(new Error('Myotis caller deadline exceeded'), { code: 'MYOTIS_UNAVAILABLE' }) },
-  native_failed: { make: () => Object.assign(new Error('Myotis native operation failed'), { code: 'MYOTIS_UNAVAILABLE' }) },
   rejected: { make: (_chain, outcome) => Object.assign(new Error(outcome.reason), { code: -32000, myotisRefusal: 'rejected' }) },
   // In band: the client answered without a hash (sendRawTransaction).
   uncertain: { make: () => Object.assign(new Error('Myotis broadcast outcome uncertain; reconcile the original signed transaction'), { code: 'MYOTIS_BROADCAST_UNCERTAIN' }) },
@@ -214,11 +279,22 @@ const MYOTIS_ERRORS = {
 
 const hex = (n) => `0x${n.toString(16)}`;
 
+/** A step as recorded: plain JSON, each call's params as their JSON text. */
+function recordStep(step) {
+  const recordCall = (call) => Object.fromEntries(Object.entries(call).flatMap(([key, value]) => (
+    key === 'params' ? Object.entries(jsonField('params', value)) : [[key, plain(value, `call.${key}`)]])));
+  return Object.fromEntries(Object.entries(step).flatMap(([key, value]) => {
+    if (value === undefined) return [];
+    return [[key, key === 'calls' ? value.map(recordCall) : plain(value, `step.${key}`)]];
+  }));
+}
+
 /** Runs one scenario and returns its record. Every global it changes is restored on every path. */
 async function runScenario(checkout, FakeTimers, scenario) {
   const world = structuredClone(scenario.world);
   const io = [];
   const violations = [];
+  const expectations = [];
   const callStore = new AsyncLocalStorage();
   // The innermost operation an I/O request belongs to: a Blockscout read
   // holds its pages, a page its HTTP hops and DNS lookups.
@@ -310,7 +386,8 @@ async function runScenario(checkout, FakeTimers, scenario) {
   };
 
   // JSON-RPC endpoints: world.rpc[url] is a plan of answers. An answer is
-  // { result } or { error } (a 200 JSON-RPC body), { logs } (built from the
+  // { result } or { error } (a 200 JSON-RPC body), { result_repeat } (a
+  // result string given by a repeat macro), { logs } (built from the
   // filter), { noResult } (a body without one), { body } (raw text, with
   // `status`), { status } (a non-2xx with `text`), { fail } (fetch rejects
   // with that TypeError) or { hang } (no answer until aborted), each with an
@@ -321,7 +398,7 @@ async function runScenario(checkout, FakeTimers, scenario) {
     const parsed = JSON.parse(text);
     const prefix = `{"jsonrpc":"2.0","id":${parsed.id},`;
     if (!text.startsWith(prefix) || parsed.id !== Date.now()) throw new Error(`scenario ${scenario.id}: unexpected JSON-RPC body`);
-    const item = record({ kind: 'rpc', url, method: parsed.method, body: `{"jsonrpc":"2.0","id":0,${text.slice(prefix.length)}` });
+    const item = record({ kind: 'rpc', url, method: parsed.method, ...textField('body', `{"jsonrpc":"2.0","id":0,${text.slice(prefix.length)}`) });
     if (!URL.canParse(url)) {
       // undici refuses it before any I/O.
       item.answer = { refused: 'Failed to parse URL' };
@@ -340,7 +417,7 @@ async function runScenario(checkout, FakeTimers, scenario) {
     const to = typeof filter?.toBlock === 'string' ? parseInt(filter.toBlock, 16) : null;
     const ctx = { nth, method: parsed.method, from, to, span: from !== null && to !== null && !Number.isNaN(from + to) ? to - from + 1 : null };
     if (!world.rpc || !Object.hasOwn(world.rpc, url)) violations.push(`undeclared RPC endpoint ${url}`);
-    let answer = expand(pick(world.rpc?.[url], ctx));
+    let answer = pick(world.rpc?.[url], ctx);
     if (!answer) {
       violations.push(`unscripted ${parsed.method} at ${url}`);
       answer = { error: { code: -32601, message: 'unscripted' } };
@@ -367,12 +444,13 @@ async function runScenario(checkout, FakeTimers, scenario) {
         if ('body' in answer) body = answer.body;
         else if ('error' in answer) body = JSON.stringify({ jsonrpc: '2.0', id: 1, error: answer.error });
         else if ('result' in answer) body = JSON.stringify({ jsonrpc: '2.0', id: 1, result: answer.result });
+        else if (answer.result_repeat) body = JSON.stringify({ jsonrpc: '2.0', id: 1, result: repeated(answer.result_repeat) });
         else if (answer.logs) body = JSON.stringify({ jsonrpc: '2.0', id: 1, result: logsFor(answer.logs, ctx) });
         else if (answer.noResult) body = '{"jsonrpc":"2.0","id":1}';
         else if (answer.status) body = answer.text ?? '';
         else throw new Error(`scenario ${scenario.id}: an answer with nothing to send at ${url}`);
         if (!(status >= 200 && status <= 599)) throw new Error(`scenario ${scenario.id}: status ${status}`);
-        item.answer = { status, body };
+        item.answer = { status, ...textField('body', body) };
         close(item, 'answered');
         resolve(new Response([204, 205, 304].includes(status) ? null : body, { status, headers: { 'content-type': 'application/json' } }));
       }, delayOf(answer));
@@ -382,8 +460,9 @@ async function runScenario(checkout, FakeTimers, scenario) {
   // Blockscout and the hosts its redirects reach: world.blockscout[host] is
   // a plan of answers, each { transfers } (Blockscout's list for the
   // queried address, served newest first, 50 to a page, before the page's
-  // block_number/index), { status, headers, json | text }, { redirect } (a
-  // `status` 3xx, 302 by default, to that location), { fail } or { hang }.
+  // block_number/index), { status, headers, page | text } (`page` a JSON
+  // value sent as the body), { redirect } (a `status` 3xx, 302 by default,
+  // to that location), { fail } or { hang }.
   const blockscoutCalls = new Map();
   const blockscoutPage = (transfers, url, pageSize = 50) => {
     const query = new URL(url).searchParams;
@@ -410,7 +489,7 @@ async function runScenario(checkout, FakeTimers, scenario) {
     const nth = blockscoutCalls.get(host) ?? 0;
     blockscoutCalls.set(host, nth + 1);
     if (!world.blockscout || !Object.hasOwn(world.blockscout, host)) violations.push(`undeclared Blockscout host ${host}`);
-    let answer = expand(pick(world.blockscout?.[host], { nth }));
+    let answer = pick(world.blockscout?.[host], { nth });
     if (!answer) {
       violations.push(`unscripted Blockscout read at ${host}`);
       answer = { status: 404, text: '' };
@@ -442,13 +521,13 @@ async function runScenario(checkout, FakeTimers, scenario) {
         } else if (answer.transfers) {
           body = JSON.stringify(blockscoutPage(answer.transfers, url, answer.pageSize));
           headers['content-type'] = 'application/json';
-        } else if ('json' in answer) {
-          body = JSON.stringify(answer.json);
+        } else if ('page' in answer) {
+          body = JSON.stringify(answer.page);
           headers['content-type'] = 'application/json';
         } else {
           body = answer.text ?? '';
         }
-        item.answer = { status, headers, body };
+        item.answer = { status, headers: plain(headers, 'headers'), ...textField('body', body) };
         close(item, 'answered');
         resolve(new Response([204, 205, 304].includes(status) ? null : body, { status, headers }));
       }, delayOf(answer));
@@ -462,9 +541,9 @@ async function runScenario(checkout, FakeTimers, scenario) {
   const dns = {
     promises: {
       lookup: (host, options) => {
-        const item = record({ kind: 'dns', host, options: describe(options) });
+        const item = record({ kind: 'dns', host, ...jsonField('options', options) });
         if (!world.dns || !Object.hasOwn(world.dns, host)) violations.push(`undeclared DNS name ${host}`);
-        const answer = expand(world.dns?.[host] ?? { fail: 'ENOTFOUND' });
+        const answer = world.dns?.[host] ?? { fail: 'ENOTFOUND' };
         return new Promise((resolve, reject) => {
           if (answer.hang) return;
           later(() => {
@@ -474,7 +553,7 @@ async function runScenario(checkout, FakeTimers, scenario) {
               reject(Object.assign(new Error(`getaddrinfo ${answer.fail} ${host}`), { code: answer.fail }));
               return;
             }
-            item.answer = { addresses: answer.addresses };
+            item.answer = jsonField('addresses', answer.addresses);
             close(item, 'answered');
             resolve(structuredClone(answer.addresses));
           }, delayOf(answer));
@@ -502,25 +581,25 @@ async function runScenario(checkout, FakeTimers, scenario) {
     const settle = () => {
       if (make) {
         const error = make();
-        item.answer = { thrown: describeError(error), ...(errorClass ? { class: errorClass } : {}) };
+        item.answer = { thrown: recordError(error), ...(errorClass ? { class: errorClass } : {}) };
         close(item, 'answered');
         reject(error);
         return;
       }
-      item.answer = 'payload' in outcome ? { payload: describe(outcome.payload) } : { result: describe(outcome.result) };
+      item.answer = 'payload' in outcome ? jsonField('payload', outcome.payload) : jsonField('result', outcome.result);
       close(item, 'answered');
       resolve(structuredClone('payload' in outcome ? outcome.payload : outcome.result));
     };
-    const delay = delayOf(outcome, errorClass && MYOTIS_ERRORS[errorClass]?.immediate ? 0 : DEFAULT_DELAY_MS);
+    const delay = delayOf(outcome);
     // At 0 the operation settles as an async function that throws or
     // returns before its first await.
     if (delay === 0) settle();
     else setTimeout(settle, delay);
   });
   const myotisOp = (op, chainId, params) => {
-    const item = record({ kind: 'verified-op', host: 'myotis', op, chain: Number(chainId), params: describe(params) });
+    const item = record({ kind: 'verified-op', host: 'myotis', op, chain: Number(chainId), ...jsonField('params', params) });
     const ops = myotisChain(chainId).ops ?? {};
-    let outcome = expand(pick(ops[op], { nth: nthOf(`${chainId} ${op}`) }));
+    let outcome = pick(ops[op], { nth: nthOf(`${chainId} ${op}`) });
     if (!outcome) {
       violations.push(`unscripted Myotis ${op} on chain ${chainId}`);
       outcome = { throws: 'error', message: 'unscripted' };
@@ -535,15 +614,15 @@ async function runScenario(checkout, FakeTimers, scenario) {
     isReady: (chainId) => myotisChain(chainId).ready === true,
     getStatus: (chainId) => {
       const item = record({ kind: 'myotis-status', chain: Number(chainId) });
-      const sample = expand(pick(myotisChain(chainId).status, { nth: nthOf(`${chainId} status`) }));
+      const sample = pick(myotisChain(chainId).status, { nth: nthOf(`${chainId} status`) });
       item.end = item.t;
       item.outcome = 'answered';
       if (sample?.throws) {
         const error = new Error(sample.throws);
-        item.answer = { thrown: describeError(error) };
+        item.answer = { thrown: recordError(error) };
         throw error;
       }
-      item.answer = { status: describe(sample) };
+      item.answer = jsonField('status', sample);
       return sample === null ? null : structuredClone(sample);
     },
     getAccount: (address, chainId) => myotisOp('account', chainId, { address }),
@@ -561,8 +640,8 @@ async function runScenario(checkout, FakeTimers, scenario) {
   let colibriCount = 0;
   const COLIBRI = {
     requestViaColibri: (chainId, method, params, options) => {
-      const item = record({ kind: 'verified-op', host: 'colibri', op: 'request', chain: Number(chainId), params: describe({ method, params, deadline_ms: options?.deadlineMs }) });
-      let outcome = expand(pick(world.colibri, { nth: colibriCount++, method }));
+      const item = record({ kind: 'verified-op', host: 'colibri', op: 'request', chain: Number(chainId), ...jsonField('params', { method, params, deadline_ms: options?.deadlineMs }) });
+      let outcome = pick(world.colibri, { nth: colibriCount++, method });
       if (!outcome) {
         violations.push(`unscripted Colibri ${method}`);
         outcome = { error: { message: 'unscripted' } };
@@ -587,7 +666,7 @@ async function runScenario(checkout, FakeTimers, scenario) {
 
   // A scripted event during a step: Myotis readiness or a registry change.
   const fire = (event) => {
-    const item = record({ kind: 'event', event: describe(event) });
+    const item = record({ kind: 'event', event: plain(event, 'event') });
     item.end = item.t;
     item.outcome = 'fired';
     for (const [chain, change] of Object.entries(event.myotis ?? {})) {
@@ -619,15 +698,15 @@ async function runScenario(checkout, FakeTimers, scenario) {
     // it through the module's exports) and each page it fetches.
     const fetchTransfers = blockscout.fetchBlockscoutTransferLogs;
     blockscout.fetchBlockscoutTransferLogs = function observedRead(filter, toBlock, options) {
-      const item = record({ kind: 'blockscout-read', filter: describe(filter), to_block: toBlock, timeout_ms: options?.timeoutMs });
+      const item = record({ kind: 'blockscout-read', ...jsonField('filter', filter), to_block: toBlock, timeout_ms: options?.timeoutMs });
       return withinStore.run(item.id, () => fetchTransfers(filter, toBlock, options)).then(
         (list) => {
-          item.answer = { transfers: describe(list) };
+          item.answer = jsonField('transfers', list);
           close(item, 'answered');
           return list;
         },
         (error) => {
-          item.answer = { thrown: describeError(error) };
+          item.answer = { thrown: recordError(error) };
           close(item, 'failed');
           throw error;
         }
@@ -643,7 +722,7 @@ async function runScenario(checkout, FakeTimers, scenario) {
           return body;
         },
         (error) => {
-          item.answer = { thrown: describeError(error) };
+          item.answer = { thrown: recordError(error) };
           close(item, 'failed');
           throw error;
         }
@@ -697,8 +776,8 @@ async function runScenario(checkout, FakeTimers, scenario) {
     const settleAll = async (promises) => {
       const results = promises.map(() => null);
       promises.forEach((promise, i) => promise.then(
-        (value) => { results[i] = { value: describe(value), settled: now() }; },
-        (error) => { results[i] = { thrown: describeError(error), settled: now() }; }
+        (value) => { results[i] = { ...recordValue(value), settled: now() }; },
+        (error) => { results[i] = { thrown: recordError(error), settled: now() }; }
       ));
       const done = () => results.every(Boolean);
       const limit = Date.now() + MAX_STEP_MS;
@@ -723,7 +802,7 @@ async function runScenario(checkout, FakeTimers, scenario) {
         log_index_pair_cool_until: raw.log_index_pair_cool_until.map(([key, value]) => [key, at(value)]),
       };
       // Empty tables are left out.
-      return describe(Object.fromEntries(Object.entries(state).filter(([, value]) => (Array.isArray(value) ? value.length > 0 : value > 0))));
+      return plain(Object.fromEntries(Object.entries(state).filter(([, value]) => (Array.isArray(value) ? value.length > 0 : value > 0))), 'state');
     };
 
     const steps = [];
@@ -755,14 +834,34 @@ async function runScenario(checkout, FakeTimers, scenario) {
           return call.at ? new Promise((resolve) => setTimeout(resolve, call.at)).then(() => start(call, owner)) : start(call, owner);
         }));
       }
-      steps.push({ at, ...describe(step), results, state: stateOf() });
+      // The settle times the ported test asserts (`expect_settle_ms`, or a
+      // bound, `expect_settle_max_ms`), after the call's start: a fixture
+      // that drifts from its source fails the generation.
+      step.calls.forEach((call, i) => {
+        const took = results[i].settled === undefined ? null : results[i].settled - call.started;
+        if (call.expect_settle_ms !== undefined && took !== call.expect_settle_ms) {
+          expectations.push(`step ${index} call ${i} settled after ${took} ms, not ${call.expect_settle_ms}`);
+        }
+        if (call.expect_settle_max_ms !== undefined && !(took !== null && took <= call.expect_settle_max_ms)) {
+          expectations.push(`step ${index} call ${i} settled after ${took} ms, over ${call.expect_settle_max_ms}`);
+        }
+      });
+      steps.push({ at, ...recordStep(step), results, state: stateOf() });
     }
     // Let stragglers finish, so a late answer nobody waits for is recorded
     // as answered rather than left open.
     const limit = Date.now() + MAX_STEP_MS;
     while (clock.countTimers() > 0 && Date.now() < limit) await clock.nextAsync();
     if (violations.length > 0) throw new Error(`scenario ${scenario.id}: unscripted I/O: ${[...new Set(violations)].join('; ')}`);
-    return { id: scenario.id, from: scenario.from, world: describe(scenario.world), steps, io: describe(io) };
+    if (expectations.length > 0) throw new Error(`scenario ${scenario.id}: ${expectations.join('; ')}`);
+    return {
+      id: scenario.id,
+      from: scenario.from,
+      ...(scenario.deviation ? { deviation: scenario.deviation } : {}),
+      world: plain(scenario.world, 'world'),
+      steps,
+      io: plain(io, 'io'),
+    };
   } finally {
     for (const fn of undo.reverse()) fn();
   }
@@ -784,7 +883,10 @@ async function drive(driver, run, bridge) {
     // Ant's filter, its block range in place: { address, fromBlock, toBlock, topics }.
     const { address, topics } = driver.filter ?? {};
     const filter = { ...(address === undefined ? {} : { address }), ...window, ...(topics === undefined ? {} : { topics }) };
-    const call = { fn: 'request', chain: 100, method: 'eth_getLogs', params: [filter], background: true, profile: 'ant_scan', signal: true };
+    const call = {
+      fn: 'request', chain: 100, method: 'eth_getLogs', params: [filter], background: true, profile: 'ant_scan', signal: true,
+      ...(driver.expect_settle_ms === undefined ? {} : { expect_settle_ms: driver.expect_settle_ms }),
+    };
     calls.push(call);
     const { result, error } = await run(call, calls.length - 1);
     results.push(result);
@@ -849,6 +951,8 @@ const chainEntry = (network, rpc = [], prover = [], extra = {}) => ({ network, r
 /** Myotis ready on `chain` with these operations. */
 const myotisOn = (chain, ops = {}, extra = {}) => ({ [chain]: { ready: true, status: { optimisticBlockNumber: MYOTIS_BLOCK }, ops, ...extra } });
 const ok = (result, delay) => ({ result, ...(delay === undefined ? {} : { delay }) });
+/** A call option: the ported test says the call settles `ms` after it starts. */
+const settles = (ms) => ({ expect_settle_ms: ms });
 const rpcError = (code, message, extra = {}) => ({ error: { code, message, ...extra } });
 
 // chain-data-router.test.js's defaults: chains 1 and 100 both answer the
@@ -1070,7 +1174,7 @@ function routerScenarios(tx) {
       network: colibriFirst,
       colibri: { hang: true },
       rpc: { [RPC]: ok('0xrpc', 0) },
-    }), req(1, 'eth_call', call('0x1234'), swap), req(1, 'eth_call', call('0x1234'), swap)),
+    }), req(1, 'eth_call', call('0x1234'), { ...swap, ...settles(2000) }), req(1, 'eth_call', call('0x1234'), { ...swap, ...settles(0) })),
     scenario('router-excluded-source', T(814), routerWorld({
       network: colibriFirst,
       colibri: ok('0xcolibri'),
@@ -1091,24 +1195,24 @@ function routerScenarios(tx) {
       network: myotisFirst,
       myotis: myotisOn(1, { call_tx: { payload: { resultHex: '0xlate' }, delay: 5000 } }),
       rpc: { [RPC]: ok('0xrpc', 0) },
-    }), req(1, 'eth_call', [{ to: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', data: '0x1234' }, 'latest'], swap),
-    req(1, 'eth_call', [{ to: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', data: '0x1234' }, 'latest'], swap)),
+    }), req(1, 'eth_call', [{ to: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', data: '0x1234' }, 'latest'], { ...swap, ...settles(2000) }),
+    req(1, 'eth_call', [{ to: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', data: '0x1234' }, 'latest'], { ...swap, ...settles(0) })),
     scenario('router-myotis-noncancellable-no-starvation', T(923), routerWorld({
       network: myotisFirst,
       myotis: myotisOn(1, { call_tx: { hang: true } }),
       rpc: { [RPC]: ok('0xrpc', 0) },
-    }), Array.from({ length: 6 }, (_, i) => req(1, 'eth_call', [{ to: target(i), data: '0x1234' }, 'latest'], swap))),
+    }), Array.from({ length: 6 }, (_, i) => req(1, 'eth_call', [{ to: target(i), data: '0x1234' }, 'latest'], { ...swap, ...settles(2000) }))),
     scenario('router-myotis-late-read-keeps-slot', T(951), routerWorld({
       network: myotisFirst,
       myotis: myotisOn(1, { call_tx: [{ payload: { resultHex: '0xlate' }, delay: 2100 }, { payload: { resultHex: '0xverified' } }] }),
       rpc: { [RPC]: ok('0xrpc', 0) },
-    }), req(1, 'eth_call', [{ to: '0x1111111111111111111111111111111111111111', data: '0x1234' }, 'latest'], swap),
-    req(1, 'eth_call', [{ to: '0x2222222222222222222222222222222222222222', data: '0x1234' }, 'latest'], swap)),
+    }), req(1, 'eth_call', [{ to: '0x1111111111111111111111111111111111111111', data: '0x1234' }, 'latest'], { ...swap, ...settles(2000) }),
+    req(1, 'eth_call', [{ to: '0x2222222222222222222222222222222222222222', data: '0x1234' }, 'latest'], { ...swap, ...settles(100) })),
     scenario('router-myotis-serialized', T(983), routerWorld({
       network: myotisFirst,
       myotis: myotisOn(1, { call_tx: [{ payload: { resultHex: '0x2a' } }, { payload: { resultHex: '0x12' } }] }),
-    }), [req(1, 'eth_call', [{ to: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', data: '0x70a08231' }, 'latest']),
-      req(1, 'eth_call', [{ to: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', data: '0x313ce567' }, 'latest'])]),
+    }), [req(1, 'eth_call', [{ to: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', data: '0x70a08231' }, 'latest'], settles(0)),
+      req(1, 'eth_call', [{ to: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', data: '0x313ce567' }, 'latest'], settles(0))]),
     scenario('router-myotis-terminal-concurrent', T(1021), routerWorld({
       network: { access: { readOrder: ['myotis'] }, quorum: { timeoutMs: 5000 } },
       myotis: myotisOn(1, { account: { payload: ACCOUNT } }),
@@ -1117,7 +1221,7 @@ function routerScenarios(tx) {
       network: myotisFirst,
       myotis: myotisOn(1, { call_tx: { hang: true } }),
       rpc: { [RPC]: ok('0xrpc', 0) },
-    }), Array.from({ length: 18 }, (_, i) => req(1, 'eth_call', [{ to: target(i), data: '0x1234' }, 'latest']))),
+    }), Array.from({ length: 18 }, (_, i) => req(1, 'eth_call', [{ to: target(i), data: '0x1234' }, 'latest'], settles(i === 17 ? 0 : 5000)))),
     scenario('router-myotis-status-throw-releases-slot', T(1066), routerWorld({
       network: { access: { readOrder: ['myotis', 'direct'] }, quorum: { timeoutMs: 500 } },
       myotis: myotisOn(1, { call_tx: { payload: { resultHex: '0x2a' } } }, { status: [{ throws: 'native getStatus binding failed' }, { optimisticBlockNumber: MYOTIS_BLOCK }] }),
@@ -1130,7 +1234,8 @@ function routerScenarios(tx) {
       network: colibriFirst,
       colibri: [ok('0xlate', 2000), ok('0xlate', 2000), ok('0xlate', 2000), ok('0xverified')],
       rpc: { [RPC]: ok('0xrpc', 0) },
-    }), ...[0, 0, 15_000, 29_999, 1, 59_999, 1, 0].map((after) => ({ after, calls: [req(1, 'eth_call', call('0x1234'), swap)] }))),
+    }), ...[[0, 2000], [0, 0], [15_000, 2000], [29_999, 0], [1, 2000], [59_999, 0], [1, 0], [0, 0]]
+      .map(([after, ms]) => ({ after, calls: [req(1, 'eth_call', call('0x1234'), { ...swap, ...settles(ms) })] }))),
     scenario('router-colibri-capacity-demotion', T(1145), routerWorld({
       network: colibriFirst,
       colibri: { error: { message: 'prover execution failed: Out of gas' } },
@@ -1145,7 +1250,7 @@ function routerScenarios(tx) {
       network: colibriFirst,
       colibri: { hang: true },
       rpc: { [RPC]: ok('0xrpc', 0) },
-    }), Array.from({ length: 3 }, () => req(1, 'eth_call', call('0x1234'), swap))),
+    }), [2000, 2000, 0].map((ms) => req(1, 'eth_call', call('0x1234'), { ...swap, ...settles(ms) }))),
     scenario('router-quorum-settles-at-m', T(1206), {
       chains: { 1: chainEntry(quorumOnly, ABC) },
       rpc: { [A]: ok('0x42'), [B]: ok('0x42'), [C]: { hang: true } },
@@ -1153,28 +1258,28 @@ function routerScenarios(tx) {
     scenario('router-quorum-carries-past-deadline', T(1239), {
       chains: { 1: chainEntry(quorumDirect, [A, B, C, D]) },
       rpc: { [A]: [{ hang: true }, ok('0xrpc', 0)], [B]: { hang: true }, [C]: { hang: true }, [D]: ok('0xrpc', 0) },
-    }, req(1, 'eth_call', call('0x1234'), swap), req(1, 'eth_call', call('0x1234'), swap)),
+    }, req(1, 'eth_call', call('0x1234'), { ...swap, ...settles(5000) }), req(1, 'eth_call', call('0x1234'), { ...swap, ...settles(0) })),
     scenario('router-quorum-no-extension-before-colibri', T(1285), {
       chains: { 1: chainEntry({ access: { readOrder: ['quorum', 'colibri', 'direct'] }, quorum: { k: 3, m: 2, timeoutMs: 5000 } }, ABC, [PROVER]) },
       rpc: { [A]: { hang: true }, [B]: { hang: true }, [C]: { hang: true } },
       colibri: ok('0xverified'),
-    }, req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], swap)),
+    }, req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], { ...swap, ...settles(2000) })),
     scenario('router-quorum-wallet-read-stays-verified', T(1318), {
       chains: { 1: chainEntry(quorumDirect, ABC) },
       rpc: Object.fromEntries(ABC.map((u) => [u, ok('0x42', 3000)])),
-    }, req(1, 'eth_call', [{ to: '0xabc' }, 'latest'])),
+    }, req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], settles(3000))),
     scenario('router-quorum-last-source', T(1353), {
       chains: { 1: chainEntry(quorumOnly, ABC) },
       rpc: Object.fromEntries(ABC.map((u) => [u, ok('0x42', 3000)])),
-    }, req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], swap)),
+    }, req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], { ...swap, ...settles(3000) })),
     scenario('router-colibri-last-source', T(1388), routerWorld({
       network: { access: { readOrder: ['colibri'] }, quorum: { timeoutMs: 5000 } },
       colibri: ok('0xverified', 3000),
-    }), req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], swap)),
+    }), req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], { ...swap, ...settles(3000) })),
     scenario('router-myotis-last-source', T(1410), routerWorld({
       network: { access: { readOrder: ['myotis'] }, quorum: { timeoutMs: 5000 } },
       myotis: myotisOn(1, { call_tx: { payload: { resultHex: '0xverified' }, delay: 3000 } }),
-    }), req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], swap)),
+    }), req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], { ...swap, ...settles(3000) })),
     scenario('router-quorum-member-reused-as-direct', T(1432), {
       chains: { 1: chainEntry(quorumDirect, ABC) },
       rpc: { [A]: [ok('0x42', 20), ok('0xnext')], [B]: outOfGas, [C]: outOfGas },
@@ -1221,11 +1326,11 @@ function cancellationScenarios(tx) {
     scenario('cancel-direct-timeout-widened-never-narrowed', T(1567), {
       chains: { 100: chainEntry({ access: { readOrder: ['direct'] }, quorum: { timeoutMs: 5000 } }, [url('one')]) },
       rpc: { [url('one')]: { hang: true } },
-    }, req(100, 'eth_getLogs', [{}], { options: { directTimeoutMs: 60000 } }), req(100, 'eth_getLogs', [{}], { options: { directTimeoutMs: 10 } })),
+    }, req(100, 'eth_getLogs', [{}], { options: { directTimeoutMs: 60000 }, ...settles(60000) }), req(100, 'eth_getLogs', [{}], { options: { directTimeoutMs: 10 }, ...settles(5000) })),
     scenario('cancel-quorum-timeout-widened-never-narrowed', T(1598), {
       chains: { 100: chainEntry(quorumOnly, [A, B]) },
       rpc: { [A]: { hang: true }, [B]: { hang: true } },
-    }, req(100, 'eth_getLogs', [{}], { options: { quorumTimeoutMs: 30000 } }), req(100, 'eth_getLogs', [{}], { options: { quorumTimeoutMs: 10 } })),
+    }, req(100, 'eth_getLogs', [{}], { options: { quorumTimeoutMs: 30000 }, ...settles(30000) }), req(100, 'eth_getLogs', [{}], { options: { quorumTimeoutMs: 10 }, ...settles(5000) })),
     scenario('cancel-range-not-learned-without-cap-reader', T(1634), {
       chains: { 100: chainEntry(quorumOnly, THREE) },
       rpc: { [A]: ok([]), [B]: ok([]), [C]: rpcError(-32701, 'exceed maximum block range: 50000') },
@@ -1242,10 +1347,12 @@ function cancellationScenarios(tx) {
       chains: { 100: chainEntry({ access: { broadcastOrder: ['myotis', 'direct'] }, quorum: { timeoutMs: 5000 } }, [A, B]) },
       myotis: { 100: { ready: false } },
       rpc: { [A]: rpcError(-32005, 'rate limit exceeded'), [B]: { hang: true } },
-    }, send(100, tx.gnosis.raw)),
+    }, send(100, tx.gnosis.raw, settles(5000))),
     scenario('cancel-broadcast-no-second-rpc', T(1736), {
       chains: { 100: chainEntry({ access: { broadcastOrder: ['direct'] } }, [url('one'), url('two')]) },
-      rpc: { [url('one')]: { fail: 'disconnected' }, [url('two')]: ok(tx.gnosis.hash) },
+      // The test's fetch aborts the caller and fails at once: here both at
+      // 10 ms, the abort first.
+      rpc: { [url('one')]: { fail: 'disconnected', delay: 10 }, [url('two')]: ok(tx.gnosis.hash) },
     }, send(100, tx.gnosis.raw, { abort_at: 10 })),
     scenario('cancel-filter-names-sources', T(1761), {
       chains: { 1: chainEntry({ access: { readOrder: ['myotis', 'colibri', 'quorum'] }, quorum: { timeoutMs: 5000 } }, [RPC], [PROVER]) },
@@ -1262,11 +1369,11 @@ function cancellationScenarios(tx) {
     scenario('truncation-direct-check-one-attempt', T(1842), {
       chains: { 100: chainEntry({ access: { readOrder: ['direct'] }, quorum: { timeoutMs: 5000 } }, THREE) },
       rpc: Object.fromEntries(THREE.map((u) => [u, fullOrEarlier({ hang: true })])),
-    }, req(100, 'eth_getLogs', FULL)),
+    }, req(100, 'eth_getLogs', FULL, settles(5000))),
     scenario('truncation-direct-check-asks-answering-endpoint', T(1875), {
       chains: { 100: chainEntry({ access: { readOrder: ['direct'] }, quorum: { timeoutMs: 5000 } }, [A, C]) },
       rpc: { [A]: { hang: true }, [C]: fullOrEarlier(cutEarlier) },
-    }, req(100, 'eth_getLogs', FULL)),
+    }, req(100, 'eth_getLogs', FULL, settles(5000))),
     scenario('truncation-direct-check-reused-member', T(1906), {
       chains: { 100: chainEntry({ access: { readOrder: ['quorum', 'direct'] }, quorum: { k: 3, m: 2, timeoutMs: 5000 } }, THREE) },
       rpc: { [A]: { hang: true }, [B]: fullOrEarlier(cutEarlier), [C]: ok([]) },
@@ -1331,7 +1438,9 @@ const antWorld = (rpcs, network = { access: { readOrder: ['myotis', 'colibri', '
 const S = (line) => `ant-log-scan-routing.test.js:${line}`;
 
 function antScanScenarios() {
-  const halve = (span = ANT_FULL_HISTORY) => ({ driver: { kind: 'halve', head: ANT_HEAD, span } });
+  const halve = (span = ANT_FULL_HISTORY, extra = {}) => ({ driver: { kind: 'halve', head: ANT_HEAD, span, ...extra } });
+  // Every case asserts when Ant's request settles (`at`).
+  const at = (ms) => antLogs([{}], settles(ms));
   const matrix = {
     '3of3': (kind) => ({ a: kind, b: kind, c: kind, d: 'success' }),
     '2of3': (kind) => ({ a: kind, b: kind, c: 'down', d: 'success' }),
@@ -1348,54 +1457,54 @@ function antScanScenarios() {
   const MANY = { ...rpcError(-32005, 'query returned more than 10000 results'), delay: 0 };
   const recentOr = (earlier) => ({ rules: [{ when: { toBlock: ANT_HEAD }, then: { logs: { blocks: [ANT_HEAD - 120] }, delay: 0 } }], else: earlier });
   return [
-    scenario('ant-scan-quorum-only', S(294), antWorld({ a: 'success', b: 'success', c: 'success' }), antLogs()),
+    scenario('ant-scan-quorum-only', S(294), antWorld({ a: 'success', b: 'success', c: 'success' }), at(0)),
     {
       // Colibri would answer each of these; it is never asked.
       ...scenario('ant-scan-colibri-never-asked', S(303), antWorld({ a: 'down', b: 'down', c: 'down' })),
       steps: [ok(['LOGS']), rpcError(-32005, 'query exceeds max block range 50000'), rpcError(-32000, 'query timeout exceeded'), { hang: true }]
-        .map((colibri) => ({ world: { colibri }, calls: [antLogs()] })),
+        .map((colibri) => ({ world: { colibri }, calls: [at(0)] })),
     },
-    scenario('ant-scan-one-answer-does-not-settle', S(319), antWorld({ a: 'success', b: 'down', c: 'down', d: 'success' }), antLogs()),
+    scenario('ant-scan-one-answer-does-not-settle', S(319), antWorld({ a: 'success', b: 'down', c: 'down', d: 'success' }), at(0)),
     scenario('ant-scan-no-quorum-reply', S(328), antWorld({ a: 'success', b: 'down', c: 'down' }), antLogs()),
     ...Object.entries(matrix).flatMap(([pattern, rpcs]) => kinds.map((kind) => scenario(
-      `ant-scan-members-${pattern}-${kebab(kind)}`, S(375), antWorld(rpcs(kind)), antLogs()))),
-    scenario('ant-scan-range-after-endpoint-ends-quorum', S(385), antWorld({ a: 'endpoint', b: ant('range', 1000), c: 'hang' }), antLogs()),
-    scenario('ant-scan-endpoint-after-range-kept', S(390), antWorld({ a: ant('endpoint', 1000), b: 'range', c: 'hang' }), antLogs()),
-    scenario('ant-scan-timeouts-after-range-kept', S(395), antWorld({ a: 'hang', b: 'range', c: 'hang' }), antLogs()),
-    scenario('ant-scan-timeout-replaces-endpoint-error', S(401), antWorld({ a: 'endpoint', b: 'hang', c: 'hang' }), antLogs()),
-    scenario('ant-scan-answer-does-not-outvote-ranges', S(406), antWorld({ a: 'success', b: 'range', c: 'range' }), antLogs()),
-    scenario('ant-scan-two-answers-beat-failure', S(411), antWorld({ a: ant('success', 1000), b: 'endpoint', c: ant('success', 2000) }), antLogs()),
-    scenario('ant-scan-r1-f1-upstream-wording', S(422), antWorld({ a: 'down', b: 'range', c: 'range' }), antLogs()),
-    scenario('ant-scan-r4-f1-hung-member-range-final', S(428), antWorld({ a: 'hang', b: 'range', c: 'range', d: 'range' }), antLogs()),
+      `ant-scan-members-${pattern}-${kebab(kind)}`, S(375), antWorld(rpcs(kind)), at(pattern !== '1of3' && kind === 'hang' ? 30_000 : 0)))),
+    scenario('ant-scan-range-after-endpoint-ends-quorum', S(385), antWorld({ a: 'endpoint', b: ant('range', 1000), c: 'hang' }), at(1000)),
+    scenario('ant-scan-endpoint-after-range-kept', S(390), antWorld({ a: ant('endpoint', 1000), b: 'range', c: 'hang' }), at(1000)),
+    scenario('ant-scan-timeouts-after-range-kept', S(395), antWorld({ a: 'hang', b: 'range', c: 'hang' }), at(30_000)),
+    scenario('ant-scan-timeout-replaces-endpoint-error', S(401), antWorld({ a: 'endpoint', b: 'hang', c: 'hang' }), at(30_000)),
+    scenario('ant-scan-answer-does-not-outvote-ranges', S(406), antWorld({ a: 'success', b: 'range', c: 'range' }), at(0)),
+    scenario('ant-scan-two-answers-beat-failure', S(411), antWorld({ a: ant('success', 1000), b: 'endpoint', c: ant('success', 2000) }), at(2000)),
+    scenario('ant-scan-r1-f1-upstream-wording', S(422), antWorld({ a: 'down', b: 'range', c: 'range' }), at(0)),
+    scenario('ant-scan-r4-f1-hung-member-range-final', S(428), antWorld({ a: 'hang', b: 'range', c: 'range', d: 'range' }), at(0)),
     ...['429', 'endpoint', 'down'].map((kind) => scenario(`ant-scan-r6-f1-range-survives-${kind}`, S(436),
-      antWorld({ a: 'range', b: ant(kind, 100), c: 'hang' }), antLogs())),
+      antWorld({ a: 'range', b: ant(kind, 100), c: 'hang' }), at(100))),
     ...['throttle', 'limitExceeded', 'rethLag', 'erigonLag'].map((kind) => scenario(`ant-scan-${kebab(kind)}-two-agree`, S(450),
-      antWorld({ a: kind, b: 'success', c: 'success' }), antLogs())),
-    scenario('ant-scan-all-throttled', S(458), antWorld({ a: 'throttle', b: 'throttle', c: 'throttle' }), antLogs()),
+      antWorld({ a: kind, b: 'success', c: 'success' }), at(0))),
+    scenario('ant-scan-all-throttled', S(458), antWorld({ a: 'throttle', b: 'throttle', c: 'throttle' }), at(0)),
     ...['limitExceeded', 'logCap'].map((kind) => scenario(`ant-scan-r2-f2-all-${kebab(kind)}`, S(463),
-      antWorld({ a: kind, b: kind, c: kind }), antLogs())),
+      antWorld({ a: kind, b: kind, c: kind }), at(0))),
     ...[['logCap', 'down'], ['logCap', '429'], ['logCap', 'throttle'], ['limitExceeded', 'down'], ['limitExceeded', '429'], ['rangesOver', 'down']]
       .flatMap(([kind, others]) => [
-        scenario(`ant-scan-r3-f1-${kebab(kind)}-then-${others}`, S(479), antWorld({ a: kind, b: ant(others, 100), c: 'hang' }), antLogs()),
-        scenario(`ant-scan-r3-f1-${others}-then-${kebab(kind)}`, S(479), antWorld({ a: ant(kind, 100), b: others, c: 'hang' }), antLogs()),
+        scenario(`ant-scan-r3-f1-${kebab(kind)}-then-${others}`, S(479), antWorld({ a: kind, b: ant(others, 100), c: 'hang' }), at(100)),
+        scenario(`ant-scan-r3-f1-${others}-then-${kebab(kind)}`, S(479), antWorld({ a: ant(kind, 100), b: others, c: 'hang' }), at(100)),
       ]),
-    scenario('ant-scan-r3-f1-cap-loses-to-timeout', S(506), antWorld({ a: 'logCap', b: 'timeoutReply', c: 'hang' }), antLogs()),
-    scenario('ant-scan-r3-f1-cap-loses-to-answers', S(506), antWorld({ a: 'logCap', b: 'success', c: 'success' }), antLogs()),
+    scenario('ant-scan-r3-f1-cap-loses-to-timeout', S(506), antWorld({ a: 'logCap', b: 'timeoutReply', c: 'hang' }), at(0)),
+    scenario('ant-scan-r3-f1-cap-loses-to-answers', S(506), antWorld({ a: 'logCap', b: 'success', c: 'success' }), at(0)),
     scenario('ant-scan-r3-f1-lag-not-kept', S(513), antWorld({ a: 'rethLag', b: 'down', c: 'down' }), antLogs()),
-    scenario('ant-scan-caps-full-history-one-answer', S(529), antWorld({ a: FULL, b: FULL, c: PUBLICNODE, d: DRPC }), halve()),
+    scenario('ant-scan-caps-full-history-one-answer', S(529), antWorld({ a: FULL, b: FULL, c: PUBLICNODE, d: DRPC }), halve(ANT_FULL_HISTORY, settles(0))),
     scenario('ant-scan-caps-capped-endpoint-left-out', S(536), antWorld({ a: FULL, b: PUBLICNODE, c: FULL }),
-      antLogs(logsOver(ANT_FULL_HISTORY)), antLogs(logsOver(ANT_FULL_HISTORY)), antLogs(logsOver(10_000))),
+      antLogs(logsOver(ANT_FULL_HISTORY)), antLogs(logsOver(ANT_FULL_HISTORY), settles(0)), antLogs(logsOver(10_000))),
     scenario('ant-scan-caps-fourth-endpoint-joins', S(547), antWorld({ a: FULL, b: PUBLICNODE, c: DRPC, d: FULL }),
-      antLogs(logsOver(ANT_FULL_HISTORY)), antLogs(logsOver(ANT_FULL_HISTORY))),
-    scenario('ant-scan-caps-two-down-second-round', S(557), antWorld({ a: 'down', b: 'down', c: 'success', d: 'success' }), antLogs(logsOver(5000))),
+      antLogs(logsOver(ANT_FULL_HISTORY), settles(0)), antLogs(logsOver(ANT_FULL_HISTORY))),
+    scenario('ant-scan-caps-two-down-second-round', S(557), antWorld({ a: 'down', b: 'down', c: 'success', d: 'success' }), antLogs(logsOver(5000), settles(0))),
     scenario('ant-scan-caps-widest-servable-span', S(563), antWorld({ a: FULL, b: PUBLICNODE, c: DRPC }),
-      antLogs(logsOver(40_000)), antLogs(logsOver(40_000)), antLogs(logsOver(ANT_FULL_HISTORY))),
-    scenario('ant-scan-caps-shrink-to-capped-windows', S(578), antWorld({ a: FULL, b: 'down', c: PUBLICNODE, d: DRPC }), halve()),
+      antLogs(logsOver(40_000)), antLogs(logsOver(40_000)), antLogs(logsOver(ANT_FULL_HISTORY), settles(0))),
+    scenario('ant-scan-caps-shrink-to-capped-windows', S(578), antWorld({ a: FULL, b: 'down', c: PUBLICNODE, d: DRPC }), halve(ANT_FULL_HISTORY, settles(0))),
     scenario('ant-scan-caps-full-history-endpoint-fails-later', S(590),
       antWorld({ a: ant('success', 100), b: [ant('success', 100), ant('down')], c: PUBLICNODE }),
-      antLogs(logsOver(ANT_FULL_HISTORY)), antLogs(logsOver(ANT_FULL_HISTORY))),
+      antLogs(logsOver(ANT_FULL_HISTORY)), antLogs(logsOver(ANT_FULL_HISTORY), settles(0))),
     scenario('ant-scan-caps-hung-endpoint-cools-down', S(607), antWorld({ a: FULL, b: 'hang', c: PUBLICNODE }),
-      antLogs(logsOver(ANT_FULL_HISTORY)), antLogs(logsOver(10_000)), { after: 30_000, calls: [antLogs(logsOver(10_000))] }),
+      antLogs(logsOver(ANT_FULL_HISTORY), settles(30_000)), antLogs(logsOver(10_000), settles(0)), { after: 30_000, calls: [antLogs(logsOver(10_000))] }),
     scenario('ant-scan-caps-expire', S(626), antWorld({ a: FULL, b: PUBLICNODE, c: FULL }),
       antLogs(logsOver(ANT_FULL_HISTORY)),
       { world: { rpc: antWorld({ a: FULL, b: FULL, c: FULL }).rpc }, calls: [antLogs(logsOver(ANT_FULL_HISTORY))] },
@@ -1411,7 +1520,7 @@ function antScanScenarios() {
     scenario('ant-scan-caps-result-count-not-learned', S(678), antWorld({ a: MANY, b: MANY, c: MANY }),
       antLogs(logsOver(20_000)),
       { world: { rpc: antWorld({ a: FULL, b: FULL, c: FULL }).rpc }, calls: [antLogs(logsOver(20_000))] }),
-    scenario('ant-scan-caps-all-down', S(696), antWorld({ a: 'down', b: 'down', c: 'down' }), halve(), antLogs(logsOver(ANT_FULL_HISTORY))),
+    scenario('ant-scan-caps-all-down', S(696), antWorld({ a: 'down', b: 'down', c: 'down' }), halve(ANT_FULL_HISTORY, settles(0)), antLogs(logsOver(ANT_FULL_HISTORY), settles(0))),
     scenario('ant-scan-truncation-halves-until-complete', S(723), antWorld({ a: dense(400_000), b: dense(400_000), c: dense(400_000) }), halve()),
     scenario('ant-scan-truncation-narrow-window-checked', S(742), antWorld({ a: dense(10_000), b: dense(10_000), c: dense(10_000) }), antLogs(logsOver(15_000))),
     ...[['timeout-reply', ant('timeoutReply')], ['hang', ant('hang')]].map(([label, failure]) => scenario(
@@ -1508,6 +1617,9 @@ function antIndexScenarios() {
   // budget runs out on the third page).
   const MANY = Array.from({ length: 101 }, (_, i) => transferLog(DEPLOY_BLOCK + 1000 * i, 1));
   const TOO_MANY = { status: 429, headers: { 'x-ratelimit-reset': '344628' }, text: '{"message":"Too many requests"}', delay: 0 };
+  // The suite's bound on a scan that gives Blockscout up: the scan budget
+  // (the widened quorum timeout) plus its 100 ms polling step.
+  const WITHIN_BUDGET = { expect_settle_max_ms: 30_100 };
   return [
     scenario('ant-index-first-wallet-scan', X(286), indexWorld(), walletScan()),
     scenario('ant-index-blockscout-down-window-by-window', X(302), indexWorld(INDEX_DEFAULTS, { fail: 'fetch failed', delay: 0 }), walletScan(INDEX_HEAD - 200_000)),
@@ -1520,21 +1632,21 @@ function antIndexScenarios() {
         walletLogs(), walletLogs(), walletLogs(DEPLOY_BLOCK, INDEX_HEAD - 1))),
     scenario('ant-index-429-named-reset', X(408), indexWorld(INDEX_DEFAULTS, TOO_MANY),
       walletLogs(), walletLogs(), { after: 344_000, calls: [walletLogs()] }, { after: 1_000, calls: [walletLogs()] }),
-    scenario('ant-index-blockscout-hung', X(421), indexWorld(INDEX_DEFAULTS, { hang: true }), walletLogs(), walletLogs()),
+    scenario('ant-index-blockscout-hung', X(421), indexWorld(INDEX_DEFAULTS, { hang: true }), walletLogs(), walletLogs(DEPLOY_BLOCK, INDEX_HEAD, WITHIN_BUDGET)),
     scenario('ant-index-slow-multipage-budget', X(433), indexWorld(INDEX_DEFAULTS, transfers(MANY, { delay: 12_000 })),
-      walletLogs(), walletLogs(), walletLogs(DEPLOY_BLOCK, INDEX_HEAD - 1)),
+      walletLogs(), walletLogs(DEPLOY_BLOCK, INDEX_HEAD, WITHIN_BUDGET), walletLogs(DEPLOY_BLOCK, INDEX_HEAD - 1)),
     scenario('ant-index-late-blockscout-tail-budget', X(451), indexWorld(INDEX_DEFAULTS, transfers(WALLET_LOGS, { delay: 24_000 })),
       walletLogs(),
-      { world: { rpc: indexWorld({ gnosischain: hangOver(false), publicnode: hangOver(true), drpc: hangOver(true) }).rpc }, calls: [walletLogs()] }),
+      { world: { rpc: indexWorld({ gnosischain: hangOver(false), publicnode: hangOver(true), drpc: hangOver(true) }).rpc }, calls: [walletLogs(DEPLOY_BLOCK, INDEX_HEAD, WITHIN_BUDGET)] }),
     scenario('ant-index-tail-rounds-share-budget', X(475), indexWorld({ gnosischain: IN_RANGE, publicnode: CAPPED, drpc: CAPPED, fourth: CAPPED, fifth: CAPPED }),
       walletLogs(),
-      { world: { rpc: indexWorld({ gnosischain: hangOver(false), publicnode: hangOver(true), drpc: hangOver(true), fourth: hangOver(true), fifth: hangOver(true) }).rpc }, calls: [walletLogs()] }),
-    scenario('ant-index-blockscout-slower-than-budget', X(505), indexWorld(INDEX_DEFAULTS, transfers(WALLET_LOGS, { delay: 28_000 })), walletLogs(), walletLogs()),
+      { world: { rpc: indexWorld({ gnosischain: hangOver(false), publicnode: hangOver(true), drpc: hangOver(true), fourth: hangOver(true), fifth: hangOver(true) }).rpc }, calls: [walletLogs(DEPLOY_BLOCK, INDEX_HEAD, WITHIN_BUDGET)] }),
+    scenario('ant-index-blockscout-slower-than-budget', X(505), indexWorld(INDEX_DEFAULTS, transfers(WALLET_LOGS, { delay: 28_000 })), walletLogs(), walletLogs(DEPLOY_BLOCK, INDEX_HEAD, WITHIN_BUDGET)),
     scenario('ant-index-caller-abort-cools-blockscout', X(515), indexWorld(INDEX_DEFAULTS, { hang: true }),
       walletLogs(), walletLogs(DEPLOY_BLOCK, INDEX_HEAD, { abort_at: 3000 }), walletLogs(),
       { after: 61_000, world: { blockscout: { [BLOCKSCOUT]: transfers(WALLET_LOGS) } }, calls: [walletLogs()] }),
     scenario('ant-index-hung-pair-rpc', X(529), indexWorld({ ...INDEX_DEFAULTS, gnosischain: [IN_RANGE, { rules: [{ when: { spanOver: 10_000 }, then: { hang: true } }], else: IN_RANGE }] }),
-      walletLogs(), walletLogs()),
+      walletLogs(), walletLogs(DEPLOY_BLOCK, INDEX_HEAD, WITHIN_BUDGET)),
     scenario('ant-index-lagging-blockscout-agrees', X(542), indexWorld(INDEX_DEFAULTS, transfers(WALLET_LOGS.filter((log) => log !== WALLET_LOGS[6]))), walletScan()),
     scenario('ant-index-truncated-rpc-never-accepted', X(551), indexWorld({ ...INDEX_DEFAULTS, gnosischain: { logs: { inRange: true, newest: 475 }, delay: 0 } }),
       walletLogs(), walletLogs()),
@@ -1596,8 +1708,8 @@ function blockscoutScenarios() {
   const two = (id, line, blockscout, extra = {}) => scenario(id, L(line), indexWorld(INDEX_DEFAULTS, blockscout, extra), walletLogs(), walletLogs());
   const item = (block, change = {}) => ({ ...blockscoutItem(transferLog(block, 0)), ...change });
   const OTHER = `0x${'1'.repeat(40)}`;
-  const json = (value) => ({ json: value, delay: 0 });
-  const page = (items, more = false) => json({ items, next_page_params: more ? { block_number: items.at(-1).block_number, index: items.at(-1).log_index, items_count: 50 } : null });
+  const pageOf = (value) => ({ page: value, delay: 0 });
+  const page = (items, more = false) => pageOf({ items, next_page_params: more ? { block_number: items.at(-1).block_number, index: items.at(-1).log_index, items_count: 50 } : null });
   const PUBLIC = { addresses: [{ address: '104.18.12.34', family: 4 }], delay: 0 };
   const redirect = (location, status = 302) => ({ redirect: location, status, delay: 0 });
   const OTHER_PARTY = `0x${'0'.repeat(24)}${'7'.repeat(40)}`;
@@ -1617,7 +1729,7 @@ function blockscoutScenarios() {
     // Pages of three: two full ones, then one whose transfer is older than
     // fromBlock, which ends the read.
     two('blockscout-pages-until-from-block', 356, transfers([transferLog(DEPLOY_BLOCK - 5, 2), ...WALLET_LOGS], { pageSize: 3 })),
-    two('blockscout-empty-page-not-last', 373, json({ items: [], next_page_params: { block_number: 1, index: 0 } })),
+    two('blockscout-empty-page-not-last', 373, pageOf({ items: [], next_page_params: { block_number: 1, index: 0 } })),
     two('blockscout-over-40-pages', 379, transfers(MANY, { pageSize: 1 })),
     two('blockscout-transfer-after-to-block', 390, page([item(PAIR_TO + 1)])),
     two('blockscout-transfer-other-sender', 390, page([item(30_000_000, { from: { hash: OTHER } })])),
@@ -1641,10 +1753,10 @@ function blockscoutScenarios() {
     },
     two('blockscout-http-500', 432, { status: 500, text: 'oops', delay: 0 }),
     two('blockscout-not-json', 432, { text: '<html>', delay: 0 }),
-    two('blockscout-refusal', 432, json({ message: 'Invalid address format' })),
-    two('blockscout-items-not-a-list', 432, json({ items: {}, next_page_params: null })),
-    two('blockscout-no-next-page-params', 432, json({ items: [] })),
-    two('blockscout-throttle-in-body', 432, json({ message: 'Too many requests. Increase limits' })),
+    two('blockscout-refusal', 432, pageOf({ message: 'Invalid address format' })),
+    two('blockscout-items-not-a-list', 432, pageOf({ items: {}, next_page_params: null })),
+    two('blockscout-no-next-page-params', 432, pageOf({ items: [] })),
+    two('blockscout-throttle-in-body', 432, pageOf({ message: 'Too many requests. Increase limits' })),
     two('blockscout-redirect-off-https', 432, redirect(PAGE.replace('https:', 'http:'), 307)),
     two('blockscout-redirect-without-location', 432, { status: 302, text: '', delay: 0 }),
     two('blockscout-transport-failure', 432, { fail: 'fetch failed', delay: 0 }),
@@ -1669,11 +1781,11 @@ function blockscoutScenarios() {
 // Design 0005's named boundary cases, as the reference behaves (its
 // restatement in "The router machine", "Broadcast" and "Fee quotes").
 
-/** An ERC-8244 html() answer of `bytes` bytes of 'a', ABI-encoded, as $repeat. */
+/** An answer whose result is an ERC-8244 html() document of `bytes` bytes of 'a', ABI-encoded: a repeat macro. */
 function htmlDocument(bytes) {
   const word = (n) => n.toString(16).padStart(64, '0');
   const padding = (32 - (bytes % 32)) % 32;
-  return { $repeat: { head: `0x${word(32)}${word(bytes)}`, unit: '61', count: bytes, tail: '00'.repeat(padding) } };
+  return { result_repeat: { head: `0x${word(32)}${word(bytes)}`, unit: '61', count: bytes, tail: '00'.repeat(padding) } };
 }
 
 function boundaryScenarios(ethers, tx) {
@@ -1697,6 +1809,20 @@ function boundaryScenarios(ethers, tx) {
     ...extra,
   });
   const nodeRefusal = (message) => rpcError(-32000, message);
+  // A JSON escape, \uXXXX, built here: the source holds no escapes to decode.
+  const U = (hex) => `${String.fromCharCode(92)}u${hex}`;
+  const nested = (n) => '['.repeat(n) + ']'.repeat(n);
+  // One Direct endpoint that answers a raw body; each step its own body.
+  const direct = () => ({ ...w(1, net(['direct']), [A]), rpc: { [A]: { body: '{"jsonrpc":"2.0","id":1,"result":"0x"}' } } });
+  const rpcBody = (text) => ({ world: { rpc: { [A]: { body: text } } }, calls: [req(1, 'eth_call', [{ to: '0xabc' }, 'latest'])] });
+  // A quorum of two over raw results: each step one pair, a's first.
+  const agreement = (id, pairs) => ({
+    ...scenario(id, `${D_}: Answers, agreement`, w(1, net(['quorum'], { k: 2, m: 2, timeoutMs: 5000 }), [A, B])),
+    steps: pairs.map(([first, second]) => ({
+      world: { rpc: { [A]: { body: `{"jsonrpc":"2.0","id":1,"result":${first}}` }, [B]: { body: `{"jsonrpc":"2.0","id":1,"result":${second}}`, delay: 10 } } },
+      calls: [req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], { include_trust: true })],
+    })),
+  });
   return [
     // An html() document at its 8 MiB limit is 16,777,346 hex characters,
     // its minimal JSON-RPC answer 16,777,382 bytes: the router takes it
@@ -1705,7 +1831,7 @@ function boundaryScenarios(ethers, tx) {
     {
       ...scenario('boundary-html-8mib-through-quorum', `${D_}: Transport, html()`, w(1, net(['quorum', 'direct']), ABC)),
       steps: [8 * 1024 * 1024, 8 * 1024 * 1024 + 1].map((bytes) => ({
-        world: { rpc: Object.fromEntries(ABC.map((u) => [u, ok(htmlDocument(bytes))])) },
+        world: { rpc: Object.fromEntries(ABC.map((u) => [u, htmlDocument(bytes)])) },
         calls: [req(1, 'eth_call', [{ to: app, data: html }, 'latest'], web3)],
       })),
     },
@@ -1886,11 +2012,18 @@ function boundaryScenarios(ethers, tx) {
       myotis: myotisOn(1, { call_tx: { payload: { resultHex: '0x1' }, delay: 300 } }),
       rpc: { [RPC]: ok('0x10') },
     }, [req(1, 'eth_call', [{ to: target(0) }, 'latest']), req(1, 'eth_blockNumber', [], { at: 5 })]),
-    ...[['not-running', 'not_running'], ['state-changed', 'state_changed'], ['caller-deadline', 'caller_deadline']].map(([label, throws]) => scenario(
-      `boundary-myotis-${label}-last-error`, `${D_}: Myotis, outcomes`, {
-        ...w(1, net(['myotis', 'quorum']), [RPC]),
-        myotis: myotisOn(1, { call_tx: { throws } }),
-      }, req(1, 'eth_call', [{ to: '0xabc' }, 'latest']))),
+    // The adapter's own errors, each the last error with its text and code.
+    // The child process gives up on a read 10 s after it is asked: while
+    // still queued (queue deadline) or once dispatched (caller deadline).
+    // The source's budget here is 15 s, so the child's deadline comes first.
+    ...[
+      ['not-running', 'not_running', 0], ['state-changed', 'state_changed', 0], ['queue-full', 'queue_full', 0],
+      ['queue-deadline', 'queue_deadline', 10_000], ['caller-deadline', 'caller_deadline', 10_000],
+    ].map(([label, throws, delay]) => scenario(
+      `boundary-myotis-${label}-last-error`, `${D_}: Myotis read outcomes`, {
+        ...w(1, net(['myotis', 'quorum'], { k: 3, m: 2, timeoutMs: 15_000 }), [RPC]),
+        myotis: myotisOn(1, { call_tx: { throws, delay } }),
+      }, req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], settles(delay)))),
     scenario('boundary-myotis-unexpected-response-last-error', `${D_}: Myotis, outcomes`, {
       ...w(1, net(['myotis', 'quorum']), [RPC]),
       myotis: myotisOn(1, { call_tx: { payload: { status: 'ok' } } }),
@@ -1967,6 +2100,67 @@ function boundaryScenarios(ethers, tx) {
         calls: [req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], { include_trust: true })],
       })),
     },
+    // The recorder keeps every value apart from its own encodings: a result
+    // or error data that happens to look like one, and a missing result.
+    {
+      ...scenario('boundary-result-literal-undefined-tag', `${D_}: Replay, recorded`, direct()),
+      steps: [
+        rpcBody('{"jsonrpc":"2.0","id":1,"result":{"$undefined":true}}'),
+        rpcBody('{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted","data":{"$undefined":true}}}'),
+      ],
+    },
+    {
+      ...scenario('boundary-result-literal-repeat-tag', `${D_}: Replay, recorded`, direct()),
+      steps: [
+        rpcBody('{"jsonrpc":"2.0","id":1,"result":{"$repeat":{"head":"","unit":"x","count":2,"tail":""}}}'),
+        rpcBody('{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted","data":{"$repeat":{"head":"","unit":"x","count":2,"tail":""}}}}'),
+      ],
+    },
+    {
+      ...scenario('boundary-result-empty-body', `${D_}: Answers, undefined`, direct()),
+      steps: [rpcBody('{}'), rpcBody('{"jsonrpc":"2.0","id":1,"result":null}'), rpcBody('{"jsonrpc":"2.0","id":1,"error":{"message":"m"}}')],
+    },
+    // Nesting: the body is one level, so a result of 511 nested arrays is
+    // 512 in all. The reference reads any depth; the core refuses a body
+    // deeper than 512 (deviation json-depth).
+    scenario('boundary-json-depth-512', `${D_}: Answers, depth`, {
+      ...w(1, net(['quorum']), ABC),
+      rpc: Object.fromEntries(ABC.map((u) => [u, { body: `{"jsonrpc":"2.0","id":1,"result":${nested(511)}}` }])),
+    }, req(1, 'eth_call', [{ to: '0xabc' }, 'latest'])),
+    {
+      ...scenario('boundary-json-depth-513', `${D_}: Answers, depth; deviation json-depth`, {
+        ...w(1, net(['quorum']), ABC),
+        rpc: Object.fromEntries(ABC.map((u) => [u, { body: `{"jsonrpc":"2.0","id":1,"result":${nested(512)}}` }])),
+      }, req(1, 'eth_call', [{ to: '0xabc' }, 'latest'])),
+      deviation: 'json-depth',
+    },
+    // Agreement is stableValue's: pairs that agree and pairs that don't,
+    // a answering first (its value is the one returned), b 10 ms later.
+    agreement('boundary-agreement-duplicate-keys', [
+      ['{"a":1,"a":2}', '{"a":2}'],
+      [`{"a":1,"${U('0061')}":2}`, '{"a":2}'],
+      ['{"a":1,"a":2}', '{"a":1}'],
+    ]),
+    agreement('boundary-agreement-number-spellings', [
+      ['1e2', '100'],
+      ['1E+2', '100.0'],
+      ['-0', '0'],
+      ['9007199254740993', '9007199254740992'],
+      ['0.1', '0.10000000000000001'],
+      ['1e400', 'null'],
+      ['1', '"1"'],
+    ]),
+    agreement('boundary-agreement-proto-key', [
+      ['{"__proto__":1,"b":2}', '{"b":2,"__proto__":1}'],
+      ['{"__proto__":{"a":1}}', '{"a":1}'],
+      ['{"__proto__":1}', '{}'],
+    ]),
+    agreement('boundary-agreement-lone-surrogates', [
+      [`"${U('d800')}"`, `"${U('D800')}"`],
+      [`"${U('d800')}"`, `"${U('fffd')}"`],
+      [`{"${U('d800')}":1}`, `{"${U('fffd')}":1}`],
+      [`"${U('d83d')}${U('de00')}"`, '"\u{1F600}"'],
+    ]),
     scenario('boundary-unsupported-requests', `${D_}: Methods and sources`, w(1, net(['direct']), [RPC]),
       req(1, 'eth_sendTransaction', [{}]), req(999, 'eth_blockNumber', []), fee(999), send(999, tx.mainnet.raw)),
   ];
@@ -2023,10 +2217,14 @@ async function buildChainReplay(checkout, ethers, privateKey, meta) {
   return {
     meta,
     encodings: {
-      undefined: '{"$undefined":true} is a present property or element whose value is undefined',
-      repeat: '{"$repeat":{"head","unit","count","tail","length","sha256"}} is the string head + unit × count + tail (length UTF-16 units, sha256 of its UTF-8)',
+      json: 'every value the reference produced or was given (results, thrown properties, operation params and answers, call params) is JSON text in a string field: <name>_json, or json in an entry; -0 is written -0 and ±Infinity ±1e400, which JSON.parse reads back as such; lone surrogates are escapes',
+      undefined: 'a present undefined is a field of its own, <name>_undefined: true (undefined: true in an entry), never a value',
+      entries: 'an object the router returned or threw is a list of { key, json | json_repeat | undefined } in property order',
+      repeat: 'a text over 64 KiB is <field>_repeat: { head, unit, count, tail, length, sha256 }, the text being head + unit × count + tail (length in UTF-16 units, sha256 of its UTF-8)',
+      plain: 'worlds, steps, state tables and the frames of the records are plain JSON the harness writes itself; a world\'s result_repeat is a repeat macro for a result string',
       times: `virtual milliseconds after the scenario's start (Date.now() ${EPOCH}); in state tables 0 stays 0, the reference's unset`,
       rpc_body: 'the request body as sent, with its id (Date.now()) replaced by 0',
+      expect_settle_ms: 'on a call: how long after its start the ported test says it settles (expect_settle_max_ms: at most); generation fails otherwise',
     },
     scenarios,
   };
@@ -2034,5 +2232,5 @@ async function buildChainReplay(checkout, ethers, privateKey, meta) {
 
 module.exports = {
   buildChainReplay, runScenario, scenarioDefinitions, loadFakeTimers, signedTransactions,
-  describe, describeError, compact, expand, repeatOf, EPOCH,
+  jsonText, jsonField, entriesOf, recordError, recordValue, textField, plain, repeatOf, EPOCH,
 };

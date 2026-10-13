@@ -521,15 +521,68 @@ test('chain replay attributes every request to its call and every hop to its pag
       if (entry.kind === 'rpc') assert.match(entry.body, /^\{"jsonrpc":"2\.0","id":0,"method":"/);
     }
   }
+  // No key in the file is an encoding: values are text.
+  const keys = (value) => (Array.isArray(value) ? value.flatMap(keys) : value && typeof value === 'object'
+    ? Object.entries(value).flatMap(([key, item]) => [key, ...keys(item)]) : []);
+  assert.deepEqual(keys(vectors).filter((key) => key.startsWith('$')), []);
 });
 
-test('chain replay records long strings as verified $repeat', () => {
-  const text = `{"result":"0x${'0'.repeat(128)}${'61'.repeat(40_000)}00"}`;
-  const { $repeat: repeat } = chainReplay.compact(text);
-  assert.equal(repeat.unit.length <= 2, true);
-  assert.equal(repeat.head + repeat.unit.repeat(repeat.count) + repeat.tail, text);
-  assert.equal(chainReplay.expand({ $repeat: repeat }), text);
-  assert.equal(chainReplay.compact('short'), 'short');
-  // A long string with no repeating stretch can't be recorded.
-  assert.throws(() => chainReplay.compact(Array.from({ length: 70_000 }, (_, i) => String.fromCharCode(33 + ((i * 7919) % 90))).join('')), /no \$repeat form/);
+test('chain replay records values as JSON text, apart from its encodings', () => {
+  const { jsonText, jsonField, entriesOf, textField, recordError } = chainReplay;
+  // A missing value and values that look like the old tags stay apart.
+  assert.deepEqual(jsonField('result', undefined), { result_undefined: true });
+  assert.deepEqual(jsonField('result', { $undefined: true }), { result_json: '{"$undefined":true}' });
+  assert.deepEqual(jsonField('result', { $repeat: { head: '', unit: 'x', count: 2, tail: '' } }), { result_json: '{"$repeat":{"head":"","unit":"x","count":2,"tail":""}}' });
+  assert.deepEqual(entriesOf({ result: undefined, source: 'quorum' }), [{ key: 'result', undefined: true }, { key: 'source', json: '"quorum"' }]);
+  // Every value JSON.parse makes survives its text.
+  for (const text of ['-0', '1e400', '-1e400', '{"__proto__":1,"b":[null,true,"x"]}']) assert.equal(jsonText(JSON.parse(text)), text);
+  assert.ok(Object.is(JSON.parse(jsonText(-0)), -0));
+  const lone = String.fromCharCode(0xd800);
+  assert.equal(jsonText(lone), `"${String.fromCharCode(92)}ud800"`);
+  assert.equal(JSON.parse(jsonText(lone)), lone);
+  const deep = `${'['.repeat(600)}${']'.repeat(600)}`;
+  assert.equal(jsonText(JSON.parse(deep)), deep);
+  // What no record could keep fails the generation.
+  assert.throws(() => jsonText({ a: undefined }), /nested undefined/);
+  assert.throws(() => jsonText([undefined]), /nested undefined/);
+  assert.throws(() => jsonText(Number.NaN), /NaN/);
+  assert.throws(() => jsonText(() => 1), /function/);
+  // A large text takes its field's repeat form, verified.
+  const body = `{"result":"0x${'0'.repeat(128)}${'61'.repeat(40_000)}00"}`;
+  const { body_repeat: repeat } = textField('body', body);
+  assert.equal(repeat.head + repeat.unit.repeat(repeat.count) + repeat.tail, body);
+  assert.equal(repeat.length, body.length);
+  assert.deepEqual(textField('body', 'short'), { body: 'short' });
+  assert.throws(() => textField('body', Array.from({ length: 70_000 }, (_, i) => String.fromCharCode(33 + ((i * 7919) % 90))).join('')), /no repeat form/);
+  // A thrown error keeps its class, name, message and own properties in order.
+  const error = Object.assign(new Error('execution reverted'), { code: 3, data: undefined });
+  assert.deepEqual(recordError(error), {
+    class: 'Error', name: 'Error', message_json: '"execution reverted"',
+    props: [{ key: 'code', json: '3' }, { key: 'data', undefined: true }],
+  });
+});
+
+test('chain replay keeps the router\'s values as data, literal tags included', async () => {
+  const FakeTimers = chainReplay.loadFakeTimers(REFERENCE);
+  const resultOf = (run, step) => run.steps[step].results[0].value.find((entry) => entry.key === 'result');
+  const repeat = await chainReplay.runScenario(REFERENCE, FakeTimers, chainDefinition('boundary-result-literal-repeat-tag'));
+  assert.deepEqual(resultOf(repeat, 0), { key: 'result', json: '{"$repeat":{"head":"","unit":"x","count":2,"tail":""}}' });
+  const undef = await chainReplay.runScenario(REFERENCE, FakeTimers, chainDefinition('boundary-result-literal-undefined-tag'));
+  assert.deepEqual(resultOf(undef, 0), { key: 'result', json: '{"$undefined":true}' });
+  assert.deepEqual(undef.steps[1].results[0].thrown.props.find((entry) => entry.key === 'data'), { key: 'data', json: '{"$undefined":true}' });
+  const empty = await chainReplay.runScenario(REFERENCE, FakeTimers, chainDefinition('boundary-result-empty-body'));
+  assert.deepEqual(resultOf(empty, 0), { key: 'result', undefined: true });
+  assert.deepEqual(resultOf(empty, 1), { key: 'result', json: 'null' });
+});
+
+test('chain replay fails when a fixture drifts from its source test\'s settle time', async () => {
+  const FakeTimers = chainReplay.loadFakeTimers(REFERENCE);
+  // chain-data-router.test.js:1842 answers the full range at once; a 10 ms
+  // reply moves the settle time off the test's 5,000 ms.
+  const drifted = structuredClone(chainDefinition('truncation-direct-check-one-attempt'));
+  for (const plan of Object.values(drifted.world.rpc)) plan.rules[0].then.delay = 10;
+  await assert.rejects(chainReplay.runScenario(REFERENCE, FakeTimers, drifted), /settled after 5010 ms, not 5000/);
+  const bounded = structuredClone(chainDefinition('ant-index-blockscout-hung'));
+  bounded.steps[1].calls[0].expect_settle_max_ms = 1000;
+  await assert.rejects(chainReplay.runScenario(REFERENCE, FakeTimers, bounded), /settled after 25000 ms, over 1000/);
 });
