@@ -21,7 +21,7 @@ use std::ops::Range;
 
 use fc_json::index::{Index, IndexError, Kind, Value};
 
-use crate::js::{JsString, NOT_PRIMITIVE, js_string_len, js_string_of};
+use crate::js::{JsString, NOT_PRIMITIVE, js_string_reserving};
 
 /// The core's text for a body that isn't JSON (deviation `json-parse-text`).
 pub const JSON_PARSE_FAILURE: &str = "The RPC answer is not valid JSON";
@@ -252,17 +252,12 @@ fn reply<E>(
         Kind::Object => match root.get("error").filter(|e| e.truthy()) {
             Some(error) if error.kind() == Kind::Object => {
                 let message = match error.get("message").filter(|m| m.truthy()) {
-                    Some(message) => {
-                        // Its UTF-16, reserved before it is made.
-                        let Some(units) = js_string_len(message) else {
-                            return Ok(Err(AnswerError::NotPrimitive));
-                        };
-                        reserve(units.saturating_mul(2))?;
-                        match js_string_of(message) {
-                            Ok(message) => message,
-                            Err(_) => return Ok(Err(AnswerError::NotPrimitive)),
-                        }
-                    }
+                    // Its UTF-16, in a buffer of exactly its length, and
+                    // an array's walk, reserved before they are made.
+                    Some(message) => match js_string_reserving(message, reserve)? {
+                        Some(message) => message,
+                        None => return Ok(Err(AnswerError::NotPrimitive)),
+                    },
                     None => JsString::from("RPC request failed"),
                 };
                 Ok(Reply::NodeError {
@@ -287,6 +282,29 @@ fn reply<E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_node_errors_message_is_built_at_its_length() {
+        // A message's buffer holds exactly its units, a string's or an
+        // array's joined text, so its reservation covers what it holds.
+        let long = "a".repeat(131_073);
+        for message in [format!("\"{long}\""), format!("[\"{long}\",1,[2,null]]")] {
+            let body = format!(r#"{{"error":{{"code":-32000,"message":{message}}}}}"#);
+            let mut asked = 0usize;
+            let answer = read_answer_reserving(body, |bytes| {
+                asked += bytes;
+                Ok::<(), ()>(())
+            })
+            .unwrap()
+            .unwrap();
+            let Outcome::NodeError(error) = answer.outcome() else {
+                panic!("not a node error");
+            };
+            assert!(error.message.len() >= 131_073);
+            assert_eq!(error.message.heap_bytes(), 2 * error.message.len());
+            assert!(asked >= error.message.heap_bytes());
+        }
+    }
 
     fn result(body: &[u8]) -> Option<String> {
         match decode_answer(200, body.to_vec()).unwrap().outcome() {

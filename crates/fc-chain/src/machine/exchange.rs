@@ -136,9 +136,10 @@ pub(crate) async fn decode(
         Ok::<(), Over>(())
     });
     let answer = within!(read)?;
-    // The index is gone; a node error's message stays with the answer.
+    // The index is gone; a node error's message stays with the answer, at
+    // what its buffer holds.
     let message = match answer.outcome() {
-        Outcome::NodeError(error) => error.message.len().saturating_mul(2),
+        Outcome::NodeError(error) => error.message.heap_bytes(),
         Outcome::Result(_) => 0,
     };
     drop(reservations);

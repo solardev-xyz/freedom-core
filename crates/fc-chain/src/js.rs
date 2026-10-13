@@ -350,6 +350,33 @@ pub(crate) fn js_string_of_into(
     Ok(out)
 }
 
+/// The most the walks of [`js_string_len`] and [`js_string_of`] keep on
+/// the heap for `value`: an array's stack, one frame per level of nesting
+/// (`fc_json`'s depth limit), its growth included; nothing for anything
+/// else.
+pub(crate) fn js_string_walk_bytes(value: Value<'_, '_>) -> usize {
+    if value.kind() != Kind::Array {
+        return 0;
+    }
+    std::mem::size_of_val(&(value.children(), true)).saturating_mul(2 * fc_json::MAX_DEPTH)
+}
+
+/// [`js_string_of`] into a buffer of exactly its length, with what the walk
+/// and the text take reserved first: `Ok(None)` for a value the conversion
+/// throws on (an object with its own `toString`, which JSON can't make
+/// callable), found without building any of the text.
+pub(crate) fn js_string_reserving<E>(
+    value: Value<'_, '_>,
+    reserve: &mut impl FnMut(usize) -> Result<(), E>,
+) -> Result<Option<JsString>, E> {
+    reserve(js_string_walk_bytes(value))?;
+    let Some(units) = js_string_len(value) else {
+        return Ok(None);
+    };
+    reserve(units.saturating_mul(2))?;
+    Ok(js_string_of_into(value, JsString::from_units(Vec::with_capacity(units))).ok())
+}
+
 /// The length of [`js_string_of`]'s string in UTF-16 code units, found
 /// without building it (a number's text is built, a few bytes): a caller
 /// reserves the string's room first. An object with its own `toString` is

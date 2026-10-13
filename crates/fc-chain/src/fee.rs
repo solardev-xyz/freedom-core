@@ -18,7 +18,7 @@ use fc_json::index::{Index, Kind, Value, quoted_len};
 use fc_json::number_to_string;
 
 use crate::bigint::{BigInt, MAX_DECIMAL_BITS, Parsed, parse_string};
-use crate::js::{JsError, JsString, js_string_len, js_string_of, js_string_of_into};
+use crate::js::{JsError, JsString, NOT_PRIMITIVE, js_string_reserving};
 
 /// A fee quote, in today's shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -316,28 +316,15 @@ fn to_bigint_reserving<E>(
             JsString::from_units(text)
         }
         // ToPrimitive: an array's joined string, `[object Object]`, or a
-        // TypeError for an own `toString`. The walks' stacks hold at most
-        // one frame per level.
-        Kind::Array | Kind::Object => {
-            let frame = std::mem::size_of_val(&(value.children(), true));
-            reserve(frame.saturating_mul(2 * fc_json::MAX_DEPTH))?;
-            // An own `toString` has no length: the conversion fails on it,
-            // with a short message.
-            let built = match js_string_len(value) {
-                Some(units) => {
-                    reserve(units.saturating_mul(2))?;
-                    js_string_of_into(value, JsString::from_units(Vec::with_capacity(units)))
-                }
-                None => {
-                    reserve(MESSAGE)?;
-                    js_string_of(value)
-                }
-            };
-            match built {
-                Ok(text) => text,
-                Err(error) => return Ok(Err(error)),
+        // TypeError for an own `toString` (never callable in JSON), known
+        // before any of the text is built.
+        Kind::Array | Kind::Object => match js_string_reserving(value, reserve)? {
+            Some(text) => text,
+            None => {
+                reserve(MESSAGE)?;
+                return Ok(Err(JsError::new("TypeError", NOT_PRIMITIVE)));
             }
-        }
+        },
     };
     reserve(parse_bytes(string.len()))?;
     if let Some(parsed) = parse_string(string.units()) {
@@ -404,6 +391,30 @@ mod tests {
             });
             assert_eq!(quoted, Ok(fee_quote("x", Some(gas), priority)));
             assert_eq!(asked.first(), Some(&Index::heap_needed(gas).unwrap()));
+        }
+        // A conversion that throws is known before any of its text is
+        // built: an object with its own `toString`, after a long string or
+        // before it, is the same TypeError, with nothing of the string
+        // reserved.
+        let long = "a".repeat(100_000);
+        for gas in [
+            format!(r#"["{long}",{{"toString":null}}]"#),
+            format!(r#"[{{"toString":null}},"{long}"]"#),
+            format!(r#"[["{long}"],[{{"x":1,"toString":"f"}}]]"#),
+            r#"{"toString":1}"#.to_owned(),
+        ] {
+            let mut asked = 0usize;
+            let quoted = fee_quote_reserving("x", Some(&gas), None, |bytes| {
+                asked += bytes;
+                Ok::<(), ()>(())
+            });
+            let index = Index::new(&gas).unwrap();
+            let thrown = crate::js::js_string_of(index.root()).unwrap_err();
+            assert_eq!(quoted, Ok(Err(thrown)), "{gas}");
+            assert!(
+                asked < Index::heap_needed(&gas).unwrap() + 64 * 1024,
+                "{asked}"
+            );
         }
         let refused = fee_quote_reserving("x", Some(&gas), None, |bytes| {
             if bytes > 1_000 { Err("over") } else { Ok(()) }

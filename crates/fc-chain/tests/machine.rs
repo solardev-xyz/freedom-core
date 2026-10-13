@@ -1651,3 +1651,42 @@ fn a_queued_error_reply_counts_its_utf16_message() {
     world.machine.set_output_backlog(0);
     assert_eq!(world.machine.held(), 0);
 }
+
+// ---------------------------------------------------------------------------
+// The safety review's third round (PR #55). The hash and fee conversion
+// peaks are measured in their own processes: `tests/peak_hash.rs`,
+// `tests/peak_fee.rs`.
+
+#[test]
+fn a_node_errors_message_holds_what_was_reserved_for_it() {
+    // The message is built in a buffer of exactly its length: the
+    // reservation, its length in UTF-16, covers what it holds.
+    let message = "a".repeat(131_073);
+    let body = format!(r#"{{"error":{{"code":-32000,"message":"{message}"}}}}"#);
+    let decoded = fc_chain::decode_answer(200, body.into_bytes()).unwrap();
+    let fc_chain::Outcome::NodeError(error) = decoded.outcome() else {
+        panic!("not a node error");
+    };
+    assert_eq!(error.message.len(), 131_073);
+    assert_eq!(error.message.heap_bytes(), 2 * error.message.len());
+}
+
+#[test]
+fn an_oversized_hash_answer_stays_ambiguous() {
+    // A result of "0x" and 4 MiB of hex is another hash, read without
+    // copies: the attempt is ambiguous and the core reconciles.
+    let mut world = World::new(Bounds::default(), &[broadcaster(&["direct"], &["a"])]);
+    let id = world.submit(send(), None);
+    world.answer(
+        world.rpcs()[0].0,
+        ok(&format!("\"0x{}\"", "a".repeat(4 * 1024 * 1024))),
+    );
+    assert!(!world.replied(id));
+    let lookup = world.rpcs()[1].clone();
+    assert_eq!(lookup.3, "eth_getTransactionByHash");
+    world.answer(lookup.0, ok("null"));
+    assert_eq!(
+        outcome(world.reply(id)),
+        (BroadcastOutcome::Uncertain, Some("direct"))
+    );
+}
