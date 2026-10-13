@@ -672,9 +672,9 @@ fn a_burst_survives_main_pausing_its_reads() {
 /// bytes, fill any OS's stdout pipe and the loop's 256-frame allowance
 /// within a few hundred, so 450 of them leave what follows within the
 /// reader's 256 credits.
-fn filling(ids: std::ops::Range<u64>) -> Vec<u8> {
+fn filling(ids: std::ops::Range<u64>) -> Vec<Vec<u8>> {
     let accounts: Vec<u32> = (0..8).collect();
-    ids.flat_map(|id| {
+    ids.map(|id| {
         frame(&request(
             id,
             "keys.addresses",
@@ -697,9 +697,9 @@ fn auto_lock_fires_while_main_is_not_reading() {
         &data,
         &locks,
         &[],
-        &[("FREEDOM_CORED_TEST_JOB_DELAY_MS", "3000")],
+        &[("FREEDOM_CORED_TEST_JOB_DELAY_MS", "4000")],
     );
-    core.hello_with(1_000);
+    core.hello_with(2_000);
     core.call(
         2,
         "vault.import",
@@ -707,7 +707,7 @@ fn auto_lock_fires_while_main_is_not_reading() {
     );
     assert_eq!(core.event()["event"], "vault.unlocked");
     core.pause_reading();
-    let resume = core.resume_reading_after(Duration::from_secs(5));
+    let resume = core.resume_reading_after(Duration::from_secs(6));
     let mut burst = frame(&request(
         3,
         "vault.export_mnemonic",
@@ -746,7 +746,7 @@ fn shutdown_is_honored_while_main_is_not_reading() {
     // core still finds it, and exits 0 without main reading anything more.
     let (root, data, mut core) = imported(&[]);
     core.pause_reading();
-    let mut burst = filling(3..453);
+    let mut burst = filling(3..453).concat();
     burst.extend(frame(&request(453, "core.shutdown", json!({}))));
     // Stdin stays open: the exit is the shutdown's, not EOF's.
     let writer = core.send_in_background(burst);
@@ -764,24 +764,29 @@ fn a_lock_is_honored_while_main_is_not_reading() {
     // comes, and the lock is acknowledged in its own turn.
     let (_root, _data, mut core) = imported(&[]);
     core.pause_reading();
-    let resume = core.resume_reading_after(Duration::from_secs(2));
-    let mut burst = filling(3..453);
-    burst.extend(frame(&request(453, "vault.lock", json!({}))));
-    burst.extend(filling(454..464));
-    core.send_raw(&burst);
+    let mut frames = filling(3..453);
+    frames.push(frame(&request(453, "vault.lock", json!({}))));
+    frames.extend(filling(454..464));
+    // Past the reader's credits: feeding stalls once the core waits.
+    frames.extend(padded(464..764));
+    let feed = core.feed(frames);
+    feed.wait_stalled(Duration::from_secs(1));
+    core.resume_reading();
+    core.fed(feed);
     let mut seen = Vec::new();
-    while seen.last().is_none_or(|m: &Value| m["id"] != 463) {
+    while seen.last().is_none_or(|m: &Value| m["id"] != 763) {
         seen.push(core.recv());
     }
-    resume.join().unwrap();
-    let event = seen
-        .iter()
-        .position(|m| m["event"] == "vault.locked")
-        .unwrap();
+    let events: Vec<usize> = (0..seen.len())
+        .filter(|&i| seen[i]["type"] == "event")
+        .collect();
+    assert_eq!(events.len(), 1);
+    let event = events[0];
+    assert_eq!(seen[event]["event"], "vault.locked");
     assert_eq!(seen[event]["data"]["reason"], "manual");
     let lock = seen.iter().position(|m| m["id"] == 453).unwrap();
     assert_eq!(seen[lock]["result"], json!({}));
-    // Some lookups sent before the lock were answered after it took effect.
+    // Lookups sent before the lock were answered after it took effect.
     let first_locked = seen
         .iter()
         .position(|m| m["error"]["code"] == "vault_locked")
@@ -790,28 +795,26 @@ fn a_lock_is_honored_while_main_is_not_reading() {
     assert!(event < first_locked && first_locked < lock);
     // Replies stay in request order, and none after the lock found keys.
     let ids: Vec<u64> = seen.iter().filter_map(|m| m["id"].as_u64()).collect();
-    assert!(ids.windows(2).all(|w| w[0] < w[1]), "{ids:?}");
-    assert!(
-        seen[first_locked..]
-            .iter()
-            .filter(|m| m["type"] == "response" && m["id"] != 453)
-            .all(|m| m["error"]["code"] == "vault_locked")
-    );
-    assert_eq!(seen.iter().filter(|m| m["type"] == "event").count(), 1);
-    let status = core.call(464, "vault.status", json!({}));
-    assert_eq!(status["result"]["unlocked"], false, "{status}");
+    assert!(ids.windows(2).all(|w| w[0] < w[1]));
+    for reply in &seen[first_locked..] {
+        if reply["id"] == 453 || reply["type"] == "event" {
+            continue;
+        }
+        let locked =
+            reply["error"]["code"] == "vault_locked" || reply["result"]["unlocked"] == false;
+        assert!(locked, "{}", reply["id"]);
+    }
 }
 
 #[test]
 fn a_cancel_reaches_queued_work_while_main_is_not_reading() {
     // A verify runs and a second one is queued behind it. Replies then fill
     // the loop's allowance, and a cancel for the queued verify comes behind
-    // requests that wait for main to read. It still reaches the verify
-    // before that one starts, as it would otherwise start, and finish,
-    // while main reads nothing.
-    let (_root, _data, mut core) = imported(&[("FREEDOM_CORED_TEST_JOB_DELAY_MS", "1000")]);
+    // requests that wait for main to read. It still reaches the verify at
+    // once, which would otherwise run to its end while main reads nothing.
+    let (_root, _data, mut core) = imported(&[("FREEDOM_CORED_TEST_JOB_DELAY_MS", "2000")]);
     core.pause_reading();
-    let resume = core.resume_reading_after(Duration::from_secs(4));
+    let paused = Instant::now();
     let verify = |id| {
         frame(&request(
             id,
@@ -819,18 +822,23 @@ fn a_cancel_reaches_queued_work_while_main_is_not_reading() {
             json!({ "password_b64": b64("testpass1") }),
         ))
     };
-    let mut burst = [verify(3), verify(4)].concat();
-    burst.extend(filling(5..455));
-    burst.extend(cancel(4));
-    core.send_raw(&burst);
+    let mut frames = vec![verify(3), verify(4)];
+    frames.extend(filling(5..455));
+    frames.push(cancel(4));
+    frames.extend(padded(455..755));
+    let feed = core.feed(frames);
+    feed.wait_stalled(Duration::from_secs(1));
+    // Long enough for both verifies to have run (2 s of delay each).
+    std::thread::sleep(Duration::from_secs(7).saturating_sub(paused.elapsed()));
+    core.resume_reading();
+    core.fed(feed);
     let mut seen = Vec::new();
-    while seen.len() < 452 {
+    while seen.len() < 752 {
         let message = core.recv();
         if message["type"] == "response" {
             seen.push(message);
         }
     }
-    resume.join().unwrap();
     let reply = |id: u64| seen.iter().find(|m| m["id"] == id).unwrap();
     assert_eq!(reply(3)["result"], json!({}), "{}", reply(3));
     assert_eq!(reply(4)["error"]["code"], "cancelled", "{}", reply(4));
