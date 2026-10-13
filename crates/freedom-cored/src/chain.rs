@@ -857,7 +857,7 @@ struct VerifiedReply<'a> {
     #[serde(borrow, default, deserialize_with = "present")]
     hash: Option<&'a RawValue>,
     #[serde(borrow, default)]
-    rejected: Option<Rejected<'a>>,
+    rejected: Option<ObjectOf<Rejected<'a>>>,
     #[serde(default)]
     uncertain: Option<bool>,
     #[serde(default)]
@@ -865,7 +865,7 @@ struct VerifiedReply<'a> {
     #[serde(borrow, default, deserialize_with = "present")]
     result: Option<&'a RawValue>,
     #[serde(borrow, default)]
-    revert: Option<Revert<'a>>,
+    revert: Option<ObjectOf<Revert<'a>>>,
 }
 
 #[derive(Deserialize)]
@@ -887,6 +887,56 @@ fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<&'de RawValu
     <&'de RawValue>::deserialize(d).map(Some)
 }
 
+/// A member that must be present and may be `null`: serde would otherwise
+/// take a missing `Option` member for `null`.
+fn nullable<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d)
+}
+
+/// `T` read from a JSON object only. Serde's derived structs also take a
+/// positional array, which no shape here has: `[true]` must never pass for
+/// `{ "not_sent": true }` (PR #57 review, 57-M1).
+struct ObjectOf<T>(T);
+
+impl<T> ObjectOf<T> {
+    fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+impl<T> std::ops::Deref for ObjectOf<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for ObjectOf<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Only<T>(std::marker::PhantomData<T>);
+
+        impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for Only<T> {
+            type Value = T;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a JSON object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<T, A::Error> {
+                T::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+            }
+        }
+
+        d.deserialize_map(Only(std::marker::PhantomData))
+            .map(ObjectOf)
+    }
+}
+
 /// A JSON string's text, any lone surrogate replaced by U+FFFD; `None` for
 /// anything but a string.
 fn string_of(raw: &RawValue) -> Option<String> {
@@ -904,25 +954,36 @@ struct NotSent {
     not_sent: bool,
 }
 
+/// A transport failure: one of the closed set, with no text and no data
+/// (design 0004, Transport errors); `None` for anything else, which is
+/// malformed. Only `not_sent` proves nothing was sent, so every failure may
+/// have followed a send.
+fn transport_failure(error: &ErrorBody) -> Option<Transport> {
+    if error.data.is_some() {
+        return None;
+    }
+    Some(match error.code {
+        ErrorCode::Timeout | ErrorCode::Deadline => Transport::Timeout,
+        ErrorCode::Network | ErrorCode::Cancelled | ErrorCode::StaleGeneration => {
+            Transport::Network
+        }
+        ErrorCode::Refused => Transport::Refused,
+        ErrorCode::TooLarge => Transport::TooLarge,
+        ErrorCode::Busy => Transport::Busy,
+        _ => return None,
+    })
+}
+
 /// Main's terminal reply as the machine's answer; `None` when it is
 /// malformed.
 fn answer(kind: Kind, outcome: Result<Box<RawValue>, ErrorBody>) -> Option<Answer> {
     let result = match outcome {
         Ok(result) => result,
-        // A transport failure: no text. Only `not_sent` proves nothing was
-        // sent, so any other failure may have followed a send.
-        Err(error) => {
-            return Some(Answer::Failed(match error.code {
-                ErrorCode::Timeout | ErrorCode::Deadline => Transport::Timeout,
-                ErrorCode::Refused => Transport::Refused,
-                ErrorCode::TooLarge => Transport::TooLarge,
-                ErrorCode::Busy => Transport::Busy,
-                _ => Transport::Network,
-            }));
-        }
+        Err(error) => return transport_failure(&error).map(Answer::Failed),
     };
     let text = result.get();
-    if let Ok(NotSent { not_sent }) = serde_json::from_str::<NotSent>(text) {
+    if let Ok(not_sent) = serde_json::from_str::<ObjectOf<NotSent>>(text) {
+        let NotSent { not_sent } = not_sent.into_inner();
         // Only `true` says it.
         return not_sent.then_some(match kind {
             Kind::MyotisBroadcast => Answer::Myotis(MyotisReply::NotSent),
@@ -938,7 +999,9 @@ fn answer(kind: Kind, outcome: Result<Box<RawValue>, ErrorBody>) -> Option<Answe
                 #[serde(borrow)]
                 body: Cow<'a, str>,
             }
-            let http: Http = serde_json::from_str(text).ok()?;
+            let http = serde_json::from_str::<ObjectOf<Http>>(text)
+                .ok()?
+                .into_inner();
             let body = base64::engine::general_purpose::STANDARD
                 .decode(http.body.as_bytes())
                 .ok()?;
@@ -956,7 +1019,9 @@ fn answer(kind: Kind, outcome: Result<Box<RawValue>, ErrorBody>) -> Option<Answe
                 #[serde(borrow)]
                 body: Cow<'a, str>,
             }
-            let page: Page = serde_json::from_str(text).ok()?;
+            let page = serde_json::from_str::<ObjectOf<Page>>(text)
+                .ok()?
+                .into_inner();
             let body = base64::engine::general_purpose::STANDARD
                 .decode(page.body.as_bytes())
                 .ok()?;
@@ -967,7 +1032,9 @@ fn answer(kind: Kind, outcome: Result<Box<RawValue>, ErrorBody>) -> Option<Answe
             })
         }
         Kind::MyotisRead | Kind::MyotisBroadcast | Kind::Colibri => {
-            let reply: VerifiedReply = serde_json::from_str(text).ok()?;
+            let reply = serde_json::from_str::<ObjectOf<VerifiedReply>>(text)
+                .ok()?
+                .into_inner();
             verified(kind, reply)
         }
     }
@@ -1075,19 +1142,19 @@ const MAX_CHAIN_ID: u64 = MAX_ID;
 /// as 0004, the core refuses a longer list).
 const MAX_RPC_ENDPOINTS: usize = 64;
 
+/// Params from a JSON object: never an array serde would also take for a
+/// struct, at any depth (every nested shape is an [`ObjectOf`]).
 fn parse<'a, T: Deserialize<'a>>(params: &'a str) -> Option<T> {
-    // A JSON object, not an array serde would also take for a struct.
-    if !params.trim_start().starts_with('{') {
-        return None;
-    }
-    serde_json::from_str(params).ok()
+    serde_json::from_str::<ObjectOf<T>>(params)
+        .ok()
+        .map(ObjectOf::into_inner)
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigureParams<'a> {
     #[serde(borrow)]
-    chains: Vec<ChainParam<'a>>,
+    chains: Vec<ObjectOf<ChainParam<'a>>>,
 }
 
 #[derive(Deserialize)]
@@ -1100,11 +1167,15 @@ struct ChainParam<'a> {
     /// `network.quorum` as the registry merges it, raw: the machine applies
     /// today's coercions, defaults and clamps, and the core's bounds.
     #[serde(borrow, default)]
-    quorum: Option<QuorumParam<'a>>,
-    rpc: Vec<RpcParam>,
-    prover: Option<ProverParam>,
+    quorum: Option<ObjectOf<QuorumParam<'a>>>,
+    rpc: Vec<ObjectOf<RpcParam>>,
+    /// Present, `null` when the chain has none (design 0005,
+    /// Configuration).
+    #[serde(deserialize_with = "nullable")]
+    prover: Option<ObjectOf<ProverParam>>,
     myotis: bool,
-    blockscout: Option<BlockscoutParam>,
+    #[serde(deserialize_with = "nullable")]
+    blockscout: Option<ObjectOf<BlockscoutParam>>,
 }
 
 #[derive(Deserialize)]
@@ -1147,6 +1218,7 @@ fn configure_params(params: &str) -> Option<Vec<ChainConfig>> {
     let mut seen = BTreeSet::new();
     let mut chains = Vec::with_capacity(snapshot.chains.len());
     for chain in snapshot.chains {
+        let chain = chain.into_inner();
         if chain.chain_id > MAX_CHAIN_ID
             || !seen.insert(chain.chain_id)
             || chain.rpc.len() > MAX_RPC_ENDPOINTS
@@ -1170,17 +1242,23 @@ fn configure_params(params: &str) -> Option<Vec<ChainConfig>> {
             rpc: chain
                 .rpc
                 .into_iter()
-                .map(|e| RpcEndpoint {
-                    endpoint: e.endpoint,
-                    user_configured: e.user_configured,
+                .map(|e| {
+                    let e = e.into_inner();
+                    RpcEndpoint {
+                        endpoint: e.endpoint,
+                        user_configured: e.user_configured,
+                    }
                 })
                 .collect(),
-            prover: chain.prover.map(|p| Prover {
-                endpoint: p.endpoint,
-                zk: p.zk,
+            prover: chain.prover.map(|p| {
+                let p = p.into_inner();
+                Prover {
+                    endpoint: p.endpoint,
+                    zk: p.zk,
+                }
             }),
             myotis: chain.myotis,
-            blockscout: chain.blockscout.map(|b| b.endpoint),
+            blockscout: chain.blockscout.map(|b| b.into_inner().endpoint),
         });
     }
     Some(chains)

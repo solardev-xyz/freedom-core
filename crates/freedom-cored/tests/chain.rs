@@ -982,3 +982,173 @@ fn main_holds_at_most_256_requests_across_naming_and_chain() {
     let answered = response_to(&mut core, 200);
     assert_eq!(answered["result"]["result"], "0x9", "{answered}");
 }
+
+// ---------------------------------------------------------------------------
+// PR #57's reviews: each probe, through the real binary.
+
+/// Main answers the core's next request with `outcome`, which is
+/// malformed: the core ends the connection (exit 76, logging `category`)
+/// and never replies to main's request `id`.
+fn malformed(core: &mut Core, id: u64, outcome: Value, category: &str) {
+    let request = requests_only(core, 1).pop().unwrap();
+    reply(core, &request, outcome);
+    let rest = core.rest();
+    assert!(
+        !rest
+            .iter()
+            .any(|m| m["type"] == "response" && m["id"] == id),
+        "{rest:?}"
+    );
+    assert_eq!(core.exit_code(Duration::from_secs(10)), 76);
+    let stderr = core.stderr();
+    assert!(
+        stderr.contains(&format!(r#""category":"{category}""#)),
+        "{stderr}"
+    );
+}
+
+/// A core with chain 1 configured as `chain`, Myotis ready if it serves
+/// the chain.
+fn configured(chain: Value) -> (tempfile::TempDir, Core) {
+    let (root, mut core) = core();
+    let myotis = chain["myotis"] == true;
+    configure(&mut core, 2, &[chain]);
+    if myotis {
+        call(
+            &mut core,
+            3,
+            "chain.availability",
+            json!({ "chain_id": 1, "ready": true }),
+        );
+    }
+    (root, core)
+}
+
+fn myotis_broadcaster() -> Value {
+    let mut chain = snapshot(&[], &[], 5000);
+    chain["myotis"] = json!(true);
+    chain["broadcast_order"] = json!(["myotis"]);
+    chain
+}
+
+#[test]
+fn shell_errors_outside_the_transport_set_end_the_connection() {
+    // Daemon review MEDIUM 1: request and protocol codes are no transport
+    // failure; nor is one with data beside it.
+    for (error, category) in [
+        (
+            json!({ "code": "invalid_argument", "message": "not a transport failure" }),
+            "malformed_shell_reply",
+        ),
+        (
+            json!({ "code": "internal", "message": "Internal error" }),
+            "malformed_shell_reply",
+        ),
+        (
+            json!({ "code": "unknown_method", "message": "Unknown method" }),
+            "malformed_shell_reply",
+        ),
+        (
+            json!({ "code": "network", "message": "Network error", "data": {} }),
+            "malformed_shell_reply",
+        ),
+        // A member an error body doesn't have: the envelope is malformed.
+        (
+            json!({ "code": "network", "message": "Network error", "unexpected": 1 }),
+            "malformed",
+        ),
+    ] {
+        let (_root, mut core) = configured(snapshot(&["direct"], &["a"], 5000));
+        core.send(&request(
+            4,
+            "chain.request",
+            read("eth_blockNumber", json!([])),
+        ));
+        malformed(&mut core, 4, json!({ "error": error }), category);
+    }
+}
+
+#[test]
+fn configure_requires_prover_and_blockscout_to_be_present() {
+    // Daemon review MEDIUM 2: `null` when absent, but never missing.
+    let (_root, mut core) = core();
+    for (id, member) in [(2, "prover"), (3, "blockscout")] {
+        let mut chain = snapshot(&["direct"], &["a"], 5000);
+        chain.as_object_mut().unwrap().remove(member);
+        let reply = call(
+            &mut core,
+            id,
+            "chain.configure",
+            json!({ "chains": [chain] }),
+        );
+        assert_eq!(reply["error"]["code"], "invalid_argument", "{member}");
+    }
+    let mut chain = snapshot(&["direct"], &["a"], 5000);
+    chain["prover"] = json!({ "endpoint": "p1", "zk": false });
+    assert_eq!(configure(&mut core, 4, &[chain]), json!({ "1": 1 }));
+}
+
+#[test]
+fn arrays_are_never_proofs_that_nothing_was_sent() {
+    // 57-M1: an array where an object belongs, outer or nested, is
+    // malformed, and never lowers a broadcast's outcome.
+    let direct = snapshot(&[], &["a"], 5000);
+    let colibri = {
+        let mut chain = snapshot(&["colibri"], &[], 5000);
+        chain["prover"] = json!({ "endpoint": "p1", "zk": true });
+        chain
+    };
+    let myotis_reader = {
+        let mut chain = snapshot(&["myotis"], &[], 5000);
+        chain["myotis"] = json!(true);
+        chain
+    };
+    let call_read = read("eth_call", json!([{ "to": ADDRESS }, "latest"]));
+    for (chain, call, result) in [
+        // A Direct attempt: `[true]` for `{ not_sent: true }`.
+        (direct.clone(), broadcast(4), json!([true])),
+        (
+            direct,
+            broadcast(4),
+            json!({ "status": 200, "body": ["e30="] }),
+        ),
+        // Myotis's broadcast: outer and nested arrays.
+        (myotis_broadcaster(), broadcast(4), json!([true])),
+        (
+            myotis_broadcaster(),
+            broadcast(4),
+            json!({ "rejected": ["no"] }),
+        ),
+        (
+            myotis_broadcaster(),
+            broadcast(4),
+            json!({ "rejected": { "reason": ["no"] } }),
+        ),
+        (myotis_broadcaster(), broadcast(4), json!(["0xab"])),
+        // Verified reads.
+        (
+            myotis_reader,
+            request(4, "chain.request", call_read.clone()),
+            json!([{ "verify_method": "proof" }, 1, 1]),
+        ),
+        (
+            colibri.clone(),
+            request(4, "chain.request", call_read.clone()),
+            json!({ "revert": ["0x12"] }),
+        ),
+        (
+            colibri,
+            request(4, "chain.request", call_read.clone()),
+            json!([true]),
+        ),
+    ] {
+        let (_root, mut core) = configured(chain);
+        core.send(&call);
+        malformed(
+            &mut core,
+            4,
+            json!({ "result": result }),
+            "malformed_shell_reply",
+        );
+    }
+}

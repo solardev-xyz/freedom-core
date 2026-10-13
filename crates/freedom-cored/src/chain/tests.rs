@@ -161,11 +161,30 @@ fn configure_is_validated_strictly() {
     huge_id["chain_id"] = json!(1u64 << 53);
     let mut no_order = ok.clone();
     no_order.as_object_mut().unwrap().remove("read_order");
+    // `prover` and `blockscout` are required, `null` when absent.
+    let mut no_prover = ok.clone();
+    no_prover.as_object_mut().unwrap().remove("prover");
+    let mut no_blockscout = ok.clone();
+    no_blockscout.as_object_mut().unwrap().remove("blockscout");
+    // Positional arrays where objects belong, at any depth.
+    let positional: Vec<Value> = ok.as_object().unwrap().values().cloned().collect();
+    let mut array_rpc = ok.clone();
+    array_rpc["rpc"] = json!([["a", false]]);
+    let mut array_prover = ok.clone();
+    array_prover["prover"] = json!(["p1", true]);
+    let mut array_quorum = ok.clone();
+    array_quorum["quorum"] = json!([3, 2, 5000]);
     for chains in [
         json!([many]),
         json!([unknown]),
         json!([huge_id]),
         json!([no_order]),
+        json!([no_prover]),
+        json!([no_blockscout]),
+        json!([positional]),
+        json!([array_rpc]),
+        json!([array_prover]),
+        json!([array_quorum]),
         json!([ok.clone(), ok.clone()]),
         json!("nope"),
     ] {
@@ -173,6 +192,10 @@ fn configure_is_validated_strictly() {
         assert_eq!(reply["error"]["code"], "invalid_argument", "{chains}");
     }
     // At most 64 endpoints is fine.
+    let mut both = ok.clone();
+    both["prover"] = json!({ "endpoint": "p1", "zk": true });
+    both["blockscout"] = json!({ "endpoint": "b1" });
+    assert!(t.configure(json!([both]))["result"].is_object());
     let mut sixty_four = ok;
     sixty_four["rpc"] = (0..64)
         .map(|i| json!({ "endpoint": format!("e{i}"), "user_configured": i == 0 }))
@@ -730,9 +753,11 @@ fn raw(text: &str) -> Result<Box<RawValue>, ErrorBody> {
 
 #[test]
 fn mains_answers_take_one_closed_shape() {
-    // Transport failures carry no text; only `not_sent` says nothing went.
+    // Transport failures are a closed set and carry no text; only
+    // `not_sent` says nothing went.
     for (code, transport) in [
         (ErrorCode::Timeout, Transport::Timeout),
+        (ErrorCode::Deadline, Transport::Timeout),
         (ErrorCode::Network, Transport::Network),
         (ErrorCode::Refused, Transport::Refused),
         (ErrorCode::TooLarge, Transport::TooLarge),
@@ -745,6 +770,23 @@ fn mains_answers_take_one_closed_shape() {
             Some(Answer::Failed(transport))
         );
     }
+    // Any other code, or data beside one, is malformed.
+    for code in [
+        ErrorCode::InvalidArgument,
+        ErrorCode::Internal,
+        ErrorCode::UnknownMethod,
+        ErrorCode::ChainError,
+        ErrorCode::VaultLocked,
+    ] {
+        assert_eq!(answer(Kind::Rpc, Err(ErrorBody::new(code, "x"))), None);
+    }
+    assert_eq!(
+        answer(
+            Kind::MyotisBroadcast,
+            Err(ErrorBody::new(ErrorCode::Network, "x").with_data(json!({ "a": 1 })))
+        ),
+        None
+    );
     assert_eq!(
         answer(Kind::Rpc, raw(r#"{"not_sent":true}"#)),
         Some(Answer::NotSent)
@@ -854,6 +896,17 @@ fn mains_answers_take_one_closed_shape() {
         (Kind::Colibri, r#"{"result":1,"revert":{"data":"0x"}}"#),
         (Kind::Colibri, r#"{"message":"out of gas"}"#),
         (Kind::Colibri, r#""ok""#),
+        // Arrays where objects belong, outer or nested (57-M1): never a
+        // proof that nothing was sent, nor a refusal.
+        (Kind::Rpc, "[true]"),
+        (Kind::Rpc, "[200,\"e30=\"]"),
+        (Kind::Blockscout, "[true]"),
+        (Kind::MyotisRead, "[true]"),
+        (Kind::MyotisRead, r#"[{"a":1},5,5]"#),
+        (Kind::MyotisBroadcast, "[true]"),
+        (Kind::MyotisBroadcast, r#"{"rejected":["no"]}"#),
+        (Kind::Colibri, "[true]"),
+        (Kind::Colibri, r#"{"revert":["0x12"]}"#),
     ] {
         assert_eq!(answer(kind, raw(text)), None, "{kind:?} {text}");
     }

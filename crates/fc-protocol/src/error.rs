@@ -47,8 +47,10 @@ pub enum ErrorCode {
     Internal,
 }
 
-/// The `error` member of a response.
+/// The `error` member of a response: a closed shape, so a member it
+/// doesn't have makes the response malformed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ErrorBody {
     pub code: ErrorCode,
     pub message: String,
@@ -74,6 +76,16 @@ impl ErrorBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_error_body_has_no_other_members() {
+        let ok: Result<ErrorBody, _> =
+            serde_json::from_str(r#"{"code":"network","message":"x","data":{"a":1}}"#);
+        assert!(ok.is_ok());
+        let extra: Result<ErrorBody, _> =
+            serde_json::from_str(r#"{"code":"network","message":"x","unexpected":1}"#);
+        assert!(extra.is_err());
+    }
 
     #[test]
     fn chain_codes_on_the_wire() {
