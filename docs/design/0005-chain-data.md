@@ -142,11 +142,14 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
 - **`{ failure: class }`:** chain data's own closed set of classes, which carry no text. Naming's set (0004) is unchanged. The classes:
   - `not_running` and `not_ready`: `runningInstance`'s two errors;
   - `state_changed`: `verifiedRequest`'s `MYOTIS_UNAVAILABLE`;
-  - `queue_full` and `timeout`: myotis-process's queue and deadline rejections;
+  - `queue_full`, `queue_deadline` and `caller_deadline`: myotis-process's rejections of a read:
+    - `Myotis request queue is full`;
+    - `Myotis queue deadline exceeded`: still queued at the read's 10 s deadline;
+    - `Myotis caller deadline exceeded`: dispatched, and still running at that deadline;
   - `too_large` and `busy` ([Main's pool](#mains-pool));
   - `error`: any other throw.
 
-  The core rebuilds the adapter's own errors with their fixed texts, using the chain's display name from configuration: `not_running`, `not_ready`, `state_changed`, `queue_full` and `timeout`. So they can become the last error as today. `state_changed`, `queue_full` and `timeout` carry the code `MYOTIS_UNAVAILABLE`, as today (`boundary-myotis-caller-deadline-last-error`). Any other throw keeps neither its text nor its code (deviation `adapter-error-text`).
+  The core rebuilds the adapter's own errors with their fixed texts, using the chain's display name from configuration: `not_running`, `not_ready`, `state_changed`, `queue_full`, `queue_deadline` and `caller_deadline`. So they can become the last error as today. The last four carry the code `MYOTIS_UNAVAILABLE`, as today (`boundary-myotis-state-changed-last-error`, `boundary-myotis-queue-full-last-error`, `boundary-myotis-queue-deadline-last-error`, `boundary-myotis-caller-deadline-last-error`). Any other throw keeps neither its text nor its code (deviation `adapter-error-text`). That includes the child's other `MYOTIS_UNAVAILABLE` rejections: `Myotis is unavailable`, `Myotis request exceeds size limit`, `Myotis native operation failed`, `Myotis stopped` and `Myotis child exited`.
 
 #### The rest
 
@@ -585,7 +588,7 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 The harness drives the pinned `chain-data-router.js`, with the real `blockscout-logs.js` and the Ant bridge's options, through scripted worlds:
 - **World inputs:**
   - a registry snapshot per chain;
-  - Myotis readiness and status sequences, and its outcomes per operation, its three thrown errors included;
+  - Myotis readiness and status sequences, and its outcomes per operation, its thrown errors included (each recorded with its class);
   - Colibri outcomes, with and without codes;
   - `fetch` exchanges with their delays, statuses and throws;
   - Blockscout pages and DNS answers;
@@ -607,10 +610,14 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
   - a repeat broadcast of mined bytes refused with `nonce too low` (freedom-browser's tests cover the wallet's rule: external same-payment replacements, lagging and inconsistent receipts, a reorg before finality, status-0 receipts, a singleton quorum, a crash between dispatch and record, concurrent reservations, and that no path signs an existing intent at a second nonce);
   - a read's reply overtaken by a configuration change after it was made;
   - a truncation with Direct still available;
-  - nesting at 512 and 513 levels;
-  - canonical-equivalence pairs: duplicate keys, number spellings, `__proto__`, lone surrogates.
-- **The harness** (`vectors/generator/chain-replay.js`) has 286 scenarios, each with a stable ID and a `from` field citing its source test or this document. Strings over 64 KiB are stored as a repeat unit plus a SHA-256, which keeps the 8 MiB `html()` answers small.
+  - nesting at 512 and 513 levels (`boundary-json-depth-512`, and `boundary-json-depth-513` for deviation `json-depth`);
+  - canonical-equivalence pairs through the quorum: duplicate keys, number spellings, `__proto__`, lone surrogates (`boundary-agreement-*`).
+- **The harness** (`vectors/generator/chain-replay.js`) has 297 scenarios, each with a stable ID and a `from` field citing its source test or this document.
+  - **Values as text:** every value the reference produced or was given is recorded as JSON text, and `undefined` as a field of its own. No value can pass for an encoding, and every value `JSON.parse` makes survives: lone surrogates, any depth, `-0` and infinities.
+  - **Large texts:** a text over 64 KiB is stored in its field's repeat form, a repeat unit plus a SHA-256, which keeps the 8 MiB `html()` answers small.
+  - **Settle times:** ported scenarios carry the settle times their tests assert, and generation fails if a fixture drifts from them.
 - **Not replayed:** these are left to step 3's own tests:
+  - a read's reply overtaken by a configuration change after it was made: that is main's reply fencing ([Generations](#generations)), and the reference has no seam for it;
   - the adaptive table's 1,024-route eviction;
   - a Myotis slot granted in the same turn as its waiter's deadline;
   - Blockscout's opaque redirect, which Node's `fetch` can't produce.
