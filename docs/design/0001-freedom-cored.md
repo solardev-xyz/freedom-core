@@ -147,6 +147,7 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
     - **`core.shutdown`** among the waiting requests is handled at once. The requests before it are dropped unanswered: none of them was admitted, so none ran, and main is closing the core. A shutdown still in main's own backed-up writes arrives once main reads again; main's kill after 3 s covers a main that doesn't.
     - **`vault.lock`** locks at once, and is acknowledged in its turn. Until then, whatever the requests before it admit is revoked at once: they are answered as if they came after the lock, so nothing main sent before a lock outlives it.
     - **`cancel`** reaches admitted work at once. One whose request waits too waits behind it.
+  - **Requests that waited go one at a time** once there is room, each as if it had just arrived: after the loop's timers, and with whatever main sends meanwhile handled between them. An auto-lock that comes due while they drain therefore locks before the next one, and a `vault.touch` among them can't postpone a lock already due. A cancel or `core.shutdown` sent meanwhile is handled within one request's time, not behind the whole backlog.
   - **Memory stays bounded:** what waits is the frames the reader holds, and for each vault request admitted before the wait (one running, 32 queued) its reply and at most one event.
   - **The core exits only on a stall.** If its frames wait while the writer writes nothing for **30 s**, main has stopped reading: the core logs "main is not reading replies" and exits 76 (`protocol`). Writer progress is any frame written, whoever made it: the 30 s count from the later of the writer's last write and the moment the frames began to wait.
     - **Why 30 s:** it is far above a healthy main's pauses, which last milliseconds to seconds, and waiting costs nothing meanwhile. It is also the longest deadline the core gives a request (the KDF methods'), which puts it between main's [hang watchdogs](#deadlines-cancellation-and-commit): 20 s for a 5 s method, 45 s for a KDF method. So the core never gives up on main sooner than main gives up on a short request, and a main that can no longer run its timers keeps it waiting no longer than main would wait for a KDF reply.
@@ -501,6 +502,8 @@ The password crosses the pipe, which is no worse than today, where it is used in
   - **Backpressure:**
     - a 1,500-request burst while main reads nothing for 2 s, all answered in order once it reads, with the core taking in stdin only as main reads and its peak memory bounded;
     - the auto-lock landing on time while replies wait: it revokes an export whose job finishes before main reads again;
+    - the auto-lock coming due while waiting requests drain, after main reads again: a key request among them gets `vault_locked`, and a `vault.touch` among them doesn't postpone the lock;
+    - a cancel and a `core.shutdown` sent while a long backlog drains, each handled before the backlog ends;
     - `core.shutdown`, `vault.lock` and a `cancel` for queued work, each honored behind requests that wait;
     - the stall exit, with an injected clock and, in the binary, with a shortened bound.
   - **Reconciliation:**

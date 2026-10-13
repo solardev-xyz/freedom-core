@@ -22,6 +22,12 @@
 //! - **The auto-lock fires on time,** whatever the room: it wipes the
 //!   secrets and revokes admitted work at once. Only its event and the
 //!   revoked requests' replies wait, and they carry no secret.
+//! - **Requests that waited go one per turn of the loop** once there is
+//!   room, each as if it had just been read: after the timers, so an
+//!   auto-lock that comes due while they drain locks before the next one,
+//!   and before a `vault.touch` could postpone it; and with whatever main
+//!   sends meanwhile handled between them. The loop doesn't wait while one
+//!   can go.
 //! - **Control requests don't wait:**
 //!   - **`core.shutdown`** among the waiting requests is handled at once.
 //!     The requests before it are dropped: none of them ran, and main is
@@ -43,7 +49,7 @@ use std::collections::VecDeque;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
@@ -306,7 +312,16 @@ pub fn run(options: &Options) -> Exit {
         } else {
             hello_deadline.saturating_duration_since(Instant::now())
         };
-        let received = events.recv_timeout(timeout);
+        // While a request that waited can go, the loop doesn't wait: it
+        // takes an event if one is there, then that request (`resume`).
+        let received = if core.resumable() {
+            events.try_recv().map_err(|e| match e {
+                TryRecvError::Empty => RecvTimeoutError::Timeout,
+                TryRecvError::Disconnected => RecvTimeoutError::Disconnected,
+            })
+        } else {
+            events.recv_timeout(timeout)
+        };
         // Whatever arrived, first apply what is due (auto-lock, deadlines):
         // a busy queue must not postpone either, nor a writer without room.
         if core.hello_done {
@@ -395,9 +410,9 @@ pub fn run(options: &Options) -> Exit {
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break Exit::Ok,
         }
-        // Then the requests that waited, as far as the loop's frames find
-        // room; and a writer that has written nothing for the stall bound
-        // means main has stopped reading.
+        // Then the next request that waited, if the loop's frames have room;
+        // and a writer that has written nothing for the stall bound means
+        // main has stopped reading.
         if let Flow::Exit(exit) = core.resume() {
             break exit;
         }
@@ -669,27 +684,43 @@ impl Core {
         });
     }
 
-    /// Handles the requests that waited, in order, for as long as the
-    /// loop's frames find room in the writer.
+    /// Whether a request that waited can go: the loop's frames have room.
+    fn resumable(&self) -> bool {
+        !self.parked.is_empty() && !self.outbox.is_waiting()
+    }
+
+    /// Handles the next request that waited, if it can go: one per turn of
+    /// the loop, as if it had just been read, so whatever main sends
+    /// meanwhile (a cancel, a shutdown) and the loop's timers come between
+    /// them.
     fn resume(&mut self) -> Flow {
-        while !self.outbox.is_waiting() {
-            let Some(parked) = self.parked.pop_front() else {
-                break;
-            };
-            if parked.lock {
-                self.locks_ahead = self.locks_ahead.saturating_sub(1);
-            }
-            if let Flow::Exit(exit) = self.handle(parked.frame, parked.credit) {
-                return Flow::Exit(exit);
-            }
-            // A lock still to come holds meanwhile: what this request
-            // admitted is revoked, as that lock's turn would have done.
-            if self.locks_ahead > 0 {
-                let outs = self.vault.lock();
-                if let Flow::Exit(exit) = self.dispatch(outs) {
-                    return Flow::Exit(exit);
-                }
-            }
+        if !self.resumable() {
+            return Flow::Continue;
+        }
+        // What is due first, right before the request: an auto-lock that
+        // came due while the backlog drained locks before it, and before a
+        // `vault.touch` could postpone it.
+        let outs = self.vault.tick();
+        if let Flow::Exit(exit) = self.dispatch(outs) {
+            return Flow::Exit(exit);
+        }
+        if self.outbox.is_waiting() {
+            return Flow::Continue;
+        }
+        let Some(parked) = self.parked.pop_front() else {
+            return Flow::Continue;
+        };
+        if parked.lock {
+            self.locks_ahead = self.locks_ahead.saturating_sub(1);
+        }
+        if let Flow::Exit(exit) = self.handle(parked.frame, parked.credit) {
+            return Flow::Exit(exit);
+        }
+        // A lock still to come holds meanwhile: what this request admitted
+        // is revoked, as that lock's turn would have done.
+        if self.locks_ahead > 0 {
+            let outs = self.vault.lock();
+            return self.dispatch(outs);
         }
         Flow::Continue
     }

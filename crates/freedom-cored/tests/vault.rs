@@ -847,6 +847,217 @@ fn a_cancel_reaches_queued_work_while_main_is_not_reading() {
     assert_eq!(reply(4)["error"]["code"], "cancelled", "{}", reply(4));
 }
 
+/// `keys.addresses` for accounts and publishers `0..n`, padded like
+/// `filling`. With `n = 4` it is light: a few milliseconds, and a reply of
+/// about 1 KB. With `n = 64`, the most, it is heavy: tens of milliseconds,
+/// and about 10 KB.
+fn addresses(id: u64, n: u32) -> Vec<u8> {
+    let indices: Vec<u32> = (0..n).collect();
+    frame(&request(
+        id,
+        "keys.addresses",
+        json!({ "accounts": indices, "publishers": indices, "pad": "x".repeat(64 * 1024) }),
+    ))
+}
+
+/// A backlog that drains slowly once main reads again, from ID `first`:
+/// 330 light lookups, then 170 heavy ones. The light replies fill any OS's
+/// stdout pipe and the loop's allowance within the first 321 frames, so
+/// all the heavy lookups wait, and the frames right after them still fall
+/// within the reader's credits. Every 25th of the first 250 frames is a
+/// `vault.touch` instead, so the auto-lock counts from just before the
+/// wait. Returns the frames and the heavy lookups' IDs.
+fn slow_backlog(first: u64) -> (Vec<Vec<u8>>, std::ops::Range<u64>) {
+    let pad = "x".repeat(64 * 1024);
+    let mut frames = Vec::new();
+    for id in first..first + 330 {
+        frames.push(if (id - first).is_multiple_of(25) && id - first <= 250 {
+            frame(&request(id, "vault.touch", json!({ "pad": pad })))
+        } else {
+            addresses(id, 4)
+        });
+    }
+    let heavy = first + 330..first + 500;
+    frames.extend(heavy.clone().map(|id| addresses(id, 64)));
+    (frames, heavy)
+}
+
+/// Main stops reading while a slow backlog waits, then reads again before
+/// the auto-lock is due, and the lock comes due while the backlog drains.
+/// A key request at its end, after a `vault.touch` if `late_touch`, must
+/// find the vault locked.
+fn auto_lock_due_while_draining(late_touch: bool) {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello_with(4_000);
+    core.call(
+        2,
+        "vault.import",
+        json!({ "password_b64": b64("testpass1"), "mnemonic_b64": b64(ABANDON) }),
+    );
+    assert_eq!(core.event()["event"], "vault.unlocked");
+    core.pause_reading();
+    let (mut frames, heavy) = slow_backlog(3);
+    let pad = "x".repeat(64 * 1024);
+    let touch = heavy.end;
+    if late_touch {
+        frames.push(frame(&request(touch, "vault.touch", json!({ "pad": pad }))));
+    }
+    let key = if late_touch { touch + 1 } else { touch };
+    frames.push(frame(&shell_request(
+        key,
+        "compat.private_key",
+        json!({ "account": 0, "pad": pad }),
+    )));
+    // Past the reader's credits: feeding stalls once the core waits.
+    frames.extend(padded(key + 1..key + 101));
+    let feed = core.feed(frames);
+    feed.wait_stalled(Duration::from_secs(1));
+    core.resume_reading();
+    core.fed(feed);
+    let mut seen = Vec::new();
+    while seen.last().is_none_or(|m: &Value| m["id"] != key + 100) {
+        seen.push(core.recv());
+    }
+    let at = |id: u64| seen.iter().position(|m| m["id"] == id).unwrap();
+    // Main read again before the lock was due: heavy lookups that waited
+    // still found keys.
+    assert!(
+        seen.iter()
+            .any(|m| heavy.contains(&m["id"].as_u64().unwrap_or(0)) && m["result"].is_object()),
+        "main read again only after the lock was due"
+    );
+    let events: Vec<usize> = (0..seen.len())
+        .filter(|&i| seen[i]["type"] == "event")
+        .collect();
+    assert_eq!(
+        events.len(),
+        1,
+        "{:?}",
+        events.iter().map(|&i| &seen[i]).collect::<Vec<_>>()
+    );
+    let lock = events[0];
+    assert_eq!(seen[lock]["event"], "vault.locked");
+    assert_eq!(seen[lock]["data"]["reason"], "auto");
+    // The lock landed before the requests that came after its deadline: the
+    // touch didn't postpone it, and the key request found the vault locked.
+    if late_touch {
+        assert!(lock < at(touch));
+    }
+    assert!(lock < at(key));
+    assert_eq!(
+        seen[at(key)]["error"]["code"],
+        "vault_locked",
+        "{}",
+        seen[at(key)]
+    );
+    assert!(
+        seen.iter()
+            .all(|m| m["result"]["private_key_hex"].is_null())
+    );
+    // Nothing after the lock found keys.
+    for reply in &seen[lock + 1..] {
+        if reply["id"] == touch && late_touch {
+            continue;
+        }
+        let locked =
+            reply["error"]["code"] == "vault_locked" || reply["result"]["unlocked"] == false;
+        assert!(locked, "{}", reply["id"]);
+    }
+    let status = core.call(key + 101, "vault.status", json!({}));
+    assert_eq!(status["result"]["unlocked"], false, "{status}");
+}
+
+#[test]
+fn auto_lock_due_while_waiting_requests_drain_locks_before_the_next() {
+    auto_lock_due_while_draining(false);
+}
+
+#[test]
+fn a_late_touch_cannot_postpone_a_lock_due_while_requests_drain() {
+    auto_lock_due_while_draining(true);
+}
+
+#[test]
+fn a_draining_backlog_does_not_starve_a_shutdown() {
+    // A shutdown that arrives while a slow backlog drains is handled within
+    // a request or so: the core exits with much of the backlog unanswered,
+    // rather than answering all of it first.
+    let (_root, _data, mut core) = imported(&[]);
+    core.pause_reading();
+    let (mut frames, heavy) = slow_backlog(3);
+    // Past the reader's credits: it reads the shutdown only as the backlog
+    // drains.
+    frames.extend(padded(heavy.end..heavy.end + 100));
+    frames.push(frame(&request(heavy.end + 100, "core.shutdown", json!({}))));
+    let feed = core.feed(frames);
+    feed.wait_stalled(Duration::from_secs(1));
+    core.resume_reading();
+    core.fed(feed);
+    let replies = core.rest();
+    assert_eq!(core.exit_code(Duration::from_secs(10)), 0);
+    let answered = replies
+        .iter()
+        .filter(|m| heavy.contains(&m["id"].as_u64().unwrap_or(0)))
+        .count();
+    // 170 heavy lookups; the shutdown came after the first 100 or so frames.
+    assert!(answered <= 120, "{answered} of 170 heavy lookups answered");
+}
+
+#[test]
+fn a_draining_backlog_does_not_starve_a_cancel() {
+    // 32 verifies, half a second each: the last is still queued long after
+    // the rest of this test. A cancel for it arrives while a slow backlog
+    // drains, and is handled within a request or so: its reply comes before
+    // most of the backlog's, not after all of it.
+    let (_root, _data, mut core) = imported(&[("FREEDOM_CORED_TEST_JOB_DELAY_MS", "500")]);
+    core.pause_reading();
+    let mut frames: Vec<Vec<u8>> = (3..35)
+        .map(|id| {
+            frame(&request(
+                id,
+                "vault.verify_password",
+                json!({ "password_b64": b64("testpass1") }),
+            ))
+        })
+        .collect();
+    let (backlog, heavy) = slow_backlog(35);
+    frames.extend(backlog);
+    frames.extend(padded(heavy.end..heavy.end + 100));
+    frames.push(cancel(34));
+    let feed = core.feed(frames);
+    feed.wait_stalled(Duration::from_secs(1));
+    core.resume_reading();
+    core.fed(feed);
+    let mut seen = Vec::new();
+    while seen
+        .last()
+        .is_none_or(|m: &Value| m["id"] != heavy.end + 99)
+    {
+        let message = core.recv();
+        if message["type"] == "response" {
+            seen.push(message);
+        }
+    }
+    let cancelled = seen
+        .iter()
+        .position(|m| m["id"] == 34)
+        .expect("no reply to the cancelled verify before the backlog's end");
+    assert_eq!(
+        seen[cancelled]["error"]["code"], "cancelled",
+        "{}",
+        seen[cancelled]
+    );
+    let heavy_after = seen[cancelled..]
+        .iter()
+        .filter(|m| heavy.contains(&m["id"].as_u64().unwrap_or(0)))
+        .count();
+    assert!(
+        heavy_after >= 50,
+        "only {heavy_after} heavy replies after the cancel's"
+    );
+}
+
 #[test]
 fn malformed_public_keys_never_crash_the_core() {
     let (_root, _data, mut core) = imported(&[]);
