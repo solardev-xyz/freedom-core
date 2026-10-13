@@ -141,6 +141,10 @@ pub fn lock_file_name(namespace: &str, canonical_data_dir: &Path) -> String {
 /// The `hold-lock` subcommand (0001): takes the gate, writes `locked`, and
 /// holds it until `input` closes. Profile delete, reset and the services'
 /// own resets run under it.
+///
+/// Only a real EOF releases the gate with exit 0. An interrupted read is
+/// retried; any other read error releases it with exit 70, which main
+/// treats as a failed hold.
 pub fn hold_lock(
     data_dir: &Path,
     lock_dir: &Path,
@@ -166,8 +170,20 @@ pub fn hold_lock(
         return Exit::Internal;
     }
     let mut sink = [0u8; 4096];
-    while matches!(input.read(&mut sink), Ok(n) if n > 0) {}
-    Exit::Ok
+    loop {
+        match input.read(&mut sink) {
+            Ok(0) => return Exit::Ok,
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => {
+                crate::log::error(
+                    "cannot read stdin while holding the gate",
+                    serde_json::json!({ "error": e.kind().to_string() }),
+                );
+                return Exit::Internal;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -257,6 +273,68 @@ mod tests {
         let (exit, out) = holder.join().unwrap();
         said.extend(out);
         assert_eq!((exit, said.as_slice()), (Exit::Ok, &b"locked\n"[..]));
+        assert!(acquire(&data, &locks, "ipfs", Duration::ZERO).is_ok());
+    }
+
+    /// A stdin that fails its first read with `kind`, then reads `inner`.
+    struct FailsOnce<R> {
+        inner: R,
+        kind: Option<std::io::ErrorKind>,
+    }
+
+    impl<R: Read> Read for FailsOnce<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self.kind.take() {
+                Some(kind) => Err(kind.into()),
+                None => self.inner.read(buf),
+            }
+        }
+    }
+
+    #[test]
+    fn an_interrupted_read_is_not_eof() {
+        let (_root, data, locks) = dirs();
+        let (reader, writer) = std::io::pipe().unwrap();
+        let (data2, locks2) = (data.clone(), locks.clone());
+        let (said_tx, said) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let input = FailsOnce {
+                inner: reader,
+                kind: Some(std::io::ErrorKind::Interrupted),
+            };
+            struct Said(std::sync::mpsc::Sender<Vec<u8>>);
+            impl Write for Said {
+                fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                    let _ = self.0.send(buf.to_vec());
+                    Ok(buf.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+            hold_lock(&data2, &locks2, "ipfs", input, Said(said_tx))
+        });
+        assert_eq!(said.recv().unwrap(), b"locked\n");
+        // Still held after the interruption, while stdin is open.
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!holder.is_finished());
+        assert!(matches!(
+            acquire(&data, &locks, "ipfs", Duration::ZERO),
+            Err(GateError::Held)
+        ));
+        drop(writer);
+        assert_eq!(holder.join().unwrap(), Exit::Ok);
+    }
+
+    #[test]
+    fn a_failed_read_releases_the_gate_with_exit_70() {
+        let (_root, data, locks) = dirs();
+        let input = FailsOnce {
+            inner: std::io::empty(),
+            kind: Some(std::io::ErrorKind::BrokenPipe),
+        };
+        let exit = hold_lock(&data, &locks, "ipfs", input, Vec::new());
+        assert_eq!(exit, Exit::Internal);
         assert!(acquire(&data, &locks, "ipfs", Duration::ZERO).is_ok());
     }
 
