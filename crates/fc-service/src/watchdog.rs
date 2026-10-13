@@ -8,6 +8,9 @@
 //!   teardown and disarms it once quiescence is proven. If it fires, it
 //!   logs its fixed reason (`teardown_unproven`) and exits 70, releasing
 //!   nothing.
+//!
+//! A firing watchdog never waits on stderr: its line has at most 150 ms,
+//! under a bound armed before it is written.
 
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -25,6 +28,16 @@ impl Watchdog {
     /// name), unless disarmed first. If no thread can be started, it fires
     /// at once: a bound that can't be kept is no bound.
     pub fn arm(reason: &'static str, after: Duration, exit: Exit) -> Watchdog {
+        Watchdog::arm_with(after, move || (reason, exit))
+    }
+
+    /// As [`Watchdog::arm`], with the reason and the exit decided when it
+    /// fires: the connection's exit watchdog exits with the process's
+    /// result as it stands then.
+    pub(crate) fn arm_with(
+        after: Duration,
+        decide: impl FnOnce() -> (&'static str, Exit) + Send + 'static,
+    ) -> Watchdog {
         let disarmed = Arc::new((Mutex::new(false), Condvar::new()));
         let state = disarmed.clone();
         let deadline = Instant::now() + after;
@@ -35,6 +48,7 @@ impl Watchdog {
                 let mut flag = flag.lock().unwrap_or_else(|p| p.into_inner());
                 while !*flag {
                     let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                        let (reason, exit) = decide();
                         fire(reason, exit);
                     };
                     flag = match wake.wait_timeout(flag, left) {
@@ -43,8 +57,10 @@ impl Watchdog {
                     };
                 }
             });
-        if spawned.is_err() {
-            fire(reason, exit);
+        if let Err(error) = spawned {
+            // The closure, and so `decide`, went with the error.
+            drop(error);
+            fire("watchdog_unavailable", Exit::Internal);
         }
         Watchdog { disarmed }
     }
@@ -58,12 +74,12 @@ impl Watchdog {
 }
 
 fn fire(reason: &'static str, exit: Exit) -> ! {
-    crate::log::error(
-        "a watchdog ends the process",
-        serde_json::json!({ "reason": reason, "exit": exit.code() }),
-    );
-    crate::log::finish(Duration::from_millis(100));
-    std::process::exit(i32::from(exit.code()))
+    crate::exit::exit_reporting(exit, crate::exit::REPORT_BOUND, || {
+        crate::log::error(
+            "a watchdog ends the process",
+            serde_json::json!({ "reason": reason, "exit": exit.code() }),
+        );
+    })
 }
 
 #[cfg(test)]

@@ -308,6 +308,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 - **`abort` is the one frame that jumps the queue.** It purges the stream's queued, unwritten data and is then written. Nothing of the stream is written after it.
 - **Cancel against an unwritten head:** when main's `cancel` arrives while the head is queued but not yet written, the head is dropped. `cancelled` is the request's only reply, and no stream opens.
 - **Once the head is written,** a cancel gives `abort { code: "cancelled" }`, unless the stream's terminal is already settled: `end` already written, or an abort already queued. Then the cancel is late and is ignored, as in 0001.
+- **Written means taken by the writer.** The service's writer takes one frame at a time from the queue, as it is about to write it, so every frame behind the one being written stays queued and cancellable. A frame whose write has begun can't be taken back, even if main hasn't read it yet: stdout's writes block, and their bytes are the OS's. `vectors/streams.json` models each take as a `write` step.
 - **A cancel for an ID the service doesn't hold** (one already answered or ended, one never seen, or one above the highest request ID seen) is late and is ignored, as `freedom-cored` ignores IDs it doesn't hold. It is not a protocol error.
 
 **Credit:**

@@ -64,18 +64,10 @@ pub fn finish(timeout: Duration) {
     }
 }
 
-fn write(level: &str, message: &str, mut fields: serde_json::Value) {
-    if !fields.is_object() {
-        fields = serde_json::json!({});
-    }
-    if let Some(map) = fields.as_object_mut() {
-        map.insert("level".into(), level.into());
-        map.insert("msg".into(), message.into());
-    }
-    let Ok(mut line) = serde_json::to_vec(&fields) else {
-        return;
-    };
-    line.push(b'\n');
+/// Queues one finished line (ending in `\n`), as [`info`] and the others
+/// do: once [`init`] has run it never blocks, and a line that doesn't fit the
+/// queue is dropped and counted. Before `init`, it is written directly.
+pub(crate) fn line(line: Vec<u8>) {
     let sink = SINK.lock().ok().and_then(|sink| sink.clone());
     match sink {
         Some(sink) => {
@@ -90,6 +82,21 @@ fn write(level: &str, message: &str, mut fields: serde_json::Value) {
             let _ = std::io::stderr().lock().write_all(&line);
         }
     }
+}
+
+fn write(level: &str, message: &str, mut fields: serde_json::Value) {
+    if !fields.is_object() {
+        fields = serde_json::json!({});
+    }
+    if let Some(map) = fields.as_object_mut() {
+        map.insert("level".into(), level.into());
+        map.insert("msg".into(), message.into());
+    }
+    let Ok(mut line) = serde_json::to_vec(&fields) else {
+        return;
+    };
+    line.push(b'\n');
+    self::line(line);
 }
 
 pub fn info(message: &str, fields: serde_json::Value) {

@@ -9,13 +9,17 @@
 //!   reporting dialog or dumps on Windows where the API allows it, and the
 //!   parent checks (`--parent-pid`, `PR_SET_PDEATHSIG`).
 //! - [`panic`]: the startup panic hook. It writes one fixed JSON line,
-//!   `{"panic":"<task kind>"}`, never a payload or a backtrace. A panic in
-//!   request work unwinds to its join handle; any other panic exits 70.
+//!   `{"panic":"<task kind>"}`, never a payload or a backtrace, and never
+//!   waits on stderr. A panic in request work (polled or dropped) unwinds to
+//!   its join handle; any other panic exits 70.
 //! - [`conn`]: the frame I/O on stdin and stdout, with `fc-protocol`'s
-//!   stream [`Sender`](fc_protocol::stream::Sender): one reader that never
-//!   waits on the writer, one writer that serves control frames first, the
-//!   handshake within its deadline, `<service>.shutdown`, parent death,
-//!   the writer-stall exit, and the exit watchdog after EOF.
+//!   stream [`Sender`](fc_protocol::stream::Sender): a reader that handles
+//!   control frames on arrival and calls the service one callback at a
+//!   time, never after the end; requests bounded by what the connection
+//!   holds, the rest parked; a writer that claims each frame only to write
+//!   it, so what is unwritten stays cancellable; the handshake within its
+//!   deadline, `<service>.shutdown`, parent death, the writer-stall exit,
+//!   a closing phase for the teardown, and the exit watchdog.
 //! - [`watchdog`]: plain threads that end the process unless disarmed in
 //!   time: the exit watchdog after EOF, and a teardown's 5 s bound
 //!   (`teardown_unproven`, exit 70).

@@ -12,14 +12,22 @@
 //! - **Everything else exits 70.** A panic in any other task (an instance's
 //!   own, a library's), or on any other thread, exits the process with 70
 //!   from the hook: a crash, which main restarts.
+//! - **Reporting never holds the process up.** The line goes through the log
+//!   queue, which never blocks once [`crate::log::init`] has run (before it,
+//!   it is written directly). A fatal panic arms its exit first, on a thread
+//!   of its own, and gives the line at most 150 ms: a stderr that main has
+//!   stopped draining can't keep the process alive, nor stop a request's
+//!   panic from unwinding.
+//! - **Dropping request work is request work.** [`Labeled`] drops its future
+//!   under its kind too, so a panic in a cancelled request's destructor
+//!   unwinds like one in its poll.
 
 use std::cell::Cell;
 use std::future::Future;
-use std::io::Write;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use crate::exit::Exit;
+use crate::exit::{Exit, REPORT_BOUND, exit_reporting};
 
 /// What a thread is doing, for the hook's line and for whether a panic may
 /// unwind.
@@ -59,11 +67,12 @@ pub fn install() {
     std::panic::set_hook(Box::new(|_info| {
         let kind = KIND.with(Cell::get);
         let name = kind.map_or("thread", TaskKind::name);
-        // Directly, not through the log queue: the process may exit now.
-        let line = format!("{{\"panic\":\"{name}\"}}\n");
-        let _ = std::io::stderr().lock().write_all(line.as_bytes());
-        if !kind.is_some_and(|kind| kind.request) {
-            std::process::exit(i32::from(Exit::Internal.code()));
+        let line = format!("{{\"panic\":\"{name}\"}}\n").into_bytes();
+        if kind.is_some_and(|kind| kind.request) {
+            // It unwinds: queued, never waited on.
+            crate::log::line(line);
+        } else {
+            exit_reporting(Exit::Internal, REPORT_BOUND, || crate::log::line(line));
         }
     }));
 }
@@ -85,18 +94,20 @@ impl Drop for Restore {
     }
 }
 
-/// A future polled with its thread marked as `kind`, whatever thread a
-/// runtime polls it on: blocking regions inside the poll are marked too.
+/// A future polled, and dropped, with its thread marked as `kind`, whatever
+/// thread a runtime polls or drops it on: blocking regions inside the poll
+/// are marked too.
 pub struct Labeled<F> {
     kind: TaskKind,
-    future: Pin<Box<F>>,
+    /// `None` only while it is being dropped.
+    future: Option<Pin<Box<F>>>,
 }
 
 impl<F: Future> Labeled<F> {
     pub fn new(kind: TaskKind, future: F) -> Self {
         Labeled {
             kind,
-            future: Box::pin(future),
+            future: Some(Box::pin(future)),
         }
     }
 }
@@ -106,13 +117,29 @@ impl<F: Future> Future for Labeled<F> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
         let kind = self.kind;
-        with_kind(kind, || self.future.as_mut().poll(cx))
+        match self.future.as_mut() {
+            Some(future) => with_kind(kind, || future.as_mut().poll(cx)),
+            None => Poll::Pending,
+        }
+    }
+}
+
+impl<F> Drop for Labeled<F> {
+    fn drop(&mut self) {
+        // A cancelled request's destructors are its work too.
+        let future = self.future.take();
+        with_kind(self.kind, move || drop(future));
     }
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::print_stdout
+    )]
 
     use super::*;
     use std::process::Command;
@@ -145,6 +172,49 @@ mod tests {
                 let waker = std::task::Waker::noop();
                 let _ = Pin::new(&mut future).poll(&mut Context::from_waker(waker));
             }
+            "request_drop" => {
+                // A pending request dropped (cancelled) whose destructor
+                // panics: request work, so it unwinds.
+                struct PanicsOnDrop;
+                impl Future for PanicsOnDrop {
+                    type Output = ();
+                    fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+                        Poll::Pending
+                    }
+                }
+                impl Drop for PanicsOnDrop {
+                    fn drop(&mut self) {
+                        panic!("SECRET /path/bafy");
+                    }
+                }
+                let mut future = Labeled::new(TaskKind::REQUEST, PanicsOnDrop);
+                let waker = std::task::Waker::noop();
+                let _ = Pin::new(&mut future).poll(&mut Context::from_waker(waker));
+                let caught = std::panic::catch_unwind(move || drop(future));
+                assert!(caught.is_err());
+                assert_eq!(KIND.with(Cell::get), None);
+            }
+            "blocked_stderr" => {
+                // A log line main never drains: the log thread blocks on the
+                // pipe, holding stderr's lock.
+                crate::log::init();
+                crate::log::info("filler", serde_json::json!({ "x": "x".repeat(1 << 20) }));
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let _ = std::thread::spawn(|| panic!("SECRET /path/bafy")).join();
+                std::thread::sleep(std::time::Duration::from_secs(10));
+            }
+            "blocked_stderr_request" => {
+                crate::log::init();
+                crate::log::info("filler", serde_json::json!({ "x": "x".repeat(1 << 20) }));
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let caught = std::panic::catch_unwind(|| {
+                    with_kind(TaskKind::REQUEST, || panic!("SECRET /path/bafy"))
+                });
+                assert!(caught.is_err());
+                // Unwound without waiting on stderr: say so on stdout.
+                println!("UNWOUND");
+                std::process::exit(0);
+            }
             other => panic!("unknown mode {other}"),
         }
     }
@@ -172,6 +242,72 @@ mod tests {
         assert_eq!(code, Some(0), "{stderr}");
         assert!(stderr.contains("{\"panic\":\"request\"}\n"), "{stderr}");
         assert!(!stderr.contains("SECRET"), "{stderr}");
+    }
+
+    #[test]
+    fn a_request_dropped_with_a_panicking_destructor_unwinds() {
+        let (code, stderr) = run_child("request_drop");
+        assert_eq!(code, Some(0), "{stderr}");
+        assert!(stderr.contains("{\"panic\":\"request\"}\n"), "{stderr}");
+        assert!(!stderr.contains("SECRET"), "{stderr}");
+    }
+
+    /// Runs a child whose stderr is a pipe nobody reads, and returns its
+    /// exit code and stdout once it exits, or `None` past `within`.
+    fn run_child_unread_stderr(mode: &str, within: std::time::Duration) -> Option<(i32, String)> {
+        use std::io::Read;
+        use std::process::Stdio;
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "panic::tests::child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, mode)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + within;
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if std::time::Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        let Some(status) = status else {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            return None;
+        };
+        let mut stdout = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut stdout)
+            .unwrap();
+        Some((status.code().unwrap_or(-1), stdout))
+    }
+
+    #[test]
+    fn a_fatal_panic_exits_70_even_when_stderr_is_not_drained() {
+        // The child panics 100 ms in; the exit's bound is 150 ms.
+        let exited = run_child_unread_stderr("blocked_stderr", std::time::Duration::from_secs(3));
+        assert_eq!(exited.map(|(code, _)| code), Some(70));
+    }
+
+    #[test]
+    fn a_request_panic_unwinds_even_when_stderr_is_not_drained() {
+        let exited =
+            run_child_unread_stderr("blocked_stderr_request", std::time::Duration::from_secs(3));
+        let (code, stdout) = exited.expect("the child hung in the hook");
+        assert_eq!(code, 0);
+        assert!(stdout.contains("UNWOUND"), "{stdout}");
     }
 
     #[test]

@@ -1,27 +1,55 @@
 //! A service's connection to main: stdin and stdout frames (designs 0001
 //! and 0007, "Frames" and "Progress under backpressure").
 //!
-//! - **One reader thread** decodes main's frames as they arrive and handles
-//!   each at once: the handshake, requests (handed to the service, which
-//!   must not block), `cancel`, stream credit and `<service>.shutdown`.
-//!   None of it needs writer room, so **the reader never waits on the
-//!   writer**.
-//! - **One writer thread** takes frames from `fc-protocol`'s stream
-//!   [`Sender`]: control frames first (replies, heads, aborts, the replies to
-//!   `cancel`), then the streams round-robin. Events go ahead of both.
-//! - **The service** answers through [`Connection`]: exactly one reply or
-//!   head per request, and for a head with a body, its data and one
-//!   terminal. Its producers wait for room with [`Connection::send`], a
-//!   future that any async runtime can poll.
-//! - **A lifecycle thread** enforces the handshake's deadline, polls the
+//! - **The stdin pump** reads stdin into a bounded queue (256 KiB) and sees
+//!   its EOF.
+//! - **The reader** decodes main's frames and handles each in order, at
+//!   once: the handshake, `cancel`, stream credit and `<service>.shutdown`
+//!   change state and need no writer room, so **the reader never waits on
+//!   the writer** for them. It is also the one thread that calls the
+//!   [`Service`]: callbacks run one at a time, in the order of main's
+//!   frames, and none after the connection has ended.
+//! - **Admission is bounded by what the connection holds.** A request is
+//!   live from its admission until its reply, or its stream's terminal, is
+//!   written: refusals included. With [`MAX_REQUESTS`] live (0007's 512
+//!   admitted plus 256 refusals), the reader parks further requests, up to
+//!   0001's reader budget of 256 frames and 16 MiB, and admits them in
+//!   order as the writer frees room. Credit, cancels and shutdown behind
+//!   them are still handled on arrival. Only with its budget full does the
+//!   reader stop reading, which happens only when main sends requests
+//!   faster than they can be answered (0007).
+//! - **The writer** claims one frame at a time from `fc-protocol`'s stream
+//!   [`Sender`] (events first, then control frames, then the streams
+//!   round-robin) and writes it before it claims the next. The claim is the
+//!   commit: a head opens its stream, a reply or terminal ends its request.
+//!   Frames behind the one being written stay queued, so a cancel still
+//!   drops an unwritten head (`cancelled` is then the only reply) or beats
+//!   an unwritten terminal. The writer never holds the connection's lock
+//!   while it writes, and the body bytes it holds count toward its 16 MiB
+//!   cap.
+//! - **The lifecycle thread** enforces the handshake's deadline, polls the
 //!   parent every 2 s, and watches for the writer stall.
+//! - **Wakers run outside the lock,** so a producer's waker may call back
+//!   into its [`Connection`].
+//!
+//! **What "written" means.** stdout takes blocking writes, and a write that
+//! has begun can't be taken back: its bytes are the OS's, even if main
+//! hasn't read them yet. So a frame counts as written once the writer has
+//! claimed it, which it does only to write it at once.
 //!
 //! **How it ends** ([`End`]): stdin EOF or a failed write to stdout (exit
 //! 0), `<service>.shutdown` (0), the parent gone (0), a protocol error (76),
 //! the handshake's deadline (76), the writer stall (76), or the service's
-//! own fatal error. [`run`] then arms the exit watchdog, which ends the
-//! process after 5 s whatever its state, lets the service tear down, and
-//! returns the exit code.
+//! own fatal error ([`Connection::fail`]). Then [`run`]:
+//! 1. arms the exit watchdog, before anything that could wait: it ends the
+//!    process 5 s later whatever its state;
+//! 2. waits for the service callback in progress, if any;
+//! 3. lets the service tear down ([`Service::end`]). Meanwhile the
+//!    connection is *closing*: what requests are owed (replies, heads
+//!    without a body, stream terminals) can still be queued, nothing new;
+//! 4. lets the writer write what is queued, for at most 1 s;
+//! 5. returns the process's result: the end's exit code, unless the
+//!    teardown failed ([`Connection::fail`] during [`Service::end`]).
 //!
 //! **Requests have no caller context.** 0001's envelope carries one, but a
 //! service's requests are all main's (0007, "No caller context"), so the
@@ -32,6 +60,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::io::{Read, Write};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
@@ -40,7 +69,8 @@ use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::frame::{self, Decoder, Frame, KIND_JSON, Kinds};
 use fc_protocol::message::{check_id, write_error, write_event, write_result};
 use fc_protocol::stream::{
-    Abort, Cancel, Credited, SendError, Sender, Side, StreamFrame, WRITER_DATA_CAP,
+    Abort, Cancel, Credited, MAX_DATA, SendError, Sender, Side, StreamError, StreamFrame,
+    WRITER_DATA_CAP, Written,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -48,6 +78,7 @@ use serde_json::value::RawValue;
 use crate::exit::Exit;
 use crate::hardening;
 use crate::panic::{TaskKind, with_kind};
+use crate::watchdog::Watchdog;
 
 /// The handshake's deadline after spawn (0001: 10 s).
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -60,9 +91,17 @@ pub const EXIT_WATCHDOG: Duration = Duration::from_secs(5);
 pub const PARENT_POLL: Duration = Duration::from_secs(2);
 /// The most events waiting for the writer.
 pub const MAX_EVENTS: usize = 256;
-/// The writer writes at most this much per batch taken from the queue.
-const BATCH: usize = 256 << 10;
-/// How long [`run`] lets the writer flush what the teardown queued.
+/// The most requests the connection holds at once, from admission until
+/// the reply or the stream's terminal is written: 0007's admission bound
+/// (512) plus the refusals the reader's budget allows (256).
+pub const MAX_REQUESTS: usize = 512 + 256;
+/// The requests the reader parks beyond [`MAX_REQUESTS`]: 0001's reader
+/// budget, 256 frames and 16 MiB.
+pub const PARKED_FRAMES: usize = 256;
+pub const PARKED_BYTES: usize = 16 << 20;
+/// Bytes read from stdin and not yet taken by the reader.
+const PUMPED: usize = 256 << 10;
+/// How long [`run`] lets the writer write what the teardown queued.
 const FINAL_FLUSH: Duration = Duration::from_secs(1);
 
 /// How a connection runs.
@@ -82,9 +121,16 @@ pub struct Options {
     /// only for tests that run a connection inside a test process.
     pub exit_watchdog: Option<Duration>,
     pub parent_poll: Duration,
-    /// The writer's cap on queued body bytes (0007: 16 MiB).
+    /// The writer's cap on body bytes, queued or being written (0007:
+    /// 16 MiB).
     pub data_cap: usize,
     pub max_events: usize,
+    /// The most requests held at once ([`MAX_REQUESTS`]).
+    pub max_requests: usize,
+    /// The requests the reader parks beyond them ([`PARKED_FRAMES`],
+    /// [`PARKED_BYTES`]).
+    pub parked_frames: usize,
+    pub parked_bytes: usize,
 }
 
 impl Options {
@@ -101,6 +147,9 @@ impl Options {
             parent_poll: PARENT_POLL,
             data_cap: WRITER_DATA_CAP,
             max_events: MAX_EVENTS,
+            max_requests: MAX_REQUESTS,
+            parked_frames: PARKED_FRAMES,
+            parked_bytes: PARKED_BYTES,
         }
     }
 }
@@ -155,6 +204,7 @@ impl End {
         }
     }
 
+    /// The exit code this end calls for, unless the teardown fails.
     pub fn exit(self) -> Exit {
         match self {
             End::Eof | End::Shutdown | End::ParentGone => Exit::Ok,
@@ -164,8 +214,10 @@ impl End {
     }
 }
 
-/// What a service does with its connection. Every method runs on the reader
-/// thread, except [`Service::end`], so none may block.
+/// What a service does with its connection. [`Service::hello`],
+/// [`Service::request`] and [`Service::cancel`] run on the reader thread,
+/// one at a time and in the order of main's frames, so none may block. None
+/// runs once the connection has ended.
 pub trait Service: Send + Sync + 'static {
     /// Answers the handshake with the result's members other than
     /// `protocol`, or refuses it. Called once, after the protocol version
@@ -179,12 +231,20 @@ pub trait Service: Send + Sync + 'static {
     fn request(&self, conn: &Connection, request: Request<'_>);
 
     /// Main cancelled request `id` before its reply or its stream's
-    /// terminal was settled. Its `cancelled` reply or abort is already
+    /// terminal was written. Its `cancelled` reply or abort is already
     /// queued: stop its work. (A late cancel never reaches the service.)
     fn cancel(&self, conn: &Connection, id: u64);
 
     /// The connection ended: tear down. Called once, on [`run`]'s thread,
-    /// after the exit watchdog is armed.
+    /// after the exit watchdog is armed and once no other callback runs.
+    ///
+    /// While it runs, the connection is closing: what requests are owed
+    /// ([`Connection::reply`], [`Connection::reply_error`], a head without a
+    /// body, [`Connection::finish`], [`Connection::abort`]) may still be
+    /// queued, and the writer writes it for at most 1 s after this returns;
+    /// new streams, data and events are refused. A teardown that fails
+    /// calls [`Connection::fail`]: its exit becomes the process's result
+    /// (70 for quiescence it can't prove).
     fn end(&self, conn: &Connection, end: End);
 }
 
@@ -209,8 +269,19 @@ struct Link {
     state: Mutex<State>,
     /// Wakes the writer: something to write, or the end.
     writer: Condvar,
-    /// Wakes [`run`] and the lifecycle thread: the end.
+    /// Wakes [`run`] and the lifecycle thread: the end, the writer done, a
+    /// callback returned.
     ended: Condvar,
+    /// Wakes the reader: input, a request freed, or the end.
+    reader: Condvar,
+    /// Wakes the stdin pump: room for input, or the end.
+    pump: Condvar,
+    /// The process's result: the end's exit code, unless the teardown
+    /// failed. Outside the lock, for the exit watchdog.
+    result: AtomicU8,
+    /// [`Service::end`] has returned.
+    torn_down: AtomicBool,
+    max_requests: usize,
 }
 
 struct State {
@@ -219,55 +290,184 @@ struct State {
     max_events: usize,
     hello_done: bool,
     end: Option<End>,
+    /// [`Service::end`] has returned: nothing more may be queued.
+    closed: bool,
+    /// The reader is in a service callback.
+    dispatching: bool,
     /// Send futures waiting for room.
     waiters: Vec<Waker>,
-    /// The writer holds frames it hasn't finished writing.
+    /// The writer holds a frame it hasn't finished writing.
     writing: bool,
-    /// The last time the writer finished writing a frame, or started on a
-    /// batch.
+    /// When the writer last claimed or finished a frame.
     progress: Instant,
     writer_done: bool,
+    /// Bytes from stdin, not yet taken by the reader.
+    input: VecDeque<Vec<u8>>,
+    input_bytes: usize,
+    /// stdin ended (EOF or a failed read) after `input`.
+    input_end: bool,
 }
 
 impl Link {
+    fn new(options: &Options) -> Link {
+        Link {
+            state: Mutex::new(State {
+                // The writer holds at most one data frame outside the
+                // queue: the cap covers both.
+                sender: Sender::with_data_cap(options.data_cap.saturating_sub(MAX_DATA)),
+                events: VecDeque::new(),
+                max_events: options.max_events,
+                hello_done: false,
+                end: None,
+                closed: false,
+                dispatching: false,
+                waiters: Vec::new(),
+                writing: false,
+                progress: Instant::now(),
+                writer_done: false,
+                input: VecDeque::new(),
+                input_bytes: 0,
+                input_end: false,
+            }),
+            writer: Condvar::new(),
+            ended: Condvar::new(),
+            reader: Condvar::new(),
+            pump: Condvar::new(),
+            result: AtomicU8::new(Exit::Ok.code()),
+            torn_down: AtomicBool::new(false),
+            max_requests: options.max_requests.max(1),
+        }
+    }
+
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Ends the connection, once: the first end wins.
-    fn end(&self, end: End) {
-        let mut state = self.lock();
-        if state.end.is_none() {
-            state.end = Some(end);
-            wake_all(&mut state);
-        }
-        drop(state);
+    fn notify_all(&self) {
         self.writer.notify_all();
         self.ended.notify_all();
+        self.reader.notify_all();
+        self.pump.notify_all();
+    }
+
+    /// Ends the connection, once: the first end wins.
+    fn end(&self, end: End) {
+        let wakers = {
+            let mut state = self.lock();
+            if state.end.is_some() {
+                return;
+            }
+            state.end = Some(end);
+            self.result.store(end.exit().code(), Ordering::SeqCst);
+            std::mem::take(&mut state.waiters)
+        };
+        self.notify_all();
+        wake(wakers);
+    }
+
+    /// The service's fatal error: it ends the connection, or, once the
+    /// connection has ended, sets the process's result. A teardown's
+    /// failure replaces the end's code; 70, once set, stays.
+    fn fail(&self, exit: Exit) {
+        let wakers = {
+            let mut state = self.lock();
+            if state.end.is_none() {
+                state.end = Some(End::Fatal(exit));
+                self.result.store(exit.code(), Ordering::SeqCst);
+                std::mem::take(&mut state.waiters)
+            } else {
+                if exit != Exit::Ok && self.result.load(Ordering::SeqCst) != Exit::Internal.code() {
+                    self.result.store(exit.code(), Ordering::SeqCst);
+                }
+                Vec::new()
+            }
+        };
+        self.notify_all();
+        wake(wakers);
+    }
+
+    fn result(&self) -> Exit {
+        Exit::from_code(self.result.load(Ordering::SeqCst)).unwrap_or(Exit::Internal)
+    }
+
+    /// What the exit watchdog exits with: the result, once the teardown has
+    /// returned; 70 if it hasn't, since its quiescence is unproven.
+    fn watchdog_exit(&self) -> (&'static str, Exit) {
+        if self.torn_down.load(Ordering::SeqCst) {
+            ("exit_after_end", self.result())
+        } else {
+            ("teardown_unproven", Exit::Internal)
+        }
+    }
+
+    /// [`Service::end`] returned: nothing more is queued.
+    fn close(&self) {
+        self.torn_down.store(true, Ordering::SeqCst);
+        self.lock().closed = true;
+        self.notify_all();
     }
 }
 
-fn wake_all(state: &mut State) {
-    for waker in state.waiters.drain(..) {
+fn wait<'a>(condvar: &Condvar, state: MutexGuard<'a, State>) -> MutexGuard<'a, State> {
+    condvar
+        .wait(state)
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn wait_timeout<'a>(
+    condvar: &Condvar,
+    state: MutexGuard<'a, State>,
+    timeout: Duration,
+) -> MutexGuard<'a, State> {
+    match condvar.wait_timeout(state, timeout) {
+        Ok((state, _)) => state,
+        Err(poisoned) => poisoned.into_inner().0,
+    }
+}
+
+/// Wakes producers, after the lock is released: a waker may call back into
+/// the connection.
+fn wake(wakers: Vec<Waker>) {
+    for waker in wakers {
         waker.wake();
     }
 }
 
+/// What a [`Connection`] call needs of the connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Need {
+    /// New work: only while the connection is open.
+    Open,
+    /// What a request is owed (its one reply, its stream's terminal): also
+    /// while the connection closes, until [`Service::end`] returns.
+    Owed,
+}
+
 impl Connection {
-    /// Runs `op` on the stream state machine, then wakes the writer.
+    /// Runs `op` on the stream state machine, then wakes the writer, and the
+    /// producers if `op` made room.
     fn queue<T>(
         &self,
-        op: impl FnOnce(&mut State) -> Result<T, SendError>,
+        need: Need,
+        op: impl FnOnce(&mut State) -> (Result<T, SendError>, bool),
     ) -> Result<T, SendError> {
-        let mut state = self.link.lock();
-        if state.end.is_some() {
-            return Err(SendError::Closed);
-        }
-        let result = op(&mut state);
-        drop(state);
+        let (result, wakers) = {
+            let mut state = self.link.lock();
+            if state.closed || (state.end.is_some() && need == Need::Open) {
+                return Err(SendError::Closed);
+            }
+            let (result, room) = op(&mut state);
+            let wakers = if room {
+                std::mem::take(&mut state.waiters)
+            } else {
+                Vec::new()
+            };
+            (result, wakers)
+        };
         self.link.writer.notify_one();
+        wake(wakers);
         result
     }
 
@@ -275,14 +475,14 @@ impl Connection {
     pub fn reply<T: Serialize>(&self, id: u64, result: &T) -> Result<(), SendError> {
         let mut json = Vec::new();
         write_result(&mut json, id, result).map_err(|_| SendError::TooLarge)?;
-        self.queue(|state| state.sender.reply(id, json))
+        self.queue(Need::Owed, |state| (state.sender.reply(id, json), false))
     }
 
     /// Answers request `id` with `error`: its one reply.
     pub fn reply_error(&self, id: u64, error: &ErrorBody) -> Result<(), SendError> {
         let mut json = Vec::new();
         write_error(&mut json, id, error).map_err(|_| SendError::TooLarge)?;
-        self.queue(|state| state.sender.reply(id, json))
+        self.queue(Need::Owed, |state| (state.sender.reply(id, json), false))
     }
 
     /// Answers request `id` with a head, `result`. With `body`, it opens a
@@ -290,13 +490,14 @@ impl Connection {
     pub fn head<T: Serialize>(&self, id: u64, result: &T, body: bool) -> Result<(), SendError> {
         let mut json = Vec::new();
         write_result(&mut json, id, result).map_err(|_| SendError::TooLarge)?;
-        self.queue(|state| state.sender.head(id, json, body))
+        let need = if body { Need::Open } else { Need::Owed };
+        self.queue(need, |state| (state.sender.head(id, json, body), false))
     }
 
     /// Queues as much of `bytes` as stream `id`'s window and the writer's cap
     /// allow, without waiting.
     pub fn push(&self, id: u64, bytes: &[u8]) -> Result<usize, SendError> {
-        self.queue(|state| state.sender.push(id, bytes))
+        self.queue(Need::Open, |state| (state.sender.push(id, bytes), false))
     }
 
     /// Queues all of `bytes` on stream `id`, waiting for room as often as
@@ -312,15 +513,16 @@ impl Connection {
 
     /// Queues stream `id`'s end, behind every byte queued.
     pub fn finish(&self, id: u64) -> Result<(), SendError> {
-        self.queue(|state| state.sender.finish(id))
+        self.queue(Need::Owed, |state| (state.sender.finish(id), false))
     }
 
     /// Aborts stream `id`.
     pub fn abort(&self, id: u64, abort: &Abort) -> Result<(), SendError> {
-        self.queue(|state| {
+        self.queue(Need::Owed, |state| {
             let result = state.sender.abort(id, abort);
-            wake_all(state);
-            result
+            // Its purge made room under the writer's cap.
+            let room = result.is_ok();
+            (result, room)
         })
     }
 
@@ -344,10 +546,12 @@ impl Connection {
         Ok(())
     }
 
-    /// Ends the connection with `exit`: for a service that can't go on
-    /// (0007: a teardown that couldn't prove quiescence exits 70).
+    /// The service can't go on: ends the connection with `exit`. During
+    /// [`Service::end`] it doesn't change the connection's [`End`] but sets
+    /// the process's result (0007: a teardown that couldn't prove
+    /// quiescence exits 70).
     pub fn fail(&self, exit: Exit) {
-        self.link.end(End::Fatal(exit));
+        self.link.fail(exit);
     }
 
     /// Whether the connection has ended.
@@ -369,7 +573,8 @@ impl Connection {
 /// What a connection's writer holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConnectionStats {
-    /// Requests with a record: unanswered, or streams not yet ended.
+    /// Requests with a record: unanswered, with a reply not yet written, or
+    /// with a stream not yet ended. At most [`Options::max_requests`].
     pub live_requests: usize,
     /// Queued body bytes across streams.
     pub held_bytes: usize,
@@ -417,7 +622,7 @@ impl Future for SendBytes<'_> {
 }
 
 /// Runs a connection on `input` and `output` (stdin and stdout) until it
-/// ends, lets `service` tear down, and returns the exit code.
+/// ends, lets `service` tear down, and returns the process's exit code.
 ///
 /// Before it, the process has installed the panic hook
 /// ([`crate::panic::install`]) and hardened itself
@@ -433,21 +638,7 @@ pub fn run<S: Service>(
         crate::log::info("the parent is gone", serde_json::json!({}));
         return Exit::Ok;
     }
-    let link = Arc::new(Link {
-        state: Mutex::new(State {
-            sender: Sender::with_data_cap(options.data_cap),
-            events: VecDeque::new(),
-            max_events: options.max_events,
-            hello_done: false,
-            end: None,
-            waiters: Vec::new(),
-            writing: false,
-            progress: Instant::now(),
-            writer_done: false,
-        }),
-        writer: Condvar::new(),
-        ended: Condvar::new(),
-    });
+    let link = Arc::new(Link::new(&options));
     let conn = Connection { link: link.clone() };
 
     let spawned = [
@@ -455,10 +646,14 @@ pub fn run<S: Service>(
             let link = link.clone();
             move || write_loop(&link, output)
         }),
+        spawn("stdin", {
+            let link = link.clone();
+            move || pump_loop(&link, input)
+        }),
         spawn("reader", {
             let (link, conn, service, options) =
                 (link.clone(), conn.clone(), service.clone(), options.clone());
-            move || read_loop(&link, &conn, &*service, &options, input)
+            move || Reader::new(&link, &conn, &*service, &options).run()
         }),
         spawn("lifecycle", {
             let (link, options) = (link.clone(), options.clone());
@@ -466,25 +661,26 @@ pub fn run<S: Service>(
         }),
     ];
     if spawned.iter().any(Option::is_none) {
-        link.end(End::Fatal(Exit::Internal));
+        link.fail(Exit::Internal);
     }
 
     let end = wait_end(&link);
-    log_end(end);
+    // First, before anything that could wait (a log line on a stderr main
+    // stopped draining, a callback, the teardown): the process ends within
+    // `after` whatever its state (0007, "Startup and shutdown"). Never
+    // disarmed.
     if let Some(after) = options.exit_watchdog {
-        // Never disarmed: the process ends within `after` whatever its
-        // runtimes' state (0007, "Startup and shutdown").
-        drop(crate::watchdog::Watchdog::arm(
-            "exit_after_end",
-            after,
-            end.exit(),
-        ));
+        let link = link.clone();
+        drop(Watchdog::arm_with(after, move || link.watchdog_exit()));
     }
+    log_end(end);
+    wait_callback(&link);
     service.end(&conn, end);
+    link.close();
     // The writer writes what is still queued (the teardown's replies, a
     // refused handshake's), briefly.
     wait_writer(&link, FINAL_FLUSH);
-    end.exit()
+    link.result()
 }
 
 fn spawn(name: &'static str, f: impl FnOnce() + Send + 'static) -> Option<()> {
@@ -501,10 +697,16 @@ fn wait_end(link: &Link) -> End {
         if let Some(end) = state.end {
             return end;
         }
-        state = link
-            .ended
-            .wait(state)
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state = wait(&link.ended, state);
+    }
+}
+
+/// Waits for the service callback in progress, if any: none starts after
+/// the end. Unbounded but for the exit watchdog, armed before.
+fn wait_callback(link: &Link) {
+    let mut state = link.lock();
+    while state.dispatching {
+        state = wait(&link.ended, state);
     }
 }
 
@@ -515,10 +717,7 @@ fn wait_writer(link: &Link, timeout: Duration) {
         let Some(left) = deadline.checked_duration_since(Instant::now()) else {
             return;
         };
-        state = match link.ended.wait_timeout(state, left) {
-            Ok((state, _)) => state,
-            Err(poisoned) => poisoned.into_inner().0,
-        };
+        state = wait_timeout(&link.ended, state, left);
     }
 }
 
@@ -537,41 +736,44 @@ fn log_end(end: End) {
     }
 }
 
-// ---- the reader ----------------------------------------------------------
+// ---- the stdin pump ------------------------------------------------------
 
-fn read_loop(
-    link: &Link,
-    conn: &Connection,
-    service: &dyn Service,
-    options: &Options,
-    mut input: impl Read,
-) {
-    let mut decoder = Decoder::with_kinds(Kinds::service(Side::Sender));
+fn pump_loop(link: &Link, mut input: impl Read) {
     let mut buffer = vec![0u8; 64 << 10];
     loop {
-        let read = match input.read(&mut buffer) {
-            Ok(0) => return link.end(End::Eof),
-            Ok(read) => read,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => return link.end(End::Eof),
-        };
-        let mut rest = buffer.get(..read).unwrap_or_default();
-        while !rest.is_empty() {
-            match decoder.push(rest) {
-                Ok(consumed) => rest = rest.get(consumed..).unwrap_or_default(),
-                Err(e) => return link.end(End::Protocol(e.category())),
+        {
+            let mut state = link.lock();
+            while state.input_bytes >= PUMPED && state.end.is_none() {
+                state = wait(&link.pump, state);
             }
-            while let Some(frame) = decoder.pop() {
-                if let Err(end) = handle(link, conn, service, options, &frame) {
-                    return link.end(end);
-                }
-            }
-            if link.lock().end.is_some() {
+            if state.end.is_some() {
                 return;
             }
         }
+        let read = match input.read(&mut buffer) {
+            Ok(0) => None,
+            Ok(read) => Some(read),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => None,
+        };
+        {
+            let mut state = link.lock();
+            match read.and_then(|read| buffer.get(..read)) {
+                Some(bytes) => {
+                    state.input.push_back(bytes.to_vec());
+                    state.input_bytes += bytes.len();
+                }
+                None => state.input_end = true,
+            }
+        }
+        link.reader.notify_one();
+        if read.is_none() {
+            return;
+        }
     }
 }
+
+// ---- the reader ----------------------------------------------------------
 
 /// A message envelope from main: `{ type, id, method, params }`; a
 /// `context` and other members are ignored.
@@ -586,212 +788,554 @@ struct Envelope<'a> {
     params: Option<&'a RawValue>,
 }
 
-fn handle(
-    link: &Link,
-    conn: &Connection,
-    service: &dyn Service,
-    options: &Options,
-    frame: &Frame,
-) -> Result<(), End> {
-    if frame.kind != KIND_JSON {
-        return credit(link, frame);
-    }
+fn envelope(frame: &Frame) -> Result<Envelope<'_>, End> {
     let text = std::str::from_utf8(&frame.payload).map_err(|_| End::Protocol("invalid_utf8"))?;
     if !text.trim_start().starts_with('{') {
         return Err(End::Protocol("invalid_message"));
     }
-    let envelope: Envelope<'_> =
-        serde_json::from_str(text).map_err(|_| End::Protocol("invalid_message"))?;
-    let id = |id: Option<u64>| -> Result<u64, End> {
-        check_id(id.ok_or(End::Protocol("invalid_message"))?).map_err(|_| End::Protocol("bad_id"))
-    };
-    let hello_done = link.lock().hello_done;
-    match envelope.kind.as_ref() {
-        "request" => {
-            let id = id(envelope.id)?;
-            let method = envelope.method.ok_or(End::Protocol("invalid_message"))?;
-            let is_hello = method
-                .strip_prefix(options.service)
-                .is_some_and(|rest| rest == ".hello");
-            {
-                let mut state = link.lock();
-                state
-                    .sender
-                    .request(id)
-                    .map_err(|e| End::Protocol(e.category()))?;
-            }
-            if !hello_done {
-                if !is_hello {
-                    return Err(End::Protocol("not_hello_first"));
-                }
-                return hello(link, conn, service, options, id, envelope.params);
-            }
-            if is_hello {
-                return Err(End::Protocol("second_hello"));
-            }
-            if method
-                .strip_prefix(options.service)
-                .is_some_and(|rest| rest == ".shutdown")
-            {
-                return Err(End::Shutdown);
-            }
-            service.request(
-                conn,
-                Request {
-                    id,
-                    method: &method,
-                    params: envelope.params,
-                },
-            );
-            Ok(())
-        }
-        "cancel" => {
-            if !hello_done {
-                return Err(End::Protocol("not_hello_first"));
-            }
-            let id = id(envelope.id)?;
-            let outcome = {
-                let mut state = link.lock();
-                let outcome = state
-                    .sender
-                    .cancel(id)
-                    .map_err(|e| End::Protocol(e.category()))?;
-                wake_all(&mut state);
-                outcome
-            };
-            link.writer.notify_one();
-            if outcome == Cancel::Cancelled {
-                service.cancel(conn, id);
-            }
-            Ok(())
-        }
-        "event" => {
-            crate::log::warn("ignoring an event from main", serde_json::json!({}));
-            Ok(())
-        }
-        // The service makes no requests: a response answers nothing.
-        "response" => Err(End::Protocol("unsolicited_response")),
-        _ => Err(End::Protocol("invalid_message")),
-    }
+    serde_json::from_str(text).map_err(|_| End::Protocol("invalid_message"))
 }
 
-fn credit(link: &Link, frame: &Frame) -> Result<(), End> {
-    let mut state = link.lock();
-    if !state.hello_done {
-        return Err(End::Protocol("not_hello_first"));
-    }
-    let frame = StreamFrame::from_frame(frame).map_err(|e| End::Protocol(e.category()))?;
-    match state
-        .sender
-        .receive(frame)
-        .map_err(|e| End::Protocol(e.category()))?
-    {
-        Credited::Taken(_) => wake_all(&mut state),
-        Credited::Late => {}
-    }
-    Ok(())
+fn valid_id(id: Option<u64>) -> Result<u64, End> {
+    check_id(id.ok_or(End::Protocol("invalid_message"))?).map_err(|_| End::Protocol("bad_id"))
 }
 
-fn hello(
-    link: &Link,
-    conn: &Connection,
-    service: &dyn Service,
-    options: &Options,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Request,
+    Cancel,
+    Event,
+    Response,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Method {
+    Hello,
+    Shutdown,
+    Other,
+}
+
+/// A request waiting for the connection to hold fewer than its allowance.
+struct Parked {
     id: u64,
-    params: Option<&RawValue>,
-) -> Result<(), End> {
-    let hello = params
-        .filter(|raw| raw.get().trim_start().starts_with('{'))
-        .and_then(|raw| serde_json::from_str::<Hello>(raw.get()).ok())
-        .ok_or(End::Protocol("bad_hello"))?;
-    let mismatch = if hello.protocol != options.protocol {
-        Some(format!(
-            "protocol {} is not this service's {}",
-            hello.protocol, options.protocol
-        ))
-    } else if !hello.frames.iter().any(|kind| kind == "stream") {
-        Some("main must take stream frames".to_owned())
-    } else {
-        None
-    };
-    if let Some(message) = mismatch {
-        // The reply goes out before the process exits: a packaging bug that
-        // main must see.
-        let _ = conn.reply_error(id, &ErrorBody::new(ErrorCode::ProtocolMismatch, message));
-        return Err(End::Protocol("protocol_mismatch"));
+    frame: Frame,
+    /// Main cancelled it while it waited: `cancelled` is its one reply.
+    cancelled: bool,
+}
+
+/// What [`Reader::admit`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Admitted {
+    Yes,
+    /// The connection holds its allowance: park it.
+    Full,
+    /// The connection ended: drop it.
+    Ended,
+}
+
+struct Reader<'a> {
+    link: &'a Link,
+    conn: &'a Connection,
+    service: &'a dyn Service,
+    options: &'a Options,
+    hello_deadline: Instant,
+    decoder: Decoder,
+    parked: VecDeque<Parked>,
+    parked_bytes: usize,
+    /// The highest request ID read.
+    highest: u64,
+    /// The highest request ID admitted: requests above it, up to `highest`,
+    /// are parked.
+    admitted: u64,
+    hello_seen: bool,
+}
+
+impl<'a> Reader<'a> {
+    fn new(
+        link: &'a Link,
+        conn: &'a Connection,
+        service: &'a dyn Service,
+        options: &'a Options,
+    ) -> Self {
+        Reader {
+            link,
+            conn,
+            service,
+            options,
+            hello_deadline: options.started + options.hello_timeout,
+            decoder: Decoder::with_kinds(Kinds::service(Side::Sender)),
+            parked: VecDeque::new(),
+            parked_bytes: 0,
+            highest: 0,
+            admitted: 0,
+            hello_seen: false,
+        }
     }
-    match service.hello(&hello) {
-        Ok(members) => {
-            // The protocol is the connection's to state, whatever the
-            // service's members say.
-            let mut result = members;
-            result.insert("protocol".into(), options.protocol.into());
-            conn.reply(id, &result)
-                .map_err(|_| End::Fatal(Exit::Internal))?;
-            link.lock().hello_done = true;
-            Ok(())
+
+    fn run(mut self) {
+        if let Err(end) = self.read() {
+            self.link.end(end);
         }
-        Err(error) => {
-            let _ = conn.reply_error(id, &error);
-            Err(End::Protocol("hello_refused"))
+    }
+
+    fn read(&mut self) -> Result<(), End> {
+        while let Some(chunk) = self.next_input()? {
+            let mut rest = chunk.as_slice();
+            while !rest.is_empty() {
+                let consumed = self
+                    .decoder
+                    .push(rest)
+                    .map_err(|e| End::Protocol(e.category()))?;
+                rest = rest.get(consumed..).unwrap_or_default();
+                while let Some(frame) = self.decoder.pop() {
+                    self.handle(frame)?;
+                    // Nothing more is handled once the connection has
+                    // ended, whatever else this read brought.
+                    if self.ended() {
+                        return Ok(());
+                    }
+                }
+            }
         }
+        Ok(())
+    }
+
+    fn ended(&self) -> bool {
+        self.link.lock().end.is_some()
+    }
+
+    /// The next bytes from stdin, or `None` once the connection has ended.
+    /// While it waits, it admits parked requests as the writer frees room.
+    fn next_input(&mut self) -> Result<Option<Vec<u8>>, End> {
+        loop {
+            {
+                let mut state = self.link.lock();
+                loop {
+                    if state.end.is_some() {
+                        return Ok(None);
+                    }
+                    if !self.parked.is_empty() && state.sender.live() < self.link.max_requests {
+                        break;
+                    }
+                    if let Some(chunk) = state.input.pop_front() {
+                        state.input_bytes -= chunk.len();
+                        drop(state);
+                        self.link.pump.notify_one();
+                        return Ok(Some(chunk));
+                    }
+                    if state.input_end {
+                        return Err(End::Eof);
+                    }
+                    state = wait(&self.link.reader, state);
+                }
+            }
+            self.admit_parked()?;
+        }
+    }
+
+    fn handle(&mut self, frame: Frame) -> Result<(), End> {
+        if frame.kind != KIND_JSON {
+            return self.credit(&frame);
+        }
+        let (kind, id, method) = {
+            let envelope = envelope(&frame)?;
+            let kind = match envelope.kind.as_ref() {
+                "request" => Kind::Request,
+                "cancel" => Kind::Cancel,
+                "event" => Kind::Event,
+                "response" => Kind::Response,
+                _ => Kind::Other,
+            };
+            let method = envelope
+                .method
+                .as_deref()
+                .map(|method| self.classify(method));
+            (kind, envelope.id, method)
+        };
+        // Every message waits for the handshake.
+        if !self.hello_seen && !(kind == Kind::Request && method == Some(Method::Hello)) {
+            return Err(End::Protocol("not_hello_first"));
+        }
+        match kind {
+            Kind::Request => {
+                let method = method.ok_or(End::Protocol("invalid_message"))?;
+                self.request(frame, valid_id(id)?, method)
+            }
+            Kind::Cancel => self.cancel(valid_id(id)?),
+            Kind::Event => {
+                crate::log::warn("ignoring an event from main", serde_json::json!({}));
+                Ok(())
+            }
+            // The service makes no requests: a response answers nothing.
+            Kind::Response => Err(End::Protocol("unsolicited_response")),
+            Kind::Other => Err(End::Protocol("invalid_message")),
+        }
+    }
+
+    fn classify(&self, method: &str) -> Method {
+        match method
+            .strip_prefix(self.options.service)
+            .and_then(|rest| rest.strip_prefix('.'))
+        {
+            Some("hello") => Method::Hello,
+            Some("shutdown") => Method::Shutdown,
+            _ => Method::Other,
+        }
+    }
+
+    fn request(&mut self, frame: Frame, id: u64, method: Method) -> Result<(), End> {
+        if id <= self.highest {
+            let highest = self.highest;
+            return Err(End::Protocol(
+                StreamError::RequestOrder { id, highest }.category(),
+            ));
+        }
+        self.highest = id;
+        match method {
+            Method::Hello if !self.hello_seen => {
+                self.hello_seen = true;
+                self.hello(id, &frame)
+            }
+            Method::Hello => Err(End::Protocol("second_hello")),
+            Method::Shutdown => Err(End::Shutdown),
+            Method::Other => {
+                if self.parked.is_empty() && self.admit(id, &frame, false)? != Admitted::Full {
+                    return Ok(());
+                }
+                self.park(id, frame)
+            }
+        }
+    }
+
+    /// Admits request `id` to the stream state machine and hands it to the
+    /// service, unless the connection holds its allowance. A request
+    /// cancelled while parked gets its `cancelled` reply instead: the
+    /// service never sees it.
+    fn admit(&mut self, id: u64, frame: &Frame, cancelled: bool) -> Result<Admitted, End> {
+        let envelope = envelope(frame)?;
+        {
+            let mut state = self.link.lock();
+            if state.end.is_some() {
+                return Ok(Admitted::Ended);
+            }
+            if state.sender.live() >= self.link.max_requests {
+                return Ok(Admitted::Full);
+            }
+            state
+                .sender
+                .request(id)
+                .map_err(|e| End::Protocol(e.category()))?;
+            self.admitted = id;
+            if cancelled {
+                let _ = state.sender.cancel(id);
+                drop(state);
+                self.link.writer.notify_one();
+                return Ok(Admitted::Yes);
+            }
+            state.dispatching = true;
+        }
+        let method = envelope.method.as_deref().unwrap_or_default();
+        self.service.request(
+            self.conn,
+            Request {
+                id,
+                method,
+                params: envelope.params,
+            },
+        );
+        self.leave();
+        Ok(Admitted::Yes)
+    }
+
+    /// A service callback returned.
+    fn leave(&self) {
+        self.link.lock().dispatching = false;
+        self.link.ended.notify_all();
+    }
+
+    /// Parks a request until the connection holds fewer than its allowance.
+    /// With the reader's budget full, it waits for room first, admitting
+    /// parked requests as the writer frees it: then nothing more is read.
+    fn park(&mut self, id: u64, frame: Frame) -> Result<(), End> {
+        let len = frame.payload.len();
+        while self.parked.len() >= self.options.parked_frames.max(1)
+            || (!self.parked.is_empty() && self.parked_bytes + len > self.options.parked_bytes)
+        {
+            if !self.wait_for_room() {
+                return Ok(());
+            }
+            self.admit_parked()?;
+        }
+        self.parked_bytes += len;
+        self.parked.push_back(Parked {
+            id,
+            frame,
+            cancelled: false,
+        });
+        Ok(())
+    }
+
+    /// Waits until the connection holds fewer requests than its allowance;
+    /// false if it ended.
+    fn wait_for_room(&self) -> bool {
+        let mut state = self.link.lock();
+        loop {
+            if state.end.is_some() {
+                return false;
+            }
+            if state.sender.live() < self.link.max_requests {
+                return true;
+            }
+            state = wait(&self.link.reader, state);
+        }
+    }
+
+    /// Admits parked requests, in order, while there is room.
+    fn admit_parked(&mut self) -> Result<(), End> {
+        while let Some(parked) = self.parked.pop_front() {
+            match self.admit(parked.id, &parked.frame, parked.cancelled)? {
+                Admitted::Yes => self.parked_bytes -= parked.frame.payload.len(),
+                Admitted::Full => {
+                    self.parked.push_front(parked);
+                    break;
+                }
+                Admitted::Ended => break,
+            }
+        }
+        Ok(())
+    }
+
+    fn cancel(&mut self, id: u64) -> Result<(), End> {
+        if id > self.admitted {
+            // Parked: its `cancelled` reply goes out once it is admitted.
+            // Above every request read: late.
+            if let Some(parked) = self.parked.iter_mut().find(|parked| parked.id == id) {
+                parked.cancelled = true;
+            }
+            return Ok(());
+        }
+        let (cancelled, wakers) = {
+            let mut state = self.link.lock();
+            if state.end.is_some() {
+                return Ok(());
+            }
+            let outcome = state
+                .sender
+                .cancel(id)
+                .map_err(|e| End::Protocol(e.category()))?;
+            let cancelled = outcome == Cancel::Cancelled;
+            state.dispatching = cancelled;
+            // A purge made room under the writer's cap.
+            let wakers = if cancelled {
+                std::mem::take(&mut state.waiters)
+            } else {
+                Vec::new()
+            };
+            (cancelled, wakers)
+        };
+        self.link.writer.notify_one();
+        wake(wakers);
+        if cancelled {
+            self.service.cancel(self.conn, id);
+            self.leave();
+        }
+        Ok(())
+    }
+
+    fn credit(&mut self, frame: &Frame) -> Result<(), End> {
+        if !self.hello_seen {
+            return Err(End::Protocol("not_hello_first"));
+        }
+        let frame = StreamFrame::from_frame(frame).map_err(|e| End::Protocol(e.category()))?;
+        let id = frame.id();
+        if id > self.admitted && id <= self.highest {
+            // A parked request: nothing of it was sent.
+            return Err(End::Protocol(StreamError::Overgrant(id).category()));
+        }
+        let wakers = {
+            let mut state = self.link.lock();
+            if state.end.is_some() {
+                return Ok(());
+            }
+            match state
+                .sender
+                .receive(frame)
+                .map_err(|e| End::Protocol(e.category()))?
+            {
+                Credited::Taken(_) => std::mem::take(&mut state.waiters),
+                Credited::Late => Vec::new(),
+            }
+        };
+        wake(wakers);
+        Ok(())
+    }
+
+    fn hello(&mut self, id: u64, frame: &Frame) -> Result<(), End> {
+        // Past its deadline, the handshake is refused here, whether or not
+        // the lifecycle thread has looked yet.
+        if Instant::now() >= self.hello_deadline {
+            return Err(End::HelloTimeout);
+        }
+        let hello = envelope(frame)?
+            .params
+            .filter(|raw| raw.get().trim_start().starts_with('{'))
+            .and_then(|raw| serde_json::from_str::<Hello>(raw.get()).ok())
+            .ok_or(End::Protocol("bad_hello"))?;
+        {
+            let mut state = self.link.lock();
+            if state.end.is_some() {
+                return Ok(());
+            }
+            state
+                .sender
+                .request(id)
+                .map_err(|e| End::Protocol(e.category()))?;
+        }
+        self.admitted = id;
+        let mismatch = if hello.protocol != self.options.protocol {
+            Some(format!(
+                "protocol {} is not this service's {}",
+                hello.protocol, self.options.protocol
+            ))
+        } else if !hello.frames.iter().any(|kind| kind == "stream") {
+            Some("main must take stream frames".to_owned())
+        } else {
+            None
+        };
+        if let Some(message) = mismatch {
+            // The reply goes out before the process exits: a packaging bug
+            // that main must see.
+            self.refuse_hello(id, &ErrorBody::new(ErrorCode::ProtocolMismatch, message));
+            return Err(End::Protocol("protocol_mismatch"));
+        }
+        {
+            let mut state = self.link.lock();
+            if state.end.is_some() {
+                return Ok(());
+            }
+            state.dispatching = true;
+        }
+        let answer = self.service.hello(&hello);
+        self.leave();
+        let mut members = match answer {
+            Ok(members) => members,
+            Err(error) => {
+                self.refuse_hello(id, &error);
+                return Err(End::Protocol("hello_refused"));
+            }
+        };
+        // The protocol is the connection's to state, whatever the service's
+        // members say.
+        members.insert("protocol".into(), self.options.protocol.into());
+        let mut json = Vec::new();
+        write_result(&mut json, id, &members).map_err(|_| End::Fatal(Exit::Internal))?;
+        let mut state = self.link.lock();
+        if state.end.is_some() {
+            return Ok(());
+        }
+        // The deadline and `hello_done` under the lock the lifecycle thread
+        // checks them under: the handshake completes in time, or not at all.
+        if Instant::now() >= self.hello_deadline {
+            return Err(End::HelloTimeout);
+        }
+        state
+            .sender
+            .reply(id, json)
+            .map_err(|_| End::Fatal(Exit::Internal))?;
+        state.hello_done = true;
+        drop(state);
+        self.link.writer.notify_one();
+        Ok(())
+    }
+
+    fn refuse_hello(&self, id: u64, error: &ErrorBody) {
+        let mut json = Vec::new();
+        if write_error(&mut json, id, error).is_ok() {
+            let mut state = self.link.lock();
+            if state.end.is_none() {
+                let _ = state.sender.reply(id, json);
+            }
+        }
+        self.link.writer.notify_one();
     }
 }
 
 // ---- the writer ----------------------------------------------------------
 
+/// A frame the writer claimed.
+struct Claimed {
+    /// Producers to wake: its body bytes left the queue.
+    wakers: Vec<Waker>,
+    /// It ended a request: the reader may admit a parked one.
+    freed: bool,
+}
+
 fn write_loop(link: &Link, mut output: impl Write) {
-    let mut buffer = Vec::with_capacity(BATCH + (64 << 10));
-    let mut ends = Vec::new();
-    loop {
+    let mut frame = Vec::with_capacity(MAX_DATA + 64);
+    while let Some(claimed) = claim(link, &mut frame) {
+        if claimed.freed {
+            link.reader.notify_one();
+        }
+        wake(claimed.wakers);
+        // Outside the lock: a write may block for as long as main doesn't
+        // read, and nothing else waits for it.
+        if output
+            .write_all(&frame)
+            .and_then(|()| output.flush())
+            .is_err()
         {
-            let mut state = link.lock();
-            loop {
-                while buffer.len() < BATCH {
-                    let Some(event) = state.events.pop_front() else {
-                        break;
-                    };
-                    if frame::encode_json(&event, &mut buffer).is_ok() {
-                        ends.push(buffer.len());
-                    }
-                }
-                while buffer.len() < BATCH && state.sender.next_frame(&mut buffer).is_some() {
-                    ends.push(buffer.len());
-                }
-                if !buffer.is_empty() {
-                    // Data left the queue: producers may find room.
-                    wake_all(&mut state);
-                    state.writing = true;
-                    state.progress = Instant::now();
-                    break;
-                }
-                if state.end.is_some() {
-                    state.writer_done = true;
-                    drop(state);
-                    link.ended.notify_all();
-                    return;
-                }
-                state = link
-                    .writer
-                    .wait(state)
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-            }
-        }
-        let mut start = 0;
-        for &end in &ends {
-            let written = output.write_all(buffer.get(start..end).unwrap_or_default());
-            if written.is_err() {
-                return writer_failed(link);
-            }
-            start = end;
-            link.lock().progress = Instant::now();
-        }
-        if output.flush().is_err() {
             return writer_failed(link);
         }
-        link.lock().writing = false;
-        buffer.clear();
-        ends.clear();
+        frame.clear();
+        // A 1 MiB reply's buffer isn't kept.
+        frame.shrink_to(MAX_DATA + 64);
+        let mut state = link.lock();
+        state.writing = false;
+        state.progress = Instant::now();
+    }
+}
+
+/// Claims the next frame into `frame`, waiting for one: an event, else the
+/// stream state machine's next. `None` once nothing more will be written:
+/// the connection closed (or its stream state failed) with nothing queued.
+fn claim(link: &Link, frame: &mut Vec<u8>) -> Option<Claimed> {
+    let mut state = link.lock();
+    loop {
+        let failed = state.sender.failed().is_some();
+        if !failed {
+            if let Some(event) = state.events.pop_front() {
+                if frame::encode_json(&event, frame).is_ok() {
+                    state.writing = true;
+                    state.progress = Instant::now();
+                    return Some(Claimed {
+                        wakers: Vec::new(),
+                        freed: false,
+                    });
+                }
+                frame.clear();
+                continue;
+            }
+            let live = state.sender.live();
+            if let Some(written) = state.sender.next_frame(frame) {
+                let freed = state.sender.live() < live;
+                let wakers = if matches!(written, Written::Data { .. }) {
+                    std::mem::take(&mut state.waiters)
+                } else {
+                    Vec::new()
+                };
+                state.writing = true;
+                state.progress = Instant::now();
+                return Some(Claimed { wakers, freed });
+            }
+        }
+        if state.closed || failed {
+            state.writer_done = true;
+            drop(state);
+            link.ended.notify_all();
+            return None;
+        }
+        state = wait(&link.writer, state);
     }
 }
 
@@ -835,9 +1379,6 @@ fn lifecycle_loop(link: &Link, options: &Options) {
             state = link.lock();
             continue;
         }
-        state = match link.ended.wait_timeout(state, tick) {
-            Ok((state, _)) => state,
-            Err(poisoned) => poisoned.into_inner().0,
-        };
+        state = wait_timeout(&link.ended, state, tick);
     }
 }
