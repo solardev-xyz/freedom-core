@@ -683,14 +683,19 @@ fn write_frames<W: Write>(sink: &mut W, queue: &Receiver<Out>, link: &Link) -> s
             sending = begin(sink, bulk, link)?;
         }
         if let Some((bulk, splitter)) = sending.as_mut() {
-            if let Some((header, range)) = splitter.next_fragment() {
-                let len = range.len();
-                sink.write_all(&header)?;
-                sink.write_all(&bulk.payload[range])?;
-                sink.flush()?;
-                bulk.hold.release(len);
-            }
-            if splitter.is_done() {
+            let ended = match splitter.next_fragment() {
+                Some((header, range)) => {
+                    let len = range.len();
+                    sink.write_all(&header)?;
+                    sink.write_all(&bulk.payload[range])?;
+                    sink.flush()?;
+                    bulk.hold.release(len);
+                    splitter.is_done()
+                }
+                // The splitter ends with its last fragment: unreachable.
+                None => true,
+            };
+            if ended {
                 sending = None;
             }
             whole_since_fragment = 0;

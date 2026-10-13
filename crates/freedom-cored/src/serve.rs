@@ -69,7 +69,8 @@ pub enum Event {
 }
 
 /// The methods this build implements, in `core.hello`'s capabilities. Only
-/// these names are ever logged; anything else is logged as `<unknown>`.
+/// these names and the test methods' are ever logged; anything else is
+/// logged as `<unknown>`.
 const CAPABILITIES: &[&str] = &[
     "core.hello",
     "core.shutdown",
