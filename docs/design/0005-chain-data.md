@@ -504,13 +504,16 @@ Main's wallet chooses nonces for the sends it controls (0002). The guarantee cov
 - **Failed and taken go back to the user.** The wallet explains what it knows and offers no retry. A new payment is the user's own act from the send screen: a new intent, with its own nonce and its own confirmation.
 - **Inclusion** means that a receipt's block number is at or below the finalized block's, and that its block hash is the canonical hash at that height.
 - **Evidence for labels** comes from a verified source: Myotis, Colibri, or a quorum of at least two agreeing endpoints. A quorum with m = 1 counts as Direct. Without such a source, an intent stays held. Since labels authorize nothing, a dishonest provider can mislead the display, but it can't make the wallet pay twice.
-- **Records.** Each intent has a durable record in main, separate from the display history, which can be cleared: `{ intent_id, chain_id, sender, nonce, hashes }`. Every hash in it was signed at that one nonce.
+- **Records.** Each intent has a durable record in main, separate from the display history, which can be cleared: `{ intent_id, chain_id, sender, nonce, hashes }`. Every hash in it was signed at that one nonce: main decodes each signed transaction before committing it and refuses one whose nonce, chain, sender or hash differs.
+  - **What else it holds:** each hash's signed bytes, and the intent's unsigned fields and origin. Then "send again" needs neither the vault nor a device after a restart, and a replacement at N reuses the confirmed content. They are written with the record (mode 0600), never logged, and deleted when the intent settles.
   - **Committed first:** the record, with each new hash, is committed (written atomically, with fsync) before those bytes are handed to a broadcaster.
   - **Kept** until the intent is paid, failed or taken at finality, and never removed by clearing the history.
+  - **Void, the one exception:** an intent may be voided when every broadcast of every one of its hashes ended `not_sent`, so no byte of it ever left main (main's `not_sent`, Myotis's `{ not_sent }`, or an attempt the core never sent). Voiding frees N and forgets the bytes. Since nothing was sent, no copy can be mined, and a later intent at N can't pay twice. Any other outcome, `rejected` included, keeps the record: a refusal proves only that the nodes it reached refused it ([Refusals](#refusals)).
   - **Identity:** `intent_id` is created when the user confirms a send, and retries carry it.
   - **After a restore,** a profile without records has nothing to retry. A request that arrives again (the same dApp call) is a new intent, for the user to confirm.
 - **Reservations.** Nonces are reserved per `(chain_id, sender)` under one lock in main, from reading the `pending` count to committing the record. That includes a pending device approval, so two callers can't take the same nonce.
   - **The first free nonce:** a new intent takes the `pending` count, as today, but at least one above every nonce a held intent of that account has.
+  - **The floor's cost:** a held intent that never reached the network (a crash before its broadcast, or a refusal) leaves a gap, and later sends wait behind it until it is sent again, replaced, voided or taken. Main therefore shows held intents, offers "send again" for each, and warns on a new send that would sit behind one.
   - **Release:** a reservation whose signature never happened (the user rejected it on the device) is released, since no bytes exist.
 
 ### Main's record
