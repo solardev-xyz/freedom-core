@@ -6,6 +6,11 @@
 //! The machine is sans-I/O: each of its requests becomes a `shell.*`
 //! request to main, each answer goes back to it, and its timers run on this
 //! thread's monotonic clock.
+//!
+//! `dweb.open` (design 0006) runs here too: fc-dweb plans the request, and
+//! a name host is a lookup on the machine first, under naming's admission,
+//! generations and deadlines. The plan waits only for its name; once
+//! returned, the core keeps nothing of it.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -13,6 +18,7 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
+use fc_dweb::{Opening, Pending, Plan, Resolved, Resolver};
 use fc_naming::jsjson::{self, JsValue};
 use fc_naming::session::bounds::Bounds;
 use fc_naming::session::ens::{Answer, Config, Direct, Request, Thrown, Verified, VerifiedOp};
@@ -44,10 +50,17 @@ pub const METHODS: &[&str] = &[
     "naming.resolve_tezos",
     "naming.invalidate_content",
     "naming.invalidate_tezos",
+    "dweb.open",
 ];
 
 pub fn handles(method: &str) -> bool {
     METHODS.contains(&method)
+}
+
+/// Methods only main itself calls (caller kind `shell`): pages never reach
+/// the core, and the browser UI has no use for a plan (design 0006).
+pub fn shell_only(method: &str) -> bool {
+    method == "dweb.open"
 }
 
 /// What the event loop forwards.
@@ -192,6 +205,8 @@ fn run(
         outbox: VecDeque::new(),
         max_backlog: MAX_NAMING_BACKLOG,
         callers: BTreeMap::new(),
+        plans: BTreeMap::new(),
+        planned: 0,
         outgoing: BTreeMap::new(),
         by_io: BTreeMap::new(),
         queued: VecDeque::new(),
@@ -280,6 +295,12 @@ struct Naming {
     queued: VecDeque<(u64, Request, Generations, Ms)>,
     /// The machine's callers, by the request ID main gave them.
     callers: BTreeMap<u64, u64>,
+    /// `dweb.open` plans waiting for their names, by the machine's caller
+    /// for the lookup.
+    plans: BTreeMap<u64, Pending>,
+    /// What those plans hold: naming's total counts it as it counts
+    /// unwritten replies (`memory-budgets`).
+    planned: usize,
     /// This thread's `shell.*` requests, by their message ID.
     outgoing: BTreeMap<u64, Outgoing>,
     /// Message IDs by the machine's request id.
@@ -290,8 +311,8 @@ impl Naming {
     /// Polls the machine, with what waits to be written counted in its
     /// sessions' total (`memory-budgets`).
     fn poll(&mut self) {
-        let backlog = self.backlog();
-        self.machine.set_output_backlog(backlog);
+        let output = self.output();
+        self.machine.set_output_backlog(output);
         self.machine.poll();
     }
 
@@ -338,11 +359,13 @@ impl Naming {
                 }
             };
         }
-        // A lookup's reply can't be written while the backlog is this deep:
-        // busy, which is small, in its place.
+        // A lookup's reply, or a plan, can't be written while the backlog is
+        // this deep: busy, which is small, in its place.
         let backlog = self.backlog();
-        self.machine.set_output_backlog(backlog);
-        if method.starts_with("naming.resolve_") && backlog > self.max_backlog {
+        let output = self.output();
+        self.machine.set_output_backlog(output);
+        let lookup = method.starts_with("naming.resolve_") || method == "dweb.open";
+        if lookup && backlog > self.max_backlog {
             return self.error(
                 id,
                 ErrorBody::new(ErrorCode::Busy, code_message(ErrorCode::Busy)),
@@ -441,10 +464,61 @@ impl Naming {
                 self.machine.invalidate_tezos(params.name.as_deref());
                 self.result(id, &serde_json::json!({}))
             }
+            "dweb.open" => {
+                // An object, never a positional array serde would also take.
+                if !params.trim_start().starts_with('{') {
+                    return self.error(
+                        id,
+                        ErrorBody::new(ErrorCode::InvalidArgument, "Invalid parameters"),
+                    );
+                }
+                let params = parse!(OpenParams);
+                self.open(id, &params)
+            }
             _ => self.error(
                 id,
                 ErrorBody::new(ErrorCode::UnknownMethod, "Unknown method"),
             ),
+        }
+    }
+
+    /// `dweb.open` (design 0006): the request planned at once, or its name
+    /// looked up first, as `naming.resolve_content` (or, for `.tez`,
+    /// `naming.resolve_tezos`) would, with the caller's attempts and
+    /// deadline. A plan made at once carries the generations current now and
+    /// the attempts the caller came with, as any immediate reply does.
+    fn open(&mut self, id: u64, params: &OpenParams) -> Flow {
+        let invalid = || ErrorBody::new(ErrorCode::InvalidArgument, "Invalid parameters");
+        let (Some(options), Some(backend)) = (params.options(), params.backend()) else {
+            return self.error(id, invalid());
+        };
+        let request = fc_dweb::Request {
+            url: &params.url,
+            method: &params.method,
+            headers: &params.headers,
+            backend,
+        };
+        match fc_dweb::open(&request) {
+            // Not a dweb URL, or a backend for another scheme.
+            Err(_) => self.error(id, invalid()),
+            Ok(Opening::Plan(plan)) => {
+                let generations = self.machine.generations();
+                self.plan(id, &plan, generations, options.attempts_used)
+            }
+            Ok(Opening::Resolve(pending)) => {
+                // Counted from before its lookup is admitted.
+                let held = pending.heap_bytes();
+                let output = self.output().saturating_add(held);
+                self.machine.set_output_backlog(output);
+                let caller = match pending.resolver() {
+                    Resolver::Ens => self.machine.resolve_content_with(pending.name(), options),
+                    Resolver::Tezos => self.machine.resolve_tezos_with(pending.name(), options),
+                };
+                self.callers.insert(id, caller);
+                self.planned = self.planned.saturating_add(held);
+                self.plans.insert(caller, pending);
+                Ok(())
+            }
         }
     }
 
@@ -474,11 +548,18 @@ impl Naming {
             self.effects()?;
             let settled = self.dispatch()?;
             for reply in self.machine.take_replies() {
+                let pending = self.plans.remove(&reply.caller);
+                if let Some(pending) = &pending {
+                    self.planned = self.planned.saturating_sub(pending.heap_bytes());
+                }
                 let Some((&id, _)) = self.callers.iter().find(|(_, c)| **c == reply.caller) else {
                     continue;
                 };
                 self.callers.remove(&id);
-                self.reply(id, &reply)?;
+                match pending {
+                    Some(pending) => self.planned_reply(id, pending, &reply)?,
+                    None => self.reply(id, &reply)?,
+                }
             }
             if !settled {
                 return Ok(());
@@ -618,6 +699,54 @@ impl Naming {
         }
     }
 
+    /// A plan whose name was looked up (design 0006, `dweb.open`): the
+    /// lookup's result, or its thrown message, finishes it, as the handlers
+    /// map `resolveContentName`'s outcome, and the plan carries the lookup's
+    /// generations and attempts. The lookup's own protocol errors (`busy`,
+    /// `deadline`, `cancelled`) are the plan's.
+    fn planned_reply(&mut self, id: u64, pending: Pending, reply: &Reply) -> Flow {
+        let resolved = match &reply.outcome {
+            Ok(value) => Resolved::Returned(value),
+            Err(Thrown {
+                code: Some(code), ..
+            }) => {
+                let code = match *code {
+                    "busy" => ErrorCode::Busy,
+                    "deadline" => ErrorCode::Deadline,
+                    "cancelled" => ErrorCode::Cancelled,
+                    _ => ErrorCode::Internal,
+                };
+                return self.error(id, ErrorBody::new(code, code_message(code)));
+            }
+            Err(thrown) => Resolved::Threw(&thrown.message),
+        };
+        match pending.finish(resolved) {
+            Ok(plan) => self.plan(id, &plan, reply.generations, reply.attempts),
+            // A result the handlers would throw on, which naming never
+            // makes (a `basePath` that isn't a string, say).
+            Err(_) => self.error(
+                id,
+                ErrorBody::new(ErrorCode::Internal, code_message(ErrorCode::Internal)),
+            ),
+        }
+    }
+
+    /// `dweb.open`'s result: `{ plan, generations, attempts }`, the plan as
+    /// main validates it, apart from the fence's inputs.
+    fn plan(&mut self, id: u64, plan: &Plan, generations: Generations, attempts: u32) -> Flow {
+        let Ok(plan) = RawValue::from_string(plan.to_json()) else {
+            return Err(Stop::Protocol("unwritable_result"));
+        };
+        self.result(
+            id,
+            &serde_json::json!({
+                "plan": plan,
+                "generations": generations_json(generations),
+                "attempts": attempts,
+            }),
+        )
+    }
+
     fn result(&mut self, id: u64, result: &serde_json::Value) -> Flow {
         let mut payload = Zeroizing::new(Vec::with_capacity(256));
         message::write_result(&mut *payload, id, result)
@@ -647,6 +776,12 @@ impl Naming {
     /// waiting here.
     fn backlog(&self) -> usize {
         self.allowance.held_bytes() + self.outbox.iter().map(|f| f.len()).sum::<usize>()
+    }
+
+    /// What naming's total counts beside its sessions (`memory-budgets`):
+    /// the frames not yet written, and the plans waiting for their names.
+    fn output(&self) -> usize {
+        self.backlog().saturating_add(self.planned)
     }
 
     /// Hands every waiting frame to the writer, past the allowance: at
@@ -1011,6 +1146,70 @@ struct InvalidateParams {
     name: Option<String>,
 }
 
+/// The longest URL `dweb.open` takes, and the most header text, in UTF-16
+/// code units as JavaScript counts a string's `length` (design 0006,
+/// Bounds). Main answers 414 or 431 past them before it asks, so a request
+/// past them is main's mistake.
+const MAX_URL_UNITS: usize = 64 * 1024;
+const MAX_HEADER_UNITS: usize = 64 * 1024;
+/// What each header counts beside its name and value: `: ` and CRLF, as on
+/// the wire. An empty header so still counts.
+const HEADER_UNITS: usize = 4;
+/// Room for any backend's JSON (`{"ant":"external","up":false}` is 30
+/// bytes), whitespace included.
+const MAX_BACKEND_BYTES: usize = 256;
+
+/// `dweb.open`'s params (design 0006, `dweb.open`).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenParams {
+    /// The request URL as Chromium hands it to the handler.
+    url: String,
+    method: String,
+    /// The request's headers as name–value pairs, in order.
+    headers: Vec<(String, String)>,
+    /// `{ ant | ipfs: mode, up }`: a reference with no URL.
+    backend: Box<RawValue>,
+    /// A private window's request: the core logs no URL anyway.
+    #[allow(dead_code)]
+    private: bool,
+    deadline_ms: u64,
+    #[serde(default)]
+    attempts_used: u32,
+}
+
+impl OpenParams {
+    /// The lookup's options, as a resolution's (main resubmits only with
+    /// attempts left, and with the remainder of the caller's deadline), or
+    /// `None` when they, or the request's size, are out of range.
+    fn options(&self) -> Option<CallOptions> {
+        let units = |text: &str| text.encode_utf16().count();
+        let headers = self
+            .headers
+            .iter()
+            .map(|(name, value)| units(name) + units(value) + HEADER_UNITS)
+            .fold(0usize, usize::saturating_add);
+        let sized = units(&self.url) <= MAX_URL_UNITS && headers <= MAX_HEADER_UNITS;
+        (sized
+            && self.attempts_used < MAX_LIFECYCLE_ATTEMPTS
+            && self.deadline_ms <= Bounds::default().deadline_ms)
+            .then_some(CallOptions {
+                attempts_used: self.attempts_used,
+                deadline_ms: Some(self.deadline_ms),
+            })
+    }
+
+    /// The backend, read strictly; one too long to be any backend isn't
+    /// parsed at all.
+    fn backend(&self) -> Option<fc_dweb::Backend> {
+        let text = self.backend.get();
+        if text.len() > MAX_BACKEND_BYTES {
+            return None;
+        }
+        fc_dweb::Backend::from_value(&jsjson::parse(text).ok()?)
+    }
+}
+
 /// `naming.configure`'s snapshot (design 0004, Configuration).
 #[derive(Deserialize)]
 struct Snapshot {
@@ -1130,6 +1329,8 @@ mod tests {
             outbox: VecDeque::new(),
             max_backlog: MAX_NAMING_BACKLOG,
             callers: BTreeMap::new(),
+            plans: BTreeMap::new(),
+            planned: 0,
             outgoing: BTreeMap::new(),
             by_io: BTreeMap::new(),
             queued: VecDeque::new(),
@@ -1490,5 +1691,298 @@ mod tests {
             adapter_keys(&value).stringify(),
             r#"{"resultHex":"0x01","optimisticBlockNumber":7}"#
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // dweb.open (design 0006)
+
+    const REFERENCE: &str = "c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef";
+
+    fn open_params(url: &str, backend: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "url": url,
+            "method": "GET",
+            "headers": [["Accept", "*/*"], ["Cookie", "a=1"]],
+            "backend": backend,
+            "private": false,
+            "deadline_ms": 120_000,
+        })
+    }
+
+    fn ant(up: bool) -> serde_json::Value {
+        serde_json::json!({ "ant": "bundled", "up": up })
+    }
+
+    /// The reply to `id` among the frames written.
+    fn reply_to(frames: &[serde_json::Value], id: u64) -> serde_json::Value {
+        frames
+            .iter()
+            .find(|f| f["type"] == "response" && f["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("no reply to {id} in {frames:?}"))
+    }
+
+    /// `dweb.open`, then a turn of the thread's loop: the machine polled.
+    fn open(naming: &mut Naming, id: u64, params: &serde_json::Value) {
+        assert!(
+            naming
+                .request(id, "dweb.open", Some(&params.to_string()))
+                .is_ok()
+        );
+        assert!(naming.flush().is_ok());
+        assert!(naming.advance(0).is_ok());
+    }
+
+    #[test]
+    fn a_hash_host_is_planned_at_once() {
+        let (mut naming, rx) = naming(256, usize::MAX);
+        let url = format!("bzz://{REFERENCE}/a?b=1");
+        open(&mut naming, 1, &open_params(&url, ant(true)));
+        let reply = reply_to(&written(&rx), 1);
+        let result = &reply["result"];
+        let keys: Vec<&String> = result.as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["plan", "generations", "attempts"]);
+        let fetch = &result["plan"]["fetch"];
+        assert_eq!(fetch["node"], "ant");
+        assert_eq!(fetch["path"], format!("/bzz/{REFERENCE}/a?b=1"));
+        // bzz:'s allowlist: no cookie, Swarm's three headers.
+        let names: Vec<&str> = fetch["headers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|pair| pair[0].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "accept",
+                "swarm-chunk-retrieval-timeout",
+                "swarm-redundancy-fallback-mode",
+                "swarm-redundancy-strategy"
+            ]
+        );
+        assert_eq!(
+            fetch["trust"],
+            serde_json::json!({ "name": null, "content": "node_asserted" })
+        );
+        assert_eq!(
+            result["generations"],
+            serde_json::json!({ "ens": 0, "tezos": 0, "lifecycle": 0 })
+        );
+        // An immediate reply keeps the attempts the caller came with.
+        assert_eq!(result["attempts"], 0);
+        let mut again = open_params(&url, ant(true));
+        again["attempts_used"] = serde_json::json!(2);
+        open(&mut naming, 2, &again);
+        assert_eq!(reply_to(&written(&rx), 2)["result"]["attempts"], 2);
+        // Nothing was looked up, and nothing is kept.
+        assert_eq!(naming.machine.running(), 0);
+        assert!(naming.plans.is_empty() && naming.callers.is_empty());
+    }
+
+    #[test]
+    fn plans_answered_without_a_node() {
+        let (mut naming, rx) = naming(256, usize::MAX);
+        let cases = [
+            // Ant down: a 503 before any name is resolved.
+            (
+                open_params("bzz://site.eth/", ant(false)),
+                serde_json::json!({ "error": { "status": 503, "code": 503, "message": "Swarm node is not ready" } }),
+            ),
+            (
+                serde_json::json!({
+                    "url": format!("bzz://{REFERENCE}/"),
+                    "method": "POST",
+                    "headers": [],
+                    "backend": ant(true),
+                    "private": true,
+                    "deadline_ms": 1000,
+                }),
+                serde_json::json!({ "error": { "status": 405, "code": 405, "message": "method not allowed" } }),
+            ),
+            (
+                open_params("bzz://not_a_name/", ant(true)),
+                serde_json::json!({ "error": { "status": 400, "code": 400, "message": "invalid bzz reference" } }),
+            ),
+        ];
+        for (i, (params, plan)) in cases.iter().enumerate() {
+            let id = 10 + i as u64;
+            open(&mut naming, id, params);
+            assert_eq!(
+                reply_to(&written(&rx), id)["result"]["plan"],
+                *plan,
+                "{params}"
+            );
+        }
+        // A gateway-form URL is redirected, even with the node down.
+        let gateway = serde_json::json!({ "ipfs": "native", "up": false });
+        let url = "ipfs://ipfs.io/ipfs/QmVmkadKS2uvxyD6YJJzd3Umem6SWV7QxYnL7kbpdWAsPS/x";
+        open(&mut naming, 20, &open_params(url, gateway));
+        let plan = &reply_to(&written(&rx), 20)["result"]["plan"];
+        assert_eq!(plan["redirect"]["status"], 307, "{plan}");
+        assert_eq!(
+            plan["redirect"]["location"],
+            "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/x"
+        );
+        assert_eq!(naming.machine.running(), 0);
+    }
+
+    #[test]
+    fn open_params_are_validated_strictly() {
+        let (mut naming, rx) = naming(256, usize::MAX);
+        let good = open_params(&format!("bzz://{REFERENCE}/"), ant(true));
+        let mut cases = Vec::new();
+        for (key, value) in [
+            ("url", serde_json::json!("https://example.com/")),
+            (
+                "url",
+                serde_json::json!(format!("bzz://{REFERENCE}/{}", "a".repeat(64 * 1024))),
+            ),
+            ("headers", serde_json::json!([["a", "b", "c"]])),
+            ("headers", serde_json::json!({ "accept": "*/*" })),
+            ("headers", serde_json::json!([["x", "y".repeat(64 * 1024)]])),
+            // Each header counts four units beside its text.
+            ("headers", serde_json::json!(vec![["", ""]; 16 * 1024 + 1])),
+            (
+                "backend",
+                serde_json::json!({ "ipfs": "native", "up": true }),
+            ),
+            ("backend", serde_json::json!({ "ant": "bundled" })),
+            ("backend", serde_json::json!("ant")),
+            (
+                "backend",
+                serde_json::json!({ "ant": "bundled", "up": true, "pad": "x".repeat(256) }),
+            ),
+            ("private", serde_json::json!("no")),
+            ("deadline_ms", serde_json::json!(120_001)),
+            ("attempts_used", serde_json::json!(3)),
+            ("extra", serde_json::json!(1)),
+        ] {
+            let mut params = good.clone();
+            params[key] = value;
+            cases.push(params);
+        }
+        for key in [
+            "url",
+            "method",
+            "headers",
+            "backend",
+            "private",
+            "deadline_ms",
+        ] {
+            let mut params = good.clone();
+            params.as_object_mut().unwrap().remove(key);
+            cases.push(params);
+        }
+        // A positional array never passes for the object.
+        let positional: Vec<serde_json::Value> =
+            good.as_object().unwrap().values().cloned().collect();
+        cases.push(serde_json::json!(positional));
+        for (i, params) in cases.iter().enumerate() {
+            let id = 100 + i as u64;
+            open(&mut naming, id, params);
+            let reply = reply_to(&written(&rx), id);
+            assert_eq!(reply["error"]["code"], "invalid_argument", "{params}");
+        }
+        // At the bounds exactly, and an empty method (GET), are fine.
+        let mut longest = good.clone();
+        let path = "a".repeat(64 * 1024 - format!("bzz://{REFERENCE}/").len());
+        longest["url"] = serde_json::json!(format!("bzz://{REFERENCE}/{path}"));
+        longest["headers"] = serde_json::json!(vec![["", ""]; 16 * 1024]);
+        longest["method"] = serde_json::json!("");
+        open(&mut naming, 500, &longest);
+        assert!(reply_to(&written(&rx), 500)["result"]["plan"]["fetch"].is_object());
+    }
+
+    #[test]
+    fn a_name_host_is_looked_up_first() {
+        let (mut naming, rx) = naming(256, usize::MAX);
+        assert!(
+            naming
+                .request(1, "naming.configure", Some(SNAPSHOT))
+                .is_ok()
+        );
+        drop(written(&rx));
+        open(&mut naming, 2, &open_params("bzz://site.eth/a", ant(true)));
+        // A session runs for the name, and the plan's other half waits,
+        // counted in naming's total.
+        assert_eq!(naming.machine.running(), 1);
+        assert_eq!(naming.plans.len(), 1);
+        let held = naming
+            .plans
+            .values()
+            .map(fc_dweb::Pending::heap_bytes)
+            .sum::<usize>();
+        assert!(held > 0 && naming.planned == held);
+        assert_eq!(naming.output(), naming.backlog() + held);
+        let frames = written(&rx);
+        assert!(!shell(&frames).is_empty());
+        assert!(frames.iter().all(|f| f["type"] != "response"));
+        // A cancel ends the lookup: the plan's reply is `cancelled`, and
+        // nothing is kept.
+        assert!(naming.handle(In::Cancel { id: 2 }).is_ok());
+        assert!(naming.flush().is_ok());
+        let reply = reply_to(&written(&rx), 2);
+        assert_eq!(reply["error"]["code"], "cancelled", "{reply}");
+        assert!(naming.plans.is_empty() && naming.planned == 0);
+    }
+
+    #[test]
+    fn a_thrown_lookup_is_an_error_plan_with_its_generations() {
+        let (mut naming, rx) = naming(256, usize::MAX);
+        // Nothing configured: the method order ends at once, thrown.
+        open(&mut naming, 1, &open_params("bzz://site.eth/", ant(true)));
+        let reply = reply_to(&written(&rx), 1);
+        assert_eq!(
+            reply["result"]["plan"],
+            serde_json::json!({ "error": {
+                "status": 502,
+                "code": 502,
+                "message": "ENS resolver error: No enabled name-resolution method could resolve site.eth",
+            } }),
+            "{reply}"
+        );
+        assert_eq!(reply["result"]["attempts"], 1);
+        // A name ENS normalization refuses throws before any session.
+        open(
+            &mut naming,
+            2,
+            &open_params(
+                "ipfs://a_b.eth/",
+                serde_json::json!({ "ipfs": "native", "up": true }),
+            ),
+        );
+        let plan = &reply_to(&written(&rx), 2)["result"]["plan"];
+        assert_eq!(plan["error"]["status"], 502, "{plan}");
+        let message = plan["error"]["message"].as_str().unwrap();
+        assert!(message.starts_with("ENS resolver error: "), "{message}");
+        assert!(naming.plans.is_empty() && naming.planned == 0);
+    }
+
+    #[test]
+    fn plans_are_busy_while_naming_cannot_write() {
+        let (mut naming, rx) = naming(256, 1);
+        naming.max_backlog = 1000;
+        let filler = format!(
+            r#"{{"type":"event","event":"x.y","data":{{"pad":"{}"}}}}"#,
+            "x".repeat(2000)
+        );
+        assert!(naming.send(filler.as_bytes()).is_ok());
+        assert!(naming.send(filler.as_bytes()).is_ok());
+        let url = format!("bzz://{REFERENCE}/");
+        assert!(
+            naming
+                .request(
+                    7,
+                    "dweb.open",
+                    Some(&open_params(&url, ant(true)).to_string())
+                )
+                .is_ok()
+        );
+        let busy: serde_json::Value =
+            serde_json::from_slice(&naming.outbox.back().unwrap()[5..]).unwrap();
+        assert_eq!(busy["id"], 7);
+        assert_eq!(busy["error"]["code"], "busy");
+        drop(rx);
     }
 }

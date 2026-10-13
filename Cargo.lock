@@ -499,6 +499,7 @@ version = "0.4.0"
 dependencies = [
  "base64",
  "fc-chain",
+ "fc-dweb",
  "fc-evm",
  "fc-keys",
  "fc-naming",
