@@ -10,8 +10,9 @@ const test = require('node:test');
 const SOURCE = path.resolve(__dirname, '..');
 const REFERENCE = process.env.FREEDOM_BROWSER_CHECKOUT || '/root/herdr/freedom-browser';
 const FILES = ['keys.json', 'mnemonic-validation.json', 'identity-formats.json', 'signing.json', 'naming.json', 'naming-replay.json',
-  'chain.json', 'fixtures/vaults.json', 'fixtures/bee-keystores.json', 'fixtures/radicle-openssh.json',
-  'generator/generate.js', 'generator/signing.js', 'generator/naming.js', 'generator/naming-replay.js', 'generator/chain.js'];
+  'chain.json', 'chain-replay.json', 'fixtures/vaults.json', 'fixtures/bee-keystores.json', 'fixtures/radicle-openssh.json',
+  'generator/generate.js', 'generator/signing.js', 'generator/naming.js', 'generator/naming-replay.js', 'generator/chain.js',
+  'generator/chain-replay.js'];
 
 function corruptedCheck(filename, corrupt) {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
@@ -82,6 +83,14 @@ test('check rejects a changed log-scan rank and a changed broadcast refusal', ()
   ]) {
     assert.match(corruptedCheck('chain.json', corrupt), /Byte mismatch: chain.json/);
   }
+});
+
+test('check rejects a changed chain replay exchange', () => {
+  const stderr = corruptedCheck('chain-replay.json', (contents) => {
+    const exchange = contents.scenarios.find((scenario) => scenario.id === 'router-quorum-settles-at-m').io[2];
+    exchange.outcome = 'answered';
+  });
+  assert.match(stderr, /Byte mismatch: chain-replay.json/);
 });
 
 test('check decrypts vault fixtures and rejects a damaged authentication tag', () => {
@@ -443,4 +452,137 @@ test('replay attributes every verifier raw call to its operation', () => {
   const concurrent = vectors.scenarios.find((s) => s.id === 'colibri-concurrent');
   const owners = concurrent.io.filter((e) => e.kind === 'verified').map((e) => e.within);
   assert.equal(new Set(owners).size, 2, 'each concurrent operation owns its raw call');
+});
+
+// The chain replay runs in this process too.
+const chainReplay = require('./chain-replay');
+const TEST_KEY = '0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727';
+
+function chainDefinition(id) {
+  return chainReplay.scenarioDefinitions(referenceEthers(), TEST_KEY).find((scenario) => scenario.id === id);
+}
+
+function chainGlobals() {
+  return { fetch: globalThis.fetch, date: Date, setTimeout, load: require('node:module')._load };
+}
+
+test('chain replay leaves its input unchanged and repeats exactly', async () => {
+  const FakeTimers = chainReplay.loadFakeTimers(REFERENCE);
+  for (const id of ['router-colibri-cooldown-escalation', 'ant-index-first-wallet-scan']) {
+    const scenario = chainDefinition(id);
+    const before = structuredClone(scenario);
+    const first = await chainReplay.runScenario(REFERENCE, FakeTimers, scenario);
+    assert.deepEqual(scenario, before);
+    assert.deepEqual(await chainReplay.runScenario(REFERENCE, FakeTimers, scenario), first);
+  }
+});
+
+test('chain replay restores every global, also when setup fails', async () => {
+  const FakeTimers = chainReplay.loadFakeTimers(REFERENCE);
+  const before = chainGlobals();
+  await chainReplay.runScenario(REFERENCE, FakeTimers, chainDefinition('router-quorum-settles-at-m'));
+  assert.deepEqual(chainGlobals(), before);
+  await assert.rejects(chainReplay.runScenario(path.join(os.tmpdir(), 'no-such-checkout'), FakeTimers, chainDefinition('router-quorum-settles-at-m')), /ENOENT/);
+  assert.deepEqual(chainGlobals(), before);
+  // No router module survives its scenario.
+  assert.ok(!Object.keys(require.cache).some((key) => key.includes(`${path.sep}src${path.sep}main${path.sep}networks${path.sep}`)));
+});
+
+test('chain replay fails loudly on unscripted I/O', async () => {
+  const FakeTimers = chainReplay.loadFakeTimers(REFERENCE);
+  const undeclared = structuredClone(chainDefinition('router-quorum-settles-at-m'));
+  delete undeclared.world.rpc['https://c.example'];
+  await assert.rejects(chainReplay.runScenario(REFERENCE, FakeTimers, undeclared), /undeclared RPC endpoint https:\/\/c\.example/);
+  const myotis = structuredClone(chainDefinition('router-myotis-balance'));
+  delete myotis.world.myotis[100].ops.account;
+  await assert.rejects(chainReplay.runScenario(REFERENCE, FakeTimers, myotis), /unscripted Myotis account on chain 100/);
+  const colibri = structuredClone(chainDefinition('router-colibri-deadline'));
+  delete colibri.world.colibri;
+  await assert.rejects(chainReplay.runScenario(REFERENCE, FakeTimers, colibri), /unscripted Colibri eth_call/);
+  const dns = structuredClone(chainDefinition('blockscout-redirect-dns-fails'));
+  delete dns.world.dns;
+  await assert.rejects(chainReplay.runScenario(REFERENCE, FakeTimers, dns), /undeclared DNS name nowhere\.example/);
+});
+
+test('chain replay attributes every request to its call and every hop to its page', () => {
+  const vectors = JSON.parse(fs.readFileSync(path.join(SOURCE, 'chain-replay.json'), 'utf8'));
+  const ids = new Set();
+  for (const scenario of vectors.scenarios) {
+    assert.ok(!ids.has(scenario.id), `${scenario.id} twice`);
+    ids.add(scenario.id);
+    const byId = new Map(scenario.io.map((entry) => [entry.id, entry]));
+    for (const entry of scenario.io) {
+      if (entry.kind === 'event') continue;
+      assert.equal(typeof entry.call, 'number', `${scenario.id}: ${entry.kind} ${entry.id} has no call`);
+      const calls = scenario.steps[entry.step].calls;
+      assert.ok(entry.call < calls.length && entry.t >= calls[entry.call].started, `${scenario.id}: ${entry.id} before its call`);
+      if (['blockscout', 'dns'].includes(entry.kind)) assert.equal(byId.get(entry.within)?.kind, 'blockscout-page', `${scenario.id}: ${entry.id}`);
+      if (entry.kind === 'blockscout-page') assert.equal(byId.get(entry.within)?.kind, 'blockscout-read', `${scenario.id}: ${entry.id}`);
+      if (entry.kind === 'rpc') assert.match(entry.body, /^\{"jsonrpc":"2\.0","id":0,"method":"/);
+    }
+  }
+  // No key in the file is an encoding: values are text.
+  const keys = (value) => (Array.isArray(value) ? value.flatMap(keys) : value && typeof value === 'object'
+    ? Object.entries(value).flatMap(([key, item]) => [key, ...keys(item)]) : []);
+  assert.deepEqual(keys(vectors).filter((key) => key.startsWith('$')), []);
+});
+
+test('chain replay records values as JSON text, apart from its encodings', () => {
+  const { jsonText, jsonField, entriesOf, textField, recordError } = chainReplay;
+  // A missing value and values that look like the old tags stay apart.
+  assert.deepEqual(jsonField('result', undefined), { result_undefined: true });
+  assert.deepEqual(jsonField('result', { $undefined: true }), { result_json: '{"$undefined":true}' });
+  assert.deepEqual(jsonField('result', { $repeat: { head: '', unit: 'x', count: 2, tail: '' } }), { result_json: '{"$repeat":{"head":"","unit":"x","count":2,"tail":""}}' });
+  assert.deepEqual(entriesOf({ result: undefined, source: 'quorum' }), [{ key: 'result', undefined: true }, { key: 'source', json: '"quorum"' }]);
+  // Every value JSON.parse makes survives its text.
+  for (const text of ['-0', '1e400', '-1e400', '{"__proto__":1,"b":[null,true,"x"]}']) assert.equal(jsonText(JSON.parse(text)), text);
+  assert.ok(Object.is(JSON.parse(jsonText(-0)), -0));
+  const lone = String.fromCharCode(0xd800);
+  assert.equal(jsonText(lone), `"${String.fromCharCode(92)}ud800"`);
+  assert.equal(JSON.parse(jsonText(lone)), lone);
+  const deep = `${'['.repeat(600)}${']'.repeat(600)}`;
+  assert.equal(jsonText(JSON.parse(deep)), deep);
+  // What no record could keep fails the generation.
+  assert.throws(() => jsonText({ a: undefined }), /nested undefined/);
+  assert.throws(() => jsonText([undefined]), /nested undefined/);
+  assert.throws(() => jsonText(Number.NaN), /NaN/);
+  assert.throws(() => jsonText(() => 1), /function/);
+  // A large text takes its field's repeat form, verified.
+  const body = `{"result":"0x${'0'.repeat(128)}${'61'.repeat(40_000)}00"}`;
+  const { body_repeat: repeat } = textField('body', body);
+  assert.equal(repeat.head + repeat.unit.repeat(repeat.count) + repeat.tail, body);
+  assert.equal(repeat.length, body.length);
+  assert.deepEqual(textField('body', 'short'), { body: 'short' });
+  assert.throws(() => textField('body', Array.from({ length: 70_000 }, (_, i) => String.fromCharCode(33 + ((i * 7919) % 90))).join('')), /no repeat form/);
+  // A thrown error keeps its class, name, message and own properties in order.
+  const error = Object.assign(new Error('execution reverted'), { code: 3, data: undefined });
+  assert.deepEqual(recordError(error), {
+    class: 'Error', name: 'Error', message_json: '"execution reverted"',
+    props: [{ key: 'code', json: '3' }, { key: 'data', undefined: true }],
+  });
+});
+
+test('chain replay keeps the router\'s values as data, literal tags included', async () => {
+  const FakeTimers = chainReplay.loadFakeTimers(REFERENCE);
+  const resultOf = (run, step) => run.steps[step].results[0].value.find((entry) => entry.key === 'result');
+  const repeat = await chainReplay.runScenario(REFERENCE, FakeTimers, chainDefinition('boundary-result-literal-repeat-tag'));
+  assert.deepEqual(resultOf(repeat, 0), { key: 'result', json: '{"$repeat":{"head":"","unit":"x","count":2,"tail":""}}' });
+  const undef = await chainReplay.runScenario(REFERENCE, FakeTimers, chainDefinition('boundary-result-literal-undefined-tag'));
+  assert.deepEqual(resultOf(undef, 0), { key: 'result', json: '{"$undefined":true}' });
+  assert.deepEqual(undef.steps[1].results[0].thrown.props.find((entry) => entry.key === 'data'), { key: 'data', json: '{"$undefined":true}' });
+  const empty = await chainReplay.runScenario(REFERENCE, FakeTimers, chainDefinition('boundary-result-empty-body'));
+  assert.deepEqual(resultOf(empty, 0), { key: 'result', undefined: true });
+  assert.deepEqual(resultOf(empty, 1), { key: 'result', json: 'null' });
+});
+
+test('chain replay fails when a fixture drifts from its source test\'s settle time', async () => {
+  const FakeTimers = chainReplay.loadFakeTimers(REFERENCE);
+  // chain-data-router.test.js:1842 answers the full range at once; a 10 ms
+  // reply moves the settle time off the test's 5,000 ms.
+  const drifted = structuredClone(chainDefinition('truncation-direct-check-one-attempt'));
+  for (const plan of Object.values(drifted.world.rpc)) plan.rules[0].then.delay = 10;
+  await assert.rejects(chainReplay.runScenario(REFERENCE, FakeTimers, drifted), /settled after 5010 ms, not 5000/);
+  const bounded = structuredClone(chainDefinition('ant-index-blockscout-hung'));
+  bounded.steps[1].calls[0].expect_settle_max_ms = 1000;
+  await assert.rejects(chainReplay.runScenario(REFERENCE, FakeTimers, bounded), /settled after 25000 ms, over 1000/);
 });
