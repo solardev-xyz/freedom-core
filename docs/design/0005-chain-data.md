@@ -61,6 +61,7 @@ All accept caller kinds `chrome` and `shell`.
 - **`deadline_ms`** is what is left of the caller's overall deadline when main sends the request, as naming's driver does; at most 120 s ([Deadlines](#deadlines)).
 - **Cancellation** is 0001's `cancel`, which replaces the router's `AbortSignal` ([Cancellation](#cancellation)).
 - **`isReadMethod`** stays in main: it is a constant table, mirrored with a vector.
+- **`chain.html`** ([0006](0006-dweb-transports.md#chainhtml-43)), the `web3:` handler's `html()` read, is a request on this machine too: a read with its admission, generation, deadline, cancel and budget, whose document the core decodes and charges to the request.
 
 ### Requests the core makes
 
