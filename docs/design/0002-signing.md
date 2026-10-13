@@ -192,7 +192,7 @@ The subtype closure is computed once per type (memoized), and each reachable typ
 - 99,999 `uint256` values take about 12 ms.
 - A realistic request (the Mail example) takes about 8 µs.
 
-That 50 ms is the longest a signing request can hold the core's event loop. Tests check accepted inputs just under the caps against a time bound, the rejections at the caps, and a 40-level diamond type graph, which ethers' walk would take 2^40 steps over.
+That 50 ms is the longest a signing request can hold the core's event loop. Tests check that accepted inputs just under the caps take linear time: each is timed against inputs that linear work takes as long over (the same input in tenths or thirtieths, or a type with a fraction of the text), back to back in the same run, so neither the machine's speed nor its load decides the outcome. They also check the rejections at the caps, and a 40-level diamond type graph, which ethers' walk would take 2^40 steps over.
 
 ## Parity contract and vectors
 
