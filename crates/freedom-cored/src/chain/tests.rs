@@ -2268,3 +2268,198 @@ fn a_deep_reply_nobody_reads_is_not_parsed_and_frees_its_slot() {
     t.call(id, "chain.request", &params);
     assert_eq!(verified(&t.written()).len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// chain.html (design 0006)
+
+const CONTRACT: &str = "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed";
+/// Its EIP-55 form, as `ethers.getAddress` gives it.
+const CHECKSUMMED: &str = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed";
+
+fn html_params(contract: &str) -> Value {
+    json!({
+        "chain_id": 1,
+        "contract": contract,
+        "origin": format!("web3://{contract}:1"),
+        "deadline_ms": 30_000,
+    })
+}
+
+/// A JSON-RPC answer whose result is `html()`'s ABI encoding of `document`.
+fn html_answer(document: &[u8]) -> String {
+    let pad = document.len().div_ceil(32) * 32 - document.len();
+    format!(
+        r#"{{"jsonrpc":"2.0","id":1,"result":"0x{:064x}{:064x}{}{}"}}"#,
+        32,
+        document.len(),
+        hex(document),
+        "00".repeat(pad)
+    )
+}
+
+#[test]
+fn html_params_are_validated_strictly() {
+    let mut t = test();
+    t.configure(json!([chain_snapshot(&["direct"], &["a"])]));
+    let good = html_params(CONTRACT);
+    let mut cases = Vec::new();
+    for (key, value) in [
+        (
+            "contract",
+            json!("5aaeb6053f3e94c9b9a09f33669435e7ef1beaed"),
+        ),
+        (
+            "contract",
+            json!("0x5aaeb6053f3e94c9b9a09f33669435e7ef1beae"),
+        ),
+        (
+            "contract",
+            json!("0X5aaeb6053f3e94c9b9a09f33669435e7ef1beaed"),
+        ),
+        // Mixed case with a wrong checksum: `getAddress` throws.
+        (
+            "contract",
+            json!("0x5AAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"),
+        ),
+        ("contract", json!(7)),
+        ("origin", json!(null)),
+        ("deadline_ms", json!(120_001)),
+        ("chain_id", json!(1u64 << 53)),
+        ("extra", json!(true)),
+    ] {
+        let mut params = good.clone();
+        params[key] = value;
+        cases.push(params);
+    }
+    let mut missing = good.clone();
+    missing.as_object_mut().unwrap().remove("origin");
+    cases.push(missing);
+    cases.push(json!([good.clone()]));
+    for (i, params) in cases.iter().enumerate() {
+        let id = 10 + i as u64;
+        t.call(id, "chain.html", params);
+        let frames = t.written();
+        let reply = frames.iter().find(|f| f["id"] == id).unwrap();
+        assert_eq!(reply["error"]["code"], "invalid_argument", "{params}");
+        assert!(requests(&frames).is_empty());
+    }
+    // A lowercase contract, and its checksum form, are read as
+    // `getAddress` reads them: today's `to`.
+    for (id, contract) in [(50, CONTRACT), (51, CHECKSUMMED)] {
+        t.call(id, "chain.html", &html_params(contract));
+        let frames = t.written();
+        let asked = requests(&frames);
+        assert_eq!(asked.len(), 1);
+        let body: Value =
+            serde_json::from_str(asked[0]["params"]["body"].as_str().unwrap()).unwrap();
+        assert_eq!(body["method"], "eth_call");
+        assert_eq!(
+            body["params"],
+            json!([{ "to": CHECKSUMMED, "data": "0x33c34ac3" }, "latest"])
+        );
+    }
+}
+
+#[test]
+fn an_html_document_comes_as_base64_with_its_hash_and_class() {
+    let mut t = test();
+    t.configure(json!([chain_snapshot(&["direct"], &["a"])]));
+    t.call(7, "chain.html", &html_params(CONTRACT));
+    let frames = t.written();
+    let id = requests(&frames)[0]["id"].as_u64().unwrap();
+    // dweb.json's `hello`.
+    assert!(
+        t.answer(id, rpc_answer(&html_answer(b"<h1>hello</h1>")))
+            .is_ok()
+    );
+    let frames = t.written();
+    let reply = frames.iter().find(|f| f["id"] == 7).unwrap();
+    let result = reply["result"].as_object().unwrap();
+    assert_eq!(
+        result.keys().collect::<Vec<_>>(),
+        [
+            "html_base64",
+            "hash",
+            "source",
+            "verified",
+            "trust",
+            "class",
+            "generation"
+        ],
+        "{reply}"
+    );
+    let html = base64::engine::general_purpose::STANDARD
+        .decode(result["html_base64"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(html, b"<h1>hello</h1>");
+    assert_eq!(
+        result["hash"],
+        "0xcb02a6622b097fd62f34606ee58fc466e99e5353c08c5341bf7e47b76072bcd7"
+    );
+    assert_eq!(result["source"], "direct");
+    assert_eq!(result["verified"], false);
+    assert_eq!(result["trust"]["level"], "unverified");
+    assert_eq!(result["trust"]["agreed"], json!([{ "ref": "a" }]));
+    assert_eq!(result["class"], "untrusted");
+    assert_eq!(result["generation"], 1);
+    // The message measured before it was written is the one written.
+    let empty = Done {
+        id: 1,
+        result: Ok(Success::Html {
+            html: String::new(),
+            hash: [0; 32],
+            source: "direct",
+            verified: false,
+            trust: None,
+            class: fc_chain::machine::HtmlClass::Trusted,
+        }),
+        outcome: None,
+        settled: 0,
+        generation: 1,
+    };
+    let message = reply_message(1, &empty);
+    assert_eq!(message.len(), message.write().len());
+    let written: Value = serde_json::from_slice(&message.write()).unwrap();
+    assert_eq!(written["result"]["html_base64"], "");
+    assert!(written["result"].get("trust").is_none());
+}
+
+#[test]
+fn an_html_document_that_isnt_served_is_todays_error() {
+    let mut t = test();
+    t.configure(json!([chain_snapshot(&["direct"], &["a"])]));
+    // One byte past the encoded bound, and no hex: the size is read first.
+    let over = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"result":"0x{}"}}"#,
+        "zz".repeat(8 * 1024 * 1024 + 96)
+    );
+    for (call, body, message, props) in [
+        (
+            7,
+            over,
+            "html() response exceeds Freedom's 8 MiB limit",
+            json!({ "code": "ONCHAIN_APP_TOO_LARGE" }),
+        ),
+        (
+            8,
+            r#"{"jsonrpc":"2.0","id":1,"result":12}"#.to_owned(),
+            "html() returned malformed ABI data",
+            json!({}),
+        ),
+    ] {
+        t.call(call, "chain.html", &html_params(CONTRACT));
+        let frames = t.written();
+        let id = requests(&frames)[0]["id"].as_u64().unwrap();
+        assert!(t.answer(id, rpc_answer(&body)).is_ok());
+        let frames = t.written();
+        let reply = frames.iter().find(|f| f["id"] == call).unwrap();
+        let error = &reply["error"];
+        assert_eq!(error["code"], "chain_error", "{reply}");
+        // A core error: only this one has the code main answers 413 for.
+        assert_eq!(error["data"]["kind"], "core");
+        assert_eq!(error["data"]["constructor"], "Error");
+        assert_eq!(error["data"]["message"], message);
+        assert_eq!(error["data"]["props"], props);
+        assert_eq!(error["data"]["generation"], 1);
+    }
+}

@@ -1,7 +1,8 @@
 //! The chain thread (design 0005): fc-chain's machine on its own thread, as
 //! the naming thread runs fc-naming's. The event loop forwards `chain.*`
-//! requests, cancels and main's responses to `shell.*` here; this thread
-//! writes its own replies, cancels and requests to the writer.
+//! requests (design 0006's `chain.html` among them), cancels and main's
+//! responses to `shell.*` here; this thread writes its own replies, cancels
+//! and requests to the writer.
 //!
 //! - **Admission and limits** are the machine's: 64 running and 256 waiting
 //!   requests, and the memory budgets.
@@ -61,6 +62,7 @@ pub const METHODS: &[&str] = &[
     "chain.request",
     "chain.fee_quote",
     "chain.broadcast",
+    "chain.html",
 ];
 
 pub fn handles(method: &str) -> bool {
@@ -559,7 +561,7 @@ impl Chain {
                 self.machine.availability(params.chain_id, params.ready);
                 self.result(id, b"{}".to_vec())
             }
-            "chain.request" | "chain.fee_quote" | "chain.broadcast" => {
+            "chain.request" | "chain.fee_quote" | "chain.broadcast" | "chain.html" => {
                 let Some((call, deadline_ms)) = call_params(method, params) else {
                     return self.error(id, invalid());
                 };
@@ -1966,6 +1968,21 @@ struct BroadcastParams {
     deadline_ms: u64,
 }
 
+/// `chain.html`'s params (design 0006, `chain.html`).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HtmlParams {
+    chain_id: u64,
+    /// The `web3:` URL's contract: `0x` and 40 hex digits, its EIP-55
+    /// checksum right when its letters are mixed, as `ethers.getAddress`
+    /// takes it.
+    contract: String,
+    /// The page's permission key: it makes the read interactive, stays in
+    /// memory and is never logged.
+    origin: String,
+    deadline_ms: u64,
+}
+
 /// A request's call and what is left of its caller's deadline; `None` when
 /// its params are invalid. `deadline_ms` is at most 120 s (design 0005,
 /// Methods main calls); main never sends more.
@@ -2016,6 +2033,20 @@ fn call_params(method: &str, params: &str) -> Option<(Call, Ms)> {
                 deadline_ms,
             ))
         }
+        "chain.html" => {
+            let p: HtmlParams = parse(params)?;
+            let deadline_ms = valid(p.chain_id, p.deadline_ms)?;
+            // The `to` today's handler sends: `ethers.getAddress`'s form.
+            let address = fc_evm::parse_address(&p.contract).ok()?;
+            Some((
+                Call::Html {
+                    chain_id: p.chain_id,
+                    contract: fc_evm::checksum_address(&address),
+                    origin: p.origin,
+                },
+                deadline_ms,
+            ))
+        }
         _ => None,
     }
 }
@@ -2024,7 +2055,8 @@ fn call_chain(call: &Call) -> u64 {
     match call {
         Call::Read { chain_id, .. }
         | Call::FeeQuote { chain_id }
-        | Call::Broadcast { chain_id, .. } => *chain_id,
+        | Call::Broadcast { chain_id, .. }
+        | Call::Html { chain_id, .. } => *chain_id,
     }
 }
 
@@ -2039,6 +2071,7 @@ fn label(call: &Call) -> &'static str {
             .unwrap_or("unsupported"),
         Call::FeeQuote { .. } => "fee_quote",
         Call::Broadcast { .. } => "broadcast",
+        Call::Html { .. } => "html",
     }
 }
 
@@ -2056,7 +2089,11 @@ const SOURCES: &[&str] = &[
 /// Errors and text): never an origin, an address or a message.
 fn log_outcome(caller: &Caller, done: &Done) {
     let source = match &done.result {
-        Ok(Success::Read { source, .. } | Success::Broadcast { source, .. }) => Some(*source),
+        Ok(
+            Success::Read { source, .. }
+            | Success::Broadcast { source, .. }
+            | Success::Html { source, .. },
+        ) => Some(*source),
         Ok(Success::FeeQuote(quote)) => {
             let named = match quote {
                 fc_chain::FeeQuote::Legacy { source, .. }
@@ -2188,6 +2225,8 @@ enum Part<'a> {
     Bytes(Cow<'a, [u8]>),
     /// A JavaScript string, written as `JSON.stringify` writes it.
     Js(&'a JsString),
+    /// Bytes as standard base64, written straight into the message.
+    Base64(&'a [u8]),
 }
 
 /// A message as the parts it is written from: its size is known before
@@ -2221,14 +2260,20 @@ impl<'a> Message<'a> {
         self
     }
 
+    fn base64(&mut self, bytes: &'a [u8]) -> &mut Self {
+        self.parts.push(Part::Base64(bytes));
+        self
+    }
+
     fn len(&self) -> usize {
         self.parts
             .iter()
             .map(|part| match part {
                 Part::Bytes(bytes) => bytes.len(),
                 Part::Js(text) => text.json_len(),
+                Part::Base64(bytes) => base64::encoded_len(bytes.len(), true).unwrap_or(usize::MAX),
             })
-            .sum()
+            .fold(0, usize::saturating_add)
     }
 
     fn write(&self) -> Zeroizing<Vec<u8>> {
@@ -2237,6 +2282,17 @@ impl<'a> Message<'a> {
             match part {
                 Part::Bytes(bytes) => out.extend_from_slice(bytes),
                 Part::Js(text) => out.extend_from_slice(text.to_json().as_bytes()),
+                Part::Base64(bytes) => {
+                    let start = out.len();
+                    out.resize(
+                        start + base64::encoded_len(bytes.len(), true).unwrap_or(0),
+                        0,
+                    );
+                    let written = base64::engine::general_purpose::STANDARD
+                        .encode_slice(bytes, &mut out[start..])
+                        .unwrap_or(0);
+                    out.truncate(start + written);
+                }
             }
         }
         out
@@ -2273,6 +2329,10 @@ fn tail(message: &mut Message<'_>, outcome: Option<BroadcastOutcome>, generation
 /// - `chain.fee_quote`: today's quote, keys in the router's order, then
 ///   `generation`.
 /// - `chain.broadcast`: `{ hash, source, outcome, generation }`.
+/// - `chain.html` (design 0006): `{ html_base64, hash, source, verified,
+///   trust?, class, generation }`: the document's UTF-8 as base64, its
+///   keccak-256 as `0x` and 64 hex digits, and the read's source, verified
+///   and trust (with endpoint references, as `chain.request`'s).
 /// - Today's thrown error: `chain_error`, whose `data` is `{ kind,
 ///   constructor, message, props, undefined_keys, outcome?, generation }`.
 ///   `kind` is `node` for a JSON-RPC error the core parsed out of an answer,
@@ -2343,6 +2403,34 @@ fn reply_message(id: u64, done: &Done) -> Message<'_> {
                 .string(outcome.as_str())
                 .owned(format!(r#","generation":{generation}}}}}"#));
         }
+        Ok(Success::Html {
+            html,
+            hash,
+            source,
+            verified,
+            trust,
+            class,
+        }) => {
+            message
+                .text(r#""result":{"html_base64":""#)
+                .base64(html.as_bytes())
+                .text(r#"","hash":"0x"#)
+                .owned(hex(hash))
+                .text(r#"","source":"#)
+                .string(source)
+                .text(if *verified {
+                    r#","verified":true"#
+                } else {
+                    r#","verified":false"#
+                });
+            if let Some(trust) = trust {
+                message.text(r#","trust":"#).text(trust);
+            }
+            message
+                .text(r#","class":"#)
+                .string(class.as_str())
+                .owned(format!(r#","generation":{generation}}}}}"#));
+        }
         Err(ChainError::Thrown(thrown)) => {
             message
                 .text(r#""error":{"code":"chain_error","message":"Chain request failed","data":{"kind":"#)
@@ -2399,6 +2487,17 @@ fn reply_message(id: u64, done: &Done) -> Message<'_> {
         }
     }
     message
+}
+
+/// Lowercase hex, as ethers writes a hash after its `0x`.
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        out.push(char::from(DIGITS[usize::from(byte & 0xf)]));
+    }
+    out
 }
 
 /// `too_large` in place of a reply that can't go out.
