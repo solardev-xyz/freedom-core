@@ -27,7 +27,7 @@ pub fn after_dial(backend: Backend, thrown: &Thrown<'_>) -> ErrorPlan {
         thrown.message
     };
     match backend {
-        Backend::Ant(_) => {
+        Backend::Ant { .. } => {
             let code = thrown
                 .cause_code
                 .filter(|c| !c.is_empty())
@@ -39,14 +39,12 @@ pub fn after_dial(backend: Backend, thrown: &Thrown<'_>) -> ErrorPlan {
                 ErrorPlan::new(502, "bee gateway error")
             }
         }
-        Backend::Ipfs(Ipfs::Gateway) if thrown.name != "AbortError" => {
+        Backend::Ipfs {
+            mode: Ipfs::Gateway,
+            ..
+        } if thrown.name != "AbortError" => {
             ErrorPlan::new(502, "external IPFS gateway request failed")
         }
-        Backend::Ipfs(_) => ErrorPlan::new(502, message),
+        Backend::Ipfs { .. } => ErrorPlan::new(502, message),
     }
 }
-
-/// The external gateway's text when it isn't running. A `{ ipfs:
-/// "absent" }` plan carries the native node's text, which today's
-/// external mode doesn't use.
-pub const GATEWAY_NOT_RUNNING: &str = "external IPFS gateway is not running";

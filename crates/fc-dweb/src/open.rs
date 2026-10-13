@@ -115,25 +115,38 @@ pub(crate) fn fetch_plan(
     small_text: bool,
     name_trust: Option<String>,
 ) -> Plan {
-    if backend.is_absent() {
-        return Plan::Error(absent(scheme));
+    if !backend.up() {
+        return Plan::Error(not_running(backend));
     }
     let node = match scheme {
         Scheme::Bzz => Node::Ant,
         Scheme::Ipfs | Scheme::Ipns => Node::Ipfs,
     };
     let mut response = match backend {
-        Backend::Ant(_) => vec![ResponseOp::CanonicalizeRedirect, ResponseOp::StripPageState],
-        Backend::Ipfs(Ipfs::Gateway) => vec![
+        Backend::Ant { .. } => vec![ResponseOp::CanonicalizeRedirect, ResponseOp::StripPageState],
+        Backend::Ipfs {
+            mode: Ipfs::Gateway,
+            ..
+        } => vec![
             ResponseOp::StripDecodedEncoding,
             ResponseOp::StripPageState,
             ResponseOp::CanonicalizeRedirect,
         ],
-        Backend::Ipfs(_) => vec![ResponseOp::StripPageState],
+        Backend::Ipfs {
+            mode: Ipfs::Native, ..
+        } => vec![ResponseOp::StripPageState],
     };
     // The gateway's length is stripped before this rule could read it,
     // so it never fires there.
-    if small_text && backend == Backend::Ipfs(Ipfs::Native) {
+    if small_text
+        && matches!(
+            backend,
+            Backend::Ipfs {
+                mode: Ipfs::Native,
+                ..
+            }
+        )
+    {
         response.push(ResponseOp::SmallText);
     }
     Plan::Fetch(Fetch {
@@ -150,10 +163,27 @@ pub(crate) fn fetch_plan(
     })
 }
 
-/// The node isn't there: `bzz:` says so before resolving, IPFS at dispatch.
-pub(crate) fn absent(scheme: Scheme) -> ErrorPlan {
-    match scheme {
-        Scheme::Bzz => ErrorPlan::new(503, "Swarm node is not ready"),
-        Scheme::Ipfs | Scheme::Ipns => ErrorPlan::new(503, "freedom-ipfs node is not running"),
-    }
+/// `getAntApiUrl()` is null: either Ant mode.
+pub const ANT_NOT_READY: &str = "Swarm node is not ready";
+/// `serveNativeGatewayRequest` with the native node stopped.
+pub const NATIVE_NOT_RUNNING: &str = "freedom-ipfs node is not running";
+/// `serveExternalGatewayRequest` with the external gateway stopped.
+pub const GATEWAY_NOT_RUNNING: &str = "external IPFS gateway is not running";
+
+/// The backend isn't up: `bzz:` says so before resolving, IPFS at dispatch,
+/// each mode with its own text.
+pub(crate) fn not_running(backend: Backend) -> ErrorPlan {
+    ErrorPlan::new(
+        503,
+        match backend {
+            Backend::Ant { .. } => ANT_NOT_READY,
+            Backend::Ipfs {
+                mode: Ipfs::Native, ..
+            } => NATIVE_NOT_RUNNING,
+            Backend::Ipfs {
+                mode: Ipfs::Gateway,
+                ..
+            } => GATEWAY_NOT_RUNNING,
+        },
+    )
 }

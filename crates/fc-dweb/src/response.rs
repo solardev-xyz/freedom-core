@@ -5,7 +5,7 @@
 
 use crate::headers::Headers;
 use crate::js;
-use crate::plan::{Backend, Fetch, Ipfs, Node, ResponseOp};
+use crate::plan::{Backend, Fetch, Node, ResponseOp};
 use crate::url;
 
 /// A response's status and headers.
@@ -261,9 +261,7 @@ pub fn respond(
     body_present: bool,
 ) -> Responded {
     let mut ops = Vec::new();
-    if backend == Backend::Ipfs(Ipfs::Gateway)
-        && !fetch.response.contains(&ResponseOp::StripDecodedEncoding)
-    {
+    if backend.is_gateway() && !fetch.response.contains(&ResponseOp::StripDecodedEncoding) {
         ops.push(ResponseOp::StripDecodedEncoding);
     }
     if !fetch.response.contains(&ResponseOp::StripPageState) {

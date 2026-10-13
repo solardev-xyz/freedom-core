@@ -59,7 +59,10 @@ pub use names::{
     Resolved, Resolver, Unplannable, is_dweb_name_host, is_ens_host, is_potential_ens_name,
     is_tezos_domain_host, join_published_path, name_system_label_for_host,
 };
-pub use open::{OpenError, Opening, Pending, Request, open};
+pub use open::{
+    ANT_NOT_READY, GATEWAY_NOT_RUNNING, NATIVE_NOT_RUNNING, OpenError, Opening, Pending, Request,
+    open,
+};
 pub use plan::{
     Ant, BODY_IDLE_MS, BZZ_HEADERS_MS, BZZ_RETRY_DELAYS_MS, BZZ_RETRY_STATUSES, Backend,
     ContentTrust, ErrorPlan, Fetch, Ipfs, NATIVE_HEADERS_MS, NATIVE_QUEUE_MS, Node, Plan, Redirect,

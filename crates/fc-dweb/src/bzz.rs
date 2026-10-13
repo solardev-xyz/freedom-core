@@ -4,7 +4,7 @@
 
 use crate::headers::Headers;
 use crate::names::{has_empty_label, is_dweb_name_host, is_potential_ens_name};
-use crate::open::{Opening, Pending, Request, absent, fetch_plan};
+use crate::open::{Opening, Pending, Request, fetch_plan, not_running};
 use crate::plan::{ErrorPlan, Plan, Scheme};
 use crate::{js, url};
 
@@ -68,10 +68,10 @@ pub(crate) fn open(request: &Request<'_>, headers: &Headers) -> Opening {
     }
     let host = url::hostname(&parsed);
     let search = url::search(&parsed);
-    let absent_ant = request.backend.is_absent();
+    let ant_down = !request.backend.up();
     if is_reference(host) {
-        if absent_ant {
-            return Opening::Plan(Plan::Error(absent(Scheme::Bzz)));
+        if ant_down {
+            return Opening::Plan(Plan::Error(not_running(request.backend)));
         }
         return Opening::Plan(fetch_plan(
             Scheme::Bzz,
@@ -83,8 +83,8 @@ pub(crate) fn open(request: &Request<'_>, headers: &Headers) -> Opening {
         ));
     }
     if (is_dweb_name_host(host) || is_potential_ens_name(host)) && !has_empty_label(host) {
-        if absent_ant {
-            return Opening::Plan(Plan::Error(absent(Scheme::Bzz)));
+        if ant_down {
+            return Opening::Plan(Plan::Error(not_running(request.backend)));
         }
         return Opening::Resolve(Pending {
             scheme: Scheme::Bzz,

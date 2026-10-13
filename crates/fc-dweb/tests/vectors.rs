@@ -58,15 +58,27 @@ fn js_value(value: &Json) -> JsValue {
     fc_json::parse(&value.to_string()).unwrap()
 }
 
+/// `{ ant | ipfs: mode, up }`, read as `dweb.open` reads it, and written
+/// back the same.
 fn backend(request: &Json) -> Backend {
-    let (node, value) = request["backend"]
-        .as_object()
-        .unwrap()
-        .iter()
-        .next()
-        .unwrap();
-    Backend::from_names(node, value.as_str().unwrap()).unwrap()
+    let value = js_value(&request["backend"]);
+    let backend = Backend::from_value(&value).unwrap_or_else(|| panic!("{request}"));
+    assert_eq!(backend.to_value(), value);
+    backend
 }
+
+const BUNDLED: Backend = Backend::Ant {
+    mode: fc_dweb::Ant::Bundled,
+    up: true,
+};
+const NATIVE: Backend = Backend::Ipfs {
+    mode: fc_dweb::Ipfs::Native,
+    up: true,
+};
+const GATEWAY: Backend = Backend::Ipfs {
+    mode: fc_dweb::Ipfs::Gateway,
+    up: true,
+};
 
 fn plan_json(plan: &Plan) -> Json {
     serde_json::from_str(&plan.to_json()).unwrap()
@@ -141,9 +153,9 @@ fn constants() {
         plan_json(&fetch)["fetch"].clone()
     };
     for (backend, expected) in [
-        (Backend::Ant(fc_dweb::Ant::Bundled), &c["bzz"]),
-        (Backend::Ipfs(fc_dweb::Ipfs::Native), &c["ipfs"]["native"]),
-        (Backend::Ipfs(fc_dweb::Ipfs::Gateway), &c["ipfs"]["gateway"]),
+        (BUNDLED, &c["bzz"]),
+        (NATIVE, &c["ipfs"]["native"]),
+        (GATEWAY, &c["ipfs"]["gateway"]),
     ] {
         let ours = table(backend);
         assert_eq!(ours["retry"], expected["retry"], "{backend:?}");
@@ -193,17 +205,18 @@ fn constants() {
         c["design"]["body_idle_ms"].as_u64(),
         Some(u64::from(fc_dweb::BODY_IDLE_MS))
     );
-    // An absent node: the native node's text, as at today's dispatch.
-    let absent = &c["ipfs"]["absent"];
-    assert_eq!(
-        s(&absent["native"], "body"),
-        fc_dweb::ErrorPlan {
+    // A node that isn't running: each mode's text, as the manager gives it.
+    let not_running = &c["ipfs"]["not_running"];
+    for (mode, text) in [
+        ("native", fc_dweb::NATIVE_NOT_RUNNING),
+        ("gateway", fc_dweb::GATEWAY_NOT_RUNNING),
+    ] {
+        let error = fc_dweb::ErrorPlan {
             status: 503,
-            message: "freedom-ipfs node is not running".into()
-        }
-        .body()
-    );
-    assert!(s(&absent["gateway"], "body").contains(failure::GATEWAY_NOT_RUNNING));
+            message: text.into(),
+        };
+        assert_eq!(s(&not_running[mode], "body"), error.body(), "{mode}");
+    }
 }
 
 #[test]
@@ -404,12 +417,7 @@ fn exchanges() {
         if let Some(expected) = js["reads_before_response"].as_u64() {
             assert_eq!(reads as u64, expected, "{}", id(entry));
         } else {
-            assert_eq!(
-                backend,
-                Backend::Ipfs(fc_dweb::Ipfs::Gateway),
-                "{}",
-                id(entry)
-            );
+            assert_eq!(backend, GATEWAY, "{}", id(entry));
         }
     }
     assert_eq!(deviations, 2);
@@ -515,11 +523,7 @@ fn failures() {
             code: f["code"].as_str(),
             cause_code: f["cause_code"].as_str(),
         };
-        for (key, backend) in [
-            ("ant", Backend::Ant(fc_dweb::Ant::Bundled)),
-            ("native", Backend::Ipfs(fc_dweb::Ipfs::Native)),
-            ("gateway", Backend::Ipfs(fc_dweb::Ipfs::Gateway)),
-        ] {
+        for (key, backend) in [("ant", BUNDLED), ("native", NATIVE), ("gateway", GATEWAY)] {
             let error = failure::after_dial(backend, &thrown);
             let js = &entry["js"][key];
             assert_eq!(

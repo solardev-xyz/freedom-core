@@ -9,7 +9,7 @@ use fc_json::JsValue;
 use crate::bzz::{FORWARDED_REQUEST_HEADERS, SWARM_HEADERS, has_encoded_separator, is_reference};
 use crate::ipfs::{GatewayForm, REDIRECT_HEADERS, STRIPPED_REQUEST_HEADERS, gateway_form};
 use crate::plan::{
-    Ant, BODY_IDLE_MS, BZZ_HEADERS_MS, BZZ_RETRY_DELAYS_MS, BZZ_RETRY_STATUSES, Backend, Ipfs,
+    BODY_IDLE_MS, BZZ_HEADERS_MS, BZZ_RETRY_DELAYS_MS, BZZ_RETRY_STATUSES, Backend, Ipfs,
     NATIVE_QUEUE_MS, ResponseOp, Scheme, content_trust,
 };
 use crate::{js, url};
@@ -39,7 +39,8 @@ pub enum Refusal {
     /// A fetch for a method other than GET or HEAD.
     #[error("method")]
     Method,
-    /// `node` doesn't name the backend main admitted for the scheme.
+    /// `node` doesn't name the backend main admitted for the scheme, or
+    /// that backend isn't up.
     #[error("node")]
     Node,
     /// The target leaves the node's namespace, isn't normalized, or (Ant)
@@ -161,18 +162,17 @@ fn fetch(body: &JsValue, request: &PlanRequest<'_>, scheme: Option<Scheme>) -> R
     }
     let backend = request.backend;
     let node = field(body, "node")?.as_str();
-    let node_ok = matches!(
-        (node, scheme, backend),
-        (
-            Some("ant"),
-            Some(Scheme::Bzz),
-            Backend::Ant(Ant::Bundled | Ant::External)
-        ) | (
-            Some("ipfs"),
-            Some(Scheme::Ipfs | Scheme::Ipns),
-            Backend::Ipfs(Ipfs::Native | Ipfs::Gateway)
-        )
-    );
+    // The node must be the backend main admitted, and up.
+    let node_ok = backend.up()
+        && matches!(
+            (node, scheme, backend),
+            (Some("ant"), Some(Scheme::Bzz), Backend::Ant { .. })
+                | (
+                    Some("ipfs"),
+                    Some(Scheme::Ipfs | Scheme::Ipns),
+                    Backend::Ipfs { .. }
+                )
+        );
     let Some(scheme) = scheme.filter(|_| node_ok) else {
         return Err(Refusal::Node);
     };
@@ -306,7 +306,8 @@ fn check_retry(retry: &JsValue, backend: Backend) -> Result<(), Refusal> {
         return bad;
     }
     // IPFS has no retry today.
-    if matches!(backend, Backend::Ipfs(_)) && (attempts != 1.0 || !statuses.is_empty() || *on_error)
+    if matches!(backend, Backend::Ipfs { .. })
+        && (attempts != 1.0 || !statuses.is_empty() || *on_error)
     {
         return bad;
     }
@@ -319,7 +320,7 @@ fn check_timers(timers: &JsValue, backend: Backend) -> Result<(), Refusal> {
         Some(value) => integer_in(value, 1.0, f64::from(max)).is_some(),
         None => false,
     };
-    let gateway = backend == Backend::Ipfs(Ipfs::Gateway);
+    let gateway = backend.is_gateway();
     if bounded("queue_ms", NATIVE_QUEUE_MS, true)
         && bounded("headers_ms", BZZ_HEADERS_MS, gateway)
         && bounded("body_idle_ms", BODY_IDLE_MS, false)
@@ -333,9 +334,14 @@ fn check_timers(timers: &JsValue, backend: Backend) -> Result<(), Refusal> {
 /// The operations each backend allows.
 fn allowed_ops(backend: Backend) -> &'static [ResponseOp] {
     match backend {
-        Backend::Ant(_) => &[ResponseOp::CanonicalizeRedirect, ResponseOp::StripPageState],
-        Backend::Ipfs(Ipfs::Gateway) => &ResponseOp::ALL,
-        Backend::Ipfs(_) => &[ResponseOp::StripPageState, ResponseOp::SmallText],
+        Backend::Ant { .. } => &[ResponseOp::CanonicalizeRedirect, ResponseOp::StripPageState],
+        Backend::Ipfs {
+            mode: Ipfs::Gateway,
+            ..
+        } => &ResponseOp::ALL,
+        Backend::Ipfs {
+            mode: Ipfs::Native, ..
+        } => &[ResponseOp::StripPageState, ResponseOp::SmallText],
     }
 }
 

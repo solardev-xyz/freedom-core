@@ -35,7 +35,15 @@ impl Scheme {
 pub enum Ant {
     Bundled,
     External,
-    Absent,
+}
+
+impl Ant {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bundled => "bundled",
+            Self::External => "external",
+        }
+    }
 }
 
 /// The IPFS node main will use for an `ipfs:` or `ipns:` request.
@@ -43,39 +51,100 @@ pub enum Ant {
 pub enum Ipfs {
     Native,
     Gateway,
-    Absent,
 }
 
-/// The backend main names in `dweb.open`, as a reference with no URL.
+impl Ipfs {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Gateway => "gateway",
+        }
+    }
+}
+
+/// The backend main names in `dweb.open`, as a reference with no URL: its
+/// mode, and whether it is up. A backend that isn't up keeps its mode, so
+/// the answer names what isn't running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
-    Ant(Ant),
-    Ipfs(Ipfs),
+    Ant { mode: Ant, up: bool },
+    Ipfs { mode: Ipfs, up: bool },
 }
 
 impl Backend {
-    /// `{ ant: "bundled" }` and the like, as `dweb.open` carries it.
-    pub fn from_names(node: &str, value: &str) -> Option<Self> {
-        Some(match (node, value) {
-            ("ant", "bundled") => Self::Ant(Ant::Bundled),
-            ("ant", "external") => Self::Ant(Ant::External),
-            ("ant", "absent") => Self::Ant(Ant::Absent),
-            ("ipfs", "native") => Self::Ipfs(Ipfs::Native),
-            ("ipfs", "gateway") => Self::Ipfs(Ipfs::Gateway),
-            ("ipfs", "absent") => Self::Ipfs(Ipfs::Absent),
+    /// `{ ant: "bundled" | "external", up }` or `{ ipfs: "native" |
+    /// "gateway", up }`, as `dweb.open` carries it: exactly those two keys.
+    pub fn from_value(value: &JsValue) -> Option<Self> {
+        let JsValue::Object(props) = value else {
+            return None;
+        };
+        let up = match value.get("up") {
+            Some(JsValue::Bool(up)) => *up,
             _ => return None,
-        })
+        };
+        if props.len() != 2 {
+            return None;
+        }
+        if let Some(mode) = value.get("ant") {
+            return match mode.as_str()? {
+                "bundled" => Some(Self::Ant {
+                    mode: Ant::Bundled,
+                    up,
+                }),
+                "external" => Some(Self::Ant {
+                    mode: Ant::External,
+                    up,
+                }),
+                _ => None,
+            };
+        }
+        match value.get("ipfs")?.as_str()? {
+            "native" => Some(Self::Ipfs {
+                mode: Ipfs::Native,
+                up,
+            }),
+            "gateway" => Some(Self::Ipfs {
+                mode: Ipfs::Gateway,
+                up,
+            }),
+            _ => None,
+        }
+    }
+
+    /// The backend as `dweb.open` carries it.
+    pub fn to_value(self) -> JsValue {
+        let (node, mode, up) = match self {
+            Self::Ant { mode, up } => ("ant", mode.as_str(), up),
+            Self::Ipfs { mode, up } => ("ipfs", mode.as_str(), up),
+        };
+        object(vec![
+            (node, JsValue::String(mode.to_owned())),
+            ("up", JsValue::Bool(up)),
+        ])
+    }
+
+    /// Whether main can dial it now.
+    pub fn up(self) -> bool {
+        match self {
+            Self::Ant { up, .. } | Self::Ipfs { up, .. } => up,
+        }
     }
 
     pub(crate) fn serves(self, scheme: Scheme) -> bool {
         matches!(
             (self, scheme),
-            (Self::Ant(_), Scheme::Bzz) | (Self::Ipfs(_), Scheme::Ipfs | Scheme::Ipns)
+            (Self::Ant { .. }, Scheme::Bzz) | (Self::Ipfs { .. }, Scheme::Ipfs | Scheme::Ipns)
         )
     }
 
-    pub(crate) fn is_absent(self) -> bool {
-        matches!(self, Self::Ant(Ant::Absent) | Self::Ipfs(Ipfs::Absent))
+    pub(crate) fn is_gateway(self) -> bool {
+        matches!(
+            self,
+            Self::Ipfs {
+                mode: Ipfs::Gateway,
+                ..
+            }
+        )
     }
 }
 
@@ -365,13 +434,13 @@ pub const BODY_IDLE_MS: u32 = 60_000;
 /// The retry table: `bzz:` retries, IPFS doesn't.
 pub fn retry(backend: Backend) -> Retry {
     match backend {
-        Backend::Ant(_) => Retry {
+        Backend::Ant { .. } => Retry {
             statuses: BZZ_RETRY_STATUSES.to_vec(),
             on_error: true,
             attempts: 1 + BZZ_RETRY_DELAYS_MS.len() as u32,
             delays_ms: BZZ_RETRY_DELAYS_MS.to_vec(),
         },
-        Backend::Ipfs(_) => Retry {
+        Backend::Ipfs { .. } => Retry {
             statuses: Vec::new(),
             on_error: false,
             attempts: 1,
@@ -384,17 +453,22 @@ pub fn retry(backend: Backend) -> Retry {
 /// only the page's abort.
 pub fn timers(backend: Backend) -> Timers {
     match backend {
-        Backend::Ant(_) => Timers {
+        Backend::Ant { .. } => Timers {
             queue_ms: None,
             headers_ms: Some(BZZ_HEADERS_MS),
             body_idle_ms: BODY_IDLE_MS,
         },
-        Backend::Ipfs(Ipfs::Native | Ipfs::Absent) => Timers {
+        Backend::Ipfs {
+            mode: Ipfs::Native, ..
+        } => Timers {
             queue_ms: Some(NATIVE_QUEUE_MS),
             headers_ms: Some(NATIVE_HEADERS_MS),
             body_idle_ms: BODY_IDLE_MS,
         },
-        Backend::Ipfs(Ipfs::Gateway) => Timers {
+        Backend::Ipfs {
+            mode: Ipfs::Gateway,
+            ..
+        } => Timers {
             queue_ms: None,
             headers_ms: None,
             body_idle_ms: BODY_IDLE_MS,
@@ -405,7 +479,57 @@ pub fn timers(backend: Backend) -> Timers {
 /// The content label for a backend.
 pub fn content_trust(backend: Backend) -> ContentTrust {
     match backend {
-        Backend::Ant(Ant::External) | Backend::Ipfs(Ipfs::Gateway) => ContentTrust::Unverified,
-        _ => ContentTrust::NodeAsserted,
+        Backend::Ant {
+            mode: Ant::External,
+            ..
+        }
+        | Backend::Ipfs {
+            mode: Ipfs::Gateway,
+            ..
+        } => ContentTrust::Unverified,
+        Backend::Ant {
+            mode: Ant::Bundled, ..
+        }
+        | Backend::Ipfs {
+            mode: Ipfs::Native, ..
+        } => ContentTrust::NodeAsserted,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn backend(text: &str) -> Option<Backend> {
+        Backend::from_value(&fc_json::parse(text).ok()?)
+    }
+
+    #[test]
+    fn backends_read_strictly() {
+        assert_eq!(
+            backend(r#"{"ipfs":"gateway","up":false}"#),
+            Some(Backend::Ipfs {
+                mode: Ipfs::Gateway,
+                up: false
+            })
+        );
+        assert_eq!(
+            backend(r#"{"up":true,"ant":"external"}"#),
+            Some(Backend::Ant {
+                mode: Ant::External,
+                up: true
+            })
+        );
+        for text in [
+            r#"{"ant":"absent","up":false}"#,
+            r#"{"ant":"bundled"}"#,
+            r#"{"ant":"bundled","up":"true"}"#,
+            r#"{"ant":"bundled","up":true,"ipfs":"native"}"#,
+            r#"{"ipfs":"Native","up":true}"#,
+            r#"{"node":"ant","up":true}"#,
+            r#"["ant","bundled"]"#,
+        ] {
+            assert_eq!(backend(text), None, "{text}");
+        }
     }
 }

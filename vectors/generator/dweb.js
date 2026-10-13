@@ -460,10 +460,12 @@ function bzzCases() {
   cases.push({ id: 'headers-none', url: `bzz://${h}/x`, headers: [] });
   // Backends.
   cases.push({ id: 'external', url: `bzz://${h}/x`, backend: 'external' });
-  for (const [id, url, method] of [['absent-hash', `bzz://${h}/x`], ['absent-name', 'bzz://site.eth/x'],
-    ['absent-post', `bzz://${h}/x`, 'POST'], ['absent-encoded-slash', `bzz://${h}/a%2Fb`], ['absent-invalid', 'bzz://example/'],
-    ['absent-empty-label', 'bzz://a..eth/']]) {
-    cases.push({ id, url, method, backend: 'absent' });
+  // Ant down: the method, path and host checks first, then 503 before any name.
+  for (const [id, url, method, backend] of [['down-hash', `bzz://${h}/x`], ['down-name', 'bzz://site.eth/x'],
+    ['down-post', `bzz://${h}/x`, 'POST'], ['down-encoded-slash', `bzz://${h}/a%2Fb`], ['down-invalid', 'bzz://example/'],
+    ['down-empty-label', 'bzz://a..eth/'], ['down-external-hash', `bzz://${h}/x`, 'GET', 'external'],
+    ['down-external-name', 'bzz://site.eth/x', 'GET', 'external']]) {
+    cases.push({ id, url, method, backend, up: false });
   }
   // Name hosts, with the resolver's answers.
   const named = (id, url, resolution, extra = {}) => cases.push({ id, url, resolution, ...extra });
@@ -610,8 +612,9 @@ function ipfsCases() {
     ['from-ipns-scheme', `ipns://localhost/ipfs/${v1}/x`],
   ]) add(id.startsWith('from-ipns') ? 'ipns' : 'ipfs', `gateway-${id}`, url, resolution ? { resolution } : {});
   add('ipfs', 'gateway-post', `ipfs://localhost/ipfs/${v1}/`, { method: 'POST' });
-  add('ipfs', 'gateway-absent', `ipfs://localhost/ipfs/${v1}/`, { backend: 'absent' });
-  add('ipfs', 'gateway-refused-absent', `ipfs://localhost/ipfs/${CIDV0.toLowerCase()}/`, { backend: 'absent' });
+  add('ipfs', 'gateway-form-node-down', `ipfs://localhost/ipfs/${v1}/`, { up: false });
+  add('ipfs', 'gateway-form-external-down', `ipfs://localhost/ipfs/${v1}/`, { backend: 'gateway', up: false });
+  add('ipfs', 'gateway-form-refused-node-down', `ipfs://localhost/ipfs/${CIDV0.toLowerCase()}/`, { up: false });
   // Methods.
   for (const [id, method] of [['head', 'HEAD'], ['get-lowercase', 'get'], ['empty', ''], ['post', 'POST'], ['patch', 'PATCH']]) {
     add('ipfs', `method-${id}`, `ipfs://${v1}/`, { method });
@@ -639,10 +642,17 @@ function ipfsCases() {
   // Backends.
   add('ipfs', 'gateway', `ipfs://${v1}/x`, { backend: 'gateway' });
   add('ipns', 'gateway-ipns', `ipns://${key36}/x`, { backend: 'gateway' });
-  add('ipfs', 'absent', `ipfs://${v1}/x`, { backend: 'absent' });
-  add('ipfs', 'absent-invalid', 'ipfs://abc/', { backend: 'absent' });
-  add('ipfs', 'absent-lowercased', `ipfs://${CIDV0.toLowerCase()}/`, { backend: 'absent' });
-  add('ipfs', 'absent-post', `ipfs://${v1}/`, { backend: 'absent', method: 'POST' });
+  // Down: canonicalization and the name's result first; only a plan bound
+  // for the node becomes the 503, with its mode's text.
+  add('ipfs', 'node-down', `ipfs://${v1}/x`, { up: false });
+  add('ipns', 'node-down-ipns', `ipns://${key36}/x`, { up: false });
+  add('ipfs', 'node-down-invalid', 'ipfs://abc/', { up: false });
+  add('ipfs', 'node-down-lowercased', `ipfs://${CIDV0.toLowerCase()}/`, { up: false });
+  add('ipfs', 'node-down-post', `ipfs://${v1}/`, { up: false, method: 'POST' });
+  add('ipfs', 'external-down', `ipfs://${v1}/x`, { backend: 'gateway', up: false });
+  add('ipns', 'external-down-ipns', `ipns://docs.ipfs.tech/x`, { backend: 'gateway', up: false });
+  add('ipfs', 'external-down-invalid', 'ipfs://abc/', { backend: 'gateway', up: false });
+  add('ipfs', 'external-down-post', `ipfs://${v1}/`, { backend: 'gateway', up: false, method: 'POST' });
   // Name hosts.
   add('ipfs', 'name-ok', 'ipfs://site.eth/a?b', { resolution: okIpfs() });
   add('ipfs', 'name-ok-trust', 'ipfs://site.eth/a', { resolution: okIpfs({ trust: { level: 'unverified' } }) });
@@ -670,7 +680,8 @@ function ipfsCases() {
   add('ipns', 'name-empty-label-ipns', 'ipns://a..eth/');
   for (const [id, resolution] of [['ok', okIpfs()], ['not-found', { value: { type: 'not_found' } }], ['unsupported', { value: { type: 'unsupported' } }],
     ['mismatch', okBzz()], ['threw', { threw: 'x' }]]) {
-    add('ipfs', `name-absent-${id}`, 'ipfs://site.eth/', { resolution, backend: 'absent' });
+    add('ipfs', `name-node-down-${id}`, 'ipfs://site.eth/', { resolution, up: false });
+    add('ipfs', `name-external-down-${id}`, 'ipfs://site.eth/', { resolution, backend: 'gateway', up: false });
   }
   add('ipfs', 'name-gateway', 'ipfs://site.eth/', { resolution: okIpfs(), backend: 'gateway' });
   return cases;
@@ -678,13 +689,16 @@ function ipfsCases() {
 
 const BACKENDS = { bzz: 'bundled', ipfs: 'native', ipns: 'native' };
 
+/** The backend's mode: `{ ant: mode, up }` or `{ ipfs: mode, up }`. */
+const modeOf = (request) => request.backend.ant ?? request.backend.ipfs;
+
 function requestOf(c) {
   const node = c.scheme === 'bzz' ? 'ant' : 'ipfs';
   return {
     url: c.url,
     method: c.method ?? 'GET',
     headers: c.headers ?? [['Accept', '*/*'], ['User-Agent', 'Freedom']],
-    backend: { [node]: c.backend ?? BACKENDS[c.scheme] },
+    backend: { [node]: c.backend ?? BACKENDS[c.scheme], up: c.up ?? true },
   };
 }
 
@@ -692,7 +706,8 @@ function requestOf(c) {
 async function runRequest(ref, c, upstream = { status: 200, headers: [], chunks: [] }) {
   const { world, bzz, ipfs, manager, mode } = ref;
   const request = requestOf(c);
-  const backend = Object.values(request.backend)[0];
+  const backend = modeOf(request);
+  const { up } = request.backend;
   world.calls = [];
   world.fetches = [];
   world.unscripted = null;
@@ -702,7 +717,8 @@ async function runRequest(ref, c, upstream = { status: 200, headers: [], chunks:
   const jsRequest = { url: request.url, method: request.method, headers: new Headers(request.headers), signal: new AbortController().signal };
   let response;
   if (c.scheme === 'bzz') {
-    world.antApiUrl = backend === 'absent' ? null : ANT_API_URL;
+    // Either mode: main has no Ant API URL while Ant isn't up.
+    world.antApiUrl = up ? ANT_API_URL : null;
     response = await bzz.handleBzzRequest(jsRequest, {
       fetchImpl: async (url, init) => {
         world.fetches.push({ url, method: init.method, headers: [...init.headers], redirect: init.redirect });
@@ -711,14 +727,15 @@ async function runRequest(ref, c, upstream = { status: 200, headers: [], chunks:
     });
   } else {
     let requestImpl;
-    if (backend === 'native') {
+    if (backend === 'native' && up) {
       requestImpl = async ({ path, method, headers }) => {
         world.fetches.push({ path, method, headers: [...headers] });
         return reply();
       };
     } else {
-      // The external gateway and the absent node go through the real manager.
-      manager.__setState(backend === 'gateway' ? mode.EXTERNAL : mode.BUNDLED, backend === 'gateway' ? 'running' : 'stopped', GATEWAY_URL);
+      // The external gateway, and either mode when it isn't up, go through
+      // the real manager.
+      manager.__setState(backend === 'gateway' ? mode.EXTERNAL : mode.BUNDLED, up ? 'running' : 'stopped', GATEWAY_URL);
       world.gatewayFetch = async (url, init) => {
         world.fetches.push({ url, method: init.method, headers: [...init.headers], redirect: init.redirect });
         return reply();
@@ -795,7 +812,7 @@ function tables(ref) {
 }
 
 function planOf(c, request, js, run, ref, table) {
-  const backend = Object.values(request.backend)[0];
+  const backend = modeOf(request);
   if (js.fetch) {
     const node = c.scheme === 'bzz' ? 'ant' : 'ipfs';
     const kind = node === 'ant' ? 'bzz' : backend;
@@ -964,7 +981,7 @@ async function buildExchanges(ref) {
     // The external gateway's counting stream reads one chunk ahead (a
     // ReadableStream's default high-water mark), so reads before the
     // response say something only where the body passes straight through.
-    const gateway = Object.values(run.request.backend)[0] === 'gateway';
+    const gateway = modeOf(run.request) === 'gateway';
     if (gateway) assert.ok(run.readsAtResponse <= 1, c.id);
     const reads = gateway ? null : run.readsAtResponse;
     const response = await describeResponse(run.response);
@@ -1142,14 +1159,14 @@ async function buildFailures(ref) {
       },
     });
   }
-  // The node isn't there: what the manager answers at dispatch.
-  const absent = {};
+  // The node isn't running: what the manager answers at dispatch, by mode.
+  const notRunning = {};
   for (const [id, m] of [['native', mode.BUNDLED], ['gateway', mode.EXTERNAL]]) {
     manager.__setState(m, 'stopped', GATEWAY_URL);
     const response = await manager.serveNativeGatewayRequest({ path: '/ipfs/x', method: 'GET', headers: new Headers() });
-    absent[id] = { status: response.status, body: await response.text() };
+    notRunning[id] = { status: response.status, body: await response.text() };
   }
-  return { failures: out, absent };
+  return { failures: out, notRunning };
 }
 
 // ---------------------------------------------------------------------------
@@ -1374,8 +1391,11 @@ function validationCases(requests) {
   mutate('method-empty', base, () => {}, 'valid', withRequest(base, (r) => { r.method = ''; }));
   mutate('node-ipfs-for-ant', base, (p) => { f(p).node = 'ipfs'; }, 'node');
   mutate('node-unknown', base, (p) => { f(p).node = 'http://127.0.0.1:1633'; }, 'node');
-  mutate('node-absent', base, () => {}, 'node', withRequest(base, (r) => { r.backend = { ant: 'absent' }; }));
-  mutate('node-scheme-mismatch', base, () => {}, 'node', withRequest(base, (r) => { r.backend = { ipfs: 'native' }; }));
+  mutate('node-down', base, () => {}, 'node', withRequest(base, (r) => { r.backend.up = false; }));
+  mutate('node-external', base, (p) => { f(p).trust.content = 'unverified'; }, 'valid', withRequest(base, (r) => { r.backend.ant = 'external'; }));
+  mutate('node-external-down', base, () => {}, 'node', withRequest(base, (r) => { r.backend = { ant: 'external', up: false }; }));
+  mutate('node-gateway-down', gatewayBase, () => {}, 'node', withRequest(gatewayBase, (r) => { r.backend.up = false; }));
+  mutate('node-scheme-mismatch', base, () => {}, 'node', withRequest(base, (r) => { r.backend = { ipfs: 'native', up: true }; }));
   mutate('node-ant-for-ipfs', ipfsBase, (p) => { f(p).node = 'ant'; }, 'node');
   // Paths.
   const h = SWARM_REF;
@@ -1494,7 +1514,8 @@ function validationCases(requests) {
   mutate('redirect-header-value', redirect, (p) => { p.redirect.headers[0][1] = 'https://evil.example'; }, 'redirect');
   mutate('redirect-not-gateway-form', redirect, () => {}, 'redirect', withRequest(redirect, (r) => { r.url = `ipfs://${v1}/a/b?q=1`; }));
   mutate('redirect-for-bzz', redirect, () => {}, 'redirect', withRequest(base, () => {}));
-  mutate('redirect-absent', redirect, () => {}, 'valid', withRequest(redirect, (r) => { r.backend = { ipfs: 'absent' }; }));
+  mutate('redirect-node-down', redirect, () => {}, 'valid', withRequest(redirect, (r) => { r.backend.up = false; }));
+  mutate('redirect-external-down', redirect, () => {}, 'valid', withRequest(redirect, (r) => { r.backend = { ipfs: 'gateway', up: false }; }));
   // Errors.
   mutate('error-500', error, (p) => { p.error.status = 500; p.error.code = 500; }, 'error');
   mutate('error-code-mismatch', error, (p) => { p.error.code = 502; }, 'error');
@@ -1506,6 +1527,7 @@ function validationCases(requests) {
   mutate('error-message-astral-over', error, (p) => { p.error.message = { $repeat: [ch(0x1f600) + 'x', Math.floor(MAX_MESSAGE_UNITS / 3) + 1] }; }, 'error');
   mutate('error-message-empty', error, (p) => { p.error.message = ''; }, 'valid');
   mutate('error-503', error, (p) => { p.error.status = 503; p.error.code = 503; }, 'valid');
+  mutate('error-503-down', error, (p) => { p.error.status = 503; p.error.code = 503; }, 'valid', withRequest(error, (r) => { r.backend.up = false; }));
   mutate('error-405-any-method', error, (p) => { p.error.status = 405; p.error.code = 405; }, 'valid', withRequest(error, (r) => { r.method = 'POST'; }));
   mutate('error-status-string', error, (p) => { p.error.status = '404'; }, 'error');
   return out;
@@ -1538,7 +1560,7 @@ async function buildDweb(checkout, ethers, meta) {
         known_gateway_hosts: [...ipfs.__internals.KNOWN_GATEWAY_HOSTS],
         dropped_upstream_response_headers: [...manager.__internals.DROPPED_UPSTREAM_RESPONSE_HEADERS],
         native_buffer_size: ref.native.__internals.BUFFER_SIZE,
-        absent: failures.absent,
+        not_running: failures.notRunning,
       },
       page_state_response_headers: [...pageState.PAGE_STATE_RESPONSE_HEADERS],
       html: { max_html_bytes: html.MAX_HTML_BYTES, selector: ref.onchain.HTML_SELECTOR },
