@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use fc_json::index::{Kind, Value, quote_units};
+use fc_json::index::{KeyOrder, Kind, Value, quote_units};
 use fc_json::number_to_string;
 
 /// A JavaScript string: UTF-16 code units. Node errors and the router's
@@ -123,6 +123,107 @@ pub fn is_js_whitespace(unit: u16) -> bool {
     )
 }
 
+/// `Number.isSafeInteger(x)` for a number.
+pub(crate) fn is_safe_integer(x: f64) -> bool {
+    x.is_finite() && x.trunc() == x && x.abs() <= 9_007_199_254_740_991.0
+}
+
+/// `Number(text)` (StringToNumber): JavaScript's whitespace trimmed; empty
+/// is 0; `Infinity` with an optional sign; `0x`, `0o` and `0b` integers
+/// without a sign; otherwise a decimal literal, or `NaN`.
+pub(crate) fn string_to_number(text: &str) -> f64 {
+    let text = text.trim_matches(|c: char| u16::try_from(u32::from(c)).is_ok_and(is_js_whitespace));
+    match text {
+        "" => return 0.0,
+        "Infinity" | "+Infinity" => return f64::INFINITY,
+        "-Infinity" => return f64::NEG_INFINITY,
+        _ => {}
+    }
+    let bytes = text.as_bytes();
+    if let [b'0', prefix, digits @ ..] = bytes {
+        let radix = match prefix {
+            b'x' | b'X' => Some(4),
+            b'o' | b'O' => Some(3),
+            b'b' | b'B' => Some(1),
+            _ => None,
+        };
+        if let Some(bits) = radix {
+            return radix_to_number(digits, bits);
+        }
+    }
+    if decimal_literal(bytes) {
+        text.parse().unwrap_or(f64::NAN)
+    } else {
+        f64::NAN
+    }
+}
+
+/// `[+-]? (digits [. digits?] | . digits) ([eE] [+-]? digits)?`, all ASCII.
+fn decimal_literal(bytes: &[u8]) -> bool {
+    let digits = |s: &[u8]| s.iter().take_while(|b| b.is_ascii_digit()).count();
+    let mut rest = match bytes {
+        [b'+' | b'-', rest @ ..] => rest,
+        rest => rest,
+    };
+    let whole = digits(rest);
+    rest = rest.get(whole..).unwrap_or_default();
+    let mut fraction = 0;
+    if let [b'.', after @ ..] = rest {
+        fraction = digits(after);
+        rest = after.get(fraction..).unwrap_or_default();
+    }
+    if whole == 0 && fraction == 0 {
+        return false;
+    }
+    if let [b'e' | b'E', after @ ..] = rest {
+        let after = match after {
+            [b'+' | b'-', after @ ..] => after,
+            after => after,
+        };
+        let exponent = digits(after);
+        return exponent > 0 && exponent == after.len();
+    }
+    rest.is_empty()
+}
+
+/// The digits of a `0x`, `0o` or `0b` literal (`bits` per digit), rounded
+/// to the nearest double, ties to even; `NaN` when empty or invalid.
+fn radix_to_number(digits: &[u8], bits: u32) -> f64 {
+    let radix = 1u32 << bits;
+    let Some(values) = digits
+        .iter()
+        .map(|&b| char::from(b).to_digit(radix))
+        .collect::<Option<Vec<u32>>>()
+    else {
+        return f64::NAN;
+    };
+    if values.is_empty() {
+        return f64::NAN;
+    }
+    // The top 64 significant bits, with any lower 1 bits folded into the
+    // last one, round to 53 bits exactly as the whole value does.
+    let mut top: u64 = 0;
+    let mut width: u32 = 0;
+    let mut shift: i32 = 0;
+    let mut sticky = false;
+    for value in values.into_iter().skip_while(|&v| v == 0) {
+        for bit in (0..bits).rev() {
+            let one = (value >> bit) & 1 == 1;
+            if width < 64 {
+                top = (top << 1) | u64::from(one);
+                width += 1;
+            } else {
+                sticky |= one;
+                shift = shift.saturating_add(1);
+            }
+        }
+    }
+    if sticky {
+        top |= 1;
+    }
+    (top as f64) * 2f64.powi(shift)
+}
+
 /// `String.prototype.trim`.
 pub(crate) fn trim(units: &[u16]) -> &[u16] {
     let start = units
@@ -134,6 +235,71 @@ pub(crate) fn trim(units: &[u16]) -> &[u16] {
         .rposition(|u| !is_js_whitespace(*u))
         .map_or(start, |i| i + 1);
     units.get(start..end).unwrap_or_default()
+}
+
+/// What `value[i]` gives for a JSON value.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Element<'i, 't> {
+    Undefined,
+    Value(Value<'i, 't>),
+    /// One UTF-16 unit of a string, as a one-unit string.
+    Unit(u16),
+}
+
+impl<'i, 't> Element<'i, 't> {
+    /// `element == null`.
+    pub(crate) fn is_nullish(self) -> bool {
+        match self {
+            Self::Undefined => true,
+            Self::Value(value) => value.kind() == Kind::Null,
+            Self::Unit(_) => false,
+        }
+    }
+
+    /// The value, when the element is a JSON value of `kind`.
+    pub(crate) fn of_kind(self, kind: Kind) -> Option<Value<'i, 't>> {
+        match self {
+            Self::Value(value) if value.kind() == kind => Some(value),
+            _ => None,
+        }
+    }
+
+    /// `JSON.stringify(element)`; `None` for `undefined`.
+    pub(crate) fn to_json(self) -> Option<String> {
+        match self {
+            Self::Undefined => None,
+            Self::Value(value) => Some(value.stringify(KeyOrder::Property)),
+            Self::Unit(unit) => Some(JsString::from_units(vec![unit]).to_json()),
+        }
+    }
+
+    /// `String(element)`.
+    pub(crate) fn js_string(self) -> Result<JsString, JsError> {
+        match self {
+            Self::Undefined => Ok(JsString::from("undefined")),
+            Self::Value(value) => js_string_of(value),
+            Self::Unit(unit) => Ok(JsString::from_units(vec![unit])),
+        }
+    }
+}
+
+/// `value[i]`: an array's element, an object's property `"i"`, a string's
+/// code unit, or `undefined`. `None` for `null`, where JavaScript throws
+/// (and `?.[i]` gives `undefined`).
+pub(crate) fn element<'i, 't>(value: Value<'i, 't>, i: usize) -> Option<Element<'i, 't>> {
+    let found = match value.kind() {
+        Kind::Null => return None,
+        Kind::Array => value.children().nth(i).map(Element::Value),
+        Kind::Object => value.get(&i.to_string()).map(Element::Value),
+        Kind::String => value.units().nth(i).map(Element::Unit),
+        Kind::True | Kind::False | Kind::Number => None,
+    };
+    Some(found.unwrap_or(Element::Undefined))
+}
+
+/// `TypeError`'s message for `null[i]`.
+pub(crate) fn null_index_message(i: usize) -> String {
+    format!("Cannot read properties of null (reading '{i}')")
 }
 
 /// `String(value)` for a JSON value. Arrays join their elements with commas

@@ -68,6 +68,22 @@ test('check rejects a changed chain-data aggregate text', () => {
   assert.match(stderr, /Byte mismatch: chain.json/);
 });
 
+test('check rejects a changed Myotis classification', () => {
+  const stderr = corruptedCheck('chain.json', (contents) => {
+    contents.myotis.reads.find((item) => item.id === 'invalid-params').js.error.final = false;
+  });
+  assert.match(stderr, /Byte mismatch: chain.json/);
+});
+
+test('check rejects a changed log-scan rank and a changed broadcast refusal', () => {
+  for (const corrupt of [
+    (contents) => { contents.ant_profile.errors[0].js.rank = 3; },
+    (contents) => { contents.broadcast_refusals.errors[0].design = { class: 'ambiguous' }; },
+  ]) {
+    assert.match(corruptedCheck('chain.json', corrupt), /Byte mismatch: chain.json/);
+  }
+});
+
 test('check decrypts vault fixtures and rejects a damaged authentication tag', () => {
   const stderr = corruptedCheck('fixtures/vaults.json', (contents) => {
     const vault = JSON.parse(contents.fixtures[0].fileContents);
