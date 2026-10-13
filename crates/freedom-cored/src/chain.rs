@@ -27,6 +27,7 @@
 //!   or over the message cap, the request fails with `too_large`.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Range;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -49,7 +50,7 @@ use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
 use crate::log;
-use crate::requests::{self, Dispatch, Owner, Requests};
+use crate::requests::{self, Dispatch, Owner, Refusal, Requests};
 use crate::serve::Event;
 use crate::transport::{self, Allowance, Credit, Link, Out, Reply};
 
@@ -203,7 +204,7 @@ fn run(rx: &Receiver<Mail>, mut chain: Chain) -> Stop {
             (a, b) => a.or(b),
         };
         let wait = due.map_or(Duration::from_secs(3600), |at| {
-            Duration::from_millis(at.saturating_sub((chain.clock)()))
+            Duration::from_millis(at.saturating_sub(chain.clock.now()))
         });
         let flow = match rx.recv_timeout(wait) {
             // The frame's credit goes once its message is handled. The
@@ -274,10 +275,34 @@ struct Caller {
     cutoff: Option<Ms>,
 }
 
+/// The thread's monotonic clock, in milliseconds. A reading is never
+/// earlier than the one before it, whatever the source does: a request
+/// found past its latest start is past it at every later reading.
+struct Clock {
+    source: Box<dyn Fn() -> Ms>,
+    latest: Cell<Ms>,
+}
+
+impl Clock {
+    fn new(source: Box<dyn Fn() -> Ms>) -> Self {
+        Self {
+            source,
+            latest: Cell::new(0),
+        }
+    }
+
+    fn now(&self) -> Ms {
+        let now = (self.source)().max(self.latest.get());
+        self.latest.set(now);
+        now
+    }
+}
+
 struct Chain {
-    /// The monotonic clock, in milliseconds: sampled whenever the thread
-    /// flushes, so nothing is dispatched against a time that has passed.
-    clock: Box<dyn Fn() -> Ms>,
+    /// Read whenever the machine is brought to now, and again as each
+    /// request takes its slot at main, so nothing is dispatched against a
+    /// time that has passed.
+    clock: Clock,
     machine: Machine,
     out: Sender<Out>,
     /// Whether main takes fragments.
@@ -305,6 +330,10 @@ struct Chain {
     outgoing: BTreeMap<u64, Outgoing>,
     /// Message IDs by the machine's request id.
     by_io: BTreeMap<u64, u64>,
+    /// Runs as each reply is queued: a test's way to act while this thread
+    /// serializes one (PR #57 review, round 4).
+    #[cfg(test)]
+    on_reply: Option<Box<dyn FnMut()>>,
 }
 
 /// The chain thread's two shares of the writer.
@@ -328,7 +357,7 @@ impl Chain {
         clock: Box<dyn Fn() -> Ms>,
     ) -> Self {
         Self {
-            clock,
+            clock: Clock::new(clock),
             machine,
             out,
             link,
@@ -342,6 +371,8 @@ impl Chain {
             by_main: BTreeMap::new(),
             outgoing: BTreeMap::new(),
             by_io: BTreeMap::new(),
+            #[cfg(test)]
+            on_reply: None,
         }
     }
 
@@ -353,20 +384,27 @@ impl Chain {
         self.machine.poll();
     }
 
-    /// Brings the machine to the clock's now, then sends what waits.
-    ///
-    /// Every timer and every queued request's expiry due by now is
-    /// processed first, in time order, the machine polled after each as
-    /// the executor requires, its I/O queued and its replies taken; a
-    /// request whose time runs out while it waits here completes as not
-    /// sent before a timer due at the same instant fires (the machine's own
-    /// for that exchange): none of it reached main (design 0005, Attempts).
-    /// Only then, with the machine at now, is anything dispatched, so no
-    /// queued request starts past its latest start, however long handling
-    /// a message took (PR #57 review, round 3, R3-M1).
+    /// Brings the machine to the clock's now ([`Chain::advance`]), then
+    /// sends what waits ([`Chain::deliver`]).
     fn flush(&mut self) -> Flow {
-        let now = (self.clock)();
+        self.advance()?;
+        self.poll();
+        self.deliver()
+    }
+
+    /// Brings the machine to the clock's now. Every timer and every queued
+    /// request's expiry due by now is processed, in time order, the machine
+    /// polled after each as the executor requires, its I/O queued and its
+    /// replies taken; a request whose time runs out while it waits here
+    /// completes as not sent before a timer due at the same instant fires
+    /// (the machine's own for that exchange): none of it reached main
+    /// (design 0005, Attempts). The clock is read again after each, since
+    /// processing one (a reply serialized) takes time, until a reading finds
+    /// nothing due: no work at all lies between that reading and the
+    /// return.
+    fn advance(&mut self) -> Flow {
         loop {
+            let now = self.clock.now();
             let expiry = self.next_expiry().filter(|at| *at <= now);
             let timer = self.machine.next_due().filter(|at| *at <= now);
             match (expiry, timer) {
@@ -379,16 +417,17 @@ impl Chain {
                 (_, Some(_)) => {
                     self.machine.fire_next(now);
                 }
-                _ => break,
+                _ => {
+                    // Nothing is due: the machine's clock moves to now.
+                    self.machine.fire_next(now);
+                    return Ok(());
+                }
             }
             self.poll();
             while self.settle()? {
                 self.poll();
             }
         }
-        self.machine.fire_next(now);
-        self.poll();
-        self.deliver()
     }
 
     /// When the first request waiting here runs out of time.
@@ -592,10 +631,10 @@ impl Chain {
         Ok(settled)
     }
 
-    /// Sends the machine's requests, cancels and replies, the machine at
-    /// the clock's now ([`Chain::flush`]). A request that completes here
-    /// (expired, too large to send, or retired) settles at the next poll,
-    /// so this polls and goes round again.
+    /// Sends the machine's requests, cancels and replies, each dispatch
+    /// against the clock's now ([`Chain::dispatch`]). A request that
+    /// completes here (expired, too large to send, or retired) settles at
+    /// the next poll, so this polls and goes round again.
     fn deliver(&mut self) -> Flow {
         loop {
             let mut settled = self.settle()?;
@@ -691,32 +730,37 @@ impl Chain {
     /// waits, a slot at main is free and the control share has room; the
     /// gate and the allowance wake the thread when one is. A request leaves the
     /// queue only when it is sent or settled here, so until then a cancel
-    /// removes it, and its deadline is what is left when it goes. True when
-    /// one settled here.
+    /// removes it. True when one settled here.
+    ///
+    /// No request goes against a time that has passed (PR #57 review,
+    /// rounds 3 and 4, R3-M1): the machine is first brought to the clock's
+    /// now ([`Chain::advance`]), whatever this thread did before (a reply
+    /// serialized), so what came due meanwhile, a queued request's expiry
+    /// or a timer, is processed first. Then each request's time is read
+    /// again as it takes its slot, under the gate's lock: past its latest
+    /// start, it never goes; otherwise its deadline is what is left then.
     fn dispatch(&mut self) -> Result<bool, Stop> {
+        self.advance()?;
         let mut settled = false;
         while self.control.is_empty() {
             let Some(queued) = self.queued.front() else {
                 break;
             };
             let io = queued.io;
-            let left = queued
-                .until
-                .map(|until| until.saturating_sub(self.machine.now()));
-            // Its time ran out while it waited: it completes here, unsent.
-            if left == Some(0) {
-                let kind = kind_of(&queued.request);
-                self.queued.pop_front();
-                self.machine.complete(io, unsent(kind));
-                settled = true;
-                continue;
-            }
-            let (method, kind, params) =
-                shell_request(&queued.request, queued.generation, left.unwrap_or(0));
+            let kind = kind_of(&queued.request);
+            let clock = &self.clock;
             let sent = self
                 .requests
                 .send(Owner::Chain, &self.control_allowance, &self.out, |id| {
-                    requests::request_frame(id, method, &params)
+                    let left = match queued.until {
+                        Some(until) => match until.checked_sub(clock.now()) {
+                            Some(left) if left > 0 => left,
+                            _ => return Err(Refusal::Late),
+                        },
+                        None => 0,
+                    };
+                    let (method, params) = shell_params(&queued.request, queued.generation, left);
+                    requests::request_frame(id, method, &params).ok_or(Refusal::TooLarge)
                 });
             match sent {
                 Dispatch::Sent(id) => {
@@ -728,6 +772,13 @@ impl Chain {
                 Dispatch::TooLarge => {
                     self.queued.pop_front();
                     self.machine.complete(io, too_large(kind));
+                    settled = true;
+                }
+                // Its time ran out since the machine was brought to now:
+                // brought there again, it expires in time order, unsent. The
+                // clock never goes back, so it is due there.
+                Dispatch::Late => {
+                    self.advance()?;
                     settled = true;
                 }
                 // The core is exiting, main holds all it takes, or the
@@ -770,6 +821,10 @@ impl Chain {
                     self.control.push_back(frame);
                 }
                 reply => self.bulk.push_back(reply),
+            }
+            #[cfg(test)]
+            if let Some(on_reply) = self.on_reply.as_mut() {
+                on_reply();
             }
         }
         self.pump()
@@ -860,16 +915,9 @@ impl Chain {
 // ---------------------------------------------------------------------------
 // The core's requests to main (design 0005, Requests the core makes).
 
-/// A `shell.*` request: its method, how to read the answer, and its params
-/// with the generation it runs under. `left` is what is left of its time,
-/// sent as `deadline_ms` where the design has one.
-fn shell_request(request: &Request, generation: u64, left: Ms) -> (&'static str, Kind, Vec<u8>) {
-    let kind = kind_of(request);
-    let (method, params) = shell_params(request, generation, left);
-    (method, kind, params)
-}
-
-/// A `shell.*` request's method and params.
+/// A `shell.*` request's method, and its params with the generation it
+/// runs under. `left` is what is left of its time, sent as `deadline_ms`
+/// where the design has one.
 fn shell_params(request: &Request, generation: u64, left: Ms) -> (&'static str, Vec<u8>) {
     match request {
         Request::Rpc {

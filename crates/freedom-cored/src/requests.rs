@@ -53,8 +53,20 @@ pub enum Dispatch {
     Full,
     /// The owner's share of the writer is full. Its allowance wakes it.
     NoRoom,
+    /// Its latest start had passed when it would have taken its slot: never
+    /// sent, nothing taken.
+    Late,
     /// The writer has gone.
     WriterGone,
+}
+
+/// Why a request's frame wasn't made at the moment it would take its slot.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// Over one frame.
+    TooLarge,
+    /// Past its latest start.
+    Late,
 }
 
 type Wake = Box<dyn Fn() + Send>;
@@ -111,15 +123,16 @@ impl Requests {
 
     /// Hands a request of `owner`'s to the writer, if the gate is open, a
     /// slot is free and the owner's allowance has room. `frame` makes its
-    /// frame for the ID it would take, `None` when that is over one frame.
-    /// The ID is taken, the request registered (for routing and for the
-    /// reader) and the frame queued under one lock.
+    /// frame for the ID it would take, at the moment it would take its
+    /// slot, or refuses: over one frame, or past its latest start. The ID
+    /// is taken, the request registered (for routing and for the reader)
+    /// and the frame queued under one lock.
     pub fn send(
         &self,
         owner: Owner,
         allowance: &Arc<Allowance>,
         out: &Sender<Out>,
-        frame: impl FnOnce(u64) -> Option<Zeroizing<Vec<u8>>>,
+        frame: impl FnOnce(u64) -> Result<Zeroizing<Vec<u8>>, Refusal>,
     ) -> Dispatch {
         let Ok(mut state) = self.state.lock() else {
             return Dispatch::Closed;
@@ -132,8 +145,10 @@ impl Requests {
             return Dispatch::Full;
         }
         let id = state.next_id;
-        let Some(frame) = frame(id) else {
-            return Dispatch::TooLarge;
+        let frame = match frame(id) {
+            Ok(frame) => frame,
+            Err(Refusal::TooLarge) => return Dispatch::TooLarge,
+            Err(Refusal::Late) => return Dispatch::Late,
         };
         let Some(hold) = allowance.take(frame.len()) else {
             return Dispatch::NoRoom;
@@ -207,8 +222,8 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
 
-    fn frame_of(id: u64) -> Option<Zeroizing<Vec<u8>>> {
-        request_frame(id, "shell.rpc", br#"{"endpoint":"e1"}"#)
+    fn frame_of(id: u64) -> Result<Zeroizing<Vec<u8>>, Refusal> {
+        request_frame(id, "shell.rpc", br#"{"endpoint":"e1"}"#).ok_or(Refusal::TooLarge)
     }
 
     /// The IDs of the requests the writer got, in order.
@@ -313,8 +328,13 @@ mod tests {
         );
         // An ID over one frame is not taken.
         assert_eq!(
-            requests.send(Owner::Chain, &allowance, &out, |_| None),
+            requests.send(Owner::Chain, &allowance, &out, |_| Err(Refusal::TooLarge)),
             Dispatch::TooLarge
+        );
+        // Nor one past its latest start.
+        assert_eq!(
+            requests.send(Owner::Chain, &allowance, &out, |_| Err(Refusal::Late)),
+            Dispatch::Late
         );
         drop(rx.try_recv());
         assert_eq!(

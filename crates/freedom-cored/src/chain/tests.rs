@@ -1048,6 +1048,13 @@ fn mains_answers_take_one_closed_shape() {
     }
 }
 
+/// A `shell.*` request: its method, how to read the answer, and its
+/// params.
+fn shell_request(request: &Request, generation: u64, left: Ms) -> (&'static str, Kind, Vec<u8>) {
+    let (method, params) = shell_params(request, generation, left);
+    (method, kind_of(request), params)
+}
+
 #[test]
 fn requests_to_main_take_the_designs_forms() {
     let (method, kind, params) = shell_request(
@@ -1119,7 +1126,7 @@ fn occupy(t: &Test) -> u64 {
         .chain
         .requests
         .send(Owner::Naming, &allowance, &out, |id| {
-            requests::request_frame(id, "shell.rpc", b"{}")
+            requests::request_frame(id, "shell.rpc", b"{}").ok_or(Refusal::TooLarge)
         }) {
         Dispatch::Sent(id) => id,
         other => panic!("{other:?}"),
@@ -1526,6 +1533,161 @@ fn nothing_is_dispatched_against_a_clock_handling_left_behind() {
     assert_eq!(reply["error"]["data"]["outcome"], "not_sent", "{reply}");
     assert!(t.chain.queued.is_empty());
     assert_eq!(t.chain.requests.answered(replacement), Some(Owner::Naming));
+}
+
+/// The round-3 interleaving moved into one flush (round 4): a Myotis
+/// broadcast waits for a slot, its cutoff at 200 ms; a read's 16 MiB answer
+/// was decoded at 199 ms, its slot gone to naming. Returns the read's ID and
+/// the slot naming holds, to free while the read's reply is serialized.
+fn a_broadcast_behind_a_heavy_reply(t: &mut Test) -> (u64, u64) {
+    let mut config = chain_snapshot(&["direct"], &["a"]);
+    config["myotis"] = json!(true);
+    config["broadcast_order"] = json!(["myotis"]);
+    t.configure(json!([config]));
+    t.call(
+        2,
+        "chain.availability",
+        &json!({ "chain_id": 1, "ready": true }),
+    );
+    let (read_id, read_params) = read(3, "eth_call", json!([{ "to": "0xabc" }, "latest"]));
+    t.call(read_id, "chain.request", &read_params);
+    let heavy = requests(&t.written())[0]["id"].as_u64().unwrap();
+    let held = occupy(t);
+    t.call(
+        4,
+        "chain.broadcast",
+        &json!({ "chain_id": 1, "raw": "0x01", "deadline_ms": 10_200 }),
+    );
+    assert_eq!(t.chain.queued[0].until, Some(200));
+    t.at(199);
+    assert_eq!(t.chain.requests.answered(heavy), Some(Owner::Chain));
+    let body = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"result":"0x{}"}}"#,
+        "ab".repeat(8 << 20)
+    );
+    let encoded = base64::engine::general_purpose::STANDARD.encode(body);
+    let result = json!({ "status": 200, "body": encoded }).to_string();
+    assert!(
+        t.chain
+            .handle(In::Response {
+                id: heavy,
+                reply: shell_result(heavy, &result),
+            })
+            .is_ok()
+    );
+    (read_id, held)
+}
+
+#[test]
+fn nothing_is_dispatched_against_a_clock_a_reply_left_behind() {
+    // Round 4, R3-M1 inside one flush, the reviewer's interleaving: the
+    // flush starts at 199 ms with nothing due. While it serializes the
+    // read's 16 MiB reply, the clock reaches 1,329 ms and a naming answer
+    // frees a slot on another thread. Dispatch must see that time: the
+    // broadcast never starts.
+    let mut t = test_with(Bounds::default(), usize::MAX, 2, true);
+    let (read_id, held) = a_broadcast_behind_a_heavy_reply(&mut t);
+    let replacement = occupy(&t);
+    let clock = std::rc::Rc::clone(&t.clock);
+    let requests = Arc::clone(&t.chain.requests);
+    let mut held = Some(held);
+    t.chain.on_reply = Some(Box::new(move || {
+        if let Some(held) = held.take() {
+            clock.set(1_329);
+            assert_eq!(requests.answered(held), Some(Owner::Naming));
+        }
+    }));
+    assert!(t.chain.flush().is_ok());
+    // The reply was serialized in that flush.
+    assert_eq!(t.clock.get(), 1_329);
+    let frames = t.written();
+    assert!(frames.iter().any(|f| f["id"] == read_id));
+    let sent = verified(&frames);
+    assert!(sent.is_empty(), "{sent:?}");
+    // It never went: it is not sent, and the slot is still free.
+    let reply = frames.iter().find(|f| f["id"] == 4).unwrap();
+    assert_eq!(reply["error"]["data"]["outcome"], "not_sent", "{reply}");
+    assert!(t.chain.queued.is_empty());
+    let free = occupy(&t);
+    assert_eq!(t.chain.requests.answered(free), Some(Owner::Naming));
+    assert_eq!(t.chain.requests.answered(replacement), Some(Owner::Naming));
+}
+
+/// A clock that reads `before` until `freed` is set, `before` once more
+/// after that (the machine brought to now just before dispatch), then
+/// `after`: time passes between that reading and a request taking its
+/// slot (waiting for the gate's lock, say).
+fn a_clock_moving_at_the_gate(
+    freed: &std::rc::Rc<std::cell::Cell<bool>>,
+    before: Ms,
+    after: Ms,
+) -> Clock {
+    let freed = std::rc::Rc::clone(freed);
+    let read_since = std::cell::Cell::new(false);
+    Clock::new(Box::new(move || {
+        // Once freed, one reading more at `before`.
+        if freed.get() && read_since.replace(true) {
+            after
+        } else {
+            before
+        }
+    }))
+}
+
+#[test]
+fn a_request_past_its_latest_start_as_it_takes_its_slot_never_goes() {
+    // Round 4: a slot frees while the reply is serialized, and the
+    // machine is brought to 199 ms before dispatch. The cutoff passes
+    // before the broadcast takes the slot: it is read again under the
+    // gate's lock, and refused.
+    let mut t = test_with(Bounds::default(), usize::MAX, 2, true);
+    let (_, held) = a_broadcast_behind_a_heavy_reply(&mut t);
+    let replacement = occupy(&t);
+    let freed = std::rc::Rc::new(std::cell::Cell::new(false));
+    t.chain.clock = a_clock_moving_at_the_gate(&freed, 199, 1_329);
+    let requests = Arc::clone(&t.chain.requests);
+    let set = std::rc::Rc::clone(&freed);
+    t.chain.on_reply = Some(Box::new(move || {
+        if !set.replace(true) {
+            assert_eq!(requests.answered(held), Some(Owner::Naming));
+        }
+    }));
+    assert!(t.chain.flush().is_ok());
+    assert!(freed.get());
+    let frames = t.written();
+    let sent = verified(&frames);
+    assert!(sent.is_empty(), "{sent:?}");
+    let reply = frames.iter().find(|f| f["id"] == 4).unwrap();
+    assert_eq!(reply["error"]["data"]["outcome"], "not_sent", "{reply}");
+    assert!(t.chain.queued.is_empty());
+    // Refused, it took nothing.
+    let free = occupy(&t);
+    assert_eq!(t.chain.requests.answered(free), Some(Owner::Naming));
+    assert_eq!(t.chain.requests.answered(replacement), Some(Owner::Naming));
+}
+
+#[test]
+fn a_requests_deadline_is_what_is_left_as_it_takes_its_slot() {
+    // Round 4: the deadline sent is read with the clock the request takes
+    // its slot by, not the one the machine was last brought to.
+    let mut t = test_with(Bounds::default(), usize::MAX, 1, true);
+    t.configure(json!([chain_snapshot(&["direct"], &["a"])]));
+    let held = occupy(&t);
+    let (id, params) = read(3, "eth_blockNumber", json!([]));
+    t.call(id, "chain.request", &params);
+    let until = t.chain.queued[0].until.unwrap();
+    assert!(until > 1_329, "{until}");
+    let freed = std::rc::Rc::new(std::cell::Cell::new(true));
+    t.chain.clock = a_clock_moving_at_the_gate(&freed, 199, 1_329);
+    assert_eq!(t.chain.requests.answered(held), Some(Owner::Naming));
+    // Delivery alone: dispatch brings the machine to 199 ms itself.
+    assert!(t.chain.deliver().is_ok());
+    assert_eq!(t.chain.machine.now(), 199);
+    let frames = t.written();
+    let sent = requests(&frames);
+    assert_eq!(sent.len(), 1, "{frames:?}");
+    assert_eq!(sent[0]["method"], "shell.rpc");
+    assert_eq!(sent[0]["params"]["deadline_ms"], until - 1_329);
 }
 
 #[test]

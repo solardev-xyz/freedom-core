@@ -29,7 +29,7 @@ use serde::Deserialize;
 use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
-use crate::requests::{self, Dispatch, Owner, Requests};
+use crate::requests::{self, Dispatch, Owner, Refusal, Requests};
 use crate::serve::Event;
 use crate::transport;
 use crate::transport::{Allowance, Credit, Out};
@@ -546,7 +546,7 @@ impl Naming {
             let sent = self
                 .requests
                 .send(Owner::Naming, &self.allowance, &self.out, |id| {
-                    requests::request_frame(id, method, &params)
+                    requests::request_frame(id, method, &params).ok_or(Refusal::TooLarge)
                 });
             match sent {
                 Dispatch::Sent(id) => {
@@ -562,8 +562,9 @@ impl Naming {
                     settled = true;
                 }
                 // The core is exiting, main holds all it takes, or the
-                // writer share is full: it waits.
-                Dispatch::Closed | Dispatch::Full | Dispatch::NoRoom => break,
+                // writer share is full: it waits. (Naming's frames are never
+                // refused as late.)
+                Dispatch::Closed | Dispatch::Full | Dispatch::NoRoom | Dispatch::Late => break,
                 Dispatch::WriterGone => return Err(Stop::Writer),
             }
         }
