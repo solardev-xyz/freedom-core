@@ -182,21 +182,21 @@ Electron main (profile P) ──spawn──▶ freedom-radicled serve --home <ra
 - **Start:**
   1. spawn;
   2. `rad.hello`;
-  3. `rad.start`, which runs **reconciliation under the lock** ([below](#reconciliation)), then `Embedded::start` with today's options, the [network policy](#network-policy) and no key generation, and returns `{ did, nid, alias }`;
-  4. `RUNNING`;
-  5. main runs today's background `rad.connect_seeds` and default-repository `rad.clone`.
+  3. **`rad.reconcile`,** a phase of its own, with its own deadline ([Reconciliation](#reconciliation)). Its reply is the boundary main can see: the home is consistent;
+  4. `rad.start`, which runs `Embedded::start` with today's options, the [network policy](#network-policy) and no key generation, and returns `{ did, nid, alias }`;
+  5. `RUNNING`;
+  6. main runs today's background `rad.connect_seeds` and default-repository `rad.clone`.
 
   Until `RUNNING`, every other request gets `stopped`.
 - **A failed start ends the process.**
   - libradicle can fail after heartwood's threads have started (`lr:777`). Those threads hold each other alive.
-  - So the service answers `rad.start` with the error (`start_failed`, `recovery_failed` or `no_identity`) and then exits. Main shows the error and doesn't restart, as a failed start is handled today.
+  - So the service answers with the error and then exits: `recovery_failed` or `deadline` from `rad.reconcile`, or `start_failed` or `no_identity` from `rad.start`. Main shows the error and doesn't restart, as a failed start is handled today.
   - The menu's start spawns a fresh process.
 - **Stop is the process's end:**
   1. main sends `rad.shutdown` and closes stdin;
   2. the service fences new work, answers waiting requests `stopped`, and calls `Embedded::shutdown`;
   3. it exits 0 when that returns, or after 5 s whatever its state (`lr:1343` joins with no timeout);
   4. main kills it 10 s after `rad.shutdown`.
-- **A clean stop** writes `node/clean-stop` after `Embedded::shutdown` returns, and a start removes it. Its absence at the next start means the last run was interrupted.
 - **Quit:** Radicle gets a 10 s leg in the wind-down. That equals Tor's, so the 20 s watchdog stands.
 - **Parent death:**
   - stdin EOF, with `--parent-pid` and `PR_SET_PDEATHSIG` as 0001;
@@ -209,7 +209,18 @@ A kill can land between the steps of one operation:
 - a first clone's temporary directory and its rename;
 - a COB write's object, its ref, `rad/sigrefs` and the COB cache.
 
-Each ref is renamed into place atomically, but the steps together aren't. So before `RUNNING`, with the lock held, the service runs an **upstream reconciliation procedure** (`Storage::reconcile`, [upstream](#upstream-changes)).
+Each ref is renamed into place atomically, but the steps together aren't. So before `RUNNING`, with the lock held, the service runs an **upstream reconciliation procedure** (`Storage::reconcile`, [upstream](#upstream-changes)) as `rad.reconcile`.
+
+**The dirty marker** (`node/dirty`) records that the home may hold a partial mutation:
+- **It is set before any mutation can run.** `rad.reconcile` writes it durably (the file, then its directory, flushed) before it changes anything. It stays present for the whole run, and every mutation of the home happens while it is present: COB writes, `unseed`, the import, clones, and heartwood's own fetches.
+- **It is kept after anything that may be partial:** a write that ends `outcome_unknown`, or a clone or fetch that is cancelled or cut off.
+- **It is cleared only after a proven clean stop.** At `rad.shutdown`, it is removed (durably) only when all of these hold:
+  - the write queue is empty, and the executing writer, if any, has returned;
+  - every write that ended `outcome_unknown` this run has had its repository repaired since ([Writes](#writes));
+  - `Embedded::shutdown` has returned, so heartwood's workers have finished their fetches.
+
+  A shutdown with a timed-out writer still running, or one that reaches the 5 s exit, leaves the marker.
+- **What it selects:** with the marker present at start, the own-namespace check and the cache rebuild run. Temporary clones and ref lock files are handled on every start.
 
 - **Temporary clones:**
   - **What is recognized:** directories directly under `storage/` named `<RID>.tmp`, which is heartwood's `TempRepository` format (`hw/radicle/src/storage/git/temp.rs`: `<rid>.<random>` with its extension replaced by `tmp`), and the legacy `<RID>.lock`, where `<RID>` parses as a repository ID.
@@ -218,15 +229,31 @@ Each ref is renamed into place atomically, but the steps together aren't. So bef
 - **Ref lock files:**
   - **What is recognized:** regular files named `*.lock` under a repository's `refs/`, plus `packed-refs.lock`, `HEAD.lock` and `config.lock` at its root.
   - A lock file is an update that never committed, so its ref keeps its old value. It is removed, with no symlinks followed.
-- **The node's own namespace,** in every repository, after an interrupted run (no `node/clean-stop`):
+- **The node's own namespace,** in every repository, when the marker was present:
   - its refs are checked against its `rad/sigrefs`;
   - if refs advanced without a matching signature (a kill between the ref and the signing), the namespace is re-signed over its current refs, with the node's key. The refs were written by this node.
   - The repository is queued for a refs announcement once the node runs.
-- **The COB cache,** after an interrupted run: rebuilt from storage for every repository. `cobs/cache.db` is derived data.
+- **The COB cache,** when the marker was present: rebuilt from storage for every repository. `cobs/cache.db` is derived data.
 - **Failure:**
   - Anything the procedure doesn't recognize, or can't repair, is left exactly as it is. An example is an owned ref that points at a missing object.
   - `rad.start` then answers `recovery_failed`, with the repository ID and the step. The evidence stays for inspection, and nothing is deleted to make the start succeed.
 - **Logs:** counts and repository IDs, never paths inside a repository.
+
+**The bound:**
+- **The deadline:** `rad.reconcile` has 300 s from admission, owned by the service. Main's watchdog is at 315 s: 0001's deadline plus 15 s.
+- **Repository by repository:** each repository's repair is idempotent and committed on its own. The cache rebuild for one repository is one SQLite transaction; a re-sign is one ref update.
+- **A done-record** (`node/reconcile-done`) lists the repositories finished in this dirty episode, so a later attempt skips them. It is removed when every repository is done.
+- **At the deadline,** it stops at the next repository boundary, keeps the marker and the record, and answers `deadline`.
+  - Main shows "Radicle is still repairing its data" with **Retry**. A retry spawns a new process, which continues from the record.
+  - There is no automatic restart loop.
+- **Shutdown and kill:**
+  - `rad.shutdown` during the repair stops it at the next repository boundary;
+  - a kill is safe at any point, because every step is idempotent and the marker stays.
+
+**Reads of unreconciled state:**
+- Nothing is read before `RUNNING`.
+- During a run, an uncertain write's repository is repaired before its COBs are read again ([Writes](#writes)).
+- A read is never proof that an uncertain write is absent.
 
 **After reconciliation:**
 - a COB write that was cut off is either absent, because its ref was never committed, or present, with its ref signed and cached;
@@ -283,7 +310,8 @@ The rules this design relies on, as 0007 specifies them:
 | Method | Params | Result | Pool and deadline |
 |---|---|---|---|
 | `rad.hello` | `protocol`, `shell_version`, `frames` | `protocol`, `service_version`, `libradicle` build info | 10 s after spawn |
-| `rad.start` | `alias`, `network` | `did`, `nid`, `alias` | 30 s, after reconciliation; on failure, the process exits |
+| `rad.reconcile` | none | `{ was_dirty, repaired }`: counts per step | 300 s ([the bound](#reconciliation)); on failure or deadline, the process exits |
+| `rad.start` | `alias`, `network` | `did`, `nid`, `alias` | 30 s; on failure, the process exits |
 | `rad.stats` | none | `connected_peers`, `node_alive`, pool and budget use | inline; 5 s |
 | `rad.shutdown` | none | none: the process exits | main kills after 10 s |
 | `rad.read` | `op`, `args` | head `{ content_type: "application/json", bytes }`, then the JSON as a body stream | read pool; 60 s to the head |
@@ -337,7 +365,8 @@ The rules this design relies on, as 0007 specifies them:
 | `outcome_unknown` | any write that has started and isn't proven ([Writes](#writes)) | provider error -32603 with new text |
 | `stopped` | not yet `RUNNING`, or shutting down | 503 |
 | `internal` | a panic on a read's thread | 500 |
-| `start_failed`, `recovery_failed`, `no_identity` | `rad.start`; `message` is libradicle's, or the reconciliation step | the manager's error state, with that message |
+| `recovery_failed`; `deadline` | `rad.reconcile`; `message` names the repository and the step | the manager's error state; for `deadline`, "Radicle is still repairing its data" with Retry |
+| `start_failed`, `no_identity` | `rad.start`; `message` is libradicle's | the manager's error state, with that message |
 
 Exit codes:
 - 0001's: 64, 74, 75 and 76;
@@ -351,8 +380,10 @@ Exit codes:
   - **`resolving`, `connecting` and `fetching`:** only the latest unwritten one is kept.
   - **`peer-failed`:** up to 8 unwritten events are kept as they are. Beyond that, they fold into one summary event, `{"phase":"peer-failed","summary":{"count":N,"reasons":[…]}}`, holding the count and the 4 most recent reasons.
   - **The terminal event** (`done`, `failed` or `cancelled`) has a reserved slot and is never dropped. It is written after everything queued before it.
-  - **Text:** each `reason` is cut at 512 bytes, marked with `…`, so each event stays within 4 KiB.
-- **So a clone holds at most 10 unwritten events of 4 KiB:** one latest phase event, 8 failures, and the summary. Its terminal event is separate.
+  - **Size:** every event is measured as encoded JSON, envelope fields and escaping included, and must be at most 4 KiB.
+    - An event that would be larger is cut down before it is queued. First the summary's oldest reasons are dropped. Then the remaining `reason` texts are shortened at UTF-8 character boundaries, each ending with `…`, until the whole encoded event fits.
+    - The phase and the count are never cut. Escaping counts: a NUL encodes to 6 bytes, a backslash to 2.
+- **So a clone holds at most 10 unwritten events of at most 4 KiB encoded:** one latest phase event, 8 failures, and the summary. Its terminal event is separate.
 - **This is a deviation** (`progress-summary`): today every event reaches the callback. `seed-status.js` accepts the summary event.
 
 ### Pools and budgets
@@ -386,20 +417,35 @@ All bounds are process-wide. The service hosts one node.
     - The limit counts output bytes after escaping. So lossy text and escape expansion (`\u0000` is 6 bytes for 1) can't pass it.
     - The finished JSON is then streamed, under credit, with its length in the head, and its reservation is released as it is written.
 - **In main, handlers get streams.**
-  - `serveRepoApi`'s pass-through reads (`callRaw` today) become `callStream`, which returns the head and a body stream. The handler builds `new Response(body, …)` from it.
+  - `serveRepoApi`'s reads become `callStream`, which returns the head and a body stream. The handler builds `new Response(body, …)` from it.
   - Main holds 0007's 128 KiB ring per stream and nothing more.
   - `HEAD` cancels the body after the head.
-- **Collected results** are for callers that need a parsed value: `call` today.
-  - They are a closed list of small results, each with its own cap:
-    - `repo_info`, `seeders`, `identity` and `status`: 64 KiB each;
-    - `list_seeded_repos` and `list_repos`: 4 MiB each.
+- **Composition moves into the service.** What main builds today from parsed results, the service builds, writing the same bytes main's `JSON.stringify` writes. Vectors recorded from main's code at the reference pin each one ([Tests first](#tests-first)).
+- **Collected results** are for callers that need a parsed value, and only for a closed list of small results, each with its own cap. A body past its cap aborts the call with `too_large`.
+- **Every export has a route.** None is dropped, and no caller parses a whole body outside `callScoped`:
 
-    A body past its cap aborts the call with `too_large`.
-  - **The collection budget:** 16 MiB in main, for the bytes being collected and the parsed value.
-    - It is reserved as bytes arrive. A call that can't reserve waits up to 5 s, then fails `busy`.
-    - The result is handed to a scope: `callScoped(op, args, async (value) => …)`. The reservation is released when the scope's callback settles, which is the result's lifetime.
-    - A value under 4 KiB (`identity`, `status`) may be kept after its scope. It is no longer charged.
-  - **Cancel:** an aborted caller cancels the call, and the collected bytes are released at once.
+| Export (today) | Callers today | Route |
+|---|---|---|
+| `treeAt`, `blobAt`, `commits`, `commit` | `serveRepoApi` (passed through) | `callStream` of the same op |
+| `readmeAt` (composed in main from `treeAt` and `blobAt`) | `serveRepoApi` `/readme/` | `callStream` of `readme_at` |
+| `buildRepoMeta` (`repoInfo` and `seeders`, composed in main) | `serveRepoApi`'s repository root; `radapi`'s repository list | `callStream` of `repo_meta`, and of `repos_meta` for the list. A `seeders` failure still gives `seeding: 0`, as today |
+| `issues`, `patches` (filtered and paginated in main) | `serveRepoApi` | `callStream` of `issues_page` and `patches_page`, with `status`, `page` and `perPage` exactly as main's `paginate` reads them |
+| `issue`, `patch`, `remotes`, `repoStats` (parsed and re-serialized in main) | `serveRepoApi` | `callStream` of the same op |
+| `status` with a `listRepos` count | `serveNodeApi` (`/`, `/api/v1/stats`); the manager's connection count | collected `node_info` (64 KiB): the peer count and repository count |
+| `repoInfo` | the `rad:` visibility check; the manager | collected (64 KiB) |
+| `seeders`, `identity`, `status` | the manager; `cob-service.js` | collected (64 KiB each) |
+| `listSeededRepos` | the manager; the provider | collected (4 MiB) |
+| `listRepos` | the GitHub bridge | collected (4 MiB) |
+| `tree`, `blob` (no revision) | none of the handlers today | `callStream` |
+| `start`, `shutdown`, `connectSeeds`, `cloneRepo`, `cloneRepoWithProgress`, `cancelClone`, `unseedRepo`, `importRepo`, and the four COB writes | as today | their own methods ([Methods](#methods)); small results |
+
+- **The collection budget:** 16 MiB in main, for the bytes being collected and the parsed value.
+  - It is reserved as bytes arrive. A call that can't reserve waits up to 5 s, then fails `busy`.
+  - The result is handed to a scope: `callScoped(op, args, async (value) => …)`. The reservation is released when the scope's callback settles, which is the result's lifetime.
+  - A value under 4 KiB (`identity`, `status`) may be kept after its scope. It is no longer charged.
+- **Cancel and ownership:**
+  - **Before the handoff,** an abort cancels the call, and the bytes collected so far are released at once.
+  - **After the handoff,** the scope owns the value. An abort reaches the callback as a signal, but the reservation stays until the callback settles. So a scope's allowance can't be reused while its callback may still hold the value.
 
 ### Writes
 
@@ -425,7 +471,11 @@ All bounds are process-wide. The service hosts one node.
   - **Why:** a COB write commits a git object, updates a ref, re-signs `rad/sigrefs`, updates the COB cache and announces the change. An error at a later step doesn't prove that an earlier one didn't commit.
 - **What the page sees:**
   - `outcome_unknown` answers -32603 with "The Radicle node stopped before confirming this write; it may have been recorded."
-  - Main never retries one, and the page must check before writing again. [Reconciliation](#reconciliation) makes the write either absent or complete at the next start.
+  - Main never retries one, and the page must check before writing again. The write is either absent or complete once its repository's repair has run: online, below, or at the next start ([Reconciliation](#reconciliation)).
+- **Online repair after an uncertain write:**
+  - As soon as the executing call returns, the writer's next exclusive task is that repository's repair: validate and re-sign the node's own namespace, and rebuild the repository's COB cache.
+  - Until the repair succeeds, `issues`, `issue`, `patches` and `patch` reads of that repository answer `stopped` (503), and writes to it wait behind it.
+  - If the repair fails, the service exits 70. The marker is still set, so the next start reconciles fully.
   - This mirrors 0005's uncertain broadcasts.
 - **Import, in process:**
   - `rad.import_repo` creates the repository in storage and fetches the working copy's default branch into the node's namespace with libgit2's local transport, then signs the refs ([upstream](#upstream-changes)).
@@ -556,7 +606,7 @@ All bounds are process-wide. The service hosts one node.
   - main holds one 128 KiB ring per stream.
 - **Other callers:**
   - The manager, `cob-service.js`, the provider and the GitHub bridge aren't dweb-admitted. They share a limit of 64 outstanding service requests, with 64 more waiting in main. Beyond that a call fails `busy`.
-  - Their reads use the same 60 s deadline to the head, and their collected results use the collection budget.
+  - Their reads use the same 60 s deadline to the head. Their parsed results take the routes in [JSON results](#json-results), and so the collection budget, with no whole-body parsing outside it.
 - **Readiness:**
   - The node is up while all of these hold:
     - its generation is live;
@@ -726,6 +776,8 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
     - typed recognition of temporary clones (`<RID>.tmp`, legacy `<RID>.lock`) and ref lock files, with no symlinks followed;
     - validation and re-signing of the node's own namespace;
     - a COB cache rebuild;
+    - per-repository steps that are idempotent and committed on their own, with a done-record and a deadline checked between repositories;
+    - `reconcile_repository(rid)` for the online repair;
     - a report of what it changed, and an error that names anything it couldn't repair.
 
 ## Where the code lives
@@ -779,12 +831,15 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
   - cancel mid-body, a paused reader, and admission's 503;
   - the service exiting mid-body;
   - private partitions refused for writes.
+- **Composed outputs:** `readme_at`, `repo_meta`, `repos_meta`, `issues_page` and `patches_page` (with each `status` and page bound), `node_info`, and the re-serialized `issue`, `patch`, `remotes` and `repo_stats`, each recorded from main's code at the reference and matched byte for byte.
 - **JSON results:**
   - 4 concurrent maximum-size results with slow consumers: the output budget holds, and main holds one ring per stream;
   - a blob of 6 MiB of NUL bytes, whose escaped JSON would be 36 MiB: `too_large`, stopped while it was being written;
   - a history walk past its byte budget: `too_large`, stopped while it was being built;
   - collected results over their caps, and over the 16 MiB collection budget: `too_large`, then `busy`;
-  - an aborted collecting call releases its bytes.
+  - an aborted collecting call releases its bytes;
+  - a scope paused with a 4 MiB result, then aborted: its allowance stays reserved until the callback settles, and a new call can't use it;
+  - the budget tests include the composed issue and patch endpoints, and the callers outside the handlers: the manager, the provider, the GitHub bridge and `cob-service.js`.
 - **Deadlines:** a read queued past its deadline never starts; a read waiting for a reservation past its deadline gets `deadline`; a paused body after the head is never timed out by the service.
 - **Writes:**
   - a failure injected at each durable stage of a COB write (the object, the ref, the sigrefs, the cache, the announcement), and on each terminal path (error, panic, cancel, deadline, shutdown, kill): every result after the boundary is `outcome_unknown`;
@@ -795,6 +850,12 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
   - a stop and a kill during an import, then a restart: reconciliation handles the partial repository, and no process outlives the service;
   - a policy change during an import;
   - an import whose working copy has hooks and a `url.*.insteadOf` configuration: none of it runs or applies.
+- **The dirty marker:**
+  - a failure injected after a COB ref and before its sigrefs, then an ordinary `rad.shutdown` and a restart: the marker stays, and the restart repairs;
+  - a shutdown while a timed-out writer is still running: the marker stays;
+  - an `outcome_unknown` write, then reads of its repository: 503 until the online repair is done; a failed repair exits 70;
+  - a clean run: the marker is cleared, and the next start skips the full repair.
+- **The bound:** a slow rebuild that passes 300 s: `deadline`, with the marker and the done-record kept. A retry completes from the record, and a kill during the repair is followed by a retry that completes.
 - **Reconciliation:**
   - a kill between a COB ref and its sigrefs: the namespace is re-signed;
   - between the sigrefs and the cache: the cache is rebuilt;
@@ -806,7 +867,7 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
   - with an independently running service holding the gate: `lock_held`, and no file touched;
   - core recovery while the gate is held: `pending_recovery`, then completion once the service stops;
   - a profile without a key: `no_identity`, the core's device key, then a start.
-- **Progress:** more than 16 failed candidates with a paused writer, then a cancel: the summary counts every failure, the terminal `cancelled` arrives, and memory stays bounded. Also an oversized `reason`.
+- **Progress:** more than 16 failed candidates with a paused writer, then a cancel: the summary counts every failure, the terminal `cancelled` arrives, and memory stays bounded. Also an oversized `reason`, and a summary whose reasons are NULs and backslashes: the encoded event stays within 4 KiB, cut at character boundaries.
 - **Rust tests through the binary,** with test hooks behind a feature:
   - the lock and `hold-lock`;
   - parent death;
@@ -860,7 +921,7 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 
 | Budget | Bound | Exhausted |
 |---|---|---|
-| handshake; `rad.start` | 10 s; 30 s after reconciliation | kill; error, and the process exits |
+| handshake; `rad.reconcile`; `rad.start` | 10 s; 300 s; 30 s | kill; error, and the process exits (Retry continues a repair) |
 | shutdown | the service exits within 5 s of `rad.shutdown`; main kills at 10 s | kill |
 | exit after stdin EOF | 5 s, a watchdog thread | `std::process::exit` |
 | lock contention | 5 s of retries, for the service, the core and `hold-lock` | exit 75; `lock_held` |
@@ -870,9 +931,9 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 | network pool | 8 threads, 16 queued; `timeout_ms` + 30 s | `busy`; `deadline`, with the slot held until libradicle returns |
 | write queue | 1 at a time, 16 queued; 60 s (300 s for import); the slot held until the call returns | `busy`; `outcome_unknown` once started |
 | output budget | 256 MiB by reservation; a blob ≤ 64 MiB (128 MiB reserved while loading); a JSON read ≤ 64 MiB with ≤ 32 MiB of JSON | the read waits within its deadline; `too_large` per read |
-| progress events | per clone, ≤ 10 unwritten of ≤ 4 KiB, plus the terminal; failures past 8 are summarized | the summary grows its count, not its size |
+| progress events | per clone, ≤ 10 unwritten of ≤ 4 KiB encoded, plus the terminal; failures past 8 are summarized | the summary grows its count, not its size; reasons are cut |
 | streams | 0007's: a 128 KiB window, 64 KiB frames, one 128 KiB ring per stream in main | the service waits for credit |
-| collected results in main | per call: 64 KiB, or 4 MiB for the lists; 16 MiB in all, held for the scope | `too_large`; `busy` after 5 s |
+| collected results in main | per call: 64 KiB, or 4 MiB for the lists; 16 MiB in all, held until the scope's callback settles, even after an abort | `too_large`; `busy` after 5 s |
 | other callers in main | 64 outstanding, 64 waiting | `busy` |
 | admission in main | shared with dweb fetches: 256 active, 512 waiting | 503 |
 | health | `rad.stats` every 5 s; main's watchdog at 20 s | kill |
@@ -887,7 +948,7 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 | `home-lock` | the control-socket bind | an OS lock, taken by every Freedom writer before it touches the home | a second owner fails at start (75); the core never writes under a running node |
 | `network-fs` | any filesystem | a network filesystem is refused (74) | Radicle doesn't start there |
 | `failed-start` | handled in main's process | the process exits after replying | nothing of a failed start survives |
-| `reconcile` | an interrupted write stays as it was left | reconciled under the lock before `RUNNING`, or `recovery_failed` | writes are absent or complete after a crash |
+| `reconcile` | an interrupted write stays as it was left | a dirty marker, and a bounded reconciliation phase under the lock before `RUNNING`, or `recovery_failed`; an online repair after an uncertain write | writes are absent or complete after any interruption; a repository's COB reads answer 503 during its repair |
 | `control-socket` | `node/control.sock` is bound | none | the `rad` CLI can't attach to Freedom's node |
 | `import-in-process` | `git push` from the working copy, which gains a `rad` remote | a libgit2 fetch; the working copy is untouched | no child process, and no git configuration from outside the service |
 | `blob-api` | text as lossy JSON; binary dropped | `/raw/` with raw bytes, Range, length, ETag and inert types; `/blob/` unchanged | images and downloads work; the JSON endpoint is the same |
@@ -915,7 +976,7 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
    The service can start on items 1–4, 9, 10 and 13.
 3. **The shared service skeleton,** from 0007: the lock, `hold-lock`, the handshake, parent death, the panic hook, hardening and the frame I/O.
 4. **`services/freedom-radicled`:**
-   - reconciliation at start;
+   - the dirty marker, `rad.reconcile` with its bound, and the online repair;
    - the pools, the output budget and bounded JSON construction;
    - `rad.read` and `rad.blob`, with ranges;
    - network operations with bounded progress and cancel;
@@ -951,4 +1012,4 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 8. **The address policy:** are these the right ranges, and is the exact-address exemption for configured seeds enough for LAN setups?
 9. **One Tor switch:** should Route Radicle through Tor and 0007's Route IPFS through Tor be one setting?
 10. **heartwood's memory:** should the service run under an OS-level limit (`RLIMIT_AS`, or a Windows job memory limit), given that heartwood's own buffers aren't bounded by the service?
-11. **Private windows:** is read-only acceptable, or should an internal page in a private window still be able to seed?
+11. **Private windows:** is read-only the right rule for private partitions, or should an explicit, user-initiated seed be allowed there?
