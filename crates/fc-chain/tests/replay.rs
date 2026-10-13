@@ -2188,11 +2188,31 @@ const DEVIATIONS: &[Expected] = &[
         )],
         ..EXPECTED
     },
+    // A verified revert that is also a capacity failure: rebuilt as
+    // `execution reverted` with its code and data, where the reference
+    // rethrows the adapter's error with its own text. The route is blocked
+    // alike, so the same call again never asks Colibri.
+    Expected {
+        id: "boundary-colibri-revert-capacity",
+        deviation: "adapter-error-text",
+        replies: &[(
+            0,
+            0,
+            0,
+            Want::Thrown {
+                class: "Error",
+                name: "Error",
+                message: "execution reverted",
+                props: &[("code", "3"), ("data", r#""0x""#)],
+            },
+        )],
+        ..EXPECTED
+    },
 ];
 
 /// The score: scenarios replayed exactly (deviation scenarios with their
 /// asserted difference included), and those not replayed yet.
-const PASSING: usize = 301;
+const PASSING: usize = 303;
 const NOT_REPLAYED: usize = 0;
 /// The permitted races, counted: each is a cancel the machine made in the
 /// tick the reference's exchange settled, after what [`race`] names. Main

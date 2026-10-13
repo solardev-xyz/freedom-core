@@ -79595,6 +79595,294 @@
       ]
     },
     {
+      "id": "boundary-colibri-revert-capacity",
+      "from": "design 0005: Verified operations, Colibri's outcomes",
+      "world": {
+        "chains": {
+          "1": {
+            "network": {
+              "access": {
+                "readOrder": [
+                  "colibri"
+                ],
+                "broadcastOrder": [
+                  "myotis",
+                  "direct"
+                ]
+              },
+              "quorum": {
+                "k": 3,
+                "m": 2,
+                "timeoutMs": 5000
+              }
+            },
+            "rpc": [],
+            "prover": [
+              "https://prover.example"
+            ]
+          }
+        },
+        "colibri": {
+          "error": {
+            "message": "out of gas",
+            "code": 3,
+            "data": "0x"
+          }
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_call",
+              "params_json": "[{\"to\":\"0xabc\",\"data\":\"0x1234\"},\"latest\"]",
+              "origin": "https://swap.example",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "thrown": {
+                "class": "Error",
+                "name": "Error",
+                "message_json": "\"out of gas\"",
+                "props": [
+                  {
+                    "key": "code",
+                    "json": "3"
+                  },
+                  {
+                    "key": "data",
+                    "json": "\"0x\""
+                  }
+                ]
+              },
+              "settled": 0
+            }
+          ],
+          "state": {
+            "adaptive": [
+              [
+                "[\"colibri\",1,\"https://swap.example\",\"eth_call\",\"*\"]",
+                {
+                  "timeoutCount": 0,
+                  "openUntil": 0,
+                  "sessionBlocked": true
+                }
+              ]
+            ]
+          }
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_call",
+              "params_json": "[{\"to\":\"0xabc\",\"data\":\"0x1234\"},\"latest\"]",
+              "origin": "https://swap.example",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "thrown": {
+                "class": "Error",
+                "name": "Error",
+                "message_json": "\"All chain sources failed for eth_call (colibri: temporarily bypassed for this app workload)\"",
+                "props": []
+              },
+              "settled": 0
+            }
+          ],
+          "state": {
+            "adaptive": [
+              [
+                "[\"colibri\",1,\"https://swap.example\",\"eth_call\",\"*\"]",
+                {
+                  "timeoutCount": 0,
+                  "openUntil": 0,
+                  "sessionBlocked": true
+                }
+              ]
+            ]
+          }
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "call": 0,
+          "t": 0,
+          "kind": "verified-op",
+          "host": "colibri",
+          "op": "request",
+          "chain": 1,
+          "params_json": "{\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\",\"data\":\"0x1234\"},\"latest\"],\"deadline_ms\":5000}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "thrown": {
+              "class": "Error",
+              "name": "Error",
+              "message_json": "\"out of gas\"",
+              "props": [
+                {
+                  "key": "code",
+                  "json": "3"
+                },
+                {
+                  "key": "data",
+                  "json": "\"0x\""
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "boundary-colibri-undefined-result",
+      "from": "design 0005: Verified operations, Colibri's outcomes",
+      "world": {
+        "chains": {
+          "1": {
+            "network": {
+              "access": {
+                "readOrder": [
+                  "colibri"
+                ],
+                "broadcastOrder": [
+                  "myotis",
+                  "direct"
+                ]
+              },
+              "quorum": {
+                "k": 3,
+                "m": 2,
+                "timeoutMs": 5000
+              }
+            },
+            "rpc": [],
+            "prover": [
+              "https://prover.example"
+            ]
+          }
+        },
+        "colibri": {}
+      },
+      "steps": [
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_blockNumber",
+              "params_json": "[]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "undefined": true
+                },
+                {
+                  "key": "source",
+                  "json": "\"colibri\""
+                },
+                {
+                  "key": "verified",
+                  "json": "true"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_blockNumber",
+              "params_json": "[]",
+              "include_trust": true,
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "undefined": true
+                },
+                {
+                  "key": "source",
+                  "json": "\"colibri\""
+                },
+                {
+                  "key": "verified",
+                  "json": "true"
+                },
+                {
+                  "key": "trust",
+                  "json": "{\"level\":\"verified\",\"method\":\"colibri\",\"prover\":\"prover.example\",\"proof\":\"ZK sync-committee proof\",\"block\":null,\"agreed\":[\"prover.example\"],\"dissented\":[],\"queried\":[\"prover.example\"],\"quorum\":{\"k\":1,\"m\":1,\"achieved\":true}}"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "call": 0,
+          "t": 0,
+          "kind": "verified-op",
+          "host": "colibri",
+          "op": "request",
+          "chain": 1,
+          "params_json": "{\"method\":\"eth_blockNumber\",\"params\":[],\"deadline_ms\":5000}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "result_undefined": true
+          }
+        },
+        {
+          "id": 1,
+          "step": 1,
+          "call": 0,
+          "t": 0,
+          "kind": "verified-op",
+          "host": "colibri",
+          "op": "request",
+          "chain": 1,
+          "params_json": "{\"method\":\"eth_blockNumber\",\"params\":[],\"deadline_ms\":5000}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "result_undefined": true
+          }
+        }
+      ]
+    },
+    {
       "id": "boundary-quorum-reverts-one-answer",
       "from": "design 0005: Quorum, errors",
       "world": {

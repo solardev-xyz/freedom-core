@@ -258,6 +258,8 @@ const SCENARIO_IDS: &[&str] = &[
     "boundary-truncation-with-direct-left",
     "boundary-quorum-reverts-direct-untried",
     "boundary-quorum-reverts-colibri-revert-survives",
+    "boundary-colibri-revert-capacity",
+    "boundary-colibri-undefined-result",
     "boundary-quorum-reverts-one-answer",
     "boundary-fee-myotis-priority-equals-gas-price",
     "boundary-fee-myotis-priority-zero",
