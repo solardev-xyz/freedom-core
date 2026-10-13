@@ -5,6 +5,9 @@
 //! - `FREEDOM_CORED_TEST_JOB_DELAY_MS` stalls each vault job before it does
 //!   anything (so before its commit point).
 //! - `FREEDOM_CORED_TEST_KDF_DEADLINE_MS` replaces the 30 s KDF deadline.
+//! - `FREEDOM_CORED_TEST_STALL_MS` replaces the 30 s the vault loop's
+//!   replies may wait on a writer that writes nothing before the core
+//!   exits.
 //! - `FREEDOM_CORED_TEST_COMMIT_DELAY_MS` stalls a job right after it claims
 //!   its commit point, before the rename or unlink.
 //! - `FREEDOM_CORED_TEST_COMMIT_MARKER` names a file created the moment a job
@@ -56,6 +59,11 @@ pub fn kdf_deadline(default: Duration) -> Duration {
 }
 
 #[cfg(debug_assertions)]
+pub fn stall(default: Duration) -> Duration {
+    millis("FREEDOM_CORED_TEST_STALL_MS").map_or(default, Duration::from_millis)
+}
+
+#[cfg(debug_assertions)]
 pub fn chain_bounds(mut bounds: fc_chain::machine::Bounds) -> fc_chain::machine::Bounds {
     if let Some(total) = millis("FREEDOM_CORED_TEST_CHAIN_TOTAL_BYTES") {
         bounds.total_bytes = usize::try_from(total).unwrap_or(usize::MAX);
@@ -102,6 +110,11 @@ pub fn commit_delay() {}
 
 #[cfg(not(debug_assertions))]
 pub fn kdf_deadline(default: Duration) -> Duration {
+    default
+}
+
+#[cfg(not(debug_assertions))]
+pub fn stall(default: Duration) -> Duration {
     default
 }
 

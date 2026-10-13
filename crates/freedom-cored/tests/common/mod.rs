@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -264,6 +264,69 @@ impl Core {
         self.paused.1.notify_all();
     }
 
+    /// Resumes reading stdout after `delay`, from a thread: the test can
+    /// meanwhile block writing a burst the core takes in only as main reads.
+    pub fn resume_reading_after(&self, delay: Duration) -> std::thread::JoinHandle<()> {
+        let paused = Arc::clone(&self.paused);
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            *paused.0.lock().unwrap() = false;
+            paused.1.notify_all();
+        })
+    }
+
+    /// Writes `bytes` to stdin from a thread: for a burst the core may never
+    /// take in whole. The thread ends once the write is done or fails (the
+    /// core exited), and hands stdin back still open, so EOF comes only
+    /// when the test drops it.
+    pub fn send_in_background(&mut self, bytes: Vec<u8>) -> std::thread::JoinHandle<ChildStdin> {
+        let mut stdin = self.stdin.take().unwrap();
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&bytes);
+            stdin
+        })
+    }
+
+    /// Writes `frames` to stdin from a thread, one at a time, counting them
+    /// as they go in ([`Feed`]).
+    pub fn feed(&mut self, frames: Vec<Vec<u8>>) -> Feed {
+        let mut stdin = self.stdin.take().unwrap();
+        let written = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&written);
+        let thread = std::thread::spawn(move || {
+            for frame in frames {
+                if stdin.write_all(&frame).is_err() {
+                    break;
+                }
+                count.fetch_add(1, Ordering::SeqCst);
+            }
+            stdin
+        });
+        Feed { thread, written }
+    }
+
+    /// Takes stdin back from a feed once it has written everything.
+    pub fn fed(&mut self, feed: Feed) {
+        self.stdin = Some(feed.thread.join().unwrap());
+    }
+
+    /// The core's resident memory now (`VmRSS`) and at its peak (`VmHWM`),
+    /// in KiB.
+    #[cfg(target_os = "linux")]
+    pub fn memory_kib(&self) -> (u64, u64) {
+        let status = std::fs::read_to_string(format!("/proc/{}/status", self.child.id())).unwrap();
+        let field = |name: &str| -> u64 {
+            let line = status.lines().find(|l| l.starts_with(name)).unwrap();
+            line[name.len()..]
+                .trim()
+                .trim_end_matches("kB")
+                .trim()
+                .parse()
+                .unwrap()
+        };
+        (field("VmRSS:"), field("VmHWM:"))
+    }
+
     /// Stops reading stdout right after the next begin frame, until
     /// [`Core::resume_reading`]: the core then stalls in that response.
     pub fn pause_after_begin(&self) {
@@ -475,6 +538,45 @@ impl Core {
     pub fn stderr(&mut self) -> String {
         self.stderr.take().unwrap().join().unwrap()
     }
+}
+
+/// Frames going into stdin from a thread ([`Core::feed`]).
+pub struct Feed {
+    thread: std::thread::JoinHandle<ChildStdin>,
+    written: Arc<AtomicUsize>,
+}
+
+impl Feed {
+    /// Waits until no frame has gone in for `quiet`, and returns how many
+    /// did. Frames of 64 KiB or more, larger than the pipe and the
+    /// reader's chunk, go in only as the core handles the frames it holds,
+    /// so feeding them stalls once the core stops taking frames, not while
+    /// it is merely slow. (Smaller frames go in many to a read, ahead of
+    /// their handling.)
+    pub fn wait_stalled(&self, quiet: Duration) -> usize {
+        let deadline = Instant::now() + READ_TIMEOUT;
+        let mut seen = self.written.load(Ordering::SeqCst);
+        let mut since = Instant::now();
+        loop {
+            std::thread::sleep(Duration::from_millis(20));
+            let written = self.written.load(Ordering::SeqCst);
+            assert!(!self.thread.is_finished(), "the core took every frame");
+            if written != seen {
+                seen = written;
+                since = Instant::now();
+            } else if since.elapsed() >= quiet {
+                return written;
+            }
+            assert!(Instant::now() < deadline, "the core kept taking frames");
+        }
+    }
+}
+
+/// Requests too large for any pipe: `vault.status` padded to 64 KiB.
+pub fn padded(ids: std::ops::Range<u64>) -> Vec<Vec<u8>> {
+    let pad = "x".repeat(64 * 1024);
+    ids.map(|id| frame(&request(id, "vault.status", json!({ "pad": pad }))))
+        .collect()
 }
 
 pub fn dirs() -> (tempfile::TempDir, PathBuf, PathBuf) {
