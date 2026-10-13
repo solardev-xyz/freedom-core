@@ -133,7 +133,7 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
 | `{ myotis: "call_tx", chain_id, tx }` | `ethCallTx` at `latest` | likewise |
 | `{ myotis: "estimate_tx", chain_id, tx }` | `estimateGas` at `latest` | likewise |
 | `{ myotis: "fee", chain_id }` | `feeEstimate` | likewise |
-| `{ myotis: "broadcast", chain_id, raw }` | `sendRawTransaction` | `{ hash }`, `{ rejected: { reason } }`, `{ uncertain }` or `{ not_sent }` |
+| `{ myotis: "broadcast", chain_id, raw }` | `sendRawTransaction` | `{ hash }`, `{ rejected: { reason } }`, `{ uncertain }`, `{ not_sent }` or `{ failure: class }` |
 | `{ colibri: "request", chain_id, method, params, deadline_ms }` | `requestViaColibri` | `{ result }`, `{ revert: { data } }` or `{ failure: class }` |
 
 #### Myotis read outcomes
@@ -156,9 +156,13 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
 - **Broadcast classes** are exactly myotis-process's:
   - `not_sent`: queued and expired, or the client wasn't running;
   - `uncertain`: dispatched, then a deadline, an exit or a stop.
+- **A broadcast's `{ failure: class }`:** main may also answer a broadcast with a class of the chain set, so that a failure that sent nothing keeps today's text:
+  - `not_running`, `not_ready`, `queue_full` and `queue_deadline` count as **not sent**, and the core rebuilds their texts and codes as for a read, so the last error is today's (`boundary-broadcast-myotis-not-running-last-error`: `Gnosis Myotis client is not running`; `boundary-broadcast-myotis-not-sent-then-direct` falls to Direct);
+  - every other class is **ambiguous**: the client may have dispatched the transaction.
 - **Colibri's outcomes:**
   - **`{ revert: { data } }`:** the worker's error carried code 3 and hex `data`, a revert the prover verified. The core rebuilds it as `execution reverted`, with code 3 and that data.
-  - **`{ failure: class }`:** everything else, from the chain set above. Its text isn't forwarded whether or not it had a code (deviation `adapter-error-text`): main can't tell a node's error from the SDK's own.
+  - **`{ failure: class }`:** everything else, from the chain set above, plus Colibri's own `capacity`. Its text isn't forwarded whether or not it had a code (deviation `adapter-error-text`): main can't tell a node's error from the SDK's own.
+  - **`capacity`** is the one bit of that text the [adaptive bypass](#adaptive-bypass) needs. Main sets it where the router's `isCapacityFailure` pattern, `/out of gas|execution (?:gas|resource) limit|exceeds? (?:the )?(?:gas|execution) limit/i`, matches the adapter's error. As today, it blocks the app's Colibri route for the core process's life (`router-colibri-capacity-demotion`, `boundary-adaptive-capacity-survives-success`, `boundary-adaptive-route-target-case`).
 - **Admission:** the router's slots stay as the core's admission rules, held until main's terminal reply. Myotis has 1 in flight and 16 waiting per chain, and background callers take only an idle slot. Colibri has 8 in flight, 2 per route.
 - **Physical completion:** main replies only when the adapter's promise settles, never early. Main's per-verifier bound (0004: 8 operations) is shared by naming and chain data.
 - **Reply size:** as 0004, main serializes each reply first; one over the message cap is `{ failure: "too_large" }`.
@@ -204,7 +208,7 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
   - `configured = max(500, quorum.timeout_ms || 5000)`;
   - an interactive read caps a source at 2 s when a later source exists;
   - the quorum's budget is a *verification* budget: when Direct comes next, its members run on to `configured`;
-  - Direct gives every endpoint `configured`, walking them one at a time;
+  - Direct gives every endpoint `configured`, walking them one at a time ([Direct](#direct) on the reference's widening);
   - the Ant profile widens the quorum budget to 30 s.
 - **Overall:** 120 s per request, or the caller's `deadline_ms` if lower (deviation `overall-deadline`).
   - **Today** a request has no overall bound: an interactive read on chain 1 can take about 39 s, and more with user settings.
@@ -214,8 +218,9 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
 
 ### Cancellation
 
-- **A `cancel`** ends the request, unless its response has already begun ([Frames](#frames)). Its pending `shell.rpc` and `shell.blockscout` requests are cancelled, quorum members included (deviation `abandoned-exchanges`: today's caller signal doesn't reach the quorum).
-- **Verifier work** keeps its slot until main's terminal reply (parity: the router holds Myotis and Colibri slots until the operation physically settles).
+- **A `cancel`** ends the request at once, unless its response has already begun ([Frames](#frames)): a read or a fee quote replies `cancelled` (deviation `cancel-promptly`). Its pending `shell.rpc` and `shell.blockscout` requests are cancelled, quorum members included (deviation `abandoned-exchanges`: today's caller signal doesn't reach the quorum).
+  - **Today** the router throws its `AbortError` only at its next check of the signal, so a read waiting on a verifier settles only when that operation does: `cancel-read-no-fallthrough` is aborted at 10 ms and throws at 20 ms, when Myotis's read settles. The core replies at 10 ms.
+- **Verifier work** keeps its slot until main's terminal reply (parity: the router holds Myotis and Colibri slots until the operation physically settles). In `cancel-read-no-fallthrough` the Myotis slot is still held when the core replies.
 - **A broadcast** that is cancelled ends as [Broadcast](#broadcast) says. Today it is an `AbortError`.
 
 ## Configuration
@@ -311,6 +316,7 @@ The router keeps parsed values; the core keeps **text**.
 
 - **Reuse:** with a quorum's `directFallback` waiting, Direct returns its text without a new request, with `user-configured` or `unverified` trust.
 - **Otherwise** it walks the endpoints the quorum didn't ask, one at a time, each at `configured`. Every error falls through to the next. The last error is thrown.
+- **Widening:** the reference also takes a `directTimeoutMs` router option that widens each endpoint's budget, and with it retries the members the quorum cut off, after the endpoints it never asked (`cancel-direct-timeout-widened-never-narrowed`; `cancel-range-limit-not-kept-without-rank`: `d`, then `a` again for 60 s). No shipped caller passes it, so the `default` and `ant_scan` profiles keep "each at `configured`". The machine reproduces the option for the replay, but `chain.request` doesn't expose it: a request names only its profile.
 - **Gnosis without API keys** has no endpoint left after a failed quorum (N = k = 3). Today's `All RPC endpoints failed` stays (parity); whether that is intended is an [open question](#open-questions).
 
 ### Myotis
@@ -344,7 +350,7 @@ The router keeps parsed values; the core keeps **text**.
 For myotis, colibri and quorum, and only on interactive reads:
 - the route key is `[source, chain, origin, method, target]`;
 - **a failure of kind `timeout`** opens the route for 15, 30 and then 60 s (`router-colibri-cooldown-escalation`). A quorum has that kind only when its members time out themselves, which they do when Direct comes next and they run on (`router-quorum-carries-past-deadline`). A quorum cut at its own 2 s budget opens nothing, and is asked again on the next read (`boundary-adaptive-quorum-deadline-not-a-timeout`);
-- **a capacity failure** blocks it for the core process's life;
+- **a capacity failure** blocks it for the core process's life: an error whose text matches `isCapacityFailure`, a quorum whose members' capacity failures reach m, or Colibri's `capacity` class ([The rest](#the-rest));
 - **a success** clears it, unless the route is blocked;
 - **at most 1024 routes,** evicting the oldest.
 
@@ -366,6 +372,8 @@ The origin is browsing data: it stays in core memory, is never logged and dies w
 - **Blockscout pairing,** in the Ant profile, for xBZZ Transfer scans:
   - the RPC half, then Blockscout's pages back from the newest (50 a page, at most 40 pages). The reference caps a page at 8 Mi UTF-16 units, which can be more than 8 MiB of bytes; the core caps it at 8 MiB of bytes (deviation `blockscout-page-bytes`);
   - field-by-field agreement, then a quorum over the newest blocks;
+  - **texts that name the pair:** the reference's `<host> answered the span with a malformed log entry` and `Blockscout (<n> logs) and <host> (<m> logs) disagree` embed an endpoint's host, which the core doesn't know. The core says `the paired endpoint` in its place (deviation `paired-endpoint-text`; the paths of `ant-index-malformed-pair-entry-*` and `ant-index-blockscout-missing-old-log-falls-back`). Both texts stay inside the source's failure, and no vector shows them in a final error;
+  - **`shell.blockscout`'s failures** carry no reason: a redirect hop main refuses (off https, a local host, no or a malformed location, too many hops, a name that doesn't resolve) is one `refused`, whose text is `redirected to a refused location`, where the reference names the reason (deviation `adapter-error-text`; `blockscout-redirect-off-https`, `blockscout-redirect-without-location`, `blockscout-redirect-loop`, `blockscout-redirect-local-host-*`, `blockscout-redirect-dns-local`, `blockscout-redirect-dns-fails`). Its cooldown is today's 60 s, and no vector shows the text in a final error;
   - **today's cooldowns:**
     - a 429 that names its reset: that time, clamped to 1–15 min;
     - 5 min for a 429 naming no reset, a throttle in the body, or a disagreement;
@@ -408,8 +416,8 @@ Every attempt (a Direct endpoint's `eth_sendRawTransaction`, Myotis's `broadcast
 |---|---|
 | **accepted** | a success whose result is the transaction's hash; Myotis `{ hash }` likewise |
 | **refused** | a node error matching a [refusal predicate](#refusals), or Myotis `{ rejected }` |
-| **not sent** | main's `not_sent`; Myotis `{ not_sent }`; an attempt the core never sent to main |
-| **ambiguous** | everything else: other node errors (`already known` and unrecognized ones), a success with a different, missing or malformed hash, a non-2xx status, a transport failure, a timeout, a cancel or a deadline after the request reached main, Myotis `{ uncertain }` |
+| **not sent** | main's `not_sent`; Myotis `{ not_sent }`, or its `{ failure }` with `not_running`, `not_ready`, `queue_full` or `queue_deadline`; an attempt the core never sent to main |
+| **ambiguous** | everything else: other node errors (`already known` and unrecognized ones), a success with a different, missing or malformed hash, a non-2xx status, a transport failure, a timeout, a cancel or a deadline after the request reached main, Myotis `{ uncertain }` or any other `{ failure }` class |
 
 - **The hash** is computed by the core: keccak-256 of the signed bytes. Hashes compare as 32-byte values, any hex case.
 - **An attempt is possibly sent** from the moment the core sends its request to main until main's reply proves otherwise (`not_sent`).
@@ -434,7 +442,8 @@ A node's error proves only that *these* bytes weren't admitted by *that* node *n
 
   `already known` is never a refusal, in any client's wording, because it says the bytes exist. Anything unmatched is ambiguous, geth's minimum-tip refusal (`transaction gas price below minimum`) among them. Under the wallet's rule a classification decides only what is shown ([Retrying an intent](#retrying-an-intent)).
 - **Myotis `rejected`** counts as a refusal; its reasons include a used nonce.
-- **Order doesn't matter.** A refusal after an ambiguous attempt stops the attempt loop, as Myotis's final verdict does today, but it can't erase that attempt: the outcome table looks at every attempt.
+- **Order doesn't matter.** A refusal after an attempt that may have been sent (an ambiguous one) stops the attempt loop, as Myotis's final verdict does today, but it can't erase that attempt: the outcome table looks at every attempt (`boundary-broadcast-refusal-after-ambiguous`).
+- **A refusal with nothing possibly sent** doesn't stop the loop: re-sending continues as today, since another node may admit the bytes (`boundary-broadcast-resends-until-accepted`: `nonce too low` from a, `insufficient funds` from b, accepted by c).
 
 ### Outcome
 
@@ -574,9 +583,11 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 | `order-validation` | duplicates run twice; unknown names fail late | dropped at configuration | |
 | `config-change` | the registry re-read mid-request; a change applies piecemeal | a change ends the chain's requests; main sends reads and fee quotes again once | callers see the new configuration whole |
 | `abandoned-exchanges` | the caller's signal doesn't reach the quorum | a cancel cancels members | |
+| `cancel-promptly` | the `AbortError` is thrown at the router's next check, so a read waiting on a verifier settles when that operation does | `cancelled` at once; the verifier's slot is held until main's reply | `cancel-read-no-fallthrough` replies at 10 ms, not 20 |
 | `state-retention` | log-range and pair state never pruned | configured + 64 retired | |
 | `json-parse-text` | V8's message with a body fragment | a fixed message | |
-| `adapter-error-text` | adapter and transport diagnostics' own text and code, Colibri's errors included | the core's fixed text; only errors parsed from node bodies pass through, and the adapter's own known errors keep their texts and codes | another diagnostic loses its text and its code; a Colibri revert's message reads differently |
+| `adapter-error-text` | adapter and transport diagnostics' own text and code, Colibri's errors included | the core's fixed text; only errors parsed from node bodies pass through, and the adapter's own known errors keep their texts and codes; Colibri's capacity limit survives as a class; a refused Blockscout redirect is `redirected to a refused location` | another diagnostic loses its text and its code; a Colibri revert's message reads differently; a Blockscout redirect refusal doesn't name its reason (its 60 s cooldown is unchanged) |
+| `paired-endpoint-text` | Blockscout's pairing texts name the RPC endpoint's host | `the paired endpoint` | a source failure's text reads differently; no final error shows it |
 | `myotis-readiness` | `isReady()` sampled live | the last `chain.availability` | |
 | `memory-budgets` | unbounded | per request and in total | `budget`, `busy` |
 | `broadcast-outcome` | the last error wins; lost replies look like failures | attempt classes, exact refusals, `sent` / `uncertain` / `rejected` / `not_sent`, reconciliation, main's record | a lost reply is `uncertain`, not a failure |
@@ -616,7 +627,10 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
   - **Values as text:** every value the reference produced or was given is recorded as JSON text, and `undefined` as a field of its own. No value can pass for an encoding, and every value `JSON.parse` makes survives: lone surrogates, any depth, `-0` and infinities.
   - **Large texts:** a text over 64 KiB is stored in its field's repeat form, a repeat unit plus a SHA-256, which keeps the 8 MiB `html()` answers small.
   - **Settle times:** ported scenarios carry the settle times their tests assert, and generation fails if a fixture drifts from them.
-- **Not replayed:** these are left to step 3's own tests:
+- **The machine replays all 297** (`crates/fc-chain/tests/replay.rs`), comparing every I/O request with its time and its cancel, every result and error with its key order and own properties, settle times and the state tables. A driver plays main from the records, delivering answers due in one tick in the reference's microtask order.
+  - **17 scenarios show a deviation's difference,** each listed in the test with the reply, the I/O and the state it must show instead: `broadcast-outcome` (13: today's error, or a success with another hash, becomes `uncertain`, with the reconciliation lookups made listed), `config-change` (`boundary-registry-change-mid-request`), `order-validation` (`boundary-order-duplicates-and-unknown`), `json-depth` (`boundary-json-depth-513`) and `cancel-promptly` (`cancel-read-no-fallthrough`).
+  - **None is skipped.**
+- **Not replayed:** the machine's own tests cover the second and third (`crates/fc-chain/tests/machine.rs` and its unit tests); the first and fourth are main's (step 5):
   - a read's reply overtaken by a configuration change after it was made: that is main's reply fencing ([Generations](#generations)), and the reference has no seam for it;
   - the adaptive table's 1,024-route eviction;
   - a Myotis slot granted in the same turn as its waiter's deadline;

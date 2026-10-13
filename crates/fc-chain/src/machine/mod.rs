@@ -15,9 +15,10 @@
 //! (`vectors/chain-replay.json`), with design 0005's deviations:
 //! `overall-deadline`, `admission`, `abandoned-exchanges`,
 //! `order-validation`, `quorum-clamps`, `config-change`, `memory-budgets`,
-//! `monotonic-time`, `state-retention`, `rpc-id`, `adapter-error-text` and
-//! `broadcast-outcome`. It keeps no wall clock: every instant is the
-//! executor's monotonic milliseconds.
+//! `monotonic-time`, `state-retention`, `rpc-id`, `adapter-error-text`,
+//! `cancel-promptly`, `paired-endpoint-text` and `broadcast-outcome`. It
+//! keeps no wall clock: every instant is the executor's monotonic
+//! milliseconds.
 
 mod blockscout;
 mod bounds;

@@ -156,7 +156,7 @@ pub(crate) async fn log_index(
                     .logs
                     .set_pair_cool_until(chain_id, url, until);
                 // The reference names the endpoint's host, which the core
-                // doesn't know.
+                // doesn't know (deviation `paired-endpoint-text`).
                 last = Some(Thrown::error(
                     "the paired endpoint answered the span with a malformed log entry",
                 ));
@@ -231,6 +231,7 @@ pub(crate) async fn log_index(
                 || "no".to_owned(),
                 |index| index.root().children().count().to_string(),
             );
+        // Deviation `paired-endpoint-text`, as above.
         return Err(unavailable(&format!(
             "Blockscout ({} logs) and the paired endpoint ({count} logs) disagree",
             indexed.len()

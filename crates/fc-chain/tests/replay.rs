@@ -1739,12 +1739,11 @@ const DEVIATIONS: &[Expected] = &[
         extra: &["colibri eth_getTransactionByHash at 0"],
         ..EXPECTED
     },
-    // Design 0005, Cancellation: a cancel ends a read at once. The reference
-    // throws its AbortError only once Myotis's read settles; the slot stays
-    // taken until then in both.
+    // A cancel ends a read at once. The reference throws its AbortError only
+    // once Myotis's read settles; the slot stays taken until then in both.
     Expected {
         id: "cancel-read-no-fallthrough",
-        deviation: "cancellation",
+        deviation: "cancel-promptly",
         replies: &[(0, 0, 10, Want::Protocol("cancelled"))],
         states: &[(0, r#"{"myotis_slots":[[100,{"in_flight":1,"waiting":0}]]}"#)],
         ..EXPECTED
