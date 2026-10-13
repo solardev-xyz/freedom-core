@@ -13,13 +13,18 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_freedom-cored");
-pub const READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// A hang guard, never a timing assertion: no test waits on it to prove
+/// silence, and a test whose timing matters asserts it itself (as
+/// `auto_lock_fires` does). A generous guard only slows a failing test.
+pub const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// stdout, read on a thread: either frames (serve) or lines (hold-lock,
 /// recover).
 pub enum Output {
     Frame(Value),
     Line(String),
+    /// The reader stopped on a frame it couldn't parse.
+    Malformed(String),
 }
 
 pub struct Core {
@@ -93,15 +98,24 @@ pub fn spawn_env(
             if stdout.read_exact(&mut header).is_err() {
                 return;
             }
-            let len = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize - 1;
+            let Some(len) = (u32::from_be_bytes([header[0], header[1], header[2], header[3]])
+                as usize)
+                .checked_sub(1)
+            else {
+                let _ = tx.send(Output::Malformed(format!("frame header {header:?}")));
+                return;
+            };
             let mut payload = vec![0u8; len];
             if stdout.read_exact(&mut payload).is_err() {
                 return;
             }
-            if tx
-                .send(Output::Frame(serde_json::from_slice(&payload).unwrap()))
-                .is_err()
-            {
+            let output = match serde_json::from_slice(&payload) {
+                Ok(value) => Output::Frame(value),
+                Err(err) => {
+                    Output::Malformed(format!("{err}: {}", String::from_utf8_lossy(&payload)))
+                }
+            };
+            if tx.send(output).is_err() {
                 return;
             }
         }
@@ -167,8 +181,32 @@ impl Core {
         match self.output.recv_timeout(READ_TIMEOUT) {
             Ok(Output::Frame(value)) => value,
             Ok(Output::Line(line)) => panic!("expected a frame, got line {line:?}"),
-            Err(_) => panic!("no reply within {READ_TIMEOUT:?}"),
+            Ok(Output::Malformed(what)) => panic!("malformed frame: {what}"),
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!("no reply within {READ_TIMEOUT:?}"),
+            Err(mpsc::RecvTimeoutError::Disconnected) => self.closed("a reply"),
         }
+    }
+
+    /// stdout ended while a test waited on it: say how the core ended, which
+    /// a timeout would hide.
+    fn closed(&mut self, waiting_for: &str) -> ! {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                _ => break None,
+            }
+        };
+        let stderr = match (status, self.stderr.take()) {
+            (Some(_), Some(handle)) => handle.join().unwrap_or_default(),
+            _ => String::from("(core still running: stderr not collected)"),
+        };
+        panic!(
+            "stdout closed while waiting for {waiting_for}; core status {status:?}; stderr:\n{stderr}"
+        )
     }
 
     /// Every frame left, until the core closes stdout.
@@ -178,6 +216,7 @@ impl Core {
             match self.output.recv_timeout(READ_TIMEOUT) {
                 Ok(Output::Frame(value)) => frames.push(value),
                 Ok(Output::Line(line)) => panic!("expected a frame, got line {line:?}"),
+                Ok(Output::Malformed(what)) => panic!("malformed frame: {what}"),
                 Err(mpsc::RecvTimeoutError::Disconnected) => return frames,
                 Err(mpsc::RecvTimeoutError::Timeout) => panic!("stdout still open"),
             }
@@ -188,7 +227,9 @@ impl Core {
         match self.output.recv_timeout(READ_TIMEOUT) {
             Ok(Output::Line(line)) => line,
             Ok(Output::Frame(_)) => panic!("expected a line"),
-            Err(_) => panic!("no line within {READ_TIMEOUT:?}"),
+            Ok(Output::Malformed(what)) => panic!("malformed frame: {what}"),
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!("no line within {READ_TIMEOUT:?}"),
+            Err(mpsc::RecvTimeoutError::Disconnected) => self.closed("a line"),
         }
     }
 
