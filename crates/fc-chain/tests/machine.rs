@@ -263,6 +263,9 @@ fn admission_bounds_running_and_waiting_requests() {
     assert_eq!((world.machine.running(), world.machine.waiting()), (2, 1));
     assert_eq!(protocol(world.reply(fourth)), Some(Protocol::Busy));
     assert_eq!(world.reply(fourth).settled, 0);
+    // Under the chain's current generation, like every reply: main's fence
+    // must not take it for an overtaken one.
+    assert_eq!(world.reply(fourth).generation, 1);
     assert_eq!(world.rpcs().len(), 2);
     // The first finishes at 1 s: the waiting one starts then.
     world.run(1_000);
@@ -276,6 +279,30 @@ fn admission_bounds_running_and_waiting_requests() {
     assert_eq!(protocol(world.reply(third)), Some(Protocol::Deadline));
     assert_eq!(world.reply(third).settled, 10_000);
     assert!(!world.replied(second));
+}
+
+#[test]
+fn replies_made_at_once_carry_the_current_generation() {
+    let config = chain(1, &["direct"], &["a"], ("3", "2", "5000"));
+    let mut world = World::new(Bounds::default(), std::slice::from_ref(&config));
+    let mut changed = config;
+    changed.rpc.clear();
+    world.machine.configure(&[changed]);
+    // An unsupported method and a call with no time left, under generation
+    // 2; a chain not configured has none.
+    let refused = world.submit(read(1, "eth_sign", "[]"), None);
+    let expired = world.submit(read(1, "eth_call", CALL), Some(0));
+    let unknown = world.submit(read(5, "eth_call", CALL), None);
+    assert_eq!(world.reply(refused).generation, 2);
+    assert_eq!(
+        (
+            protocol(world.reply(expired)),
+            world.reply(expired).generation
+        ),
+        (Some(Protocol::Deadline), 2)
+    );
+    assert_eq!(world.reply(unknown).generation, 0);
+    assert!(world.requests.is_empty());
 }
 
 #[test]

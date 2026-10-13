@@ -320,15 +320,19 @@ impl Machine {
     pub fn submit(&mut self, call: Call, deadline_ms: Option<Ms>) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
+        let chain_id = call.chain_id();
+        // A reply made at once is computed under the chain's current
+        // generation, so main's fence doesn't take it for an overtaken one
+        // (design 0005, Generations); 0 for a chain not configured.
+        let current = self.generation_of(chain_id);
         // Refusals before any I/O, as the router throws them.
         if let Call::Read { method, .. } = &call
             && !is_read_method(method)
         {
             let error = Thrown::error(&unsupported_read_method_text(method));
-            self.reply(id, Err(ChainError::Thrown(error)), None, 0);
+            self.reply(id, Err(ChainError::Thrown(error)), None, current);
             return id;
         }
-        let chain_id = call.chain_id();
         let configured = self.ctx.state.borrow().chains.contains_key(&chain_id);
         if !configured {
             let error = Thrown::error(&format!("Unsupported chain ID: {chain_id}"));
@@ -353,7 +357,12 @@ impl Machine {
         let Some(input) = input else {
             self.ctx.budget.borrow_mut().forget(id);
             let outcome = call.is_broadcast().then_some(BroadcastOutcome::NotSent);
-            self.reply(id, Err(ChainError::Protocol(Protocol::Busy)), outcome, 0);
+            self.reply(
+                id,
+                Err(ChainError::Protocol(Protocol::Busy)),
+                outcome,
+                current,
+            );
             return id;
         };
         if room {
