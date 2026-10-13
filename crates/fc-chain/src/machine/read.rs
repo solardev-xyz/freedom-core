@@ -491,10 +491,10 @@ pub(crate) fn myotis_failure(failure: MyotisFailure) -> Thrown {
     match failure {
         MyotisFailure::Final(refusal) => {
             let error = Thrown::of_class(ErrorClass::Error, refusal.message.clone())
-                .with("code", Prop::Json(refusal.code.to_string()));
+                .with("code", Prop::Json(refusal.code.to_string().into()));
             match (refusal.kind(), &refusal.data) {
                 (Some(kind), _) => error.with("myotisRefusal", Prop::string(kind)),
-                (None, Some(data)) => error.with("data", Prop::Json(data.to_json())),
+                (None, Some(data)) => error.with("data", Prop::Json(data.to_json().into())),
                 (None, None) => error,
             }
         }

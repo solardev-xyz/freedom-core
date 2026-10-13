@@ -87,7 +87,8 @@ pub(crate) async fn round(
     let mut groups: Vec<Group> = Vec::new();
     let mut fulfilled: Vec<String> = Vec::new();
     let mut candidates: Vec<Candidate> = Vec::new();
-    let mut errors: Vec<Thrown> = Vec::new();
+    // Only their kinds: the failure's own kind comes from them.
+    let mut errors: Vec<Option<FailureKind>> = Vec::new();
     let mut answered = vec![false; urls.len()];
     let mut pending = urls.len();
     let mut impossible = false;
@@ -160,7 +161,7 @@ pub(crate) async fn round(
                     if error.failure_kind() != Some(FailureKind::Timeout) {
                         answered[i] = true;
                     }
-                    errors.push(error);
+                    errors.push(error.failure_kind());
                 }
             }
             // `rejectIfImpossible`.
@@ -235,11 +236,9 @@ pub(crate) async fn round(
             note_answers(&fulfilled);
             let capacity = errors
                 .iter()
-                .filter(|e| e.failure_kind() == Some(FailureKind::Capacity))
+                .filter(|kind| **kind == Some(FailureKind::Capacity))
                 .count();
-            let timed_out = errors
-                .iter()
-                .any(|e| e.failure_kind() == Some(FailureKind::Timeout));
+            let timed_out = errors.contains(&Some(FailureKind::Timeout));
             let kind = if reaches(capacity) {
                 Some("capacity")
             } else if timed_out {
@@ -381,8 +380,10 @@ pub(crate) async fn request_quorum(
     #[allow(clippy::cast_precision_loss)]
     if servable > 0.0 && servable < range.span as f64 {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let refusal = Thrown::error(&log_range_refusal_text(servable as u64))
-            .with("code", Prop::Json(LOG_RANGE_REFUSAL_CODE.to_string()));
+        let refusal = Thrown::error(&log_range_refusal_text(servable as u64)).with(
+            "code",
+            Prop::Json(LOG_RANGE_REFUSAL_CODE.to_string().into()),
+        );
         options.keeper.borrow_mut().note(&refusal);
         return Err(refusal);
     }

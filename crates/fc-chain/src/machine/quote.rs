@@ -13,7 +13,7 @@ use super::read::{
     MYOTIS_FAILED, SourceOptions, myotis_adapter_error, myotis_failure, request_source,
 };
 use crate::fee::{FeeQuote, fee_quote as quote};
-use crate::js::{JsError, JsString};
+use crate::js::JsError;
 use crate::myotis::{MYOTIS_NOT_READY, MyotisOperation, myotis_fee_values};
 use crate::text::fee_quote_failure_text;
 
@@ -28,7 +28,7 @@ fn json(result: &ResultText) -> Option<&str> {
 /// `getFeeQuote(chainId)`.
 pub(crate) async fn fee_quote(req: &Req) -> Result<FeeQuote, Thrown> {
     let chain = std::rc::Rc::clone(&req.chain);
-    let mut failures: Vec<(&str, JsString)> = Vec::new();
+    let mut failures: Vec<(&str, Thrown)> = Vec::new();
     let mut last_rpc_error: Option<Thrown> = None;
     for &source in &chain.read_order {
         let attempt = match source {
@@ -42,7 +42,7 @@ pub(crate) async fn fee_quote(req: &Req) -> Result<FeeQuote, Thrown> {
                 if !error.is_unavailable() {
                     last_rpc_error = Some(error.clone());
                 }
-                failures.push((source, error.message));
+                failures.push((source, error));
             }
         }
     }
@@ -51,7 +51,7 @@ pub(crate) async fn fee_quote(req: &Req) -> Result<FeeQuote, Thrown> {
     }
     let parts: Vec<(&str, &[u16])> = failures
         .iter()
-        .map(|(source, message)| (*source, message.units()))
+        .map(|(source, error)| (*source, error.message.units()))
         .collect();
     Err(Thrown::of_class(
         ErrorClass::Error,

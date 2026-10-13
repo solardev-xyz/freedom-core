@@ -349,7 +349,7 @@ mod tests {
     use crate::machine::error::Prop;
 
     fn node(code: i64, message: &str) -> Thrown {
-        Thrown::error(message).with("code", Prop::Json(code.to_string()))
+        Thrown::error(message).with("code", Prop::Json(code.to_string().into()))
     }
 
     #[test]

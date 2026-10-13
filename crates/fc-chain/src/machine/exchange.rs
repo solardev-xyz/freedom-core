@@ -64,7 +64,7 @@ pub(crate) fn read(req: &Req, delivered: Delivered, timeout: f64) -> Result<Resu
                     charge,
                 )))),
                 None => match answer.outcome() {
-                    Outcome::NodeError(error) => Err(Thrown::node(&error)),
+                    Outcome::NodeError(error) => Err(node_error(req, &error)),
                     Outcome::Result(_) => Ok(None),
                 },
             }
@@ -72,6 +72,20 @@ pub(crate) fn read(req: &Req, delivered: Delivered, timeout: f64) -> Result<Resu
         Answer::Failed(transport) => Err(transport_error(transport, timeout)),
         Answer::NotSent => Err(Thrown::error(NOT_SENT)),
         _ => Err(Thrown::error(NOT_SENT)),
+    }
+}
+
+/// A node's error, charged to its request for as long as any copy of it
+/// lives: its `data` can be as large as its answer (`memory-budgets`).
+pub(crate) fn node_error(req: &Req, error: &crate::answer::NodeError<'_>) -> Thrown {
+    let mut thrown = Thrown::node(error);
+    match req.ctx.charge(thrown.bytes()) {
+        Ok(charge) => {
+            thrown.charge = Some(Rc::new(charge));
+            thrown
+        }
+        // Over the budget: the request ends at the machine's next poll.
+        Err(over) => over,
     }
 }
 

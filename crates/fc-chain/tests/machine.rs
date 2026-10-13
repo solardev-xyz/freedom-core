@@ -564,6 +564,43 @@ fn an_answer_over_the_requests_budget_ends_it() {
 }
 
 #[test]
+fn a_kept_node_error_counts_against_the_budget() {
+    // A node's error can carry as much data as an answer: the last error
+    // a request keeps is charged while any copy of it lives. Each answer
+    // here is about 3 KB, and so is its error.
+    let bounds = Bounds {
+        request_bytes: 7_000,
+        ..Bounds::default()
+    };
+    let mut world = World::new(
+        bounds,
+        &[chain(1, &["direct"], &["a", "b"], ("3", "2", "5000"))],
+    );
+    let id = world.submit(read(1, "eth_call", CALL), None);
+    let revert = || {
+        Answer::Rpc {
+        status: 200,
+        body: format!(
+            r#"{{"jsonrpc":"2.0","id":1,"error":{{"code":3,"message":"execution reverted","data":"0x{}"}}}}"#,
+            "ab".repeat(1_500)
+        )
+        .into_bytes(),
+    }
+    };
+    let first = world.rpcs()[0].0;
+    assert!(world.answer(first, revert()));
+    assert!(!world.replied(id));
+    // a's error is kept as the last one; b's answer and its error on top
+    // cross the bound.
+    let second = world.rpcs()[1].0;
+    world.answer(second, revert());
+    assert_eq!(protocol(world.reply(id)), Some(Protocol::Budget));
+    world.machine.set_output_backlog(0);
+    world.collect();
+    assert_eq!(world.machine.held(), 0);
+}
+
+#[test]
 fn the_total_budget_ends_the_request_that_crosses_it_and_refuses_new_ones() {
     let bounds = Bounds {
         request_bytes: 10_000,

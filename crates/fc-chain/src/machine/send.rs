@@ -24,7 +24,7 @@ use fc_naming::session::exec::{Either, race};
 use super::config::ms;
 use super::ctx::{Release, Req, reply, started};
 use super::error::{ErrorClass, Prop, Thrown};
-use super::exchange::{answer_error, transport_error};
+use super::exchange::{answer_error, node_error, transport_error};
 use super::io::{Answer, Delivered, Ms, MyotisClass, MyotisReply, Request, VerifiedOp, rpc_body};
 use super::read::{MYOTIS_FAILED, ReadOptions, myotis_adapter_error, read};
 use crate::answer::{Outcome as AnswerOutcome, decode_answer};
@@ -75,8 +75,8 @@ pub(crate) struct SendState {
     pub last_refusal: Option<Thrown>,
     /// Today's last error that wasn't a source being unavailable.
     pub last_rpc_error: Option<Thrown>,
-    /// Today's per-broadcaster failure texts.
-    pub failures: Vec<(&'static str, JsString)>,
+    /// Today's per-broadcaster failures.
+    pub failures: Vec<(&'static str, Thrown)>,
 }
 
 impl SendState {
@@ -141,7 +141,7 @@ impl SendState {
         let parts: Vec<(&str, &[u16])> = self
             .failures
             .iter()
-            .map(|(source, message)| (*source, message.units()))
+            .map(|(source, error)| (*source, error.message.units()))
             .collect();
         Thrown::of_class(ErrorClass::Error, broadcast_failure_text(&parts))
     }
@@ -264,7 +264,7 @@ async fn attempts(req: &Req, raw: &str, state: &RefCell<SendState>) -> Option<&'
             _ => {
                 let error =
                     Thrown::unavailable(format!("{source} cannot broadcast transactions").as_str());
-                state.borrow_mut().failures.push((source, error.message));
+                state.borrow_mut().failures.push((source, error));
                 Step::Next
             }
         };
@@ -289,7 +289,7 @@ fn fail(state: &RefCell<SendState>, source: &'static str, error: Thrown) {
     if !error.is_unavailable() {
         state.last_rpc_error = Some(error.clone());
     }
-    state.failures.push((source, error.message));
+    state.failures.push((source, error));
 }
 
 /// Myotis's `sendRawTransaction`: `rejected` and `uncertain` end the loop,
@@ -392,7 +392,7 @@ async fn direct(req: &Req, raw: &str, state: &RefCell<SendState>) -> Step {
             deadline_ms: ms(timeout),
         });
         let (class, error) = match race(io, timer).await {
-            Either::Left(Delivered { answer, .. }) => attempt(state, answer, timeout),
+            Either::Left(Delivered { answer, .. }) => attempt(req, state, answer, timeout),
             Either::Right(()) => (Class::Ambiguous, Some(Thrown::rpc_timeout(timeout))),
         };
         state.borrow_mut().record("direct", class);
@@ -418,7 +418,12 @@ async fn direct(req: &Req, raw: &str, state: &RefCell<SendState>) -> Step {
 }
 
 /// One Direct attempt's class, and today's error for it.
-fn attempt(state: &RefCell<SendState>, answer: Answer, timeout: f64) -> (Class, Option<Thrown>) {
+fn attempt(
+    req: &Req,
+    state: &RefCell<SendState>,
+    answer: Answer,
+    timeout: f64,
+) -> (Class, Option<Thrown>) {
     match answer {
         Answer::Rpc { status, body } => {
             let decoded = decode_answer(status, body);
@@ -438,7 +443,7 @@ fn attempt(state: &RefCell<SendState>, answer: Answer, timeout: f64) -> (Class, 
             };
             let error = match &decoded {
                 Ok(answer) => match answer.outcome() {
-                    AnswerOutcome::NodeError(error) => Some(Thrown::node(&error)),
+                    AnswerOutcome::NodeError(error) => Some(node_error(req, &error)),
                     AnswerOutcome::Result(_) => None,
                 },
                 Err(error) => Some(answer_error(error.clone())),

@@ -9,25 +9,27 @@
 
 use std::rc::Rc;
 
+use super::budget::Charge;
 use super::config::number_text;
 use crate::js::JsString;
 use crate::pattern::{JsPattern, MatchText};
 use crate::text::safe_error_message;
 
-/// An own property's value: JSON text, or `undefined`.
+/// An own property's value: JSON text, or `undefined`. The text is
+/// shared: a copy of an error costs no copy of its data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Prop {
     Undefined,
-    Json(String),
+    Json(Rc<str>),
 }
 
 impl Prop {
     pub(crate) fn of(text: Option<&str>) -> Self {
-        text.map_or(Self::Undefined, |t| Self::Json(t.to_owned()))
+        text.map_or(Self::Undefined, |t| Self::Json(t.into()))
     }
 
     pub(crate) fn string(text: &str) -> Self {
-        Self::Json(JsString::from(text).to_json())
+        Self::Json(JsString::from(text).to_json().into())
     }
 
     /// The JSON text, `None` for `undefined`.
@@ -118,10 +120,13 @@ pub(crate) struct Fallback {
 }
 
 /// An error as the router throws it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Thrown {
     pub class: ErrorClass,
-    pub message: JsString,
+    /// Shared, like the properties: the router keeps an error in several
+    /// places (the last error, the kept one, the failures), and a node's
+    /// can be as large as its answer.
+    pub message: Rc<JsString>,
     /// Own enumerable properties, in order.
     pub props: Vec<(&'static str, Prop)>,
     pub origin: Origin,
@@ -130,6 +135,19 @@ pub struct Thrown {
     /// Main classed a Colibri failure as a capacity limit: the one bit of
     /// the adapter's text the adaptive bypass needs; never in a reply.
     pub(crate) capacity: bool,
+    /// A node error's charge against its request's budget, held while any
+    /// copy of it lives (`memory-budgets`).
+    pub(crate) charge: Option<Rc<Charge>>,
+}
+
+/// Errors compare by what a reply carries.
+impl PartialEq for Thrown {
+    fn eq(&self, other: &Self) -> bool {
+        self.class == other.class
+            && self.message == other.message
+            && self.props == other.props
+            && self.origin == other.origin
+    }
 }
 
 static CAPACITY_TEXT: JsPattern = JsPattern::new(
@@ -148,11 +166,12 @@ impl Thrown {
     fn core(class: ErrorClass, message: impl Into<JsString>) -> Self {
         Self {
             class,
-            message: message.into(),
+            message: Rc::new(message.into()),
             props: Vec::new(),
             origin: Origin::Core,
             quorum: None,
             capacity: false,
+            charge: None,
         }
     }
 
@@ -204,7 +223,7 @@ impl Thrown {
     pub(crate) fn node(error: &crate::answer::NodeError<'_>) -> Self {
         Self {
             class: ErrorClass::Error,
-            message: error.message.clone(),
+            message: Rc::new(error.message.clone()),
             props: vec![
                 ("code", Prop::of(error.code)),
                 ("data", Prop::of(error.data)),
@@ -212,6 +231,7 @@ impl Thrown {
             origin: Origin::Node,
             quorum: None,
             capacity: false,
+            charge: None,
         }
     }
 
@@ -234,6 +254,16 @@ impl Thrown {
     /// `error.code`'s JSON text.
     pub fn code(&self) -> Option<&str> {
         self.prop("code").and_then(Prop::json)
+    }
+
+    /// What its text holds, as the budget counts it.
+    pub(crate) fn bytes(&self) -> usize {
+        self.message.len().saturating_mul(2).saturating_add(
+            self.props
+                .iter()
+                .map(|(_, v)| v.json().map_or(0, str::len))
+                .sum(),
+        )
     }
 
     /// `instanceof SourceUnavailableError`.
