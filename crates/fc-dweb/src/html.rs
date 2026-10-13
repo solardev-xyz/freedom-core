@@ -1,7 +1,10 @@
 //! `web3:`'s `html()` codec (`onchain/onchain-html.js`) and the stateless
 //! class the gate starts from (`onchain-app-protocol.js`).
 
+use std::ops::Range;
+
 use fc_json::JsValue;
+use fc_json::index::{Kind, Value};
 use sha3::{Digest, Keccak256};
 
 use crate::js;
@@ -78,10 +81,10 @@ pub fn exceeds_encoded_bound(result: &str) -> bool {
     result.len() > bound && js::utf16_len(result) > bound
 }
 
-/// Decodes an `html()` answer as `decodeHtmlInWorker` does: the size check
-/// before anything else, then `^0x[0-9a-f]*$` (any case), then ethers'
-/// `decodeFunctionResult` for `(string)`, the 8 MiB cap, and the hash.
-pub fn decode_html(result: &str) -> Result<HtmlDocument, HtmlError> {
+/// The checks [`decode_html`] makes before it allocates, in its order: the
+/// size check before anything else, then `^0x[0-9a-f]*$` (any case), then
+/// whole bytes and whole 32-byte words. The hex digits.
+fn precheck(result: &str) -> Result<&str, HtmlError> {
     if exceeds_encoded_bound(result) {
         return Err(HtmlError::TooLarge);
     }
@@ -93,19 +96,36 @@ pub fn decode_html(result: &str) -> Result<HtmlDocument, HtmlError> {
     if !digits.len().is_multiple_of(2) {
         return Err(HtmlError::OddLength);
     }
-    let data = hex_bytes(digits);
-    if !data.len().is_multiple_of(32) {
+    if !(digits.len() / 2).is_multiple_of(32) {
         return Err(HtmlError::BadLength);
     }
-    let bytes = abi_string(&data)?;
-    let html = std::str::from_utf8(bytes).map_err(|_| HtmlError::BadString)?;
+    Ok(digits)
+}
+
+/// What [`decode_html`] allocates for `result`, at most, or the error it
+/// fails with before it allocates anything: one buffer, the ABI data's
+/// bytes, which the document is then cut from in place. A caller that
+/// reserves memory before it is allocated reserves this much.
+pub fn decode_html_room(result: &str) -> Result<usize, HtmlError> {
+    precheck(result).map(|digits| digits.len() / 2)
+}
+
+/// Decodes an `html()` answer as `decodeHtmlInWorker` does: the size check
+/// before anything else, then `^0x[0-9a-f]*$` (any case), then ethers'
+/// `decodeFunctionResult` for `(string)`, the 8 MiB cap, and the hash. It
+/// allocates one buffer ([`decode_html_room`]), which becomes the document.
+pub fn decode_html(result: &str) -> Result<HtmlDocument, HtmlError> {
+    let digits = precheck(result)?;
+    let mut data = hex_bytes(digits);
+    let string = abi_string(&data)?;
+    data.truncate(string.end);
+    data.drain(..string.start);
+    let html = String::from_utf8(data).map_err(|_| HtmlError::BadString)?;
     if html.len() > MAX_HTML_BYTES {
         return Err(HtmlError::TooLarge);
     }
-    Ok(HtmlDocument {
-        html: html.to_owned(),
-        hash: Keccak256::digest(bytes).into(),
-    })
+    let hash = Keccak256::digest(html.as_bytes()).into();
+    Ok(HtmlDocument { html, hash })
 }
 
 /// [`decode_html`] for the answer as JSON gives it: anything but a string
@@ -142,15 +162,15 @@ fn index(word: &[u8]) -> Option<u64> {
 /// ethers' strict (not loose) decode of one dynamic `string`: the offset
 /// word; at the offset, a length word, then the bytes padded to whole
 /// words. The padding's contents and anything after are not checked, and
-/// the offset may point anywhere, its own word included.
-fn abi_string(data: &[u8]) -> Result<&[u8], HtmlError> {
+/// the offset may point anywhere, its own word included. Where the
+/// string's bytes lie in `data`.
+fn abi_string(data: &[u8]) -> Result<Range<usize>, HtmlError> {
     let offset_word = data.get(..32).ok_or(HtmlError::Undecodable)?;
     // Read outside the coder's guard: any failure is the whole decode's.
-    let offset = index(offset_word).ok_or(HtmlError::Undecodable)?;
-    let tail = usize::try_from(offset)
-        .ok()
-        .and_then(|offset| data.get(offset..))
-        .unwrap_or_default();
+    let offset = index(offset_word)
+        .and_then(|offset| usize::try_from(offset).ok())
+        .ok_or(HtmlError::Undecodable)?;
+    let tail = data.get(offset..).unwrap_or_default();
     let length_word = tail.get(..32).ok_or(HtmlError::Undecodable)?;
     // Inside the coder: a numeric fault is deferred to the read.
     let length = index(length_word).ok_or(HtmlError::BadString)?;
@@ -158,8 +178,9 @@ fn abi_string(data: &[u8]) -> Result<&[u8], HtmlError> {
     if 32 + padded > tail.len() as u64 {
         return Err(HtmlError::Undecodable);
     }
-    tail.get(32..32 + length as usize)
-        .ok_or(HtmlError::Undecodable)
+    // Within `tail`, which lies within `data`: `length` fits.
+    let start = offset + 32;
+    Ok(start..start + length as usize)
 }
 
 /// The gate's input (design 0006, `chain.html`).
@@ -206,6 +227,31 @@ pub fn classify(chain_result: &JsValue) -> Class {
         .and_then(JsValue::as_array)
         .is_some_and(|dissented| !dissented.is_empty())
     {
+        Class::Conflict
+    } else {
+        Class::Untrusted
+    }
+}
+
+/// [`classify`] for a result held as JSON text: `trust` is its `trust`
+/// member, read in place from an index of the text, and `verified` whether
+/// its `verified` is `true`. Nothing is built from the trust, so a caller
+/// that reserves memory first reserves only the index.
+pub fn classify_trust(trust: Option<Value<'_, '_>>, verified: bool) -> Class {
+    let Some(trust) = trust.filter(|trust| trust.truthy()) else {
+        return if verified {
+            Class::Trusted
+        } else {
+            Class::Untrusted
+        };
+    };
+    let level = trust.get("level");
+    if level.is_some_and(|level| level.is_str("verified") || level.is_str("user-configured")) {
+        return Class::Trusted;
+    }
+    if trust.get("dissented").is_some_and(|dissented| {
+        dissented.kind() == Kind::Array && dissented.children().next().is_some()
+    }) {
         Class::Conflict
     } else {
         Class::Untrusted
