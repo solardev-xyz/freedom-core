@@ -28,6 +28,8 @@ struct Test {
     chain: Chain,
     rx: mpsc::Receiver<Out>,
     link: Arc<Link>,
+    /// The thread's clock, which the test moves.
+    clock: std::rc::Rc<std::cell::Cell<u64>>,
 }
 
 /// A thread whose writer shares, bulk and control, are `writer_bytes`
@@ -47,6 +49,8 @@ fn test_shares(
     if offered {
         link.offer();
     }
+    let clock = std::rc::Rc::new(std::cell::Cell::new(0));
+    let now = std::rc::Rc::clone(&clock);
     let chain = Chain::new(
         Machine::new(0, bounds),
         out,
@@ -56,8 +60,14 @@ fn test_shares(
             control: Allowance::new(usize::MAX, control),
         },
         Requests::new(outstanding, Arc::new(Pending::default())),
+        Box::new(move || now.get()),
     );
-    Test { chain, rx, link }
+    Test {
+        chain,
+        rx,
+        link,
+        clock,
+    }
 }
 
 fn test() -> Test {
@@ -91,8 +101,10 @@ impl Test {
         self.chain.flush()
     }
 
+    /// Moves the clock to `now`, and flushes.
     fn at(&mut self, now: u64) {
-        assert!(self.chain.advance(now).is_ok());
+        self.clock.set(now);
+        assert!(self.chain.flush().is_ok());
     }
 
     fn written(&self) -> Vec<Value> {
@@ -1436,4 +1448,67 @@ fn a_cancelled_callers_queued_operation_never_goes_when_room_opens_before_flush(
     );
     t.call(id, "chain.request", &params);
     assert_eq!(verified(&t.written()).len(), 1);
+}
+
+#[test]
+fn nothing_is_dispatched_against_a_clock_handling_left_behind() {
+    // Round 3, R3-M1, the reviewer's interleaving: a Myotis broadcast waits
+    // for a slot, its cutoff at 200 ms. At 199 ms an expensive answer
+    // arrives: its request's slot freed on the event loop's thread went to
+    // naming, and another naming answer frees one while this thread decodes
+    // the 16 MiB body. Decoding took until 1,329 ms: the flush after it
+    // must see that, and the broadcast never starts.
+    let mut t = test_with(Bounds::default(), usize::MAX, 2, true);
+    let mut config = chain_snapshot(&["direct"], &["a"]);
+    config["myotis"] = json!(true);
+    config["broadcast_order"] = json!(["myotis"]);
+    t.configure(json!([config]));
+    t.call(
+        2,
+        "chain.availability",
+        &json!({ "chain_id": 1, "ready": true }),
+    );
+    let (read_id, read_params) = read(3, "eth_call", json!([{ "to": "0xabc" }, "latest"]));
+    t.call(read_id, "chain.request", &read_params);
+    let heavy = requests(&t.written())[0]["id"].as_u64().unwrap();
+    let held = occupy(&t);
+    t.call(
+        4,
+        "chain.broadcast",
+        &json!({ "chain_id": 1, "raw": "0x01", "deadline_ms": 10_200 }),
+    );
+    assert_eq!(t.chain.queued[0].until, Some(200));
+    t.at(199);
+    assert_eq!(t.chain.requests.answered(heavy), Some(Owner::Chain));
+    let replacement = occupy(&t);
+    let requests = Arc::clone(&t.chain.requests);
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(2));
+        requests.answered(held)
+    });
+    let body = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"result":"0x{}"}}"#,
+        "ab".repeat(8 << 20)
+    );
+    let encoded = base64::engine::general_purpose::STANDARD.encode(body);
+    let result = json!({ "status": 200, "body": encoded }).to_string();
+    assert!(
+        t.chain
+            .handle(In::Response {
+                id: heavy,
+                reply: shell_result(heavy, &result),
+            })
+            .is_ok()
+    );
+    assert_eq!(release.join().unwrap(), Some(Owner::Naming));
+    // The time decoding took.
+    t.clock.set(1_329);
+    assert!(t.chain.flush().is_ok());
+    let frames = t.written();
+    assert!(verified(&frames).is_empty(), "{frames:?}");
+    // It never went: it is not sent.
+    let reply = frames.iter().find(|f| f["id"] == 4).unwrap();
+    assert_eq!(reply["error"]["data"]["outcome"], "not_sent", "{reply}");
+    assert!(t.chain.queued.is_empty());
+    assert_eq!(t.chain.requests.answered(replacement), Some(Owner::Naming));
 }

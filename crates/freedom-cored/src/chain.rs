@@ -154,6 +154,9 @@ pub fn spawn(
         .name("chain".into())
         .spawn(move || {
             let _notice = transport::DeathNotice::new(events.clone(), "chain");
+            // The thread's monotonic clock, in milliseconds from its start.
+            let started = Instant::now();
+            let clock = move || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let chain = Chain::new(
                 Machine::new(0, crate::testhooks::chain_bounds(Bounds::default())),
                 out,
@@ -163,6 +166,7 @@ pub fn spawn(
                     control,
                 },
                 requests,
+                Box::new(clock),
             );
             let event = match run(&rx, chain) {
                 Stop::Protocol(category) => Event::ProtocolError(category),
@@ -190,10 +194,8 @@ type Flow = Result<(), Stop>;
 
 /// The thread's loop, until it has to stop.
 fn run(rx: &Receiver<Mail>, mut chain: Chain) -> Stop {
-    let started = Instant::now();
-    let now = || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     loop {
-        if let Err(stop) = chain.advance(now()) {
+        if let Err(stop) = chain.flush() {
             return stop;
         }
         let due = match (chain.machine.next_due(), chain.next_expiry()) {
@@ -201,12 +203,15 @@ fn run(rx: &Receiver<Mail>, mut chain: Chain) -> Stop {
             (a, b) => a.or(b),
         };
         let wait = due.map_or(Duration::from_secs(3600), |at| {
-            Duration::from_millis(at.saturating_sub(now()))
+            Duration::from_millis(at.saturating_sub((chain.clock)()))
         });
         let flow = match rx.recv_timeout(wait) {
-            // The frame's credit goes once its message is handled.
+            // The frame's credit goes once its message is handled. The
+            // machine is brought to the clock before the message, and again
+            // after it, before anything is dispatched: handling it can take
+            // a while (R3-M1).
             Ok((message, _credit)) => chain
-                .advance(now())
+                .flush()
                 .and_then(|()| chain.handle(message))
                 .and_then(|()| chain.flush()),
             Err(RecvTimeoutError::Timeout) => Ok(()),
@@ -270,6 +275,9 @@ struct Caller {
 }
 
 struct Chain {
+    /// The monotonic clock, in milliseconds: sampled whenever the thread
+    /// flushes, so nothing is dispatched against a time that has passed.
+    clock: Box<dyn Fn() -> Ms>,
     machine: Machine,
     out: Sender<Out>,
     /// Whether main takes fragments.
@@ -317,8 +325,10 @@ impl Chain {
         link: Arc<Link>,
         shares: Shares,
         requests: Arc<Requests>,
+        clock: Box<dyn Fn() -> Ms>,
     ) -> Self {
         Self {
+            clock,
             machine,
             out,
             link,
@@ -343,12 +353,19 @@ impl Chain {
         self.machine.poll();
     }
 
-    /// Fires the timers due by `now`, polling after each as the executor
-    /// requires, then moves the clock to `now`. A request whose time runs
-    /// out while it waits here completes as not sent before a timer due at
-    /// the same instant fires (the machine's own for that exchange): none
-    /// of it reached main (design 0005, Attempts).
-    fn advance(&mut self, now: u64) -> Flow {
+    /// Brings the machine to the clock's now, then sends what waits.
+    ///
+    /// Every timer and every queued request's expiry due by now is
+    /// processed first, in time order, the machine polled after each as
+    /// the executor requires, its I/O queued and its replies taken; a
+    /// request whose time runs out while it waits here completes as not
+    /// sent before a timer due at the same instant fires (the machine's own
+    /// for that exchange): none of it reached main (design 0005, Attempts).
+    /// Only then, with the machine at now, is anything dispatched, so no
+    /// queued request starts past its latest start, however long handling
+    /// a message took (PR #57 review, round 3, R3-M1).
+    fn flush(&mut self) -> Flow {
+        let now = (self.clock)();
         loop {
             let expiry = self.next_expiry().filter(|at| *at <= now);
             let timer = self.machine.next_due().filter(|at| *at <= now);
@@ -365,11 +382,13 @@ impl Chain {
                 _ => break,
             }
             self.poll();
-            self.flush()?;
+            while self.settle()? {
+                self.poll();
+            }
         }
         self.machine.fire_next(now);
         self.poll();
-        self.flush()
+        self.deliver()
     }
 
     /// When the first request waiting here runs out of time.
@@ -541,16 +560,26 @@ impl Chain {
         Ok(())
     }
 
-    /// Sends the machine's requests, cancels and replies. A request that
-    /// completes here (expired, or too large to send) settles at the next
-    /// poll, so this polls and goes round again.
-    fn flush(&mut self) -> Flow {
+    /// Queues the machine's requests and cancels, retires what is no
+    /// longer wanted, and takes its replies, dispatching nothing. True when
+    /// a request completed here, to settle at the next poll.
+    fn settle(&mut self) -> Result<bool, Stop> {
+        self.effects()?;
+        let mut settled = self.retire();
+        self.take_replies()?;
+        settled |= self.retire();
+        Ok(settled)
+    }
+
+    /// Sends the machine's requests, cancels and replies, the machine at
+    /// the clock's now ([`Chain::flush`]). A request that completes here
+    /// (expired, too large to send, or retired) settles at the next poll,
+    /// so this polls and goes round again.
+    fn deliver(&mut self) -> Flow {
         loop {
-            self.effects()?;
-            let mut settled = self.retire();
+            let mut settled = self.settle()?;
             settled |= self.dispatch()?;
-            self.take_replies()?;
-            settled |= self.retire();
+            settled |= self.settle()?;
             if !settled {
                 return Ok(());
             }
