@@ -790,6 +790,16 @@ impl Vault {
         out
     }
 
+    /// Locks for a `vault.lock` that waits for its turn behind replies main
+    /// hasn't read (design 0001, Transport and framing): the secrets are
+    /// wiped and admitted work revoked now, as by the auto-lock. Its turn
+    /// locks again, which acknowledges it.
+    pub fn lock(&mut self) -> Vec<Out> {
+        let mut out = Vec::new();
+        self.lock_now(LockReason::Manual, &mut out);
+        out
+    }
+
     /// Whether a job past its commit point is still running (its reply is
     /// still to come).
     pub fn committing(&self) -> bool {

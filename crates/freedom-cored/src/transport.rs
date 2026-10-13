@@ -30,12 +30,21 @@
 //!   - **Requests** never fragment: one over a frame isn't sent, and its
 //!     producer completes it as `too_large` (deviation `request-size`), so
 //!     request IDs keep their write order and a `cancel` finds its request.
-//! - **Consumers never block on the writer,** so the reader always gets its
-//!   credits back and main always gets its bulk credit back:
+//!   - **Progress:** the writer notes when it last wrote a frame
+//!     ([`Link::last_write`]), which moves only while main reads stdout.
+//! - **Consumers never block on the writer,** so they keep handling what
+//!   reaches them, and main's bulk credit comes back once its response is
+//!   read:
 //!   - the writer's queue is unbounded, so handing it a frame never waits;
 //!     the allowances bound it instead;
-//!   - the vault loop's full allowance means main has stopped reading, and
-//!     the core exits rather than buffer without limit;
+//!   - the vault loop's frames past its allowance wait in the loop, and
+//!     meanwhile it takes no new request (`serve`, design 0001): requests
+//!     keep their credits, so the reader stops reading, which is
+//!     backpressure on main. The loop still runs its timers, the auto-lock
+//!     among them, and handles everything else that reaches it, a
+//!     `vault.lock` or `core.shutdown` among the waiting requests included.
+//!     It exits only once the writer has written nothing for a long bound:
+//!     then main has stopped reading;
 //!   - naming's frames past its allowance wait in the naming thread, which
 //!     keeps taking messages (design 0004);
 //!   - the chain thread's replies wait in its own queue the same way, past
@@ -54,6 +63,7 @@ use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Instant;
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::fragment::{self, Delivery, FragmentError, Reassembler, Splitter};
@@ -68,7 +78,8 @@ const READ_CHUNK: usize = 64 * 1024;
 pub const MAX_QUEUED_FRAMES: usize = 256;
 /// ...and their bytes (a frame alone always passes).
 pub const MAX_QUEUED_FRAME_BYTES: usize = 16 * 1024 * 1024;
-/// The vault loop's replies waiting for the writer.
+/// The vault loop's replies and events waiting for the writer. Past it,
+/// they wait in the loop, which then takes no new request.
 pub const MAX_QUEUED_REPLIES: usize = 256;
 /// Naming's frames waiting for the writer (design 0004, Bounds: the writer).
 pub const MAX_QUEUED_NAMING_BYTES: usize = 8 * 1024 * 1024;
@@ -302,8 +313,8 @@ impl Reply {
     }
 }
 
-/// The bulk-credit state both threads and the producers share (design
-/// 0005, Frames).
+/// The state both threads and the producers share: bulk credit (design
+/// 0005, Frames), and the writer's progress.
 pub struct Link {
     /// Main offered fragments in its hello.
     offered: AtomicBool,
@@ -318,6 +329,8 @@ pub struct Link {
     /// The `0x13` frames' share of the writer. Main can begin again only
     /// once its credit is back, so a few at most are ever queued.
     control: Arc<Allowance>,
+    /// When the writer last wrote and flushed a frame, whole or a fragment.
+    last_write: Mutex<Option<Instant>>,
 }
 
 impl Link {
@@ -328,7 +341,22 @@ impl Link {
             returned: AtomicBool::new(false),
             writer: Mutex::new(None),
             control: Allowance::new(usize::MAX, usize::MAX),
+            last_write: Mutex::new(None),
         })
+    }
+
+    /// When the writer last wrote a frame: its progress, which moves only
+    /// while main reads stdout. The vault loop watches it while its frames
+    /// wait for room.
+    pub fn last_write(&self) -> Option<Instant> {
+        self.last_write.lock().ok().and_then(|at| *at)
+    }
+
+    /// The writer wrote and flushed a frame `at` then.
+    pub(crate) fn wrote(&self, at: Instant) {
+        if let Ok(mut last) = self.last_write.lock() {
+            *last = Some(at);
+        }
     }
 
     /// Main offered fragments (`frames: ["fragment"]` in its hello): the
@@ -685,6 +713,7 @@ fn write_frames<W: Write>(sink: &mut W, queue: &Receiver<Out>, link: &Link) -> s
                     Out::Frame { frame, hold } => {
                         sink.write_all(&frame)?;
                         sink.flush()?;
+                        link.wrote(Instant::now());
                         // Written: its place in the producer's allowance is
                         // free.
                         drop(hold);
@@ -713,6 +742,7 @@ fn write_frames<W: Write>(sink: &mut W, queue: &Receiver<Out>, link: &Link) -> s
                     sink.write_all(&header)?;
                     sink.write_all(&bulk.payload[range])?;
                     sink.flush()?;
+                    link.wrote(Instant::now());
                     bulk.hold.release(len);
                     splitter.is_done()
                 }
@@ -755,6 +785,7 @@ fn begin<W: Write>(
             {
                 sink.write_all(&frame)?;
                 sink.flush()?;
+                link.wrote(Instant::now());
             }
             Ok(None)
         }
@@ -985,6 +1016,32 @@ mod tests {
             .collect();
         assert_eq!(responses, [(5, a_bytes2.len()), (6, b_bytes.len())]);
         assert!(seen.contains(&Seen::Message(serde_json::json!({ "n": 2 }))));
+    }
+
+    #[test]
+    fn the_writer_notes_when_it_writes() {
+        let link = offered();
+        let producer = Allowance::new(usize::MAX, MAX_QUEUED_CHAIN_BYTES);
+        let control = Allowance::new(usize::MAX, usize::MAX);
+        // Whole frames and fragments alike move it.
+        for out in [
+            whole(&control, &serde_json::json!({ "n": 1 })),
+            large(&producer, &link, 5, 2 * MAX_PAYLOAD + 7).0,
+        ] {
+            let (queue, frames) = mpsc::channel();
+            queue.send(out).unwrap();
+            drop(queue);
+            let before = Instant::now();
+            write_frames(&mut Vec::new(), &frames, &link).unwrap();
+            let last = link.last_write().unwrap();
+            assert!(before <= last && last <= Instant::now());
+        }
+        // Nothing written: nothing moves.
+        let (queue, frames) = mpsc::channel();
+        drop(queue);
+        let last = link.last_write();
+        write_frames(&mut Vec::new(), &frames, &link).unwrap();
+        assert_eq!(link.last_write(), last);
     }
 
     /// A sink that queues a whole frame the moment the first fragment's

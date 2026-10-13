@@ -264,6 +264,46 @@ impl Core {
         self.paused.1.notify_all();
     }
 
+    /// Resumes reading stdout after `delay`, from a thread: the test can
+    /// meanwhile block writing a burst the core takes in only as main reads.
+    pub fn resume_reading_after(&self, delay: Duration) -> std::thread::JoinHandle<()> {
+        let paused = Arc::clone(&self.paused);
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            *paused.0.lock().unwrap() = false;
+            paused.1.notify_all();
+        })
+    }
+
+    /// Writes `bytes` to stdin from a thread: for a burst the core may never
+    /// take in whole. The thread ends once the write is done or fails (the
+    /// core exited), and hands stdin back still open, so EOF comes only
+    /// when the test drops it.
+    pub fn send_in_background(&mut self, bytes: Vec<u8>) -> std::thread::JoinHandle<ChildStdin> {
+        let mut stdin = self.stdin.take().unwrap();
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&bytes);
+            stdin
+        })
+    }
+
+    /// The core's resident memory now (`VmRSS`) and at its peak (`VmHWM`),
+    /// in KiB.
+    #[cfg(target_os = "linux")]
+    pub fn memory_kib(&self) -> (u64, u64) {
+        let status = std::fs::read_to_string(format!("/proc/{}/status", self.child.id())).unwrap();
+        let field = |name: &str| -> u64 {
+            let line = status.lines().find(|l| l.starts_with(name)).unwrap();
+            line[name.len()..]
+                .trim()
+                .trim_end_matches("kB")
+                .trim()
+                .parse()
+                .unwrap()
+        };
+        (field("VmRSS:"), field("VmHWM:"))
+    }
+
     /// Stops reading stdout right after the next begin frame, until
     /// [`Core::resume_reading`]: the core then stalls in that response.
     pub fn pause_after_begin(&self) {
