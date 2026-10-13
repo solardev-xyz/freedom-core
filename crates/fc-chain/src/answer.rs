@@ -296,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn replacement_decoding_is_lossys_into_an_exact_buffer() {
+    fn replacement_decoding_is_lossy_into_an_exact_buffer() {
         let bodies: [&[u8]; 5] = [
             b"plain",
             b"\xFF\xFE",
