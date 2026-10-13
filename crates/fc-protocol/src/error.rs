@@ -22,6 +22,9 @@ pub enum ErrorCode {
     NodeIdentityCorrupt,
     /// A thrown name resolution (design 0004, Replies).
     ResolutionFailed,
+    /// A `chain.*` request failed with today's thrown error, tagged with its
+    /// origin in `data.kind` (design 0005, Errors and text).
+    ChainError,
     // Transport errors, main's terminal replies to `shell.*` requests
     // (design 0004, Transport errors). None carries a URL or server text.
     Timeout,
@@ -34,6 +37,11 @@ pub enum ErrorCode {
     Busy,
     Cancelled,
     Deadline,
+    /// A request spent its memory budget (design 0005, Bounds).
+    Budget,
+    /// The chain's configuration changed while the request ran: main sends
+    /// a read or a fee quote again, once (design 0005, Generations).
+    Reconfigured,
     ProtocolMismatch,
     UnknownMethod,
     Internal,
@@ -60,5 +68,31 @@ impl ErrorBody {
     pub fn with_data(mut self, data: serde_json::Value) -> Self {
         self.data = Some(data);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chain_codes_on_the_wire() {
+        // Design 0005, Errors and text: `chain_error` for today's thrown
+        // errors; `budget` and `reconfigured` beside 0001's own codes.
+        for (code, wire) in [
+            (ErrorCode::ChainError, "chain_error"),
+            (ErrorCode::Budget, "budget"),
+            (ErrorCode::Reconfigured, "reconfigured"),
+            (ErrorCode::TooLarge, "too_large"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(code).ok(),
+                Some(serde_json::Value::from(wire))
+            );
+            assert_eq!(
+                serde_json::from_value::<ErrorCode>(wire.into()).ok(),
+                Some(code)
+            );
+        }
     }
 }
