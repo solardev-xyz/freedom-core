@@ -14,6 +14,8 @@ const FILES = ['keys.json', 'mnemonic-validation.json', 'identity-formats.json',
   'generator/generate.js', 'generator/signing.js', 'generator/naming.js', 'generator/naming-replay.js', 'generator/chain.js',
   'generator/chain-replay.js'];
 
+FILES.push('dweb.json', 'generator/dweb.js');
+
 function corruptedCheck(filename, corrupt) {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
   for (const file of FILES) {
@@ -585,4 +587,20 @@ test('chain replay fails when a fixture drifts from its source test\'s settle ti
   const bounded = structuredClone(chainDefinition('ant-index-blockscout-hung'));
   bounded.steps[1].calls[0].expect_settle_max_ms = 1000;
   await assert.rejects(chainReplay.runScenario(REFERENCE, FakeTimers, bounded), /settled after 25000 ms, over 1000/);
+});
+
+test('check rejects a changed dweb outcome', () => {
+  const stderr = corruptedCheck('dweb.json', (contents) => {
+    const entry = contents.requests.find((item) => item.id === 'bzz-headers-allowlist');
+    entry.js.fetch.headers.push(['cookie', 'a=1']);
+  });
+  assert.match(stderr, /Byte mismatch: dweb.json/);
+});
+
+test('check rejects a changed dweb validation expectation', () => {
+  const stderr = corruptedCheck('dweb.json', (contents) => {
+    const entry = contents.validation.find((item) => item.id === 'path-bzz-dot-dot');
+    entry.expect = 'valid';
+  });
+  assert.match(stderr, /Byte mismatch: dweb.json/);
 });
