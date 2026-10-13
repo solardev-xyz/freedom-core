@@ -1049,9 +1049,12 @@ fn mains_answers_take_one_closed_shape() {
 }
 
 /// A `shell.*` request: its method, how to read the answer, and its
-/// params.
+/// params, `left` written in their `deadline_ms` slot when they have one.
 fn shell_request(request: &Request, generation: u64, left: Ms) -> (&'static str, Kind, Vec<u8>) {
-    let (method, params) = shell_params(request, generation, left);
+    let (method, (mut params, deadline)) = shell_params(request, generation);
+    if let Some(at) = deadline {
+        requests::write_slot(&mut params[at..at + requests::SLOT], left);
+    }
     (method, kind_of(request), params)
 }
 
@@ -1122,12 +1125,13 @@ fn requests_to_main_take_the_designs_forms() {
 fn occupy(t: &Test) -> u64 {
     let (out, _rx) = mpsc::channel();
     let allowance = Allowance::new(usize::MAX, usize::MAX);
-    match t
-        .chain
-        .requests
-        .send(Owner::Naming, &allowance, &out, |id| {
-            requests::request_frame(id, "shell.rpc", b"{}").ok_or(Refusal::TooLarge)
-        }) {
+    match t.chain.requests.send(
+        Owner::Naming,
+        &allowance,
+        &out,
+        || requests::request_frame("shell.rpc", b"{}", None),
+        || Start::Anytime,
+    ) {
         Dispatch::Sent(id) => id,
         other => panic!("{other:?}"),
     }
@@ -1682,6 +1686,100 @@ fn a_requests_deadline_is_what_is_left_as_it_takes_its_slot() {
     assert_eq!(t.chain.requests.answered(held), Some(Owner::Naming));
     // Delivery alone: dispatch brings the machine to 199 ms itself.
     assert!(t.chain.deliver().is_ok());
+    assert_eq!(t.chain.machine.now(), 199);
+    let frames = t.written();
+    let sent = requests(&frames);
+    assert_eq!(sent.len(), 1, "{frames:?}");
+    assert_eq!(sent[0]["method"], "shell.rpc");
+    assert_eq!(sent[0]["params"]["deadline_ms"], until - 1_329);
+}
+
+#[test]
+fn a_broadcast_late_once_its_frame_is_made_never_goes() {
+    // Round 5, the reviewer's case: a queued Myotis broadcast of nearly one
+    // frame, its cutoff 1 ms away. Making its frame (copying and escaping
+    // up to one frame) took 31 ms: the start is checked after that, on a
+    // fresh reading, so it never goes.
+    let mut t = test_with(Bounds::default(), usize::MAX, 1, true);
+    let mut config = chain_snapshot(&["direct"], &["a"]);
+    config["myotis"] = json!(true);
+    config["broadcast_order"] = json!(["myotis"]);
+    t.configure(json!([config]));
+    t.call(
+        2,
+        "chain.availability",
+        &json!({ "chain_id": 1, "ready": true }),
+    );
+    let held = occupy(&t);
+    t.call(
+        3,
+        "chain.broadcast",
+        &json!({ "chain_id": 1, "raw": "0x01", "deadline_ms": 10_001 }),
+    );
+    let Some(Queued {
+        request: Request::Verified(VerifiedOp::MyotisBroadcast { raw, .. }),
+        until,
+        ..
+    }) = t.chain.queued.front_mut()
+    else {
+        panic!("no queued broadcast");
+    };
+    assert_eq!(*until, Some(1));
+    *raw = format!(
+        "0x{}",
+        "ab".repeat((fc_protocol::frame::MAX_PAYLOAD - 1024) / 2)
+    );
+    // Within one frame: it would go.
+    let (method, (params, deadline)) = shell_params(&t.chain.queued[0].request, 1);
+    assert!(requests::request_frame(method, &params, deadline).is_some());
+    let clock = std::rc::Rc::clone(&t.clock);
+    let made = std::rc::Rc::new(std::cell::Cell::new(0));
+    let count = std::rc::Rc::clone(&made);
+    t.chain.on_frame = Some(Box::new(move || {
+        count.set(count.get() + 1);
+        clock.set(31);
+    }));
+    assert_eq!(t.chain.requests.answered(held), Some(Owner::Naming));
+    assert!(t.chain.flush().is_ok());
+    // Its frame was made, then refused.
+    assert_eq!(made.get(), 1);
+    let frames = t.written();
+    let sent = verified(&frames);
+    assert!(sent.is_empty(), "sent past its cutoff");
+    let reply = frames.iter().find(|f| f["id"] == 3).unwrap();
+    assert_eq!(reply["error"]["data"]["outcome"], "not_sent", "{reply}");
+    assert!(t.chain.queued.is_empty());
+    // It took no slot.
+    let free = occupy(&t);
+    assert_eq!(t.chain.requests.answered(free), Some(Owner::Naming));
+}
+
+#[test]
+fn a_requests_deadline_is_written_from_the_reading_it_starts_on() {
+    // Round 5: the frame is made at 199 ms, and the request takes its
+    // slot at 1,329 ms. Its `deadline_ms` is what is left then, written
+    // into the frame already made.
+    let mut t = test_with(Bounds::default(), usize::MAX, 1, true);
+    t.configure(json!([chain_snapshot(&["direct"], &["a"])]));
+    let held = occupy(&t);
+    let (id, params) = read(3, "eth_blockNumber", json!([]));
+    t.call(id, "chain.request", &params);
+    let until = t.chain.queued[0].until.unwrap();
+    assert!(until > 1_329, "{until}");
+    let clock = std::rc::Rc::clone(&t.clock);
+    let made = std::rc::Rc::new(std::cell::Cell::new(0));
+    let count = std::rc::Rc::clone(&made);
+    t.chain.on_frame = Some(Box::new(move || {
+        count.set(count.get() + 1);
+        clock.set(1_329);
+    }));
+    // No frame is made while main holds all it takes.
+    t.at(199);
+    assert_eq!(made.get(), 0);
+    assert_eq!(t.chain.requests.answered(held), Some(Owner::Naming));
+    assert!(t.chain.flush().is_ok());
+    assert_eq!(made.get(), 1);
+    // The machine was last brought to 199 ms.
     assert_eq!(t.chain.machine.now(), 199);
     let frames = t.written();
     let sent = requests(&frames);

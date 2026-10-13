@@ -50,7 +50,7 @@ use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
 use crate::log;
-use crate::requests::{self, Dispatch, Owner, Refusal, Requests};
+use crate::requests::{self, Dispatch, Owner, Requests, Start};
 use crate::serve::Event;
 use crate::transport::{self, Allowance, Credit, Link, Out, Reply};
 
@@ -334,6 +334,10 @@ struct Chain {
     /// serializes one (PR #57 review, round 4).
     #[cfg(test)]
     on_reply: Option<Box<dyn FnMut()>>,
+    /// Runs as each request's frame is made: a test's way to act while
+    /// this thread makes one (round 5).
+    #[cfg(test)]
+    on_frame: Option<Box<dyn FnMut()>>,
 }
 
 /// The chain thread's two shares of the writer.
@@ -373,6 +377,8 @@ impl Chain {
             by_io: BTreeMap::new(),
             #[cfg(test)]
             on_reply: None,
+            #[cfg(test)]
+            on_frame: None,
         }
     }
 
@@ -733,12 +739,13 @@ impl Chain {
     /// removes it. True when one settled here.
     ///
     /// No request goes against a time that has passed (PR #57 review,
-    /// rounds 3 and 4, R3-M1): the machine is first brought to the clock's
+    /// rounds 3 to 5, R3-M1): the machine is first brought to the clock's
     /// now ([`Chain::advance`]), whatever this thread did before (a reply
     /// serialized), so what came due meanwhile, a queued request's expiry
-    /// or a timer, is processed first. Then each request's time is read
-    /// again as it takes its slot, under the gate's lock: past its latest
-    /// start, it never goes; otherwise its deadline is what is left then.
+    /// or a timer, is processed first. Then each request's frame is made,
+    /// and only then, as it takes its slot under the gate's lock, is its
+    /// time read again: past its latest start, it never goes; otherwise its
+    /// `deadline_ms` is what is left at that reading ([`Requests::send`]).
     fn dispatch(&mut self) -> Result<bool, Stop> {
         self.advance()?;
         let mut settled = false;
@@ -749,19 +756,30 @@ impl Chain {
             let io = queued.io;
             let kind = kind_of(&queued.request);
             let clock = &self.clock;
-            let sent = self
-                .requests
-                .send(Owner::Chain, &self.control_allowance, &self.out, |id| {
-                    let left = match queued.until {
-                        Some(until) => match until.checked_sub(clock.now()) {
-                            Some(left) if left > 0 => left,
-                            _ => return Err(Refusal::Late),
-                        },
-                        None => 0,
-                    };
-                    let (method, params) = shell_params(&queued.request, queued.generation, left);
-                    requests::request_frame(id, method, &params).ok_or(Refusal::TooLarge)
-                });
+            #[cfg(test)]
+            let on_frame = &mut self.on_frame;
+            let sent = self.requests.send(
+                Owner::Chain,
+                &self.control_allowance,
+                &self.out,
+                || {
+                    let (method, (params, deadline)) =
+                        shell_params(&queued.request, queued.generation);
+                    let frame = requests::request_frame(method, &params, deadline);
+                    #[cfg(test)]
+                    if let Some(on_frame) = on_frame.as_mut() {
+                        on_frame();
+                    }
+                    frame
+                },
+                || match queued.until {
+                    Some(until) => match until.checked_sub(clock.now()) {
+                        Some(left) if left > 0 => Start::Within(left),
+                        _ => Start::Late,
+                    },
+                    None => Start::Anytime,
+                },
+            );
             match sent {
                 Dispatch::Sent(id) => {
                     self.queued.pop_front();
@@ -916,9 +934,10 @@ impl Chain {
 // The core's requests to main (design 0005, Requests the core makes).
 
 /// A `shell.*` request's method, and its params with the generation it
-/// runs under. `left` is what is left of its time, sent as `deadline_ms`
-/// where the design has one.
-fn shell_params(request: &Request, generation: u64, left: Ms) -> (&'static str, Vec<u8>) {
+/// runs under. Where the design has a `deadline_ms`, the params have a slot
+/// for it, written as the request takes its slot at main
+/// ([`requests::RequestFrame`]), and where it starts comes with them.
+fn shell_params(request: &Request, generation: u64) -> (&'static str, (Vec<u8>, Option<usize>)) {
     match request {
         Request::Rpc {
             endpoint,
@@ -933,8 +952,8 @@ fn shell_params(request: &Request, generation: u64, left: Ms) -> (&'static str, 
                 .string("policy", "plain")
                 .number("max_bytes", *max_bytes as u64)
                 .number("generation", generation)
-                .number("deadline_ms", left)
-                .finish(),
+                .deadline_slot()
+                .finish_params(),
         ),
         Request::Blockscout {
             endpoint,
@@ -948,8 +967,8 @@ fn shell_params(request: &Request, generation: u64, left: Ms) -> (&'static str, 
                 .string("query", query)
                 .number("max_bytes", *max_bytes as u64)
                 .number("generation", generation)
-                .number("deadline_ms", left)
-                .finish(),
+                .deadline_slot()
+                .finish_params(),
         ),
         Request::Verified(VerifiedOp::MyotisRead {
             chain_id,
@@ -981,7 +1000,7 @@ fn shell_params(request: &Request, generation: u64, left: Ms) -> (&'static str, 
             };
             (
                 "shell.verified",
-                op.number("generation", generation).finish(),
+                op.number("generation", generation).finish_params(),
             )
         }
         Request::Verified(VerifiedOp::MyotisBroadcast { chain_id, raw }) => (
@@ -991,7 +1010,7 @@ fn shell_params(request: &Request, generation: u64, left: Ms) -> (&'static str, 
                 .number("chain_id", *chain_id)
                 .string("raw", raw)
                 .number("generation", generation)
-                .finish(),
+                .finish_params(),
         ),
         Request::Verified(VerifiedOp::Colibri {
             chain_id,
@@ -1005,9 +1024,9 @@ fn shell_params(request: &Request, generation: u64, left: Ms) -> (&'static str, 
                 .number("chain_id", *chain_id)
                 .string("method", method)
                 .raw("params", params)
-                .number("deadline_ms", left)
+                .deadline_slot()
                 .number("generation", generation)
-                .finish(),
+                .finish_params(),
         ),
     }
 }
@@ -1973,24 +1992,31 @@ fn log_outcome(caller: &Caller, done: &Done) {
 
 /// A JSON object written member by member: raw JSON embedded as it is,
 /// strings escaped. Keys are the core's own names.
-struct Object(Vec<u8>);
+struct Object {
+    json: Vec<u8>,
+    /// Where its `deadline_ms` slot starts, when it has one.
+    deadline: Option<usize>,
+}
 
 impl Object {
     fn new() -> Self {
-        Self(vec![b'{'])
+        Self {
+            json: vec![b'{'],
+            deadline: None,
+        }
     }
 
     fn key(&mut self, key: &str) {
-        if self.0.len() > 1 {
-            self.0.push(b',');
+        if self.json.len() > 1 {
+            self.json.push(b',');
         }
-        quote_into(&mut self.0, key);
-        self.0.push(b':');
+        quote_into(&mut self.json, key);
+        self.json.push(b':');
     }
 
     fn raw(mut self, key: &str, json: &str) -> Self {
         self.key(key);
-        self.0.extend_from_slice(json.as_bytes());
+        self.json.extend_from_slice(json.as_bytes());
         self
     }
 
@@ -2003,19 +2029,33 @@ impl Object {
 
     fn string(mut self, key: &str, value: &str) -> Self {
         self.key(key);
-        quote_into(&mut self.0, value);
+        quote_into(&mut self.json, value);
         self
     }
 
     fn number(mut self, key: &str, value: u64) -> Self {
         self.key(key);
-        self.0.extend_from_slice(value.to_string().as_bytes());
+        self.json.extend_from_slice(value.to_string().as_bytes());
+        self
+    }
+
+    /// A request's `deadline_ms`, as a slot written as it takes its slot
+    /// at main.
+    fn deadline_slot(mut self) -> Self {
+        self.key("deadline_ms");
+        self.deadline = Some(requests::slot_into(&mut self.json));
         self
     }
 
     fn finish(mut self) -> Vec<u8> {
-        self.0.push(b'}');
-        self.0
+        self.json.push(b'}');
+        self.json
+    }
+
+    /// A request's params, and where their `deadline_ms` slot starts.
+    fn finish_params(self) -> (Vec<u8>, Option<usize>) {
+        let deadline = self.deadline;
+        (self.finish(), deadline)
     }
 
     fn finish_text(self) -> String {

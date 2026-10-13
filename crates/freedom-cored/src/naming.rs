@@ -29,7 +29,7 @@ use serde::Deserialize;
 use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
-use crate::requests::{self, Dispatch, Owner, Refusal, Requests};
+use crate::requests::{self, Dispatch, Owner, Requests, Start};
 use crate::serve::Event;
 use crate::transport;
 use crate::transport::{Allowance, Credit, Out};
@@ -543,11 +543,15 @@ impl Naming {
             let (method, kind, params) = shell_request(request, *generations, left);
             let params =
                 serde_json::to_vec(&params).map_err(|_| Stop::Protocol("unwritable_request"))?;
-            let sent = self
-                .requests
-                .send(Owner::Naming, &self.allowance, &self.out, |id| {
-                    requests::request_frame(id, method, &params).ok_or(Refusal::TooLarge)
-                });
+            // Its frame is made outside the gate's lock. Naming's requests
+            // have no latest start: their deadline is in their params.
+            let sent = self.requests.send(
+                Owner::Naming,
+                &self.allowance,
+                &self.out,
+                || requests::request_frame(method, &params, None),
+                || Start::Anytime,
+            );
             match sent {
                 Dispatch::Sent(id) => {
                     self.queued.pop_front();
@@ -562,8 +566,8 @@ impl Naming {
                     settled = true;
                 }
                 // The core is exiting, main holds all it takes, or the
-                // writer share is full: it waits. (Naming's frames are never
-                // refused as late.)
+                // writer share is full: it waits. (Naming's requests are
+                // never late.)
                 Dispatch::Closed | Dispatch::Full | Dispatch::NoRoom | Dispatch::Late => break,
                 Dispatch::WriterGone => return Err(Stop::Writer),
             }
