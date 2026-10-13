@@ -14,7 +14,6 @@ use fc_naming::session::exec::{Io, Rt, Sleep};
 use super::bounds::Bounds;
 use super::budget::{self, Budget, Charge};
 use super::config::Chain;
-use super::error::Thrown;
 use super::io::{Delivered, Ms, Request};
 use super::logs::LogState;
 use super::route::Adaptive;
@@ -117,7 +116,43 @@ pub(crate) struct Ctx {
     pub held: RefCell<Vec<Held>>,
     /// The request being polled: what its futures charge goes to it.
     pub current: Cell<u64>,
+    /// The charges of requests made and not yet taken by the driver.
+    pub pending: RefCell<Vec<Charge>>,
 }
+
+/// A request crossed its memory budget (`memory-budgets`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Over;
+
+/// What a future does once its request is over its budget: nothing more.
+/// The machine ends the request with `budget` (a broadcast through its
+/// outcome table) before it would poll it again.
+pub(crate) async fn stall<T>() -> T {
+    std::future::pending::<T>().await
+}
+
+/// Reserves bytes for the request being polled, or stops its future when
+/// that crosses the budget.
+macro_rules! reserve {
+    ($ctx:expr, $bytes:expr) => {
+        match $ctx.reserve($bytes) {
+            Ok(charge) => charge,
+            Err(_) => return $crate::machine::ctx::stall().await,
+        }
+    };
+}
+pub(crate) use reserve;
+
+/// Stops a future whose request crossed its budget.
+macro_rules! within {
+    ($result:expr) => {
+        match $result {
+            Ok(value) => value,
+            Err($crate::machine::ctx::Over) => return $crate::machine::ctx::stall().await,
+        }
+    };
+}
+pub(crate) use within;
 
 impl Ctx {
     pub(crate) fn new(now: Ms, bounds: Bounds) -> Self {
@@ -131,6 +166,7 @@ impl Ctx {
             state: RefCell::new(State::default()),
             held: RefCell::new(Vec::new()),
             current: Cell::new(0),
+            pending: RefCell::new(Vec::new()),
         }
     }
 
@@ -138,11 +174,24 @@ impl Ctx {
         self.rt.now()
     }
 
-    /// Charges the request being polled. `Err` once it is over its budget;
-    /// it then ends at the machine's next poll.
-    pub(crate) fn charge(&self, bytes: usize) -> Result<Charge, Thrown> {
-        budget::charge(&self.budget, self.current.get(), bytes)
-            .map_err(|_| Thrown::error("The request is over its memory budget"))
+    /// Reserves `bytes` for the request being polled, before what they
+    /// cover is allocated. `Err` once that crosses its budget: the request
+    /// is over, and its future must stop ([`stall`]); the machine ends it
+    /// with `budget` before polling it again.
+    pub(crate) fn reserve(&self, bytes: usize) -> Result<Charge, Over> {
+        budget::charge(&self.budget, self.current.get(), bytes).map_err(|_| Over)
+    }
+
+    /// A request made: its bytes stay charged to the request until the
+    /// driver takes it ([`Ctx::take_pending`]).
+    pub(crate) fn pend(&self, charge: Charge) {
+        self.pending.borrow_mut().push(charge);
+    }
+
+    /// The driver took the requests made: their charges end, and the
+    /// driver's backlog counts them until written.
+    pub(crate) fn take_pending(&self) {
+        self.pending.borrow_mut().clear();
     }
 
     pub(crate) fn ready(&self, chain_id: u64) -> bool {
@@ -277,9 +326,11 @@ impl Ctx {
         }
         let any = !finished.is_empty();
         for (op, delivered) in finished {
+            // Main's terminal reply frees the slot, even one whose payload
+            // was over its request's budget and is discarded.
             self.release(&op.release);
             // Nobody waits any more: the outcome is dropped.
-            if Rc::strong_count(&op.cell) > 1 {
+            if !delivered.discarded && Rc::strong_count(&op.cell) > 1 {
                 *op.cell.borrow_mut() = Some(delivered);
             }
         }

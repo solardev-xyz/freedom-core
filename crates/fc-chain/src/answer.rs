@@ -21,7 +21,7 @@ use std::ops::Range;
 
 use fc_json::index::{Index, IndexError, Kind, Value};
 
-use crate::js::{JsError, JsString, NOT_PRIMITIVE, js_string_of};
+use crate::js::{JsString, NOT_PRIMITIVE, js_string_len, js_string_of};
 
 /// The core's text for a body that isn't JSON (deviation `json-parse-text`).
 pub const JSON_PARSE_FAILURE: &str = "The RPC answer is not valid JSON";
@@ -90,8 +90,6 @@ pub struct Answer {
     /// The body as `TextDecoder` gives it, BOMs dropped.
     text: String,
     reply: Reply,
-    /// The heap the body's index took while it was read.
-    index_bytes: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -127,12 +125,6 @@ impl Answer {
     /// The decoded body, BOMs dropped.
     pub fn text(&self) -> &str {
         &self.text
-    }
-
-    /// The heap the body's index took while it was read (memory budgets
-    /// charge it).
-    pub fn index_bytes(&self) -> usize {
-        self.index_bytes
     }
 
     /// The result's span in [`Answer::text`]: `Some(None)` for `undefined`,
@@ -175,21 +167,71 @@ pub fn decode_answer(status: u16, body: Vec<u8>) -> Result<Answer, AnswerError> 
     if !(200..=299).contains(&status) {
         return Err(AnswerError::Status(status));
     }
-    let text = decode_text(body);
-    let (reply, index_bytes) = read(&text)?;
-    Ok(Answer {
-        text,
-        reply,
-        index_bytes,
-    })
+    read_answer(decode_body(body))
+}
+
+/// The buffer [`decode_body`] allocates for `body`: the length of its
+/// replacement decoding, or `None` when the body is valid UTF-8 and is
+/// decoded in place. A caller reserves it before decoding: an invalid
+/// byte becomes U+FFFD's three bytes, so the text can be three times the
+/// body.
+pub fn replaced_len(body: &[u8]) -> Option<usize> {
+    if std::str::from_utf8(body).is_ok() {
+        return None;
+    }
+    Some(
+        body.utf8_chunks()
+            .map(|chunk| chunk.valid().len() + if chunk.invalid().is_empty() { 0 } else { 3 })
+            .sum(),
+    )
+}
+
+/// What the router makes of a decoded body (a 2xx answer's).
+pub fn read_answer(text: String) -> Result<Answer, AnswerError> {
+    match read_answer_reserving(text, |_| Ok::<(), std::convert::Infallible>(())) {
+        Ok(read) => read,
+        Err(never) => match never {},
+    }
+}
+
+/// [`read_answer`], asking `reserve` for room before each allocation: the
+/// index, before it is built, and a node error's message, before it is
+/// made. An `Err` from `reserve` stops the read.
+pub fn read_answer_reserving<E>(
+    text: String,
+    mut reserve: impl FnMut(usize) -> Result<(), E>,
+) -> Result<Result<Answer, AnswerError>, E> {
+    let needed = match Index::heap_needed(&text) {
+        Ok(needed) => needed,
+        Err(error) => return Ok(Err(error.into())),
+    };
+    reserve(needed)?;
+    let reply = match Index::new(&text) {
+        Ok(index) => reply(&index, &mut reserve)?,
+        Err(error) => Err(error.into()),
+    };
+    Ok(reply.map(|reply| Answer { text, reply }))
 }
 
 /// A body as undici's `text()` and `json()` decode it: UTF-8 with
-/// replacement; undici drops a BOM's bytes, then `TextDecoder` drops a
-/// decoded one.
-pub(crate) fn decode_text(body: Vec<u8>) -> String {
-    let mut text = String::from_utf8(body)
-        .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned());
+/// replacement (`String::from_utf8_lossy`'s, into a buffer of exactly
+/// [`replaced_len`]); undici drops a BOM's bytes, then `TextDecoder` drops
+/// a decoded one.
+pub fn decode_body(body: Vec<u8>) -> String {
+    let mut text = match String::from_utf8(body) {
+        Ok(text) => text,
+        Err(error) => {
+            let bytes = error.into_bytes();
+            let mut text = String::with_capacity(replaced_len(&bytes).unwrap_or(0));
+            for chunk in bytes.utf8_chunks() {
+                text.push_str(chunk.valid());
+                if !chunk.invalid().is_empty() {
+                    text.push('\u{FFFD}');
+                }
+            }
+            text
+        }
+    };
     let boms = text
         .char_indices()
         .take(2)
@@ -199,22 +241,27 @@ pub(crate) fn decode_text(body: Vec<u8>) -> String {
     text
 }
 
-fn read(text: &str) -> Result<(Reply, usize), AnswerError> {
-    let index = Index::new(text)?;
-    let reply = reply(&index)?;
-    Ok((reply, index.heap_bytes()))
-}
-
-fn reply(index: &Index<'_>) -> Result<Reply, AnswerError> {
+fn reply<E>(
+    index: &Index<'_>,
+    reserve: &mut impl FnMut(usize) -> Result<(), E>,
+) -> Result<Result<Reply, AnswerError>, E> {
     let root = index.root();
     let span = |value: Value<'_, '_>| value.start()..value.end();
-    match root.kind() {
+    Ok(match root.kind() {
         Kind::Null => Err(AnswerError::NullBody),
         Kind::Object => match root.get("error").filter(|e| e.truthy()) {
             Some(error) if error.kind() == Kind::Object => {
                 let message = match error.get("message").filter(|m| m.truthy()) {
                     Some(message) => {
-                        js_string_of(message).map_err(|_: JsError| AnswerError::NotPrimitive)?
+                        // Its UTF-16, reserved before it is made.
+                        let Some(units) = js_string_len(message) else {
+                            return Ok(Err(AnswerError::NotPrimitive));
+                        };
+                        reserve(units.saturating_mul(2))?;
+                        match js_string_of(message) {
+                            Ok(message) => message,
+                            Err(_) => return Ok(Err(AnswerError::NotPrimitive)),
+                        }
                     }
                     None => JsString::from("RPC request failed"),
                 };
@@ -234,7 +281,7 @@ fn reply(index: &Index<'_>) -> Result<Reply, AnswerError> {
         },
         // `data.error` and `data.result` of a primitive or an array.
         _ => Ok(Reply::Result(None)),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -246,6 +293,31 @@ mod tests {
             Outcome::Result(text) => text.map(str::to_owned),
             Outcome::NodeError(error) => panic!("{error:?}"),
         }
+    }
+
+    #[test]
+    fn replacement_decoding_is_lossys_into_an_exact_buffer() {
+        let bodies: [&[u8]; 5] = [
+            b"plain",
+            b"\xFF\xFE",
+            b"a\xE2\x82b\xF0\x9F\x98",
+            b"\xEF\xBB\xBF\xEF\xBB\xBFx\xC0",
+            b"",
+        ];
+        for body in bodies {
+            let lossy = String::from_utf8_lossy(body).into_owned();
+            let decoded = decode_body(body.to_vec());
+            let expected = lossy.trim_start_matches('\u{FEFF}');
+            let boms = lossy.len() - expected.len();
+            assert!(boms <= 6);
+            assert_eq!(decoded, expected);
+            match replaced_len(body) {
+                None => assert!(std::str::from_utf8(body).is_ok()),
+                Some(len) => assert_eq!((len, decoded.capacity()), (lossy.len(), len)),
+            }
+        }
+        // Five thousand invalid bytes are fifteen thousand decoded.
+        assert_eq!(replaced_len(&[0xFF; 5000]), Some(15_000));
     }
 
     #[test]

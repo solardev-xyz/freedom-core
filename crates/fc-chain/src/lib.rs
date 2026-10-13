@@ -62,8 +62,8 @@ pub use blockscout::{
     LOG_INDEX_PAIR_MALFORMED_COOLDOWN_MS, LOG_INDEX_TAIL_BLOCKS, LOG_INDEX_TOKEN, LogIndexFilter,
     MAX_COOLDOWN_MS, MAX_PAGE_SIZE, MIN_COOLDOWN_MS, PageReply, Party, RATE_LIMIT_COOLDOWN_MS,
     ScanStep, Transfer, TransferScan, agreed_rpc_logs, blockscout_transfer, canonical_log,
-    cooldown_from, log_index_filter, logs_agree, rpc_transfer, rpc_transfer_log_well_formed,
-    rpc_transfer_logs_well_formed, transfers_json,
+    cooldown_from, log_index_filter, logs_agree, page_text, rpc_transfer,
+    rpc_transfer_log_well_formed, rpc_transfer_logs_well_formed, transfers_json,
 };
 pub use broadcast::{AttemptClass, RefusalReason, broadcast_refusal, classify_broadcast_answer};
 pub use fee::{FeeQuote, fee_quote};
@@ -78,8 +78,8 @@ pub use methods::{
 };
 pub use myotis::{
     MAX_MYOTIS_REFUSAL_MESSAGE, MYOTIS_BLOB_FIELDS, MYOTIS_NOT_READY, MYOTIS_PROOF, MyotisFailure,
-    MyotisOperation, MyotisRefusal, MyotisVerdict, myotis_answer, myotis_fee_values,
-    myotis_operation, myotis_trust, myotis_trust_block,
+    MyotisOperation, MyotisRefusal, MyotisVerdict, myotis_answer, myotis_call_span,
+    myotis_fee_values, myotis_operation, myotis_trust, myotis_trust_block,
 };
 pub use normalize::{Normalized, normalize_params};
 pub use stable::{StableDigest, stable_digest, stable_value, value_digest};

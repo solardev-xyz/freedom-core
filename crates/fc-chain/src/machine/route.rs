@@ -44,6 +44,10 @@ fn lower(units: &[u16]) -> String {
 
 /// `requestTarget(method, params)`: the contract or account a request is
 /// about, lowercased; a list of them sorted and joined; `*` for none.
+///
+/// A list of more than one is kept as its digest, [`list_target`]: the
+/// adaptive table outlives its requests, and its keys are bounded in bytes
+/// (`memory-budgets`).
 pub(crate) fn request_target(method: &str, params: &str) -> String {
     let Ok(index) = Index::new(params) else {
         return "*".into();
@@ -74,15 +78,31 @@ pub(crate) fn request_target(method: &str, params: &str) -> String {
                 .map(|units| lower(&units))
                 .collect();
             addresses.sort();
-            if addresses.is_empty() {
-                "*".into()
-            } else {
-                addresses.join(",")
+            match addresses.as_slice() {
+                [] => "*".into(),
+                [one] => one.clone(),
+                _ => list_target(&addresses.join(",")),
             }
         }
         Some(Element::Value(value)) if value.kind() == Kind::String => string_target(value),
         _ => "*".into(),
     }
+}
+
+/// A list target's identity: `sha256:` and the SHA-256 of the reference's
+/// joined text, in hex. Two lists share a route exactly when the reference's
+/// joined texts are equal (to SHA-256's collision resistance), and a key
+/// holds 71 bytes of target however long the list.
+pub(crate) fn list_target(joined: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
+    let digest = Sha256::digest(joined.as_bytes());
+    let mut text = String::with_capacity(7 + 64);
+    text.push_str("sha256:");
+    for byte in digest {
+        let _ = write!(text, "{byte:02x}");
+    }
+    text
 }
 
 fn string_target(value: Value<'_, '_>) -> String {
@@ -227,12 +247,26 @@ mod tests {
                     addr
                 )
             ),
-            format!(
-                "{},{}",
-                "0x".to_owned() + &"ab".repeat(20),
-                "0x".to_owned() + &"b".repeat(40)
-            )
+            // SHA-256 of `0xabab…ab,0xbbbb…bb`, the reference's joined text.
+            "sha256:8a0b71b5b46abc57a3c4d254d7d67228a909121d4fef526805a0a9d2edc825b3"
         );
+        // One address is itself; a list of any length is 71 bytes, the
+        // same for the same set in any order or case.
+        assert_eq!(
+            request_target("eth_getLogs", &format!(r#"[{{"address":["{addr}"]}}]"#)),
+            "0x".to_owned() + &"ab".repeat(20)
+        );
+        let list = |order: &mut dyn Iterator<Item = usize>| {
+            let items: Vec<String> = order.map(|n| format!("\"0x{n:040X}\"")).collect();
+            request_target(
+                "eth_getLogs",
+                &format!(r#"[{{"address":[{}]}}]"#, items.join(",")),
+            )
+        };
+        let forward = list(&mut (0..100));
+        assert_eq!(forward.len(), 71);
+        assert_eq!(forward, list(&mut (0..100).rev()));
+        assert_ne!(forward, list(&mut (0..99)));
         assert_eq!(
             request_target("eth_getBalance", &format!(r#"["{addr}"]"#)).len(),
             42

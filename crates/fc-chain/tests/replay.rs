@@ -1289,6 +1289,32 @@ fn compare_thrown(thrown: &Thrown, want: &Json) -> Option<String> {
     ))
 }
 
+/// The reference's route keys as the core keeps them: a target listing
+/// more than one address is its SHA-256 (`memory-budgets`, design 0005,
+/// Adaptive bypass), computed here on its own.
+fn canonical_route_keys(state: &mut Json) {
+    use sha2::{Digest as _, Sha256};
+    for table in ["adaptive", "colibri_routes"] {
+        let Some(entries) = state.get_mut(table).and_then(Json::as_array_mut) else {
+            continue;
+        };
+        for entry in entries {
+            let Some(key) = entry.get(0).and_then(Json::as_str) else {
+                continue;
+            };
+            let mut parts: Vec<Json> = serde_json::from_str(key).unwrap();
+            let Some(Json::String(target)) = parts.last_mut() else {
+                continue;
+            };
+            if !target.contains(',') {
+                continue;
+            }
+            *target = format!("sha256:{}", hex::encode(Sha256::digest(target.as_bytes())));
+            entry[0] = Json::String(serde_json::to_string(&parts).unwrap());
+        }
+    }
+}
+
 /// The machine's state tables as the replay records them (empty ones left
 /// out).
 fn tables_json(tables: &StateTables) -> Json {
@@ -1573,12 +1599,13 @@ fn replay(scenario: &Json, expect: Option<&'static Expected>) -> Outcome {
             }
         }
         let tables = tables_json(&driver.machine.state_tables());
-        let want = expect
+        let mut want = expect
             .and_then(|e| e.states.iter().find(|(s, _)| *s == index))
             .map_or_else(
                 || step.get("state").cloned().unwrap_or(Json::Null),
                 |(_, state)| serde_json::from_str(state).unwrap(),
             );
+        canonical_route_keys(&mut want);
         if tables != want {
             driver.mismatches.push(format!(
                 "{id} step {index}: state {} instead of {}",

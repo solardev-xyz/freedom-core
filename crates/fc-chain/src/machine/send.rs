@@ -18,16 +18,17 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use fc_json::index::{Index, Kind};
+use fc_json::index::Kind;
 use fc_naming::session::exec::{Either, race};
 
+use super::budget::Charge;
 use super::config::ms;
-use super::ctx::{Release, Req, reply, started};
+use super::ctx::{Over, Release, Req, reply, reserve, started, within};
 use super::error::{ErrorClass, Prop, Thrown};
-use super::exchange::{answer_error, node_error, transport_error};
-use super::io::{Answer, Delivered, Ms, MyotisClass, MyotisReply, Request, VerifiedOp, rpc_body};
-use super::read::{MYOTIS_FAILED, ReadOptions, myotis_adapter_error, read};
-use crate::answer::{Outcome as AnswerOutcome, decode_answer};
+use super::exchange::{answer_error, decode, indexed, node_error, rpc_request, transport_error};
+use super::io::{Answer, Delivered, Ms, MyotisClass, MyotisReply, Request, VerifiedOp};
+use super::read::{MYOTIS_FAILED, ReadOptions, charged, myotis_adapter_error, read};
+use crate::answer::Outcome as AnswerOutcome;
 use crate::broadcast::{AttemptClass, broadcast_refusal};
 use crate::js::JsString;
 use crate::myotis::MYOTIS_NOT_READY;
@@ -300,15 +301,21 @@ async fn myotis(req: &Req, raw: &str, state: &RefCell<SendState>) -> Step {
         fail(state, "myotis", Thrown::unavailable(MYOTIS_NOT_READY));
         return Step::Next;
     }
+    // The operation's copy of the bytes, reserved before the attempt: a
+    // budget refused here sends nothing.
+    let made = reserve!(req.ctx, raw.len());
     state.borrow_mut().outstanding = Some("myotis");
-    let cell = req.ctx.hold(
-        Request::Verified(VerifiedOp::MyotisBroadcast {
-            chain_id,
-            raw: raw.to_owned(),
-        }),
-        Release::Nothing,
-    );
-    let Delivered { answer, .. } = reply(&cell).await;
+    let request = Request::Verified(VerifiedOp::MyotisBroadcast {
+        chain_id,
+        raw: raw.to_owned(),
+    });
+    req.ctx.pend(made);
+    let cell = req.ctx.hold(request, Release::Nothing);
+    let Delivered {
+        answer,
+        charge: _held,
+        ..
+    } = reply(&cell).await;
     let hash = state.borrow().hash;
     match answer {
         Answer::Myotis(MyotisReply::Sent { hash: sent }) => {
@@ -322,9 +329,13 @@ async fn myotis(req: &Req, raw: &str, state: &RefCell<SendState>) -> Step {
             }
         }
         Answer::Myotis(MyotisReply::Rejected { reason }) => {
+            // Its text, reserved before it is copied; the error holds the
+            // charge while any copy of it lives.
+            let copies = reserve!(req.ctx, reason.len().saturating_mul(2) + 64);
             let error = Thrown::error(&reason)
                 .with("code", Prop::Json("-32000".into()))
                 .with("myotisRefusal", Prop::string("rejected"));
+            let error = within!(charged(error, copies));
             let mut state = state.borrow_mut();
             state.record("myotis", Class::Refused);
             state.last_refusal = Some(error);
@@ -378,21 +389,31 @@ async fn direct(req: &Req, raw: &str, state: &RefCell<SendState>) -> Step {
         return Step::Next;
     }
     let timeout = req.chain.timeout;
+    // The params, `[raw]` as JSON, reserved before they are made (the raw
+    // bytes in UTF-16 on the way), kept while the endpoints are tried.
+    let mut room = reserve!(req.ctx, raw.len().saturating_mul(4) + 8);
     let params = format!("[{}]", JsString::from(raw).to_json());
+    within!(room.settle(params.capacity()).map_err(|()| Over));
     let mut last: Option<Thrown> = None;
     let mut stopped = false;
     for url in &urls {
         let earlier_ambiguous = state.borrow().possibly_sent();
-        state.borrow_mut().outstanding = Some("direct");
         let timer = started(req.ctx.rt.sleep(ms(timeout)));
-        let io = req.ctx.rt.request(Request::Rpc {
-            endpoint: url.clone(),
-            body: rpc_body(req.next_rpc_id(), "eth_sendRawTransaction", &params),
-            max_bytes: req.ctx.bounds.answer_bytes,
-            deadline_ms: ms(timeout),
-        });
+        // The body is reserved before the attempt: a budget refused here
+        // sends nothing.
+        let request = within!(rpc_request(
+            req,
+            url,
+            "eth_sendRawTransaction",
+            &params,
+            timeout
+        ));
+        state.borrow_mut().outstanding = Some("direct");
+        let io = req.ctx.rt.request(request);
         let (class, error) = match race(io, timer).await {
-            Either::Left(Delivered { answer, .. }) => attempt(req, state, answer, timeout),
+            Either::Left(Delivered { answer, charge, .. }) => {
+                attempt(req, state, answer, charge, timeout).await
+            }
             Either::Right(()) => (Class::Ambiguous, Some(Thrown::rpc_timeout(timeout))),
         };
         state.borrow_mut().record("direct", class);
@@ -417,16 +438,22 @@ async fn direct(req: &Req, raw: &str, state: &RefCell<SendState>) -> Step {
     if stopped { Step::Stop } else { Step::Next }
 }
 
-/// One Direct attempt's class, and today's error for it.
-fn attempt(
+/// One Direct attempt's class, and today's error for it. Its answer is
+/// read with every allocation reserved first; a budget refused there stops
+/// the broadcast with this attempt outstanding, so the outcome table counts
+/// it as possibly sent.
+async fn attempt(
     req: &Req,
     state: &RefCell<SendState>,
     answer: Answer,
+    charge: Charge,
     timeout: f64,
 ) -> (Class, Option<Thrown>) {
     match answer {
         Answer::Rpc { status, body } => {
-            let decoded = decode_answer(status, body);
+            let decoded = decode(req, status, body, charge)
+                .await
+                .map(|(answer, _held)| answer);
             let hash = state.borrow().hash;
             let class = match hash {
                 Some(hash) => crate::broadcast::classify_broadcast_answer(&hash, &decoded),
@@ -443,7 +470,7 @@ fn attempt(
             };
             let error = match &decoded {
                 Ok(answer) => match answer.outcome() {
-                    AnswerOutcome::NodeError(error) => Some(node_error(req, &error)),
+                    AnswerOutcome::NodeError(error) => Some(within!(node_error(req, &error))),
                     AnswerOutcome::Result(_) => None,
                 },
                 Err(error) => Some(answer_error(error.clone())),
@@ -485,7 +512,7 @@ async fn reconcile(req: &Req, hash: TxHash) -> bool {
     let Some(text) = answer.result else {
         return false;
     };
-    let Ok(index) = Index::new(text.json()) else {
+    let Some((index, _index)) = within!(indexed(req, text.json())) else {
         return false;
     };
     let root = index.root();

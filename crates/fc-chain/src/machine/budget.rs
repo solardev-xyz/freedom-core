@@ -44,6 +44,33 @@ impl Charge {
             bytes: 0,
         }
     }
+
+    /// The bytes it holds.
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// Makes a reservation exact once what it covers is made: the excess
+    /// is released, or a shortfall charged. `Err` when the shortfall
+    /// crosses a bound: the request is over.
+    pub(crate) fn settle(&mut self, actual: usize) -> Result<(), ()> {
+        let Some(budget) = &self.budget else {
+            return Ok(());
+        };
+        let mut ledger = budget.borrow_mut();
+        if actual <= self.bytes {
+            ledger.release(self.request, self.bytes - actual);
+            self.bytes = actual;
+            return Ok(());
+        }
+        let extra = actual - self.bytes;
+        self.bytes = actual;
+        if ledger.add(self.request, extra) {
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
 }
 
 impl Drop for Charge {
@@ -90,9 +117,24 @@ impl Budget {
         self.over.contains(&request)
     }
 
-    /// Whether a new request may start: the total has room.
-    pub(crate) fn admits(&self) -> bool {
-        self.held() < self.total_bytes
+    /// Whether a new request holding `bytes` from its start may be
+    /// admitted: within its own bound, and the total with it.
+    pub(crate) fn admits(&self, bytes: usize) -> bool {
+        bytes <= self.request_bytes && self.held().saturating_add(bytes) <= self.total_bytes
+    }
+
+    /// Adds `bytes` to `request`. False, and the request is over, when that
+    /// crosses its bound or the total's.
+    fn add(&mut self, request: u64, bytes: usize) -> bool {
+        let used = self.used.entry(request).or_default();
+        *used = used.saturating_add(bytes);
+        let own = *used > self.request_bytes;
+        self.total = self.total.saturating_add(bytes);
+        let all = self.held() > self.total_bytes;
+        if own || all {
+            self.over.insert(request);
+        }
+        !(own || all)
     }
 
     /// A request ended: it can't be over any more.
@@ -130,22 +172,13 @@ pub(crate) fn charge(
     if request == 0 {
         return Ok(Charge::none());
     }
-    let mut ledger = budget.borrow_mut();
-    let used = ledger.used.entry(request).or_default();
-    *used = used.saturating_add(bytes);
-    let own = *used > ledger.request_bytes;
-    ledger.total = ledger.total.saturating_add(bytes);
-    let all = ledger.held() > ledger.total_bytes;
-    if own || all {
-        ledger.over.insert(request);
-    }
-    drop(ledger);
+    let within = budget.borrow_mut().add(request, bytes);
     let charge = Charge {
         budget: Some(Rc::clone(budget)),
         request,
         bytes,
     };
-    if own || all { Err(charge) } else { Ok(charge) }
+    if within { Ok(charge) } else { Err(charge) }
 }
 
 #[cfg(test)]
@@ -169,19 +202,37 @@ mod tests {
     }
 
     #[test]
+    fn a_reservation_settles_to_what_it_covered() {
+        let budget = Rc::new(RefCell::new(Budget::new(100, 150)));
+        let mut reserved = charge(&budget, 1, 90).unwrap();
+        reserved.settle(30).unwrap();
+        assert_eq!(budget.borrow().used(1), 30);
+        reserved.settle(60).unwrap();
+        assert_eq!(budget.borrow().used(1), 60);
+        // A shortfall that crosses the bound makes the request over.
+        assert!(reserved.settle(101).is_err());
+        assert!(budget.borrow().over(1));
+        drop(reserved);
+        assert_eq!(budget.borrow().held(), 0);
+    }
+
+    #[test]
     fn the_total_counts_unwritten_replies() {
         let budget = Rc::new(RefCell::new(Budget::new(100, 150)));
         let _a = charge(&budget, 1, 80).unwrap();
         budget.borrow_mut().add_output(60);
-        assert!(budget.borrow().admits());
+        assert!(budget.borrow().admits(0));
+        // Admission judges what the new request brings.
+        assert!(budget.borrow().admits(10) && !budget.borrow().admits(11));
         // The request that crosses the total is the one that ends.
         assert!(charge(&budget, 2, 20).is_err());
         assert!(budget.borrow().over(2) && !budget.borrow().over(1));
         budget.borrow_mut().take_output();
         budget.borrow_mut().set_backlog(70);
-        assert!(!budget.borrow().admits());
+        assert!(!budget.borrow().admits(1));
         budget.borrow_mut().set_backlog(0);
-        assert!(budget.borrow().admits());
+        assert!(budget.borrow().admits(70));
+        assert!(!budget.borrow().admits(101));
         assert!(charge(&budget, 0, usize::MAX).is_ok());
     }
 }

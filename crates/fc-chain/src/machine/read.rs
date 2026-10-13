@@ -8,16 +8,19 @@ use std::rc::Rc;
 use fc_json::index::{Index, KeyOrder, Kind};
 use fc_naming::session::exec::{Either, race};
 
+use super::budget::Charge;
 use super::config::{Chain, ms};
+use super::ctx::{Over, reserve, stall, within};
 use super::ctx::{Release, Req, reply, started};
 use super::error::{ErrorClass, Fallback, Prop, Thrown};
-use super::exchange::{ResultText, exchange, owned};
+use super::exchange::{ResultText, exchange, indexed, owned};
 use super::io::{
     Answer, ColibriClass, ColibriReply, Delivered, MyotisClass, MyotisReply, Request, VerifiedOp,
 };
 use super::logs::{CapReader, Keeper, LogRange, Ranker};
 use super::quorum::{QuorumOptions, request_quorum};
 use super::route::{colibri_key, request_target, route_key, routing_origin};
+use super::text::Retained;
 use super::trust::{colibri_trust, direct_trust};
 use crate::ant::{ANT_EXCLUDE_SOURCES, ANT_INCLUDE_SOURCES, LOG_SCAN_QUORUM_TIMEOUT_MS};
 use crate::js::{Element, element};
@@ -26,7 +29,8 @@ use crate::logs::{
 };
 use crate::methods::{is_read_method, source_order, source_serves_method};
 use crate::myotis::{
-    MYOTIS_NOT_READY, MyotisFailure, myotis_answer, myotis_operation, myotis_trust,
+    MYOTIS_NOT_READY, MyotisFailure, myotis_answer, myotis_call_span, myotis_operation,
+    myotis_trust,
 };
 use crate::normalize::normalize_params;
 use crate::text::{SourceFailure, request_failure_text, unsupported_read_method_text};
@@ -150,9 +154,36 @@ pub(crate) async fn read(
         return Err(Thrown::error(&unsupported_read_method_text(method)));
     }
     let chain = Rc::clone(&req.chain);
-    let normalized = normalize_params(method, raw_params)
-        .map_err(|_| Thrown::of_class(ErrorClass::SyntaxError, "The params are not valid JSON"))?;
+    let not_json = || Thrown::of_class(ErrorClass::SyntaxError, "The params are not valid JSON");
+    // Normalization's index, its writer and its output, reserved first: the
+    // output and its working copies are at most six times the input (a
+    // number such as `1e20` becomes 19 bytes of hex; calldata is copied
+    // into `data`).
+    let Some((raw, mut room)) = within!(indexed(req, raw_params)) else {
+        return Err(not_json());
+    };
+    // The writer's scratch; the normalized params have the same shape.
+    let scratch = reserve!(req.ctx, raw.root().write_scratch(KeyOrder::Property) + 64);
+    drop(raw);
+    let mut copy = reserve!(req.ctx, raw_params.len().saturating_mul(6) + 64);
+    let normalized = normalize_params(method, raw_params).map_err(|_| not_json())?;
     let params = normalized.params.as_str();
+    // The normalized params live with the request. It keeps, for its whole
+    // life, room for one index of them, its writer and twice their bytes:
+    // the transient reads of the params (the route target's sorted list,
+    // the log span, the filters, an operation's copy) each fit in it, one
+    // at a time.
+    within!(copy.settle(normalized.params.capacity()).map_err(|()| Over));
+    within!(
+        room.settle(Index::heap_needed(params).unwrap_or(0))
+            .map_err(|()| Over)
+    );
+    let _standing = (
+        copy,
+        room,
+        scratch,
+        reserve!(req.ctx, params.len().saturating_mul(2) + 256),
+    );
     let span = match (options.ranker, options.cap_reader) {
         (Some(_), Some(_)) => log_query_span(method, params),
         _ => None,
@@ -432,58 +463,95 @@ async fn via_myotis(
     let timer = started(ctx.rt.sleep(ms(remaining)));
     // `requestMyotis`'s checks, then the operation, which keeps the slot
     // until main's terminal reply.
-    let start = || -> Result<_, Thrown> {
-        if !ctx.ready(chain_id) {
-            return Err(Thrown::unavailable(MYOTIS_NOT_READY));
-        }
-        let operation = myotis_operation(method, params).map_err(myotis_failure)?;
-        Ok(ctx.hold(
-            Request::Verified(VerifiedOp::MyotisRead {
-                chain_id,
-                operation,
-            }),
-            Release::Myotis(chain_id),
-        ))
-    };
-    let cell = match start() {
-        Ok(cell) => cell,
-        Err(error) => {
+    if !ctx.ready(chain_id) {
+        ctx.release_myotis(chain_id);
+        return Err(Thrown::unavailable(MYOTIS_NOT_READY));
+    }
+    // The operation's copy of the call (at most the params, which are
+    // already JSON.stringify's), reserved before it is made.
+    let mut made = match ctx.reserve(params.len() + 256) {
+        Ok(made) => made,
+        Err(Over) => {
             ctx.release_myotis(chain_id);
-            return Err(error);
+            return stall().await;
         }
     };
+    let operation = match myotis_operation(method, params) {
+        Ok(operation) => operation,
+        Err(failure) => {
+            ctx.release_myotis(chain_id);
+            return Err(myotis_failure(failure));
+        }
+    };
+    let request = Request::Verified(VerifiedOp::MyotisRead {
+        chain_id,
+        operation,
+    });
+    if made.settle(request.bytes()).is_err() {
+        ctx.release_myotis(chain_id);
+        return stall().await;
+    }
+    ctx.pend(made);
+    let cell = ctx.hold(request, Release::Myotis(chain_id));
     match race(reply(&cell), timer).await {
-        Either::Left(delivered) => myotis_result(req, method, include_trust, delivered),
+        Either::Left(delivered) => myotis_result(req, method, include_trust, delivered).await,
         Either::Right(()) => Err(Thrown::source_deadline("Myotis", remaining)),
     }
 }
 
-/// A Myotis read's outcome.
-fn myotis_result(
+/// A Myotis read's outcome. An `eth_call` result is kept as its span of
+/// the payload, no copy made; any other result, and a failure's texts, are
+/// copies of the payload's values, reserved first: at most twice its bytes
+/// in UTF-16, and its bytes again as JSON, twice while an error's data is
+/// shared.
+async fn myotis_result(
     req: &Req,
     method: &str,
     include_trust: bool,
     delivered: Delivered,
 ) -> Result<SourceResult, Thrown> {
-    let Delivered { answer, charge } = delivered;
+    let Delivered { answer, charge, .. } = delivered;
     match answer {
         Answer::Myotis(MyotisReply::Read {
             payload,
             block_before,
             block_after,
         }) => {
-            let json = myotis_answer(method, Some(&payload)).map_err(myotis_failure)?;
-            drop(charge);
             let trust = include_trust
                 .then(|| myotis_trust(block_before.as_deref(), block_after.as_deref()));
-            Ok(SourceResult {
-                result: owned(req, json)?,
-                trust,
-            })
+            // The codec's own index of the payload.
+            let _index = reserve!(req.ctx, Index::heap_needed(&payload).unwrap_or(0));
+            let copies = reserve!(req.ctx, payload.len().saturating_mul(4) + 2048);
+            if method == "eth_call" {
+                return match myotis_call_span(&payload) {
+                    Ok(span) => {
+                        drop(copies);
+                        Ok(SourceResult {
+                            result: Some(Rc::new(Retained::new(payload, span, charge))),
+                            trust,
+                        })
+                    }
+                    Err(failure) => Err(within!(charged(myotis_failure(failure), copies))),
+                };
+            }
+            match myotis_answer(method, Some(&payload)) {
+                Ok(json) => Ok(SourceResult {
+                    result: within!(owned(json, copies)),
+                    trust,
+                }),
+                Err(failure) => Err(within!(charged(myotis_failure(failure), copies))),
+            }
         }
         Answer::Myotis(MyotisReply::Failure(class)) => Err(myotis_adapter_error(req, class)),
         _ => Err(Thrown::error(MYOTIS_FAILED)),
     }
+}
+
+/// An error made from an answer's values, holding `reserved`, settled to
+/// its size, while any copy of it lives (`memory-budgets`).
+pub(crate) fn charged(error: Thrown, mut reserved: Charge) -> Result<Thrown, Over> {
+    reserved.settle(error.bytes()).map_err(|()| Over)?;
+    Ok(error.charged(reserved))
 }
 
 /// What the read loop makes of a Myotis payload's failure.
@@ -563,28 +631,33 @@ async fn colibri(
     }
     let budget = deadline.filter(|d| *d != 0.0).unwrap_or(req.chain.timeout);
     let timer = started(req.ctx.rt.sleep(ms(budget)));
+    // The operation's copies of the method and params, reserved first.
+    let made = reserve!(req.ctx, method.len() + params.len());
     req.ctx.add_colibri(&key);
-    let cell = req.ctx.hold(
-        Request::Verified(VerifiedOp::Colibri {
-            chain_id,
-            method: method.to_owned(),
-            params: params.to_owned(),
-            deadline_ms: ms(budget),
-        }),
-        Release::Colibri(key),
-    );
+    let request = Request::Verified(VerifiedOp::Colibri {
+        chain_id,
+        method: method.to_owned(),
+        params: params.to_owned(),
+        deadline_ms: ms(budget),
+    });
+    req.ctx.pend(made);
+    let cell = req.ctx.hold(request, Release::Colibri(key));
     match race(reply(&cell), timer).await {
-        Either::Left(Delivered { answer, charge }) => match answer {
-            Answer::Colibri(ColibriReply::Result(json)) => {
-                drop(charge);
-                owned(req, json)
-            }
+        Either::Left(Delivered { answer, charge, .. }) => match answer {
+            // The answer's own buffer is the result: no copy.
+            Answer::Colibri(ColibriReply::Result(json)) => Ok(within!(owned(json, charge))),
             // A revert the prover verified, rebuilt: `execution reverted`,
-            // code 3, its data.
-            Answer::Colibri(ColibriReply::Revert { data }) => {
-                Err(Thrown::error("execution reverted")
+            // code 3, its data. Main sends only hex data, so its JSON is the
+            // data quoted; the copies are reserved first, and the error holds
+            // their charge while any copy of it lives.
+            Answer::Colibri(ColibriReply::Revert { data }) if is_hex_data(&data) => {
+                let copies = reserve!(req.ctx, (data.len() + 2) * 2);
+                drop(charge);
+                let quoted: Rc<str> = Rc::from(format!("\"{data}\"").as_str());
+                let error = Thrown::error("execution reverted")
                     .with("code", Prop::Json("3".into()))
-                    .with("data", Prop::string(&data)))
+                    .with("data", Prop::Json(quoted));
+                Err(within!(charged(error, copies)))
             }
             Answer::Colibri(ColibriReply::Failure(class)) => {
                 let mut error = Thrown::error(COLIBRI_FAILED);
@@ -597,6 +670,12 @@ async fn colibri(
         },
         Either::Right(()) => Err(Thrown::source_deadline("Colibri", budget)),
     }
+}
+
+/// `0x` and whole bytes of hex, as a verified revert's data is.
+fn is_hex_data(data: &str) -> bool {
+    data.strip_prefix("0x")
+        .is_some_and(|d| d.len() % 2 == 0 && d.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// `requestDirect`: the quorum's reusable answer, or the endpoints the
@@ -709,13 +788,31 @@ impl Probe {
 /// `logTruncationProbe(method, params, result)`: an answer is suspect when
 /// every log falls in the last 1000 blocks of a numeric range at least
 /// 2000 wide.
-pub(crate) fn truncation_probe(method: &str, params: &str, result: &ResultText) -> Option<Probe> {
-    let full = log_query_span(method, params)?;
+/// The answer's index is reserved before it is built (`Err` when the
+/// request crosses its budget); the params' index and the probe's params
+/// fit the request's standing room.
+pub(crate) fn truncation_probe(
+    req: &Req,
+    method: &str,
+    params: &str,
+    result: &ResultText,
+) -> Result<Option<Probe>, Over> {
+    let Some(full) = log_query_span(method, params) else {
+        return Ok(None);
+    };
     if full < LOG_TRUNCATION_MIN_SPAN {
-        return None;
+        return Ok(None);
     }
-    let text = result.as_ref()?;
-    let index = Index::new(text.json()).ok()?;
+    let Some(text) = result.as_ref() else {
+        return Ok(None);
+    };
+    let Some((index, _index)) = indexed(req, text.json())? else {
+        return Ok(None);
+    };
+    Ok(probe_of(&index, params, full))
+}
+
+fn probe_of(index: &Index<'_>, params: &str, full: u64) -> Option<Probe> {
     let entries = index.root();
     if entries.kind() != Kind::Array || entries.children().next().is_none() {
         return None;
@@ -815,7 +912,7 @@ async fn check_log_truncation(
     result: &ResultText,
     options: &CheckOptions<'_>,
 ) -> Result<(), Thrown> {
-    let Some(probe) = truncation_probe(method, params, result) else {
+    let Some(probe) = within!(truncation_probe(req, method, params, result)) else {
         return Ok(());
     };
     let keeper = RefCell::new(Keeper::new(None));
@@ -893,11 +990,16 @@ async fn check_log_truncation(
     let Ok(earlier) = earlier else {
         return Ok(());
     };
-    let found = earlier.result.as_ref().is_some_and(|text| {
-        Index::new(text.json()).is_ok_and(|index| {
-            let root = index.root();
-            root.kind() == Kind::Array && root.children().next().is_some()
-        })
-    });
-    if found { Err(probe.error()) } else { Ok(()) }
+    let Some(text) = earlier.result.as_ref() else {
+        return Ok(());
+    };
+    let Some((index, _index)) = within!(indexed(req, text.json())) else {
+        return Ok(());
+    };
+    let root = index.root();
+    if root.kind() == Kind::Array && root.children().next().is_some() {
+        Err(probe.error())
+    } else {
+        Ok(())
+    }
 }

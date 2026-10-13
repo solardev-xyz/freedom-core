@@ -13,11 +13,11 @@ use std::task::{Context, Waker};
 use fc_naming::session::exec::{Effect, Fired, Sleep, Task};
 
 use super::bounds::Bounds;
-use super::budget;
+use super::budget::{self, Charge};
 use super::config::{Chain, ChainConfig};
 use super::ctx::{Ctx, Req};
 use super::error::{ChainError, Protocol, Thrown};
-use super::io::{Answer, Delivered, Ms, Request};
+use super::io::{Answer, Delivered, Ms, Request, Transport};
 use super::logs::RangeEntry;
 use super::quote::fee_quote;
 use super::read::{ReadAnswer, ReadOptions, read};
@@ -55,6 +55,31 @@ impl Call {
 
     fn is_broadcast(&self) -> bool {
         matches!(self, Self::Broadcast { .. })
+    }
+
+    /// The bytes it holds while queued and running, as the budget counts
+    /// them: its strings.
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Read {
+                method,
+                params,
+                options,
+                ..
+            } => {
+                method.capacity()
+                    + params.capacity()
+                    + options.origin.as_ref().map_or(0, String::capacity)
+                    + options
+                        .exclude_sources
+                        .iter()
+                        .chain(&options.include_sources)
+                        .map(String::capacity)
+                        .sum::<usize>()
+            }
+            Self::FeeQuote { .. } => 0,
+            Self::Broadcast { raw, .. } => raw.capacity(),
+        }
     }
 }
 
@@ -132,6 +157,8 @@ struct Running {
     deadline: Sleep<Request, Delivered>,
     /// A broadcast's attempts, for the outcome table.
     send: Option<Rc<RefCell<SendState>>>,
+    /// The call's own strings, charged from its admission.
+    _input: Charge,
 }
 
 struct Waiting {
@@ -139,6 +166,8 @@ struct Waiting {
     call: Call,
     deadline: Sleep<Request, Delivered>,
     deadline_at: Ms,
+    /// The call's own strings, charged from its admission.
+    input: Charge,
 }
 
 pub struct Machine {
@@ -298,15 +327,24 @@ impl Machine {
         let deadline_ms = deadline_ms.map_or(bounds.deadline_ms, |d| d.min(bounds.deadline_ms));
         let deadline_at = self.now().saturating_add(deadline_ms);
         let room = self.running.len() < bounds.running;
-        let busy =
-            !self.ctx.budget.borrow().admits() || (!room && self.waiting.len() >= bounds.waiting);
-        if busy {
+        // Admission judges what the call brings: its strings, held while it
+        // waits and runs (`memory-budgets`).
+        let bytes = call.bytes();
+        let fits = self.ctx.budget.borrow().admits(bytes);
+        let busy = !fits || (!room && self.waiting.len() >= bounds.waiting);
+        let input = if busy {
+            None
+        } else {
+            budget::charge(&self.ctx.budget, id, bytes).ok()
+        };
+        let Some(input) = input else {
+            self.ctx.budget.borrow_mut().forget(id);
             let outcome = call.is_broadcast().then_some(BroadcastOutcome::NotSent);
             self.reply(id, Err(ChainError::Protocol(Protocol::Busy)), outcome, 0);
             return id;
-        }
+        };
         if room {
-            self.start(id, call, deadline_at);
+            self.start(id, call, deadline_at, input);
         } else {
             let deadline = started(self.ctx.rt.sleep(deadline_ms));
             self.waiting.push_back(Waiting {
@@ -314,21 +352,47 @@ impl Machine {
                 call,
                 deadline,
                 deadline_at,
+                input,
             });
         }
         id
     }
 
-    fn start(&mut self, id: u64, call: Call, deadline_at: Ms) {
+    /// The chain's current generation (0 for one not configured).
+    fn generation_of(&self, chain_id: u64) -> u64 {
+        self.ctx
+            .state
+            .borrow()
+            .chains
+            .get(&chain_id)
+            .map_or(0, |(_, generation)| *generation)
+    }
+
+    fn start(&mut self, id: u64, call: Call, deadline_at: Ms, input: Charge) {
         let chain_id = call.chain_id();
         let found = self.ctx.state.borrow().chains.get(&chain_id).cloned();
         let Some((chain, generation)) = found else {
             let error = Thrown::error(&format!("Unsupported chain ID: {chain_id}"));
             let outcome = call.is_broadcast().then_some(BroadcastOutcome::NotSent);
+            drop(input);
+            self.ctx.budget.borrow_mut().forget(id);
             self.reply(id, Err(ChainError::Thrown(error)), outcome, 0);
             return;
         };
         let now = self.now();
+        // An expired call starts nothing: no poll, no I/O.
+        if deadline_at <= now {
+            let outcome = call.is_broadcast().then_some(BroadcastOutcome::NotSent);
+            drop(input);
+            self.ctx.budget.borrow_mut().forget(id);
+            self.reply(
+                id,
+                Err(ChainError::Protocol(Protocol::Deadline)),
+                outcome,
+                generation,
+            );
+            return;
+        }
         let deadline = started(self.ctx.rt.sleep(deadline_at.saturating_sub(now)));
         let req = Rc::new(Req::new(Rc::clone(&self.ctx), chain));
         let mut send = None;
@@ -368,6 +432,7 @@ impl Machine {
             task,
             deadline,
             send,
+            _input: input,
         });
     }
 
@@ -379,6 +444,15 @@ impl Machine {
         generation: u64,
     ) {
         let bounds = self.ctx.bounds;
+        // The reply's error leaves its request's charge behind: the reply
+        // counts as output from here on.
+        let result = match result {
+            Err(ChainError::Thrown(mut thrown)) => {
+                thrown.charge = None;
+                Err(ChainError::Thrown(thrown))
+            }
+            other => other,
+        };
         let bytes = reply_bytes(&result);
         let (result, outcome) = if bytes > bounds.message_bytes {
             (Err(ChainError::Protocol(Protocol::TooLarge)), outcome)
@@ -452,12 +526,26 @@ impl Machine {
     fn finish(&mut self, i: usize) {
         let mut running = self.running.remove(i);
         let done = running.task.take();
-        let Running { id, generation, .. } = running;
-        self.ctx.budget.borrow_mut().forget(id);
+        let (id, generation) = (running.id, running.generation);
         match done {
             Some(Done::Read(Ok(answer))) => {
+                // The reply's copy of the result, reserved before it is
+                // made, while the request still holds the original.
+                let len = answer.result.as_ref().map_or(0, |text| text.json().len());
+                let Ok(copy) = budget::charge(&self.ctx.budget, id, len) else {
+                    drop((answer, running));
+                    self.ctx.budget.borrow_mut().forget(id);
+                    self.reply(
+                        id,
+                        Err(ChainError::Protocol(Protocol::Budget)),
+                        None,
+                        generation,
+                    );
+                    return;
+                };
                 let result = answer.result.as_ref().map(|text| text.json().to_owned());
-                drop(answer.result);
+                drop((copy, running));
+                self.ctx.budget.borrow_mut().forget(id);
                 self.reply(
                     id,
                     Ok(Success::Read {
@@ -471,13 +559,24 @@ impl Machine {
                 );
             }
             Some(Done::Read(Err(error)) | Done::Fee(Err(error))) => {
+                drop(running);
+                self.ctx.budget.borrow_mut().forget(id);
                 self.reply(id, Err(ChainError::Thrown(error)), None, generation);
             }
             Some(Done::Fee(Ok(quote))) => {
+                drop(running);
+                self.ctx.budget.borrow_mut().forget(id);
                 self.reply(id, Ok(Success::FeeQuote(quote)), None, generation);
             }
-            Some(Done::Broadcast(ended)) => self.broadcast_reply(id, ended, generation),
-            None => {}
+            Some(Done::Broadcast(ended)) => {
+                drop(running);
+                self.ctx.budget.borrow_mut().forget(id);
+                self.broadcast_reply(id, ended, generation);
+            }
+            None => {
+                drop(running);
+                self.ctx.budget.borrow_mut().forget(id);
+            }
         }
     }
 
@@ -496,11 +595,14 @@ impl Machine {
                     .call
                     .is_broadcast()
                     .then_some(BroadcastOutcome::NotSent);
+                let generation = self.generation_of(waiting.call.chain_id());
+                drop(waiting.input);
+                self.ctx.budget.borrow_mut().forget(id);
                 self.reply(
                     id,
                     Err(ChainError::Protocol(Protocol::Cancelled)),
                     outcome,
-                    0,
+                    generation,
                 );
             }
             return true;
@@ -518,6 +620,13 @@ impl Machine {
             let mut i = 0;
             while i < self.running.len() {
                 let id = self.running[i].id;
+                // A request over its budget is never polled again: its
+                // futures make no more I/O and change no shared state.
+                if self.ctx.budget.borrow().over(id) {
+                    self.end(i, Protocol::Budget);
+                    changed = true;
+                    continue;
+                }
                 self.ctx.current.set(id);
                 self.ctx.rt.set_owner(id);
                 let finished = self.running[i].task.poll();
@@ -556,11 +665,14 @@ impl Machine {
                     .call
                     .is_broadcast()
                     .then_some(BroadcastOutcome::NotSent);
+                let generation = self.generation_of(waiting.call.chain_id());
+                drop(waiting.input);
+                self.ctx.budget.borrow_mut().forget(waiting.id);
                 self.reply(
                     waiting.id,
                     Err(ChainError::Protocol(Protocol::Deadline)),
                     outcome,
-                    0,
+                    generation,
                 );
                 changed = true;
                 continue;
@@ -570,7 +682,7 @@ impl Machine {
         while self.running.len() < self.ctx.bounds.running
             && let Some(waiting) = self.waiting.pop_front()
         {
-            self.start(waiting.id, waiting.call, waiting.deadline_at);
+            self.start(waiting.id, waiting.call, waiting.deadline_at, waiting.input);
             changed = true;
         }
         changed
@@ -583,7 +695,8 @@ impl Machine {
         std::mem::take(&mut self.replies)
     }
 
-    /// The driver's replies not yet written: they count in the total
+    /// The bytes of the frames the driver has taken and not yet written,
+    /// replies and requests alike: they count in the total
     /// (`memory-budgets`).
     pub fn set_output_backlog(&mut self, bytes: usize) {
         self.ctx.budget.borrow_mut().set_backlog(bytes);
@@ -592,6 +705,9 @@ impl Machine {
     /// The effects since the last call.
     pub fn take_effects(&mut self) -> Vec<Emitted> {
         let effects = self.ctx.rt.take_effects();
+        // The requests leave the machine: their charges end here, and the
+        // driver's backlog counts them until written.
+        self.ctx.take_pending();
         let emitted = effects
             .into_iter()
             .map(|effect| {
@@ -618,6 +734,14 @@ impl Machine {
     /// and the request ends at the next poll. False when nothing waits for
     /// it (cancelled, or unknown).
     pub fn complete(&mut self, id: u64, answer: Answer) -> bool {
+        // Main enforces `max_bytes`; an answer over the cap anyway is the
+        // `too_large` failure it should have been (`response-caps`).
+        let answer = match answer {
+            Answer::Rpc { body, .. } if body.len() > self.ctx.bounds.answer_bytes => {
+                Answer::Failed(Transport::TooLarge)
+            }
+            answer => answer,
+        };
         let owner = self.ctx.rt.owner_of(id).unwrap_or(0);
         let request = if self.running.iter().any(|r| r.id == owner) {
             owner
@@ -625,8 +749,31 @@ impl Machine {
             0
         };
         match budget::charge(&self.ctx.budget, request, answer.bytes()) {
-            Ok(charge) => self.ctx.rt.complete(id, Delivered { answer, charge }),
-            Err(_) => false,
+            Ok(charge) => self.ctx.rt.complete(
+                id,
+                Delivered {
+                    answer,
+                    charge,
+                    discarded: false,
+                },
+            ),
+            Err(_) => {
+                // Over its request's budget: the payload is dropped, but
+                // main's one terminal reply still completes the operation,
+                // so a verifier's slot is freed. The request ends with
+                // `budget` (a broadcast through its outcome table) before
+                // it is polled again.
+                drop(answer);
+                self.ctx.rt.complete(
+                    id,
+                    Delivered {
+                        answer: Answer::NotSent,
+                        charge: Charge::none(),
+                        discarded: true,
+                    },
+                );
+                false
+            }
         }
     }
 

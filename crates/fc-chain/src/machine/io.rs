@@ -166,15 +166,16 @@ pub enum Answer {
 }
 
 impl Answer {
-    /// The bytes it holds, as the budget counts them.
+    /// The bytes it holds, as the budget counts them: each buffer's
+    /// capacity.
     pub fn bytes(&self) -> usize {
         match self {
-            Self::Rpc { body, .. } => body.len(),
+            Self::Rpc { body, .. } => body.capacity(),
             Self::Blockscout { headers, body, .. } => headers
                 .iter()
-                .map(|(k, v)| k.len() + v.len())
+                .map(|(k, v)| k.capacity() + v.capacity())
                 .sum::<usize>()
-                .saturating_add(body.len()),
+                .saturating_add(body.capacity()),
             Self::NotSent | Self::Failed(_) => 0,
             Self::Myotis(reply) => match reply {
                 MyotisReply::Read {
@@ -191,7 +192,7 @@ impl Answer {
                 _ => 0,
             },
             Self::Colibri(reply) => match reply {
-                ColibriReply::Result(text) | ColibriReply::Revert { data: text } => text.len(),
+                ColibriReply::Result(text) | ColibriReply::Revert { data: text } => text.capacity(),
                 ColibriReply::Failure(_) => 0,
             },
         }
@@ -204,12 +205,77 @@ impl Answer {
 pub struct Delivered {
     pub answer: Answer,
     pub(crate) charge: super::budget::Charge,
+    /// Main's terminal reply arrived, but its payload was over its
+    /// request's budget: it completes the operation (freeing a verifier's
+    /// slot) and is dropped.
+    pub(crate) discarded: bool,
 }
 
-/// The JSON-RPC body of one exchange.
+impl Request {
+    /// The bytes it holds, as the budget counts them.
+    pub(crate) fn bytes(&self) -> usize {
+        match self {
+            Self::Rpc { endpoint, body, .. } => endpoint.capacity() + body.capacity(),
+            Self::Blockscout {
+                endpoint, query, ..
+            } => endpoint.capacity() + query.capacity(),
+            Self::Verified(VerifiedOp::MyotisRead { operation, .. }) => match operation {
+                MyotisOperation::Account { address } | MyotisOperation::Code { address } => {
+                    address.as_ref().map_or(0, String::capacity)
+                }
+                MyotisOperation::Storage { address, slot } => {
+                    address.as_ref().map_or(0, String::capacity)
+                        + slot.as_ref().map_or(0, String::capacity)
+                }
+                MyotisOperation::CallTx { tx } | MyotisOperation::EstimateTx { tx } => {
+                    tx.capacity()
+                }
+                MyotisOperation::Fee => 0,
+            },
+            Self::Verified(VerifiedOp::MyotisBroadcast { raw, .. }) => raw.capacity(),
+            Self::Verified(VerifiedOp::Colibri { method, params, .. }) => {
+                method.capacity() + params.capacity()
+            }
+        }
+    }
+}
+
+/// The length of [`rpc_body`]'s text, known before it is made.
+pub(crate) fn rpc_body_len(id: u64, method: &str, params: &str) -> usize {
+    r#"{"jsonrpc":"2.0","id":,"method":,"params":}"#.len()
+        + id.to_string().len()
+        + crate::js::JsString::from(method).to_json().len()
+        + params.len()
+}
+
+/// The JSON-RPC body of one exchange, in a buffer of exactly its length.
 pub(crate) fn rpc_body(id: u64, method: &str, params: &str) -> String {
-    format!(
-        r#"{{"jsonrpc":"2.0","id":{id},"method":{},"params":{params}}}"#,
-        crate::js::JsString::from(method).to_json()
-    )
+    let mut body = String::with_capacity(rpc_body_len(id, method, params));
+    body.push_str(r#"{"jsonrpc":"2.0","id":"#);
+    body.push_str(&id.to_string());
+    body.push_str(r#","method":"#);
+    body.push_str(&crate::js::JsString::from(method).to_json());
+    body.push_str(r#","params":"#);
+    body.push_str(params);
+    body.push('}');
+    body
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_body_is_made_in_a_buffer_of_its_length() {
+        let body = rpc_body(12, "eth_call", r#"[{"to":"0x1"},"latest"]"#);
+        assert_eq!(
+            body,
+            r#"{"jsonrpc":"2.0","id":12,"method":"eth_call","params":[{"to":"0x1"},"latest"]}"#
+        );
+        assert_eq!(
+            body.capacity(),
+            rpc_body_len(12, "eth_call", r#"[{"to":"0x1"},"latest"]"#)
+        );
+        assert_eq!(body.len(), body.capacity());
+    }
 }

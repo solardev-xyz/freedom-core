@@ -8,7 +8,7 @@
 use fc_chain::machine::{
     Answer, Bounds, BroadcastOutcome, Call, ChainConfig, ChainError, ColibriReply, Effect, Emitted,
     Machine, MyotisClass, MyotisReply, Protocol, Prover, QuorumConfig, ReadOptions, Reply, Request,
-    RpcEndpoint, Success, VerifiedOp,
+    RpcEndpoint, Success, Transport, VerifiedOp,
 };
 
 /// A test world: the machine and everything it emitted.
@@ -143,20 +143,25 @@ fn read(chain_id: u64, method: &str, params: &str) -> Call {
     }
 }
 
+/// A body held at exactly its length: the budget counts what a buffer
+/// holds, so the bounds below read in answer sizes.
+fn exact(text: String) -> Vec<u8> {
+    text.into_bytes().into_boxed_slice().into_vec()
+}
+
 fn ok(result: &str) -> Answer {
     Answer::Rpc {
         status: 200,
-        body: format!(r#"{{"jsonrpc":"2.0","id":1,"result":{result}}}"#).into_bytes(),
+        body: exact(format!(r#"{{"jsonrpc":"2.0","id":1,"result":{result}}}"#)),
     }
 }
 
 fn node_error(code: i64, message: &str) -> Answer {
     Answer::Rpc {
         status: 200,
-        body: format!(
+        body: exact(format!(
             r#"{{"jsonrpc":"2.0","id":1,"error":{{"code":{code},"message":"{message}"}}}}"#
-        )
-        .into_bytes(),
+        )),
     }
 }
 
@@ -577,15 +582,12 @@ fn a_kept_node_error_counts_against_the_budget() {
         &[chain(1, &["direct"], &["a", "b"], ("3", "2", "5000"))],
     );
     let id = world.submit(read(1, "eth_call", CALL), None);
-    let revert = || {
-        Answer::Rpc {
+    let revert = || Answer::Rpc {
         status: 200,
-        body: format!(
+        body: exact(format!(
             r#"{{"jsonrpc":"2.0","id":1,"error":{{"code":3,"message":"execution reverted","data":"0x{}"}}}}"#,
             "ab".repeat(1_500)
-        )
-        .into_bytes(),
-    }
+        )),
     };
     let first = world.rpcs()[0].0;
     assert!(world.answer(first, revert()));
@@ -1058,5 +1060,422 @@ fn colibri_reverts_and_failures_carry_no_adapter_text() {
             );
         }
         other => panic!("{other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The safety review's cases (PR #55): memory-budgets, verifier slots,
+// response-caps and overall-deadline, each as a regression test.
+
+fn colibri_chain(read: &[&str]) -> ChainConfig {
+    ChainConfig {
+        prover: Some(Prover {
+            endpoint: "p".into(),
+            zk: true,
+        }),
+        ..chain(1, read, &["a"], ("3", "2", "5000"))
+    }
+}
+
+fn interactive(method: &str, params: &str, origin: &str) -> Call {
+    Call::Read {
+        chain_id: 1,
+        method: method.into(),
+        params: params.into(),
+        options: ReadOptions {
+            origin: Some(origin.into()),
+            ..ReadOptions::default()
+        },
+    }
+}
+
+/// What a read holds once it has started and its first request has left:
+/// its call and its standing room for its params.
+fn standing(read: &[&str], params: &str) -> usize {
+    let mut world = World::new(
+        Bounds::default(),
+        &[chain(1, read, &["a"], ("3", "2", "5000"))],
+    );
+    world.submit(self::read(1, "eth_call", params), None);
+    world.machine.held()
+}
+
+#[test]
+fn a_myotis_answer_over_the_budget_still_frees_its_slot() {
+    // Main's one terminal reply ends the operation even when its payload
+    // is over the request's budget: the slot is free again.
+    let bounds = Bounds {
+        request_bytes: 1_000,
+        ..Bounds::default()
+    };
+    let mut world = World::new(bounds, &[chain(1, &["myotis"], &["a"], ("3", "2", "5000"))]);
+    world.machine.availability(1, true);
+    let id = world.submit(read(1, "eth_call", CALL), None);
+    let io = world.requests[0].0;
+    assert_eq!(world.machine.state_tables().myotis_slots, vec![(1, 1, 0)]);
+    let payload = format!(r#"{{"result_hex":"0x{}"}}"#, "a".repeat(2_000));
+    assert!(!world.answer(
+        io,
+        Answer::Myotis(MyotisReply::Read {
+            payload,
+            block_before: None,
+            block_after: None,
+        })
+    ));
+    assert_eq!(protocol(world.reply(id)), Some(Protocol::Budget));
+    assert!(world.machine.state_tables().myotis_slots.is_empty());
+    world.machine.set_output_backlog(0);
+    world.collect();
+    assert_eq!(world.machine.held(), 0);
+}
+
+#[test]
+fn colibri_answers_over_the_budget_still_free_every_slot() {
+    let bounds = Bounds {
+        request_bytes: 1_000,
+        ..Bounds::default()
+    };
+    let mut world = World::new(bounds, &[colibri_chain(&["colibri"])]);
+    let ids: Vec<u64> = (0..8)
+        .map(|i| {
+            world.submit(
+                interactive("eth_call", CALL, &format!("https://app{i}.example")),
+                None,
+            )
+        })
+        .collect();
+    assert_eq!(world.machine.state_tables().colibri_in_flight, 8);
+    let ios: Vec<u64> = world.requests.iter().map(|r| r.0).collect();
+    for io in ios {
+        let result = format!("\"{}\"", "a".repeat(2_000));
+        assert!(!world.answer(io, Answer::Colibri(ColibriReply::Result(result))));
+    }
+    for id in ids {
+        assert_eq!(protocol(world.reply(id)), Some(Protocol::Budget));
+    }
+    let tables = world.machine.state_tables();
+    assert_eq!(tables.colibri_in_flight, 0);
+    assert!(tables.colibri_routes.is_empty());
+}
+
+#[test]
+fn a_kept_colibri_revert_is_charged_while_it_lives() {
+    // The revert is kept as the last error while Direct is asked: its data
+    // is charged until the request ends.
+    let mut world = World::new(Bounds::default(), &[colibri_chain(&["colibri", "direct"])]);
+    let id = world.submit(read(1, "eth_call", CALL), None);
+    let before = world.machine.held();
+    let data = format!("0x{}", "ab".repeat(400));
+    world.answer(
+        world.requests[0].0,
+        Answer::Colibri(ColibriReply::Revert { data }),
+    );
+    assert!(!world.replied(id));
+    assert_eq!(world.rpcs().len(), 1);
+    assert!(
+        world.machine.held() >= before + 802,
+        "held {} after a kept 802-byte revert (before: {before})",
+        world.machine.held()
+    );
+    world.answer(world.rpcs()[0].0, node_error(-32000, "boom"));
+    world.machine.set_output_backlog(0);
+    world.collect();
+    assert!(world.replied(id));
+    assert_eq!(world.machine.held(), 0);
+}
+
+#[test]
+fn a_myotis_revert_counts_against_the_budget() {
+    let base = standing(&["myotis"], CALL);
+    let bounds = Bounds {
+        request_bytes: base + 6_000,
+        ..Bounds::default()
+    };
+    let mut world = World::new(bounds, &[chain(1, &["myotis"], &["a"], ("3", "2", "5000"))]);
+    world.machine.availability(1, true);
+    let id = world.submit(read(1, "eth_call", CALL), None);
+    // The payload fits; its revert data's copies don't.
+    let payload = format!(
+        r#"{{"status":"revert","data_hex":"0x{}"}}"#,
+        "ab".repeat(1_000)
+    );
+    world.answer(
+        world.requests[0].0,
+        Answer::Myotis(MyotisReply::Read {
+            payload,
+            block_before: None,
+            block_after: None,
+        }),
+    );
+    assert_eq!(protocol(world.reply(id)), Some(Protocol::Budget));
+    assert!(world.machine.state_tables().myotis_slots.is_empty());
+}
+
+#[test]
+fn replacement_decoding_growth_counts_against_the_budget() {
+    // 5,000 invalid bytes decode to 15,000 bytes of U+FFFD: over 7,000.
+    let bounds = Bounds {
+        request_bytes: 7_000,
+        ..Bounds::default()
+    };
+    let mut world = World::new(
+        bounds,
+        &[chain(1, &["quorum"], &["a", "b", "c"], ("3", "3", "5000"))],
+    );
+    let id = world.submit(read(1, "eth_call", CALL), None);
+    let mut body = br#"{"result":""#.to_vec();
+    body.extend(vec![0xff; 5_000]);
+    body.extend(br#""}"#);
+    world.answer(world.rpcs()[0].0, Answer::Rpc { status: 200, body });
+    assert_eq!(protocol(world.reply(id)), Some(Protocol::Budget));
+}
+
+#[test]
+fn queued_calls_count_and_admission_judges_the_new_one() {
+    let bounds = Bounds {
+        running: 1,
+        waiting: 4,
+        ..Bounds::default()
+    };
+    let mut world = World::new(bounds, &[chain(1, &["direct"], &["a"], ("3", "2", "5000"))]);
+    let running = world.submit(read(1, "eth_call", CALL), None);
+    let before = world.machine.held();
+    let params = format!(
+        r#"[{{"to":"0xabc","data":"0x{}"}},"latest"]"#,
+        "ab".repeat(350)
+    );
+    let queued = world.submit(read(1, "eth_call", &params), None);
+    assert_eq!(world.machine.waiting(), 1);
+    // A waiting call holds its strings.
+    assert!(world.machine.held() >= before + params.len());
+    // The ledger is under the total, but not by enough for the new call.
+    let room = bounds.total_bytes - world.machine.held();
+    world.machine.set_output_backlog(room - params.len() / 2);
+    let refused = world.submit(read(1, "eth_call", &params), None);
+    assert_eq!(protocol(world.reply(refused)), Some(Protocol::Busy));
+    // Its charge goes with it.
+    world.machine.set_output_backlog(0);
+    assert!(world.machine.cancel(queued));
+    world.collect();
+    assert_eq!(world.machine.held(), before);
+    assert!(!world.replied(running));
+}
+
+#[test]
+fn an_expired_call_starts_nothing() {
+    for call in [read(1, "eth_call", CALL), Call::FeeQuote { chain_id: 1 }] {
+        let mut world = World::new(
+            Bounds::default(),
+            &[chain(1, &["direct"], &["a"], ("3", "2", "5000"))],
+        );
+        // A configuration change: the reply carries the chain's generation.
+        let mut changed = chain(1, &["direct"], &["b"], ("3", "2", "5000"));
+        changed.display_name = "Changed".into();
+        let generations = world.machine.configure(&[changed]);
+        let id = world.submit(call, Some(0));
+        let reply = world.reply(id);
+        assert_eq!(protocol(reply), Some(Protocol::Deadline));
+        assert_eq!(Some(&reply.generation), generations.get(&1));
+        assert_ne!(reply.generation, 0);
+        assert!(world.requests.is_empty(), "{:?}", world.requests);
+    }
+}
+
+#[test]
+fn a_broadcast_starts_no_attempt_at_its_cutoff() {
+    let mut config = chain(1, &["direct"], &["a", "b", "c"], ("3", "2", "5000"));
+    config.broadcast_order = vec!["direct".into()];
+    let bounds = Bounds {
+        deadline_ms: 15_000,
+        ..Bounds::default()
+    };
+    let mut world = World::new(bounds, &[config]);
+    world.submit(send(), None);
+    world.run(5_000);
+    let sends = world
+        .rpcs()
+        .into_iter()
+        .filter(|r| r.3 == "eth_sendRawTransaction")
+        .count();
+    assert_eq!(sends, 1);
+}
+
+#[test]
+fn a_read_asks_nothing_more_at_its_deadline() {
+    let mut world = World::new(
+        Bounds::default(),
+        &[chain(1, &["direct"], &["a", "b"], ("3", "2", "5000"))],
+    );
+    let id = world.submit(read(1, "eth_call", CALL), Some(5_000));
+    world.run(5_000);
+    assert_eq!(protocol(world.reply(id)), Some(Protocol::Deadline));
+    assert_eq!(world.rpcs().len(), 1);
+}
+
+#[test]
+fn an_rpc_answer_over_its_cap_is_too_large_whatever_the_budget() {
+    let bounds = Bounds {
+        answer_bytes: 100,
+        ..Bounds::default()
+    };
+    let mut world = World::new(bounds, &[chain(1, &["direct"], &["a"], ("3", "2", "5000"))]);
+    let id = world.submit(read(1, "eth_call", CALL), None);
+    world.answer(world.rpcs()[0].0, ok(&format!("\"{}\"", "a".repeat(200))));
+    match &world.reply(id).result {
+        Err(ChainError::Thrown(error)) => {
+            assert_eq!(
+                error.message.to_string_lossy(),
+                "The RPC answer is too large"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_broadcast_answers_index_counts_and_ends_through_the_outcome_table() {
+    // Under 2,500 bytes of body, but some 9,600 bytes of index: the attempt
+    // was made, so the outcome is uncertain, never a refusal.
+    let bounds = Bounds {
+        request_bytes: 5_000,
+        ..Bounds::default()
+    };
+    let mut world = World::new(bounds, &[broadcaster(&["direct"], &["a"])]);
+    let id = world.submit(send(), None);
+    let data = format!("[{}]", vec!["0"; 1_200].join(","));
+    let body = format!(r#"{{"error":{{"code":-32000,"message":"nonce too low","data":{data}}}}}"#);
+    assert!(body.len() < 5_000);
+    world.answer(
+        world.rpcs()[0].0,
+        Answer::Rpc {
+            status: 200,
+            body: exact(body),
+        },
+    );
+    // Ended at once by its budget, with no reconciliation: the attempt is
+    // outstanding.
+    assert_eq!(outcome(world.reply(id)).0, BroadcastOutcome::Uncertain);
+    assert_eq!(world.reply(id).settled, 0);
+    assert_eq!(world.rpcs().len(), 1);
+}
+
+#[test]
+fn a_quorum_answers_index_counts_against_the_budget() {
+    let bounds = Bounds {
+        request_bytes: 5_000,
+        ..Bounds::default()
+    };
+    let mut world = World::new(
+        bounds,
+        &[chain(1, &["quorum"], &["a", "b", "c"], ("3", "2", "5000"))],
+    );
+    let id = world.submit(read(1, "eth_call", CALL), None);
+    let result = format!("[{}]", vec!["0"; 1_200].join(","));
+    world.answer(world.rpcs()[0].0, ok(&result));
+    assert_eq!(protocol(world.reply(id)), Some(Protocol::Budget));
+}
+
+#[test]
+fn the_replys_copy_of_a_result_counts_against_the_budget() {
+    let result = format!("\"0x{}\"", "ab".repeat(1_500));
+    let body = format!(r#"{{"jsonrpc":"2.0","id":1,"result":{result}}}"#).len();
+    let base = standing(&["direct"], CALL);
+    // Room for the answer, but not for the answer and the reply's copy.
+    for (extra, fits) in [(result.len() / 2, false), (result.len() + 512, true)] {
+        let bounds = Bounds {
+            request_bytes: base + body + extra,
+            ..Bounds::default()
+        };
+        let mut world = World::new(bounds, &[chain(1, &["direct"], &["a"], ("3", "2", "5000"))]);
+        let id = world.submit(read(1, "eth_call", CALL), None);
+        world.answer(world.rpcs()[0].0, ok(&result));
+        if fits {
+            assert_eq!(self::result(world.reply(id)), Some(result.as_str()));
+        } else {
+            assert_eq!(protocol(world.reply(id)), Some(Protocol::Budget));
+        }
+    }
+}
+
+#[test]
+fn adaptive_route_keys_are_bounded_in_bytes() {
+    // Eight timed-out interactive reads, each with 100 addresses: the keys
+    // keep a digest of the list, not the list.
+    let mut world = World::new(
+        Bounds::default(),
+        &[chain(1, &["quorum"], &["a", "b", "c"], ("3", "2", "5000"))],
+    );
+    let addresses: Vec<String> = (0..100).map(|n| format!("\"0x{n:040x}\"")).collect();
+    let params = format!(r#"[{{"address":[{}]}}]"#, addresses.join(","));
+    for i in 0..8 {
+        let origin = format!("https://app{i}.example");
+        world.submit(interactive("eth_getLogs", &params, &origin), None);
+        let now = world.machine.now();
+        let ios: Vec<u64> = world
+            .rpcs()
+            .into_iter()
+            .filter(|r| r.1 == now)
+            .map(|r| r.0)
+            .collect();
+        for io in ios {
+            world.answer(io, Answer::Failed(Transport::Timeout));
+        }
+    }
+    let adaptive = world.machine.state_tables().adaptive;
+    assert_eq!(adaptive.len(), 8);
+    for (key, _) in &adaptive {
+        assert!(key.len() < 160, "{key}");
+        assert!(key.contains("\"sha256:"), "{key}");
+    }
+}
+
+#[test]
+fn every_terminal_path_keeps_a_possibly_sent_broadcast_uncertain() {
+    for termination in ["cancel", "configure", "budget", "deadline"] {
+        let bounds = Bounds {
+            request_bytes: 1_000,
+            ..Bounds::default()
+        };
+        let config = broadcaster(&["direct"], &["a"]);
+        let mut world = World::new(bounds, std::slice::from_ref(&config));
+        let id = world.submit(send(), None);
+        match termination {
+            "cancel" => {
+                world.machine.cancel(id);
+                world.collect();
+            }
+            "configure" => {
+                let mut next = config;
+                next.display_name = "changed".into();
+                world.machine.configure(&[next]);
+                world.collect();
+            }
+            "budget" => {
+                let body = vec![b'a'; 2_000];
+                world.answer(world.rpcs()[0].0, Answer::Rpc { status: 200, body });
+            }
+            _ => world.run(120_000),
+        }
+        assert_eq!(
+            outcome(world.reply(id)).0,
+            BroadcastOutcome::Uncertain,
+            "{termination}"
+        );
+    }
+}
+
+#[test]
+fn reconciliation_never_refuses() {
+    for answer in [
+        node_error(-32000, "nonce too low"),
+        ok("null"),
+        ok(r#"{"hash":"0x1234"}"#),
+    ] {
+        let mut world = World::new(Bounds::default(), &[broadcaster(&["direct"], &["a"])]);
+        let id = world.submit(send(), None);
+        world.run(5_000);
+        let lookup = world.rpcs().last().unwrap().0;
+        world.answer(lookup, answer);
+        assert_eq!(outcome(world.reply(id)).0, BroadcastOutcome::Uncertain);
     }
 }

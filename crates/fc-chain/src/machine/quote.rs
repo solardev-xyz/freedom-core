@@ -4,13 +4,15 @@
 
 use std::cell::RefCell;
 
-use super::ctx::{Release, Req, reply};
+use fc_json::index::Index;
+
+use super::ctx::{Release, Req, reply, reserve, within};
 use super::error::{ErrorClass, Thrown};
 use super::exchange::{ResultText, exchange};
 use super::io::{Answer, Delivered, MyotisReply, Request, VerifiedOp};
 use super::logs::Keeper;
 use super::read::{
-    MYOTIS_FAILED, SourceOptions, myotis_adapter_error, myotis_failure, request_source,
+    MYOTIS_FAILED, SourceOptions, charged, myotis_adapter_error, myotis_failure, request_source,
 };
 use crate::fee::{FeeQuote, fee_quote as quote};
 use crate::js::JsError;
@@ -72,10 +74,21 @@ async fn myotis(req: &Req) -> Result<FeeQuote, Thrown> {
         }),
         Release::Nothing,
     );
-    let Delivered { answer, .. } = reply(&cell).await;
+    let Delivered {
+        answer,
+        charge: _held,
+        ..
+    } = reply(&cell).await;
     match answer {
         Answer::Myotis(MyotisReply::Read { payload, .. }) => {
-            let (gas, priority) = myotis_fee_values(Some(&payload)).map_err(myotis_failure)?;
+            // The payload's index and the values' copies, reserved first
+            // (`memory-budgets`).
+            let _index = reserve!(req.ctx, Index::heap_needed(&payload).unwrap_or(0));
+            let copies = reserve!(req.ctx, payload.len().saturating_mul(4) + 2048);
+            let (gas, priority) = match myotis_fee_values(Some(&payload)) {
+                Ok(values) => values,
+                Err(failure) => return Err(within!(charged(myotis_failure(failure), copies))),
+            };
             quote("myotis", Some(&gas), priority.as_deref()).map_err(js)
         }
         Answer::Myotis(MyotisReply::Failure(class)) => Err(myotis_adapter_error(req, class)),

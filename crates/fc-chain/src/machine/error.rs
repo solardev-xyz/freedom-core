@@ -240,6 +240,12 @@ impl Thrown {
         Self::core(class, message)
     }
 
+    /// Holds `charge` for its text and data while any copy of it lives.
+    pub(crate) fn charged(mut self, charge: Charge) -> Self {
+        self.charge = Some(Rc::new(charge));
+        self
+    }
+
     /// Adds an own property.
     pub(crate) fn with(mut self, key: &'static str, value: Prop) -> Self {
         self.props.push((key, value));

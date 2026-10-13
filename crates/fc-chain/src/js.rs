@@ -331,6 +331,46 @@ pub(crate) fn js_string_of(value: Value<'_, '_>) -> Result<JsString, JsError> {
     Ok(out)
 }
 
+/// The length of [`js_string_of`]'s string in UTF-16 code units, found
+/// without building it (a number's text is built, a few bytes): a caller
+/// reserves the string's room first. An object with its own `toString` is
+/// `None`, as [`js_string_of`] fails on it.
+pub(crate) fn js_string_len(value: Value<'_, '_>) -> Option<usize> {
+    fn scalar(value: Value<'_, '_>) -> Option<usize> {
+        Some(match value.kind() {
+            Kind::Null => 4,
+            Kind::True => 4,
+            Kind::False => 5,
+            Kind::Number => number_to_string(value.number()).len(),
+            Kind::String => value.units().count(),
+            Kind::Object if value.get("toString").is_some() => return None,
+            Kind::Object => "[object Object]".len(),
+            Kind::Array => js_string_len(value)?,
+        })
+    }
+    if value.kind() != Kind::Array {
+        return scalar(value);
+    }
+    let mut len = 0usize;
+    let mut stack = vec![(value.children(), true)];
+    while let Some((items, first)) = stack.last_mut() {
+        let Some(item) = items.next() else {
+            stack.pop();
+            continue;
+        };
+        if !*first {
+            len += 1;
+        }
+        *first = false;
+        match item.kind() {
+            Kind::Array => stack.push((item.children(), true)),
+            Kind::Null => {}
+            _ => len = len.saturating_add(scalar(item)?),
+        }
+    }
+    Some(len)
+}
+
 /// `String(value)` for anything but an array.
 fn push_scalar(value: Value<'_, '_>, out: &mut JsString) -> Result<(), JsError> {
     match value.kind() {
@@ -378,6 +418,24 @@ mod tests {
             NOT_PRIMITIVE
         );
         assert!(string_of(r#"[[{"toString":"x"}]]"#).is_err());
+    }
+
+    #[test]
+    fn string_lengths_are_known_before_the_strings() {
+        for text in [
+            r#"[1,[2,[3,null]],{"a":1},"x",true,-0,1e21,[]]"#,
+            "null",
+            "1e400",
+            r#""\ud800é😀""#,
+            r#"{"valueOf":1}"#,
+            "[[[]],[null,false]]",
+        ] {
+            let index = fc_json::index::Index::new(text).unwrap();
+            let built = js_string_of(index.root()).unwrap();
+            assert_eq!(js_string_len(index.root()), Some(built.len()), "{text}");
+        }
+        let index = fc_json::index::Index::new(r#"[[{"toString":"x"}]]"#).unwrap();
+        assert_eq!(js_string_len(index.root()), None);
     }
 
     #[test]

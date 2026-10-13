@@ -200,6 +200,7 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
 ### Admission
 
 - **A separate pool** from naming's: at most **64 running and 256 waiting** chain requests. A request over the limit is `busy` at once (deviation `admission`).
+- **Memory:** a request is admitted only when what it brings fits: its own strings (method, params, origin, source lists, raw transaction) within its bound and, with everything already held, within the total. They stay charged while it waits and runs (deviation `memory-budgets`).
 - **No deduplication:** every caller is its own request, as today.
 
 ### Deadlines
@@ -212,7 +213,7 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
   - the Ant profile widens the quorum budget to 30 s.
 - **Overall:** 120 s per request, or the caller's `deadline_ms` if lower (deviation `overall-deadline`).
   - **Today** a request has no overall bound: an interactive read on chain 1 can take about 39 s, and more with user settings.
-  - **Past the deadline,** a read or a fee quote ends with `deadline`, its I/O is cancelled, and nothing more is asked.
+  - **Past the deadline,** a read or a fee quote ends with `deadline`, its I/O is cancelled, and nothing more is asked. A call that arrives with no time left (`deadline_ms` 0) replies `deadline` before any I/O, under its chain's current generation.
   - **A broadcast** ends as [Broadcast](#broadcast) says. Its attempts stop 10 s before the deadline, leaving room to [reconcile](#broadcast).
 - **Main's watchdog** is the deadline plus 15 s (0001).
 
@@ -220,7 +221,7 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
 
 - **A `cancel`** ends the request at once, unless its response has already begun ([Frames](#frames)): a read or a fee quote replies `cancelled` (deviation `cancel-promptly`). Its pending `shell.rpc` and `shell.blockscout` requests are cancelled, quorum members included (deviation `abandoned-exchanges`: today's caller signal doesn't reach the quorum).
   - **Today** the router throws its `AbortError` only at its next check of the signal, so a read waiting on a verifier settles only when that operation does: `cancel-read-no-fallthrough` is aborted at 10 ms and throws at 20 ms, when Myotis's read settles. The core replies at 10 ms.
-- **Verifier work** keeps its slot until main's terminal reply (parity: the router holds Myotis and Colibri slots until the operation physically settles). In `cancel-read-no-fallthrough` the Myotis slot is still held when the core replies.
+- **Verifier work** keeps its slot until main's terminal reply (parity: the router holds Myotis and Colibri slots until the operation physically settles). In `cancel-read-no-fallthrough` the Myotis slot is still held when the core replies. A terminal reply too large for its request's budget still frees the slot: its payload is dropped, and the request ends with `budget`.
 - **A broadcast** that is cancelled ends as [Broadcast](#broadcast) says. Today it is an `AbortError`.
 
 ## Configuration
@@ -348,7 +349,7 @@ The router keeps parsed values; the core keeps **text**.
 ### Adaptive bypass
 
 For myotis, colibri and quorum, and only on interactive reads:
-- the route key is `[source, chain, origin, method, target]`;
+- the route key is `[source, chain, origin, method, target]`. A target that lists more than one address is kept as `sha256:` and the SHA-256 of the reference's joined text, in hex: the same routes share a key, and a key is bounded in bytes however long the list (deviation `memory-budgets`; the origin is at most 2,048 UTF-16 units, so 1,024 routes hold at most about 7 MiB);
 - **a failure of kind `timeout`** opens the route for 15, 30 and then 60 s (`router-colibri-cooldown-escalation`). A quorum has that kind only when its members time out themselves, which they do when Direct comes next and they run on (`router-quorum-carries-past-deadline`). A quorum cut at its own 2 s budget opens nothing, and is asked again on the next read (`boundary-adaptive-quorum-deadline-not-a-timeout`);
 - **a capacity failure** blocks it for the core process's life: an error whose text matches `isCapacityFailure`, a quorum whose members' capacity failures reach m, or Colibri's `capacity` class ([The rest](#the-rest));
 - **a success** clears it, unless the route is blocked;
@@ -538,7 +539,7 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
   - its minimal JSON-RPC answer is 16,777,382 bytes;
   - the cap leaves about 2 MiB for envelopes and whitespace.
 
-  A boundary vector pins it. Larger `eth_getLogs` scans fail with `too_large` from that source; providers' own limits usually apply first.
+  A boundary vector pins it. Larger `eth_getLogs` scans fail with `too_large` from that source; providers' own limits usually apply first. Main enforces the cap; an answer delivered over it anyway is the same `too_large` failure.
 - **Status:** a non-2xx answer is `HTTP <status>`, its body unread, as today.
 
 ## Bounds
@@ -555,10 +556,12 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 | main's chain I/O pool | 192 MiB: bodies being read, verifier results, replies until written; replies under 64 KiB exempt | the exchange fails `busy` |
 | quorum k / endpoints | 9 / 64 | clamped at configuration |
 | JSON depth | 512 | a source failure |
-| memory, per request | 96 MiB: received messages once handed over, answer texts and their indexes, retained texts, replies | the request ends with `budget` (broadcasts: [Outcome](#outcome)) |
+| memory, per request | 96 MiB: its call's strings, received messages once handed over, answer texts and their indexes, retained texts and errors, the copies it makes, its requests until the driver takes them, replies | the request ends with `budget` (broadcasts: [Outcome](#outcome)) |
 | memory, all chain requests | 256 MiB, with unwritten replies counted until written (0004's rule) | new requests `busy`, running ones `budget` |
 | adaptive routes | 1024 | the oldest evicted |
 | retired endpoint state | 64 | the oldest dropped |
+
+**Memory is reserved before it is allocated.** Each allocation a request makes is charged first, at an upper bound, and settled to what it holds once made: a request body; a replacement-decoded text's growth over its body (whose charge goes with the body); every index, sized by a counting pass before it is built; a writer's scratch; normalized params, their index and copies (a standing reservation held for the request's life); a node error's or a verifier error's copies, held while any copy lives; Blockscout's pages, their indexes and the transfers they add; joined and agreed results; the reply's copy of a result. A reservation the budget refuses stops the request before the allocation, and it ends with `budget`; a broadcast ends through the [outcome table](#outcome), so an attempt that was outstanding stays possibly sent. A request over its budget is never polled again. Once the driver takes a request or a reply, its bytes leave the request's charge and count in the driver's backlog, which main reports, until written.
 
 **At the cap**, an 8 MiB document through a quorum of three peaks at about 78 MiB in its request:
 - one base64 message in hand: 24 MiB;
