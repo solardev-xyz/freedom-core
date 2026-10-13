@@ -406,6 +406,17 @@ fn malformed_fragments_close_the_connection() {
             json!({ "id": id, "bytes": bytes }).to_string().as_bytes(),
         )
     };
+    // A whole answer to the pending shell.rpc that naming takes as it is
+    // (an endpoint's HTTP failure), so only the reader closes the
+    // connection: `{}` would be a malformed reply, which naming closes on
+    // too, and either thread could be first.
+    let whole = |id: u64| {
+        frame(&json!({
+            "type": "response",
+            "id": id,
+            "result": { "status": 503, "body": "" },
+        }))
+    };
     // Each case: what main sends, given the ID of a pending shell.rpc
     // request, and the category the core logs as it closes.
     type Case = (&'static str, Box<dyn Fn(u64) -> Vec<u8>>);
@@ -437,17 +448,11 @@ fn malformed_fragments_close_the_connection() {
         // the same request, or a begin after a whole one.
         (
             "duplicate_response",
-            Box::new(move |id| {
-                let whole = json!({ "type": "response", "id": id, "result": {} });
-                [begin(id, 10), frame(&whole)].concat()
-            }),
+            Box::new(move |id| [begin(id, 10), whole(id)].concat()),
         ),
         (
             "begin_unknown_id",
-            Box::new(move |id| {
-                let whole = json!({ "type": "response", "id": id, "result": {} });
-                [frame(&whole), begin(id, 10)].concat()
-            }),
+            Box::new(move |id| [whole(id), begin(id, 10)].concat()),
         ),
         // Main offered fragments: the core holds main's credit already.
         (
