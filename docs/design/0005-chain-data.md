@@ -510,6 +510,8 @@ Main's wallet chooses nonces for the sends it controls (0002). The guarantee cov
        - Headers may be fetched by number, in parallel, each checked against its child's `parentHash`. A header that differs is fetched again by that hash.
        - Verified headers never change, so a client keeps them per chain, shares them among the chain's intents, and extends them each time F moves.
        - The walk is bounded (8192 headers in freedom-browser). Evidence deeper than that leaves the intent held, recorded as unverifiable.
+       - **What is retained is bounded too:** per chain, only the window from F down to F − 8192, and only each header's number, hash and `parentHash`. Headers below the window are evicted when F moves, and a chain with no held intents releases its headers.
+       - **Re-anchoring:** a new F more than the window above the retained top doesn't link to it, so the segment restarts at the new F. An F older than the retained window, which a lagging agreeing pair can return, leaves the pass's intents held. So does an F whose hash differs from the verified header at its height. Evidence that would need headers outside the window stays held.
     3. **Taken needs positive evidence.** Locate the block that consumed N within those verified headers, by a binary search on the sender's nonce at each block's hash. Read that block with its transactions.
        - If the sender's nonce-N transaction there is none of the intent's hashes, the label is taken.
        - If it is one of them, the label is paid or failed from its receipt, under rule 2.
