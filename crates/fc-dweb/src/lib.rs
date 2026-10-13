@@ -15,7 +15,10 @@
 //!   chunks.
 //! - **`html()`** ([`decode_html`], [`classify`]): the size precheck, ethers'
 //!   ABI string rules, the UTF-8 check, the 8 MiB cap, the hash and the
-//!   gate's class.
+//!   gate's class. A caller that reserves memory before it is allocated
+//!   (the chain machine's `chain.html`) learns the decode's one allocation
+//!   first ([`decode_html_room`]) and classifies the trust as text, in
+//!   place ([`classify_trust`]).
 //! - **Validation** ([`validate_plan`]): what main checks before it dials.
 //!   It has no reference; its vectors are the design's.
 //!
@@ -50,8 +53,8 @@ pub use bzz::{
 pub use cid::{cid_v0_to_v1_base32, cid_v1_b58btc_to_base32, ipns_mh_to_cid_v1_base36};
 pub use headers::Headers;
 pub use html::{
-    Class, HTML_SELECTOR, HtmlDocument, HtmlError, MAX_HTML_BYTES, classify, decode_html,
-    decode_html_value, exceeds_encoded_bound,
+    Class, HTML_SELECTOR, HtmlDocument, HtmlError, MAX_HTML_BYTES, classify, classify_trust,
+    decode_html, decode_html_room, decode_html_value, exceeds_encoded_bound,
 };
 pub use ipfs::{
     KNOWN_GATEWAY_HOSTS, STRIPPED_REQUEST_HEADERS, is_navigation,

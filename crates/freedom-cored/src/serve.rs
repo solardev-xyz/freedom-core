@@ -128,10 +128,10 @@ pub enum Event {
 }
 
 /// The methods `core.hello`'s capabilities name: every method this build
-/// implements but the `chain.*` methods, which design 0005 doesn't add to
-/// them (it adds `fragments` only). Only these names, the chain methods,
-/// and in debug builds the test methods', are ever logged; anything else is
-/// logged as `<unknown>`.
+/// implements but the `chain.*` methods (design 0006's `chain.html`
+/// included), which design 0005 doesn't add to them (it adds `fragments`
+/// only). Only these names, the chain methods, and in debug builds the test
+/// methods', are ever logged; anything else is logged as `<unknown>`.
 const CAPABILITIES: &[&str] = &[
     "core.hello",
     "core.shutdown",
@@ -169,6 +169,7 @@ const CAPABILITIES: &[&str] = &[
     "naming.resolve_tezos",
     "naming.invalidate_content",
     "naming.invalidate_tezos",
+    "dweb.open",
 ];
 
 /// The transport features in `core.hello`'s capabilities, after the
@@ -943,6 +944,11 @@ impl Core {
             method if Vault::handles(method) => {
                 let outs = self.vault.request(id, method, params, context.caller);
                 self.dispatch(outs)
+            }
+            // `dweb.open` is main's own (design 0006).
+            method if naming::shell_only(method) && context.caller != CallerKind::Shell => {
+                let forbidden = ErrorBody::new(ErrorCode::Forbidden, "main-internal only");
+                self.error(id, forbidden)
             }
             method if naming::handles(method) => {
                 let params = match params.map(|p| RawValue::from_string(p.to_owned())) {

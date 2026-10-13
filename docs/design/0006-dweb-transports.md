@@ -56,7 +56,7 @@ This design settles where each part goes:
 
 | Method | Params | Result |
 |---|---|---|
-| `dweb.open` | `{ url, method, headers, backend, private, deadline_ms, attempts_used? }` | a [plan](#plans), with `generations` and `attempts` |
+| `dweb.open` | `{ url, method, headers, backend, private, deadline_ms, attempts_used? }` | `{ plan, generations, attempts }`: a [plan](#plans), beside the fence's inputs, so the plan stays the one object main validates |
 
 - **`url`** is the request URL as Chromium hands it to the handler, with the scheme `bzz`, `ipfs` or `ipns`.
 - **`method`** is `GET` or `HEAD`, read as today's `(method || 'GET').toUpperCase()`, so `get` and an empty method are GET. Anything else is planned as today's 405.
@@ -74,10 +74,19 @@ This design settles where each part goes:
 - **Binding:** main captures the backend instance when it admits the request and keeps it, retries included, so a settings change mid-request can't redirect the fetch.
 - **`private`** marks a private window's request. The core passes it to naming and never logs the URL.
 - **`attempts_used`** is naming's resubmission count (0004), sent again when main re-plans an overtaken plan.
-- **Caller kinds:** `shell` only. Pages never reach the core directly.
+- **Caller kinds:** `shell` only. Pages never reach the core directly, and the core refuses `chrome` and `page` callers with `forbidden`.
 - **Size:** the request must fit one frame. Main refuses a URL over 64 KiB with 414 and headers over 64 KiB in all with 431, before asking.
-- **Thread:** `dweb.open` runs on the naming thread, under naming's admission (0004). A named host is a naming lookup plus planning. A hash host is planning alone, with no I/O.
+  - **The measure** is UTF-16 code units, as JavaScript's `length` counts them: the URL at most 65,536, and the headers at most 65,536 in all, each header counting its name, its value and 4 more (`: ` and CRLF), so an empty header still counts.
+  - **The core** refuses a request past either with `invalid_argument`, as it refuses unknown members, a `backend` that isn't one of the two forms, a URL that isn't `bzz:`, `ipfs:` or `ipns:`, a backend for another scheme, and naming's out-of-range `attempts_used` or `deadline_ms`.
+- **Thread:** `dweb.open` runs on the naming thread, under naming's admission (0004). A named host is a naming lookup plus planning: `naming.resolve_content`'s, or for a `.tez` name `naming.resolve_tezos`'s, with the request's `attempts_used` and `deadline_ms`. A hash host is planning alone, with no I/O.
+  - **While naming can't write:** past naming's backlog bound, `dweb.open` is `busy`, as lookups are.
+  - **While its name resolves,** the plan's other half (its host, path, query and headers) waits in the naming thread, counted in naming's memory total as unwritten replies are (0004, Bounds), from before its lookup is admitted.
+- **The lookup's outcome finishes the plan** as the handlers map `resolveContentName`'s:
+  - a result maps as today's: a `{ fetch }`, or a 404, 415 or 502 error plan, or for IPFS the 503 of a node that isn't up;
+  - a thrown resolution (0004's `resolution_failed`) is today's caught throw, a 502 error plan: `ENS resolver error: <message>`, or the host's other name system;
+  - the lookup's `busy`, `deadline` and `cancelled` are `dweb.open`'s own errors, which main maps as [below](#deadlines-cancel-and-bounds).
 - **Generations:** the result carries the naming generations and attempts a lookup's result carries (0004).
+  - **A plan made with no lookup** (a hash host, a redirect, an error before any name) carries the generations current when it is made and the attempts the caller came with, as 0004's immediate replies do. Nothing in it depends on them, so a fence that finds it overtaken only plans it again.
   - Main's driver fences plans exactly as it fences lookups (freedom-browser #672). A plan is sent and judged only with no naming control in flight. An overtaken plan is planned again with `attempts_used`, within the remaining deadline. A plan is bound to the core process that made it, and a restart re-plans nothing.
   - A plan is used once, immediately; main never caches one.
 
@@ -150,20 +159,31 @@ All of this is today's behavior, ported with vectors:
 
 | Method | Params | Result |
 |---|---|---|
-| `chain.html` | `{ chain_id, contract, origin, deadline_ms }` | `{ html_base64, hash, source, trust, class, generation }` |
+| `chain.html` | `{ chain_id, contract, origin, deadline_ms }` | `{ html_base64, hash, source, verified, trust?, class, generation }` |
 
-- **A request on 0005's machine:** an `eth_call` of `html()` (selector `0x33c34ac3`) at `latest`, interactive for `origin`, as today. The core then checks the answer as today's `onchain-html.js` does, with vectors:
+- **The params:**
+  - `contract` is read as `ethers.getAddress` reads the URL's address: `0x` and 40 hex digits, the EIP-55 checksum right when its letters are mixed. The core sends its checksum form, today's `to`.
+  - `origin` is the page's permission key, today's `routingContext.origin`.
+  - `deadline_ms` is at most 120 s, as 0005's.
+  - Caller kinds are `chrome` and `shell`, as 0005's methods. Like them, `chain.html` isn't in `core.hello`'s capabilities.
+- **A request on 0005's machine:** an `eth_call` of `html()` (selector `0x33c34ac3`) at `latest`, with trust, interactive for `origin`, as today. Its admission, generation, deadline, cancel and memory budget are the machine's. The core then checks the answer as today's `onchain-html.js` does, with vectors:
   - the encoded answer may be at most `MAX_HTML_BYTES + 95` bytes before any decode, or the result is 413 (`too_large`). The size is read from the answer's length, `(length - 2) / 2`, before the hex check, so an oversized answer that isn't hex is a 413 too;
   - the ABI string is decoded with ethers' function-result rules, then checked as UTF-8;
   - the decoded document may be at most 8 MiB (413);
   - `hash = keccak256(utf8(html))`.
 
   This replaces the worker thread and its ethers decode.
+- **The answer's `result`** is the string `JSON.parse` would make: anything but a string is malformed, and its escapes are decoded. A lone surrogate becomes U+FFFD, which no check tells apart from it: one unit to the size check, and no hex digit.
+- **Memory:** what the answer sizes is charged to the request before it is allocated (0005, Bounds): the unescaped string, when it has escapes; the decode's one buffer, the ABI data's bytes, which the document is then cut from in place; and the trust's index. The document stays charged until its reply is made, and counts as output after that. An 8 MiB document so costs 8 MiB beside its answer, and a request without room for it ends with `budget` before the buffer is made.
 - **`html_base64`** carries the document's UTF-8 bytes. Base64 keeps the reply within 0005's message cap at 10.7 MiB, where a JSON string of control characters could grow six-fold.
+- **`hash`** is `0x` and 64 lowercase hex digits, as ethers writes it.
+- **`source`, `verified` and `trust`** are the read's, as `chain.request` gives them, with endpoint references in `trust` for main to substitute (0005, Replies). Main needs `verified` as today's handler reads it: the `X-Freedom-Onchain-App-Verified` header, and the provenance's trust when the read has none.
 - **`class`** is a stateless classification. It is the gate's input, not its decision. It reads the router's `trust`, or, when that is missing or falsy, `{ level: verified === true ? "verified" : "unverified", dissented: [] }`, and decides in this order:
   - `trusted`: the level is `verified` or `user-configured`. This is checked first, so a `user-configured` result with dissenters is `trusted`;
   - `conflict`: not trusted, and `dissented` is a non-empty array;
   - `untrusted`: anything else.
+
+  The core reads the trust as it holds it, with endpoint references, so it counts dissenters before main maps them to hosts. The router drops a host that doesn't parse from `dissented` (0005, Replies), so a quorum whose only dissenters have such URLs is `untrusted` today and `conflict` here, with no approval token (deviation `web3-dissent`). Endpoint URLs are checked when they are configured, so settings don't produce one.
 - **Main decides, in today's order** (`onchain-app-protocol.js:399-470`):
   1. a GET carrying a staged document's approval token serves that document, consuming the token, with no chain read and no core call;
   2. otherwise main asks `chain.html`;
@@ -175,6 +195,9 @@ All of this is today's behavior, ported with vectors:
 
   Whether a `verified` quorum with dissenters should still pass is an [open question](#open-questions); `class` keeps today's rule.
 - **Errors:** a 413 means only that the document is too large. A deadline or a cancel is 504, as today, `busy` is 503, and other failures are 502. 0005's other bounds don't map to 413.
+  - **On the wire,** a document that isn't served is today's error, as 0005 carries the router's: `chain_error` with `data.kind` `core`, `onchain-html.js`'s texts (ethers' short messages where ethers threw), and for a document over the limit today's own property `code: "ONCHAIN_APP_TOO_LARGE"`.
+  - **Main answers 413** for exactly that: a `core` error with that code. A node's error that carries the same code (`kind: "node"`) is a 502, where today's handler would answer 413 with the node's message (deviation `web3-413`).
+  - **Everything else:** `deadline` and `cancelled` are 504, `busy` 503, and `budget`, `too_large`, a second `reconfigured` and any other `chain_error` 502.
 - **Generations:** results and errors carry the chain's generation. Main fences them with 0005's single resend (0005 *Generations*).
 - **Cancellation:** main sends 0001's `cancel` when the navigation aborts, and the chain read stops (deviation `web3-cancel`). Cancelling the plan and cancelling the body that follows are separate things: a `chain.html` result is whole when it arrives.
 
@@ -297,7 +320,7 @@ These stay in main, because they depend on the bytes. Each is today's code.
   - a request beyond that gets 503 at once;
   - each fetch owns its node handle, its sniff buffer (at most 4 KiB plus one upstream chunk) and its retry state, and frees them on every terminal path: done, error, cancel, or the session closing;
   - a plan is checked against the generations once more after any wait in main's queue, so a plan that waited is never used stale.
-- **Local failures map to HTTP:** `busy` → 503, `deadline` → 504, `too_large` → 414 or 431 as above, and a refused plan → 502.
+- **Local failures map to HTTP:** `busy` → 503, `deadline` → 504, `too_large` → 414 or 431 as above, and a refused plan → 502. A `dweb.open` error the core answers for main's own mistake (`invalid_argument`, `forbidden`) or its own (`internal`: a resolver result the handlers would throw on, which naming never makes) is a 502 and a logged core fault. A `cancelled` reply answers a request main has already dropped.
 - **Readiness keeps each scheme's order** (`backend` with `up: false`):
   - **For `bzz:`,** the method, path and host checks come first, so a POST is still a 405 and an encoded separator in a `bzz:` path still a 400 with Ant down. Then an Ant that isn't up, in either mode, is an immediate 503, before any name is resolved.
   - **For IPFS,** the name's result comes first, and only a plan bound for the node gets the 503, with its mode's text. A gateway-form URL still gets its 307.
@@ -358,13 +381,13 @@ Before step 4 moves a handler:
 
 | Budget | Bound | Exhausted |
 |---|---|---|
-| `dweb.open` admission | naming's (0004) | `busy`: main answers 503 |
-| a `dweb.open` request | one frame; URL ≤ 64 KiB, headers ≤ 64 KiB | 414 / 431 in main, before asking |
-| per-request state in the core | none after the plan | — |
+| `dweb.open` admission | naming's (0004), and its backlog bound | `busy`: main answers 503 |
+| a `dweb.open` request | one frame; URL ≤ 64 KiB, headers ≤ 64 KiB, in UTF-16 units ([`dweb.open`](#dwebopen)) | 414 / 431 in main, before asking; `invalid_argument` in the core |
+| per-request state in the core | while its name resolves, the plan's other half, counted in naming's total; none after the plan | naming's: new lookups `busy` |
 | active / waiting dweb fetches (main) | 256 / 512 | 503 at once |
 | sniff buffer (main) | 4 KiB plus one upstream chunk per fetch | the body is replayed intact |
 | body idle (main) | 60 s with a read pending | the body errors as truncated |
-| `chain.html` | 0005's bounds; encoded ≤ `MAX_HTML_BYTES + 95`, document ≤ 8 MiB | 413 for size only |
+| `chain.html` | 0005's bounds; encoded ≤ `MAX_HTML_BYTES + 95`, document ≤ 8 MiB; the decode's one buffer and the document charged to the request | 413 for size only; `budget` (502) when the request has no room |
 
 ## Deviations
 
@@ -374,7 +397,9 @@ Before step 4 moves a handler:
 | `body-idle` | no body idle timeout | 60 s with a read pending; paused streams untouched | a stalled body fails as truncated instead of hanging |
 | `fetch-admission` | unbounded | 256 active, 512 waiting | 503 under extreme load |
 | `web3-cancel` | an aborted navigation leaves the chain read running | `cancel` reaches it | |
-| `web3-decode` | ethers in a worker | the core | the same document, hash and 413s; the worker goes |
+| `web3-decode` | ethers in a worker | the core | the same document, hash and 413s; the worker goes. Errors other than `onchain-html.js`'s own carry ethers' short message, not its full one; main only logs them |
+| `web3-413` | a node error whose `code` is `ONCHAIN_APP_TOO_LARGE` is answered 413 with the node's message | only the core's size error is a 413 | such a node error is a 502, as every other failure |
+| `web3-dissent` | the router drops a dissenting endpoint whose URL doesn't parse before the gate counts dissenters | the core counts endpoint references | such a quorum is `conflict`, with no approval token, where today it is `untrusted`; configured URLs always parse |
 | `hash-host-hop` | hash hosts need no lookup | one planning round trip | measured ([Latency](#latency)) |
 | `native-page-state` | the native IPFS node's answers pass with `Set-Cookie`, `Set-Cookie2` and `Service-Worker-Allowed` | stripped, as from Ant and the external gateway | the native node can't set cookies or widen a service worker's scope on the `ipfs://` origin |
 | `plan-paths` | dialled: a `bzz:` published base path with an encoded separator, a relative one, or a climbing one; a `bzz:` resolver `decoded` that isn't a 64- or 128-hex reference, `..` included; literal-backslash dot segments; a target outside the request's own namespace, such as a `decoded` of `../ipns/…`; an IPFS path with an encoded separator that forms a `.` or `..` segment once decoded ([Validation](#validation-before-any-dial)) | refused by validation, which judges the path as decoded too | such plans get 502 where today they are dialled. Pages can't produce the backslash forms, because Chromium canonicalizes standard-scheme URLs first |
@@ -392,6 +417,8 @@ Before step 4 moves a handler:
    - the `html()` precheck, decode, caps, hash and classification;
    - byte parity with the pinned JS.
 3. **`freedom-cored`:** `dweb.open` on the naming thread, and `chain.html` on 0005's machine (after 0005's machine lands).
+   - `chain.html` is a call of fc-chain's machine, its document decoded with `fc-dweb`'s codec under the request's budget;
+   - tests through the real binary: plans for `bzz:`, `ipfs:` and `ipns:` hosts and names through a scripted main, and `chain.html` with cancel, deadline, budget and configuration changes; the `html()` read against the replay's `boundary-html-8mib-through-quorum`.
 4. **freedom-browser:**
    - the handlers validate and execute plans, under the naming driver's fence;
    - a non-loopback Ant moves onto the session stack, with the guard's announcement;

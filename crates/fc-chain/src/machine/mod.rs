@@ -4,7 +4,8 @@
 //!
 //! - **In:** `chain.configure` ([`Machine::configure`]),
 //!   `chain.availability` ([`Machine::availability`]), `chain.request`,
-//!   `chain.fee_quote` and `chain.broadcast` ([`Machine::submit`]),
+//!   `chain.fee_quote`, `chain.broadcast` and design 0006's `chain.html`
+//!   ([`Machine::submit`]),
 //!   `cancel` ([`Machine::cancel`]), main's replies to the machine's I/O
 //!   ([`Machine::complete`]), and time ([`Machine::fire_next`]).
 //! - **Out:** `shell.rpc`, `shell.verified` and `shell.blockscout` requests
@@ -27,6 +28,7 @@ mod config;
 mod ctx;
 mod error;
 mod exchange;
+mod html;
 mod io;
 mod logs;
 #[allow(clippy::module_inception)]
@@ -43,7 +45,9 @@ pub use bounds::Bounds;
 pub use config::{ChainConfig, Prover, QuorumConfig, RpcEndpoint};
 pub use error::{ChainError, ErrorClass, Origin, Prop, Protocol, Thrown};
 pub use exchange::{BUSY, FETCH_FAILED, NOT_SENT, TOO_LARGE};
+pub use fc_dweb::Class as HtmlClass;
 pub use fc_naming::session::exec::{Effect, Fired};
+pub use html::HTML_TOO_LARGE_CODE;
 pub use io::{
     Answer, ColibriClass, ColibriReply, Endpoint, Ms, MyotisClass, MyotisReply, Request, Transport,
     VerifiedOp,

@@ -538,7 +538,7 @@ fn failures() {
 
 #[test]
 fn html() {
-    use fc_dweb::{HtmlError, decode_html, decode_html_value};
+    use fc_dweb::{HtmlError, decode_html, decode_html_room, decode_html_value};
 
     fn expand_recipe(recipe: &[Json]) -> String {
         let mut out = String::from("0x");
@@ -561,13 +561,27 @@ fn html() {
     assert_eq!(s(c, "selector"), fc_dweb::HTML_SELECTOR);
     let mut successes = 0;
     for entry in arr(&vectors, "html") {
-        let result = if let Some(recipe) = entry["recipe"].as_array() {
-            decode_html(&expand_recipe(recipe))
-        } else if let Some(text) = entry["result"].as_str() {
-            decode_html(text)
+        let text = if let Some(recipe) = entry["recipe"].as_array() {
+            Some(expand_recipe(recipe))
         } else {
-            decode_html_value(&js_value(&entry["result_json"]))
+            entry["result"].as_str().map(str::to_owned)
         };
+        let result = match &text {
+            Some(text) => decode_html(text),
+            None => decode_html_value(&js_value(&entry["result_json"])),
+        };
+        // The room a reserving caller takes first: the decode's error when
+        // it fails before allocating, else at least what the document holds.
+        if let Some(text) = &text {
+            match (decode_html_room(text), &result) {
+                (Ok(room), Ok(document)) => {
+                    assert!(document.html.capacity() <= room, "{}", id(entry));
+                }
+                (Ok(_), Err(_)) => {}
+                (Err(early), Err(error)) => assert_eq!(early, *error, "{}", id(entry)),
+                (Err(early), Ok(_)) => panic!("{}: room refused with {early:?}", id(entry)),
+            }
+        }
         let js = &entry["js"];
         let status = js["status"].as_u64().unwrap();
         match result {
@@ -603,7 +617,7 @@ fn html() {
 
 #[test]
 fn html_class() {
-    use fc_dweb::{Class, classify};
+    use fc_dweb::{Class, classify, classify_trust};
 
     let vectors = vectors();
     for entry in arr(&vectors, "html_class") {
@@ -615,6 +629,19 @@ fn html_class() {
             other => panic!("{other}"),
         };
         assert_eq!(class, expected, "{}", id(entry));
+        // The same result read as text, in place.
+        let text = entry["chain_result"].to_string();
+        let index = fc_json::index::Index::new(&text).unwrap();
+        let root = index.root();
+        let verified = root
+            .get("verified")
+            .is_some_and(|v| v.kind() == fc_json::index::Kind::True);
+        assert_eq!(
+            classify_trust(root.get("trust"), verified),
+            expected,
+            "{}",
+            id(entry)
+        );
     }
 }
 

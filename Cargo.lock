@@ -341,6 +341,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 name = "fc-chain"
 version = "0.4.0"
 dependencies = [
+ "fc-dweb",
  "fc-json",
  "fc-naming",
  "hex",
@@ -498,6 +499,7 @@ version = "0.4.0"
 dependencies = [
  "base64",
  "fc-chain",
+ "fc-dweb",
  "fc-evm",
  "fc-keys",
  "fc-naming",

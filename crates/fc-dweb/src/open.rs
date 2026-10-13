@@ -60,6 +60,21 @@ impl Pending {
         Resolver::for_name(&self.host)
     }
 
+    /// What it holds on the heap while the name resolves: its strings and
+    /// its headers' places, by capacity.
+    pub fn heap_bytes(&self) -> usize {
+        let headers = self
+            .headers
+            .iter()
+            .map(|(name, value)| name.capacity() + value.capacity())
+            .sum::<usize>();
+        self.host.capacity()
+            + self.pathname.capacity()
+            + self.search.capacity()
+            + self.headers.capacity() * std::mem::size_of::<(String, String)>()
+            + headers
+    }
+
     /// The plan, given what the resolver did.
     pub fn finish(self, resolved: Resolved<'_>) -> Result<Plan, Unplannable> {
         let namespace = self.scheme.as_str();

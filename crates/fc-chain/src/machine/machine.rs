@@ -1,7 +1,8 @@
 //! The machine a driver runs (design 0005): `chain.configure`,
 //! `chain.availability`, `chain.request`, `chain.fee_quote`,
-//! `chain.broadcast` and `cancel` in; `shell.*` requests, cancels and
-//! replies out. Time comes in through the executor's timers.
+//! `chain.broadcast`, `chain.html` (design 0006) and `cancel` in; `shell.*`
+//! requests, cancels and replies out. Time comes in through the executor's
+//! timers.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -17,6 +18,7 @@ use super::budget::{self, Charge};
 use super::config::{Chain, ChainConfig};
 use super::ctx::{Ctx, Req};
 use super::error::{ChainError, Protocol, Thrown};
+use super::html::{HtmlAnswer, html};
 use super::io::{Answer, Delivered, Ms, Request, Transport};
 use super::logs::RangeEntry;
 use super::quote::fee_quote;
@@ -42,6 +44,15 @@ pub enum Call {
     FeeQuote { chain_id: u64 },
     /// `chain.broadcast`.
     Broadcast { chain_id: u64, raw: String },
+    /// `chain.html` (design 0006): the `web3:` handler's `html()` read of
+    /// `contract`, the address as `ethers.getAddress` gives it (the driver
+    /// checks it), interactive for `origin`, and today's checks of the
+    /// document.
+    Html {
+        chain_id: u64,
+        contract: String,
+        origin: String,
+    },
 }
 
 impl Call {
@@ -49,7 +60,8 @@ impl Call {
         match self {
             Self::Read { chain_id, .. }
             | Self::FeeQuote { chain_id }
-            | Self::Broadcast { chain_id, .. } => *chain_id,
+            | Self::Broadcast { chain_id, .. }
+            | Self::Html { chain_id, .. } => *chain_id,
         }
     }
 
@@ -79,6 +91,9 @@ impl Call {
             }
             Self::FeeQuote { .. } => 0,
             Self::Broadcast { raw, .. } => raw.capacity(),
+            Self::Html {
+                contract, origin, ..
+            } => contract.capacity() + origin.capacity(),
         }
     }
 }
@@ -102,6 +117,17 @@ pub enum Success {
         hash: Option<String>,
         source: &'static str,
         outcome: BroadcastOutcome,
+    },
+    /// `chain.html`'s document (design 0006): its UTF-8, its hash
+    /// (`keccak256(utf8(html))`), the read's `source`, `verified` and
+    /// `trust` (with endpoint references), and the gate's class.
+    Html {
+        html: String,
+        hash: [u8; 32],
+        source: &'static str,
+        verified: bool,
+        trust: Option<String>,
+        class: fc_dweb::Class,
     },
 }
 
@@ -147,6 +173,7 @@ enum Done {
     Read(Result<ReadAnswer, Thrown>),
     Fee(Result<FeeQuote, Thrown>),
     Broadcast(Ended),
+    Html(Result<HtmlAnswer, Thrown>),
 }
 
 struct Running {
@@ -197,6 +224,14 @@ fn ready(sleep: &mut Sleep<Request, Delivered>) -> bool {
 /// A reply's frame around its result or message.
 const ENVELOPE: usize = 256;
 
+/// A document's hash in a reply: `"0x"` and 64 digits, quoted.
+const HASH_JSON: usize = 68;
+
+/// A document's bytes in a reply, as base64.
+fn base64_len(bytes: usize) -> usize {
+    bytes.div_ceil(3).saturating_mul(4)
+}
+
 /// What a reply takes on the wire, serialized: its result or message and
 /// an envelope. Measured, never written.
 fn reply_wire_bytes(result: &Result<Success, ChainError>) -> usize {
@@ -207,6 +242,9 @@ fn reply_wire_bytes(result: &Result<Success, ChainError>) -> usize {
             }
             Ok(Success::FeeQuote(quote)) => quote.json_len(),
             Ok(Success::Broadcast { hash, .. }) => hash.as_ref().map_or(0, String::len),
+            Ok(Success::Html { html, trust, .. }) => {
+                base64_len(html.len()) + HASH_JSON + trust.as_ref().map_or(0, String::len)
+            }
             Err(ChainError::Protocol(_)) => 0,
             Err(ChainError::Thrown(thrown)) => thrown.json_len(),
         }
@@ -223,6 +261,9 @@ fn reply_heap_bytes(result: &Result<Success, ChainError>) -> usize {
             }
             Ok(Success::FeeQuote(quote)) => quote.heap_bytes(),
             Ok(Success::Broadcast { hash, .. }) => hash.as_ref().map_or(0, String::capacity),
+            Ok(Success::Html { html, trust, .. }) => {
+                html.capacity() + trust.as_ref().map_or(0, String::capacity)
+            }
             Err(ChainError::Protocol(_)) => 0,
             Err(ChainError::Thrown(thrown)) => thrown.heap_bytes(),
         }
@@ -462,6 +503,9 @@ impl Machine {
                 ..
             } => Task::new(async move { Done::Read(read(&req, &method, &params, &options).await) }),
             Call::FeeQuote { .. } => Task::new(async move { Done::Fee(fee_quote(&req).await) }),
+            Call::Html {
+                contract, origin, ..
+            } => Task::new(async move { Done::Html(html(&req, &contract, origin).await) }),
             Call::Broadcast { raw, .. } => {
                 let stop_at = deadline_at.saturating_sub(self.ctx.bounds.reconcile_ms);
                 if stop_at <= now {
@@ -619,7 +663,35 @@ impl Machine {
                     generation,
                 );
             }
-            Some(Done::Read(Err(error)) | Done::Fee(Err(error))) => {
+            Some(Done::Html(Ok(answer))) => {
+                let HtmlAnswer {
+                    html,
+                    hash,
+                    source,
+                    verified,
+                    trust,
+                    class,
+                    charge,
+                } = answer;
+                // The document leaves the request's charge for the reply,
+                // which counts it as output until it is written.
+                drop((charge, running));
+                self.ctx.budget.borrow_mut().forget(id);
+                self.reply(
+                    id,
+                    Ok(Success::Html {
+                        html,
+                        hash,
+                        source,
+                        verified,
+                        trust,
+                        class,
+                    }),
+                    None,
+                    generation,
+                );
+            }
+            Some(Done::Read(Err(error)) | Done::Fee(Err(error)) | Done::Html(Err(error))) => {
                 drop(running);
                 self.ctx.budget.borrow_mut().forget(id);
                 self.reply(id, Err(ChainError::Thrown(error)), None, generation);
