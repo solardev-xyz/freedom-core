@@ -244,6 +244,32 @@ impl Request {
             }
         }
     }
+
+    /// Whether it sends a transaction: a broadcast's attempt, Direct's
+    /// `eth_sendRawTransaction` or Myotis's `broadcast`. None starts at or
+    /// after its broadcast's attempt cutoff (design 0005, Deadlines); a
+    /// reconciliation read may, until the broadcast's deadline. Reads never
+    /// send `eth_sendRawTransaction` ([`crate::is_read_method`]).
+    pub fn sends_transaction(&self) -> bool {
+        match self {
+            Self::Rpc { body, .. } => rpc_method_is(body, "eth_sendRawTransaction"),
+            Self::Verified(VerifiedOp::MyotisBroadcast { .. }) => true,
+            Self::Verified(VerifiedOp::MyotisRead { .. } | VerifiedOp::Colibri { .. })
+            | Self::Blockscout { .. } => false,
+        }
+    }
+}
+
+/// Whether `body`, as [`rpc_body`] makes it, calls `method`: a name of the
+/// core's own, which needs no escaping.
+fn rpc_method_is(body: &str, method: &str) -> bool {
+    let Some(rest) = body.strip_prefix(r#"{"jsonrpc":"2.0","id":"#) else {
+        return false;
+    };
+    let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+    rest.strip_prefix(r#","method":""#)
+        .and_then(|rest| rest.strip_prefix(method))
+        .is_some_and(|rest| rest.starts_with(r#"","params":"#))
 }
 
 /// The length of [`rpc_body`]'s text, known before it is made.
@@ -270,6 +296,35 @@ pub(crate) fn rpc_body(id: u64, method: &str, params: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_broadcasts_attempts_send_a_transaction() {
+        let rpc = |method: &str, params: &str| Request::Rpc {
+            endpoint: "e1".into(),
+            body: rpc_body(12, method, params),
+            max_bytes: 1,
+            deadline_ms: 5000,
+        };
+        assert!(rpc("eth_sendRawTransaction", r#"["0x01"]"#).sends_transaction());
+        // Reconciliation, and a method that only starts the same.
+        assert!(!rpc("eth_getTransactionByHash", r#"["0x01"]"#).sends_transaction());
+        assert!(!rpc("eth_sendRawTransactionX", "[]").sends_transaction());
+        assert!(!rpc("eth_send", "[]").sends_transaction());
+        assert!(
+            Request::Verified(VerifiedOp::MyotisBroadcast {
+                chain_id: 1,
+                raw: "0x01".into(),
+            })
+            .sends_transaction()
+        );
+        assert!(
+            !Request::Verified(VerifiedOp::MyotisRead {
+                chain_id: 1,
+                operation: MyotisOperation::Fee,
+            })
+            .sends_transaction()
+        );
+    }
 
     #[test]
     fn a_pages_answer_counts_its_headers_places() {
