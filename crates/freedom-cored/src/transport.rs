@@ -624,6 +624,9 @@ fn frame_category(error: &fc_protocol::frame::FrameError) -> &'static str {
     match error {
         fc_protocol::frame::FrameError::BadLength(_) => "bad_frame_length",
         fc_protocol::frame::FrameError::UnknownKind(_) => "unknown_frame_kind",
+        // Stream frames' checks: the core's decoder takes no stream kinds
+        // (design 0007), so these never arise here.
+        other => other.category(),
     }
 }
 

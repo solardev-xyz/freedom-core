@@ -6,8 +6,17 @@
 //! - `0x10`, `0x11`, `0x12`: a fragment, the last fragment and the begin of
 //!   a fragmented response, and `0x13`: bulk credit (design 0005, Frames).
 //!   [`crate::fragment`] reassembles them;
-//! - `0x02`–`0x0F`: reserved for Phase 4's streams, and refused like every
-//!   other kind.
+//! - `0x02`–`0x05`: design 0007's stream frames (data, end, abort and
+//!   stream credit), taken only on a connection whose handshake granted
+//!   `stream`, and only from the side that sends each ([`Kinds`]).
+//!   [`crate::stream`] decodes them. `freedom-cored`'s connections never
+//!   grant them;
+//! - `0x06`–`0x0F`: still reserved, and refused like every other kind.
+//!
+//! **A stream frame's payload length is checked against its kind at the
+//! header,** before any of its payload is read or allocated (design 0007,
+//! Frames): an end is exactly its 8-byte stream ID, a credit exactly 12
+//! bytes, a data frame 1 to 65 536 bytes after the ID, an abort 1 to 1024.
 //!
 //! The decoder is sans-I/O: feed it whatever the pipe returned, take out
 //! complete frames. Each payload lands in its own exactly sized `Zeroizing`
@@ -25,6 +34,8 @@ use std::collections::VecDeque;
 
 use zeroize::Zeroizing;
 
+use crate::stream::{self, Side};
+
 /// The largest payload: 1 MiB.
 pub const MAX_PAYLOAD: usize = 1 << 20;
 /// The largest serialized message, fragmented or not: 32 MiB (design
@@ -32,8 +43,22 @@ pub const MAX_PAYLOAD: usize = 1 << 20;
 pub const MAX_MESSAGE: usize = 32 << 20;
 /// One JSON message.
 pub const KIND_JSON: u8 = 0x01;
-/// Kinds `0x02..=0x0F` are reserved for Phase 4 streams (protocol v2).
+/// Kinds `0x02..=0x0F`, set aside by design 0001 for streams. Design 0007
+/// takes `0x02`–`0x05` from them, on connections that grant `stream`; the
+/// rest stay reserved, and a connection without streams refuses them all.
 pub const RESERVED_KINDS: std::ops::RangeInclusive<u8> = 0x02..=0x0F;
+/// Stream data: an 8-byte stream ID, then 1 to 65 536 body bytes (design
+/// 0007). Service to main.
+pub const KIND_DATA: u8 = 0x02;
+/// A stream's end, the 8-byte ID alone: the body is complete. Service to
+/// main.
+pub const KIND_END: u8 = 0x03;
+/// A stream's abort: the ID, then JSON `{ code, message }` of at most
+/// 1 KiB. The body is truncated. Service to main.
+pub const KIND_ABORT: u8 = 0x04;
+/// Stream credit: the ID, then a `u32` big-endian above zero, the bytes
+/// main has handed on. Main to service. Not 0005's bulk credit (`0x13`).
+pub const KIND_STREAM_CREDIT: u8 = 0x05;
 /// A fragment of a response's bytes.
 pub const KIND_FRAGMENT: u8 = 0x10;
 /// A response's last fragment.
@@ -44,13 +69,62 @@ pub const KIND_BEGIN: u8 = 0x12;
 /// another fragmented response.
 pub const KIND_CREDIT: u8 = 0x13;
 
-/// Whether a frame of `kind` may appear on the wire.
+/// Whether a frame of `kind` may appear on a `freedom-cored` connection
+/// ([`Kinds::CORE`]). [`header`] and [`encode`] write only these; stream
+/// frames have their own encoders in [`crate::stream`].
 pub fn is_known_kind(kind: u8) -> bool {
     matches!(
         kind,
         KIND_JSON | KIND_FRAGMENT | KIND_LAST | KIND_BEGIN | KIND_CREDIT
     )
 }
+
+/// The frame kinds a connection takes, as its handshake negotiated them.
+/// Whole JSON messages (`0x01`) are always taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Kinds {
+    /// Design 0005's fragmented responses and bulk credit (`0x10`–`0x13`).
+    pub fragments: bool,
+    /// Design 0007's stream frames (`0x02`–`0x05`), as this side reads
+    /// them: the side that receives bodies takes data, end and abort; the
+    /// side that sends them takes credit. `None` refuses all four.
+    pub streams: Option<Side>,
+}
+
+impl Kinds {
+    /// `freedom-cored`'s connections: whole messages and fragmented
+    /// responses. They never grant `stream` (design 0007).
+    pub const CORE: Kinds = Kinds {
+        fragments: true,
+        streams: None,
+    };
+
+    /// A service connection whose handshake granted `stream` (design 0007,
+    /// `frames: ["stream"]`), as `side` reads it: whole messages and the
+    /// stream frames the other side sends.
+    pub const fn service(side: Side) -> Kinds {
+        Kinds {
+            fragments: false,
+            streams: Some(side),
+        }
+    }
+
+    /// Checks a header: `kind` against what the connection takes, then a
+    /// stream frame's payload length against its kind.
+    pub fn check(self, kind: u8, payload_len: usize) -> Result<(), FrameError> {
+        match kind {
+            KIND_JSON => Ok(()),
+            KIND_FRAGMENT | KIND_LAST | KIND_BEGIN | KIND_CREDIT if self.fragments => Ok(()),
+            KIND_DATA | KIND_END | KIND_ABORT | KIND_STREAM_CREDIT => match self.streams {
+                None => Err(FrameError::UnknownKind(kind)),
+                Some(side) if side.takes(kind) => stream::check_length(kind, payload_len),
+                Some(_) => Err(FrameError::Direction(kind)),
+            },
+            _ => Err(FrameError::UnknownKind(kind)),
+        }
+    }
+}
+
 /// The most complete frames the decoder holds before `push` stops.
 pub const MAX_READY_FRAMES: usize = 64;
 /// Payload bytes held in complete frames at which `push` stops taking input
@@ -62,8 +136,33 @@ pub const MAX_READY_BYTES: usize = 2 * MAX_PAYLOAD;
 pub enum FrameError {
     #[error("frame length {0} is zero or above the limit")]
     BadLength(u32),
+    /// A kind the connection doesn't take.
     #[error("unknown frame kind {0:#04x}")]
     UnknownKind(u8),
+    /// A stream frame whose payload length is wrong for its kind.
+    #[error("a stream frame of kind {kind:#04x} with a payload of {len} bytes")]
+    StreamLength { kind: u8, len: usize },
+    /// A data frame with no body bytes after its stream ID.
+    #[error("an empty data frame")]
+    EmptyData,
+    /// A stream frame in the wrong direction: data, end or abort from
+    /// main, or credit from the service.
+    #[error("a stream frame of kind {0:#04x} in the wrong direction")]
+    Direction(u8),
+}
+
+impl FrameError {
+    /// A fixed name for the failure, safe to log and shared with main's
+    /// `frame.js` through `vectors/streams.json`.
+    pub fn category(&self) -> &'static str {
+        match self {
+            FrameError::BadLength(_) => "bad_length",
+            FrameError::UnknownKind(_) => "unknown_kind",
+            FrameError::StreamLength { .. } => "stream_length",
+            FrameError::EmptyData => "data_empty",
+            FrameError::Direction(_) => "stream_direction",
+        }
+    }
 }
 
 /// A complete frame.
@@ -128,6 +227,7 @@ const EMPTY_HEADER: State = State::Header {
 
 /// Turns a byte stream into frames.
 pub struct Decoder {
+    kinds: Kinds,
     state: State,
     ready: VecDeque<Frame>,
     ready_bytes: usize,
@@ -141,8 +241,15 @@ impl Default for Decoder {
 }
 
 impl Decoder {
+    /// A decoder for a `freedom-cored` connection ([`Kinds::CORE`]).
     pub fn new() -> Self {
+        Self::with_kinds(Kinds::CORE)
+    }
+
+    /// A decoder for a connection that takes `kinds`.
+    pub fn with_kinds(kinds: Kinds) -> Self {
         Decoder {
+            kinds,
             state: EMPTY_HEADER,
             ready: VecDeque::new(),
             ready_bytes: 0,
@@ -178,8 +285,9 @@ impl Decoder {
                         if len == 0 || payload_len > MAX_PAYLOAD {
                             return Err(self.fail(FrameError::BadLength(len)));
                         }
-                        if !is_known_kind(kind) {
-                            return Err(self.fail(FrameError::UnknownKind(kind)));
+                        // Before any of the payload is read or allocated.
+                        if let Err(error) = self.kinds.check(kind, payload_len) {
+                            return Err(self.fail(error));
                         }
                         self.state = State::Payload {
                             kind,
@@ -369,6 +477,58 @@ mod tests {
                 Err(FrameError::UnknownKind(kind))
             );
         }
+    }
+
+    #[test]
+    fn a_stream_connection_takes_its_sides_kinds() {
+        use crate::stream::Side;
+        let main = Kinds::service(Side::Receiver);
+        let service = Kinds::service(Side::Sender);
+        for kind in [KIND_DATA, KIND_END, KIND_ABORT] {
+            assert_eq!(service.check(kind, 9), Err(FrameError::Direction(kind)));
+        }
+        assert_eq!(
+            main.check(KIND_STREAM_CREDIT, 12),
+            Err(FrameError::Direction(KIND_STREAM_CREDIT))
+        );
+        assert_eq!(main.check(KIND_DATA, 9), Ok(()));
+        assert_eq!(main.check(KIND_END, 8), Ok(()));
+        assert_eq!(service.check(KIND_STREAM_CREDIT, 12), Ok(()));
+        // Whole messages always; fragments only where negotiated.
+        assert_eq!(main.check(KIND_JSON, 0), Ok(()));
+        assert_eq!(
+            main.check(KIND_BEGIN, 3),
+            Err(FrameError::UnknownKind(KIND_BEGIN))
+        );
+        assert_eq!(Kinds::CORE.check(KIND_BEGIN, 3), Ok(()));
+        for kind in 0x06..=0x0F {
+            assert_eq!(main.check(kind, 8), Err(FrameError::UnknownKind(kind)));
+        }
+    }
+
+    #[test]
+    fn a_stream_frames_length_is_checked_at_its_header() {
+        use crate::stream::Side;
+        // An end claiming a 1 MiB payload: refused on its five header
+        // bytes, before any payload is read or allocated.
+        let mut d = Decoder::with_kinds(Kinds::service(Side::Receiver));
+        let len = u32::try_from(MAX_PAYLOAD + 1).unwrap().to_be_bytes();
+        assert_eq!(
+            d.push(&[len[0], len[1], len[2], len[3], KIND_END]),
+            Err(FrameError::StreamLength {
+                kind: KIND_END,
+                len: MAX_PAYLOAD
+            })
+        );
+        let mut d = Decoder::with_kinds(Kinds::service(Side::Receiver));
+        assert_eq!(d.push(&[0, 0, 0, 9, KIND_DATA]), Err(FrameError::EmptyData));
+        assert_eq!(FrameError::EmptyData.category(), "data_empty");
+        // The core's decoder still refuses every stream kind.
+        let mut d = Decoder::new();
+        assert_eq!(
+            d.push(&[0, 0, 0, 9, KIND_END]),
+            Err(FrameError::UnknownKind(KIND_END))
+        );
     }
 
     #[test]

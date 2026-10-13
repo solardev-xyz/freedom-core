@@ -1,6 +1,6 @@
 [package]
 name = "fc-protocol"
-description = "The freedom-cored wire protocol: frames, message envelopes, secret fields and error codes"
+description = "The freedom-cored wire protocol: frames, stream frames, message envelopes, secret fields and error codes"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
