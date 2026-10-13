@@ -864,14 +864,14 @@ fn addresses(id: u64, n: u32) -> Vec<u8> {
 /// 330 light lookups, then 170 heavy ones. The light replies fill any OS's
 /// stdout pipe and the loop's allowance within the first 321 frames, so
 /// all the heavy lookups wait, and the frames right after them still fall
-/// within the reader's credits. Every 25th of the first 250 frames is a
+/// within the reader's credits. Every 10th of the first 250 frames is a
 /// `vault.touch` instead, so the auto-lock counts from just before the
 /// wait. Returns the frames and the heavy lookups' IDs.
 fn slow_backlog(first: u64) -> (Vec<Vec<u8>>, std::ops::Range<u64>) {
     let pad = "x".repeat(64 * 1024);
     let mut frames = Vec::new();
     for id in first..first + 330 {
-        frames.push(if (id - first).is_multiple_of(25) && id - first <= 250 {
+        frames.push(if (id - first).is_multiple_of(10) && id - first <= 250 {
             frame(&request(id, "vault.touch", json!({ "pad": pad })))
         } else {
             addresses(id, 4)
@@ -887,16 +887,8 @@ fn slow_backlog(first: u64) -> (Vec<Vec<u8>>, std::ops::Range<u64>) {
 /// A key request at its end, after a `vault.touch` if `late_touch`, must
 /// find the vault locked.
 fn auto_lock_due_while_draining(late_touch: bool) {
-    let (_root, data, locks) = dirs();
-    let mut core = spawn("serve", &data, &locks, &[]);
-    core.hello_with(4_000);
-    core.call(
-        2,
-        "vault.import",
-        json!({ "password_b64": b64("testpass1"), "mnemonic_b64": b64(ABANDON) }),
-    );
-    assert_eq!(core.event()["event"], "vault.unlocked");
-    core.pause_reading();
+    // The frames are made before the unlock: on a loaded machine, making
+    // them could take as long as the auto-lock.
     let (mut frames, heavy) = slow_backlog(3);
     let pad = "x".repeat(64 * 1024);
     let touch = heavy.end;
@@ -911,6 +903,16 @@ fn auto_lock_due_while_draining(late_touch: bool) {
     )));
     // Past the reader's credits: feeding stalls once the core waits.
     frames.extend(padded(key + 1..key + 101));
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello_with(4_000);
+    core.call(
+        2,
+        "vault.import",
+        json!({ "password_b64": b64("testpass1"), "mnemonic_b64": b64(ABANDON) }),
+    );
+    assert_eq!(core.event()["event"], "vault.unlocked");
+    core.pause_reading();
     let feed = core.feed(frames);
     feed.wait_stalled(Duration::from_secs(1));
     core.resume_reading();
