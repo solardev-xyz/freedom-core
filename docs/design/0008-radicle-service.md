@@ -236,55 +236,110 @@ Each ref is renamed into place atomically, but the steps together aren't. So bef
 - **The COB cache,** when the marker was present: rebuilt from storage for every repository, in bounded, resumable batches ([Work units](#work-units)). `cobs/cache.db` is derived data.
 - **Failure:**
   - Anything the procedure doesn't recognize, or can't repair, is left exactly as it is. An example is an owned ref that points at a missing object.
-  - **Within one repository,** that repository is quarantined ([the escape](#the-escape)), with the step and the evidence kept, and the node runs without it.
+  - **Within one repository,** that repository is quarantined ([the escape](#the-escape)), with the step and the evidence kept. The [repository gate](#the-repository-gate) shuts it, and the node runs without it.
   - **Outside any one repository,** for example an unreadable cache database or storage directory, `rad.reconcile` answers `recovery_failed`.
   - Either way, nothing is deleted to make the start succeed.
 - **Logs:** counts and repository IDs, never paths inside a repository.
 
 #### Work units
 
-Every step is bounded and resumable, and the deadline is checked between units, not only between repositories.
+Every potentially long step is a **unit**. Each unit has a work limit and a time limit, and a durable in-progress record (the repository, the unit's kind and its position) is written before it starts. The deadline is checked between units.
 
-- **Small steps:**
-  - removing temporary clones and lock files;
-  - checking a namespace and re-signing it. A re-sign is one ref update, flushed, with libgit2's fsync option on.
+| Unit | Work limit | Time limit |
+|---|---|---|
+| removing one temporary clone, or one repository's ref lock files | one directory | 30 s |
+| checking the node's namespace against its `rad/sigrefs` | 1,024 refs; a larger namespace takes several units, each with a checkpoint | 30 s |
+| re-signing the namespace | one ref update, flushed, with libgit2's fsync option on | 30 s |
+| materializing one COB into staging | one COB | 30 s |
+| committing a batch | one transaction: at most 64 staged COBs and the checkpoint | 30 s |
+| publication | one transaction | 30 s |
+
 - **The cache rebuild** of a repository runs in **batches** of at most 64 COBs:
   - Each batch materializes its COBs into a staging table in `cobs/cache.db` (`rebuild_staging`) and records its checkpoint, the last COB it finished. Both go in one durable transaction, with `synchronous = FULL` during reconciliation.
   - When every COB is staged, **publication** swaps the repository's live cache rows for the staged ones in one transaction, and clears its staging.
   - So a rebuild interrupted at any point resumes from its last checkpoint, and readers never see a half-built cache.
-- **The progress state** (`reconcile_state`, in the same database) holds the checkpoints and each repository's finished steps.
+- **The progress state** (`reconcile_state`, in the same database) holds the checkpoints, each repository's finished steps, and the unit in progress.
   - An entry is written in the same transaction as the work it records. For a re-sign, it is written after the ref update has been flushed.
   - So the state never claims work that isn't durable.
+  - **It is bound to its input:** each repository's checkpoints carry the repository's input version, a hash over its refs taken when its repair began. A resumed repair whose input version differs discards that repository's staging and starts it over.
+  - **Online,** a repository's progress rows are deleted in its publication transaction. So a completed repair can't be reused once later mutations begin.
 - **Before `RUNNING`:** once every repository is done or quarantined, the progress state is cleared in one durable transaction, before `rad.reconcile` replies. No completion record survives into a run whose new mutations could make it wrong.
 
 #### The deadline
 
 - `rad.reconcile` has 300 s from admission, owned by the service. Main's watchdog is at 315 s: 0001's deadline plus 15 s.
-- It is checked between units: between batches, and between COBs within a batch.
+- It is checked between units: between batches, between COBs within a batch, and between namespace checks.
 - At the deadline, the service does all of these:
-  - stops after the current COB;
+  - stops after the current unit;
   - commits the partial batch with its checkpoint;
   - keeps the marker and the progress state;
   - answers `deadline`.
 - Main shows "Radicle is still repairing its data" with **Retry**. A retry spawns a new process, which continues from the checkpoints. There is no automatic restart loop.
-- **Shutdown and kill:** `rad.shutdown` stops after the current COB. A kill is safe at any point, since every unit is idempotent and is recorded only once it is durable.
+- **Shutdown and kill:** `rad.shutdown` stops after the current unit. A kill is safe at any point, since every unit is idempotent and is recorded only once it is durable.
+
+#### The unit watchdog
+
+A unit that doesn't return can't be interrupted from inside the process. So time is enforced from outside the worker.
+
+- **The watchdog:** an independent thread holds the current unit's time limit. A unit that overruns isn't interrupted: the watchdog ends the process (exit 70, `unit_overrun`), so the worker, and every thread that could still mutate, ends with it.
+- **The record survives.** The unit's in-progress record and the dirty marker stay, so the next start sees exactly which unit overran.
+- **Online as at startup:**
+  - An online repair that hangs ends the process within 30 s.
+  - Main restarts it, which counts as a crash, and startup reconciliation retries the unit, or quarantines its repository.
+  - `rad.stats` reports the unit in progress and its elapsed time, so a healthy node thread isn't mistaken for a healthy repair.
+- **Quarantine waits for the worker to be gone.** A hang is quarantined only at a later start, after the process that ran the unit has ended. A unit that fails with an error has already returned. Either way, no quarantine is acknowledged, and no write resumes, while an old worker could still mutate.
+- **The interruption allowance:** the writer is held by at most one unit at a time, so for at most 30 s by the watchdog. Writes to other repositories run between units, and wait at most 30 s behind an online repair, within their 60 s deadline.
 
 #### The escape
 
 A unit that can't finish is not retried forever.
 
-- **A batch-in-progress record** (the repository and the batch's first COB) is written durably before each batch starts.
-  - If an attempt ends while a batch is in progress, whether by the deadline, a kill or a crash, the next attempt runs that batch one COB at a time.
-  - It records each COB durably before loading it.
-- **A poison unit:** a COB that was in progress when two attempts ended quarantines its repository, with the COB's ID and the step.
+- **After one interrupted attempt,** the next attempt reruns the unit in its smallest form: a batch one COB at a time, and a namespace check in single refs. It records each piece durably before starting it.
+- **A poison unit:** a unit that was in progress when two processes ended quarantines its repository, with the unit's kind and position. A unit that fails with an error quarantines it at once.
 - **So every retry makes progress or reaches a diagnosis:** it advances a checkpoint, or it quarantines a repository.
-- **A quarantined repository** is recorded in a `quarantine` table that outlives the run:
-  - It stays on disk, untouched beyond its staging.
-  - Its COB reads (`issues`, `issue`, `patches`, `patch`, `issues_page`, `patches_page`) answer `quarantined` (503). Writes to it are refused, but `unseed` still works.
-  - Its file reads and `repo_info` keep working. `repo_info`'s open-issue and open-patch counts may lag.
-  - The node reaches `RUNNING` without it.
-  - `rad.reconcile` reports it. Main shows "Radicle couldn't repair <name>", with the step and **Remove**, which unseeds it.
-  - **The diagnosis isn't retryable:** the repository stays quarantined until it is removed, or until a later service version clears the record.
+- **Two kinds of quarantine:**
+  - **`cache`:** a COB or the cache can't be rebuilt. The repository's git data and the node's namespace are intact.
+  - **`namespace`:** the node's own namespace doesn't verify and can't be re-signed, for example an owned ref that points at a missing object.
+- **The record:** a quarantine is recorded durably, in a `quarantine` table that outlives the run, before anything else resumes:
+  - at a start, before `rad.reconcile` replies;
+  - online, before the writer takes its next task.
+
+  It stays on disk, untouched beyond its staging, and the [repository gate](#the-repository-gate) shuts it.
+- **Unseed doesn't clear it:**
+  - Unseeding changes the seeding policy, not the record. While `storage/<rid>` exists, the record stays and the gate stays shut. A later seed or clone of the same repository is refused with `quarantined`.
+  - **Remove** (`rad.remove_repo`) is the only way out. It does these in order, durably:
+    1. unseeds the repository;
+    2. deletes `storage/<rid>`, following no symlinks;
+    3. deletes the repository's cache rows;
+    4. clears the record.
+
+    Main warns first that this deletes the local copy, including the user's own issues and comments in it that haven't been shared.
+- **The diagnosis isn't retryable:** the repository stays quarantined until it is removed, or until a later service version clears the record.
+- **Main's view:**
+  - `rad.reconcile` reports the first 16 quarantined repositories, and `rad.quarantine_list` pages through all of them ([Methods](#methods)).
+  - Main shows "Radicle couldn't repair <name>", with the kind, the step and **Remove**.
+
+#### The repository gate
+
+heartwood fetches, updates the COB cache, announces and serves on its own. So repair and quarantine are enforced inside the node, not only at the service's methods.
+
+- **The gate** is an upstream hook ([heartwood item 14](#upstream-changes)), held by the service and consulted by heartwood for:
+  - every fetch, explicit or automatic: clones, syncs, gossip-driven fetches, and the retries of seeded repositories that are missing;
+  - every COB cache update;
+  - refs and inventory announcements;
+  - serving the repository to peers.
+- **Its states, per repository:**
+
+| State | Fetch and cache update | Announcements | Serving | COB reads | File reads and `repo_info` | Writes |
+|---|---|---|---|---|---|---|
+| open | yes | yes | yes | yes | yes | yes |
+| repairing | deferred until publication | deferred until publication | yes | `stopped` (503) | yes | wait behind the repair |
+| quarantined, `cache` | refused | refs and inventory as before | yes | `quarantined` (503) | yes; counts may lag | refused |
+| quarantined, `namespace` | refused | the repository is left out | refused | `quarantined` (503) | `quarantined` (503) | refused |
+
+- **The whole repair is fenced:** from the start of a repository's repair until its publication, every mutator of that repository waits, heartwood's included. Its staging input can't change underneath it.
+- **Catching up:** fetches deferred during a repair run after publication, through the normal path, which updates the cache. A peer's update that arrives mid-repair is therefore applied after the repaired cache, never overwritten by it.
+- **Other repositories** stay open throughout.
 
 **Reads of unreconciled state:**
 - Nothing is read before `RUNNING`.
@@ -346,9 +401,11 @@ The rules this design relies on, as 0007 specifies them:
 | Method | Params | Result | Pool and deadline |
 |---|---|---|---|
 | `rad.hello` | `protocol`, `shell_version`, `frames` | `protocol`, `service_version`, `libradicle` build info | 10 s after spawn |
-| `rad.reconcile` | none | `{ was_dirty, repaired }`: counts per step | 300 s ([the bound](#reconciliation)); on failure or deadline, the process exits |
+| `rad.reconcile` | none | `{ was_dirty, repaired, quarantined: { count, first } }`: counts per step, and up to 16 quarantine entries | 300 s ([the bound](#reconciliation)); on failure or deadline, the process exits |
+| `rad.quarantine_list` | `page` | `{ entries, next_page }`: up to 64 entries `{ rid, kind, step, unit, since }` per page | read pool; 60 s |
+| `rad.remove_repo` | `rid` | `{ removed }` | write queue; 60 s |
 | `rad.start` | `alias`, `network` | `did`, `nid`, `alias` | 30 s; on failure, the process exits |
-| `rad.stats` | none | `connected_peers`, `node_alive`, pool and budget use | inline; 5 s |
+| `rad.stats` | none | `connected_peers`, `node_alive`, the repair unit in progress and its elapsed time, `quarantined_count`, pool and budget use | inline; 5 s |
 | `rad.shutdown` | none | none: the process exits | main kills after 10 s |
 | `rad.read` | `op`, `args` | head `{ content_type: "application/json", bytes }`, then the JSON as a body stream | read pool; 60 s to the head |
 | `rad.blob` | `rid`, `revision`, `path`, `range?`, `head_only?` | head `{ oid, size, binary?, range }`, then the bytes | read pool; 60 s to the head |
@@ -408,7 +465,7 @@ The rules this design relies on, as 0007 specifies them:
 | `cancelled` | main's cancel, before a write starts | the request is already gone |
 | `outcome_unknown` | any write that has started and isn't proven ([Writes](#writes)) | provider error -32603 with new text |
 | `stopped` | not yet `RUNNING`, shutting down, or a repository under online repair (COB ops) | 503 |
-| `quarantined` | COB ops, or a write, on a quarantined repository; `data.step` | 503 with `{"error": message}`; the provider's existing errors for writes |
+| `quarantined` | on a quarantined repository: COB ops; for `namespace`, every read; a write, seed, clone or sync; `data.kind`, `data.step` | 503 with `{"error": message}`; the provider's existing errors for writes |
 | `internal` | a panic on a read's thread | 500 |
 | `recovery_failed`; `deadline` | `rad.reconcile`: a failure outside any one repository, or the deadline; `message` names the step | the manager's error state; for `deadline`, "Radicle is still repairing its data" with Retry |
 | `start_failed`, `no_identity` | `rad.start`; `message` is libradicle's | the manager's error state, with that message |
@@ -520,9 +577,9 @@ All bounds are process-wide. The service hosts one node.
   - Main never retries one, and the page must check before writing again. The write is either absent or complete once its repository's repair has run, online (below) or at the next start, unless the repository is quarantined ([Reconciliation](#reconciliation)).
 - **Online repair after an uncertain write:**
   - When the executing call returns, that repository's repair is queued on the writer: validate and re-sign the node's own namespace, then rebuild the repository's COB cache in the same batches and checkpoints as reconciliation ([Work units](#work-units)).
-  - It runs one batch per writer turn, interleaved with other repositories' writes, so it never holds the writer for longer than one batch. Writes to the same repository wait behind it.
-  - Until it publishes, that repository's COB ops answer `stopped` (503), under the [repair fence](#methods).
-  - A batch that fails, or a poison unit, quarantines the repository, as at start. The marker stays set, so the next start checks it again.
+  - It runs one unit per writer turn, interleaved with other repositories' writes, under the [unit watchdog](#the-unit-watchdog). So it never holds the writer for longer than one unit, which is at most 30 s.
+  - The [repository gate](#the-repository-gate) is set to `repairing` for the whole repair. Until publication, that repository's COB ops answer `stopped` (503), its fetches are deferred, and writes to it wait behind it.
+  - A unit that fails with an error quarantines the repository at once. A unit that hangs ends the process, and the next start retries the unit or quarantines. The marker stays set, so the next start checks the repository again.
   - This mirrors 0005's uncertain broadcasts.
 - **Import, in process:**
   - `rad.import_repo` creates the repository in storage and fetches the working copy's default branch into the node's namespace with libgit2's local transport, then signs the refs ([upstream](#upstream-changes)).
@@ -823,11 +880,18 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
     - typed recognition of temporary clones (`<RID>.tmp`, legacy `<RID>.lock`) and ref lock files, with no symlinks followed;
     - validation and re-signing of the node's own namespace;
     - a COB cache rebuild in batches into a staging table, with durable checkpoints and atomic publication;
-    - progress state written in the same transactions as the work, and a batch-in-progress record for poison units;
-    - a cancel token and a deadline checked between COBs;
-    - a `quarantine` table, and the COB-read fence it drives;
-    - `reconcile_repository(rid)` for the online repair, one batch per call;
+    - progress state written in the same transactions as the work, bound to each repository's input version, with an in-progress record for every unit;
+    - namespace checks in units of 1,024 refs, with checkpoints;
+    - a cancel token and a deadline checked between units;
+    - a `quarantine` table with its two kinds, and `remove_repo`;
+    - `reconcile_repository(rid)` for the online repair, one unit per call;
     - a report of what it changed, and an error that names anything it couldn't repair.
+14. **The repository gate:**
+    - a per-repository state (`open`, `repairing`, `quarantined` with its kind) that the host sets;
+    - heartwood consults it before every fetch, the automatic retries of seeded repositories included (`hw/radicle-protocol/src/service.rs:765`–`772`, `2486`–`2538`), and before every COB cache update;
+    - before refs and inventory announcements (`service.rs:1967`–`1968`, `2131`, `2394`);
+    - before serving a repository to a peer (`hw/radicle-node/src/worker.rs:243`–`258`);
+    - a deferred fetch runs once its repository reopens.
 
 ## Where the code lives
 
@@ -909,20 +973,38 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
 - **The dirty marker:**
   - a failure injected after a COB ref and before its sigrefs, then an ordinary `rad.shutdown` and a restart: the marker stays, and the restart repairs;
   - a shutdown while a timed-out writer is still running: the marker stays;
-  - an `outcome_unknown` write, then reads of its repository: 503 until the online repair is done; a failed repair exits 70;
+  - an `outcome_unknown` write, then reads of its repository: 503 until the online repair is done;
+  - a unit of the online repair that fails with an error: the repository is quarantined persistently and at once. Its COB reads answer `quarantined`, and other repositories keep working;
   - a clean run: the marker is cleared, and the next start skips the full repair.
 - **The bound:**
   - **one repository whose cache rebuild alone takes longer than 315 s:** each attempt advances its checkpoint, and a retry completes;
   - **a repository with a COB that never finishes loading:** after two attempts end during it, the repository is quarantined. The node reaches `RUNNING`, its COB reads answer `quarantined`, and its file reads still work;
   - **a kill between a batch's work and its commit:** the progress state doesn't claim the batch, and the retry redoes it;
   - **at `RUNNING`:** no progress state is left;
-  - **an online repair:** it runs in batches between other writes, and a failure in it quarantines the repository.
+  - **an online repair:** it runs one unit at a time between other writes.
+- **Units and the watchdog:**
+  - **a COB that never returns during an online repair:**
+    - `rad.stats` stays answered, and shows the unit's elapsed time;
+    - the watchdog ends the process within 30 s;
+    - the restart's reconciliation retries the unit and overruns again;
+    - the next start quarantines the repository;
+    - writes to another repository resume between units, and after the restarts;
+  - **an oversized namespace check (100,000 refs):** it advances in units of 1,024 with checkpoints. A namespace unit that never finishes reaches quarantine after two process ends;
+  - **every unit kind** leaves an in-progress record that the next start finds.
+- **The repository gate:**
+  - **a peer update during a repair,** both to an already-staged COB and adding a new one: the fetch is deferred, then applied after publication. The published cache keeps both changes;
+  - **after a restart,** an automatic fetch of a quarantined repository is refused;
+  - **unseed, then seed again:** the gate stays shut, and only Remove opens it, after the data is deleted;
+  - **a `namespace` quarantine** isn't served or announced, and its reads answer `quarantined`. A `cache` quarantine keeps its file reads;
+  - **other repositories** stay usable during a repair and under a quarantine.
+- **Diagnostics:** `rad.reconcile` reports at most 16 entries, and `rad.quarantine_list` pages through 100 quarantined repositories, 64 at a time.
 - **Reconciliation:**
   - a kill between a COB ref and its sigrefs: the namespace is re-signed;
   - between the sigrefs and the cache: the cache is rebuilt;
   - during a first clone: `<RID>.tmp` is removed;
   - a symlinked `<RID>.tmp` and an unknown extension: left alone;
-  - an owned ref pointing at a missing object: `recovery_failed`, with nothing deleted.
+  - an owned ref pointing at a missing object: the repository is quarantined (`namespace`) persistently, with nothing deleted. Its reads answer `quarantined`, it isn't served or announced, and other repositories work;
+  - an unreadable cache database (home-level): `recovery_failed`, with nothing deleted.
 - **Identity changes:**
   - stop → wipe and key write by the core → restart, including a failed write;
   - with an independently running service holding the gate: `lock_held`, and no file touched;
@@ -983,7 +1065,9 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 | Budget | Bound | Exhausted |
 |---|---|---|
 | handshake; `rad.reconcile`; `rad.start` | 10 s; 300 s, checked between COBs; 30 s | kill; error, and the process exits (Retry continues from the checkpoints) |
-| reconciliation batch | at most 64 COBs, one durable transaction with its checkpoint | resumes from the checkpoint; a COB in progress when two attempts ended quarantines its repository |
+| every repair unit | its work limit, and 30 s by an independent watchdog, at startup and online | exit 70 with the record kept; a unit in progress when two processes ended quarantines its repository |
+| the writer during an online repair | one unit at a time, at most 30 s | other repositories' writes run between units |
+| quarantine diagnostics | 16 entries in `rad.reconcile`'s reply; 64 per page of `rad.quarantine_list` | the next page |
 | shutdown | the service exits within 5 s of `rad.shutdown`; main kills at 10 s | kill |
 | exit after stdin EOF | 5 s, a watchdog thread | `std::process::exit` |
 | lock contention | 5 s of retries, for the service, the core and `hold-lock` | exit 75; `lock_held` |
@@ -1010,7 +1094,7 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 | `home-lock` | the control-socket bind | an OS lock, taken by every Freedom writer before it touches the home | a second owner fails at start (75); the core never writes under a running node |
 | `network-fs` | any filesystem | a network filesystem is refused (74) | Radicle doesn't start there |
 | `failed-start` | handled in main's process | the process exits after replying | nothing of a failed start survives |
-| `reconcile` | an interrupted write stays as it was left | a dirty marker; a bounded, resumable reconciliation phase under the lock before `RUNNING`; an online repair after an uncertain write; quarantine for a repository that can't be repaired | writes are absent or complete after any interruption; a repository's COB reads answer 503 during its repair or quarantine |
+| `reconcile` | an interrupted write stays as it was left | a dirty marker; bounded, resumable repair units under a watchdog; an online repair after an uncertain write; a repository gate inside the node; quarantine for a repository that can't be repaired, until it is removed | writes are absent or complete after any interruption; a repository's COB reads answer 503 during its repair or quarantine; a quarantined repository isn't fetched |
 | `control-socket` | `node/control.sock` is bound | none | the `rad` CLI can't attach to Freedom's node |
 | `import-in-process` | `git push` from the working copy, which gains a `rad` remote | a libgit2 fetch; the working copy is untouched | no child process, and no git configuration from outside the service |
 | `blob-api` | text as lossy JSON; binary dropped | `/raw/` with raw bytes, Range, length, ETag and inert types; `/blob/` unchanged | images and downloads work; the JSON endpoint is the same |
@@ -1033,12 +1117,12 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 1. **Tests first,** in freedom-browser: the contract suite, the fixture repository and golden vectors from the v0.8.0 add-on.
 2. **Upstream:**
    - libradicle items 1–9;
-   - heartwood items 10–13, on the `freedom/embed` fork.
+   - heartwood items 10–14, on the `freedom/embed` fork.
 
    The service can start on items 1–4, 9, 10 and 13.
 3. **The shared service skeleton,** from 0007: the lock, `hold-lock`, the handshake, parent death, the panic hook, hardening and the frame I/O.
 4. **`services/freedom-radicled`:**
-   - the dirty marker, `rad.reconcile` with its bound, and the online repair;
+   - the dirty marker, `rad.reconcile` with its bound, the repair units and their watchdog, the online repair, the repository gate, quarantine and `rad.remove_repo`;
    - the pools, the output budget and bounded JSON construction;
    - `rad.read` and `rad.blob`, with ranges;
    - network operations with bounded progress and cancel;
