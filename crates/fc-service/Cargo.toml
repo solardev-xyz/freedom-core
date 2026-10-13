@@ -1,0 +1,47 @@
+[package]
+name = "fc-service"
+description = "The service processes' shared skeleton (design 0007): the lifetime lock, the handshake, parent death and the exit watchdog, the panic hook, hardening, and the frame I/O"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+# The workspace lints, except that `unsafe_code` is `deny` instead of
+# `forbid`, as in freedom-cored: three Windows FFI calls (GetDriveTypeW in
+# storage.rs; SetErrorMode and WerSetFlags in hardening.rs) carry reviewed
+# `#[allow(unsafe_code)]`s. Logic crates keep `forbid`.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+
+# Desktop only: the services never run on iOS or Android, where the crate is
+# empty and pulls in nothing.
+[target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
+fc-protocol = { path = "../fc-protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+sha2 = { version = "0.11", default-features = false }
+
+[target.'cfg(all(unix, not(any(target_os = "ios", target_os = "android"))))'.dependencies]
+rustix = { version = "1.1", default-features = false, features = ["fs", "process", "std"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_ErrorReporting",
+] }
+
+[dev-dependencies]
+tempfile = "3"
