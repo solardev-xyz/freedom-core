@@ -755,6 +755,12 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
    - The service follows redirects itself: every client is built with `Policy::none()`.
    - For each hop, its own loop classifies the `Location` target, runs the gate, picks the client again (the ordinary one, or in `socks5` mode the [onion route](#the-onion-route)), and counts the hop against that client's acceptance.
    - That covers delegated routing, DoH and providers. A refused hop fails the attempt.
+   - **Each hop is a fresh request,** built from the operation's own fixed headers, never by copying the previous hop's. Because the service follows redirects itself, it doesn't rely on reqwest's header stripping:
+     - The service sends no credentials. A configured endpoint can't carry userinfo, `Authorization`, cookies or proxy credentials: a URL with userinfo is refused when the setting is read, and no client has a cookie store.
+     - Even so, a hop that changes scheme, host or port drops every header scoped to an authority (`Authorization`, `Cookie`, `Proxy-Authorization`).
+     - No hop sends `Referer`.
+     - Methods follow reqwest's rules: 303, and 301 or 302 after a `POST`, become a `GET` without a body; 307 and 308 keep the method and body.
+     - One hop budget covers the whole chain, including hops that change client between the ordinary and onion routes.
 
 **The SOCKS contract** (a decision):
 - **(a), chosen:**
@@ -994,6 +1000,11 @@ As 0006's 4.7 did, before anything moves:
     - an onion URL that redirects to a clearnet name: the hop goes through `RESOLVE`, the gate and an IP `CONNECT`;
     - a clearnet URL that redirects to an onion: the onion client in `socks5` mode, refused in `direct` mode;
     - an ordinary name handed to the onion client: refused before anything is sent.
+  - **Redirect headers:**
+    - hops that change host, and hops that change only the port: no `Authorization`, `Cookie`, `Proxy-Authorization` or `Referer` reaches the second server;
+    - an HTTPS URL that redirects to HTTP sends no `Referer`;
+    - a chain that moves between the ordinary and onion clients is counted against one hop budget, and fails at the limit;
+    - an endpoint URL with userinfo is refused when the setting is read.
   - **Arti qualification:** the pinned Arti answers `RESOLVE`, run in the release pipeline before the setting ships.
   - **Onion:** `.onion` and `/onion3` targets in `direct` mode open no socket.
 - **Live:** `ipfs:native:smoke` re-pointed at the service, with `/ipns/ipfs.tech/` and #102's fan-out of 48 concurrent requests and no `gateway_busy`.
