@@ -49,7 +49,7 @@ pub use io::{
     VerifiedOp,
 };
 pub use logs::{CapReader, RangeEntry, Ranker};
-pub use machine::{Call, Emitted, Machine, Reply, StateTables, Success};
+pub use machine::{Call, Emitted, Machine, OverBudget, Reply, Reservation, StateTables, Success};
 pub use read::{COLIBRI_FAILED, MYOTIS_FAILED, ReadOptions};
 pub use route::RouteState;
 pub use send::BroadcastOutcome;
