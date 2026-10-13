@@ -256,12 +256,43 @@ struct Queued {
     /// The machine's id of that chain request: once it has replied, the
     /// request never goes (57-M2).
     owner: Option<u64>,
-    /// The latest it may start: past it, it completes here unsent. An
-    /// exchange's own time (what is left of it goes as `deadline_ms`); a
-    /// Myotis broadcast's attempt cutoff, 10 s before its request's
-    /// deadline (design 0005, Deadlines). `None` for a Myotis read, which
-    /// main runs whole while its request runs.
+    /// An exchange's own deadline (Direct's, Blockscout's, Colibri's): the
+    /// machine's own timer for it ends then. `None` for a Myotis
+    /// operation, which main runs whole while its request runs.
+    own: Option<Ms>,
+    /// When it expires here, unsent, if it is still waiting: its own
+    /// deadline, or for a transaction sent (a broadcast's attempt, Direct
+    /// or Myotis) its broadcast's attempt cutoff, 10 s before the deadline,
+    /// if earlier (design 0005, Deadlines). It expires before a timer due
+    /// at the same instant fires.
     until: Option<Ms>,
+    /// Its chain request's deadline. The machine's own timer for that ends
+    /// the request, and the request's waiting I/O retires.
+    deadline: Option<Ms>,
+}
+
+impl Queued {
+    /// Whether it may still start at `now` ([`Requests::send`]): not at or
+    /// after its own deadline, its broadcast's attempt cutoff or its chain
+    /// request's deadline, whichever comes first. Its `deadline_ms` is
+    /// what is left of the earlier of its own deadline and its request's.
+    fn start(&self, now: Ms) -> Start {
+        if earliest(self.until, self.deadline).is_some_and(|latest| latest <= now) {
+            return Start::Late;
+        }
+        match earliest(self.own, self.deadline) {
+            Some(end) => Start::Within(end.saturating_sub(now)),
+            None => Start::Anytime,
+        }
+    }
+}
+
+/// The earlier of two times, either of which may not be set.
+fn earliest(a: Option<Ms>, b: Option<Ms>) -> Option<Ms> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 /// A request from main the machine is running.
@@ -271,6 +302,9 @@ struct Caller {
     /// For the outcome's log line: never an origin, address or message.
     chain_id: u64,
     method: &'static str,
+    /// Its deadline, as the machine counts it: its I/O never starts at or
+    /// after it.
+    deadline: Ms,
     /// A broadcast's attempt cutoff: no attempt starts at or after it.
     cutoff: Option<Ms>,
 }
@@ -515,18 +549,20 @@ impl Chain {
                     return self.error(id, invalid());
                 };
                 let bounds = self.machine.bounds();
-                // When its attempts stop (design 0005, Deadlines), from its
-                // arrival as the machine counts its deadline.
-                let cutoff = matches!(call, Call::Broadcast { .. }).then(|| {
-                    self.machine
-                        .now()
-                        .saturating_add(deadline_ms.min(bounds.deadline_ms))
-                        .saturating_sub(bounds.reconcile_ms)
-                });
+                // Its deadline, from its arrival, as the machine counts it,
+                // and when a broadcast's attempts stop (design 0005,
+                // Deadlines).
+                let deadline = self
+                    .machine
+                    .now()
+                    .saturating_add(deadline_ms.min(bounds.deadline_ms));
+                let cutoff = matches!(call, Call::Broadcast { .. })
+                    .then(|| deadline.saturating_sub(bounds.reconcile_ms));
                 let caller = Caller {
                     id,
                     chain_id: call_chain(&call),
                     method: label(&call),
+                    deadline,
                     cutoff,
                 };
                 let call = self.machine.submit(call, Some(deadline_ms));
@@ -691,23 +727,34 @@ impl Chain {
                     request,
                     ..
                 } => {
-                    let until = match &request {
+                    let caller = owner.and_then(|owner| self.callers.get(&owner));
+                    let own = match &request {
                         Request::Rpc { deadline_ms, .. }
                         | Request::Blockscout { deadline_ms, .. }
                         | Request::Verified(VerifiedOp::Colibri { deadline_ms, .. }) => {
                             Some(at.saturating_add(*deadline_ms))
                         }
-                        Request::Verified(VerifiedOp::MyotisBroadcast { .. }) => owner
-                            .and_then(|owner| self.callers.get(&owner))
-                            .and_then(|caller| caller.cutoff),
-                        Request::Verified(VerifiedOp::MyotisRead { .. }) => None,
+                        Request::Verified(
+                            VerifiedOp::MyotisBroadcast { .. } | VerifiedOp::MyotisRead { .. },
+                        ) => None,
                     };
+                    // A transaction is sent only before its broadcast's
+                    // attempt cutoff; reconciliation reads run on to the
+                    // deadline.
+                    let cutoff = if request.sends_transaction() {
+                        caller.and_then(|caller| caller.cutoff)
+                    } else {
+                        None
+                    };
+                    let deadline = caller.map(|caller| caller.deadline);
                     self.queued.push_back(Queued {
                         io,
                         request,
                         generation: generation.unwrap_or(0),
                         owner,
-                        until,
+                        own,
+                        until: earliest(own, cutoff),
+                        deadline,
                     });
                 }
                 Effect::Cancel { id: io, .. } => {
@@ -744,8 +791,10 @@ impl Chain {
     /// serialized), so what came due meanwhile, a queued request's expiry
     /// or a timer, is processed first. Then each request's frame is made,
     /// and only then, as it takes its slot under the gate's lock, is its
-    /// time read again: past its latest start, it never goes; otherwise its
-    /// `deadline_ms` is what is left at that reading ([`Requests::send`]).
+    /// time read again: past its latest start (its own deadline, its chain
+    /// request's, or for a transaction its broadcast's attempt cutoff), it
+    /// never goes; otherwise its `deadline_ms` is what is left at that
+    /// reading ([`Requests::send`], [`Queued::start`]).
     fn dispatch(&mut self) -> Result<bool, Stop> {
         self.advance()?;
         let mut settled = false;
@@ -772,13 +821,7 @@ impl Chain {
                     }
                     frame
                 },
-                || match queued.until {
-                    Some(until) => match until.checked_sub(clock.now()) {
-                        Some(left) if left > 0 => Start::Within(left),
-                        _ => Start::Late,
-                    },
-                    None => Start::Anytime,
-                },
+                || queued.start(clock.now()),
             );
             match sent {
                 Dispatch::Sent(id) => {
@@ -793,10 +836,18 @@ impl Chain {
                     settled = true;
                 }
                 // Its time ran out since the machine was brought to now:
-                // brought there again, it expires in time order, unsent. The
-                // clock never goes back, so it is due there.
+                // brought there again, it expires in time order, unsent, or
+                // its chain request's deadline ends the request and it
+                // retires. The clock never goes back, so one is due there.
                 Dispatch::Late => {
                     self.advance()?;
+                    // The machine counts that deadline as this thread does;
+                    // were it ever later, the request goes unsent all the
+                    // same.
+                    if self.queued.front().is_some_and(|q| q.io == io) {
+                        self.queued.pop_front();
+                        self.machine.complete(io, unsent(kind));
+                    }
                     settled = true;
                 }
                 // The core is exiting, main holds all it takes, or the

@@ -630,7 +630,10 @@ fn the_overall_deadline() {
     let started = Instant::now();
     core.send(&request(3, "chain.request", params.clone()));
     let held = core.recv();
-    assert!(held["params"]["deadline_ms"].as_u64().unwrap() > 300);
+    // The exchange's own 60 s is capped by what is left of the read's
+    // (design 0005, Deadlines).
+    let left = held["params"]["deadline_ms"].as_u64().unwrap();
+    assert!((1..=300).contains(&left), "{held}");
     // The exchange is cancelled and the read replies `deadline`.
     let first = core.recv();
     let elapsed = started.elapsed();

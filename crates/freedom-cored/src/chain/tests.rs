@@ -1788,6 +1788,148 @@ fn a_requests_deadline_is_written_from_the_reading_it_starts_on() {
     assert_eq!(sent[0]["params"]["deadline_ms"], until - 1_329);
 }
 
+/// The clock moves to `to` as the next request's frame is made.
+fn the_clock_moves_as_a_frame_is_made(t: &mut Test, to: u64) {
+    let clock = std::rc::Rc::clone(&t.clock);
+    t.chain.on_frame = Some(Box::new(move || clock.set(to)));
+}
+
+/// The `eth_sendRawTransaction` exchanges among `frames`.
+fn sends(frames: &[Value]) -> usize {
+    requests(frames)
+        .into_iter()
+        .filter(|f| f["method"] == "shell.rpc")
+        .filter(|f| {
+            let body: Value = serde_json::from_str(f["params"]["body"].as_str().unwrap()).unwrap();
+            body["method"] == "eth_sendRawTransaction"
+        })
+        .count()
+}
+
+#[test]
+fn a_direct_attempt_never_starts_past_its_broadcasts_cutoff() {
+    // Daemon re-check of PR #57, MEDIUM (a): a Direct attempt's own
+    // exchange runs 5 s, but no transaction is sent at or after the
+    // broadcast's attempt cutoff, 200 ms here. The cutoff passes while
+    // its frame is made.
+    let mut t = test_with(Bounds::default(), usize::MAX, 1, true);
+    t.configure(json!([chain_snapshot(&["direct"], &["a"])]));
+    let held = occupy(&t);
+    t.call(
+        3,
+        "chain.broadcast",
+        &json!({ "chain_id": 1, "raw": "0x01", "deadline_ms": 10_200 }),
+    );
+    assert!(t.chain.queued[0].request.sends_transaction());
+    assert!(t.chain.queued[0].own.unwrap() > 231);
+    t.at(199);
+    the_clock_moves_as_a_frame_is_made(&mut t, 231);
+    assert_eq!(t.chain.requests.answered(held), Some(Owner::Naming));
+    assert!(t.chain.flush().is_ok());
+    let frames = t.written();
+    assert_eq!(sends(&frames), 0, "sent past the cutoff");
+    // It never went: the broadcast is not sent, and the slot is free.
+    let reply = frames.iter().find(|f| f["id"] == 3).unwrap();
+    assert_eq!(reply["error"]["data"]["outcome"], "not_sent", "{reply}");
+    assert!(t.chain.queued.is_empty());
+    let free = occupy(&t);
+    assert_eq!(t.chain.requests.answered(free), Some(Owner::Naming));
+}
+
+#[test]
+fn an_exchange_never_starts_past_its_reads_deadline() {
+    // MEDIUM (b): the exchange's own deadline is later, but its read's
+    // ends at 200 ms, passing while the frame is made. The read replies
+    // `deadline`; the exchange never goes.
+    let mut t = test_with(Bounds::default(), usize::MAX, 1, true);
+    t.configure(json!([chain_snapshot(&["direct"], &["a"])]));
+    let held = occupy(&t);
+    let (id, mut params) = read(3, "eth_blockNumber", json!([]));
+    params["deadline_ms"] = json!(200);
+    t.call(id, "chain.request", &params);
+    assert!(t.chain.queued[0].own.unwrap() > 231);
+    assert_eq!(t.chain.queued[0].deadline, Some(200));
+    t.at(199);
+    the_clock_moves_as_a_frame_is_made(&mut t, 231);
+    assert_eq!(t.chain.requests.answered(held), Some(Owner::Naming));
+    assert!(t.chain.flush().is_ok());
+    let frames = t.written();
+    assert!(requests(&frames).is_empty(), "{frames:?}");
+    let reply = frames.iter().find(|f| f["id"] == 3).unwrap();
+    assert_eq!(reply["error"]["code"], "deadline", "{reply}");
+    assert!(t.chain.queued.is_empty());
+    let free = occupy(&t);
+    assert_eq!(t.chain.requests.answered(free), Some(Owner::Naming));
+}
+
+#[test]
+fn a_myotis_read_never_starts_past_its_reads_deadline() {
+    // MEDIUM (c): a Myotis read's operation has no deadline of its own,
+    // but its read's ends at 200 ms, passing while its near-one-frame
+    // call is made into a frame. It never goes, the read replies
+    // `deadline`, and Myotis's one slot is free for the next read.
+    let mut t = test_with(Bounds::default(), usize::MAX, 2, true);
+    let mut config = chain_snapshot(&["myotis"], &[]);
+    config["myotis"] = json!(true);
+    t.configure(json!([config]));
+    t.call(
+        2,
+        "chain.availability",
+        &json!({ "chain_id": 1, "ready": true }),
+    );
+    let held = occupy(&t);
+    let other = occupy(&t);
+    let address = "0x1111111111111111111111111111111111111111";
+    let data = format!("0x{}", "ab".repeat(450_000));
+    let (id, mut params) = read(
+        3,
+        "eth_call",
+        json!([{ "to": address, "data": data }, "latest"]),
+    );
+    params["deadline_ms"] = json!(200);
+    t.call(id, "chain.request", &params);
+    assert!(matches!(
+        t.chain.queued[0].request,
+        Request::Verified(VerifiedOp::MyotisRead { .. })
+    ));
+    assert_eq!(t.chain.queued[0].deadline, Some(200));
+    t.at(199);
+    the_clock_moves_as_a_frame_is_made(&mut t, 231);
+    assert_eq!(t.chain.requests.answered(held), Some(Owner::Naming));
+    assert!(t.chain.flush().is_ok());
+    let frames = t.written();
+    let sent = verified(&frames);
+    assert!(sent.is_empty(), "{} sent past the deadline", sent.len());
+    let reply = frames.iter().find(|f| f["id"] == 3).unwrap();
+    assert_eq!(reply["error"]["code"], "deadline", "{reply}");
+    assert!(t.chain.queued.is_empty());
+    // The next read's operation goes at once.
+    t.chain.on_frame = None;
+    assert_eq!(t.chain.requests.answered(other), Some(Owner::Naming));
+    let (next, params) = read(4, "eth_getBalance", json!([address, "latest"]));
+    t.call(next, "chain.request", &params);
+    assert_eq!(verified(&t.written()).len(), 1);
+}
+
+#[test]
+fn a_request_late_by_this_threads_count_never_goes_whatever_the_machine_says() {
+    // Were the machine ever to count a request's deadline later than this
+    // thread does, its I/O found late at its slot still never goes, and
+    // the thread doesn't spin on it.
+    let mut t = test_with(Bounds::default(), usize::MAX, 1, true);
+    t.configure(json!([chain_snapshot(&["direct"], &["a"])]));
+    let held = occupy(&t);
+    let (id, params) = read(3, "eth_blockNumber", json!([]));
+    t.call(id, "chain.request", &params);
+    t.chain.queued[0].deadline = Some(200);
+    t.at(199);
+    the_clock_moves_as_a_frame_is_made(&mut t, 231);
+    assert_eq!(t.chain.requests.answered(held), Some(Owner::Naming));
+    assert!(t.chain.flush().is_ok());
+    assert!(requests(&t.written()).is_empty());
+    assert!(t.chain.queued.is_empty());
+}
+
 #[test]
 fn replies_are_checked_in_place() {
     // R3-M2: names and values stay raw JSON; an escaped name, which
