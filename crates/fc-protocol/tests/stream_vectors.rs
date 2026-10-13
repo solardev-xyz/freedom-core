@@ -473,6 +473,10 @@ fn sender() {
                 service.sender.control_entries() <= 3 * service.sender.live(),
                 "{at}: the control queue is bounded by the live requests"
             );
+            assert!(
+                service.sender.rotation_entries() <= service.sender.live(),
+                "{at}: the writer's rotation is bounded by the live requests"
+            );
         }
     }
 }

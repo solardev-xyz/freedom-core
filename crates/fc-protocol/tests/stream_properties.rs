@@ -494,6 +494,7 @@ impl Pipe {
         assert!(self.sender.held() <= self.data_cap);
         assert!(self.sender.held_capacity() <= self.sender.held() + self.sender.live() * (8 << 10));
         assert!(self.sender.control_entries() <= 3 * self.sender.live());
+        assert!(self.sender.rotation_entries() <= self.sender.live());
         assert!(self.receiver.ring_bytes() <= self.receiver.outstanding() * WINDOW);
         for req in &self.reqs {
             if let Some(info) = self.receiver.info(req.id) {

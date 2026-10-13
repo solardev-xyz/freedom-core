@@ -957,6 +957,58 @@
       }
     },
     {
+      "id": "end-overlong-from-main",
+      "rule": "the payload length is checked against the kind before anything else, direction included",
+      "side": "sender",
+      "input": [
+        {
+          "hex": "0000000a03000000000000002a00"
+        }
+      ],
+      "expect": {
+        "error": "stream_length"
+      }
+    },
+    {
+      "id": "data-empty-from-main",
+      "rule": "the payload length is checked against the kind before anything else, direction included",
+      "side": "sender",
+      "input": [
+        {
+          "hex": "0000000902000000000000002a"
+        }
+      ],
+      "expect": {
+        "error": "data_empty"
+      }
+    },
+    {
+      "id": "credit-short-from-the-service",
+      "rule": "the payload length is checked against the kind before anything else, direction included",
+      "side": "receiver",
+      "input": [
+        {
+          "hex": "0000000c05000000000000002a000100"
+        }
+      ],
+      "expect": {
+        "error": "stream_length"
+      }
+    },
+    {
+      "id": "abort-overlong-from-main",
+      "rule": "the payload length is checked against the kind before anything else, direction included",
+      "side": "sender",
+      "input": [
+        {
+          "hex": "0000040a04"
+        }
+      ],
+      "expect": {
+        "error": "stream_length"
+      }
+    },
+    {
       "id": "core-refuses-kind-2",
       "rule": "freedom-cored's connections never grant stream",
       "side": "core",
@@ -7201,6 +7253,2493 @@
               }
             }
           }
+        }
+      ]
+    },
+    {
+      "id": "cancel-cycles-with-the-writer-busy",
+      "rule": "repeated control-only cancels and aborts while another stream waits: each terminated stream leaves the writer's schedule",
+      "steps": [
+        {
+          "do": [
+            "request",
+            40
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            40,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              40
+            ]
+          ]
+        },
+        {
+          "do": [
+            "request",
+            100
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            100,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            100,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              100
+            ]
+          ]
+        },
+        {
+          "do": [
+            "cancel",
+            100
+          ],
+          "expect": "cancelled"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              100,
+              "cancelled"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 1,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131071,
+                "queued": 1
+              },
+              "100": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            101
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            101,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            101,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              101
+            ]
+          ]
+        },
+        {
+          "do": [
+            "abort",
+            101,
+            "internal"
+          ],
+          "expect": "ok"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              101,
+              "internal"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 2,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131070,
+                "queued": 2
+              },
+              "101": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            102
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            102,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            102,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              102
+            ]
+          ]
+        },
+        {
+          "do": [
+            "cancel",
+            102
+          ],
+          "expect": "cancelled"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              102,
+              "cancelled"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 3,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131069,
+                "queued": 3
+              },
+              "102": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            103
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            103,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            103,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              103
+            ]
+          ]
+        },
+        {
+          "do": [
+            "abort",
+            103,
+            "internal"
+          ],
+          "expect": "ok"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              103,
+              "internal"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 4,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131068,
+                "queued": 4
+              },
+              "103": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            104
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            104,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            104,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              104
+            ]
+          ]
+        },
+        {
+          "do": [
+            "cancel",
+            104
+          ],
+          "expect": "cancelled"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              104,
+              "cancelled"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 5,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131067,
+                "queued": 5
+              },
+              "104": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            105
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            105,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            105,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              105
+            ]
+          ]
+        },
+        {
+          "do": [
+            "abort",
+            105,
+            "internal"
+          ],
+          "expect": "ok"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              105,
+              "internal"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 6,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131066,
+                "queued": 6
+              },
+              "105": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            106
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            106,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            106,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              106
+            ]
+          ]
+        },
+        {
+          "do": [
+            "cancel",
+            106
+          ],
+          "expect": "cancelled"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              106,
+              "cancelled"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 7,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131065,
+                "queued": 7
+              },
+              "106": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            107
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            107,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            107,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              107
+            ]
+          ]
+        },
+        {
+          "do": [
+            "abort",
+            107,
+            "internal"
+          ],
+          "expect": "ok"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              107,
+              "internal"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 8,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131064,
+                "queued": 8
+              },
+              "107": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            108
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            108,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            108,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              108
+            ]
+          ]
+        },
+        {
+          "do": [
+            "cancel",
+            108
+          ],
+          "expect": "cancelled"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              108,
+              "cancelled"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 9,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131063,
+                "queued": 9
+              },
+              "108": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            109
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            109,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            109,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              109
+            ]
+          ]
+        },
+        {
+          "do": [
+            "abort",
+            109,
+            "internal"
+          ],
+          "expect": "ok"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              109,
+              "internal"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 10,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131062,
+                "queued": 10
+              },
+              "109": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            110
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            110,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            110,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              110
+            ]
+          ]
+        },
+        {
+          "do": [
+            "cancel",
+            110
+          ],
+          "expect": "cancelled"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              110,
+              "cancelled"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 11,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131061,
+                "queued": 11
+              },
+              "110": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            111
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            111,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            111,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              111
+            ]
+          ]
+        },
+        {
+          "do": [
+            "abort",
+            111,
+            "internal"
+          ],
+          "expect": "ok"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              111,
+              "internal"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 12,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131060,
+                "queued": 12
+              },
+              "111": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            112
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            112,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            112,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              112
+            ]
+          ]
+        },
+        {
+          "do": [
+            "cancel",
+            112
+          ],
+          "expect": "cancelled"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              112,
+              "cancelled"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 13,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131059,
+                "queued": 13
+              },
+              "112": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            113
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            113,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            113,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              113
+            ]
+          ]
+        },
+        {
+          "do": [
+            "abort",
+            113,
+            "internal"
+          ],
+          "expect": "ok"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              113,
+              "internal"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 14,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131058,
+                "queued": 14
+              },
+              "113": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            114
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            114,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            114,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              114
+            ]
+          ]
+        },
+        {
+          "do": [
+            "cancel",
+            114
+          ],
+          "expect": "cancelled"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              114,
+              "cancelled"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 15,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131057,
+                "queued": 15
+              },
+              "114": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            115
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            115,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            115,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              115
+            ]
+          ]
+        },
+        {
+          "do": [
+            "abort",
+            115,
+            "internal"
+          ],
+          "expect": "ok"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              115,
+              "internal"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 16,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131056,
+                "queued": 16
+              },
+              "115": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            116
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            116,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            116,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              116
+            ]
+          ]
+        },
+        {
+          "do": [
+            "cancel",
+            116
+          ],
+          "expect": "cancelled"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              116,
+              "cancelled"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 17,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131055,
+                "queued": 17
+              },
+              "116": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            117
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            117,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            117,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              117
+            ]
+          ]
+        },
+        {
+          "do": [
+            "abort",
+            117,
+            "internal"
+          ],
+          "expect": "ok"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              117,
+              "internal"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 18,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131054,
+                "queued": 18
+              },
+              "117": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            118
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            118,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            118,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              118
+            ]
+          ]
+        },
+        {
+          "do": [
+            "cancel",
+            118
+          ],
+          "expect": "cancelled"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              118,
+              "cancelled"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 19,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131053,
+                "queued": 19
+              },
+              "118": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            119
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            119,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            119,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              119
+            ]
+          ]
+        },
+        {
+          "do": [
+            "abort",
+            119,
+            "internal"
+          ],
+          "expect": "ok"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              119,
+              "internal"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 20,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131052,
+                "queued": 20
+              },
+              "119": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            120
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            120,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            120,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              120
+            ]
+          ]
+        },
+        {
+          "do": [
+            "cancel",
+            120
+          ],
+          "expect": "cancelled"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              120,
+              "cancelled"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 21,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131051,
+                "queued": 21
+              },
+              "120": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            121
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            121,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            121,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              121
+            ]
+          ]
+        },
+        {
+          "do": [
+            "abort",
+            121,
+            "internal"
+          ],
+          "expect": "ok"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              121,
+              "internal"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 22,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131050,
+                "queued": 22
+              },
+              "121": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            122
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            122,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            122,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              122
+            ]
+          ]
+        },
+        {
+          "do": [
+            "cancel",
+            122
+          ],
+          "expect": "cancelled"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              122,
+              "cancelled"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 23,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131049,
+                "queued": 23
+              },
+              "122": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            123
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            123,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            123,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              123
+            ]
+          ]
+        },
+        {
+          "do": [
+            "abort",
+            123,
+            "internal"
+          ],
+          "expect": "ok"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              123,
+              "internal"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 24,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131048,
+                "queued": 24
+              },
+              "123": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            124
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            124,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            124,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              124
+            ]
+          ]
+        },
+        {
+          "do": [
+            "cancel",
+            124
+          ],
+          "expect": "cancelled"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              124,
+              "cancelled"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 25,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131047,
+                "queued": 25
+              },
+              "124": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            125
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            125,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            125,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              125
+            ]
+          ]
+        },
+        {
+          "do": [
+            "abort",
+            125,
+            "internal"
+          ],
+          "expect": "ok"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              125,
+              "internal"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 26,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131046,
+                "queued": 26
+              },
+              "125": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            126
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            126,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            126,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              126
+            ]
+          ]
+        },
+        {
+          "do": [
+            "cancel",
+            126
+          ],
+          "expect": "cancelled"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              126,
+              "cancelled"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 27,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131045,
+                "queued": 27
+              },
+              "126": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            127
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            127,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            127,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              127
+            ]
+          ]
+        },
+        {
+          "do": [
+            "abort",
+            127,
+            "internal"
+          ],
+          "expect": "ok"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              127,
+              "internal"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 28,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131044,
+                "queued": 28
+              },
+              "127": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            128
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            128,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            128,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              128
+            ]
+          ]
+        },
+        {
+          "do": [
+            "cancel",
+            128
+          ],
+          "expect": "cancelled"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              128,
+              "cancelled"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 29,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131043,
+                "queued": 29
+              },
+              "128": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            129
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            129,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            129,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              129
+            ]
+          ]
+        },
+        {
+          "do": [
+            "abort",
+            129,
+            "internal"
+          ],
+          "expect": "ok"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              129,
+              "internal"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 30,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131042,
+                "queued": 30
+              },
+              "129": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            130
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            130,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            130,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              130
+            ]
+          ]
+        },
+        {
+          "do": [
+            "cancel",
+            130
+          ],
+          "expect": "cancelled"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              130,
+              "cancelled"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 31,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131041,
+                "queued": 31
+              },
+              "130": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "request",
+            131
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            131,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            131,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "do": [
+            "push",
+            40,
+            1
+          ],
+          "expect": {
+            "taken": 1
+          }
+        },
+        {
+          "write_some": [
+            [
+              "head",
+              131
+            ]
+          ]
+        },
+        {
+          "do": [
+            "abort",
+            131,
+            "internal"
+          ],
+          "expect": "ok"
+        },
+        {
+          "write_some": [
+            [
+              "abort",
+              131,
+              "internal"
+            ]
+          ]
+        },
+        {
+          "check": {
+            "held": 32,
+            "streams": {
+              "40": {
+                "live": true,
+                "room": 131040,
+                "queued": 32
+              },
+              "131": {
+                "live": false,
+                "room": null,
+                "queued": null
+              }
+            }
+          }
+        },
+        {
+          "write": [
+            [
+              "data",
+              40,
+              0,
+              32
+            ]
+          ]
         }
       ]
     }

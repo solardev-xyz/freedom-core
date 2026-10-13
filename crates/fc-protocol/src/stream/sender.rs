@@ -39,7 +39,9 @@
 //! stream's FIFO is a chain of 4 KiB blocks, each freed once it is written,
 //! so the storage follows the bytes queued: at most two blocks more per
 //! stream with bytes queued, and nothing for a drained one, however the
-//! pushes and frames were cut. The control queue holds at most three entries per live
+//! pushes and frames were cut. The writer's rotation holds each open
+//! stream at most once, and only while it has something to write: an abort
+//! takes its stream out. The control queue holds at most three entries per live
 //! request: its head, its abort, and the `cancelled` reply that a cancel
 //! put in their place. Entries a cancel made stale are skipped when they
 //! come up, and all of a request's entries come up before its record goes.
@@ -341,6 +343,7 @@ impl Sender {
             }
             State::Open(body) if body.abort.is_none() => {
                 self.held -= body.purge();
+                unschedule(&mut self.rotation, body, id);
                 body.abort = Some((AbortCode::Cancelled, CANCELLED_ABORT.to_vec()));
                 self.control.push_back((Control::Abort, id));
                 Ok(Cancel::Cancelled)
@@ -504,6 +507,7 @@ impl Sender {
             return Err(SendError::Gone);
         }
         self.held -= body.purge();
+        unschedule(&mut self.rotation, body, id);
         body.abort = Some((abort.code, json));
         self.control.push_back((Control::Abort, id));
         Ok(())
@@ -663,6 +667,12 @@ impl Sender {
             .sum()
     }
 
+    /// Streams in the writer's rotation: open streams with something to
+    /// write, each at most once, so never more than the live requests.
+    pub fn rotation_entries(&self) -> usize {
+        self.rotation.len()
+    }
+
     /// Control entries waiting, stale ones included: at most three per
     /// live request.
     pub fn control_entries(&self) -> usize {
@@ -731,6 +741,17 @@ fn body_of(
         return Err(SendError::Ended);
     }
     Ok((body, open))
+}
+
+/// Takes an aborted stream out of the writer's rotation: it has nothing
+/// left to write there, and its abort goes through the control queue.
+/// Without this, control traffic could keep the rotation from ever reaching
+/// a stale ID, and stale IDs would pile up.
+fn unschedule(rotation: &mut VecDeque<u64>, body: &mut Body, id: u64) {
+    if body.scheduled {
+        rotation.retain(|&scheduled| scheduled != id);
+        body.scheduled = false;
+    }
 }
 
 /// The abort a cancel writes on an open stream: [`Abort::cancelled`]'s JSON.
@@ -852,6 +873,38 @@ mod tests {
         assert!(fifo.is_empty() && fifo.blocks.is_empty());
         fifo.take(10, &mut out);
         assert_eq!(out.len(), bytes.len());
+    }
+
+    #[test]
+    fn control_only_cancel_cycles_leave_no_rotation_behind() {
+        // Each cycle schedules a stream and ends it through the control
+        // queue alone, while another stream keeps the writer busy, so the
+        // rotation is never drained between cycles.
+        let mut s = Sender::new();
+        let mut out = Vec::new();
+        s.request(1).unwrap();
+        s.head(1, b"{}".to_vec(), true).unwrap();
+        assert_eq!(s.next_frame(&mut out), Some(Written::Head { id: 1 }));
+        for id in 2..10_002 {
+            s.request(id).unwrap();
+            s.head(id, b"{}".to_vec(), true).unwrap();
+            assert_eq!(s.push(id, &[7]).unwrap(), 1);
+            assert_eq!(s.next_frame(&mut out), Some(Written::Head { id }));
+            // Stream 1 always has a byte waiting behind the cycles.
+            s.push(1, &[7]).unwrap();
+            if id % 2 == 0 {
+                assert_eq!(s.cancel(id), Ok(Cancel::Cancelled));
+            } else {
+                s.abort(id, &Abort::new(AbortCode::Internal, "x")).unwrap();
+            }
+            assert!(matches!(
+                s.next_frame(&mut out),
+                Some(Written::Abort { id: aborted, .. }) if aborted == id
+            ));
+            assert!(s.rotation_entries() <= s.live(), "cycle {id}");
+            assert_eq!(s.rotation_entries(), 1, "only stream 1 waits");
+        }
+        assert_eq!(s.live(), 1);
     }
 
     #[test]

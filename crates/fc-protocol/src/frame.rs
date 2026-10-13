@@ -14,9 +14,10 @@
 //! - `0x06`–`0x0F`: still reserved, and refused like every other kind.
 //!
 //! **A stream frame's payload length is checked against its kind at the
-//! header,** before any of its payload is read or allocated (design 0007,
-//! Frames): an end is exactly its 8-byte stream ID, a credit exactly 12
-//! bytes, a data frame 1 to 65 536 bytes after the ID, an abort 1 to 1024.
+//! header,** before anything else, its direction included, and before any
+//! of its payload is read or allocated (design 0007, Frames): an end is
+//! exactly its 8-byte stream ID, a credit exactly 12 bytes, a data frame 1
+//! to 65 536 bytes after the ID, an abort 1 to 1024.
 //!
 //! The decoder is sans-I/O: feed it whatever the pipe returned, take out
 //! complete frames. Each payload lands in its own exactly sized `Zeroizing`
@@ -109,16 +110,23 @@ impl Kinds {
         }
     }
 
-    /// Checks a header: `kind` against what the connection takes, then a
-    /// stream frame's payload length against its kind.
+    /// Checks a header: `kind` against what the connection takes; then, for
+    /// a stream frame, its payload length against its kind before anything
+    /// else (design 0007, Frames), and only then its direction.
     pub fn check(self, kind: u8, payload_len: usize) -> Result<(), FrameError> {
         match kind {
             KIND_JSON => Ok(()),
             KIND_FRAGMENT | KIND_LAST | KIND_BEGIN | KIND_CREDIT if self.fragments => Ok(()),
             KIND_DATA | KIND_END | KIND_ABORT | KIND_STREAM_CREDIT => match self.streams {
                 None => Err(FrameError::UnknownKind(kind)),
-                Some(side) if side.takes(kind) => stream::check_length(kind, payload_len),
-                Some(_) => Err(FrameError::Direction(kind)),
+                Some(side) => {
+                    stream::check_length(kind, payload_len)?;
+                    if side.takes(kind) {
+                        Ok(())
+                    } else {
+                        Err(FrameError::Direction(kind))
+                    }
+                }
             },
             _ => Err(FrameError::UnknownKind(kind)),
         }
@@ -484,9 +492,26 @@ mod tests {
         use crate::stream::Side;
         let main = Kinds::service(Side::Receiver);
         let service = Kinds::service(Side::Sender);
-        for kind in [KIND_DATA, KIND_END, KIND_ABORT] {
-            assert_eq!(service.check(kind, 9), Err(FrameError::Direction(kind)));
+        for (kind, len) in [(KIND_DATA, 9), (KIND_END, 8), (KIND_ABORT, 9)] {
+            assert_eq!(service.check(kind, len), Err(FrameError::Direction(kind)));
         }
+        // The length is checked against the kind first: a frame in the
+        // wrong direction with a wrong length is a length error.
+        assert_eq!(
+            service.check(KIND_END, 9),
+            Err(FrameError::StreamLength {
+                kind: KIND_END,
+                len: 9
+            })
+        );
+        assert_eq!(service.check(KIND_DATA, 8), Err(FrameError::EmptyData));
+        assert_eq!(
+            main.check(KIND_STREAM_CREDIT, 11),
+            Err(FrameError::StreamLength {
+                kind: KIND_STREAM_CREDIT,
+                len: 11
+            })
+        );
         assert_eq!(
             main.check(KIND_STREAM_CREDIT, 12),
             Err(FrameError::Direction(KIND_STREAM_CREDIT))

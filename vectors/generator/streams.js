@@ -187,6 +187,18 @@ function frameCases() {
   add('credit-from-the-service', 'credit sent by the service is a protocol error', 'receiver',
     [creditFrame(42, 1)], { error: 'stream_direction' });
 
+  // Both wrong: the length is checked against the kind before anything
+  // else, so a frame in the wrong direction with a wrong length is a length
+  // error.
+  add('end-overlong-from-main', 'the payload length is checked against the kind before anything else, direction included', 'sender',
+    [stream(KINDS.end, 42, [H([0])])], { error: 'stream_length' });
+  add('data-empty-from-main', 'the payload length is checked against the kind before anything else, direction included', 'sender',
+    [stream(KINDS.data, 42)], { error: 'data_empty' });
+  add('credit-short-from-the-service', 'the payload length is checked against the kind before anything else, direction included', 'receiver',
+    [stream(KINDS.credit, 42, [H([0, 1, 0])])], { error: 'stream_length' });
+  add('abort-overlong-from-main', 'the payload length is checked against the kind before anything else, direction included', 'sender',
+    [H(Buffer.concat([be32(1 + ID_BYTES + MAX_ABORT_JSON + 1), Buffer.from([KINDS.abort])]))], { error: 'stream_length' });
+
   // Kinds a connection doesn't take.
   for (const kind of [KINDS.data, KINDS.end, KINDS.abort, KINDS.credit]) {
     add(`core-refuses-kind-${kind}`, 'freedom-cored\'s connections never grant stream', 'core',
@@ -576,6 +588,20 @@ function senderCases() {
     steps.push(S.write(...ids.map((id) => W.abort(id, 'cancelled'))));
     steps.push(S.check(0, { 200: gone, 215: gone }));
     add('cancel-cycles-after-the-head', 'repeated cancels of open streams with a paused writer: each purge frees its data', steps);
+  }
+  {
+    // The writer takes only control frames between cycles, so it never
+    // reaches the streams: stream 40's data waits behind every cycle.
+    const steps = [S.request(40), S.head(40, true), S.writeSome(W.head(40))];
+    for (let k = 1; k <= 32; k += 1) {
+      const id = 99 + k;
+      const code = k % 2 ? 'cancelled' : 'internal';
+      steps.push(S.request(id), S.head(id, true), S.push(id, 1), S.push(40, 1), S.writeSome(W.head(id)));
+      steps.push(k % 2 ? S.cancel(id, 'cancelled') : S.abort(id, 'internal'));
+      steps.push(S.writeSome(W.abort(id, code)), S.check(k, { [id]: gone, 40: live(WINDOW - k, k) }));
+    }
+    steps.push(S.write(W.data(40, 0, 32)));
+    add('cancel-cycles-with-the-writer-busy', 'repeated control-only cancels and aborts while another stream waits: each terminated stream leaves the writer\'s schedule', steps);
   }
   return cases;
 }
