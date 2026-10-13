@@ -47,17 +47,23 @@ This design moves it into **its own supervised process, `freedom-ipfsd`**:
   - An `end` never overtakes its stream's data.
   - The reader never waits on the writer.
   - Main's existing admission (256 active fetches) bounds what main holds.
-- **The plan executor (#704) doesn't change.**
+- **The plan executor's contract (#704) keeps its shape.**
   - `ipfsBackend().request()` keeps its contract: a `Response` whose body is pulled with backpressure.
   - It becomes a client of the service instead of the add-on.
-  - The core and the plans don't change either: the backend reference stays `{ ipfs: "native", up }`.
+  - The handler gains a lease, which it releases on every exit, and a 503 `busy` for capacity, distinct from a node that isn't up.
+  - The core and the plans don't change: the backend reference stays `{ ipfs: "native", up }`.
 - **Private windows get memory-only nodes.**
   - One ephemeral process serves every private window, with one in-memory instance per private partition.
   - The instance starts on the partition's first request, inside `request()`.
+  - Readiness is per partition: an existing instance stays usable, and capacity is checked only when a partition needs a new one.
   - Nothing a private window loads reaches the profile's cache or the application's files. The instances partition caches and PeerIDs; they don't partition address spaces.
-- **Budgets are process-wide.** Retrieval admission, background queues and one memory budget span every instance in a process. Each budget names what it charges.
+- **Budgets are process-wide.**
+  - Retrieval admission, background queues and one memory budget span every instance in a process.
+  - Every accounted allocation reserves its bytes before it is made, and memory stores have a hard page cap.
+  - Admitted work that can't reserve waits for a bounded time, then ends with `busy`.
 - **Network policy becomes configuration, behind one gate.**
-  - `direct`, or `socks5` for all of the service's traffic. Under SOCKS, QUIC and the local DNS resolvers are off, and names go to the proxy.
+  - `direct`, or `socks5` for all of the service's traffic. Under SOCKS, QUIC and the local DNS resolvers are off.
+  - In both modes, a name is resolved, every answer is checked, and the connection is pinned to a checked address. Under SOCKS, names are resolved through the proxy (Tor's `RESOLVE`), and only onions are handed to it as names.
   - Every target is classified once (onion, IP literal or name) before any expansion. The policy is applied again after expansion, before each connection, and on every HTTP redirect hop.
   - By default, loopback, private and link-local targets learned from the network are refused, while configured endpoints are exempt.
   - freedom-ipfs has no hook for any of this today, so it needs upstream changes, [listed](#upstream-changes-in-freedom-ipfs) by file and line.
@@ -327,7 +333,11 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
   - Because IDs increase, recognizing it needs no table: an ID at or below the highest seen that isn't live is late.
 
 **Allocation bounds:**
-- **Main coalesces.** Received data is appended into owned buffers of 64 KiB per stream, never kept as one object per frame. A 128 KiB window therefore holds at most 3 buffers, whatever the frame sizes.
+- **Main keeps each stream in one ring of 128 KiB.**
+  - It is allocated at the stream's first data and freed at its end. Received data is copied into it, never kept as one object per frame.
+  - A `pull` copies up to 64 KiB out, into a fresh chunk that the consumer owns, and credits those bytes.
+  - Since `received − returned ≤ 128 KiB`, the ring never grows. Main's backing storage per stream is exactly the window, whatever the frame sizes.
+- **Main's decoder is counted separately.** It holds at most one partial frame (≤ 1 MiB plus its 5-byte header), and dispatches every complete frame as it decodes it.
 - **The service coalesces too.** A data frame carries as much of the stream's pending body as the window and the 64 KiB frame limit allow. A frame smaller than 4 KiB is written only when it is all that is pending, or all the credit allows.
 - **The reader's frame budget** (0001: 256 frames and 16 MiB not yet handled) bounds frames between the pipe and their stream.
 - **Retirement:** on a local cancel, main does all of these:
@@ -441,7 +451,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 | `stopped` | the instance is retired, unknown or stopping | `freedom-ipfs native node is not running` |
 | `deadline` | no head within `headers_ms` | `freedom-ipfs native request timeout` |
 | `cancelled` | main's `cancel` | `freedom-ipfs native request aborted` before the head; `…cancelled` for a body |
-| `busy` | admission or a budget is full | `freedom-ipfs native node is busy` (new) |
+| `busy` | admission is full, or a reservation can't be had in time ([Budgets](#budgets)) | `BackendBusy`, `freedom-ipfs native node is busy`, which the executor answers 503 (new) |
 | `internal` | a panic on the request's task | `freedom-ipfs native gateway error` |
 | `storage` | `ipfs.start`: the store won't open (`data.kind`) | the manager's `Failed to start freedom-ipfs native node` |
 | `protocol_mismatch` | `ipfs.hello` | a startup error; no restart |
@@ -452,7 +462,8 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
   - `cancelled`;
   - `internal`;
   - `body_stream_error` (upstream's code for a failing body);
-  - `stopped`.
+  - `stopped`;
+  - `busy`: the stream's next block couldn't reserve memory within 10 s.
 
   Main errors the body with `freedom-ipfs native request cancelled` for the first, and with today's `freedom-ipfs native read failed` for the others.
 - **Exit codes:**
@@ -475,7 +486,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 
 The 5 s health check calls `ipfs.stats`. `checkHealth()` stays synchronous, because `ipfsBackend()` calls it at admission. It reads a snapshot that is true while all of these hold:
 - the generation is live;
-- the instance is started;
+- the instance is started (for the persistent node; private partitions use [readiness per partition](#private-windows));
 - the last stats reply is under 15 s old.
 
 ## Budgets
@@ -491,27 +502,47 @@ Upstream's constants are per instance, and some limit bookkeeping rather than wo
   Work beyond them waits, under its request's deadline. Upstream's per-instance limits still apply inside them.
 - **Background queues:** an instance's background work (provider lookups, Bitswap wants, DHT queries started without a request) waits in a queue of at most 64 items per instance. When it is full, new background work is dropped, never request work.
   - Upstream's HTML prefetch and warm options stay off, as their defaults are.
-- **The memory budget,** one per process:
-  - **Persistent:** 128 MiB.
-  - **Ephemeral:** 384 MiB.
-  - **What it charges:**
-    - **memory stores:** SQLite's page use (`page_count × page_size`), which covers blocks and metadata both;
-    - **hot caches** and the gateway's small-body caches, at their configured sizes;
-    - **transient blocks:** bytes being fetched, verified or held for a stream, charged when a fetch begins at its upper bound (2 MiB for an HTTP provider block) and trued up on arrival;
-    - **pending replies:** heads waiting to be written, at their encoded size;
-    - **the writer's data queue:** 16 MiB.
-  - **What it doesn't charge:** the disk store's file, which upstream's `max_bytes` bounds on disk; and allocator and library overhead it can't see.
-- **What a store's `max_bytes` means:** a target for block data that drives LRU eviction, not a hard bound.
-  - Blocks that are retained while being streamed can't be evicted, so a store can pass its target until they are released.
-  - Metadata tables have their own rules: names are pruned to 128 rows, while provider and failing-provider records expire.
-  - The memory budget, not `max_bytes`, is the hard bound for memory stores. A private instance's 32 MiB is its block target. Its charge is its measured page use.
+- **The memory budget,** one per process: **192 MiB** for the persistent process and **448 MiB** for the ephemeral one.
+  - **It is enforced by reservation.** Every accounted allocation reserves its bytes from the budget before it is made, and releases them when it is freed.
+  - Reservations are atomic against one counter, so concurrent fetches and puts can't together pass the budget.
+  - Nothing is measured after the fact.
+- **Fixed reservations,** taken when an instance starts and held until its teardown ends:
+  - **its store:**
+    - A memory store is opened with `PRAGMA max_page_count`, so SQLite itself refuses growth past the reservation (`SQLITE_FULL`). A private instance reserves 36 MiB: its 32 MiB block target, plus 4 MiB for metadata and b-tree pages.
+    - A disk store reserves its page cache, set with `PRAGMA cache_size` to 8 MiB.
+  - **its caches:** the hot cache, the gateway's small-body cache (2 MiB) and the UnixFS metadata cache (1 MiB), each built with a fixed capacity and reserved at it.
+
+  An instance starts only if its fixed reservation fits.
+- **In all:**
+  - a private instance reserves 43 MiB (36 + 4 + 2 + 1), so eight reserve 344 MiB;
+  - the persistent instance reserves 27 MiB (8 + 16 + 2 + 1);
+  - with the writer's 16 MiB, that leaves 88 MiB of the ephemeral budget, and 149 MiB of the persistent one, for dynamic reservations.
+  - At 2 MiB per fetch, that is about 44 and 74 concurrent block fetches.
+- **Dynamic reservations:**
+  - **Transient blocks:**
+    - Before any block fetch, over HTTP or Bitswap, the fetch reserves the retriever's maximum block size (2 MiB). It trues the reservation down to the block's size when the block arrives.
+    - So the memory budget, not the 256-fetch admission, usually decides how many fetches run at once.
+  - **The transfer into a store:**
+    - A fetched block's put into a memory store is covered by the store's fixed reservation and its page cap. The block's transient reservation is released only once the put has completed or failed.
+    - A write that meets the page cap fails with `SQLITE_FULL`, whether it is a block, a name or a provider record, and that entry isn't cached. A block is still served, from its transient buffer.
+  - **Pending replies:** each head reserves its encoded size until it is written.
+  - **The writer's data queue:** 16 MiB, reserved at process start.
+- **When admitted work can't reserve:**
+  - **before its head,** it waits up to its remaining `headers_ms`, then answers `busy` (503);
+  - **after its head,** a stream's next block fetch waits up to 10 s, then the stream aborts with `busy`, a truncation;
+  - **background work** is dropped at once.
+- **What it doesn't charge:** the disk store's file, which lives on disk, not in memory; and allocator and library overhead it can't see.
+- **What a store's `max_bytes` means:** a target for block data that drives LRU eviction.
+  - On disk it bounds nothing hard. Retained blocks and metadata can pass it, and the file's size follows it only loosely.
+  - In memory, the hard bound is the page cap above, and `max_bytes` is the eviction target inside it. Blocks that are retained while being streamed can't be evicted, so when the cap is reached, new blocks go uncached rather than the store growing.
+  - Metadata tables have their own rules: names are pruned to 128 rows, while provider and failing-provider records expire. For memory stores, all of it sits inside the page cap.
 - **Under pressure:**
   1. new requests get `busy` (503);
   2. idle private instances are evicted first ([Private windows](#private-windows));
-  3. work already admitted runs on.
+  3. admitted work waits, or ends, as above.
 
   The process doesn't promise a bound on memory it can't account for. An OS-level limit is an [open question](#open-questions).
-- **Stopping instances** keep their charges until their teardown is complete.
+- **Stopping instances** keep their reservations until their teardown is complete.
 
 ## Main's side
 
@@ -519,7 +550,8 @@ Upstream's constants are per instance, and some limit bookkeeping rather than wo
 
 ```js
 ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
-                               request({ path, method, headers, signal, headersTimeoutMs }) → Promise<Response> }
+                               request({ path, method, headers, signal, headersTimeoutMs }) → Promise<Response>,
+                               release() }            // idempotent
 ```
 
 - **What changes:**
@@ -527,6 +559,24 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   - It captures the generation and instance ID ([Instance IDs](#instance-ids)).
   - A private partition gets its own instance, started inside `request()` ([Private windows](#private-windows)).
   - The core still sees only `ref`.
+- **The lease:**
+  - For a private partition, `ipfsBackend()` pins the partition's instance, or reserves a new one. It returns the pin as `release()`. For the persistent instance, `release()` does nothing.
+  - **The handler releases it in one place:** `dweb-handler.js` wraps its whole handling in a `finally` that calls `release()`, unless a body has been handed on. In that case the fetch's `onEnd` calls it.
+  - **That covers every exit:**
+    - a redirect plan, or an error plan (400, 404, 405, 415, 502, 503);
+    - a URL or header refusal;
+    - a failed lookup;
+    - a core that is unavailable or `busy`;
+    - admission's 503;
+    - an abort before the fetch;
+    - a rejected `request()`;
+    - the body's end, error or cancel.
+  - `release()` is idempotent, and `closeDwebSession(partition)` releases every lease the partition still holds, as a backstop.
+- **Capacity:**
+  - When a private partition needs a new instance and none can be reserved, `ipfsBackend()` throws `BackendBusy`.
+  - The handler answers it before planning, as it answers `AdmissionFull`: 503 `{ code: "busy", message: "Too many private windows are loading IPFS content" }`.
+  - Node readiness stays `ref.up`.
+- **The executor:** one change. A `BackendBusy` rejection from `request()` (the service's `busy`) becomes 503 `{ code: "busy" }`, as `AdmissionFull` does. Every other rejection is the 502 it is today.
 - **`request()`:**
   - **An already aborted signal** rejects at once. Nothing is sent, as today. So does a captured pair that has been retired.
   - **Otherwise** it sends `ipfs.request` with `headers_ms: headersTimeoutMs`, and registers one abort listener that sends `cancel`.
@@ -546,7 +596,8 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   - `freedom-cored`, `freedom-ipfsd` and 0008's `freedom-radicled` each configure their own instance of it.
   - `frame.js` accepts kinds `0x02`–`0x05` only on a connection whose handshake granted `stream`.
 - **Main's memory:**
-  - stream bytes are at most 256 active fetches × 128 KiB = 32 MiB, in at most three 64 KiB buffers per stream;
+  - stream storage is one 128 KiB ring per live stream: 32 MiB at 256 active fetches, which is both the live-byte window and the backing storage;
+  - the decoder adds at most one partial frame (≤ 1 MiB);
   - retiring streams hold no bytes;
   - this is separate from 0005's chain I/O pool.
 
@@ -560,27 +611,27 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
 - **What the instances guarantee, and what they don't:**
   - **They do partition:** each partition has its own store, caches and Bitswap PeerID, so nothing loaded in one is served from or timed against another's cache, or the profile's.
   - **They don't partition memory:** the ephemeral process is one address space and one compromise domain. Process separation is not an OS sandbox.
+- **Readiness is per partition** (`ipfsBackend({ partition })`):
+  - **`ref.up` is node readiness only:** the profile's IPFS is bundled and `RUNNING`, and the ephemeral process isn't stopped after three crashes. So a cold partition still gets a fetch plan.
+  - **A partition with a live or pending instance** pins it and uses it, however many instances are pinned.
+  - **A partition without one** needs a new instance, and only then is capacity checked. A slot is reserved if fewer than 8 instances exist, or if one of them is unpinned and can be evicted. The reservation is a pending instance, pinned by this request's lease.
+  - **No slot** means all 8 instances are pinned by other partitions. `ipfsBackend()` throws `BackendBusy`, and the handler answers 503 `busy`. That is distinct from the 503 of a node that isn't running ([Main's side](#mains-side)).
 - **The cold start runs inside `request()`:**
-  - **Readiness:** for a private partition, `ref.up` reports the manager's readiness, not the instance's. It is true while all of these hold:
-    - the profile's IPFS is bundled and `RUNNING`;
-    - the ephemeral process isn't stopped after three crashes;
-    - fewer than 8 instances are pinned.
-
-    So a cold partition still gets a fetch plan.
-  - **`request()` ensures the instance:** it spawns the ephemeral process if needed (with `ipfs.hello`), then sends `ipfs.start` for the partition's instance, then the request.
-    - All of it runs under the request's signal and its `headers_ms`. An abort or the deadline stops it, and the head deadline covers the start.
-    - Concurrent first requests from one partition share one start (single flight).
-- **Pinning:**
-  - A pin is taken on the partition's instance (or on its pending start) when `ipfsBackend()` captures it, and released when that request's work ends.
-  - So a pinned instance is held through planning, preparation and use.
-  - **Eviction picks only unpinned instances:** a ninth partition evicts the least recently used one with no pins. If all 8 are pinned, the new partition's `request()` rejects with `busy`, and main answers 503.
+  - It spawns the ephemeral process if needed (with `ipfs.hello`), then sends `ipfs.start` for the partition's instance, then the request.
+  - All of it runs under the request's signal and its `headers_ms`. An abort or the deadline stops it, and the head deadline covers the start.
+  - Concurrent first requests from one partition share one start (single flight).
+  - When the slot came from an eviction, the new instance's `ipfs.start` waits for the evicted one's teardown to release its reservations, within the same deadline.
+- **Pinning is the lease:**
+  - A pin is taken in `ipfsBackend()` and released by the handler on every exit ([Main's side](#mains-side)).
+  - So a pinned instance is held through planning, preparation and use, and never longer.
+  - **Eviction picks only unpinned instances:** the least recently used one with no pins.
 - **Fences:**
   - **Eviction and `closeDwebSession(partition)`** retire the instance's ID first, so every continuation that captured it fails before sending. Then comes the [teardown](#instances-and-their-teardown).
   - **A close during the cold start** cancels the start. The instance, if it came up, is torn down.
   - **When the last instance has stopped,** main sends `ipfs.shutdown`, and the process exits with everything it held.
 - **Bounds:**
   - at most 8 live instances;
-  - each has a 32 MiB block target and a hot cache of 4 MiB (an upstream option), under the process's 384 MiB [memory budget](#budgets).
+  - each has a 36 MiB page cap with a 32 MiB block target inside it, and a hot cache of 4 MiB (an upstream option), under the process's 448 MiB [memory budget](#budgets).
 - **What stays out of the application's files:**
   - `SqliteBlockStore::in_memory`, with `temp_store = MEMORY` ([upstream](#upstream-changes-in-freedom-ipfs)), so SQLite writes no temp files;
   - no data directory and no lock;
@@ -601,15 +652,18 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
 ### What can be honored
 
 - **`reqwest`:**
-  - SOCKS5 with remote name resolution (`socks5h://`), once its `socks` feature is on.
+  - SOCKS5, once its `socks` feature is on.
+    - With `socks5://` rather than `socks5h://`, the client resolves the name with its own resolver, which can be replaced (`ClientBuilder::dns_resolver`), and hands the proxy an IP.
+    - TLS SNI and `Host` still use the URL's name.
   - Every client must be built with an explicit proxy or with `no_proxy()`. Today none sets either (`ns:828`, `rt:1807`, `rv:11132`), so the environment decides.
   - A custom redirect policy can run a check on every hop before it is followed.
 - **libp2p 0.56:**
-  - It has no SOCKS transport. TCP, and WebSocket over TCP, can go through a small custom `Transport` over `tokio-socks`, which hands the proxy host names rather than addresses.
+  - It has no SOCKS transport. TCP, and WebSocket over TCP, can go through a small custom `Transport` over `tokio-socks`. Its `tor` feature also speaks Tor's `RESOLVE` extension.
   - **QUIC can't be proxied:** Tor carries TCP only, and Arti doesn't offer SOCKS5 `UDP ASSOCIATE`.
   - **libp2p's own resolver** (hickory, `ResolverConfig::cloudflare()`, plain DNS to 1.1.1.1 on port 53; `rt:1601`, `rv:8847`) must be off under a proxy.
   - **`/dnsaddr`** needs TXT records. Under a proxy they come from DoH through the proxied client, as Bitswap's address expansion already uses DoH (`rv:9435`).
   - An embedded Tor client (`arti-client`) is not used: Freedom already runs Arti, and a second Tor client in the service would duplicate it.
+- **Arti** answers Tor's SOCKS `RESOLVE` extension (command `0xF0`), resolving a name through the Tor network. A qualification test checks the pinned Arti's support before the setting ships ([The gate](#the-gate), *The SOCKS contract*).
 - **freedom-ipfs v0.4.5 honors none of this:**
   - the clients and transports are built inside the crates;
   - QUIC is always added (`rt:1597`, `rv:8825`);
@@ -621,11 +675,16 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
 - **`direct`, the default:** today's transports, behind [the gate](#the-gate). The environment's proxy variables no longer apply (deviation `env-proxy`).
 - **`socks5 { ip, port }`:** all of the service's traffic goes through the proxy.
   - **The endpoint is an IP literal,** so reaching the proxy needs no DNS. The service never resolves the proxy's name.
-  - **HTTP:** delegated routing, DoH and HTTP providers, all over `socks5h`. Names are resolved by the proxy, never locally.
+  - **Names:**
+    - They are resolved through the proxy with `RESOLVE`, never by a local resolver.
+    - Each answer passes [the gate](#the-gate), and the connection goes to a checked address, as an IP literal in SOCKS `CONNECT`.
+    - TLS SNI and HTTP `Host` keep the name.
+    - Only onions are handed to the proxy as names.
+  - **HTTP:** delegated routing, DoH and HTTP providers, all through the proxy this way.
   - **Bitswap:** TCP and WebSocket through the SOCKS transport. QUIC and hickory are off.
   - **Routing:** `delegated` by default, since the light DHT dials dozens of peers per query, each through Tor.
   - **Fails closed:**
-    - a proxy that is down fails the attempt, which gets upstream's 502 or 504;
+    - a proxy that is down, or one that refuses `RESOLVE`, fails the attempt, which gets upstream's 502 or 504;
     - nothing falls back to a direct socket;
     - a transport the proxy can't carry (QUIC, or any other non-TCP transport) is refused before any socket exists.
 - **Where the proxy comes from:**
@@ -659,13 +718,28 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   - multicast, broadcast and the documentation ranges.
 - **Onion targets:**
   - in `direct` mode, refused before any socket exists, as the session's onion gate refuses them (`OnionGateRefusal`);
-  - in `socks5` mode, handed to the proxy as names, never resolved locally.
+  - in `socks5` mode, handed to the proxy as names, never resolved locally. They are the one separately authorized case of a name the service doesn't resolve.
 
 **Where it is applied:**
 1. **Before expansion:** the original target is classified, and an onion or a refused literal stops here. Nothing is expanded or resolved for it.
 2. **After expansion:** every address that `/dnsaddr` or DNS expansion produces is classified and checked again.
-3. **Before each connection,** at the transport. In `direct` mode, every address a name resolves to is checked, and the connection goes only to one that passes. In `socks5` mode, the check runs on what is handed to the proxy: IP literals are checked, and names go unresolved.
+3. **Before each connection,** at the transport, in both modes alike:
+   - a name is resolved: locally in `direct` mode, through the proxy's `RESOLVE` in `socks5` mode;
+   - every address is checked;
+   - the connection is pinned to one that passed: `connect()` in `direct` mode, a SOCKS `CONNECT` to that IP literal in `socks5` mode.
+
+   A name whose answers change between checks can't move a connection, because the address that was checked is the address connected to. Each new connection resolves and checks again.
 4. **On every HTTP redirect hop:** the redirect policy runs the gate on the `Location` target before following it. That covers delegated routing, DoH and providers. A refused hop fails the attempt.
+
+**The SOCKS contract** (a decision):
+- **(a), chosen:**
+  - resolve ordinary names through the proxy;
+  - filter the answers;
+  - pin the chosen address for `CONNECT`, keeping SNI and `Host`.
+
+  The address policy is then the same promise in both modes, enforced by the service itself.
+- **(b), rejected:** delegate the policy to the proxy. Tor's exits refuse private destinations by default, but that is an exit operator's setting and Arti's configuration, neither of which the service can guarantee. And a SOCKS reply doesn't prove which address was connected.
+- **If the pinned Arti can't `RESOLVE`,** the setting doesn't ship until it can, unless the user accepts (b) as an explicit deviation ([Open questions](#open-questions)).
 
 **Redirect behavior** is part of parity:
 - v0.4.5's provider client follows no redirect (`rv:11136`), while its routing and DoH clients follow reqwest's default (`rt:1807`, `ns:828`).
@@ -700,12 +774,13 @@ Each is a pull request to freedom-ipfs, and none changes mobile's behavior by de
    1. **HTTP clients:**
       - a single constructor taking `Option<reqwest::Proxy>` and each client's redirect acceptance, which wraps every redirect in the gate (hop check 4);
       - it replaces the three `timeout_http_client` functions (`ns:828`, `rt:1807`, `rv:11132`) and calls `no_proxy()` when no proxy is given;
-      - it enables `reqwest`'s `socks` feature.
+      - it enables `reqwest`'s `socks` feature, and uses `socks5://` (never `socks5h://`) with the gate's resolver as the client's `dns_resolver`. That resolver resolves locally in `direct` mode and through `RESOLVE` in `socks5` mode, and returns only addresses that pass (check 3).
    2. **Errors instead of panics:** the three constructors `expect` today (`ns:833`, `rt:1812`, `rv:11138`). With a proxy their configuration can fail, so they must return an error.
    3. **DoH:** the endpoint and its client come from the policy, at `mob:2226` and `rv:9436`, `9484` and `9531`. DNSLink is already pluggable (`DnsTxtResolver`, `ns:53`); Bitswap's address expansion isn't. Expansion results pass through the gate (check 2).
    4. **Transports:**
       - `build_dht_swarm` (`rt:1588`), `build_bitswap_swarm` (`rv:8816`) and `cloudflare_websocket_transport` (`rv:8847`) take `quic: bool`, `dns: Hickory | None`, and `tcp: Direct | Socks5(addr)`;
-      - add a SOCKS5 `Transport` over `tokio-socks` (MIT) for `/ip4`, `/ip6`, `/dns*` and `/onion3` with `/tcp`, and for WebSocket on top of it;
+      - add a SOCKS5 `Transport` over `tokio-socks` (MIT, with its `tor` feature) for `/ip4`, `/ip6`, `/dns*` and `/onion3` with `/tcp`, and for WebSocket on top of it;
+      - it resolves `/dns*` names with `RESOLVE`, checks every answer, and `CONNECT`s to a checked IP literal. Only `/onion3` and onion names go to the proxy as names. The WebSocket layer above keeps the name for TLS;
       - in `direct` mode, the TCP and WebSocket transports resolve names themselves and check each address before connecting (check 3).
    5. **The gate:**
       - the classification and the address policy as one function, applied where candidates are chosen (`rt:1491`–`1525`, `rt:1767`–`1805`), after expansion, and at the dial sites (`rv:7765`, `rv:7949`, `rt:1044`);
@@ -717,6 +792,8 @@ Each is a pull request to freedom-ipfs, and none changes mobile's behavior by de
 5. **Store options:**
    - `temp_store = MEMORY` for `in_memory` stores;
    - a hot-cache size independent of `max_bytes` (today `min(max_bytes, 16 MiB)`, `st:609`), since a memory store holds the bytes twice;
+   - `max_page_count` and `cache_size` set by the host, so a memory store's growth is capped by SQLite itself;
+   - a write that meets the cap (`SQLITE_FULL`), whether a block, a name or a provider record, leaves that entry uncached and succeeds for the request;
    - its page use (`page_count × page_size`) as a metric.
 6. **Build info:**
    - `buildInfoJson` reads `FREEDOM_IPFS_GIT_COMMIT` and `FREEDOM_IPFS_GIT_DESCRIBE` (`mob:1333`), but the packaging script sets `FREEDOM_IPFS_BUILD_GIT_*`, so both fields are always null.
@@ -728,9 +805,13 @@ Each is a pull request to freedom-ipfs, and none changes mobile's behavior by de
    - **`Instance::shutdown()`,** which runs steps 2–4 of the [teardown](#instances-and-their-teardown) and reports whether quiescence was reached.
 8. **Shared limiters and accounting:**
    - the builder takes process-wide limiters for block fetches, HTTP provider requests, Bitswap connections and DHT queries;
-   - a byte budget for transient blocks, charged before a fetch begins;
-   - the background queue bound of 64;
-   - callbacks the service uses to charge caches and stores to its [memory budget](#budgets).
+   - **a reservation API:**
+     - `reserve(bytes)` before every accounted allocation, waiting or failing as the [budget](#budgets) says;
+     - a transfer when a fetched block is put into a store, releasing the transient reservation only after the put;
+     - release on drop;
+   - **a maximum block size** for every block fetch (2 MiB), on the Bitswap path as on the HTTP one, reserved before the fetch begins;
+   - **caches built with a fixed capacity:** the hot cache, the small-body cache and the UnixFS metadata cache, reserved at that capacity;
+   - **the background queue bound** of 64.
 
 ## Where the code lives
 
@@ -816,9 +897,28 @@ As 0006's 4.7 did, before anything moves:
   - concurrent first loads in one partition: one start;
   - a ninth partition evicting during another's planning: only unpinned instances go;
   - a close during the cold start;
+  - **all 8 instances pinned:**
+    - another request from each of the 8 partitions succeeds;
+    - a ninth partition gets 503 `busy`, while `ref.up` stays true;
+    - once one lease ends, the ninth succeeds by evicting that instance;
   - exhaustion across all 8 instances: `busy`, and the budget holds;
   - a panic whose payload holds a path: the log has only the fixed line.
-- **Budget cases:** many distinct CIDs over a long-lived instance, and over every private instance at once. The memory budget and the retrieval admission hold.
+- **Lease cases:** every exit of the handler releases the lease exactly once, checked by a pin count that returns to zero:
+  - a redirect plan, and each error plan (400, 404, 405, 415, 502, 503);
+  - a URL or header refusal;
+  - a failed lookup;
+  - a core that is unavailable or `busy`;
+  - admission's 503;
+  - an abort before the fetch;
+  - a rejected `request()`;
+  - the body's end, error and cancel;
+  - a second `release()` is harmless;
+  - `closeDwebSession` releases what is left.
+- **Budget cases:**
+  - many distinct CIDs over a long-lived instance, and over every private instance at once. The memory budget and the retrieval admission hold;
+  - **exhaustion during an existing stream:** the stream's next block waits, then aborts with `busy` after 10 s. Other streams continue, and the reserved total never passes the budget;
+  - **concurrent growth:** many concurrent fetches into one memory store reach its page cap. Puts fail as uncached, the responses still complete, and transient-to-store transfers never let the total pass the budget.
+- **Ring cases:** one-byte frames and full-window bursts never allocate more than 128 KiB per stream in main.
 - **Rust tests through the binary,** using test-only methods behind a cargo feature, as `freedom-cored`'s `testhooks`. These seed a memory or offline instance from CAR fixtures, and inject a panic, a stall or a slow teardown.
   - **The protocol:** frames, credit, cancel races, deadline, and one terminal per request and per stream.
   - **Isolation:** a panic on one request is `internal` for that request only.
@@ -829,7 +929,13 @@ As 0006's 4.7 did, before anything moves:
   - **A SOCKS5 test proxy** records every connection, and a canary TCP and UDP listener is advertised as a provider and a router. In `socks5` mode the canary must see nothing, and the proxy everything.
   - **Expansion and redirects:** a `/dnsaddr` that expands to a loopback address, a name that resolves to a private address, and a configured router or provider that redirects to a private address, to an onion URL and to a different scheme. Each is refused before a socket opens.
   - **Canonical forms:** upper case, a trailing dot, an IPv4-mapped IPv6 address, numeric IPv4 URL hosts, and `/dns/<x>.onion`.
-  - **Failures:** an unavailable proxy, and an unsupported transport in `socks5` mode.
+  - **Failures:** an unavailable proxy, a proxy that refuses `RESOLVE` (the attempt fails, and no name is sent in `CONNECT`), and an unsupported transport in `socks5` mode.
+  - **A SOCKS fixture with `RESOLVE`:**
+    - a name that looks acceptable but resolves to a loopback or private address is refused, and no `CONNECT` is sent;
+    - a name whose answer changes from a public address to loopback between checks never connects to loopback, and each `CONNECT` goes to the address that was checked;
+    - every `CONNECT` carries an IP literal, except for onions;
+    - TLS SNI and HTTP `Host` carry the name, checked by a test server.
+  - **Arti qualification:** the pinned Arti answers `RESOLVE`, run in the release pipeline before the setting ships.
   - **Onion:** `.onion` and `/onion3` targets in `direct` mode open no socket.
 - **Live:** `ipfs:native:smoke` re-pointed at the service, with `/ipns/ipfs.tech/` and #102's fan-out of 48 concurrent requests and no `gateway_busy`.
 
@@ -884,17 +990,18 @@ Every body already passes through main today, so the pipe adds one copy into the
 | main's outstanding service requests | 512, retiring ones included | the fetch waits in main's admission |
 | head | the plan's `headers_ms` (≤ 30 s); main's watchdog at + 15 s | `deadline`; on the watchdog, kill |
 | stream window | 128 KiB per stream, checked; data frames ≤ 64 KiB, coalesced | the service waits for credit |
-| stream bytes in main | 256 active fetches × 128 KiB = 32 MiB, ≤ 3 buffers per stream | not reachable: credit |
+| stream storage in main | one 128 KiB ring per live stream: 32 MiB at 256 fetches, both the live-byte window and the backing storage; plus one partial frame (≤ 1 MiB) in the decoder | not reachable: credit |
 | data frames queued in the service | 16 MiB | stream producers wait |
 | service reader | 256 frames and 16 MiB (0001); controls handled on arrival | stops reading |
 | writer stall | 30 s with nothing written (0001) | exit 76 |
 | retrieval admission, per process | 256 block fetches, 16 HTTP provider requests, 32 Bitswap connections, 4 DHT queries | work waits under its deadline |
 | background queue | 64 items per instance | new background work is dropped |
-| memory budget | persistent 128 MiB; ephemeral 384 MiB, as charged in [Budgets](#budgets) | `busy`; evict idle private instances |
+| memory budget | persistent 192 MiB; ephemeral 448 MiB, by reservation ([Budgets](#budgets)) | new work `busy`; admitted work waits as below; evict idle private instances |
+| a reservation for admitted work | before the head: the rest of `headers_ms`; after it: 10 s per block | `busy`; a stream aborts with `busy` |
 | `ipfs.stats` | 5 s; main's watchdog at 20 s | on the watchdog, kill |
 | abort payload | 1 KiB | protocol error |
 | persistent cache | 256 MiB of block data on disk (a target), 16 MiB hot | upstream's LRU eviction |
-| private instances | 8 per ephemeral process, 32 MiB block target and 4 MiB hot each | evict an unpinned idle instance, else `busy` (503) |
+| private instances | 8 per ephemeral process; a 36 MiB page cap (32 MiB block target) and 4 MiB hot each | a new partition evicts an unpinned instance, else 503 `busy`; existing partitions are unaffected |
 | gateway | 8 header permits, 15 s queue (today) | 503 `gateway_busy` |
 | runtime | ≤ 8 workers; a 512-thread blocking cap | tasks wait |
 
@@ -906,7 +1013,7 @@ Every body already passes through main today, so the pipe adds one copy into the
 | `auto-restart` | none; the user restarts IPFS from the nodes menu | 0.5 s, 2 s, 10 s; three crashes in 60 s stop | brief outages heal on their own |
 | `data-dir-lock` | the profile lock only | an OS lock per data directory, for writers that take it | a second gated owner fails at start (75); old builds sharing the directory are unsupported |
 | `network-fs` | the cache opens on any filesystem | a network filesystem is refused (74) | IPFS doesn't start there; WAL isn't safe there anyway |
-| `private-windows` | private windows share the profile's node and on-disk cache | an in-memory instance per private partition, in one ephemeral process | private loads leave nothing in the application's files, aren't served from shared caches, and start cold |
+| `private-windows` | private windows share the profile's node and on-disk cache | an in-memory instance per private partition, in one ephemeral process | private loads leave nothing in the application's files, aren't served from shared caches, and start cold; a ninth partition loading while 8 are busy gets 503 |
 | `env-proxy` | `reqwest` reads proxy variables from main's environment; libp2p ignores them | the environment is cleared, and the proxy is configuration | the HTTP half no longer follows `HTTPS_PROXY` and similar |
 | `proxy` | none | an optional SOCKS5 policy for all traffic, failing closed | new: Route IPFS through Tor |
 | `onion-targets` | no rule for them | refused before any socket in `direct`; through the proxy in `socks5` | a refusal proves nothing was sent |
@@ -940,16 +1047,17 @@ Every body already passes through main today, so the pipe adds one copy into the
    - the Rust tests through the binary.
 5. **Release:** the five targets, `SHA256SUMS`, attestations and notices, on `ipfsd-v*` tags, in separate build jobs.
 6. **freedom-browser, the persistent node:**
-   - `ServiceClient`, extracted from `core-client.js`, and the stream frames in `frame.js`;
+   - `ServiceClient`, extracted from `core-client.js`, and the stream frames and rings in `frame.js`;
    - instance IDs and retirement in `ipfs-manager.js`;
+   - the lease and `BackendBusy` in `dweb-handler.js` and the executor;
    - the fetch script and packaging (`mac.binaries` signing);
    - `ipfs-manager.js` on the service, behind `FREEDOM_IPFS_BACKEND` in dev;
    - the contract suite against the real binary;
    - the re-pointed smoke and the [cost](#cost) measurement.
 
    Then the default switches.
-7. **Private windows:** the ephemeral process, the cold start in `request()`, pins, eviction and fences.
-8. **Network policy:** the setting, Arti's endpoint, policy changes, and the gate, redirect, SOCKS and canary tests. This needs upstream item 3.
+7. **Private windows:** the ephemeral process, readiness per partition, the cold start in `request()`, leases, eviction and fences.
+8. **Network policy:** the setting, Arti's endpoint and its `RESOLVE` qualification, policy changes, and the gate, redirect, SOCKS and canary tests. This needs upstream item 3.
 9. **Removal,** one stable release later: the add-on, the event worker and their scripts.
 
 ## Open questions
@@ -957,7 +1065,7 @@ Every body already passes through main today, so the pipe adds one copy into the
 1. **Where the code lives:** a separate workspace in this repository (recommended), a member of the core's workspace, upstream, or a new repository (the user's decision).
 2. **Private windows:**
    - an in-memory instance per private partition in one process (recommended), one instance shared by all private windows, or a process per window, which would also separate address spaces?
-   - are 8 instances under a 384 MiB budget the right bound?
+   - are 8 instances under a 448 MiB budget the right bound?
 3. **The proxy's scope:**
    - SOCKS5 to Arti only (this design), or also a user's HTTP proxy for the HTTP half? libp2p would need another custom transport for that.
    - Should Route IPFS through Tor follow a future "everything through Tor" mode, and be one switch with 0008's Radicle setting?
@@ -967,3 +1075,4 @@ Every body already passes through main today, so the pipe adds one copy into the
 7. **Upstream timing:** will freedom-ipfs take items 1–8? Until a release carries them, does the service pin a commit on a branch?
 8. **Streams in the core:** should 4.5's protocol version 2 for `freedom-cored` adopt these four frames as they are, with an explicit global credit added?
 9. **An OS memory limit:** should each service run under `RLIMIT_AS`, or a Windows job memory limit, as a backstop for what its budget can't see?
+10. **If Arti can't `RESOLVE`:** should the Tor setting wait until it can, or ship with the proxy's own policy (option (b)) as an explicit deviation? This design waits (the user's decision).
