@@ -531,3 +531,85 @@ fn failures() {
         }
     }
 }
+
+#[test]
+fn html() {
+    use fc_dweb::{HtmlError, decode_html, decode_html_value};
+
+    fn expand_recipe(recipe: &[Json]) -> String {
+        let mut out = String::from("0x");
+        for part in recipe {
+            match part["hex"].as_str() {
+                Some(hex) => out.push_str(hex),
+                None => out
+                    .push_str(&s(part, "repeat").repeat(part["count"].as_u64().unwrap() as usize)),
+            }
+        }
+        out
+    }
+
+    let vectors = vectors();
+    let c = &vectors["constants"]["html"];
+    assert_eq!(
+        c["max_html_bytes"].as_u64(),
+        Some(fc_dweb::MAX_HTML_BYTES as u64)
+    );
+    assert_eq!(s(c, "selector"), fc_dweb::HTML_SELECTOR);
+    let mut successes = 0;
+    for entry in arr(&vectors, "html") {
+        let result = if let Some(recipe) = entry["recipe"].as_array() {
+            decode_html(&expand_recipe(recipe))
+        } else if let Some(text) = entry["result"].as_str() {
+            decode_html(text)
+        } else {
+            decode_html_value(&js_value(&entry["result_json"]))
+        };
+        let js = &entry["js"];
+        let status = js["status"].as_u64().unwrap();
+        match result {
+            Ok(document) => {
+                assert_eq!(status, 200, "{}", id(entry));
+                let ok = &js["ok"];
+                assert_eq!(
+                    format!("0x{}", hex::encode(document.hash)),
+                    s(ok, "hash"),
+                    "{}",
+                    id(entry)
+                );
+                assert_eq!(
+                    document.html.len() as u64,
+                    ok["length"].as_u64().unwrap(),
+                    "{}",
+                    id(entry)
+                );
+                if let Some(html) = ok["html"].as_str() {
+                    assert_eq!(document.html, html, "{}", id(entry));
+                }
+                successes += 1;
+            }
+            Err(error) => {
+                assert_eq!(u64::from(error.status()), status, "{}", id(entry));
+                assert_eq!(error.as_str(), s(js, "error"), "{}", id(entry));
+            }
+        }
+    }
+    assert!(successes > 10);
+    assert_eq!(HtmlError::TooLarge.status(), 413);
+}
+
+#[test]
+fn html_class() {
+    use fc_dweb::{Class, classify};
+
+    let vectors = vectors();
+    for entry in arr(&vectors, "html_class") {
+        let class = classify(&js_value(&entry["chain_result"]));
+        let expected = match s(&entry["js"], "class") {
+            "trusted" => Class::Trusted,
+            "conflict" => Class::Conflict,
+            "untrusted" => Class::Untrusted,
+            other => panic!("{other}"),
+        };
+        assert_eq!(class, expected, "{}", id(entry));
+    }
+}

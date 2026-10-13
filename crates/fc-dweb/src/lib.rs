@@ -1,6 +1,6 @@
 //! Dweb transports for Freedom (design 0006, step 2): the request logic of
-//! freedom-browser's `bzz:`, `ipfs:` and `ipns:` protocol handlers, with
-//! their behavior byte for byte.
+//! freedom-browser's `bzz:`, `ipfs:` and `ipns:` protocol handlers, and the
+//! `web3:` handler's `html()` codec, with their behavior byte for byte.
 //! `vectors/dweb.json`, produced by the pinned JS, is the contract.
 //!
 //! - **Plans** ([`open`]): a request becomes a [`Plan`] (a fetch, a
@@ -13,6 +13,9 @@
 //!   [`strip_page_state`], [`strip_decoded_encoding`], [`SmallText`]): pure
 //!   functions over a [`ResponseHead`], and a decider over the body's
 //!   chunks.
+//! - **`html()`** ([`decode_html`], [`classify`]): the size precheck, ethers'
+//!   ABI string rules, the UTF-8 check, the 8 MiB cap, the hash and the
+//!   gate's class.
 //!
 //! Where the core differs from today by design (each pinned by vectors):
 //! `body-idle` (a 60 s bound on a pending read, in every plan) and
@@ -25,6 +28,7 @@ mod bzz;
 mod cid;
 pub mod failure;
 mod headers;
+mod html;
 mod ipfs;
 mod js;
 mod names;
@@ -39,6 +43,10 @@ pub use bzz::{
 };
 pub use cid::{cid_v0_to_v1_base32, cid_v1_b58btc_to_base32, ipns_mh_to_cid_v1_base36};
 pub use headers::Headers;
+pub use html::{
+    Class, HTML_SELECTOR, HtmlDocument, HtmlError, MAX_HTML_BYTES, classify, decode_html,
+    decode_html_value, exceeds_encoded_bound,
+};
 pub use ipfs::{
     KNOWN_GATEWAY_HOSTS, STRIPPED_REQUEST_HEADERS, is_navigation,
     request_headers as ipfs_request_headers,
