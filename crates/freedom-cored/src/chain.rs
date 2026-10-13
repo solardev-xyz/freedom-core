@@ -555,19 +555,20 @@ impl Chain {
         }
     }
 
-    /// Retires the queued requests of chain requests that have replied
+    /// Retires the queued requests of chain requests that have ended
     /// (cancelled, ended by their deadline, a configuration change or
-    /// their budget, or finished): they never go to main. A verifier
-    /// operation's request is held by the machine until main's terminal
-    /// reply, so one that never went completes here unread, freeing its
-    /// slot (57-M2). True when any did.
+    /// their budget, or finished): they never go to main. Whether one has
+    /// ended is the machine's to say, whether or not its reply has been
+    /// taken yet (round 2, R2-M2). A verifier operation's request is held
+    /// by the machine until main's terminal reply, so one that never went
+    /// completes here unread, freeing its slot (57-M2). True when any did.
     fn retire(&mut self) -> bool {
         let mut retired = false;
         let mut i = 0;
         while i < self.queued.len() {
             let ended = self.queued[i]
                 .owner
-                .is_some_and(|owner| !self.callers.contains_key(&owner));
+                .is_some_and(|owner| !self.machine.runs(owner));
             if ended && let Some(queued) = self.queued.remove(i) {
                 self.machine.complete_unread(queued.io);
                 retired = true;

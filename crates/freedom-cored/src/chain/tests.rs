@@ -1249,3 +1249,42 @@ fn a_broadcast_whose_reply_cannot_be_read_stays_uncertain() {
     // Nothing more was sent.
     assert!(requests(&frames).is_empty(), "{frames:?}");
 }
+
+#[test]
+fn a_cancelled_callers_queued_operation_never_goes_when_room_opens_before_flush() {
+    // Round 2, R2-M2, the reviewer's interleaving: main holds all it takes,
+    // a Myotis read's operation waits, its caller is cancelled, and a slot
+    // frees (on the event loop's thread) before this thread flushes.
+    let mut t = test_with(Bounds::default(), usize::MAX, 1, true);
+    let mut config = chain_snapshot(&["myotis"], &[]);
+    config["myotis"] = json!(true);
+    t.configure(json!([config]));
+    t.call(
+        2,
+        "chain.availability",
+        &json!({ "chain_id": 1, "ready": true }),
+    );
+    let held = occupy(&t);
+    let (id, params) = read(
+        3,
+        "eth_getBalance",
+        json!(["0x1111111111111111111111111111111111111111", "latest"]),
+    );
+    t.call(id, "chain.request", &params);
+    assert_eq!(t.chain.queued.len(), 1);
+    assert!(t.chain.handle(In::Cancel { id: 3 }).is_ok());
+    assert_eq!(t.chain.requests.answered(held), Some(Owner::Naming));
+    assert!(t.chain.flush().is_ok());
+    let frames = t.written();
+    assert!(verified(&frames).is_empty(), "{frames:?}");
+    let reply = frames.iter().find(|f| f["id"] == 3).unwrap();
+    assert_eq!(reply["error"]["code"], "cancelled");
+    // Its slot was freed: the next read's operation goes at once.
+    let (id, params) = read(
+        4,
+        "eth_getBalance",
+        json!(["0x1111111111111111111111111111111111111111", "latest"]),
+    );
+    t.call(id, "chain.request", &params);
+    assert_eq!(verified(&t.written()).len(), 1);
+}
