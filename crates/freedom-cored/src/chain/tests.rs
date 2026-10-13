@@ -30,7 +30,18 @@ struct Test {
     link: Arc<Link>,
 }
 
+/// A thread whose writer shares, bulk and control, are `writer_bytes`
+/// each.
 fn test_with(bounds: Bounds, writer_bytes: usize, outstanding: usize, offered: bool) -> Test {
+    test_shares(bounds, (writer_bytes, writer_bytes), outstanding, offered)
+}
+
+fn test_shares(
+    bounds: Bounds,
+    (bulk, control): (usize, usize),
+    outstanding: usize,
+    offered: bool,
+) -> Test {
     let (out, rx) = mpsc::channel();
     let link = Link::new();
     if offered {
@@ -40,7 +51,10 @@ fn test_with(bounds: Bounds, writer_bytes: usize, outstanding: usize, offered: b
         Machine::new(0, bounds),
         out,
         Arc::clone(&link),
-        Allowance::new(usize::MAX, writer_bytes),
+        Shares {
+            bulk: Allowance::new(usize::MAX, bulk),
+            control: Allowance::new(usize::MAX, control),
+        },
         Requests::new(outstanding, Arc::new(Pending::default())),
     );
     Test { chain, rx, link }
@@ -564,8 +578,8 @@ fn replies_past_the_allowance_wait_here_and_count_in_the_backlog() {
     // Unsupported chain: three error replies. The first took the room; the
     // others wait here, and count in the backlog with what the writer
     // holds.
-    assert_eq!(t.chain.outbox.len(), 2);
-    let waiting: usize = t.chain.outbox.iter().map(Reply::len).sum();
+    assert_eq!(t.chain.control.len(), 2);
+    let waiting: usize = t.chain.control.iter().map(|f| f.len()).sum();
     assert!(t.chain.backlog() > waiting);
     // Each time the writer frees room, one more goes.
     for id in 2..5 {
@@ -574,7 +588,7 @@ fn replies_past_the_allowance_wait_here_and_count_in_the_backlog() {
         assert_eq!(frames[0]["id"], id, "{frames:?}");
         assert!(t.chain.handle(In::Drained).is_ok());
     }
-    assert!(t.chain.outbox.is_empty());
+    assert!(t.chain.control.is_empty());
     assert_eq!(t.chain.backlog(), 0);
 }
 
@@ -1070,4 +1084,48 @@ fn a_queued_myotis_broadcast_never_starts_past_its_attempt_cutoff() {
     assert!(t.chain.handle(In::Drained).is_ok());
     assert!(t.chain.flush().is_ok());
     assert!(verified(&t.written()).is_empty());
+}
+
+#[test]
+fn cancels_and_small_replies_never_wait_behind_bulk_replies() {
+    // 57-M3: one bulk reply at a time; control frames have their own share.
+    let mut t = test_shares(Bounds::default(), (1, usize::MAX), 256, true);
+    t.configure(json!([chain_snapshot(&["direct"], &["a"])]));
+    let call = json!([{ "to": "0xabc" }, "latest"]);
+    for id in [3, 4, 5] {
+        let (id, params) = read(id, "eth_call", call.clone());
+        t.call(id, "chain.request", &params);
+    }
+    let asked: Vec<u64> = requests(&t.written())
+        .iter()
+        .map(|r| r["id"].as_u64().unwrap())
+        .collect();
+    // Two large answers: the first reply holds the bulk share (main hasn't
+    // taken it), the second waits behind it.
+    let large = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"result":"0x{}"}}"#,
+        "ab".repeat(1 << 20)
+    );
+    for rpc in &asked[1..] {
+        assert!(t.answer(*rpc, rpc_answer(&large)).is_ok());
+        t.at(1);
+    }
+    assert_eq!(t.chain.bulk.len(), 1);
+    // The first read is cancelled: its exchange's cancel and its reply go
+    // at once, past the waiting bulk reply.
+    assert!(t.chain.handle(In::Cancel { id: 3 }).is_ok());
+    assert!(t.chain.flush().is_ok());
+    let mut seen = Vec::new();
+    while let Ok(item) = t.rx.try_recv() {
+        if let Out::Frame { frame, .. } = item {
+            seen.push(serde_json::from_slice::<Value>(&frame[5..]).unwrap());
+        }
+    }
+    assert!(
+        seen.contains(&json!({ "type": "cancel", "id": asked[0] })),
+        "{seen:?}"
+    );
+    let reply = seen.iter().find(|f| f["id"] == 3).unwrap();
+    assert_eq!(reply["error"]["code"], "cancelled");
+    assert_eq!(t.chain.bulk.len(), 1);
 }

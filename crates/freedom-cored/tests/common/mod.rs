@@ -287,6 +287,18 @@ impl Core {
         }
     }
 
+    /// The next frame, if one comes within `within`.
+    pub fn recv_wire_within(&mut self, within: Duration) -> Option<Wire> {
+        match self.output.recv_timeout(within) {
+            Ok(Output::Frame(value)) => Some(Wire::Message(value)),
+            Ok(Output::Wire(wire)) => Some(wire),
+            Ok(Output::Line(line)) => panic!("expected a frame, got line {line:?}"),
+            Ok(Output::Malformed(what)) => panic!("malformed frame: {what}"),
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
+            Err(mpsc::RecvTimeoutError::Disconnected) => self.closed("a frame"),
+        }
+    }
+
     pub fn send(&mut self, message: &Value) {
         self.send_raw(&frame(message));
     }

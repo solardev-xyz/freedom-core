@@ -1249,3 +1249,97 @@ fn a_broadcast_never_starts_after_its_attempt_cutoff() {
         "a broadcast after its cutoff: {after:?}"
     );
 }
+
+/// Main answers the core's next request, an `eth_call`, with a result of
+/// `len` hex digits, in fragments; returns once the core has taken it and
+/// returned main's credit. Whatever else comes meanwhile is returned.
+fn answer_large(core: &mut Core, len: usize) -> Vec<Wire> {
+    let mut seen = Vec::new();
+    let rpc = loop {
+        match core.recv_wire() {
+            Wire::Message(message) if message["type"] == "request" => break message,
+            other => seen.push(other),
+        }
+    };
+    let text = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"result":"0x{}"}}"#,
+        "ab".repeat(len / 2)
+    );
+    let response = json!({ "type": "response", "id": rpc["id"], "result": {
+        "status": 200,
+        "body": base64::engine::general_purpose::STANDARD.encode(&text),
+    } });
+    let pieces = response.to_string().len().div_ceil(MIB / 2);
+    for frame in fragmented(&response, pieces) {
+        core.send_raw(&frame);
+    }
+    loop {
+        let wire = core.recv_wire();
+        if wire == Wire::Credit {
+            return seen;
+        }
+        seen.push(wire);
+    }
+}
+
+#[test]
+fn a_cancel_goes_while_bulk_replies_wait_for_credit() {
+    // 57-M3: main withholds the core's bulk credit; the core's large
+    // replies wait, filling its bulk share. A cancel and its small reply
+    // still go at once.
+    let (_root, mut core) = core();
+    configure(&mut core, 2, &[snapshot(&["direct"], &["a"], 60_000)]);
+    core.send(&request(
+        3,
+        "chain.request",
+        read("eth_blockNumber", json!([])),
+    ));
+    let running = requests_only(&mut core, 1).pop().unwrap();
+    let call = read("eth_call", json!([{ "to": ADDRESS }, "latest"]));
+    // The first large reply spends the core's credit, which main keeps.
+    core.send(&request(4, "chain.request", call.clone()));
+    let mut wires = answer_large(&mut core, 2 * MIB);
+    while !wires.iter().any(|w| matches!(w, Wire::Last(_))) {
+        wires.push(core.recv_wire());
+    }
+    // The next waits for credit in the writer, holding 16 MiB of the bulk
+    // share; the one after can't fit beside it, and waits in the thread.
+    core.send(&request(5, "chain.request", call.clone()));
+    answer_large(&mut core, 16 * MIB);
+    core.send(&request(6, "chain.request", call));
+    answer_large(&mut core, 17 * MIB);
+    std::thread::sleep(Duration::from_millis(200));
+    core.send(&json!({ "type": "cancel", "id": 3 }));
+    let mut prompt = Vec::new();
+    while let Some(wire) = core.recv_wire_within(Duration::from_millis(500)) {
+        prompt.push(wire);
+    }
+    assert!(
+        prompt.contains(&Wire::Message(
+            json!({ "type": "cancel", "id": running["id"] })
+        )),
+        "{prompt:?}"
+    );
+    let cancelled = prompt
+        .iter()
+        .find_map(|w| match w {
+            Wire::Message(m) if m["type"] == "response" && m["id"] == 3 => Some(m.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no cancelled reply while credit is withheld: {prompt:?}"));
+    assert_eq!(cancelled["error"]["code"], "cancelled");
+    assert!(!prompt.iter().any(|w| matches!(w, Wire::Begin { .. })));
+    // Credit back: the waiting replies go, one at a time.
+    let mut begun = Vec::new();
+    while begun.len() < 2 {
+        core.send_credit();
+        loop {
+            match core.recv_wire() {
+                Wire::Begin { id, .. } => begun.push(id),
+                Wire::Last(_) => break,
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(begun, [5, 6]);
+}

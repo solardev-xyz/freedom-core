@@ -5,12 +5,19 @@
 //!
 //! - **Admission and limits** are the machine's: 64 running and 256 waiting
 //!   requests, and the memory budgets.
-//! - **Its own share of the writer,** one message cap
-//!   ([`transport::MAX_QUEUED_CHAIN_BYTES`]). The thread never blocks on the
-//!   writer: past its share, replies and cancels wait in its own queue. What
-//!   waits, and what the writer still holds, is the machine's backlog: it
-//!   counts in the chain total until written, and new requests are `busy`
-//!   while that total is full (design 0005, Frames).
+//! - **Its own share of the writer,** in two parts. The thread never blocks
+//!   on the writer: past a part's share, its frames wait here.
+//!   - **Bulk:** replies over [`SMALL_REPLY`], whole or fragmented, within
+//!     one message cap ([`transport::MAX_QUEUED_CHAIN_BYTES`]), in order.
+//!   - **Control:** cancels, small replies and requests to main, within
+//!     their own share ([`transport::MAX_QUEUED_CHAIN_CONTROL_BYTES`]), in
+//!     order. A bulk reply waiting for main's credit never holds them up
+//!     (0001's reserved control capacity; PR #57 review, 57-M3), so a
+//!     cancel and its small reply go at once.
+//!
+//!   What waits, and what the writer still holds, is the machine's
+//!   backlog: it counts in the chain total until written, and new requests
+//!   are `busy` while that total is full (design 0005, Frames).
 //! - **Requests to main** go through the core's one gate ([`Requests`]):
 //!   IDs from the counter naming uses too, main's limit of 256 outstanding
 //!   requests across both threads, and main's responses routed back here.
@@ -117,9 +124,12 @@ pub fn spawn(
 ) -> std::io::Result<Handle> {
     let (tx, rx) = mpsc::channel();
     let tx = Arc::new(tx);
-    // Chain's share of the writer: one message cap (design 0005, Frames).
+    // Chain's share of the writer: one message cap for bulk replies (design
+    // 0005, Frames), and a share of its own for control frames.
     let allowance = Allowance::new(usize::MAX, transport::MAX_QUEUED_CHAIN_BYTES);
     allowance.on_room(waker(&tx));
+    let control = Allowance::new(usize::MAX, transport::MAX_QUEUED_CHAIN_CONTROL_BYTES);
+    control.on_room(waker(&tx));
     requests.on_room(Owner::Chain, waker(&tx));
     std::thread::Builder::new()
         .name("chain".into())
@@ -129,7 +139,10 @@ pub fn spawn(
                 Machine::new(0, Bounds::default()),
                 out,
                 link,
-                allowance,
+                Shares {
+                    bulk: allowance,
+                    control,
+                },
                 requests,
             );
             let event = match run(&rx, chain) {
@@ -242,13 +255,18 @@ struct Chain {
     out: Sender<Out>,
     /// Whether main takes fragments.
     link: Arc<Link>,
+    /// Bulk replies' share of the writer.
     allowance: Arc<Allowance>,
+    /// Control frames' share of the writer.
+    control_allowance: Arc<Allowance>,
     /// The core's requests to main, chain's and naming's: one ID counter,
     /// main's limit of outstanding requests, and the gate closed at
     /// shutdown.
     requests: Arc<Requests>,
-    /// Replies and cancels waiting for room in the writer, in order.
-    outbox: VecDeque<Reply>,
+    /// Cancels and small replies waiting for room in the writer, in order.
+    control: VecDeque<Zeroizing<Vec<u8>>>,
+    /// Bulk replies waiting for room in the writer, in order.
+    bulk: VecDeque<Reply>,
     /// The machine's requests waiting for a slot at main or room in the
     /// writer, first in, first out.
     queued: VecDeque<Queued>,
@@ -262,21 +280,34 @@ struct Chain {
     by_io: BTreeMap<u64, u64>,
 }
 
+/// The chain thread's two shares of the writer.
+struct Shares {
+    bulk: Arc<Allowance>,
+    control: Arc<Allowance>,
+}
+
+/// A reply this size or under (its payload) is a control frame: it never
+/// waits behind a bulk reply. Main's pool exempts replies under 64 KiB
+/// (design 0005, Main's pool).
+const SMALL_REPLY: usize = 64 * 1024;
+
 impl Chain {
     fn new(
         machine: Machine,
         out: Sender<Out>,
         link: Arc<Link>,
-        allowance: Arc<Allowance>,
+        shares: Shares,
         requests: Arc<Requests>,
     ) -> Self {
         Self {
             machine,
             out,
             link,
-            allowance,
+            allowance: shares.bulk,
+            control_allowance: shares.control,
             requests,
-            outbox: VecDeque::new(),
+            control: VecDeque::new(),
+            bulk: VecDeque::new(),
             queued: VecDeque::new(),
             callers: BTreeMap::new(),
             by_main: BTreeMap::new(),
@@ -536,22 +567,22 @@ impl Chain {
                     let cancel = format!(r#"{{"type":"cancel","id":{id}}}"#);
                     let frame = transport::frame(cancel.as_bytes())
                         .ok_or(Stop::Protocol("oversized_message"))?;
-                    self.outbox.push_back(Reply::Whole(frame));
+                    self.control.push_back(frame);
                 }
             }
         }
         self.pump()
     }
 
-    /// Sends queued requests, first in, first out, while no other frame
-    /// waits, a slot at main is free and the writer has room; the gate and
-    /// the allowance wake the thread when one is. A request leaves the
+    /// Sends queued requests, first in, first out, while no control frame
+    /// waits, a slot at main is free and the control share has room; the
+    /// gate and the allowance wake the thread when one is. A request leaves the
     /// queue only when it is sent or settled here, so until then a cancel
     /// removes it, and its deadline is what is left when it goes. True when
     /// one settled here.
     fn dispatch(&mut self) -> Result<bool, Stop> {
         let mut settled = false;
-        while self.outbox.is_empty() {
+        while self.control.is_empty() {
             let Some(queued) = self.queued.front() else {
                 break;
             };
@@ -571,7 +602,7 @@ impl Chain {
                 shell_request(&queued.request, queued.generation, left.unwrap_or(0));
             let sent = self
                 .requests
-                .send(Owner::Chain, &self.allowance, &self.out, |id| {
+                .send(Owner::Chain, &self.control_allowance, &self.out, |id| {
                     requests::request_frame(id, method, &params)
                 });
             match sent {
@@ -621,7 +652,12 @@ impl Chain {
                         .ok_or(Stop::Protocol("oversized_message"))?,
                 ),
             };
-            self.outbox.push_back(reply);
+            match reply {
+                Reply::Whole(frame) if frame.len() <= SMALL_REPLY + 5 => {
+                    self.control.push_back(frame);
+                }
+                reply => self.bulk.push_back(reply),
+            }
         }
         self.pump()
     }
@@ -643,10 +679,10 @@ impl Chain {
         self.send(&payload)
     }
 
-    /// Queues a small reply behind any that wait for the writer.
+    /// Queues a small reply behind the control frames that wait.
     fn send(&mut self, payload: &[u8]) -> Flow {
         let frame = transport::frame(payload).ok_or(Stop::Protocol("oversized_message"))?;
-        self.outbox.push_back(Reply::Whole(frame));
+        self.control.push_back(frame);
         self.pump()
     }
 
@@ -655,7 +691,9 @@ impl Chain {
     /// wait to go (design 0005, Bounds: they left their request's charge).
     fn backlog(&self) -> usize {
         self.allowance.held_bytes()
-            + self.outbox.iter().map(Reply::len).sum::<usize>()
+            + self.control_allowance.held_bytes()
+            + self.control.iter().map(|f| f.len()).sum::<usize>()
+            + self.bulk.iter().map(Reply::len).sum::<usize>()
             + self
                 .queued
                 .iter()
@@ -663,24 +701,39 @@ impl Chain {
                 .sum::<usize>()
     }
 
-    /// Hands every waiting reply and cancel to the writer, past the
-    /// allowance: at shutdown, where the writer's drain is bounded by time
-    /// instead.
+    /// Hands every waiting frame to the writer, past the allowances: at
+    /// shutdown, where the writer's drain is bounded by time instead.
     fn drain(&mut self) {
-        for reply in self.outbox.drain(..) {
+        for frame in self.control.drain(..) {
+            let hold = self.control_allowance.force(frame.len());
+            let _ = self.out.send(Out::Frame { frame, hold });
+        }
+        for reply in self.bulk.drain(..) {
             let hold = self.allowance.force(reply.len());
             let _ = self.out.send(reply.into_out(hold));
         }
     }
 
-    /// Hands waiting replies and cancels to the writer while chain's
-    /// allowance has room; the rest wait for [`In::Drained`].
+    /// Hands waiting frames to the writer while their share has room, the
+    /// control frames first and apart from the bulk replies; the rest wait
+    /// for [`In::Drained`].
     fn pump(&mut self) -> Flow {
-        while let Some(reply) = self.outbox.front() {
+        while let Some(frame) = self.control.front() {
+            let Some(hold) = self.control_allowance.take(frame.len()) else {
+                break;
+            };
+            let Some(frame) = self.control.pop_front() else {
+                break;
+            };
+            self.out
+                .send(Out::Frame { frame, hold })
+                .map_err(|_| Stop::Writer)?;
+        }
+        while let Some(reply) = self.bulk.front() {
             let Some(hold) = self.allowance.take(reply.len()) else {
                 return Ok(());
             };
-            let Some(reply) = self.outbox.pop_front() else {
+            let Some(reply) = self.bulk.pop_front() else {
                 return Ok(());
             };
             self.out

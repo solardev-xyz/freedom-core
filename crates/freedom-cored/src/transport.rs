@@ -39,7 +39,10 @@
 //!   - naming's frames past its allowance wait in the naming thread, which
 //!     keeps taking messages (design 0004);
 //!   - the chain thread's replies wait in its own queue the same way, past
-//!     an allowance of one message cap ([`MAX_QUEUED_CHAIN_BYTES`]);
+//!     an allowance of one message cap ([`MAX_QUEUED_CHAIN_BYTES`]); its
+//!     cancels, small replies and requests have an allowance of their own
+//!     ([`MAX_QUEUED_CHAIN_CONTROL_BYTES`]), so they never wait behind a
+//!     bulk reply;
 //!   - the `0x13` credit is queued from the consumer's drop, never waited
 //!     on.
 //!
@@ -73,6 +76,11 @@ pub const MAX_QUEUED_NAMING_BYTES: usize = 8 * 1024 * 1024;
 /// (design 0005, Frames). A fragmented reply is charged at its whole size
 /// and released as its fragments are written.
 pub const MAX_QUEUED_CHAIN_BYTES: usize = MAX_MESSAGE;
+/// The chain thread's control frames waiting for the writer, apart from its
+/// bulk replies: cancels, small replies and its requests to main, so a
+/// bulk reply waiting for main's credit can't hold them up (0001's
+/// reserved control capacity).
+pub const MAX_QUEUED_CHAIN_CONTROL_BYTES: usize = 4 * 1024 * 1024;
 /// The most whole frames the writer writes between two fragments of a
 /// response, so a steady stream of small frames can't stall it.
 const MAX_WHOLE_BETWEEN_FRAGMENTS: usize = 64;
