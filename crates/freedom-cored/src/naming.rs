@@ -31,7 +31,7 @@ use zeroize::Zeroizing;
 
 use crate::serve::Event;
 use crate::transport;
-use crate::transport::{Allowance, Credit, Out};
+use crate::transport::{Allowance, Credit, Out, Pending};
 
 /// The methods the naming thread answers.
 pub const METHODS: &[&str] = &[
@@ -95,9 +95,14 @@ impl Handle {
     }
 }
 
-/// Starts the naming thread. It writes to `out` and reports a protocol
-/// error from main, or its own end, to the event loop.
-pub fn spawn(out: Sender<Out>, events: Sender<Event>) -> std::io::Result<Handle> {
+/// Starts the naming thread. It writes to `out`, records its `shell.*`
+/// requests in `pending` until their terminal responses, and reports a
+/// protocol error from main, or its own end, to the event loop.
+pub fn spawn(
+    out: Sender<Out>,
+    events: Sender<Event>,
+    pending: Arc<Pending>,
+) -> std::io::Result<Handle> {
     let (tx, rx) = mpsc::channel();
     let tx = Arc::new(tx);
     let closing = Arc::new(Mutex::new(false));
@@ -114,7 +119,7 @@ pub fn spawn(out: Sender<Out>, events: Sender<Event>) -> std::io::Result<Handle>
         .name("naming".into())
         .spawn(move || {
             let _notice = transport::DeathNotice::new(events.clone(), "naming");
-            let event = match run(&rx, out, allowance, gate) {
+            let event = match run(&rx, out, allowance, gate, pending) {
                 Stop::Protocol(category) => Event::ProtocolError(category),
                 Stop::Writer => Event::WriterFailed,
                 // The event loop has gone: nothing to report to.
@@ -174,6 +179,7 @@ fn run(
     out: Sender<Out>,
     allowance: Arc<Allowance>,
     closing: Arc<Mutex<bool>>,
+    pending: Arc<Pending>,
 ) -> Stop {
     let started = Instant::now();
     let mut machine = Machine::new(0, empty_config(), Box::new(OsRandom));
@@ -191,6 +197,7 @@ fn run(
         max_backlog: MAX_NAMING_BACKLOG,
         callers: BTreeMap::new(),
         outgoing: BTreeMap::new(),
+        pending,
         by_io: BTreeMap::new(),
         next_id: 1,
         queued: VecDeque::new(),
@@ -284,6 +291,9 @@ struct Naming {
     callers: BTreeMap<u64, u64>,
     /// This thread's `shell.*` requests, by their message ID.
     outgoing: BTreeMap<u64, Outgoing>,
+    /// The same IDs, for the reader: main's fragmented response must name
+    /// one (design 0005, Frames).
+    pending: Arc<Pending>,
     /// Message IDs by the machine's request id.
     by_io: BTreeMap<u64, u64>,
     next_id: u64,
@@ -457,6 +467,7 @@ impl Naming {
         let Some(outgoing) = self.outgoing.remove(&id) else {
             return Err(Stop::Protocol("unsolicited_response"));
         };
+        self.pending.remove(id);
         let Some(io) = outgoing.io else {
             return Ok(());
         };
@@ -572,8 +583,10 @@ impl Naming {
             self.next_id += 1;
             self.outgoing.insert(id, Outgoing { io: Some(io), kind });
             self.by_io.insert(io, id);
+            // Before the writer has it, so main's answer can't come first.
+            self.pending.insert(id);
             self.out
-                .send(Out { frame, hold })
+                .send(Out::Frame { frame, hold })
                 .map_err(|_| Stop::Writer)?;
             drop(closing);
         }
@@ -655,7 +668,7 @@ impl Naming {
     fn drain(&mut self) {
         for frame in self.outbox.drain(..) {
             let hold = self.allowance.force(frame.len());
-            let _ = self.out.send(Out { frame, hold });
+            let _ = self.out.send(Out::Frame { frame, hold });
         }
     }
 
@@ -670,7 +683,7 @@ impl Naming {
                 return Ok(());
             };
             self.out
-                .send(Out { frame, hold })
+                .send(Out::Frame { frame, hold })
                 .map_err(|_| Stop::Writer)?;
         }
         Ok(())
@@ -1100,7 +1113,7 @@ mod tests {
     /// What the writer got; reading a frame frees its allowance.
     fn written(rx: &mpsc::Receiver<Out>) -> Vec<serde_json::Value> {
         let mut out = Vec::new();
-        while let Ok(Out { frame, .. }) = rx.try_recv() {
+        while let Ok(Out::Frame { frame, .. }) = rx.try_recv() {
             out.extend(serde_json::from_slice(&frame[5..]).ok());
         }
         out
@@ -1129,6 +1142,7 @@ mod tests {
             max_backlog: MAX_NAMING_BACKLOG,
             callers: BTreeMap::new(),
             outgoing: BTreeMap::new(),
+            pending: Arc::new(Pending::default()),
             by_io: BTreeMap::new(),
             next_id: 1,
             queued: VecDeque::new(),
@@ -1193,9 +1207,15 @@ mod tests {
         assert!(naming.response(first[0], Ok(answer)).is_ok());
         assert!(naming.flush().is_ok());
         let frames = written(&rx);
-        assert_eq!(requests(&frames).len(), 1);
+        let second = requests(&frames);
+        assert_eq!(second.len(), 1);
         assert_eq!(shell(&frames)[0]["params"]["deadline_ms"], 119_996);
         assert_eq!(naming.queued.len(), 1);
+        // The reader knows exactly the requests still waiting for main: a
+        // fragmented answer must name one.
+        assert!(!naming.pending.contains(first[0]));
+        assert!(naming.pending.contains(first[1]));
+        assert!(naming.pending.contains(second[0]));
     }
 
     #[test]

@@ -19,6 +19,7 @@ mod serve;
 mod signing;
 mod storage;
 mod testhooks;
+mod testmethods;
 mod transport;
 mod vault;
 mod worker;
