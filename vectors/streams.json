@@ -905,6 +905,236 @@
       }
     },
     {
+      "id": "abort-code-object-cancelled",
+      "rule": "abort: the code is a JSON string, never an object",
+      "side": "receiver",
+      "input": [
+        {
+          "hex": "0000003204000000000000002a7b22636f6465223a7b2263616e63656c6c6564223a6e756c6c7d2c226d657373616765223a226d227d"
+        }
+      ],
+      "expect": {
+        "error": "abort_payload"
+      }
+    },
+    {
+      "id": "abort-code-object-escaped-cancelled",
+      "rule": "abort: the code is a JSON string, never an object",
+      "side": "receiver",
+      "input": [
+        {
+          "hex": "0000003704000000000000002a7b22636f6465223a7b225c7530303633616e63656c6c6564223a6e756c6c7d2c226d657373616765223a226d227d"
+        }
+      ],
+      "expect": {
+        "error": "abort_payload"
+      }
+    },
+    {
+      "id": "abort-code-escaped-cancelled",
+      "rule": "abort: JSON escapes are read as JSON reads them, in the code too",
+      "side": "receiver",
+      "input": [
+        {
+          "hex": "0000003004000000000000002a7b22636f6465223a225c7530303633616e63656c6c6564222c226d657373616765223a226d227d"
+        }
+      ],
+      "expect": {
+        "frames": [
+          [
+            "abort",
+            42,
+            "cancelled",
+            "m"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "abort-code-object-internal",
+      "rule": "abort: the code is a JSON string, never an object",
+      "side": "receiver",
+      "input": [
+        {
+          "hex": "0000003104000000000000002a7b22636f6465223a7b22696e7465726e616c223a6e756c6c7d2c226d657373616765223a226d227d"
+        }
+      ],
+      "expect": {
+        "error": "abort_payload"
+      }
+    },
+    {
+      "id": "abort-code-object-escaped-internal",
+      "rule": "abort: the code is a JSON string, never an object",
+      "side": "receiver",
+      "input": [
+        {
+          "hex": "0000003604000000000000002a7b22636f6465223a7b225c75303036396e7465726e616c223a6e756c6c7d2c226d657373616765223a226d227d"
+        }
+      ],
+      "expect": {
+        "error": "abort_payload"
+      }
+    },
+    {
+      "id": "abort-code-escaped-internal",
+      "rule": "abort: JSON escapes are read as JSON reads them, in the code too",
+      "side": "receiver",
+      "input": [
+        {
+          "hex": "0000002f04000000000000002a7b22636f6465223a225c75303036396e7465726e616c222c226d657373616765223a226d227d"
+        }
+      ],
+      "expect": {
+        "frames": [
+          [
+            "abort",
+            42,
+            "internal",
+            "m"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "abort-code-object-body_stream_error",
+      "rule": "abort: the code is a JSON string, never an object",
+      "side": "receiver",
+      "input": [
+        {
+          "hex": "0000003a04000000000000002a7b22636f6465223a7b22626f64795f73747265616d5f6572726f72223a6e756c6c7d2c226d657373616765223a226d227d"
+        }
+      ],
+      "expect": {
+        "error": "abort_payload"
+      }
+    },
+    {
+      "id": "abort-code-object-escaped-body_stream_error",
+      "rule": "abort: the code is a JSON string, never an object",
+      "side": "receiver",
+      "input": [
+        {
+          "hex": "0000003f04000000000000002a7b22636f6465223a7b225c75303036326f64795f73747265616d5f6572726f72223a6e756c6c7d2c226d657373616765223a226d227d"
+        }
+      ],
+      "expect": {
+        "error": "abort_payload"
+      }
+    },
+    {
+      "id": "abort-code-escaped-body_stream_error",
+      "rule": "abort: JSON escapes are read as JSON reads them, in the code too",
+      "side": "receiver",
+      "input": [
+        {
+          "hex": "0000003804000000000000002a7b22636f6465223a225c75303036326f64795f73747265616d5f6572726f72222c226d657373616765223a226d227d"
+        }
+      ],
+      "expect": {
+        "frames": [
+          [
+            "abort",
+            42,
+            "body_stream_error",
+            "m"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "abort-code-object-stopped",
+      "rule": "abort: the code is a JSON string, never an object",
+      "side": "receiver",
+      "input": [
+        {
+          "hex": "0000003004000000000000002a7b22636f6465223a7b2273746f70706564223a6e756c6c7d2c226d657373616765223a226d227d"
+        }
+      ],
+      "expect": {
+        "error": "abort_payload"
+      }
+    },
+    {
+      "id": "abort-code-object-escaped-stopped",
+      "rule": "abort: the code is a JSON string, never an object",
+      "side": "receiver",
+      "input": [
+        {
+          "hex": "0000003504000000000000002a7b22636f6465223a7b225c7530303733746f70706564223a6e756c6c7d2c226d657373616765223a226d227d"
+        }
+      ],
+      "expect": {
+        "error": "abort_payload"
+      }
+    },
+    {
+      "id": "abort-code-escaped-stopped",
+      "rule": "abort: JSON escapes are read as JSON reads them, in the code too",
+      "side": "receiver",
+      "input": [
+        {
+          "hex": "0000002e04000000000000002a7b22636f6465223a225c7530303733746f70706564222c226d657373616765223a226d227d"
+        }
+      ],
+      "expect": {
+        "frames": [
+          [
+            "abort",
+            42,
+            "stopped",
+            "m"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "abort-code-object-busy",
+      "rule": "abort: the code is a JSON string, never an object",
+      "side": "receiver",
+      "input": [
+        {
+          "hex": "0000002d04000000000000002a7b22636f6465223a7b2262757379223a6e756c6c7d2c226d657373616765223a226d227d"
+        }
+      ],
+      "expect": {
+        "error": "abort_payload"
+      }
+    },
+    {
+      "id": "abort-code-object-escaped-busy",
+      "rule": "abort: the code is a JSON string, never an object",
+      "side": "receiver",
+      "input": [
+        {
+          "hex": "0000003204000000000000002a7b22636f6465223a7b225c7530303632757379223a6e756c6c7d2c226d657373616765223a226d227d"
+        }
+      ],
+      "expect": {
+        "error": "abort_payload"
+      }
+    },
+    {
+      "id": "abort-code-escaped-busy",
+      "rule": "abort: JSON escapes are read as JSON reads them, in the code too",
+      "side": "receiver",
+      "input": [
+        {
+          "hex": "0000002b04000000000000002a7b22636f6465223a225c7530303632757379222c226d657373616765223a226d227d"
+        }
+      ],
+      "expect": {
+        "frames": [
+          [
+            "abort",
+            42,
+            "busy",
+            "m"
+          ]
+        ]
+      }
+    },
+    {
       "id": "data-from-main",
       "rule": "stream data sent by main is a protocol error",
       "side": "sender",
