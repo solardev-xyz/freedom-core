@@ -334,7 +334,11 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 
 **Allocation bounds:**
 - **Main keeps each stream in one ring of 128 KiB.**
-  - It is allocated at the stream's first data and freed at its end. Received data is copied into it, never kept as one object per frame.
+  - It is allocated at the stream's first data. Received data is copied into it, never kept as one object per frame.
+  - **When it is freed:**
+    - receiving `end` only records EOF;
+    - the ring is freed once the consumer has drained it after EOF;
+    - it is freed at once on `abort`, a local cancel, or the end of the generation.
   - A `pull` copies up to 64 KiB out, into a fresh chunk that the consumer owns, and credits those bytes.
   - Since `received − returned ≤ 128 KiB`, the ring never grows. Main's backing storage per stream is exactly the window, whatever the frame sizes.
 - **Main's decoder is counted separately.** It holds at most one partial frame (≤ 1 MiB plus its 5-byte header), and dispatches every complete frame as it decodes it.
@@ -520,10 +524,18 @@ Upstream's constants are per instance, and some limit bookkeeping rather than wo
   - At 2 MiB per fetch, that is about 44 and 74 concurrent block fetches.
 - **Dynamic reservations:**
   - **Transient blocks:**
-    - Before any block fetch, over HTTP or Bitswap, the fetch reserves the retriever's maximum block size (2 MiB). It trues the reservation down to the block's size when the block arrives.
+    - Before any block fetch, over HTTP or Bitswap, the fetch reserves the retriever's maximum block size (2 MiB).
     - So the memory budget, not the 256-fetch admission, usually decides how many fetches run at once.
-  - **The transfer into a store:**
-    - A fetched block's put into a memory store is covered by the store's fixed reservation and its page cap. The block's transient reservation is released only once the put has completed or failed.
+  - **Reservations follow physical allocations:**
+    - A reservation is attached to the buffer it pays for, and released when that buffer's last owner drops it, whoever that is.
+    - **Truing down:** a 2 MiB reservation shrinks to the block's size only once the block's bytes sit in an allocation of that size, copied out or shrunk in place, and the larger backing has been freed. A small block that still points into a larger receive buffer stays charged for the larger one.
+    - **Shared bytes stay charged dynamically:** a block's dynamic reservation lasts until its last owner outside a fixed reservation is gone. Examples:
+      - a stream that still holds the block after the put;
+      - a stream that holds it after the hot cache evicted it;
+      - a block whose put failed or met the page cap.
+    - **Moving a charge to a fixed reservation** happens only when the fixed owner covers the allocation for the rest of its life. For example, the hot cache holds the only reference, counted by its backing capacity. Until then, the bytes may be counted twice, which errs on the safe side.
+  - **The put into a store:**
+    - SQLite copies a block into its own pages, which the store's fixed reservation and page cap cover. The fetched buffer keeps its own dynamic reservation until its last owner drops it.
     - A write that meets the page cap fails with `SQLITE_FULL`, whether it is a block, a name or a provider record, and that entry isn't cached. A block is still served, from its transient buffer.
   - **Pending replies:** each head reserves its encoded size until it is written.
   - **The writer's data queue:** 16 MiB, reserved at process start.
@@ -586,9 +598,13 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
     - its `cancel` starts retirement ([Frames](#frames)).
   - **A rejection** carries today's message ([Errors](#errors)). The executor's `failure()` makes it the same 502 as today.
 - **End of a body:**
-  - **On `end`,** main records EOF but keeps the buffered bytes. The stream closes when the consumer has read them all.
+  - **On `end`,** main only records EOF and keeps the ring. The stream closes, and the ring is freed, when the consumer has read every byte.
   - **On `abort`,** the stream errors at once and its bytes are dropped.
-  - **Every terminal path frees:** the record and its buffers go once the consumer is done and the terminal has arrived (or the generation has ended). The executor's `onEnd` releases the admission slot.
+  - **Every terminal path frees:**
+    - after `end`, the record and its ring go once the consumer has drained them;
+    - after `abort`, a local cancel or the end of the generation, they go at once.
+
+    The executor's `onEnd` releases the admission slot.
 
   The executor's contract is unchanged: a pull-driven body, truncation surfaced as an error, and nothing started for a signal that is already aborted.
 - **The client:**
@@ -596,7 +612,7 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   - `freedom-cored`, `freedom-ipfsd` and 0008's `freedom-radicled` each configure their own instance of it.
   - `frame.js` accepts kinds `0x02`–`0x05` only on a connection whose handshake granted `stream`.
 - **Main's memory:**
-  - stream storage is one 128 KiB ring per live stream: 32 MiB at 256 active fetches, which is both the live-byte window and the backing storage;
+  - stream storage is one 128 KiB ring per live stream, a stream with undrained bytes after EOF included: 32 MiB at 256 active fetches, which is both the live-byte window and the backing storage;
   - the decoder adds at most one partial frame (≤ 1 MiB);
   - retiring streams hold no bytes;
   - this is separate from 0005's chain I/O pool.
@@ -618,8 +634,12 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   - **No slot** means all 8 instances are pinned by other partitions. `ipfsBackend()` throws `BackendBusy`, and the handler answers 503 `busy`. That is distinct from the 503 of a node that isn't running ([Main's side](#mains-side)).
 - **The cold start runs inside `request()`:**
   - It spawns the ephemeral process if needed (with `ipfs.hello`), then sends `ipfs.start` for the partition's instance, then the request.
-  - All of it runs under the request's signal and its `headers_ms`. An abort or the deadline stops it, and the head deadline covers the start.
-  - Concurrent first requests from one partition share one start (single flight).
+  - Each waiting request runs under its own signal and its own `headers_ms`, and the head deadline covers the start.
+  - **Concurrent first requests from one partition share one start (single flight).** The start belongs to the partition, not to the request that began it:
+    - every waiting request holds a lease on the pending instance;
+    - one waiter's abort or deadline rejects that waiter and releases its lease only;
+    - the start itself is cancelled when its last lease is released, or when the partition or the generation is retired;
+    - a cancelled start retires its pending instance ID first. Each step of the start (the spawn, `ipfs.hello`, `ipfs.start`, then the request) checks the pair before it sends, so nothing is sent late to a retired or evicted ID.
   - When the slot came from an eviction, the new instance's `ipfs.start` waits for the evicted one's teardown to release its reservations, within the same deadline.
 - **Pinning is the lease:**
   - A pin is taken in `ipfsBackend()` and released by the handler on every exit ([Main's side](#mains-side)).
@@ -655,8 +675,9 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   - SOCKS5, once its `socks` feature is on.
     - With `socks5://` rather than `socks5h://`, the client resolves the name with its own resolver, which can be replaced (`ClientBuilder::dns_resolver`), and hands the proxy an IP.
     - TLS SNI and `Host` still use the URL's name.
+    - **One trap:** in reqwest 0.12.28's SOCKS connector, a resolver that succeeds with no address makes the connector keep the original name and send it to the proxy unresolved (`connect.rs`, around lines 1750–1765). So an ordinary name must never resolve to an empty success ([The resolver contract](#the-resolver-contract)).
   - Every client must be built with an explicit proxy or with `no_proxy()`. Today none sets either (`ns:828`, `rt:1807`, `rv:11132`), so the environment decides.
-  - A custom redirect policy can run a check on every hop before it is followed.
+  - Redirects can be left to the service: with `Policy::none()`, every 3xx comes back to the caller, which decides each hop itself.
 - **libp2p 0.56:**
   - It has no SOCKS transport. TCP, and WebSocket over TCP, can go through a small custom `Transport` over `tokio-socks`. Its `tor` feature also speaks Tor's `RESOLVE` extension.
   - **QUIC can't be proxied:** Tor carries TCP only, and Arti doesn't offer SOCKS5 `UDP ASSOCIATE`.
@@ -675,11 +696,12 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
 - **`direct`, the default:** today's transports, behind [the gate](#the-gate). The environment's proxy variables no longer apply (deviation `env-proxy`).
 - **`socks5 { ip, port }`:** all of the service's traffic goes through the proxy.
   - **The endpoint is an IP literal,** so reaching the proxy needs no DNS. The service never resolves the proxy's name.
-  - **Names:**
+  - **Ordinary names:**
     - They are resolved through the proxy with `RESOLVE`, never by a local resolver.
     - Each answer passes [the gate](#the-gate), and the connection goes to a checked address, as an IP literal in SOCKS `CONNECT`.
     - TLS SNI and HTTP `Host` keep the name.
-    - Only onions are handed to the proxy as names.
+    - A failed lookup, an empty answer, or an answer whose every address is refused is an error ([The resolver contract](#the-resolver-contract)).
+  - **Onion names** take a separate, explicitly authorized route, and are handed to the proxy as names ([The onion route](#the-onion-route)).
   - **HTTP:** delegated routing, DoH and HTTP providers, all through the proxy this way.
   - **Bitswap:** TCP and WebSocket through the SOCKS transport. QUIC and hickory are off.
   - **Routing:** `delegated` by default, since the light DHT dials dozens of peers per query, each through Tor.
@@ -729,7 +751,10 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
    - the connection is pinned to one that passed: `connect()` in `direct` mode, a SOCKS `CONNECT` to that IP literal in `socks5` mode.
 
    A name whose answers change between checks can't move a connection, because the address that was checked is the address connected to. Each new connection resolves and checks again.
-4. **On every HTTP redirect hop:** the redirect policy runs the gate on the `Location` target before following it. That covers delegated routing, DoH and providers. A refused hop fails the attempt.
+4. **On every HTTP redirect hop:**
+   - The service follows redirects itself: every client is built with `Policy::none()`.
+   - For each hop, its own loop classifies the `Location` target, runs the gate, picks the client again (the ordinary one, or in `socks5` mode the [onion route](#the-onion-route)), and counts the hop against that client's acceptance.
+   - That covers delegated routing, DoH and providers. A refused hop fails the attempt.
 
 **The SOCKS contract** (a decision):
 - **(a), chosen:**
@@ -741,9 +766,26 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
 - **(b), rejected:** delegate the policy to the proxy. Tor's exits refuse private destinations by default, but that is an exit operator's setting and Arti's configuration, neither of which the service can guarantee. And a SOCKS reply doesn't prove which address was connected.
 - **If the pinned Arti can't `RESOLVE`,** the setting doesn't ship until it can, unless the user accepts (b) as an explicit deviation ([Open questions](#open-questions)).
 
+#### The resolver contract
+
+- **The service's resolver** sits under every ordinary name, in both modes. That covers reqwest's `dns_resolver` and the SOCKS and TCP transports. It answers one of two things:
+  - **one or more addresses,** every one of which passed the gate;
+  - **an error.**
+- **It never answers an empty success.** A failed lookup, an empty answer, and an answer whose every address the policy refuses are all errors, and the connection attempt fails.
+  - This matters because, in reqwest 0.12.28, an empty success makes the SOCKS connector send the original name to the proxy unresolved. That is the route reserved for onions.
+- **Onion names never reach this resolver.** The gate routes them first ([below](#the-onion-route)), and the resolver answers an onion name with an error, in case one ever arrives.
+
+#### The onion route
+
+- **In `direct` mode** there is none: onions are refused before any socket exists.
+- **In `socks5` mode,** onion targets have their own explicitly authorized route, which no ordinary name can enter:
+  - **HTTP:** a second client, built with `socks5h://` to Arti's endpoint, so the proxy receives the name. It is used only for a URL whose host the gate classified as onion. Its connector checks that classification again before it sends, and refuses anything else.
+  - **libp2p:** the SOCKS transport's onion path, taken only for `/onion3` and onion `/dns*` components.
+- **Redirects re-select the route:** the service's redirect loop picks the client per hop. An onion URL that redirects to a clearnet name moves to the ordinary client, with `RESOLVE` and the gate. A clearnet URL that redirects to an onion moves to the onion client, in `socks5` mode only.
+
 **Redirect behavior** is part of parity:
 - v0.4.5's provider client follows no redirect (`rv:11136`), while its routing and DoH clients follow reqwest's default (`rt:1807`, `ns:828`).
-- The service keeps each client's acceptance and adds the gate to every hop (deviation `redirect-gate`).
+- The service keeps each client's acceptance (the provider client, none; the routing and DoH clients, up to 10 hops, as reqwest's default allows) in its own redirect loop, with the gate on every hop (deviation `redirect-gate`).
 
 ### Changing the policy
 
@@ -772,15 +814,16 @@ Each is a pull request to freedom-ipfs, and none changes mobile's behavior by de
    - The service then treats each path exactly as the add-on does, with no copy to drift.
 3. **A network policy.** One `NetworkPolicy` value, threaded through the builder, that supplies:
    1. **HTTP clients:**
-      - a single constructor taking `Option<reqwest::Proxy>` and each client's redirect acceptance, which wraps every redirect in the gate (hop check 4);
+      - a single constructor taking `Option<reqwest::Proxy>` and each client's redirect acceptance (the hop count), built with `Policy::none()`, so the service's own loop follows redirects through the gate (hop check 4);
       - it replaces the three `timeout_http_client` functions (`ns:828`, `rt:1807`, `rv:11132`) and calls `no_proxy()` when no proxy is given;
-      - it enables `reqwest`'s `socks` feature, and uses `socks5://` (never `socks5h://`) with the gate's resolver as the client's `dns_resolver`. That resolver resolves locally in `direct` mode and through `RESOLVE` in `socks5` mode, and returns only addresses that pass (check 3).
+      - it enables `reqwest`'s `socks` feature, and uses `socks5://` (never `socks5h://`) with the gate's resolver as the client's `dns_resolver`. That resolver resolves locally in `direct` mode and through `RESOLVE` in `socks5` mode, and follows [the resolver contract](#the-resolver-contract): addresses that pass, or an error, never an empty success;
+      - in `socks5` mode, a second, onion-only client for [the onion route](#the-onion-route).
    2. **Errors instead of panics:** the three constructors `expect` today (`ns:833`, `rt:1812`, `rv:11138`). With a proxy their configuration can fail, so they must return an error.
    3. **DoH:** the endpoint and its client come from the policy, at `mob:2226` and `rv:9436`, `9484` and `9531`. DNSLink is already pluggable (`DnsTxtResolver`, `ns:53`); Bitswap's address expansion isn't. Expansion results pass through the gate (check 2).
    4. **Transports:**
       - `build_dht_swarm` (`rt:1588`), `build_bitswap_swarm` (`rv:8816`) and `cloudflare_websocket_transport` (`rv:8847`) take `quic: bool`, `dns: Hickory | None`, and `tcp: Direct | Socks5(addr)`;
       - add a SOCKS5 `Transport` over `tokio-socks` (MIT, with its `tor` feature) for `/ip4`, `/ip6`, `/dns*` and `/onion3` with `/tcp`, and for WebSocket on top of it;
-      - it resolves `/dns*` names with `RESOLVE`, checks every answer, and `CONNECT`s to a checked IP literal. Only `/onion3` and onion names go to the proxy as names. The WebSocket layer above keeps the name for TLS;
+      - it resolves `/dns*` names with `RESOLVE`, checks every answer, and `CONNECT`s to a checked IP literal. A failed, empty or wholly refused answer fails the dial. Only `/onion3` and onion names go to the proxy as names, on their own code path. The WebSocket layer above keeps the name for TLS;
       - in `direct` mode, the TCP and WebSocket transports resolve names themselves and check each address before connecting (check 3).
    5. **The gate:**
       - the classification and the address policy as one function, applied where candidates are chosen (`rt:1491`–`1525`, `rt:1767`–`1805`), after expansion, and at the dial sites (`rv:7765`, `rv:7949`, `rt:1044`);
@@ -807,8 +850,9 @@ Each is a pull request to freedom-ipfs, and none changes mobile's behavior by de
    - the builder takes process-wide limiters for block fetches, HTTP provider requests, Bitswap connections and DHT queries;
    - **a reservation API:**
      - `reserve(bytes)` before every accounted allocation, waiting or failing as the [budget](#budgets) says;
-     - a transfer when a fetched block is put into a store, releasing the transient reservation only after the put;
-     - release on drop;
+     - a buffer type that carries its reservation, so the reservation is released when the buffer's last owner drops it, after a panic or a cancel too;
+     - truing down only by replacing the backing with an allocation of the payload's size;
+     - caches that count entries by backing capacity, and take over a charge only when they hold the last reference;
    - **a maximum block size** for every block fetch (2 MiB), on the Bitswap path as on the HTTP one, reserved before the fetch begins;
    - **caches built with a fixed capacity:** the hot cache, the small-body cache and the UnixFS metadata cache, reserved at that capacity;
    - **the background queue bound** of 64.
@@ -895,6 +939,10 @@ As 0006's 4.7 did, before anything moves:
 - **Private cases:**
   - a first private load;
   - concurrent first loads in one partition: one start;
+  - **waiters with different deadlines:**
+    - the first waiter's abort leaves the start running for the others;
+    - the last waiter's abort cancels the start;
+    - in both cases pin counts return to zero, and nothing is sent late to an evicted ID;
   - a ninth partition evicting during another's planning: only unpinned instances go;
   - a close during the cold start;
   - **all 8 instances pinned:**
@@ -917,7 +965,12 @@ As 0006's 4.7 did, before anything moves:
 - **Budget cases:**
   - many distinct CIDs over a long-lived instance, and over every private instance at once. The memory budget and the retrieval admission hold;
   - **exhaustion during an existing stream:** the stream's next block waits, then aborts with `busy` after 10 s. Other streams continue, and the reserved total never passes the budget;
-  - **concurrent growth:** many concurrent fetches into one memory store reach its page cap. Puts fail as uncached, the responses still complete, and transient-to-store transfers never let the total pass the budget.
+  - **concurrent growth:** many concurrent fetches into one memory store reach its page cap. Puts fail as uncached, the responses still complete, and the total never passes the budget;
+  - **reservations follow allocations:**
+    - a small block in a large receive buffer stays charged for the buffer until it is copied out;
+    - a failed or full put keeps the block charged until its last owner drops it;
+    - a block evicted from the hot cache while a stream holds it stays charged until the stream drops it;
+    - a cancel or a panic in the middle of a put returns the counter to its baseline.
 - **Ring cases:** one-byte frames and full-window bursts never allocate more than 128 KiB per stream in main.
 - **Rust tests through the binary,** using test-only methods behind a cargo feature, as `freedom-cored`'s `testhooks`. These seed a memory or offline instance from CAR fixtures, and inject a panic, a stall or a slow teardown.
   - **The protocol:** frames, credit, cancel races, deadline, and one terminal per request and per stream.
@@ -932,9 +985,15 @@ As 0006's 4.7 did, before anything moves:
   - **Failures:** an unavailable proxy, a proxy that refuses `RESOLVE` (the attempt fails, and no name is sent in `CONNECT`), and an unsupported transport in `socks5` mode.
   - **A SOCKS fixture with `RESOLVE`:**
     - a name that looks acceptable but resolves to a loopback or private address is refused, and no `CONNECT` is sent;
+    - an empty `RESOLVE` answer, and an answer whose every address is refused: the attempt fails, and no `CONNECT` carries the ordinary name;
     - a name whose answer changes from a public address to loopback between checks never connects to loopback, and each `CONNECT` goes to the address that was checked;
     - every `CONNECT` carries an IP literal, except for onions;
     - TLS SNI and HTTP `Host` carry the name, checked by a test server.
+  - **The onion route:**
+    - an HTTP request to an onion host: one `CONNECT` with the onion name, and no `RESOLVE`;
+    - an onion URL that redirects to a clearnet name: the hop goes through `RESOLVE`, the gate and an IP `CONNECT`;
+    - a clearnet URL that redirects to an onion: the onion client in `socks5` mode, refused in `direct` mode;
+    - an ordinary name handed to the onion client: refused before anything is sent.
   - **Arti qualification:** the pinned Arti answers `RESOLVE`, run in the release pipeline before the setting ships.
   - **Onion:** `.onion` and `/onion3` targets in `direct` mode open no socket.
 - **Live:** `ipfs:native:smoke` re-pointed at the service, with `/ipns/ipfs.tech/` and #102's fan-out of 48 concurrent requests and no `gateway_busy`.
