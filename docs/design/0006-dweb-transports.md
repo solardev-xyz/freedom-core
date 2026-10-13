@@ -345,7 +345,7 @@ These stay in main, because they depend on the bytes. Each is today's code.
   - **Nodes:** a fake Ant API and a fake external IPFS gateway on loopback, in their own process, answering in well under a millisecond.
   - **Names:** looked up from the core's cache, which a recorded quorum lookup warms.
   - **Columns:** today, planned, and two controls on the planned handlers for requests with no name:
-    - *local*: planned in main by the JS planner the real-handler tests use (the fallback above). On its own it costs 5–9 µs a plan at p50, one plan at a time on an idle loop.
+    - *local*: planned in main by the JS planner the real-handler tests use (the fallback above). On its own it usually costs 5–9 µs a plan at p50, one plan at a time on an idle loop, with one 14.2 µs result under higher load.
     - *cached*: handed a plan made once at warm-up, so main executes plans with no planning at all. This is the floor any local planning could reach.
   - **Statistics:**
     - each session is three runs, each run rotating the order of the four columns;
@@ -366,7 +366,7 @@ These stay in main, because they depend on the bytes. Each is today's code.
   | Gateway, hash host, 1 KB, one at a time | 0.37 (0.38) | 0.94 (0.51) | 0.30 (0.45) | 0.37 (0.50) |
   | Gateway, hash host, 1 KB, 50 at once | 4.1 (3.7) | 9.1 (8.8) | 7.2 (6.8) | 5.7 (5.0) |
   | Gateway, hash host, 1 KB, 200 at once | 15.9 (13.3) | 23.4 (25.5) | 27.6 (21.2) | 19.1 (21.4) |
-  | Ant, named host, 1 KB, 200 at once | 28.3 (23.4) | 35.2 (30.6) | | |
+  | Ant, named host, 1 KB, 200 at once | 28.2 (23.4) | 35.2 (30.6) | | |
   | Gateway, named host, 1 KB, 200 at once | 20.5 (19.8) | 21.1 (22.9) | | |
   | Seek (1 MiB Range into 10 MiB), Ant hash host, 200 at once | 122 (118) | 141 (142) | 180 (120) | 122 (134) |
 
