@@ -12,7 +12,10 @@
 //!     never waits on a fragment. The completed response goes on with a
 //!     [`Credit`] whose drop returns main's credit (`0x13`): once its
 //!     consumer has handled it, delivered or dropped as late or cancelled.
-//!   - **A begin** must name one of the core's [`Pending`] requests.
+//!   - **A begin** must name one of the core's [`Pending`] requests, and
+//!     claims it. A response read whole retires its request too, and a
+//!     whole response for the request in reassembly is a duplicate: either
+//!     way each request gets one response, as 0001 requires.
 //! - **Writer thread:** one serialized writer for stdout. Each producer has
 //!   its own [`Allowance`] of queued frames, so naming traffic can't take
 //!   the vault loop's room (0001's reserved control capacity).
@@ -392,8 +395,11 @@ impl Link {
     }
 }
 
-/// The core's own requests to main that still wait for their terminal
-/// response: a begin must name one (design 0005, Frames).
+/// The core's own requests to main whose response hasn't started arriving:
+/// a begin must name one (design 0005, Frames). The reader retires an ID as
+/// soon as its response appears, whole or begun; its producer retires it
+/// once the response is consumed, which covers producers tested without a
+/// reader.
 #[derive(Default)]
 pub struct Pending {
     ids: Mutex<BTreeSet<u64>>,
@@ -408,13 +414,19 @@ impl Pending {
         }
     }
 
-    /// Once its terminal response has been consumed, delivered or dropped.
+    /// Once its response has been read, or consumed.
     pub fn remove(&self, id: u64) {
         if let Ok(mut ids) = self.ids.lock() {
             ids.remove(&id);
         }
     }
 
+    /// Retires `id` for a response that begins: true if it was pending.
+    fn take(&self, id: u64) -> bool {
+        self.ids.lock().is_ok_and(|mut ids| ids.remove(&id))
+    }
+
+    #[cfg(test)]
     pub fn contains(&self, id: u64) -> bool {
         self.ids.lock().is_ok_and(|ids| ids.contains(&id))
     }
@@ -535,8 +547,12 @@ impl Reader {
             self.reassembler.grant();
         }
         let pending = &self.pending;
-        match self.reassembler.push(frame, |id| pending.contains(id)) {
-            Ok(Delivery::Message(frame)) => {
+        match self.reassembler.push(frame, |id| pending.take(id)) {
+            Ok(Delivery::Message { frame, answers }) => {
+                // Answered: no begin may follow for that request.
+                if let Some(id) = answers {
+                    self.pending.remove(id);
+                }
                 let credit = self.credits.acquire(frame.payload.len());
                 self.events.send(Event::Frame(frame, credit)).is_ok()
             }
@@ -580,6 +596,7 @@ fn fragment_category(error: &FragmentError) -> &'static str {
     match error {
         FragmentError::NoCredit => "begin_without_credit",
         FragmentError::UnknownId(_) => "begin_unknown_id",
+        FragmentError::DuplicateResponse(_) => "duplicate_response",
         FragmentError::BadSize(_) => "begin_size",
         FragmentError::BadHeader => "begin_header",
         FragmentError::EmptyFragment => "empty_fragment",
@@ -832,7 +849,7 @@ mod tests {
                     seen.push(Seen::Begin(Begin::decode(&frame.payload).unwrap().id));
                 }
                 match reassembler.push(frame, |_| true).unwrap() {
-                    Delivery::Message(frame) => {
+                    Delivery::Message { frame, .. } => {
                         assert_eq!(frame.kind, KIND_JSON);
                         seen.push(Seen::Message(
                             serde_json::from_slice(&frame.payload).unwrap(),
@@ -1175,6 +1192,45 @@ mod tests {
     fn the_reader_refuses_a_begin_for_no_pending_request() {
         let (mut reader, received) = reader(offered(), &[4]);
         assert!(!reader.feed(&fragmented(8, b"{}")));
+        assert!(matches!(
+            received.try_recv(),
+            Ok(Event::ProtocolError("begin_unknown_id"))
+        ));
+    }
+
+    #[test]
+    fn each_request_gets_one_response_across_a_begin() {
+        let whole = |json: &str| {
+            let mut frame = Vec::new();
+            fc_protocol::frame::encode_json(json.as_bytes(), &mut frame).unwrap();
+            frame
+        };
+        // A begin claims its request; a whole response for another one
+        // still passes, and retires that one.
+        let (mut first, received) = reader(offered(), &[4, 5]);
+        let (begin, _) = Splitter::begin(4, 10).unwrap();
+        assert!(first.feed(&begin));
+        assert!(!first.pending.contains(4));
+        assert!(first.feed(&whole(r#"{"type":"response","id":5,"result":{}}"#)));
+        assert!(matches!(received.try_recv(), Ok(Event::Frame(..))));
+        assert!(!first.pending.contains(5));
+        // A whole response for the request whose response has begun is its
+        // second.
+        assert!(!first.feed(&whole(
+            r#"{"type":"response","id":4,"error":{"code":"internal","message":"x"}}"#
+        )));
+        assert!(matches!(
+            received.try_recv(),
+            Ok(Event::ProtocolError("duplicate_response"))
+        ));
+
+        // The other way round: once a response was read whole, a begin for
+        // its request names nothing pending, whether or not its consumer
+        // has handled the response yet.
+        let (mut second, received) = reader(offered(), &[4]);
+        assert!(second.feed(&whole(r#"{"type":"response","id":4,"result":{}}"#)));
+        assert!(matches!(received.try_recv(), Ok(Event::Frame(..))));
+        assert!(!second.feed(&fragmented(4, b"{}")));
         assert!(matches!(
             received.try_recv(),
             Ok(Event::ProtocolError("begin_unknown_id"))

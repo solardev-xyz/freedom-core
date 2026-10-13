@@ -12,6 +12,10 @@
 //! consumer. So at most one response per direction is in reassembly, and the
 //! receiver can reserve its bytes at begin.
 //!
+//! **One response per request** (0001): once a response has begun, a whole
+//! response for the same request is a duplicate, and a response read whole
+//! can't be followed by a begin for its request.
+//!
 //! Sans-I/O: [`Splitter`] cuts a response into frames for a writer, and
 //! [`Reassembler`] turns the frames a decoder produced back into whole
 //! messages, completed responses and credit returns. Every malformed
@@ -28,7 +32,7 @@ use crate::frame::{
     self, Frame, KIND_BEGIN, KIND_CREDIT, KIND_FRAGMENT, KIND_JSON, KIND_LAST, MAX_MESSAGE,
     MAX_PAYLOAD,
 };
-use crate::message::check_id;
+use crate::message::{Message, check_id};
 
 /// A fragmented stream the receiver must close on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -40,6 +44,10 @@ pub enum FragmentError {
     /// A begin whose ID is not a pending request of the receiver's.
     #[error("a begin for request {0}, which is not pending")]
     UnknownId(u64),
+    /// A whole response for the request whose response is in reassembly:
+    /// its second response.
+    #[error("a whole response for request {0}, whose response has begun")]
+    DuplicateResponse(u64),
     /// A begin whose size is zero or over the message cap.
     #[error("a response of {0} bytes, zero or over the message cap")]
     BadSize(u64),
@@ -168,8 +176,10 @@ impl Splitter {
 /// What a frame amounts to, once the reassembler has taken it.
 pub enum Delivery {
     /// A whole message (kind `0x01`), to decode at once, also between
-    /// another response's fragments.
-    Message(Frame),
+    /// another response's fragments. `answers` is the request it responds
+    /// to, if it is a response: the receiver retires that ID, so no begin
+    /// can follow for it.
+    Message { frame: Frame, answers: Option<u64> },
     /// A fragmented response, complete: exactly the begin's `bytes`, to
     /// decode as a `0x01` payload is.
     Response {
@@ -186,7 +196,11 @@ pub enum Delivery {
 impl fmt::Debug for Delivery {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Delivery::Message(frame) => f.debug_tuple("Message").field(frame).finish(),
+            Delivery::Message { frame, answers } => f
+                .debug_struct("Message")
+                .field("frame", frame)
+                .field("answers", answers)
+                .finish(),
             Delivery::Response { id, payload } => f
                 .debug_struct("Response")
                 .field("id", id)
@@ -213,6 +227,8 @@ struct Partial {
 ///   reserves exactly the declared bytes, in one `Zeroizing` buffer. Since
 ///   the credit allows one response in reassembly, nothing else is ever
 ///   reserved, and a fragment never needs room the begin didn't take.
+/// - **Whole messages** pass through. Each one's envelope is read to find
+///   a response: one for the request in reassembly is a duplicate.
 /// - **Fragments** append; the last completes the response, which must be
 ///   exactly the declared size.
 /// - **After an error** it stays failed, and the partial response is wiped.
@@ -241,7 +257,9 @@ impl Reassembler {
     }
 
     /// Takes one decoded frame. `pending` says whether an ID is a pending
-    /// request of the receiver's; it is asked only at a begin.
+    /// request of the receiver's. It is asked only at a begin, once every
+    /// other check has passed, so the receiver may claim the ID there: the
+    /// begin is then accepted.
     pub fn push(
         &mut self,
         frame: Frame,
@@ -264,7 +282,20 @@ impl Reassembler {
         pending: impl FnOnce(u64) -> bool,
     ) -> Result<Delivery, FragmentError> {
         match frame.kind {
-            KIND_JSON => Ok(Delivery::Message(frame)),
+            KIND_JSON => {
+                // A malformed envelope is the decoder's to report, as for
+                // any whole message.
+                let answers = match Message::decode(&frame.payload) {
+                    Ok(Message::Response { id, .. }) => Some(id),
+                    _ => None,
+                };
+                if let (Some(id), Some(partial)) = (answers, &self.current)
+                    && id == partial.id
+                {
+                    return Err(FragmentError::DuplicateResponse(id));
+                }
+                Ok(Delivery::Message { frame, answers })
+            }
             KIND_CREDIT if frame.payload.is_empty() => Ok(Delivery::Credit),
             KIND_CREDIT => Err(FragmentError::CreditPayload),
             KIND_BEGIN => {
@@ -417,7 +448,7 @@ mod tests {
                     piece = &piece[consumed..];
                     while let Some(frame) = decoder.pop() {
                         match reassembler.push(frame, pending).unwrap() {
-                            Delivery::Message(_) => messages += 1,
+                            Delivery::Message { .. } => messages += 1,
                             Delivery::Response { id, payload } => {
                                 responses.push((id, payload.to_vec()));
                             }
@@ -497,7 +528,7 @@ mod tests {
         let mut r = Reassembler::new();
         assert!(matches!(
             r.push(frame(KIND_JSON, b"{}"), |_| unreachable!()),
-            Ok(Delivery::Message(f)) if f.payload.as_slice() == b"{}"
+            Ok(Delivery::Message { frame: f, answers: None }) if f.payload.as_slice() == b"{}"
         ));
         assert!(matches!(
             r.push(frame(KIND_CREDIT, b""), |_| unreachable!()),
@@ -508,8 +539,31 @@ mod tests {
         r.push(frame(KIND_FRAGMENT, b"ab"), pending).unwrap();
         assert!(matches!(
             r.push(frame(KIND_JSON, b"[]"), pending),
-            Ok(Delivery::Message(_))
+            Ok(Delivery::Message { answers: None, .. })
         ));
+        // Whole messages of every other kind, and responses to other
+        // requests, still pass: a request may even reuse the number, as the
+        // peer's IDs are its own.
+        for (message, answers) in [
+            (&br#"{"type":"response","id":8,"result":{}}"#[..], Some(8)),
+            (
+                br#"{"type":"response","id":9,"error":{"code":"busy","message":"b"}}"#,
+                Some(9),
+            ),
+            (
+                br#"{"type":"request","id":7,"method":"m","context":{"caller":"chrome"}}"#,
+                None,
+            ),
+            (br#"{"type":"cancel","id":7}"#, None),
+            (br#"{"type":"event","event":"e","data":{}}"#, None),
+        ] {
+            let delivery = r.push(frame(KIND_JSON, message), pending).unwrap();
+            assert!(
+                matches!(delivery, Delivery::Message { answers: a, .. } if a == answers),
+                "{}",
+                String::from_utf8_lossy(message)
+            );
+        }
         assert!(matches!(
             r.push(frame(KIND_CREDIT, b""), pending),
             Ok(Delivery::Credit)
@@ -623,6 +677,26 @@ mod tests {
         );
         // A credit frame with a payload.
         assert_eq!(first_error(vec![frame(KIND_CREDIT, b"x")]), CreditPayload);
+        // A whole response for the request whose response has begun, an
+        // error or a result, before any fragment or between them.
+        assert_eq!(
+            first_error(vec![
+                begin(7, 10),
+                frame(
+                    KIND_JSON,
+                    br#"{"type":"response","id":7,"error":{"code":"internal","message":"x"}}"#
+                )
+            ]),
+            DuplicateResponse(7)
+        );
+        assert_eq!(
+            first_error(vec![
+                begin(7, 10),
+                frame(KIND_FRAGMENT, b"abc"),
+                frame(KIND_JSON, br#"{"type":"response","id":7,"result":null}"#)
+            ]),
+            DuplicateResponse(7)
+        );
         // A kind that isn't one.
         assert_eq!(first_error(vec![frame(0x02, b"")]), UnexpectedKind(0x02));
     }
@@ -649,7 +723,14 @@ mod tests {
         let debug = format!("{delivery:?}");
         assert!(!debug.contains("SECRET"), "{debug}");
         assert!(
-            !format!("{:?}", Delivery::Message(frame(KIND_JSON, b"SECRET"))).contains("SECRET")
+            !format!(
+                "{:?}",
+                Delivery::Message {
+                    frame: frame(KIND_JSON, b"SECRET"),
+                    answers: None
+                }
+            )
+            .contains("SECRET")
         );
     }
 

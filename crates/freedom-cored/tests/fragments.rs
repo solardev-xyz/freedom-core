@@ -433,6 +433,22 @@ fn malformed_fragments_close_the_connection() {
             Box::new(move |id| [begin(id, 10), raw_frame(KIND_LAST, b"{}")].concat()),
         ),
         ("credit_payload", Box::new(|_| raw_frame(KIND_CREDIT, b"x"))),
+        // One response per request (0001): a whole one after a begin for
+        // the same request, or a begin after a whole one.
+        (
+            "duplicate_response",
+            Box::new(move |id| {
+                let whole = json!({ "type": "response", "id": id, "result": {} });
+                [begin(id, 10), frame(&whole)].concat()
+            }),
+        ),
+        (
+            "begin_unknown_id",
+            Box::new(move |id| {
+                let whole = json!({ "type": "response", "id": id, "result": {} });
+                [frame(&whole), begin(id, 10)].concat()
+            }),
+        ),
         // Main offered fragments: the core holds main's credit already.
         (
             "unsolicited_credit",
@@ -459,6 +475,40 @@ fn malformed_fragments_close_the_connection() {
             "{category}: {stderr}"
         );
     }
+}
+
+#[test]
+fn a_whole_response_for_a_begun_one_closes_the_connection() {
+    let (_root, mut core) = core(true);
+    let answers = naming_recorded();
+    let rpc = first_rpc(&mut core);
+    let other = loop {
+        let message = core.recv();
+        if message["method"] == "shell.rpc" {
+            break message;
+        }
+    };
+    // Main begins its answer to one request...
+    let begin = json!({ "id": rpc["id"], "bytes": 2 * MIB }).to_string();
+    core.send_raw(&raw_frame(KIND_BEGIN, begin.as_bytes()));
+    // ...meanwhile answers another whole, and asks the vault: both fine.
+    core.send(&rpc_answer(&other, &answers));
+    core.send(&request(40, "vault.status", json!({})));
+    assert_eq!(core.until_response(40)["result"]["exists"], false);
+    // Then it answers the begun request whole as well: a second response
+    // for it, which closes the connection rather than strand the begun
+    // one's reservation and credit.
+    core.send(&json!({
+        "type": "response",
+        "id": rpc["id"],
+        "error": { "code": "internal", "message": "probe" },
+    }));
+    assert_eq!(core.exit_code(Duration::from_secs(5)), 76);
+    let stderr = core.stderr();
+    assert!(
+        stderr.contains(r#""category":"duplicate_response""#),
+        "{stderr}"
+    );
 }
 
 #[test]
