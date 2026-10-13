@@ -35,10 +35,6 @@ pub const MAX_OUTSTANDING: usize = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Owner {
     Naming,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the chain thread's, which comes next")
-    )]
     Chain,
 }
 

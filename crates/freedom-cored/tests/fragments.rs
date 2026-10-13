@@ -2,8 +2,8 @@
 //! the real binary, with the test playing main.
 //!
 //! - **Core to main:** the `test.*` methods (enabled by
-//!   `FREEDOM_CORED_TEST_METHODS`) stand in for the chain thread and make
-//!   responses of any size.
+//!   `FREEDOM_CORED_TEST_METHODS`) make responses of any size, as the chain
+//!   thread's large replies are (`tests/chain.rs` has those).
 //! - **Main to core:** naming's `shell.rpc` requests are the core's pending
 //!   requests, which main answers in fragments.
 

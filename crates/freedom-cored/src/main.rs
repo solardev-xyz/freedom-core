@@ -6,6 +6,7 @@
 //! freedom-cored recover   --data-dir <identity dir> --lock-dir <lock dir>
 //! ```
 
+mod chain;
 mod exit;
 mod fsx;
 mod gate;

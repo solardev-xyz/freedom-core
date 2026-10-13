@@ -12,6 +12,7 @@ Crates:
 - aead 0.6.1: MIT OR Apache-2.0
 - aes 0.9.3: MIT OR Apache-2.0
 - aes-gcm 0.11.1: Apache-2.0 OR MIT
+- aho-corasick 1.1.4: Unlicense OR MIT
 - base16ct 1.0.0: Apache-2.0 OR MIT
 - base64 0.22.1: MIT OR Apache-2.0
 - bitflags 2.13.2: MIT OR Apache-2.0
@@ -73,6 +74,9 @@ Crates:
 - primefield 0.14.0: Apache-2.0 OR MIT
 - primeorder 0.14.0: Apache-2.0 OR MIT
 - rand_core 0.10.1: MIT OR Apache-2.0
+- regex 1.12.3: MIT OR Apache-2.0
+- regex-automata 0.4.14: MIT OR Apache-2.0
+- regex-syntax 0.8.10: MIT OR Apache-2.0
 - rfc6979 0.6.0: Apache-2.0 OR MIT
 - rustix 1.1.5: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 - salsa20 0.11.0: MIT OR Apache-2.0
@@ -1298,6 +1302,66 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ========================================================================
+Used by: aho-corasick 1.1.4 (COPYING), memchr 2.8.3 (COPYING), memchr 2.8.3 (COPYING)
+------------------------------------------------------------------------
+This project is dual-licensed under the Unlicense and MIT licenses.
+
+You may use this code under the terms of either license.
+
+========================================================================
+Used by: aho-corasick 1.1.4 (LICENSE-MIT), memchr 2.8.3 (LICENSE-MIT), memchr 2.8.3 (LICENSE-MIT)
+------------------------------------------------------------------------
+The MIT License (MIT)
+
+Copyright (c) 2015 Andrew Gallant
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+========================================================================
+Used by: aho-corasick 1.1.4 (UNLICENSE), memchr 2.8.3 (UNLICENSE), memchr 2.8.3 (UNLICENSE)
+------------------------------------------------------------------------
+This is free and unencumbered software released into the public domain.
+
+Anyone is free to copy, modify, publish, use, compile, sell, or
+distribute this software, either in source code form or as a compiled
+binary, for any purpose, commercial or non-commercial, and by any
+means.
+
+In jurisdictions that recognize copyright laws, the author or authors
+of this software dedicate any and all copyright interest in the
+software to the public domain. We make this dedication for the benefit
+of the public at large and to the detriment of our heirs and
+successors. We intend this dedication to be an overt act of
+relinquishment in perpetuity of all present and future rights to this
+software under copyright law.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
+
+For more information, please refer to <http://unlicense.org/>
+
+========================================================================
 Used by: base16ct 1.0.0 (LICENSE-MIT)
 ------------------------------------------------------------------------
 Copyright (c) 2014 Steve "Sc00bz" Thomas (steve at tobtu dot com)
@@ -1328,7 +1392,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-Used by: base64 0.22.1 (LICENSE-APACHE), bitflags 2.13.2 (LICENSE-APACHE), bs58 0.5.1 (LICENSE-APACHE), cfg-if 1.0.5 (LICENSE-APACHE), equivalent 1.0.2 (LICENSE-APACHE), errno 0.3.14 (LICENSE-APACHE), ff 0.14.0 (LICENSE-APACHE), form_urlencoded 1.2.2 (LICENSE-APACHE), group 0.14.0 (LICENSE-APACHE), hashbrown 0.17.1 (LICENSE-APACHE), idna 1.1.0 (LICENSE-APACHE), idna_adapter 1.2.2 (LICENSE-APACHE), indexmap 2.14.0 (LICENSE-APACHE), linux-raw-sys 0.12.1 (LICENSE-APACHE), num-traits 0.2.19 (LICENSE-APACHE), percent-encoding 2.3.2 (LICENSE-APACHE), rustix 1.1.5 (LICENSE-APACHE), smallvec 1.16.3 (LICENSE-APACHE), stable_deref_trait 1.2.1 (LICENSE-APACHE), unicode-normalization 0.1.25 (LICENSE-APACHE), url 2.5.8 (LICENSE-APACHE), addr2line 0.27.1 (LICENSE-APACHE), cfg-if 1.0.4 (LICENSE-APACHE), gimli 0.34.0 (LICENSE-APACHE), hashbrown 0.17.1 (LICENSE-APACHE), object 0.39.1 (LICENSE-APACHE), rustc-demangle 0.1.28 (LICENSE-APACHE)
+Used by: base64 0.22.1 (LICENSE-APACHE), bitflags 2.13.2 (LICENSE-APACHE), bs58 0.5.1 (LICENSE-APACHE), cfg-if 1.0.5 (LICENSE-APACHE), equivalent 1.0.2 (LICENSE-APACHE), errno 0.3.14 (LICENSE-APACHE), ff 0.14.0 (LICENSE-APACHE), form_urlencoded 1.2.2 (LICENSE-APACHE), group 0.14.0 (LICENSE-APACHE), hashbrown 0.17.1 (LICENSE-APACHE), idna 1.1.0 (LICENSE-APACHE), idna_adapter 1.2.2 (LICENSE-APACHE), indexmap 2.14.0 (LICENSE-APACHE), linux-raw-sys 0.12.1 (LICENSE-APACHE), num-traits 0.2.19 (LICENSE-APACHE), percent-encoding 2.3.2 (LICENSE-APACHE), regex 1.12.3 (LICENSE-APACHE), regex-automata 0.4.14 (LICENSE-APACHE), regex-syntax 0.8.10 (LICENSE-APACHE), rustix 1.1.5 (LICENSE-APACHE), smallvec 1.16.3 (LICENSE-APACHE), stable_deref_trait 1.2.1 (LICENSE-APACHE), unicode-normalization 0.1.25 (LICENSE-APACHE), url 2.5.8 (LICENSE-APACHE), addr2line 0.27.1 (LICENSE-APACHE), cfg-if 1.0.4 (LICENSE-APACHE), gimli 0.34.0 (LICENSE-APACHE), hashbrown 0.17.1 (LICENSE-APACHE), object 0.39.1 (LICENSE-APACHE), rustc-demangle 0.1.28 (LICENSE-APACHE)
 ------------------------------------------------------------------------
 Apache License
                         Version 2.0, January 2004
@@ -1558,7 +1622,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 ========================================================================
-Used by: bitflags 2.13.2 (LICENSE-MIT), num-traits 0.2.19 (LICENSE-MIT)
+Used by: bitflags 2.13.2 (LICENSE-MIT), num-traits 0.2.19 (LICENSE-MIT), regex 1.12.3 (LICENSE-MIT), regex-automata 0.4.14 (LICENSE-MIT), regex-syntax 0.8.10 (LICENSE-MIT)
 ------------------------------------------------------------------------
 Copyright (c) 2014 The Rust Project Developers
 
@@ -3960,66 +4024,6 @@ conflicts with the conditions of the GPLv2, you may retroactively and
 prospectively choose to deem waived or otherwise exclude such Section(s) of
 the License, but only in their entirety and only with respect to the Combined
 Software.
-
-========================================================================
-Used by: memchr 2.8.3 (COPYING), memchr 2.8.3 (COPYING)
-------------------------------------------------------------------------
-This project is dual-licensed under the Unlicense and MIT licenses.
-
-You may use this code under the terms of either license.
-
-========================================================================
-Used by: memchr 2.8.3 (LICENSE-MIT), memchr 2.8.3 (LICENSE-MIT)
-------------------------------------------------------------------------
-The MIT License (MIT)
-
-Copyright (c) 2015 Andrew Gallant
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
-
-========================================================================
-Used by: memchr 2.8.3 (UNLICENSE), memchr 2.8.3 (UNLICENSE)
-------------------------------------------------------------------------
-This is free and unencumbered software released into the public domain.
-
-Anyone is free to copy, modify, publish, use, compile, sell, or
-distribute this software, either in source code form or as a compiled
-binary, for any purpose, commercial or non-commercial, and by any
-means.
-
-In jurisdictions that recognize copyright laws, the author or authors
-of this software dedicate any and all copyright interest in the
-software to the public domain. We make this dedication for the benefit
-of the public at large and to the detriment of our heirs and
-successors. We intend this dedication to be an overt act of
-relinquishment in perpetuity of all present and future rights to this
-software under copyright law.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
-OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
-ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
-OTHER DEALINGS IN THE SOFTWARE.
-
-For more information, please refer to <http://unlicense.org/>
 
 ========================================================================
 Used by: miniz_oxide 0.9.1 (LICENSE)

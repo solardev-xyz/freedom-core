@@ -23,7 +23,7 @@ use crate::requests::{self, Owner, Requests};
 use crate::transport::{self, Credits, Link, Pending};
 use crate::vault::{FileSnapshot, Finished, NodeRecovery, Out, Vault};
 use crate::worker::Worker;
-use crate::{gate, hardening, log, naming};
+use crate::{chain, gate, hardening, log, naming};
 #[cfg(debug_assertions)]
 use crate::{testhooks, testmethods};
 
@@ -71,9 +71,11 @@ pub enum Event {
     JobDone(u64, Finished),
 }
 
-/// The methods this build implements, in `core.hello`'s capabilities. Only
-/// these names, and in debug builds the test methods', are ever logged;
-/// anything else is logged as `<unknown>`.
+/// The methods `core.hello`'s capabilities name: every method this build
+/// implements but the `chain.*` methods, which design 0005 doesn't add to
+/// them (it adds `fragments` only). Only these names, the chain methods,
+/// and in debug builds the test methods', are ever logged; anything else is
+/// logged as `<unknown>`.
 const CAPABILITIES: &[&str] = &[
     "core.hello",
     "core.shutdown",
@@ -165,6 +167,16 @@ pub fn run(options: &Options) -> Exit {
     ) else {
         return Exit::Internal;
     };
+    // Chain data runs on its own thread too (design 0005), and fragments
+    // its large replies for a main that offered fragments.
+    let Ok(chain) = chain::spawn(
+        writer.queue.clone(),
+        events_tx.clone(),
+        Arc::clone(&link),
+        Arc::clone(&requests),
+    ) else {
+        return Exit::Internal;
+    };
     #[cfg(debug_assertions)]
     let test = if testhooks::test_methods() {
         match testmethods::spawn(writer.queue.clone(), Arc::clone(&link), events_tx.clone()) {
@@ -209,6 +221,7 @@ pub fn run(options: &Options) -> Exit {
         worker,
         requests,
         naming,
+        chain,
         #[cfg(debug_assertions)]
         test,
     };
@@ -410,6 +423,7 @@ struct Core {
     /// The core's requests to main: where main's responses go back to.
     requests: Arc<Requests>,
     naming: naming::Handle,
+    chain: chain::Handle,
     /// The `test.*` methods' thread, when the test hooks enable it (debug
     /// builds only).
     #[cfg(debug_assertions)]
@@ -444,9 +458,12 @@ struct HelloResult<'a> {
 /// A method name that is safe to log: known names only.
 fn loggable(method: &str) -> &'static str {
     #[cfg(debug_assertions)]
-    let known = CAPABILITIES.iter().chain(testmethods::METHODS);
+    let known = CAPABILITIES
+        .iter()
+        .chain(chain::METHODS)
+        .chain(testmethods::METHODS);
     #[cfg(not(debug_assertions))]
-    let known = CAPABILITIES.iter();
+    let known = CAPABILITIES.iter().chain(chain::METHODS);
     known.copied().find(|m| *m == method).unwrap_or("<unknown>")
 }
 
@@ -514,12 +531,13 @@ impl Core {
                 );
                 Flow::Exit(Exit::Protocol)
             }
-            // A cancel names a vault request or a naming one; each side
-            // ignores IDs it doesn't hold.
+            // A cancel names a vault request, a naming one or a chain one;
+            // each ignores IDs it doesn't hold.
             Message::Cancel { id } => {
-                if !self
-                    .naming
-                    .send(naming::In::Cancel { id }, self.credit.take())
+                if !self.chain.send(chain::In::Cancel { id }, None)
+                    || !self
+                        .naming
+                        .send(naming::In::Cancel { id }, self.credit.take())
                 {
                     return Flow::Exit(Exit::Internal);
                 }
@@ -575,7 +593,9 @@ impl Core {
             Owner::Naming => self
                 .naming
                 .send(naming::In::Response { id, outcome }, self.credit.take()),
-            Owner::Chain => false,
+            Owner::Chain => self
+                .chain
+                .send(chain::In::Response { id, outcome }, self.credit.take()),
         };
         if sent {
             Flow::Continue
@@ -620,6 +640,25 @@ impl Core {
                 };
                 if self.naming.send(
                     naming::In::Request {
+                        id,
+                        method: loggable(method),
+                        params,
+                    },
+                    self.credit.take(),
+                ) {
+                    Flow::Continue
+                } else {
+                    Flow::Exit(Exit::Internal)
+                }
+            }
+            method if chain::handles(method) => {
+                let params = match params.map(|p| RawValue::from_string(p.to_owned())) {
+                    Some(Ok(params)) => Some(params),
+                    Some(Err(_)) => return Flow::Exit(Exit::Internal),
+                    None => None,
+                };
+                if self.chain.send(
+                    chain::In::Request {
                         id,
                         method: loggable(method),
                         params,
