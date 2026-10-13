@@ -13,7 +13,10 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_freedom-cored");
-pub const READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// A hang guard, never a timing assertion: nothing waits on it to prove
+/// silence. Loaded CI runners (macOS, Windows, KDFs in parallel tests) have
+/// taken over 10 s to answer; a generous guard only slows a failing test.
+pub const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// stdout, read on a thread: either frames (serve) or lines (hold-lock,
 /// recover).
