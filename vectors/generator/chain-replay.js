@@ -1988,6 +1988,19 @@ function boundaryScenarios(ethers, tx) {
     req(1, 'eth_call', [{ to: `0x${'ab'.repeat(20)}`, data: '0x02' }, 'latest'], swap),
     req(1, 'eth_call', [{ to: `0x${'ab'.repeat(20)}`, data: '0x03' }, 'latest'], { origin: '  https://swap.example  ' }),
     req(1, 'eth_call', [{ to: `0x${'ab'.repeat(20)}`, data: '0x04' }, 'latest'], { origin: 'https://Swap.example' })),
+    // isCapacityFailure(error): an error's own failureKind first, then the
+    // pattern on safeErrorMessage's text, not the raw message: whitespace
+    // runs collapse, long hex is elided, and the text is cut at 500 units.
+    ...[
+      ['boundary-adaptive-capacity-whitespace', { message: 'out  of gas' }],
+      ['boundary-adaptive-capacity-past-500-units', { message: `${'x'.repeat(510)} out of gas` }],
+      ['boundary-adaptive-capacity-hex-elided', { message: `0x${'ab'.repeat(300)} out of gas` }],
+      ['boundary-adaptive-capacity-failure-kind', { message: 'prover busy', failureKind: 'capacity' }],
+    ].map(([id, error]) => scenario(id, `${D_}: Adaptive bypass, capacity`, {
+      ...w(1, net(['colibri', 'direct']), [RPC]),
+      colibri: { error },
+      rpc: { [RPC]: ok('0xrpc') },
+    }, req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], swap), req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], swap))),
     scenario('boundary-origin-not-interactive', `${D_}: Adaptive bypass, origin`, {
       ...w(1, net(['colibri', 'direct']), [RPC]),
       colibri: ok('0xverified', 3000),

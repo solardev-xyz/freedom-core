@@ -12,6 +12,9 @@ workspace = true
 
 [dependencies]
 fc-json = { path = "../fc-json" }
+# The sans-I/O executor the machine runs on (design 0005: "on fc-naming's
+# executor").
+fc-naming = { path = "../fc-naming" }
 # The reference's regular expressions, matched in linear time: error texts
 # can be as long as an answer. ASCII mode only, so no Unicode tables.
 regex = { version = "1.12", default-features = false, features = ["std", "perf"] }
@@ -22,3 +25,5 @@ thiserror = "2"
 [dev-dependencies]
 hex = "0.4"
 serde_json = "1"
+# The replay plays main, which maps endpoint references to hosts.
+url = "2"

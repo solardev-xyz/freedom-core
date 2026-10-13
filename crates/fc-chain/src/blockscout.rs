@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 use fc_json::index::{Index, KeyOrder, Kind, Value};
 
-use crate::answer::decode_text;
+use crate::answer::decode_body as decode_text;
 use crate::bigint::{BigInt, Parsed, parse_string};
 use crate::js::{is_safe_integer, string_to_number};
 use crate::logs::block_number_value;
@@ -607,9 +607,36 @@ impl TransferScan {
 
     /// Reads one page: the reply to the last [`Self::query`].
     pub fn on_page(&mut self, reply: PageReply<'_>) -> Result<ScanStep, BlockscoutError> {
-        self.pages += 1;
         let text = page_text(reply)?;
-        let index = Index::new(&text).map_err(|_| BlockscoutError::new("answer is not JSON"))?;
+        self.on_text(&text)
+    }
+
+    /// What the transfers read so far hold on the heap.
+    pub fn held_bytes(&self) -> usize {
+        self.transfers
+            .capacity()
+            .saturating_mul(std::mem::size_of::<Transfer>())
+            .saturating_add(
+                self.transfers
+                    .iter()
+                    .map(|t| {
+                        t.address.capacity()
+                            + t.block_hash.capacity()
+                            + t.transaction_hash.capacity()
+                            + t.from.capacity()
+                            + t.to.capacity()
+                            + t.value.capacity()
+                    })
+                    .sum(),
+            )
+    }
+
+    /// [`Self::on_page`] for a page's text, as [`page_text`] gave it: a
+    /// caller can so reserve the text's index, and the transfers it adds,
+    /// before reading it.
+    pub fn on_text(&mut self, text: &str) -> Result<ScanStep, BlockscoutError> {
+        self.pages += 1;
+        let index = Index::new(text).map_err(|_| BlockscoutError::new("answer is not JSON"))?;
         let body = index.root();
         let items = body
             .get("items")
@@ -679,7 +706,7 @@ impl TransferScan {
 }
 
 /// A page's text, after its status and size checks (`fetchPage`).
-fn page_text(reply: PageReply<'_>) -> Result<String, BlockscoutError> {
+pub fn page_text(reply: PageReply<'_>) -> Result<String, BlockscoutError> {
     if reply.status == 429 {
         return Err(BlockscoutError::cooling(
             "throttled (HTTP 429)",

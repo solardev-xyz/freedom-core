@@ -299,6 +299,36 @@ pub fn myotis_answer(method: &str, payload: Option<&str>) -> Result<String, Myot
     }
 }
 
+/// [`myotis_answer`] for `eth_call`, as the span of the payload's value
+/// rather than a copy: the same value, `JSON.parse` of either gives it.
+pub fn myotis_call_span(payload: &str) -> Result<std::ops::Range<usize>, MyotisFailure> {
+    let index = Index::new(payload).map_err(|_| plain(UNEXPECTED_RESPONSE))?;
+    let payload = Some(index.root());
+    assert_answer(payload)?;
+    let value = native_result(payload, &["result_hex", "result"])?;
+    Ok(value.start()..value.end())
+}
+
+/// `getFeeQuote`'s Myotis half, from the `fee` operation's payload: the
+/// gas price as `nativeResult(result, 'gasPriceWei', 'gasPrice')` reads it
+/// (the payload must be an answer) and the priority fee as
+/// `optionalNativeResult(result, 'maxPriorityFeePerGasWei',
+/// 'maxPriorityFeePerGas')` does (`None` when neither is set), each as the
+/// JSON text `feeQuote` converts.
+pub fn myotis_fee_values(payload: Option<&str>) -> Result<(String, Option<String>), MyotisFailure> {
+    let index = payload
+        .map(Index::new)
+        .transpose()
+        .map_err(|_| plain(UNEXPECTED_RESPONSE))?;
+    let payload = index.as_ref().map(Index::root);
+    let gas = native_result(payload, &["gas_price_wei", "gas_price"])?;
+    let priority = ["max_priority_fee_per_gas_wei", "max_priority_fee_per_gas"]
+        .iter()
+        .find_map(|key| payload?.get(key).filter(|v| v.kind() != Kind::Null))
+        .map(|v| v.stringify(KeyOrder::Property));
+    Ok((gas.stringify(KeyOrder::Property), priority))
+}
+
 /// `assertMyotisAnswer`: every payload that isn't a served answer fails.
 fn assert_answer(payload: Option<Value<'_, '_>>) -> Result<(), MyotisFailure> {
     let get = |key: &str| payload.and_then(|p| p.get(key));
@@ -494,6 +524,14 @@ mod tests {
             myotis_operation("eth_call", r#"[{"blobs":["0x"]}]"#),
             Err(MyotisFailure::Unavailable(_))
         ));
+        let payload = r#"{"status":"ok","result_hex": "0x2a" }"#;
+        let span = myotis_call_span(payload).unwrap();
+        assert_eq!(&payload[span], "\"0x2a\"");
+        assert_eq!(
+            myotis_call_span(r#"{"status":"revert","data_hex":"0x01"}"#).unwrap_err(),
+            myotis_answer("eth_call", Some(r#"{"status":"revert","data_hex":"0x01"}"#))
+                .unwrap_err()
+        );
         assert_eq!(
             myotis_answer(
                 "eth_getBalance",
