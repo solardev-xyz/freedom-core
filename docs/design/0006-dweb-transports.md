@@ -339,32 +339,54 @@ These stay in main, because they depend on the bytes. Each is today's code.
   - planned versus today.
 
   If hash hosts regress noticeably, main plans them locally from the same vectors (above).
-- **Measured** (freedom-browser `scripts/bench-dweb-latency.js`; a release build of freedom-core main at aed7ba7; a 4-core dev server shared with other agents' builds, load 1.3–3.9; 2026-10-13). Setup:
-  - **Handlers:** each tree's real handlers, driven as the real-handler tests drive them: planned (#704, freedom-browser f78230b0) against today (dca4a4ef).
-  - **Nodes:** a fake Ant API and a fake IPFS gateway on loopback, in their own process, answering in well under a millisecond. The numbers are main's handlers plus the core's planning, without a node's own retrieval time.
-  - **Names:** looked up from the core's cache, which a recorded quorum lookup warms. No measured request reached RPC.
-  - **Statistics:** the median of three runs. Each run rotates the order of the trees and sends 30–2,000 requests per case.
+- **Measured** (freedom-browser `scripts/bench-dweb-latency.js`, 2026-10-13). Setup:
+  - **Handlers:** each tree's real `bzz:` and `ipfs:` handlers, driven as the real-handler tests drive them: planned (#704) against today (freedom-browser dca4a4ef, before step 4).
+  - **Core:** a release build of freedom-core 0.5.0 (b4a5adc).
+  - **Nodes:** a fake Ant API and a fake external IPFS gateway on loopback, in their own process, answering in well under a millisecond.
+  - **Names:** looked up from the core's cache, which a recorded quorum lookup warms.
+  - **Columns:** today, planned, and two controls on the planned handlers for requests with no name:
+    - *local*: planned in main by the JS planner the real-handler tests use (the fallback above). On its own it costs 5–9 µs a plan at p50, one plan at a time on an idle loop.
+    - *cached*: handed a plan made once at warm-up, so main executes plans with no planning at all. This is the floor any local planning could reach.
+  - **Statistics:**
+    - each session is three runs, each run rotating the order of the four columns;
+    - the figures are the median over the runs of each percentile;
+    - every session sends 426,240 requests, with no failure, no lookup reaching RPC, and exactly the expected core calls (none for today's hash hosts or the controls, one `dweb.open` per planned request).
+  - **Load:** the machine is a 4-core dev server shared with other agents' builds, so two sessions are reported. Session B started at a load average of 1.1 and rose to 7.8; session A ran at 3.9–9.5.
+    - *local* and *cached* differ only by the planner's few microseconds, yet their burst p50s differ by a median of 4% in session A and 25% in session B, and by up to 90%. That is this machine's noise for bursts. Session B's *local* runs met its highest load.
+    - Single figures for bursts are therefore rough. The directions and ranges below hold in both sessions.
+  - **Not measured:** the native IPFS node, `ipns:`, cold name lookups, a real node's retrieval time, and Chromium's own scheduling and rendering.
 
-  Time to first byte, p50, in ms:
+  Time to first byte, p50, in ms, session B (session A):
 
-  | Case | Today | Planned | Hash hosts planned in main |
-  |---|---|---|---|
-  | Ant, hash host, 1 KB: one at a time / 50 / 200 at once | 0.57 / 9.4 / 22.7 | 1.55 / 16.5 / 46.0 | 0.92 / 13.3 / 36.2 |
-  | Gateway, hash host, 1 KB: one / 50 / 200 | 0.37 / 3.6 / 16.1 | 0.99 / 9.8 / 22.7 | 0.40 / 5.2 / 19.2 |
-  | Ant, hash host, 100 KB: one / 50 / 200 | 0.43 / 6.7 / 32.1 | 1.03 / 11.8 / 40.9 | 0.60 / 10.1 / 35.1 |
-  | Ant, named host, 1 KB: one / 50 / 200 | 1.12 / 7.9 / 20.4 | 1.11 / 7.8 / 28.9 | (as planned) |
-  | Gateway, named host, 1 KB: one / 50 / 200 | 0.80 / 6.4 / 19.8 | 0.97 / 6.4 / 24.5 | (as planned) |
-  | Seek (1 MiB Range into 10 MiB), hash host: Ant / gateway, 200 at once | 109 / 105 | 122 / 116 | 127 / 122 |
+  | Case | Today | Planned | Local | Cached |
+  |---|---|---|---|---|
+  | Ant, hash host, 1 KB, one at a time | 0.55 (0.56) | 1.03 (1.21) | 0.58 (0.67) | 0.57 (0.64) |
+  | Ant, hash host, 1 KB, 50 at once | 10.0 (10.6) | 14.7 (13.0) | 14.2 (11.7) | 12.3 (11.6) |
+  | Ant, hash host, 1 KB, 200 at once | 22.8 (26.0) | 47.7 (47.8) | 45.7 (43.1) | 40.2 (35.5) |
+  | Gateway, hash host, 1 KB, one at a time | 0.37 (0.38) | 0.94 (0.51) | 0.30 (0.45) | 0.37 (0.50) |
+  | Gateway, hash host, 1 KB, 50 at once | 4.1 (3.7) | 9.1 (8.8) | 7.2 (6.8) | 5.7 (5.0) |
+  | Gateway, hash host, 1 KB, 200 at once | 15.9 (13.3) | 23.4 (25.5) | 27.6 (21.2) | 19.1 (21.4) |
+  | Ant, named host, 1 KB, 200 at once | 28.3 (23.4) | 35.2 (30.6) | | |
+  | Gateway, named host, 1 KB, 200 at once | 20.5 (19.8) | 21.1 (22.9) | | |
+  | Seek (1 MiB Range into 10 MiB), Ant hash host, 200 at once | 122 (118) | 141 (142) | 180 (120) | 122 (134) |
 
-  - **A hash host, one at a time:** the round trip costs 0.4–1.0 ms at p50 for every body size, and up to about 5 ms at p99 (seeks). Planning in main recovers most of it.
-  - **Small hash-host bodies in a burst:** the p50 rises by up to 23 ms at 50 or 200 at once, as much as 2× (the Ant, 1 KB, 200 at once). Planning in main recovers about half of that, between a third and two thirds. The rest is main's own new per-request work: validating and executing the plan, and admission. Main's CPU per request in that case went from 0.26 ms today to 0.48 ms planned, and 0.41 ms planned in main.
-  - **A named host:** no change one at a time, since it is one core round trip either way. In 200-request bursts it gains 5–10 ms at p50, from the same per-request work in main.
-  - **10 MiB bodies:** first byte and total stay within the runs' spread (first byte −13% to +19%, total within ±7%, no consistent direction).
-  - **Seeks on hash hosts:** 2–6 ms later at 50 at once and 11–13 ms (about 10%) later at 200. Seeks on named hosts stay within the spread.
-  - **Two earlier three-run sessions** ran the fake nodes inside main's process. They gave the same picture for small bodies. They also showed 10 MiB first bytes 30–50% later when planned, but that went away once the nodes ran in their own process, as real nodes do.
-- **Verdict: hash hosts regress measurably, not noticeably.** One at a time, a hash host pays about half a millisecond to a millisecond for its plan. That is small next to any real node's retrieval time, which this measurement leaves out on purpose. Under bursts of small requests, about half of the added cost is main's own per-request plan execution, which planning in main would not remove either.
+  - **A hash host, one at a time:** planned adds 0.1–0.7 ms at p50 for every body size, and up to about 6 ms at p99. *Cached* is within 0.16 ms of today, so that cost is the round trip, and local planning would recover it.
+  - **Small hash-host bodies in bursts** (1 KB and 100 KB, 50 or 200 at once): first byte at p50 rises 23–136% (1.6–25 ms).
+    - With no planning at all, *cached* recovers 16–75% of the increase (30–71% in session B), about half at the median. Local planning can recover no more than *cached*.
+    - The rest is main's executor: validating and executing the plan, and admission.
+  - **A named host** makes one core call either way.
+    - Small bodies on the Ant still rise in bursts, mostly by 20–55% (one case by −1%), from the same executor.
+    - Gateway names range from −6% to +57%.
+  - **10 MiB bodies:**
+    - in bursts, totals move by −9% to +27% and first bytes by −14% to +23%, with no consistent direction between sessions;
+    - one at a time, totals move by −0.4 to +4.1 ms on 6–11 ms (up to +60% in one session). Named hosts move too, so this isn't only the round trip.
+  - **Seeks on hash hosts:** 4–20% later in bursts.
+  - **An earlier session** reported a smaller recovery for local planning. Its *local* control kept every request it planned (a test helper's history), so it is superseded.
+- **Verdict: a measured tradeoff, accepted under the conditions above.**
+  - **One at a time,** a hash host's plan costs a fraction of a millisecond.
+  - **In bursts of small requests** it adds between a quarter and more than double to the first-byte time. Planning in main could recover at most half of that at the median; the rest is main's executor, which named hosts pay too.
   - **So step 4 keeps the round trip,** and main does not plan hash hosts locally.
-  - **If burst latency matters later,** main's per-request work in the executor is the first target.
+  - **Revisit** if a measurement outside these conditions (real nodes, the native node, page loads in Chromium) shows a burst cost users notice. Main's per-request work in the executor comes first; local planning second.
   - **What local planning would take:**
     - move the hash-host half of the JS planner the real-handler tests already use (freedom-browser `test/helpers/fake-dweb-core.js`, held to `vectors/dweb.json`'s `requests` by `dweb-vectors.test.js`) into main;
     - route requests with no name host to it. Its plans carry no generations, so no fence is needed;
