@@ -24144,6 +24144,174 @@
       }
     },
     {
+      "id": "ipfs-small-text-length-hex-upper",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native"
+        }
+      },
+      "upstream": {
+        "status": 200,
+        "headers": [
+          [
+            "Content-Type",
+            "application/octet-stream"
+          ],
+          [
+            "Content-Length",
+            "0X2"
+          ]
+        ],
+        "chunks": [
+          "6f6b"
+        ]
+      },
+      "js": {
+        "resolve": [],
+        "request_url": "http://127.0.0.1:8080/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "reads_before_response": 2,
+        "body_cancelled": false,
+        "response": {
+          "status": 200,
+          "headers": [
+            [
+              "content-length",
+              "0X2"
+            ],
+            [
+              "content-type",
+              "text/plain; charset=utf-8"
+            ],
+            [
+              "x-content-type-options",
+              "nosniff"
+            ]
+          ],
+          "body": "intact"
+        }
+      }
+    },
+    {
+      "id": "ipfs-small-text-length-octal-upper",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native"
+        }
+      },
+      "upstream": {
+        "status": 200,
+        "headers": [
+          [
+            "Content-Type",
+            "application/octet-stream"
+          ],
+          [
+            "Content-Length",
+            "0O2"
+          ]
+        ],
+        "chunks": [
+          "6f6b"
+        ]
+      },
+      "js": {
+        "resolve": [],
+        "request_url": "http://127.0.0.1:8080/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "reads_before_response": 2,
+        "body_cancelled": false,
+        "response": {
+          "status": 200,
+          "headers": [
+            [
+              "content-length",
+              "0O2"
+            ],
+            [
+              "content-type",
+              "text/plain; charset=utf-8"
+            ],
+            [
+              "x-content-type-options",
+              "nosniff"
+            ]
+          ],
+          "body": "intact"
+        }
+      }
+    },
+    {
+      "id": "ipfs-small-text-length-binary-upper",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native"
+        }
+      },
+      "upstream": {
+        "status": 200,
+        "headers": [
+          [
+            "Content-Type",
+            "application/octet-stream"
+          ],
+          [
+            "Content-Length",
+            "0B10"
+          ]
+        ],
+        "chunks": [
+          "6f6b"
+        ]
+      },
+      "js": {
+        "resolve": [],
+        "request_url": "http://127.0.0.1:8080/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "reads_before_response": 2,
+        "body_cancelled": false,
+        "response": {
+          "status": 200,
+          "headers": [
+            [
+              "content-length",
+              "0B10"
+            ],
+            [
+              "content-type",
+              "text/plain; charset=utf-8"
+            ],
+            [
+              "x-content-type-options",
+              "nosniff"
+            ]
+          ],
+          "body": "intact"
+        }
+      }
+    },
+    {
       "id": "ipfs-small-text-length-nbsp",
       "request": {
         "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",

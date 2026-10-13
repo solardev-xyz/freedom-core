@@ -914,7 +914,7 @@ function exchangeCases() {
   small('relabel-type-parameters', { ...octet(2, [text('ok')]), headers: [['Content-Type', ' Application/Octet-Stream ; charset=x'], ['Content-Length', '2']] });
   small('relabel-length-forms', { ...octet(0, [text('ok')]), headers: [['Content-Type', 'application/octet-stream'], ['Content-Length', '0x2']] });
   for (const [id, value] of [['spaces', ' 2 '], ['plus', '+2'], ['decimal', '2.0'], ['exponent', '2e0'], ['fraction-exponent', '.2e1'],
-    ['octal', '0o2'], ['binary', '0b10'], ['nbsp', ch(0xa0) + '2'], ['leading-zeros', '002'], ['trailing-dot', '2.'],
+    ['octal', '0o2'], ['binary', '0b10'], ['hex-upper', '0X2'], ['octal-upper', '0O2'], ['binary-upper', '0B10'], ['nbsp', ch(0xa0) + '2'], ['leading-zeros', '002'], ['trailing-dot', '2.'],
     ['precision', '2.0000000000000001'], ['precision-max', '4096.0000000000001']]) {
     small(`length-${id}`, { ...octet(0, [text('ok')]), headers: [['Content-Type', 'application/octet-stream'], ['Content-Length', value]] });
   }
