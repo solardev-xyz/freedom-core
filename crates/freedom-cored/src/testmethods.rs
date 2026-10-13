@@ -1,6 +1,7 @@
-//! The `test.*` methods, for the integration tests: answered only when
-//! `testhooks::test_methods()` says so (debug builds, with
-//! `FREEDOM_CORED_TEST_METHODS` set); otherwise they are unknown methods.
+//! The `test.*` methods, for the integration tests. Only debug builds
+//! compile them, and they answer only when `testhooks::test_methods()` says
+//! so (`FREEDOM_CORED_TEST_METHODS` set); otherwise they are unknown
+//! methods.
 //!
 //! They stand in for the chain thread's side of the transport (design 0005,
 //! Frames) until it exists, so the tests can drive responses of any size:

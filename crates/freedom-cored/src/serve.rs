@@ -22,7 +22,9 @@ use crate::exit::Exit;
 use crate::transport::{self, Credits, Link, Pending};
 use crate::vault::{FileSnapshot, Finished, NodeRecovery, Out, Vault};
 use crate::worker::Worker;
-use crate::{gate, hardening, log, naming, testhooks, testmethods};
+use crate::{gate, hardening, log, naming};
+#[cfg(debug_assertions)]
+use crate::{testhooks, testmethods};
 
 /// How long the writer may take to flush on exit.
 const EXIT_DRAIN: Duration = Duration::from_secs(2);
@@ -69,8 +71,8 @@ pub enum Event {
 }
 
 /// The methods this build implements, in `core.hello`'s capabilities. Only
-/// these names and the test methods' are ever logged; anything else is
-/// logged as `<unknown>`.
+/// these names, and in debug builds the test methods', are ever logged;
+/// anything else is logged as `<unknown>`.
 const CAPABILITIES: &[&str] = &[
     "core.hello",
     "core.shutdown",
@@ -160,6 +162,7 @@ pub fn run(options: &Options) -> Exit {
     ) else {
         return Exit::Internal;
     };
+    #[cfg(debug_assertions)]
     let test = if testhooks::test_methods() {
         match testmethods::spawn(writer.queue.clone(), Arc::clone(&link), events_tx.clone()) {
             Ok(test) => Some(test),
@@ -202,6 +205,7 @@ pub fn run(options: &Options) -> Exit {
         ),
         worker,
         naming,
+        #[cfg(debug_assertions)]
         test,
     };
     let hello_deadline = options.started + options.hello_timeout;
@@ -400,7 +404,9 @@ struct Core {
     vault: Vault,
     worker: Worker,
     naming: naming::Handle,
-    /// The `test.*` methods' thread, when the test hooks enable it.
+    /// The `test.*` methods' thread, when the test hooks enable it (debug
+    /// builds only).
+    #[cfg(debug_assertions)]
     test: Option<testmethods::Handle>,
 }
 
@@ -431,12 +437,11 @@ struct HelloResult<'a> {
 
 /// A method name that is safe to log: known names only.
 fn loggable(method: &str) -> &'static str {
-    CAPABILITIES
-        .iter()
-        .chain(testmethods::METHODS)
-        .copied()
-        .find(|m| *m == method)
-        .unwrap_or("<unknown>")
+    #[cfg(debug_assertions)]
+    let known = CAPABILITIES.iter().chain(testmethods::METHODS);
+    #[cfg(not(debug_assertions))]
+    let known = CAPABILITIES.iter();
+    known.copied().find(|m| *m == method).unwrap_or("<unknown>")
 }
 
 /// A fixed category for a malformed message; the parser's own text can quote
@@ -610,6 +615,7 @@ impl Core {
                     Flow::Exit(Exit::Internal)
                 }
             }
+            #[cfg(debug_assertions)]
             method if testmethods::handles(method) && self.test.is_some() => {
                 let params = match params.map(|p| RawValue::from_string(p.to_owned())) {
                     Some(Ok(params)) => Some(params),

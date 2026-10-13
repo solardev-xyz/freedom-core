@@ -73,6 +73,13 @@ pub const MAX_QUEUED_NAMING_BYTES: usize = 8 * 1024 * 1024;
 /// The chain thread's bytes waiting for the writer: one message cap
 /// (design 0005, Frames). A fragmented reply is charged at its whole size
 /// and released as its fragments are written.
+#[cfg_attr(
+    all(not(debug_assertions), not(test)),
+    expect(
+        dead_code,
+        reason = "the chain thread's; until it exists, only the debug-only test methods make fragmented replies"
+    )
+)]
 pub const MAX_QUEUED_CHAIN_BYTES: usize = MAX_MESSAGE;
 /// The most whole frames the writer writes between two fragments of a
 /// response, so a steady stream of small frames can't stall it.
@@ -247,6 +254,13 @@ pub enum Out {
     /// A response over one frame, to a peer that offered fragments:
     /// written as a begin, fragments and a last fragment once the core holds
     /// main's credit. Its hold is released as its fragments go.
+    #[cfg_attr(
+        all(not(debug_assertions), not(test)),
+        expect(
+            dead_code,
+            reason = "the chain thread's; until it exists, only the debug-only test methods make fragmented replies"
+        )
+    )]
     Fragmented {
         id: u64,
         payload: Zeroizing<Vec<u8>>,
@@ -258,6 +272,13 @@ pub enum Out {
 
 /// A response, ready for its producer's allowance: one frame, or a payload
 /// to fragment.
+#[cfg_attr(
+    all(not(debug_assertions), not(test)),
+    expect(
+        dead_code,
+        reason = "the chain thread's; until it exists, only the debug-only test methods make fragmented replies"
+    )
+)]
 pub enum Reply {
     Whole(Zeroizing<Vec<u8>>),
     Fragmented {
@@ -266,6 +287,13 @@ pub enum Reply {
     },
 }
 
+#[cfg_attr(
+    all(not(debug_assertions), not(test)),
+    expect(
+        dead_code,
+        reason = "the chain thread's; until it exists, only the debug-only test methods make fragmented replies"
+    )
+)]
 impl Reply {
     /// Response `id`, serialized as `payload`. A response over one frame is
     /// fragmented, if main offered fragments and it is within the message

@@ -19,6 +19,8 @@ mod serve;
 mod signing;
 mod storage;
 mod testhooks;
+// Debug builds only: release builds carry no test methods at all.
+#[cfg(debug_assertions)]
 mod testmethods;
 mod transport;
 mod vault;
