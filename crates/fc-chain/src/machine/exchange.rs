@@ -23,7 +23,7 @@ use crate::answer::{
     Answer as Decoded, AnswerError, NodeError, Outcome, decode_body, read_answer_reserving,
     replaced_len,
 };
-use crate::stable::{StableDigest, value_digest};
+use crate::stable::{StableDigest, plain_string_digest, value_digest};
 
 /// A result's text, `None` for `undefined`.
 pub(crate) type ResultText = Option<Rc<Retained>>;
@@ -198,7 +198,12 @@ pub(crate) fn digest(req: &Req, result: &ResultText) -> Result<StableDigest, Ove
     let Some(text) = result else {
         return Ok(StableDigest::undefined());
     };
-    // The span was read as part of its body: it is JSON.
+    // The span was read as part of its body: it is JSON. A string with no
+    // escape (a hex result, however long) is its own stableValue, hashed
+    // with no index.
+    if let Some(digest) = plain_string_digest(text.json()) {
+        return Ok(digest);
+    }
     let Some((index, _index)) = indexed(req, text.json())? else {
         return Ok(StableDigest::undefined());
     };

@@ -54,6 +54,19 @@ pub fn value_digest(value: Value<'_, '_>) -> StableDigest {
     StableDigest(hasher.0.finalize().into())
 }
 
+/// The digest of a valid JSON value's text when it is a string with no
+/// escape: `stableValue` of such a string is its own token, quotes and all
+/// (JSON.stringify writes it back unchanged, `write_string`), so the digest
+/// is the token's SHA-256, found without an index. `None` for any other
+/// value, whose digest needs one. `json` must be one JSON value, as an
+/// answer's indexed span is: it starts and ends with a quote only if it is
+/// a single string.
+pub(crate) fn plain_string_digest(json: &str) -> Option<StableDigest> {
+    let plain =
+        json.len() >= 2 && json.starts_with('"') && json.ends_with('"') && !json.contains('\\');
+    plain.then(|| StableDigest(Sha256::digest(json.as_bytes()).into()))
+}
+
 /// The digest of a result: its JSON text, or `None` for `undefined`.
 pub fn stable_digest(result: Option<&str>) -> Result<StableDigest, IndexError> {
     match result {
@@ -87,5 +100,39 @@ mod tests {
             stable_digest(Some("\"\"")).unwrap()
         );
         assert_eq!(stable_digest(None).unwrap(), StableDigest::undefined());
+    }
+
+    /// The fast path is the indexed digest for every escape-free string,
+    /// and declines everything else (escapes, other values).
+    #[test]
+    fn a_plain_strings_digest_is_the_indexed_one() {
+        let long = format!("\"0x{}\"", "61".repeat(1 << 16));
+        for json in [
+            "\"\"",
+            "\"a\"",
+            "\"0x\"",
+            "\"caf\u{e9} \u{1f510} \u{7f}\"",
+            "\"slash / and 'quote'\"",
+            long.as_str(),
+        ] {
+            assert_eq!(
+                plain_string_digest(json),
+                Some(stable_digest(Some(json)).unwrap()),
+                "{json}"
+            );
+        }
+        for json in [
+            r#""a\nb""#,
+            r#""\u00e9""#,
+            r#""\/""#,
+            r#""\ud800""#,
+            "0",
+            "null",
+            "[\"a\"]",
+            "{\"a\":\"b\"}",
+            "true",
+        ] {
+            assert_eq!(plain_string_digest(json), None, "{json}");
+        }
     }
 }
