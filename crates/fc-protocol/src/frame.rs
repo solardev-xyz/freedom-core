@@ -87,11 +87,13 @@ pub fn header(kind: u8, len: usize) -> Result<[u8; 5], FrameError> {
     if !is_known_kind(kind) {
         return Err(FrameError::UnknownKind(kind));
     }
-    let length = u32::try_from(len + 1).map_err(|_| FrameError::BadLength(u32::MAX))?;
+    // The length field counts the kind byte too; checked before adding it,
+    // so no length can overflow.
+    let length = |len: usize| u32::try_from(len.saturating_add(1)).unwrap_or(u32::MAX);
     if len > MAX_PAYLOAD {
-        return Err(FrameError::BadLength(length));
+        return Err(FrameError::BadLength(length(len)));
     }
-    let [a, b, c, d] = length.to_be_bytes();
+    let [a, b, c, d] = length(len).to_be_bytes();
     Ok([a, b, c, d, kind])
 }
 
@@ -379,6 +381,26 @@ mod tests {
             header(KIND_LAST, MAX_PAYLOAD + 1),
             Err(FrameError::BadLength(_))
         ));
+    }
+
+    #[test]
+    fn any_length_is_refused_without_overflow() {
+        let too_long = u32::try_from(MAX_PAYLOAD + 2).unwrap();
+        assert_eq!(
+            header(KIND_JSON, MAX_PAYLOAD + 1),
+            Err(FrameError::BadLength(too_long))
+        );
+        for len in [usize::MAX, usize::MAX - 1, u32::MAX as usize] {
+            assert_eq!(
+                header(KIND_JSON, len),
+                Err(FrameError::BadLength(u32::MAX)),
+                "{len}"
+            );
+        }
+        assert_eq!(
+            header(KIND_JSON, MAX_PAYLOAD).map(|h| u32::from_be_bytes([h[0], h[1], h[2], h[3]])),
+            Ok(u32::try_from(MAX_PAYLOAD + 1).unwrap())
+        );
     }
 
     #[test]
