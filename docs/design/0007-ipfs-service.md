@@ -289,17 +289,17 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 0001's frame layer: a `u32` big-endian length, a `u8` kind, then the payload.
 
 - **Kind `0x01`** carries a JSON message of at most 1 MiB, with 0001's envelope: `request`, `response`, `event` and `cancel`, and exactly one terminal response per request.
-- **Request IDs strictly increase** within a connection (0001's counter, never reused). The stream rules below rely on it.
+- **Request IDs strictly increase** within a connection (0001's counter, never reused). The stream rules below rely on it, so the service treats a request whose ID isn't above every earlier one as a protocol error (`request_order`) and closes the connection.
 - **Kinds `0x02`–`0x05`** are the stream frames, taken from 0001's reserved range.
   - Each payload starts with the stream's 8-byte big-endian ID.
-  - The payload length is checked against the kind before anything else is done with the frame.
+  - The payload length is checked against the kind before anything else is done with the frame, its direction included: a stream frame of the wrong length is a length error whichever side sent it.
 - **The stream ID is the `ipfs.request`'s envelope ID.** One request has at most one body, so no separate ID space or open frame is needed: the head response opens the stream.
 
 | Kind | Name | Direction | Payload after the ID |
 |---|---|---|---|
 | `0x02` | data | service → main | 1 to 65 536 body bytes |
 | `0x03` | end | service → main | none (exactly 8 bytes in all): the body is complete |
-| `0x04` | abort | service → main | JSON `{ code, message }`, ≤ 1 KiB: the body is truncated |
+| `0x04` | abort | service → main | JSON `{ code, message }`, 1 byte to 1 KiB: the body is truncated |
 | `0x05` | credit | main → service | a `u32` big-endian, > 0 (exactly 12 bytes in all): bytes main has handed on |
 
 **Order, per stream:**
@@ -307,7 +307,8 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 - **Each stream is a FIFO.** Its head, data and `end` are queued in order, and **`end` is written only after the stream's last data frame has been written**.
 - **`abort` is the one frame that jumps the queue.** It purges the stream's queued, unwritten data and is then written. Nothing of the stream is written after it.
 - **Cancel against an unwritten head:** when main's `cancel` arrives while the head is queued but not yet written, the head is dropped. `cancelled` is the request's only reply, and no stream opens.
-- **Once the head is written,** a cancel gives `abort { code: "cancelled" }`, unless `end` is already written. Then the cancel is late and is ignored, as in 0001.
+- **Once the head is written,** a cancel gives `abort { code: "cancelled" }`, unless the stream's terminal is already settled: `end` already written, or an abort already queued. Then the cancel is late and is ignored, as in 0001.
+- **A cancel for an ID the service doesn't hold** (one already answered or ended, one never seen, or one above the highest request ID seen) is late and is ignored, as `freedom-cored` ignores IDs it doesn't hold. It is not a protocol error.
 
 **Credit:**
 - **The window** is 128 KiB per stream, fixed by the handshake.
@@ -315,19 +316,22 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
   - `sent` counts the bytes in data frames queued for the stream;
   - `credited` counts the bytes main has returned.
   - **Debit** happens when a data frame is queued: queuing is allowed only while `sent − credited + len ≤ 128 KiB`.
-  - **Refund:** none. A purge by `abort` ends the stream, so its account is dropped with it.
+  - **Refund:** none. A purge by `abort` returns nothing: the account stays as it was, and credit is still checked against it, until the abort is written. Then the stream has ended, its account is dropped, and later credit for it is late.
 - **Main's account,** per stream:
   - `received` counts data bytes that have arrived;
   - `returned` counts the bytes main has credited.
   - Main credits a chunk's bytes when it hands that chunk to the body's consumer, so `returned ≤ received`.
+  - **After `end`** nothing more can come, so pulls send no credit, and a local cancel frees the bytes still buffered and sends nothing: the stream is complete.
 - **Protocol errors** (0001: log and close):
-  - data beyond the window (`received − returned > 128 KiB` in main);
+  - data beyond the window (`received − returned > 128 KiB` in main), except on a retiring stream, whose data is dropped as it is read without the check (its record is the ID alone);
   - credit beyond what was sent (`credited > sent` in the service);
   - an empty data frame;
   - a wrong fixed payload length;
   - a frame for a stream ID above the highest request ID seen;
   - a second terminal frame;
-  - stream data sent by main, or credit sent by the service.
+  - stream data sent by main, or credit sent by the service;
+  - a request whose ID isn't above every earlier one (`request_order`, in the service).
+- **Error categories are a contract.** `fc-protocol` and main's `frame.js` report each failure under the same fixed name, safe to log, and `vectors/streams.json` pins them. Data or a terminal frame for a request whose stream isn't open (before its head, after a head without a body or an error reply, or after its terminal) is `stream_not_open`, whichever it is: main keeps no table of ended streams, and a name that depended on whether the consumer had drained the ring would depend on timing.
 - **Late frames:**
   - Credit for a stream ID that was opened and has since ended is late and is ignored: it can cross a terminal frame in flight.
   - Because IDs increase, recognizing it needs no table: an ID at or below the highest seen that isn't live is late.
@@ -343,6 +347,9 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
   - Since `received − returned ≤ 128 KiB`, the ring never grows. Main's backing storage per stream is exactly the window, whatever the frame sizes.
 - **Main's decoder is counted separately.** It holds at most one partial frame (≤ 1 MiB plus its 5-byte header), and dispatches every complete frame as it decodes it.
 - **The service coalesces too.** A data frame carries as much of the stream's pending body as the window and the 64 KiB frame limit allow. A frame smaller than 4 KiB is written only when it is all that is pending, or all the credit allows.
+  - **Pending** is what the producer has handed over. A push queues as much as the window and the writer's 16 MiB cap allow, and the producer keeps the rest.
+  - **A push the cap would cut below 4 KiB** queues nothing; the producer waits for the writer to make room rather than queue a fragment.
+  - **The writer** cuts each data frame from what is queued, as large as the queue and 64 KiB allow. A stream that is aborted leaves the writer's rotation at once, so the rotation never holds more streams than are live.
 - **The reader's frame budget** (0001: 256 frames and 16 MiB not yet handled) bounds frames between the pipe and their stream.
 - **Retirement:** on a local cancel, main does all of these:
   - discards the stream's queued bytes at once;
@@ -1069,7 +1076,7 @@ Every body already passes through main today, so the pipe adds one copy into the
 | memory budget | persistent 192 MiB; ephemeral 448 MiB, by reservation ([Budgets](#budgets)) | new work `busy`; admitted work waits as below; evict idle private instances |
 | a reservation for admitted work | before the head: the rest of `headers_ms`; after it: 10 s per block | `busy`; a stream aborts with `busy` |
 | `ipfs.stats` | 5 s; main's watchdog at 20 s | on the watchdog, kill |
-| abort payload | 1 KiB | protocol error |
+| abort JSON, after the stream ID | 1 KiB | protocol error |
 | persistent cache | 256 MiB of block data on disk (a target), 16 MiB hot | upstream's LRU eviction |
 | private instances | 8 per ephemeral process; a 36 MiB page cap (32 MiB block target) and 4 MiB hot each | a new partition evicts an unpinned instance, else 503 `busy`; existing partitions are unaffected |
 | gateway | 8 header permits, 15 s queue (today) | 503 `gateway_busy` |
