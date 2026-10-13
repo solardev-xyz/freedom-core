@@ -179,6 +179,22 @@ function frameCases() {
   add('abort-not-utf8', 'abort: JSON { code, message }', 'receiver',
     [abortFrame(42, H(Buffer.concat([Buffer.from('{"code":"busy","message":"'), Buffer.from([0xff]), Buffer.from('"}')])))],
     { error: 'abort_payload' });
+  // The code is a JSON string, and only a string: the object form serde's
+  // derived enums would take (an externally tagged unit variant) is
+  // refused, under either spelling of the name; a string's escapes are read
+  // as JSON reads them.
+  {
+    const BS = String.fromCharCode(92);
+    for (const code of ABORT_CODES) {
+      const escaped = `${BS}u${code.charCodeAt(0).toString(16).padStart(4, '0')}${code.slice(1)}`;
+      add(`abort-code-object-${code}`, 'abort: the code is a JSON string, never an object', 'receiver',
+        [abortFrame(42, `{"code":{"${code}":null},"message":"m"}`)], { error: 'abort_payload' });
+      add(`abort-code-object-escaped-${code}`, 'abort: the code is a JSON string, never an object', 'receiver',
+        [abortFrame(42, `{"code":{"${escaped}":null},"message":"m"}`)], { error: 'abort_payload' });
+      add(`abort-code-escaped-${code}`, 'abort: JSON escapes are read as JSON reads them, in the code too', 'receiver',
+        [abortFrame(42, `{"code":"${escaped}","message":"m"}`)], ok(['abort', 42, code, 'm']));
+    }
+  }
 
   // Direction: data, end and abort are the service's; credit is main's.
   for (const [name, frame] of [['data', dataFrame(42, H([1]))], ['end', endFrame(42)], ['abort', abortFrame(42, abortJson('busy', 'm'))]]) {

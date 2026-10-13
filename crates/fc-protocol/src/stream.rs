@@ -31,6 +31,7 @@
 
 use std::fmt;
 
+use serde::de::{self, Deserializer, Visitor};
 use serde::{Deserialize, Serialize};
 
 use crate::frame::{
@@ -161,8 +162,11 @@ impl StreamError {
     }
 }
 
-/// Why a body was truncated (design 0007, Errors).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Why a body was truncated (design 0007, Errors). On the wire it is a
+/// JSON string, and only a string: serde's derived enum would also take an
+/// externally tagged unit variant (`{"cancelled": null}`), which design 0007
+/// and main's `frame.js` refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AbortCode {
     /// Main's `cancel`.
@@ -178,6 +182,15 @@ pub enum AbortCode {
 }
 
 impl AbortCode {
+    /// Every code, in the order the design lists them.
+    const ALL: [AbortCode; 5] = [
+        AbortCode::Cancelled,
+        AbortCode::Internal,
+        AbortCode::BodyStreamError,
+        AbortCode::Stopped,
+        AbortCode::Busy,
+    ];
+
     /// The code on the wire.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -187,6 +200,44 @@ impl AbortCode {
             AbortCode::Stopped => "stopped",
             AbortCode::Busy => "busy",
         }
+    }
+
+    /// The code a wire name stands for, if it is one.
+    fn from_name(name: &str) -> Option<Self> {
+        AbortCode::ALL
+            .into_iter()
+            .find(|code| code.as_str() == name)
+    }
+}
+
+/// The wire names, for serde's error message.
+const ABORT_CODE_NAMES: &[&str] = &[
+    "cancelled",
+    "internal",
+    "body_stream_error",
+    "stopped",
+    "busy",
+];
+
+/// A string naming one of the codes: escapes are read as JSON reads them,
+/// and anything but a string (an object, a number) is refused.
+impl<'de> Deserialize<'de> for AbortCode {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Name;
+
+        impl Visitor<'_> for Name {
+            type Value = AbortCode;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("an abort code, as a string")
+            }
+
+            fn visit_str<E: de::Error>(self, name: &str) -> Result<AbortCode, E> {
+                AbortCode::from_name(name).ok_or_else(|| E::unknown_variant(name, ABORT_CODE_NAMES))
+            }
+        }
+
+        deserializer.deserialize_str(Name)
     }
 }
 
@@ -519,6 +570,12 @@ mod tests {
             br#"{"code":"busy","message":7}"#,
             b"\xff",
             b"",
+            // serde's derived enum would take these: an externally tagged
+            // unit variant.
+            br#"{"code":{"cancelled":null},"message":"m"}"#,
+            br#"{"code":{"busy":[]},"message":"m"}"#,
+            br#"{"code":["busy"],"message":"m"}"#,
+            br#"{"code":null,"message":"m"}"#,
         ] {
             assert_eq!(
                 Abort::from_json(bad),
@@ -531,6 +588,37 @@ mod tests {
             Abort::cancelled().to_json().unwrap(),
             br#"{"code":"cancelled","message":"Cancelled"}"#
         );
+    }
+
+    #[test]
+    fn abort_codes_are_strings_only() {
+        // A backslash, so the escapes below are JSON's, not Rust's.
+        const BS: char = '\\';
+        for code in AbortCode::ALL {
+            let name = code.as_str();
+            // The string, plain and with its first letter escaped.
+            let escaped = format!("{BS}u{:04x}{}", u32::from(name.as_bytes()[0]), &name[1..]);
+            for text in [name.to_owned(), escaped.clone()] {
+                let json = format!(r#"{{"code":"{text}","message":"m"}}"#);
+                assert_eq!(
+                    Abort::from_json(json.as_bytes()).unwrap(),
+                    Abort::new(code, "m"),
+                    "{json}"
+                );
+            }
+            // The object form, under either spelling.
+            for text in [name.to_owned(), escaped] {
+                let json = format!(r#"{{"code":{{"{text}":null}},"message":"m"}}"#);
+                assert_eq!(
+                    Abort::from_json(json.as_bytes()),
+                    Err(StreamError::AbortPayload),
+                    "{json}"
+                );
+            }
+            assert_eq!(AbortCode::from_name(name), Some(code));
+        }
+        assert_eq!(AbortCode::from_name("Busy"), None);
+        assert_eq!(ABORT_CODE_NAMES, AbortCode::ALL.map(AbortCode::as_str));
     }
 
     #[test]
