@@ -16,3 +16,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 thiserror = "2"
 zeroize = "1.8"
+
+[dev-dependencies]
+hex = "0.4"

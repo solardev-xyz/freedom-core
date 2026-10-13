@@ -15,6 +15,7 @@ const FILES = ['keys.json', 'mnemonic-validation.json', 'identity-formats.json',
   'generator/chain-replay.js'];
 
 FILES.push('dweb.json', 'generator/dweb.js');
+FILES.push('streams.json', 'generator/streams.js');
 
 function corruptedCheck(filename, corrupt) {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
@@ -603,4 +604,12 @@ test('check rejects a changed dweb validation expectation', () => {
     entry.expect = 'valid';
   });
   assert.match(stderr, /Byte mismatch: dweb.json/);
+});
+
+test('check rejects a changed stream expectation', () => {
+  const stderr = corruptedCheck('streams.json', (contents) => {
+    const entry = contents.sender.find((item) => item.id === 'abort-purges-queued-data');
+    entry.steps.find((step) => step.write)?.write.unshift(['data', 41, 1000, 50000]);
+  });
+  assert.match(stderr, /Byte mismatch: streams.json/);
 });

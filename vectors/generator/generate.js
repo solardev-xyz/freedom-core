@@ -14,6 +14,7 @@ const { buildNamingReplay } = require('./naming-replay');
 const { buildChain } = require('./chain');
 const { buildChainReplay } = require('./chain-replay');
 const { buildDweb } = require('./dweb');
+const { buildStreams } = require('./streams');
 
 const REFERENCE_COMMIT = 'fb540328162839e68150fe2c5e517edb86734d1c';
 const OUTPUT = path.resolve(__dirname, '..');
@@ -502,6 +503,8 @@ async function main() {
         packages: { ...reference.meta.packages, '@sinonjs/fake-timers': packageVersion(createRequire(path.join(reference.checkout, 'package.json')), '@sinonjs/fake-timers') },
       }),
     'dweb.json': await buildDweb(reference.checkout, reference.ethers, reference.meta),
+    // The design's, with no reference: its meta is the shared one.
+    'streams.json': buildStreams(reference.meta),
   };
   // Check every deterministic file before doing the more expensive fixture checks.
   for (const [filename, contents] of Object.entries(deterministic)) {
