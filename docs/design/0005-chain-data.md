@@ -220,10 +220,17 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
   - **Today** a request has no overall bound: an interactive read on chain 1 can take about 39 s, and more with user settings.
   - **Past the deadline,** a read or a fee quote ends with `deadline`, its I/O is cancelled, and nothing more is asked. A call that arrives with no time left (`deadline_ms` 0) replies `deadline` before any I/O, under its chain's current generation.
   - **A broadcast** ends as [Broadcast](#broadcast) says. Its attempts stop 10 s before the deadline, leaving room to [reconcile](#broadcast).
-- **A request's latest start** is a broadcast attempt's cutoff, 10 s before the deadline, or the end of a request's own `deadline_ms`. It is checked as the last step before the request is handed to the writer.
+- **The latest start** of each request the core makes to main is the earliest of three times:
+  - the end of its own exchange, for `shell.rpc`, `shell.blockscout` and Colibri;
+  - its chain request's deadline;
+  - for a request that sends a transaction (a Direct `eth_sendRawTransaction` or a Myotis `broadcast`), its broadcast's attempt cutoff. Reconciliation reads may still start after the cutoff, until the deadline.
+- **The latest start is checked last,** as the final step before the request is handed to the writer.
   - **The check** runs under the gate the core's requests share, once the request's frame is made. Its clock reading is the one that also writes the request's `deadline_ms`.
-  - **A request past it** never goes, and is not sent.
-  - **Not covered:** the time a request then spends in the writer's queue and in the pipe. The 10 s reserve covers that. A request is a whole frame, written in the order it comes, and never waits behind a fragmented reply or for main's credit ([Frames](#frames)).
+  - **A request past it** never goes.
+    - Past its exchange's end or the cutoff, it completes as not sent, so a broadcast attempt that never went counts as not sent.
+    - Past its chain request's deadline, that request ends with `deadline` (a broadcast, with its outcome) and its unsent I/O retires, freeing a verifier's slot.
+  - **Its `deadline_ms`** is what is left, at that reading, of the earlier of its exchange's end and its chain request's deadline.
+  - **Not covered:** the time a request then spends in the writer's queue and in the pipe. For a broadcast attempt, the 10 s reserve covers that; any request's `deadline_ms` bounds what main does with it. A request is a whole frame, written in the order it comes, and never waits behind a fragmented reply or for main's credit ([Frames](#frames)).
 - **Main's watchdog** is the deadline plus 15 s (0001).
 
 ### Cancellation
