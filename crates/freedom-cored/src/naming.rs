@@ -622,14 +622,18 @@ impl Naming {
         let mut payload = Zeroizing::new(Vec::with_capacity(256));
         message::write_result(&mut *payload, id, result)
             .map_err(|_| Stop::Protocol("unwritable_result"))?;
-        self.send(&payload)
+        self.send(&payload)?;
+        crate::testhooks::naming_reply();
+        Ok(())
     }
 
     fn error(&mut self, id: u64, error: ErrorBody) -> Flow {
         let mut payload = Zeroizing::new(Vec::with_capacity(256));
         message::write_error(&mut *payload, id, &error)
             .map_err(|_| Stop::Protocol("unwritable_result"))?;
-        self.send(&payload)
+        self.send(&payload)?;
+        crate::testhooks::naming_reply();
+        Ok(())
     }
 
     /// Queues a reply or a cancel behind any that wait for the writer.
@@ -648,10 +652,12 @@ impl Naming {
     /// Hands every waiting frame to the writer, past the allowance: at
     /// shutdown, where the writer's drain is bounded by time instead.
     fn drain(&mut self) {
+        let frames = self.outbox.len();
         for frame in self.outbox.drain(..) {
             let hold = self.allowance.force(frame.len());
             let _ = self.out.send(Out::Frame { frame, hold });
         }
+        crate::testhooks::naming_drain(frames);
     }
 
     /// Hands waiting frames (replies and cancels) to the writer while

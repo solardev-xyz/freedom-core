@@ -7,9 +7,13 @@
 mod common;
 
 use std::collections::BTreeMap;
+use std::path::Path;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
-use common::{dirs, naming_recorded as recorded, naming_snapshot as snapshot, request, spawn};
+use common::{
+    dirs, naming_recorded as recorded, naming_snapshot as snapshot, request, spawn, spawn_env,
+};
 use serde_json::{Value, json};
 
 /// Plays main until the response to `id`: answers every `shell.rpc` from
@@ -238,10 +242,41 @@ fn an_error_that_echoes_a_huge_name_still_fits_a_frame() {
     assert!(core.call(3, "vault.status", json!({}))["result"].is_object());
 }
 
+/// The lines the naming thread has appended to its marker so far
+/// (`FREEDOM_CORED_TEST_NAMING_MARKER`), whole lines only.
+fn naming_marks(marker: &Path) -> Vec<String> {
+    let text = std::fs::read_to_string(marker).unwrap_or_default();
+    text.split_inclusive('\n')
+        .filter_map(|line| line.strip_suffix('\n'))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Waits until the naming thread's marks show `what`, and returns them.
+fn wait_for_marks(marker: &Path, what: &str, done: impl Fn(&[String]) -> bool) -> Vec<String> {
+    let deadline = Instant::now() + common::READ_TIMEOUT;
+    loop {
+        let marks = naming_marks(marker);
+        if done(&marks) {
+            return marks;
+        }
+        assert!(Instant::now() < deadline, "never {what}: {marks:?}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn replies_waiting_for_the_writer_survive_shutdown() {
-    let (_root, data, locks) = dirs();
-    let mut core = spawn("serve", &data, &locks, &[]);
+    let (root, data, locks) = dirs();
+    let marker = root.path().join("naming-marks");
+    let marker_path = marker.display().to_string();
+    let mut core = spawn_env(
+        "serve",
+        &data,
+        &locks,
+        &[],
+        &[("FREEDOM_CORED_TEST_NAMING_MARKER", &marker_path)],
+    );
     core.hello();
     // Main stalls while 16 lookups fail at once, each reply carrying a
     // 600 KB name: more than naming's 8 MiB share, so some wait in the
@@ -255,10 +290,29 @@ fn replies_waiting_for_the_writer_survive_shutdown() {
             json!({ "name": name, "private": false }),
         ));
     }
-    // Long names take a while to normalize: let it finish them all.
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    // Long names take a while to normalize: seconds for the 16, in a debug
+    // build under load. Shutdown comes once the naming thread has made all
+    // 16 replies. (A lookup still running at shutdown may get no reply, as
+    // 0001's drain is bounded, which this test isn't about.)
+    wait_for_marks(&marker, "made 16 replies", |marks| {
+        marks.iter().filter(|mark| *mark == "reply").count() >= 16
+    });
     core.send(&request(100, "core.shutdown", json!({})));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    // Main reads again only after shutdown has ended the naming thread,
+    // which hands the replies still waiting in it to the writer.
+    let marks = wait_for_marks(&marker, "drained", |marks| {
+        marks.iter().any(|mark| mark.starts_with("drain "))
+    });
+    let drained: usize = marks
+        .iter()
+        .find_map(|mark| mark.strip_prefix("drain "))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        drained > 0,
+        "no reply waited in the naming thread: {marks:?}"
+    );
     core.resume_reading();
     let (mut replies, mut shutdown) = (0, false);
     while !(shutdown && replies == 16) {
@@ -269,7 +323,7 @@ fn replies_waiting_for_the_writer_survive_shutdown() {
             _ => panic!("unexpected {message}"),
         }
     }
-    assert_eq!(core.exit_code(std::time::Duration::from_secs(5)), 0);
+    assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
 }
 
 #[test]
@@ -392,8 +446,6 @@ fn configure_reports_every_generation() {
 // It reports what it measured.
 #[allow(clippy::print_stdout)]
 fn cached_fanout_under_vault_work() {
-    use std::time::{Duration, Instant};
-
     const BURST: u64 = 50;
     const ROUNDS: u64 = 20;
     let (_root, data, locks) = dirs();
