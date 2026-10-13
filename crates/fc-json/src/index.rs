@@ -646,6 +646,21 @@ pub fn quote_units(units: impl IntoIterator<Item = u16>, out: &mut impl Sink) {
     out.push(&buffer);
 }
 
+/// The length in bytes of [`quote_units`]'s text, found without writing
+/// it: a caller can size or bound the text first.
+pub fn quoted_len(units: impl IntoIterator<Item = u16>) -> usize {
+    let mut len = 2usize;
+    for item in char::decode_utf16(units) {
+        len = len.saturating_add(match item {
+            Ok('"' | '\\' | '\u{08}' | '\u{0c}' | '\n' | '\r' | '\t') => 2,
+            Ok(c) if (c as u32) < 0x20 => 6,
+            Ok(c) => c.len_utf8(),
+            Err(_) => 6,
+        });
+    }
+    len
+}
+
 /// The scratch [`Value::write`] keeps the open objects' members in.
 enum Arena {
     /// Key nodes; each value is the node after its key.
@@ -1041,6 +1056,26 @@ fn number_end(s: &[u8], mut i: usize) -> Result<usize, IndexError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quoted_len_is_quote_units_length() {
+        // Built at run time: escapes, controls, a pair, lone surrogates.
+        let mut cases: Vec<Vec<u16>> = vec![
+            Vec::new(),
+            "plain".encode_utf16().collect(),
+            "q\"b\\s/\u{08}\u{0c}\n\r\t\u{01}\u{1f}\u{7f}"
+                .encode_utf16()
+                .collect(),
+            "\u{e9}\u{20ac}\u{1f510}".encode_utf16().collect(),
+            vec![0xd800, 0x61, 0xdc00, 0xd83d, 0xdd10, 0xdbff],
+        ];
+        cases.push("x".repeat(20_000).encode_utf16().collect());
+        for units in cases {
+            let mut out = String::new();
+            quote_units(units.iter().copied(), &mut out);
+            assert_eq!(quoted_len(units.iter().copied()), out.len(), "{out}");
+        }
+    }
     use crate::{JsValue, JsonError, parse};
 
     fn stringify(text: &str, order: KeyOrder) -> String {
