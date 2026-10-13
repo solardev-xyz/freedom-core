@@ -79,11 +79,15 @@ impl Test {
         assert!(self.chain.flush().is_ok());
     }
 
-    /// Main's response, as the event loop routes it.
+    /// Main's response, as the event loop routes it: the message, with
+    /// the span of its result.
     fn answer(&mut self, id: u64, outcome: Result<Value, ErrorBody>) -> Flow {
         assert_eq!(self.chain.requests.answered(id), Some(Owner::Chain));
-        let outcome = outcome.map(|v| RawValue::from_string(v.to_string()).unwrap());
-        self.chain.handle(In::Response { id, outcome })?;
+        let reply = match outcome {
+            Ok(result) => shell_result(id, &result.to_string()),
+            Err(error) => Shell::Failed(error),
+        };
+        self.chain.handle(In::Response { id, reply })?;
         self.chain.flush()
     }
 
@@ -99,6 +103,33 @@ impl Test {
         self.call(1, "chain.configure", &json!({ "chains": chains }));
         let frames = self.written();
         frames.into_iter().find(|f| f["id"] == 1).unwrap()
+    }
+}
+
+/// A response message as the reader hands it over, with its result's span.
+fn shell_result(id: u64, result: &str) -> Shell {
+    let prefix = format!(r#"{{"type":"response","id":{id},"result":"#);
+    let mut message = Zeroizing::new(prefix.clone().into_bytes());
+    message.extend_from_slice(result.as_bytes());
+    message.push(b'}');
+    Shell::Result {
+        message,
+        result: prefix.len()..prefix.len() + result.len(),
+    }
+}
+
+/// Main's terminal reply as the machine's answer, for a request nobody
+/// owns (so nothing is charged); `None` when it is malformed.
+fn answer(kind: Kind, outcome: Result<Box<RawValue>, ErrorBody>) -> Option<Answer> {
+    match outcome {
+        Err(error) => transport_failure(&error).map(Answer::Failed),
+        Ok(raw) => {
+            let machine = Machine::new(0, Bounds::default());
+            Shape::parse(kind, raw.get())?
+                .read(&machine, 1)
+                .ok()
+                .map(|(answer, _)| answer)
+        }
     }
 }
 
@@ -1128,4 +1159,93 @@ fn cancels_and_small_replies_never_wait_behind_bulk_replies() {
     let reply = seen.iter().find(|f| f["id"] == 3).unwrap();
     assert_eq!(reply["error"]["code"], "cancelled");
     assert_eq!(t.chain.bulk.len(), 1);
+}
+
+#[test]
+fn strings_decode_in_one_pass_within_their_length() {
+    for (raw, text) in [
+        (r#""plain""#, "plain"),
+        (r#""a\"b\\c\/d\b\f\n\r\t""#, "a\"b\\c/d\u{8}\u{c}\n\r\t"),
+        (r#""é€😀""#, "é€😀"),
+        (
+            r#""lone \ud800 and \udc00 end""#,
+            "lone \u{fffd} and \u{fffd} end",
+        ),
+        (r#""lead then other \ud800A""#, "lead then other \u{fffd}A"),
+        ("\"r\u{e9}sum\u{e9}\"", "résumé"),
+        (r#""""#, ""),
+    ] {
+        let decoded = decode_string(raw).unwrap();
+        assert_eq!(decoded, text, "{raw}");
+        assert!(decoded.capacity() <= raw.len(), "{raw}");
+    }
+    for bad in [
+        r#"x"#,
+        r#""\x""#,
+        r#""\u12""#,
+        r#""\u12zz""#,
+        "\"tab\tin\"",
+        r#""a"b""#,
+        r#""end\""#,
+    ] {
+        assert_eq!(decode_string(bad), None, "{bad}");
+    }
+}
+
+#[test]
+fn reading_a_reply_past_the_budget_ends_its_request_unread() {
+    // 57-M4: the message and what decoding it makes are reserved first.
+    let bounds = Bounds {
+        request_bytes: 64 * 1024,
+        ..Bounds::default()
+    };
+    let mut t = test_with(bounds, usize::MAX, 256, true);
+    t.configure(json!([chain_snapshot(&["direct"], &["a"])]));
+    let (id, params) = read(7, "eth_call", json!([{ "to": "0xabc" }, "latest"]));
+    t.call(id, "chain.request", &params);
+    let rpc = requests(&t.written())[0]["id"].as_u64().unwrap();
+    let held = t.chain.machine.held();
+    // An answer of 100 KiB: its message alone crosses the budget.
+    let big = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"result":"0x{}"}}"#,
+        "ab".repeat(50 * 1024)
+    );
+    assert!(t.answer(rpc, rpc_answer(&big)).is_ok());
+    t.at(1);
+    let reply = t.written().into_iter().find(|f| f["id"] == 7).unwrap();
+    assert_eq!(reply["error"]["code"], "budget", "{reply}");
+    // Nothing stays charged.
+    t.chain.machine.set_output_backlog(0);
+    assert!(t.chain.machine.held() <= held);
+}
+
+#[test]
+fn a_broadcast_whose_reply_cannot_be_read_stays_uncertain() {
+    // 57-M4: a refused reservation still settles the attempt, which keeps
+    // its possibly-sent floor.
+    let bounds = Bounds {
+        request_bytes: 64 * 1024,
+        ..Bounds::default()
+    };
+    let mut t = test_with(bounds, usize::MAX, 256, true);
+    t.configure(json!([chain_snapshot(&["direct"], &["a", "b"])]));
+    let raw = "0xf85f8001825208941111111111111111111111111111111111111111018026a045df4733a45ed06c5628f22221a73e0b2faa3959f649cc47e6c2a15c9792ae07a00ea422e4923de6e5b4c52d7fbd39046e96acf73b2037a5f11918ec6c2a64b40a";
+    t.call(
+        3,
+        "chain.broadcast",
+        &json!({ "chain_id": 1, "raw": raw, "deadline_ms": 60_000 }),
+    );
+    let send = requests(&t.written())[0]["id"].as_u64().unwrap();
+    // A refusal whose message is past the budget.
+    let refusal = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"error":{{"code":-32000,"message":"nonce too low {}"}}}}"#,
+        "x".repeat(100 * 1024)
+    );
+    assert!(t.answer(send, rpc_answer(&refusal)).is_ok());
+    t.at(1);
+    let frames = t.written();
+    let reply = frames.iter().find(|f| f["id"] == 3).unwrap();
+    assert_eq!(reply["result"]["outcome"], "uncertain", "{reply}");
+    // Nothing more was sent.
+    assert!(requests(&frames).is_empty(), "{frames:?}");
 }

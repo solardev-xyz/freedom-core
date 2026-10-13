@@ -28,6 +28,7 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ops::Range;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
@@ -36,7 +37,8 @@ use base64::Engine as _;
 use fc_chain::machine::{
     Answer, Bounds, BroadcastOutcome, Call, ChainConfig, ChainError, ColibriClass, ColibriReply,
     Effect, Emitted, Machine, Ms, MyotisClass, MyotisReply, Origin, Prop, Protocol, Prover,
-    QuorumConfig, ReadOptions, Reply as Done, Request, RpcEndpoint, Success, Transport, VerifiedOp,
+    QuorumConfig, ReadOptions, Reply as Done, Request, Reservation, RpcEndpoint, Success,
+    Transport, VerifiedOp,
 };
 use fc_chain::{JsString, MyotisOperation, READ_METHODS, SINGLE_NODE_METHODS};
 use fc_protocol::error::{ErrorBody, ErrorCode};
@@ -77,10 +79,23 @@ pub enum In {
     /// Main's terminal reply to one of this thread's `shell.*` requests.
     Response {
         id: u64,
-        outcome: Result<Box<RawValue>, ErrorBody>,
+        reply: Shell,
     },
     /// The writer has room again, or main a free slot, for what waits here.
     Drained,
+}
+
+/// Main's terminal reply to one of the chain thread's requests, as the
+/// event loop hands it over.
+pub enum Shell {
+    /// A transport failure.
+    Failed(ErrorBody),
+    /// The response message as it was read, moved here rather than copied,
+    /// and where its `result` lies in it.
+    Result {
+        message: Zeroizing<Vec<u8>>,
+        result: Range<usize>,
+    },
 }
 
 /// A message, with the reader's credit for the frame it came in: the
@@ -136,7 +151,7 @@ pub fn spawn(
         .spawn(move || {
             let _notice = transport::DeathNotice::new(events.clone(), "chain");
             let chain = Chain::new(
-                Machine::new(0, Bounds::default()),
+                Machine::new(0, crate::testhooks::chain_bounds(Bounds::default())),
                 out,
                 link,
                 Shares {
@@ -157,7 +172,7 @@ pub fn spawn(
 }
 
 /// Why the chain thread stopped.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stop {
     /// Main broke the protocol (a fixed category, never input text).
     Protocol(&'static str),
@@ -388,7 +403,7 @@ impl Chain {
                 }
                 Ok(())
             }
-            In::Response { id, outcome } => self.response(id, outcome),
+            In::Response { id, reply } => self.response(id, reply),
             In::Drained => self.pump(),
         }
     }
@@ -461,20 +476,64 @@ impl Chain {
     }
 
     /// Main's reply to a `shell.*` request, which the event loop routed
-    /// here. One for a request the machine cancelled is dropped; one for no
-    /// request of chain's, or of the wrong shape, is a protocol error.
-    fn response(&mut self, id: u64, outcome: Result<Box<RawValue>, ErrorBody>) -> Flow {
+    /// here. It must be one of its request's shapes, or it is a protocol
+    /// error, even when nobody waits for it any more. One for a request the
+    /// machine cancelled is then dropped, and one whose chain request has
+    /// ended completes unread. Otherwise it is read for good with every
+    /// allocation reserved first against the request that asked, the
+    /// message itself included (57-M4); a reservation refused ends that
+    /// request with `budget` (a broadcast through its outcome table) and
+    /// the reply completes unread, so a verifier's slot is still freed.
+    fn response(&mut self, id: u64, reply: Shell) -> Flow {
         let Some(outgoing) = self.outgoing.remove(&id) else {
             return Err(Stop::Protocol("unsolicited_response"));
         };
+        let malformed = Stop::Protocol("malformed_shell_reply");
+        let (message, result) = match reply {
+            Shell::Failed(error) => {
+                let failure = transport_failure(&error).ok_or(malformed)?;
+                if let Some(io) = outgoing.io {
+                    self.by_io.remove(&io);
+                    self.machine.complete(io, Answer::Failed(failure));
+                    self.poll();
+                }
+                return Ok(());
+            }
+            Shell::Result { message, result } => (message, result),
+        };
+        let Some(text) = message
+            .get(result)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        else {
+            return Err(malformed);
+        };
+        let shape = Shape::parse(outgoing.kind, text).ok_or(malformed)?;
         let Some(io) = outgoing.io else {
             return Ok(());
         };
         self.by_io.remove(&io);
-        let Some(answer) = answer(outgoing.kind, outcome) else {
-            return Err(Stop::Protocol("malformed_shell_reply"));
+        // Nobody reads a reply whose request has ended: it completes
+        // unread, as one past the budget does.
+        let read = if self.machine.wants(io) {
+            match self.machine.reserve_reply(io, message.capacity()) {
+                Ok(held) => shape.read(&self.machine, io).map(|read| (read, held)),
+                Err(_) => Err(Unread::Over),
+            }
+        } else {
+            Err(Unread::Over)
         };
-        self.machine.complete(io, answer);
+        // The message goes before its charge does.
+        drop(message);
+        match read {
+            Ok(((answer, reservation), held)) => {
+                drop(held);
+                self.machine.complete_reserved(io, answer, reservation);
+            }
+            Err(Unread::Malformed) => return Err(malformed),
+            Err(Unread::Over) => {
+                self.machine.complete_unread(io);
+            }
+        }
         self.poll();
         Ok(())
     }
@@ -943,7 +1002,8 @@ fn colibri_class(class: &str) -> Option<ColibriClass> {
 }
 
 /// Every member main's verified replies can have (design 0005, Verified
-/// operations); which may appear together depends on the operation.
+/// operations), borrowed from the reply; which may appear together depends
+/// on the operation.
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct VerifiedReply<'a> {
@@ -954,8 +1014,9 @@ struct VerifiedReply<'a> {
     block_before: Option<&'a RawValue>,
     #[serde(borrow, default)]
     block_after: Option<&'a RawValue>,
-    #[serde(default)]
-    failure: Option<String>,
+    /// A class: one of the closed set's names, which need no escapes.
+    #[serde(borrow, default)]
+    failure: Option<&'a str>,
     #[serde(borrow, default, deserialize_with = "present")]
     hash: Option<&'a RawValue>,
     #[serde(borrow, default)]
@@ -1039,13 +1100,54 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for ObjectOf<T> {
     }
 }
 
-/// A JSON string's text, any lone surrogate replaced by U+FFFD; `None` for
-/// anything but a string.
-fn string_of(raw: &RawValue) -> Option<String> {
-    let index = fc_json::index::Index::new(raw.get()).ok()?;
-    let root = index.root();
-    (root.kind() == fc_json::index::Kind::String)
-        .then(|| String::from_utf16_lossy(&root.units().collect::<Vec<u16>>()))
+/// A Blockscout page's headers, checked in place: an object of strings.
+/// Nothing is kept; they are read for good once their room is reserved.
+struct Headers;
+
+impl<'de> Deserialize<'de> for Headers {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Text;
+
+        impl<'de> Deserialize<'de> for Text {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                struct Any;
+
+                impl serde::de::Visitor<'_> for Any {
+                    type Value = Text;
+
+                    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        f.write_str("a string")
+                    }
+
+                    fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Text, E> {
+                        Ok(Text)
+                    }
+                }
+
+                d.deserialize_str(Any)
+            }
+        }
+
+        struct Map;
+
+        impl<'de> serde::de::Visitor<'de> for Map {
+            type Value = Headers;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("an object of strings")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Headers, A::Error> {
+                while map.next_entry::<Text, Text>()?.is_some() {}
+                Ok(Headers)
+            }
+        }
+
+        d.deserialize_map(Map)
+    }
 }
 
 /// `{ "not_sent": true }`: main performed nothing (design 0005, Requests
@@ -1076,162 +1178,359 @@ fn transport_failure(error: &ErrorBody) -> Option<Transport> {
     })
 }
 
-/// Main's terminal reply as the machine's answer; `None` when it is
-/// malformed.
-fn answer(kind: Kind, outcome: Result<Box<RawValue>, ErrorBody>) -> Option<Answer> {
-    let result = match outcome {
-        Ok(result) => result,
-        Err(error) => return transport_failure(&error).map(Answer::Failed),
-    };
-    let text = result.get();
-    if let Ok(not_sent) = serde_json::from_str::<ObjectOf<NotSent>>(text) {
-        let NotSent { not_sent } = not_sent.into_inner();
-        // Only `true` says it.
-        return not_sent.then_some(match kind {
-            Kind::MyotisBroadcast => Answer::Myotis(MyotisReply::NotSent),
-            _ => Answer::NotSent,
-        });
+/// Main's reply, read in place: borrowed from its message, with nothing
+/// allocated, every structural boundary a JSON object (57-M1). Reading it
+/// for good ([`Shape::read`]) reserves each allocation first (57-M4).
+#[derive(Debug)]
+enum Shape<'a> {
+    /// `{ "not_sent": true }`; for a Myotis broadcast, its own form.
+    NotSent {
+        broadcast: bool,
+    },
+    Http {
+        status: u16,
+        body: &'a str,
+    },
+    Page {
+        status: u16,
+        headers: &'a RawValue,
+        body: &'a str,
+    },
+    Read {
+        payload: &'a RawValue,
+        before: Option<&'a RawValue>,
+        after: Option<&'a RawValue>,
+    },
+    MyotisFailure(MyotisClass),
+    Sent(&'a RawValue),
+    /// The reason, a JSON string.
+    Rejected(&'a RawValue),
+    Uncertain,
+    ColibriResult(&'a RawValue),
+    /// The data, a JSON string.
+    Revert(&'a RawValue),
+    ColibriFailure(ColibriClass),
+}
+
+/// Why a reply was not read for good.
+#[derive(Debug, PartialEq, Eq)]
+enum Unread {
+    /// Reading it would cross its request's budget: the request is over.
+    Over,
+    /// Main's reply is malformed after all (its base64, a string's escapes).
+    Malformed,
+}
+
+/// Whether a raw value is a JSON string.
+fn is_string(raw: &RawValue) -> bool {
+    raw.get().starts_with('"')
+}
+
+impl<'a> Shape<'a> {
+    /// Main's terminal reply to a request of `kind`; `None` when it is
+    /// malformed.
+    fn parse(kind: Kind, text: &'a str) -> Option<Self> {
+        if let Ok(not_sent) = serde_json::from_str::<ObjectOf<NotSent>>(text) {
+            // Only `true` says it.
+            return not_sent.not_sent.then_some(Shape::NotSent {
+                broadcast: kind == Kind::MyotisBroadcast,
+            });
+        }
+        match kind {
+            Kind::Rpc => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Http<'a> {
+                    status: u16,
+                    /// Base64, which JSON never escapes.
+                    #[serde(borrow)]
+                    body: &'a str,
+                }
+                let http = serde_json::from_str::<ObjectOf<Http>>(text)
+                    .ok()?
+                    .into_inner();
+                Some(Shape::Http {
+                    status: http.status,
+                    body: http.body,
+                })
+            }
+            Kind::Blockscout => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Page<'a> {
+                    status: u16,
+                    #[serde(borrow)]
+                    headers: &'a RawValue,
+                    #[serde(borrow)]
+                    body: &'a str,
+                }
+                let page = serde_json::from_str::<ObjectOf<Page>>(text)
+                    .ok()?
+                    .into_inner();
+                serde_json::from_str::<Headers>(page.headers.get()).ok()?;
+                Some(Shape::Page {
+                    status: page.status,
+                    headers: page.headers,
+                    body: page.body,
+                })
+            }
+            Kind::MyotisRead | Kind::MyotisBroadcast | Kind::Colibri => {
+                let reply = serde_json::from_str::<ObjectOf<VerifiedReply>>(text)
+                    .ok()?
+                    .into_inner();
+                Self::verified(kind, reply)
+            }
+        }
     }
-    match kind {
-        Kind::Rpc => {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct Http<'a> {
-                status: u16,
-                #[serde(borrow)]
-                body: Cow<'a, str>,
+
+    /// A verified operation's reply, which must be one of its operation's
+    /// shapes: a failure stands alone and carries only its class.
+    fn verified(kind: Kind, reply: VerifiedReply<'a>) -> Option<Self> {
+        let VerifiedReply {
+            payload,
+            block_before,
+            block_after,
+            failure,
+            hash,
+            rejected,
+            uncertain,
+            not_sent,
+            result,
+            revert,
+        } = reply;
+        // Members that belong to no shape of the operation.
+        let read_members = payload.is_some() || block_before.is_some() || block_after.is_some();
+        let broadcast_members = hash.is_some() || rejected.is_some() || uncertain.is_some();
+        let colibri_members = result.is_some() || revert.is_some();
+        if not_sent.is_some() {
+            return None;
+        }
+        let shapes = usize::from(failure.is_some())
+            + usize::from(payload.is_some())
+            + usize::from(hash.is_some())
+            + usize::from(rejected.is_some())
+            + usize::from(uncertain.is_some())
+            + usize::from(result.is_some())
+            + usize::from(revert.is_some());
+        if shapes != 1 {
+            return None;
+        }
+        match kind {
+            Kind::MyotisRead => {
+                if broadcast_members || colibri_members {
+                    return None;
+                }
+                if let Some(class) = failure {
+                    return (!read_members)
+                        .then(|| myotis_class(class))
+                        .flatten()
+                        .map(Shape::MyotisFailure);
+                }
+                Some(Shape::Read {
+                    payload: payload?,
+                    before: block_before,
+                    after: block_after,
+                })
             }
-            let http = serde_json::from_str::<ObjectOf<Http>>(text)
-                .ok()?
-                .into_inner();
-            let body = base64::engine::general_purpose::STANDARD
-                .decode(http.body.as_bytes())
-                .ok()?;
-            Some(Answer::Rpc {
-                status: http.status,
-                body,
-            })
-        }
-        Kind::Blockscout => {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct Page<'a> {
-                status: u16,
-                headers: BTreeMap<String, String>,
-                #[serde(borrow)]
-                body: Cow<'a, str>,
+            Kind::MyotisBroadcast => {
+                if read_members || colibri_members {
+                    return None;
+                }
+                if let Some(class) = failure {
+                    return myotis_class(class).map(Shape::MyotisFailure);
+                }
+                if let Some(hash) = hash {
+                    return Some(Shape::Sent(hash));
+                }
+                if let Some(rejected) = rejected {
+                    let reason = rejected.into_inner().reason;
+                    return is_string(reason).then_some(Shape::Rejected(reason));
+                }
+                (uncertain == Some(true)).then_some(Shape::Uncertain)
             }
-            let page = serde_json::from_str::<ObjectOf<Page>>(text)
-                .ok()?
-                .into_inner();
-            let body = base64::engine::general_purpose::STANDARD
-                .decode(page.body.as_bytes())
-                .ok()?;
-            Some(Answer::Blockscout {
-                status: page.status,
-                headers: page.headers.into_iter().collect(),
+            Kind::Colibri => {
+                if read_members || broadcast_members {
+                    return None;
+                }
+                if let Some(class) = failure {
+                    return colibri_class(class).map(Shape::ColibriFailure);
+                }
+                if let Some(result) = result {
+                    return Some(Shape::ColibriResult(result));
+                }
+                let data = revert?.into_inner().data;
+                is_string(data).then_some(Shape::Revert(data))
+            }
+            Kind::Rpc | Kind::Blockscout => None,
+        }
+    }
+
+    /// The machine's answer, each allocation reserved first against the
+    /// request that made I/O request `io`, with the reservation that covers
+    /// it (57-M4).
+    fn read(self, machine: &Machine, io: u64) -> Result<(Answer, Reservation), Unread> {
+        let reserve = |bytes: usize| machine.reserve_reply(io, bytes).map_err(|_| Unread::Over);
+        let copy = |raw: &RawValue| raw.get().to_owned();
+        Ok(match self {
+            Shape::NotSent { broadcast } => {
+                let answer = if broadcast {
+                    Answer::Myotis(MyotisReply::NotSent)
+                } else {
+                    Answer::NotSent
+                };
+                (answer, reserve(0)?)
+            }
+            Shape::Http { status, body } => {
+                let mut reservation = reserve(0)?;
+                let body = decode_base64(body, &mut reservation)?;
+                (Answer::Rpc { status, body }, reservation)
+            }
+            Shape::Page {
+                status,
+                headers,
                 body,
-            })
-        }
-        Kind::MyotisRead | Kind::MyotisBroadcast | Kind::Colibri => {
-            let reply = serde_json::from_str::<ObjectOf<VerifiedReply>>(text)
-                .ok()?
-                .into_inner();
-            verified(kind, reply)
-        }
+            } => {
+                // Each name and value is at most its JSON text.
+                let mut reservation = reserve(headers.get().len())?;
+                let headers: BTreeMap<String, String> =
+                    serde_json::from_str(headers.get()).map_err(|_| Unread::Malformed)?;
+                let body = decode_base64(body, &mut reservation)?;
+                (
+                    Answer::Blockscout {
+                        status,
+                        headers: headers.into_iter().collect(),
+                        body,
+                    },
+                    reservation,
+                )
+            }
+            Shape::Read {
+                payload,
+                before,
+                after,
+            } => {
+                let len = |raw: Option<&RawValue>| raw.map_or(0, |r| r.get().len());
+                let reservation = reserve(payload.get().len() + len(before) + len(after))?;
+                (
+                    Answer::Myotis(MyotisReply::Read {
+                        payload: copy(payload),
+                        block_before: before.map(copy),
+                        block_after: after.map(copy),
+                    }),
+                    reservation,
+                )
+            }
+            Shape::MyotisFailure(class) => {
+                (Answer::Myotis(MyotisReply::Failure(class)), reserve(0)?)
+            }
+            Shape::Sent(hash) => {
+                let reservation = reserve(hash.get().len())?;
+                (
+                    Answer::Myotis(MyotisReply::Sent { hash: copy(hash) }),
+                    reservation,
+                )
+            }
+            Shape::Rejected(reason) => {
+                let reservation = reserve(reason.get().len())?;
+                let reason = decode_string(reason.get()).ok_or(Unread::Malformed)?;
+                (
+                    Answer::Myotis(MyotisReply::Rejected { reason }),
+                    reservation,
+                )
+            }
+            Shape::Uncertain => (Answer::Myotis(MyotisReply::Uncertain), reserve(0)?),
+            Shape::ColibriResult(result) => {
+                let reservation = reserve(result.get().len())?;
+                (
+                    Answer::Colibri(ColibriReply::Result(copy(result))),
+                    reservation,
+                )
+            }
+            Shape::Revert(data) => {
+                let reservation = reserve(data.get().len())?;
+                let data = decode_string(data.get()).ok_or(Unread::Malformed)?;
+                (Answer::Colibri(ColibriReply::Revert { data }), reservation)
+            }
+            Shape::ColibriFailure(class) => {
+                (Answer::Colibri(ColibriReply::Failure(class)), reserve(0)?)
+            }
+        })
     }
 }
 
-/// A verified operation's reply, which must be one of its operation's
-/// shapes: a failure stands alone and carries only its class.
-fn verified(kind: Kind, reply: VerifiedReply<'_>) -> Option<Answer> {
-    let VerifiedReply {
-        payload,
-        block_before,
-        block_after,
-        failure,
-        hash,
-        rejected,
-        uncertain,
-        not_sent,
-        result,
-        revert,
-    } = reply;
-    // Members that belong to no shape of the operation.
-    let read_members = payload.is_some() || block_before.is_some() || block_after.is_some();
-    let broadcast_members = hash.is_some() || rejected.is_some() || uncertain.is_some();
-    let colibri_members = result.is_some() || revert.is_some();
-    if not_sent.is_some() {
-        return None;
-    }
-    let shapes = usize::from(failure.is_some())
-        + usize::from(payload.is_some())
-        + usize::from(hash.is_some())
-        + usize::from(rejected.is_some())
-        + usize::from(uncertain.is_some())
-        + usize::from(result.is_some())
-        + usize::from(revert.is_some());
-    if shapes != 1 {
-        return None;
-    }
-    match kind {
-        Kind::MyotisRead => {
-            if broadcast_members || colibri_members {
-                return None;
-            }
-            if let Some(class) = failure {
-                return (!read_members)
-                    .then(|| myotis_class(&class))
-                    .flatten()
-                    .map(|class| Answer::Myotis(MyotisReply::Failure(class)));
-            }
-            let payload = payload?;
-            Some(Answer::Myotis(MyotisReply::Read {
-                payload: payload.get().to_owned(),
-                block_before: block_before.map(|b| b.get().to_owned()),
-                block_after: block_after.map(|b| b.get().to_owned()),
-            }))
+/// A base64 body, decoded into a buffer whose room `reservation` grows to
+/// cover before it is allocated.
+fn decode_base64(body: &str, reservation: &mut Reservation) -> Result<Vec<u8>, Unread> {
+    let room = base64::decoded_len_estimate(body.len());
+    let held = reservation.bytes();
+    reservation
+        .settle(held.saturating_add(room))
+        .map_err(|_| Unread::Over)?;
+    let mut decoded = vec![0u8; room];
+    let len = base64::engine::general_purpose::STANDARD
+        .decode_slice(body.as_bytes(), &mut decoded)
+        .map_err(|_| Unread::Malformed)?;
+    decoded.truncate(len);
+    Ok(decoded)
+}
+
+/// The text of the JSON string `raw`, each lone surrogate replaced by
+/// U+FFFD, decoded in one pass into a buffer of the JSON's length (its
+/// bound: no escape decodes longer than it is written); `None` for anything
+/// but a string.
+fn decode_string(raw: &str) -> Option<String> {
+    let inner = raw.strip_prefix('"')?.strip_suffix('"')?;
+    let mut out = String::with_capacity(inner.len());
+    let bytes = inner.as_bytes();
+    let hex4 = |at: usize| -> Option<u32> {
+        let digits = inner.get(at..at + 4)?;
+        if !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
         }
-        Kind::MyotisBroadcast => {
-            if read_members || colibri_members {
-                return None;
+        u32::from_str_radix(digits, 16).ok()
+    };
+    let (mut i, mut start) = (0, 0);
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => {
+                out.push_str(inner.get(start..i)?);
+                let escape = *bytes.get(i + 1)?;
+                i += 2;
+                match escape {
+                    b'"' => out.push('"'),
+                    b'\\' => out.push('\\'),
+                    b'/' => out.push('/'),
+                    b'b' => out.push('\u{8}'),
+                    b'f' => out.push('\u{c}'),
+                    b'n' => out.push('\n'),
+                    b'r' => out.push('\r'),
+                    b't' => out.push('\t'),
+                    b'u' => {
+                        let unit = hex4(i)?;
+                        i += 4;
+                        let pair = (0xD800..0xDC00).contains(&unit)
+                            && inner.get(i..i + 2) == Some("\\u")
+                            && hex4(i + 2).is_some_and(|t| (0xDC00..0xE000).contains(&t));
+                        let c = if pair {
+                            let trail = hex4(i + 2)?;
+                            i += 6;
+                            char::from_u32(0x10000 + ((unit - 0xD800) << 10) + (trail - 0xDC00))
+                        } else {
+                            char::from_u32(unit)
+                        };
+                        // A lone surrogate is no char.
+                        out.push(c.unwrap_or('\u{fffd}'));
+                    }
+                    _ => return None,
+                }
+                start = i;
             }
-            if let Some(class) = failure {
-                return myotis_class(&class)
-                    .map(|class| Answer::Myotis(MyotisReply::Failure(class)));
-            }
-            if let Some(hash) = hash {
-                return Some(Answer::Myotis(MyotisReply::Sent {
-                    hash: hash.get().to_owned(),
-                }));
-            }
-            if let Some(rejected) = rejected {
-                return Some(Answer::Myotis(MyotisReply::Rejected {
-                    reason: string_of(rejected.reason)?,
-                }));
-            }
-            (uncertain == Some(true)).then_some(Answer::Myotis(MyotisReply::Uncertain))
+            b'"' | 0..=0x1f => return None,
+            _ => i += 1,
         }
-        Kind::Colibri => {
-            if read_members || broadcast_members {
-                return None;
-            }
-            if let Some(class) = failure {
-                return colibri_class(&class)
-                    .map(|class| Answer::Colibri(ColibriReply::Failure(class)));
-            }
-            if let Some(result) = result {
-                return Some(Answer::Colibri(ColibriReply::Result(
-                    result.get().to_owned(),
-                )));
-            }
-            let revert = revert?;
-            Some(Answer::Colibri(ColibriReply::Revert {
-                data: string_of(revert.data)?,
-            }))
-        }
-        Kind::Rpc | Kind::Blockscout => None,
     }
+    out.push_str(inner.get(start..)?);
+    Some(out)
 }
 
 // ---------------------------------------------------------------------------

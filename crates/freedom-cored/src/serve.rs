@@ -6,6 +6,7 @@
 //! keep the loop from handling EOF, shutdown or lock. KDF work will run on
 //! worker threads and report back here.
 
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
@@ -254,8 +255,7 @@ pub fn run(options: &Options) -> Exit {
                 // A message forwarded to the naming thread takes the credit
                 // along; otherwise it goes once the frame is handled.
                 core.credit = Some(credit);
-                let flow = core.handle_frame(&frame);
-                drop(frame);
+                let flow = core.handle_frame(frame);
                 core.credit = None;
                 if let Flow::Exit(exit) = flow {
                     break exit;
@@ -269,8 +269,7 @@ pub fn run(options: &Options) -> Exit {
                 // As a frame's: forwarded with the message, or dropped once
                 // it is handled, which returns main's bulk credit.
                 core.credit = Some(credit);
-                let flow = core.handle_fragmented(id, &payload);
-                drop(payload);
+                let flow = core.handle_fragmented(id, payload);
                 core.credit = None;
                 if let Flow::Exit(exit) = flow {
                     break exit;
@@ -455,6 +454,12 @@ struct HelloResult<'a> {
     node_recovery: &'a NodeRecovery,
 }
 
+/// Where `text`, borrowed from `payload`, lies in it.
+fn span(payload: &[u8], text: &RawValue) -> Range<usize> {
+    let start = (text.get().as_ptr() as usize).wrapping_sub(payload.as_ptr() as usize);
+    start..start.saturating_add(text.get().len())
+}
+
 /// A method name that is safe to log: known names only.
 fn loggable(method: &str) -> &'static str {
     #[cfg(debug_assertions)]
@@ -480,7 +485,7 @@ fn message_category(error: &MessageError) -> &'static str {
 }
 
 impl Core {
-    fn handle_frame(&mut self, frame: &Frame) -> Flow {
+    fn handle_frame(&mut self, frame: Frame) -> Flow {
         if frame.kind != KIND_JSON {
             log::error(
                 "protocol error",
@@ -544,7 +549,10 @@ impl Core {
                 let outs = self.vault.cancel(id);
                 self.dispatch(outs)
             }
-            Message::Response { id, outcome } => self.response(id, outcome),
+            Message::Response { id, outcome } => {
+                let outcome = outcome.map(|result| span(&frame.payload, result));
+                self.response(id, outcome, frame.payload)
+            }
             Message::Event { .. } => {
                 log::warn("ignoring an event from main", serde_json::json!({}));
                 Flow::Continue
@@ -554,12 +562,15 @@ impl Core {
 
     /// A fragmented response, reassembled: it must be the response its begin
     /// named.
-    fn handle_fragmented(&mut self, id: u64, payload: &[u8]) -> Flow {
-        let category = match Message::decode(payload) {
+    fn handle_fragmented(&mut self, id: u64, payload: Zeroizing<Vec<u8>>) -> Flow {
+        let category = match Message::decode(&payload) {
             Ok(Message::Response {
                 id: answered,
                 outcome,
-            }) if answered == id && self.hello_done => return self.response(id, outcome),
+            }) if answered == id && self.hello_done => {
+                let outcome = outcome.map(|result| span(&payload, result));
+                return self.response(id, outcome, payload);
+            }
             Ok(_) if !self.hello_done => "not_hello_first",
             Ok(_) => "fragmented_not_its_response",
             Err(e) => message_category(&e),
@@ -572,9 +583,15 @@ impl Core {
     }
 
     /// Main's response to one of the core's requests (`shell.*`), routed
-    /// to the thread that made it. One that answers no request is
-    /// unsolicited, a protocol error (0001).
-    fn response(&mut self, id: u64, outcome: Result<&RawValue, ErrorBody>) -> Flow {
+    /// to the thread that made it: its error, or the span of its `result`
+    /// in `message`, the response as it was read. One that answers no
+    /// request is unsolicited, a protocol error (0001).
+    fn response(
+        &mut self,
+        id: u64,
+        outcome: Result<Range<usize>, ErrorBody>,
+        message: Zeroizing<Vec<u8>>,
+    ) -> Flow {
         let Some(owner) = self.requests.answered(id) else {
             log::error(
                 "protocol error",
@@ -582,20 +599,41 @@ impl Core {
             );
             return Flow::Exit(Exit::Protocol);
         };
-        let outcome = match outcome {
-            Ok(result) => match RawValue::from_string(result.get().to_owned()) {
-                Ok(result) => Ok(result),
-                Err(_) => return Flow::Exit(Exit::Internal),
-            },
-            Err(error) => Err(error),
-        };
-        let sent = match owner {
-            Owner::Naming => self
-                .naming
-                .send(naming::In::Response { id, outcome }, self.credit.take()),
-            Owner::Chain => self
-                .chain
-                .send(chain::In::Response { id, outcome }, self.credit.take()),
+        let sent = match (owner, outcome) {
+            // Naming copies its result out of the message.
+            (Owner::Naming, outcome) => {
+                let outcome = match outcome {
+                    Ok(result) => {
+                        let copied = message
+                            .get(result)
+                            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                            .and_then(|text| RawValue::from_string(text.to_owned()).ok());
+                        match copied {
+                            Some(result) => Ok(result),
+                            None => return Flow::Exit(Exit::Internal),
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                self.naming
+                    .send(naming::In::Response { id, outcome }, self.credit.take())
+            }
+            // The chain thread takes the message itself, uncopied, and
+            // charges it to the request that asked (57-M4).
+            (Owner::Chain, Ok(result)) => self.chain.send(
+                chain::In::Response {
+                    id,
+                    reply: chain::Shell::Result { message, result },
+                },
+                self.credit.take(),
+            ),
+            (Owner::Chain, Err(error)) => self.chain.send(
+                chain::In::Response {
+                    id,
+                    reply: chain::Shell::Failed(error),
+                },
+                self.credit.take(),
+            ),
         };
         if sent {
             Flow::Continue

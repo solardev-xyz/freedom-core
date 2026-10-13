@@ -1343,3 +1343,71 @@ fn a_cancel_goes_while_bulk_replies_wait_for_credit() {
     }
     assert_eq!(begun, [5, 6]);
 }
+
+/// The core's resident memory and its peak, in KiB.
+#[cfg(target_os = "linux")]
+fn memory(core: &Core) -> (usize, usize) {
+    let status = std::fs::read_to_string(format!("/proc/{}/status", core.child.id())).unwrap();
+    let field = |name: &str| {
+        status
+            .lines()
+            .find(|line| line.starts_with(name))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|kib| kib.parse::<usize>().ok())
+            .unwrap()
+    };
+    (field("VmRSS:"), field("VmHWM:"))
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn reading_a_reply_reserves_before_it_allocates() {
+    // 57-M4: with the chain total at 24 MiB (a debug-only hook), Myotis
+    // refuses a broadcast with a 17 MiB reason. The message is charged as
+    // it arrives; decoding its text would cross the total, so nothing is
+    // decoded: the broadcast ends with its attempt possibly sent, and the
+    // core's peak grows by the message alone, not the decoding's copies
+    // (before the fix: the event loop's copy, an index, UTF-16 units and a
+    // string, on top).
+    let (_root, data, locks) = dirs();
+    let mut core = common::spawn_env(
+        "serve",
+        &data,
+        &locks,
+        &[],
+        &[("FREEDOM_CORED_TEST_CHAIN_TOTAL_BYTES", "25165824")],
+    );
+    core.hello_fragments();
+    configure(&mut core, 2, &[myotis_broadcaster()]);
+    call(
+        &mut core,
+        3,
+        "chain.availability",
+        json!({ "chain_id": 1, "ready": true }),
+    );
+    core.send(&broadcast(4));
+    let op = requests_only(&mut core, 1).pop().unwrap();
+    assert!(sends_raw(&op), "{op}");
+    let refusal = json!({ "type": "response", "id": op["id"], "result": {
+        "rejected": { "reason": "x".repeat(17 * MIB) },
+    } });
+    let pieces = refusal.to_string().len().div_ceil(MIB / 2);
+    let frames = fragmented(&refusal, pieces);
+    drop(refusal);
+    let (before, _) = memory(&core);
+    for frame in &frames {
+        core.send_raw(frame);
+    }
+    let ended = response_to(&mut core, 4);
+    let (_, peak) = memory(&core);
+    assert_eq!(
+        ended["result"],
+        json!({ "hash": HASH, "source": "myotis", "outcome": "uncertain", "generation": 1 }),
+        "{ended}"
+    );
+    let grown = peak.saturating_sub(before) / 1024;
+    assert!(
+        grown < 30,
+        "the peak grew by {grown} MiB reading a 17 MiB reply"
+    );
+}

@@ -499,7 +499,6 @@ dependencies = [
  "base64",
  "fc-chain",
  "fc-evm",
- "fc-json",
  "fc-keys",
  "fc-naming",
  "fc-protocol",

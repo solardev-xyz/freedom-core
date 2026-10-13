@@ -34,8 +34,6 @@ base64 = "0.22.1"
 # The chain-data machine the chain thread drives (design 0005).
 fc-chain = { path = "../fc-chain" }
 fc-evm = { path = "../fc-evm" }
-# Main's verified replies, read with JavaScript's string semantics.
-fc-json = { path = "../fc-json" }
 fc-keys = { path = "../fc-keys" }
 fc-naming = { path = "../fc-naming" }
 fc-protocol = { path = "../fc-protocol" }
