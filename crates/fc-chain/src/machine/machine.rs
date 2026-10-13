@@ -341,17 +341,21 @@ impl Machine {
             } => Task::new(async move { Done::Read(read(&req, &method, &params, &options).await) }),
             Call::FeeQuote { .. } => Task::new(async move { Done::Fee(fee_quote(&req).await) }),
             Call::Broadcast { raw, .. } => {
+                let stop_at = deadline_at.saturating_sub(self.ctx.bounds.reconcile_ms);
+                if stop_at <= now {
+                    // No room to attempt and reconcile before the deadline:
+                    // nothing is sent.
+                    self.reply(
+                        id,
+                        Err(ChainError::Protocol(Protocol::Deadline)),
+                        Some(BroadcastOutcome::NotSent),
+                        generation,
+                    );
+                    return;
+                }
                 let state = Rc::new(RefCell::new(SendState::default()));
                 send = Some(Rc::clone(&state));
-                let stop_at = deadline_at.saturating_sub(self.ctx.bounds.reconcile_ms);
                 Task::new(async move {
-                    if stop_at <= req.now() {
-                        // No room left to attempt and reconcile.
-                        return Done::Broadcast(Ended::Failed {
-                            error: Thrown::error("The broadcast's deadline left no room"),
-                            outcome: BroadcastOutcome::NotSent,
-                        });
-                    }
                     Done::Broadcast(broadcast(&req, &raw, &state, stop_at, deadline_at).await)
                 })
             }
