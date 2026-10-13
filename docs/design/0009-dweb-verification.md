@@ -373,7 +373,7 @@ The 2 MiB block limit bounds a block's bytes, not what decoding it allocates: a 
   - unknown keys and the values the reader doesn't need are skipped iteratively, under the same depth bound;
   - tag 42 only where a CID is expected.
 - **Caps on decoded structure,** beyond the wire caps:
-  - 65,536 links per dag-pb node. A node of real links can't reach it within 2 MiB; only degenerate encodings can;
+  - 65,536 links per dag-pb node. This is a supported-content limit, not a malformedness test. Typical directories and files are far below it, but valid content can exceed it within 2 MiB: compact links, such as identity CIDs with short names, need only about 17 bytes each. Such a node is refused as `unverifiable`, never reported as malformed;
   - 256 forks per mantaray node (one per first byte), and fork metadata within its 2-byte length, read with `fc-json`'s depth bound. Only a flat object of strings is accepted, and only the keys the walk reads are kept.
 - **What this means for sharing code:** `fc-ipfs` can't use `freedom-ipfs-unixfs`'s decoders as they are. They decode with `prost`, which allocates repeated fields while it reads, before any reservation can be made. `fc-ipfs` carries its own bounded decoders, held to vectors from the native reader on the blocks both accept ([Open questions](#open-questions)).
 
@@ -661,6 +661,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
   - **IPFS, unhelpful but honest:** a CAR that ignores `entity-bytes` and sends the whole DAG; one ordered otherwise, or without duplicates; one that reads the path differently; one that ends early with boxo's marker. Each must still give the right body, through raw blocks, or a piece failure for the early end. Also `blake3`, which is `unverifiable`.
   - **Within the wire caps, against the decoders** ([Bounded decoding](#bounded-decoding)). Each input is within every byte limit, yet would amplify allocation or nesting in a naive decoder. Each must end with its stated failure, or its correct answer, with reservations never above the request's budget:
     - a maximal block of minimal repeated fields, for dag-pb links and for UnixFS `blocksizes`;
+    - a valid directory just over the link cap: 65,537 sorted links to the empty identity CID, about 1.1 MiB, refused as `unverifiable` and not as malformed, so the cap's expectation doesn't imply every refusal is malformed content;
     - a maximal block of unknown fields;
     - a directory of as many entries as a block holds, served as a listing;
     - a CAR header and an IPNS record's signed data nested to the depth bound and one past it, and declaring lengths past the bytes remaining;
@@ -732,7 +733,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
   - `decoder-caps` and `manifest-node-cap`, for structure past the decoders' caps;
   - a Swarm leaf whose authentic payload is shorter than its logical length, which the core doesn't support.
 
-  On well-formed content these never apply.
+  Within the supported formats and the stated limits, these never apply to well-formed content. Content that is valid but outside them stays `unverifiable`: a SOC off the feed path, structure past a decoder or manifest cap. It isn't reported as malformed.
   - **Why the bundled node, not the external one:** the external node's headers are the assertions being replaced, and it may be a different implementation (a reused Bee, a Kubo, a public gateway). One rule per scheme, whatever the backend, is also what a user switching modes expects.
 - **The same as today, per piece:** the request headers Swarm needs, the retry table and its delays, the header deadline, the body idle bound, the transport and its proxy and onion rules, the Ant guard, fetch admission, the dial failure statuses, and the security response operations.
 
@@ -756,7 +757,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 | `soc-references` | an external node may answer a reference with a single-owner chunk, and what it serves then rests on that chunk | the core accepts one only as a feed update; elsewhere it is `unverifiable` | content reached through a SOC outside a feed doesn't load in verified mode |
 | `unixfs-sizes` | the native reader (the parity target) slices a child by its declared size | a declared size that disagrees with a raw leaf, or content that doesn't add up to `filesize`, cuts the body as malformed | only malformed files differ |
 | `hamt-lookup` | the native reader finds a HAMT entry by its name | the core follows the name's hash and the bitfield | an entry that isn't where its hash points is a 404; only malformed directories differ |
-| `decoder-caps` | the native reader decodes any structure a block holds | at most 65,536 links per dag-pb node, and CBOR nested at most 8 levels | only degenerate encodings are refused, as `unverifiable` |
+| `decoder-caps` | the native reader decodes any structure a block holds | at most 65,536 links per dag-pb node, and CBOR nested at most 8 levels | structure past the caps is refused as `unverifiable`. That is mostly degenerate encodings, but also rare valid content such as a directory of more than 65,536 compact identity-CID links |
 
 ## Implementation steps
 
