@@ -792,8 +792,9 @@ impl Vault {
 
     /// Locks for a `vault.lock` that waits for its turn behind replies main
     /// hasn't read (design 0001, Transport and framing): the secrets are
-    /// wiped and admitted work revoked now, as by the auto-lock. Its turn
-    /// locks again, which acknowledges it.
+    /// wiped and admitted work revoked now, as by the auto-lock, and again
+    /// after each request handled before that turn. The turn itself locks
+    /// once more, and acknowledges it.
     pub fn lock(&mut self) -> Vec<Out> {
         let mut out = Vec::new();
         self.lock_now(LockReason::Manual, &mut out);

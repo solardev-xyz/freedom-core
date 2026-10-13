@@ -671,14 +671,17 @@ fn a_burst_survives_main_pausing_its_reads() {
 /// `ids` requests deriving 8 addresses each. Their replies, about 900
 /// bytes, fill any OS's stdout pipe and the loop's 256-frame allowance
 /// within a few hundred, so 450 of them leave what follows within the
-/// reader's 256 credits.
+/// reader's 256 credits. Each is padded to 64 KiB, which the method
+/// ignores, so the core reads them only as it handles them
+/// (`Feed::wait_stalled`).
 fn filling(ids: std::ops::Range<u64>) -> Vec<Vec<u8>> {
     let accounts: Vec<u32> = (0..8).collect();
+    let pad = "x".repeat(64 * 1024);
     ids.map(|id| {
         frame(&request(
             id,
             "keys.addresses",
-            json!({ "accounts": accounts }),
+            json!({ "accounts": accounts, "pad": pad }),
         ))
     })
     .collect()

@@ -548,9 +548,11 @@ pub struct Feed {
 
 impl Feed {
     /// Waits until no frame has gone in for `quiet`, and returns how many
-    /// did. Frames larger than the pipe go in only as the core reads them,
-    /// and it reads only as it handles what it holds: feeding stalls once
-    /// the core stops taking frames, not while it is merely slow.
+    /// did. Frames of 64 KiB or more, larger than the pipe and the
+    /// reader's chunk, go in only as the core handles the frames it holds,
+    /// so feeding them stalls once the core stops taking frames, not while
+    /// it is merely slow. (Smaller frames go in many to a read, ahead of
+    /// their handling.)
     pub fn wait_stalled(&self, quiet: Duration) -> usize {
         let deadline = Instant::now() + READ_TIMEOUT;
         let mut seen = self.written.load(Ordering::SeqCst);
