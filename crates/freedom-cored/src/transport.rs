@@ -1135,6 +1135,38 @@ mod tests {
     }
 
     #[test]
+    fn the_reader_never_waits_on_a_fragment() {
+        let (mut reader, received) = reader(offered(), &[4]);
+        // Whole frames left unhandled fill the queued-frame credits...
+        let held = reader.credits.acquire(MAX_QUEUED_FRAME_BYTES);
+        let credits = Arc::clone(&reader.credits);
+        // ...yet a response of 3 MiB in fragments still goes through: the
+        // begin reserved its bytes, outside them.
+        let response = format!(
+            r#"{{"type":"response","id":4,"result":"{}"}}"#,
+            "x".repeat(3 << 20)
+        );
+        let (done, finished) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(reader.feed(&fragmented(4, response.as_bytes())));
+        });
+        assert_eq!(
+            finished.recv_timeout(std::time::Duration::from_secs(10)),
+            Ok(true),
+            "the reader waited"
+        );
+        assert!(matches!(
+            received.try_recv(),
+            Ok(Event::Response { id: 4, .. })
+        ));
+        assert_eq!(
+            *credits.in_flight.lock().unwrap(),
+            (1, MAX_QUEUED_FRAME_BYTES)
+        );
+        drop(held);
+    }
+
+    #[test]
     fn the_reader_refuses_a_begin_for_no_pending_request() {
         let (mut reader, received) = reader(offered(), &[4]);
         assert!(!reader.feed(&fragmented(8, b"{}")));
