@@ -83091,6 +83091,763 @@
       ]
     },
     {
+      "id": "boundary-adaptive-capacity-whitespace",
+      "from": "design 0005: Adaptive bypass, capacity",
+      "world": {
+        "chains": {
+          "1": {
+            "network": {
+              "access": {
+                "readOrder": [
+                  "colibri",
+                  "direct"
+                ],
+                "broadcastOrder": [
+                  "myotis",
+                  "direct"
+                ]
+              },
+              "quorum": {
+                "k": 3,
+                "m": 2,
+                "timeoutMs": 5000
+              }
+            },
+            "rpc": [
+              "https://rpc.example"
+            ],
+            "prover": [
+              "https://prover.example"
+            ]
+          }
+        },
+        "colibri": {
+          "error": {
+            "message": "out  of gas"
+          }
+        },
+        "rpc": {
+          "https://rpc.example": {
+            "result": "0xrpc"
+          }
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_call",
+              "params_json": "[{\"to\":\"0xabc\"},\"latest\"]",
+              "origin": "https://swap.example",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"0xrpc\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {
+            "adaptive": [
+              [
+                "[\"colibri\",1,\"https://swap.example\",\"eth_call\",\"*\"]",
+                {
+                  "timeoutCount": 0,
+                  "openUntil": 0,
+                  "sessionBlocked": true
+                }
+              ]
+            ]
+          }
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_call",
+              "params_json": "[{\"to\":\"0xabc\"},\"latest\"]",
+              "origin": "https://swap.example",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"0xrpc\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {
+            "adaptive": [
+              [
+                "[\"colibri\",1,\"https://swap.example\",\"eth_call\",\"*\"]",
+                {
+                  "timeoutCount": 0,
+                  "openUntil": 0,
+                  "sessionBlocked": true
+                }
+              ]
+            ]
+          }
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "call": 0,
+          "t": 0,
+          "kind": "verified-op",
+          "host": "colibri",
+          "op": "request",
+          "chain": 1,
+          "params_json": "{\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\"},\"latest\"],\"deadline_ms\":2000}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "thrown": {
+              "class": "Error",
+              "name": "Error",
+              "message_json": "\"out  of gas\"",
+              "props": []
+            }
+          }
+        },
+        {
+          "id": 1,
+          "step": 0,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_call",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\"},\"latest\"]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0xrpc\"}"
+          }
+        },
+        {
+          "id": 2,
+          "step": 1,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_call",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\"},\"latest\"]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0xrpc\"}"
+          }
+        }
+      ]
+    },
+    {
+      "id": "boundary-adaptive-capacity-past-500-units",
+      "from": "design 0005: Adaptive bypass, capacity",
+      "world": {
+        "chains": {
+          "1": {
+            "network": {
+              "access": {
+                "readOrder": [
+                  "colibri",
+                  "direct"
+                ],
+                "broadcastOrder": [
+                  "myotis",
+                  "direct"
+                ]
+              },
+              "quorum": {
+                "k": 3,
+                "m": 2,
+                "timeoutMs": 5000
+              }
+            },
+            "rpc": [
+              "https://rpc.example"
+            ],
+            "prover": [
+              "https://prover.example"
+            ]
+          }
+        },
+        "colibri": {
+          "error": {
+            "message": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx out of gas"
+          }
+        },
+        "rpc": {
+          "https://rpc.example": {
+            "result": "0xrpc"
+          }
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_call",
+              "params_json": "[{\"to\":\"0xabc\"},\"latest\"]",
+              "origin": "https://swap.example",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"0xrpc\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_call",
+              "params_json": "[{\"to\":\"0xabc\"},\"latest\"]",
+              "origin": "https://swap.example",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"0xrpc\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "call": 0,
+          "t": 0,
+          "kind": "verified-op",
+          "host": "colibri",
+          "op": "request",
+          "chain": 1,
+          "params_json": "{\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\"},\"latest\"],\"deadline_ms\":2000}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "thrown": {
+              "class": "Error",
+              "name": "Error",
+              "message_json": "\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx out of gas\"",
+              "props": []
+            }
+          }
+        },
+        {
+          "id": 1,
+          "step": 0,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_call",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\"},\"latest\"]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0xrpc\"}"
+          }
+        },
+        {
+          "id": 2,
+          "step": 1,
+          "call": 0,
+          "t": 0,
+          "kind": "verified-op",
+          "host": "colibri",
+          "op": "request",
+          "chain": 1,
+          "params_json": "{\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\"},\"latest\"],\"deadline_ms\":2000}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "thrown": {
+              "class": "Error",
+              "name": "Error",
+              "message_json": "\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx out of gas\"",
+              "props": []
+            }
+          }
+        },
+        {
+          "id": 3,
+          "step": 1,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_call",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\"},\"latest\"]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0xrpc\"}"
+          }
+        }
+      ]
+    },
+    {
+      "id": "boundary-adaptive-capacity-hex-elided",
+      "from": "design 0005: Adaptive bypass, capacity",
+      "world": {
+        "chains": {
+          "1": {
+            "network": {
+              "access": {
+                "readOrder": [
+                  "colibri",
+                  "direct"
+                ],
+                "broadcastOrder": [
+                  "myotis",
+                  "direct"
+                ]
+              },
+              "quorum": {
+                "k": 3,
+                "m": 2,
+                "timeoutMs": 5000
+              }
+            },
+            "rpc": [
+              "https://rpc.example"
+            ],
+            "prover": [
+              "https://prover.example"
+            ]
+          }
+        },
+        "colibri": {
+          "error": {
+            "message": "0xabababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab out of gas"
+          }
+        },
+        "rpc": {
+          "https://rpc.example": {
+            "result": "0xrpc"
+          }
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_call",
+              "params_json": "[{\"to\":\"0xabc\"},\"latest\"]",
+              "origin": "https://swap.example",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"0xrpc\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {
+            "adaptive": [
+              [
+                "[\"colibri\",1,\"https://swap.example\",\"eth_call\",\"*\"]",
+                {
+                  "timeoutCount": 0,
+                  "openUntil": 0,
+                  "sessionBlocked": true
+                }
+              ]
+            ]
+          }
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_call",
+              "params_json": "[{\"to\":\"0xabc\"},\"latest\"]",
+              "origin": "https://swap.example",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"0xrpc\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {
+            "adaptive": [
+              [
+                "[\"colibri\",1,\"https://swap.example\",\"eth_call\",\"*\"]",
+                {
+                  "timeoutCount": 0,
+                  "openUntil": 0,
+                  "sessionBlocked": true
+                }
+              ]
+            ]
+          }
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "call": 0,
+          "t": 0,
+          "kind": "verified-op",
+          "host": "colibri",
+          "op": "request",
+          "chain": 1,
+          "params_json": "{\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\"},\"latest\"],\"deadline_ms\":2000}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "thrown": {
+              "class": "Error",
+              "name": "Error",
+              "message_json": "\"0xabababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab out of gas\"",
+              "props": []
+            }
+          }
+        },
+        {
+          "id": 1,
+          "step": 0,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_call",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\"},\"latest\"]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0xrpc\"}"
+          }
+        },
+        {
+          "id": 2,
+          "step": 1,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_call",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\"},\"latest\"]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0xrpc\"}"
+          }
+        }
+      ]
+    },
+    {
+      "id": "boundary-adaptive-capacity-failure-kind",
+      "from": "design 0005: Adaptive bypass, capacity",
+      "world": {
+        "chains": {
+          "1": {
+            "network": {
+              "access": {
+                "readOrder": [
+                  "colibri",
+                  "direct"
+                ],
+                "broadcastOrder": [
+                  "myotis",
+                  "direct"
+                ]
+              },
+              "quorum": {
+                "k": 3,
+                "m": 2,
+                "timeoutMs": 5000
+              }
+            },
+            "rpc": [
+              "https://rpc.example"
+            ],
+            "prover": [
+              "https://prover.example"
+            ]
+          }
+        },
+        "colibri": {
+          "error": {
+            "message": "prover busy",
+            "failureKind": "capacity"
+          }
+        },
+        "rpc": {
+          "https://rpc.example": {
+            "result": "0xrpc"
+          }
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_call",
+              "params_json": "[{\"to\":\"0xabc\"},\"latest\"]",
+              "origin": "https://swap.example",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"0xrpc\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {
+            "adaptive": [
+              [
+                "[\"colibri\",1,\"https://swap.example\",\"eth_call\",\"*\"]",
+                {
+                  "timeoutCount": 0,
+                  "openUntil": 0,
+                  "sessionBlocked": true
+                }
+              ]
+            ]
+          }
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_call",
+              "params_json": "[{\"to\":\"0xabc\"},\"latest\"]",
+              "origin": "https://swap.example",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"0xrpc\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {
+            "adaptive": [
+              [
+                "[\"colibri\",1,\"https://swap.example\",\"eth_call\",\"*\"]",
+                {
+                  "timeoutCount": 0,
+                  "openUntil": 0,
+                  "sessionBlocked": true
+                }
+              ]
+            ]
+          }
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "call": 0,
+          "t": 0,
+          "kind": "verified-op",
+          "host": "colibri",
+          "op": "request",
+          "chain": 1,
+          "params_json": "{\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\"},\"latest\"],\"deadline_ms\":2000}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "thrown": {
+              "class": "Error",
+              "name": "Error",
+              "message_json": "\"prover busy\"",
+              "props": [
+                {
+                  "key": "failureKind",
+                  "json": "\"capacity\""
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": 1,
+          "step": 0,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_call",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\"},\"latest\"]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0xrpc\"}"
+          }
+        },
+        {
+          "id": 2,
+          "step": 1,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_call",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\"},\"latest\"]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0xrpc\"}"
+          }
+        }
+      ]
+    },
+    {
       "id": "boundary-origin-not-interactive",
       "from": "design 0005: Adaptive bypass, origin",
       "world": {

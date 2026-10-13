@@ -4,13 +4,22 @@
 //! answers each I/O request with the answer the reference's matching
 //! exchange or verifier operation got, at the time it got it.
 //!
-//! Compared exactly: every I/O request (endpoint, body, operation, time)
-//! and its cancel; every result and error (key order, code, message,
-//! data); settle times; and the state tables each step records.
+//! Compared exactly:
+//! - every I/O request the core owns (`shell.rpc` endpoint and body,
+//!   verifier operation and params, Blockscout page), its start, and its
+//!   place in the reference's order: no request answers an earlier record
+//!   than one already matched;
+//! - every cancel: an exchange the reference aborted at T is cancelled at
+//!   T, and no other is cancelled, except in the permitted races
+//!   ([`Race`], counted in [`RACES`]). Main never delivers an answer the
+//!   machine cancelled first;
+//! - every result and error (key order, constructor, name, message, own
+//!   properties, `-0` and UTF-16 strings), and its settle time;
+//! - the state tables each step records.
 //!
 //! Scenarios the machine doesn't serve yet are skipped by ID prefix through
 //! [`NOT_YET`], never silently; scenarios a deviation changes are listed in
-//! [`DEVIATIONS`] with the difference they must show.
+//! [`DEVIATIONS`] with the difference they must show, stated whole.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -309,13 +318,28 @@ fn broadcast_hash(payload: &Json) -> Option<String> {
     get("txHash").or_else(|| get("result")).map(Json::to_string)
 }
 
-/// `isCapacityFailure`'s text, which main classes a Colibri failure by.
-fn capacity(message: &str) -> bool {
+/// `isCapacityFailure(error)`, which main classes a Colibri failure by: an
+/// error whose `failureKind` is `capacity`, or whose `safeErrorMessage`
+/// (hex elided, whitespace collapsed, cut at 500 UTF-16 units) matches the
+/// pattern.
+fn capacity(thrown: &Json) -> bool {
+    let kind = thrown_prop(thrown, "failureKind")
+        .and_then(|e| e.get("json"))
+        .and_then(Json::as_str);
+    if kind == Some(r#""capacity""#) {
+        return true;
+    }
+    let message_json = str_of(thrown, "message_json");
+    let units: Vec<u16> = Index::new(message_json)
+        .ok()
+        .map(|index| index.root().units().collect())
+        .unwrap_or_default();
+    let safe = fc_chain::safe_error_message(str_of(thrown, "name"), &units);
     regex::Regex::new(
         r"(?i-u)out of gas|execution (?:gas|resource) limit|exceeds? (?:the )?(?:gas|execution) limit",
     )
     .unwrap()
-    .is_match(message)
+    .is_match(&safe.to_string_lossy())
 }
 
 fn is_hex_data(text: &str) -> bool {
@@ -359,7 +383,7 @@ fn verified_answer(record: &Json, before: Option<String>, after: Option<String>)
         {
             return Some(Answer::Colibri(ColibriReply::Revert { data }));
         }
-        let class = if capacity(&thrown_message(thrown)) {
+        let class = if capacity(thrown) {
             ColibriClass::Capacity
         } else {
             ColibriClass::Error
@@ -482,12 +506,35 @@ fn normalized_body(body: &str) -> String {
 
 struct Exchange {
     entry: Json,
+    /// Its place in the reference's ledger.
+    seq: usize,
     used: bool,
     /// The machine's I/O id that this record answers.
     request: Option<u64>,
-    /// When the machine cancelled it, before its answer.
-    cancelled: Option<u64>,
+    /// When the machine cancelled it, before its answer, and what the
+    /// driver had just done.
+    cancelled: Option<(u64, Cause)>,
     delivered: bool,
+}
+
+/// What the driver did last before the machine ran: what a cancel the
+/// machine then made followed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cause {
+    /// A call started, or main sent it again.
+    Start,
+    /// An answer was delivered at `at` to the I/O of call `owner` that
+    /// started at `started` (the reference's record's start, when it has
+    /// one).
+    Delivered {
+        at: u64,
+        owner: (u64, u64),
+        started: Option<u64>,
+    },
+    /// One of the machine's own timers fired at `at`.
+    Timer(u64),
+    /// A scripted event, or a caller's abort.
+    External,
 }
 
 enum Token {
@@ -525,6 +572,8 @@ struct Driver {
     slots: Vec<Slot>,
     /// Machine request id → (step, call).
     owners: BTreeMap<u64, (usize, usize)>,
+    /// Machine I/O id → the (step, call) that made it.
+    owner_of_io: BTreeMap<u64, (usize, usize)>,
     /// Requests the reference never made, by kind.
     extra: Vec<String>,
     /// Answer reconciliation lookups (deviation `broadcast-outcome`).
@@ -542,6 +591,14 @@ struct Driver {
     /// A call started: the timers due now fire before time moves on (the
     /// harness's `tickAsync(0)`), whatever the calls' state.
     flush: bool,
+    /// What the driver did last.
+    cause: Cause,
+    /// The ledger's latest entry matched so far: the machine's requests
+    /// come in the reference's order.
+    last_matched: Option<usize>,
+    /// Answers the machine cancelled before main delivered them: main
+    /// aborted them, and they never reach the machine.
+    withheld: usize,
 }
 
 impl Driver {
@@ -589,6 +646,7 @@ impl Driver {
         self.slots[i].request = Some(request);
         self.slots[i].submitted = Some(self.machine.now());
         self.flush = true;
+        self.cause = Cause::Start;
     }
 
     /// Takes the machine's replies. True when a call started (a resend,
@@ -612,6 +670,7 @@ impl Driver {
                     .is_some_and(|f| f == "broadcastRawTransaction")
             {
                 self.slots[i].resent = true;
+                self.cause = Cause::Start;
                 let request = self.machine.submit(call_of(&self.slots[i].call), None);
                 self.owners.insert(request, (step, i));
                 self.slots[i].request = Some(request);
@@ -631,8 +690,10 @@ impl Driver {
     fn drive(&mut self, until: u64, done: &dyn Fn(&Driver) -> bool) {
         loop {
             self.machine.poll();
-            let started = self.collect_replies();
+            // The poll's effects first: its cancels followed what the
+            // driver did before it, not the calls its replies start.
             self.process_effects();
+            let started = self.collect_replies();
             if started {
                 continue;
             }
@@ -666,24 +727,51 @@ impl Driver {
         }
     }
 
+    /// Main delivers an answer, unless the machine cancelled the exchange
+    /// first: main aborted it then, and nothing reaches the machine.
     fn deliver(&mut self, id: u64, answer: Answer) {
-        if let Some(exchange) = self.io.iter_mut().find(|e| e.request == Some(id))
-            && exchange.cancelled.is_none()
-        {
+        let now = self.machine.now();
+        if let Some(exchange) = self.io.iter_mut().find(|e| e.request == Some(id)) {
+            if exchange.cancelled.is_some() {
+                self.withheld += 1;
+                return;
+            }
             exchange.delivered = true;
+            let owner = (num(&exchange.entry, "step"), num(&exchange.entry, "call"));
+            let started = Some(num(&exchange.entry, "t"));
+            self.cause = Cause::Delivered {
+                at: now,
+                owner,
+                started,
+            };
+        } else {
+            let owner = self
+                .owner_of_io
+                .get(&id)
+                .map_or((u64::MAX, u64::MAX), |&(s, c)| (s as u64, c as u64));
+            self.cause = Cause::Delivered {
+                at: now,
+                owner,
+                started: None,
+            };
         }
         self.machine.complete(id, answer);
     }
 
     fn fired(&mut self, fired: Fired) {
         let Fired::External(token) = fired else {
+            self.cause = Cause::Timer(self.machine.now());
             return;
         };
         match self.tokens.remove(&token) {
             Some(Token::Deliver(id, answer)) => self.deliver(id, answer),
-            Some(Token::Event(event)) => self.event(&event),
+            Some(Token::Event(event)) => {
+                self.cause = Cause::External;
+                self.event(&event);
+            }
             Some(Token::Start(i)) => self.start(i),
             Some(Token::Abort(i)) => {
+                self.cause = Cause::External;
                 if let Some(request) = self.slots[i].request {
                     self.machine.cancel(request);
                 }
@@ -751,7 +839,7 @@ impl Driver {
                         && !exchange.delivered
                         && exchange.cancelled.is_none()
                     {
-                        exchange.cancelled = Some(at);
+                        exchange.cancelled = Some((at, self.cause));
                     }
                 }
                 Effect::Request {
@@ -761,6 +849,9 @@ impl Driver {
                     ..
                 } => {
                     let owner = request.and_then(|r| self.owners.get(&r).copied());
+                    if let Some(owner) = owner {
+                        self.owner_of_io.insert(id, owner);
+                    }
                     self.answer(id, at, &io, owner);
                 }
             }
@@ -774,9 +865,16 @@ impl Driver {
                 .push(format!("a request with no caller at {at}: {io:?}"));
             return;
         };
-        let shifted = self.expect.is_some_and(|e| e.shifted);
+        let moved = self.expect.map_or(&[][..], |e| e.moved);
+        let start_of = |entry: &Json| {
+            let record = num(entry, "id");
+            moved
+                .iter()
+                .find(|(r, _)| *r == record)
+                .map_or_else(|| num(entry, "t"), |(_, t)| *t)
+        };
         let matches = |entry: &Json| {
-            (shifted || num(entry, "t") == at)
+            start_of(entry) == at
                 && num(entry, "step") == step as u64
                 && num(entry, "call") == call as u64
                 && match io {
@@ -862,6 +960,16 @@ impl Driver {
         self.io[index].used = true;
         self.io[index].request = Some(id);
         let entry = self.io[index].entry.clone();
+        // The reference's order: no request answers a record earlier in
+        // the ledger than one already matched.
+        let seq = self.io[index].seq;
+        if let Some(last) = self.last_matched.filter(|last| seq < *last) {
+            self.mismatches.push(format!(
+                "out of the reference's order: {} is ledger entry {seq}, made after entry {last}",
+                describe_request(io, at)
+            ));
+        }
+        self.last_matched = Some(self.last_matched.map_or(seq, |last| last.max(seq)));
         let end = entry.get("end").and_then(Json::as_u64);
         let answer = match str_of(&entry, "kind") {
             "blockscout-page" => self.page_answer(&entry),
@@ -984,28 +1092,16 @@ impl Driver {
     }
 }
 
-/// A request, as the deviation lists name it.
+/// A request, as the deviation lists name it: what it asks, whole, and
+/// when.
 fn describe_request(io: &Request, at: u64) -> String {
     match io {
         Request::Rpc { endpoint, body, .. } => {
-            let method = Index::new(body)
-                .ok()
-                .and_then(|index| {
-                    index
-                        .root()
-                        .get("method")
-                        .map(|m| String::from_utf16_lossy(&m.units().collect::<Vec<u16>>()))
-                })
-                .unwrap_or_default();
-            format!("rpc {endpoint} {method} at {at}")
+            format!("rpc {endpoint} at {at} {}", normalized_body(body))
         }
         Request::Verified(op) => {
-            let (host, name, _, _) = verified_params(op);
-            let name = match op {
-                VerifiedOp::Colibri { method, .. } => method.as_str(),
-                _ => name,
-            };
-            format!("{host} {name} at {at}")
+            let (host, name, chain, params) = verified_params(op);
+            format!("{host} {name} chain {chain} at {at} {params}")
         }
         Request::Blockscout {
             endpoint, query, ..
@@ -1013,26 +1109,24 @@ fn describe_request(io: &Request, at: u64) -> String {
     }
 }
 
-/// A recorded exchange, as the deviation lists name it.
+/// A recorded exchange, as the deviation lists name it: what it asked,
+/// whole, and when.
 fn describe_record(entry: &Json) -> String {
+    let t = num(entry, "t");
     match str_of(entry, "kind") {
         "rpc" => format!(
-            "rpc {} {} at {}",
+            "rpc {} at {t} {}",
             str_of(entry, "url"),
-            str_of(entry, "method"),
-            num(entry, "t")
+            text_field(entry, "body").unwrap_or_default()
         ),
-        _ => {
-            let name = if str_of(entry, "host") == "colibri" {
-                text_field(entry, "params_json")
-                    .and_then(|p| serde_json::from_str::<Json>(&p).ok())
-                    .and_then(|p| p.get("method").and_then(Json::as_str).map(str::to_owned))
-                    .unwrap_or_default()
-            } else {
-                str_of(entry, "op").to_owned()
-            };
-            format!("{} {name} at {}", str_of(entry, "host"), num(entry, "t"))
-        }
+        "blockscout-page" => format!("blockscout {} at {t}", str_of(entry, "url")),
+        _ => format!(
+            "{} {} chain {} at {t} {}",
+            str_of(entry, "host"),
+            str_of(entry, "op"),
+            num(entry, "chain"),
+            text_field(entry, "params_json").unwrap_or_default()
+        ),
     }
 }
 
@@ -1423,6 +1517,52 @@ struct Outcome {
     extra: Vec<String>,
     /// The reference's exchanges the machine never made.
     missing: Vec<String>,
+    /// The permitted races between a cancel and an answer.
+    races: Vec<Race>,
+    /// Answers main withheld: the machine had cancelled their exchange.
+    withheld: usize,
+}
+
+/// A cancel that crossed an answer in the same tick: the reference's
+/// exchange settled at that instant, and its abort, made then, changed
+/// nothing; the machine's cancel came first, and main withheld the answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Race {
+    /// A quorum member, cancelled when another member's answer, delivered
+    /// to the same call in that tick, settled the round.
+    QuorumTail,
+    /// A Blockscout page, cancelled by the scan's deadline in the tick its
+    /// own fetch failed with `no answer within`.
+    PageDeadline,
+}
+
+/// Whether a cancel at `at`, made after `cause`, is a permitted race with
+/// the record `e` (one the reference let settle at `at`).
+fn race(e: &Json, at: u64, cause: Cause) -> Option<Race> {
+    if e.get("end").and_then(Json::as_u64) != Some(at) {
+        return None;
+    }
+    let owner = (num(e, "step"), num(e, "call"));
+    match (str_of(e, "kind"), str_of(e, "outcome"), cause) {
+        (
+            "rpc",
+            "answered" | "failed",
+            Cause::Delivered {
+                at: when,
+                owner: by,
+                started,
+            },
+        ) if when == at && by == owner && started == Some(num(e, "t")) => Some(Race::QuorumTail),
+        ("blockscout-page", "failed", Cause::Timer(when))
+            if when == at
+                && e.get("answer")
+                    .and_then(|a| a.get("thrown"))
+                    .is_some_and(|t| thrown_message(t).starts_with("no answer within")) =>
+        {
+            Some(Race::PageDeadline)
+        }
+        _ => None,
+    }
 }
 
 const MAX_STEP_MS: u64 = 10 * 60_000;
@@ -1436,15 +1576,17 @@ fn replay(scenario: &Json, expect: Option<&'static Expected>) -> Outcome {
         .and_then(Json::as_array)
         .into_iter()
         .flatten()
-        .filter(|e| match str_of(e, "kind") {
+        .enumerate()
+        .filter(|(_, e)| match str_of(e, "kind") {
             "rpc" | "verified-op" => e.get("within").is_none(),
             // A Blockscout page is one `shell.blockscout`; its hops and DNS
             // lookups are main's.
             "blockscout-page" => true,
             _ => false,
         })
-        .map(|e| Exchange {
+        .map(|(seq, e)| Exchange {
             entry: e.clone(),
+            seq,
             used: false,
             request: None,
             cancelled: None,
@@ -1475,6 +1617,7 @@ fn replay(scenario: &Json, expect: Option<&'static Expected>) -> Outcome {
         step: 0,
         slots: Vec::new(),
         owners: BTreeMap::new(),
+        owner_of_io: BTreeMap::new(),
         extra: Vec::new(),
         reconcile,
         expect,
@@ -1483,6 +1626,9 @@ fn replay(scenario: &Json, expect: Option<&'static Expected>) -> Outcome {
         pending: Vec::new(),
         sequence: 0,
         flush: false,
+        cause: Cause::Start,
+        last_matched: None,
+        withheld: 0,
     };
     driver.apply_world();
     let mut outcome = Outcome::default();
@@ -1577,7 +1723,7 @@ fn replay(scenario: &Json, expect: Option<&'static Expected>) -> Outcome {
                 expect.and_then(|e| e.replies.iter().find(|(s, c, _, _)| *s == index && *c == i));
             match want {
                 Some((_, _, settled, want)) => {
-                    if let Some(problem) = compare_want(reply, *settled, want) {
+                    if let Some(problem) = compare_want(reply, *settled, want, &slot.call) {
                         driver
                             .mismatches
                             .push(format!("{id} step {index} call {i}: {problem}"));
@@ -1624,27 +1770,47 @@ fn replay(scenario: &Json, expect: Option<&'static Expected>) -> Outcome {
             continue;
         }
         // Cancellations: an exchange the reference aborted at T is cancelled
-        // at T; one it let finish is never cancelled before its answer.
-        let mut aborted = (str_of(e, "outcome") == "aborted").then(|| num(e, "end"));
+        // at T; one it let finish is never cancelled before its answer,
+        // except in a permitted race ([`Race`]). A Blockscout page the
+        // caller's abort ended records the `AbortError` it failed with.
+        let abort_error = e
+            .get("answer")
+            .and_then(|a| a.get("thrown"))
+            .is_some_and(|t| str_of(t, "name") == "AbortError");
+        let mut aborted = (str_of(e, "outcome") == "aborted"
+            || (str_of(e, "kind") == "blockscout-page" && abort_error))
+            .then(|| num(e, "end"));
         if let Some((_, at)) =
             expect.and_then(|x| x.cancels.iter().find(|(r, _)| *r == num(e, "id")))
         {
             aborted = *at;
         }
-        // A cancel in the very tick the answer came raced it, as the
-        // reference's abort of an exchange already answered did.
-        let raced = aborted.is_none()
-            && exchange.cancelled.is_some()
-            && exchange.cancelled == e.get("end").and_then(Json::as_u64);
-        if aborted != exchange.cancelled && !raced {
+        let cancelled = exchange.cancelled.map(|(at, _)| at);
+        let race = aborted
+            .is_none()
+            .then(|| {
+                exchange
+                    .cancelled
+                    .and_then(|(at, cause)| race(e, at, cause))
+            })
+            .flatten();
+        if let Some(race) = race {
+            outcome.races.push(race);
+        } else if aborted != cancelled {
             driver.mismatches.push(format!(
-                "{id}: {what} cancelled at {:?} instead of {aborted:?}",
-                exchange.cancelled
+                "{id}: {what} cancelled at {cancelled:?} ({:?}) instead of {aborted:?}",
+                exchange.cancelled.map(|(_, cause)| cause)
             ));
         }
     }
     if let Some(expect) = expect {
-        let want: Vec<String> = expect.extra.iter().map(|s| (*s).to_owned()).collect();
+        // `{hash}` stands for the broadcast's transaction hash.
+        let hash = broadcast_raw(scenario).map(|raw| keccak_hash(&raw));
+        let want: Vec<String> = expect
+            .extra
+            .iter()
+            .map(|s| s.replace("{hash}", hash.as_deref().unwrap_or("{hash}")))
+            .collect();
         if driver.extra != want {
             driver.mismatches.push(format!(
                 "{id}: requests the reference never made {:?} instead of {want:?}",
@@ -1662,49 +1828,124 @@ fn replay(scenario: &Json, expect: Option<&'static Expected>) -> Outcome {
     }
     outcome.mismatches = driver.mismatches;
     outcome.extra = driver.extra;
+    outcome.withheld = driver.withheld;
     outcome
 }
 
-/// What a deviation's reply must be.
+/// What a deviation's reply must be, whole: every field it doesn't change
+/// is stated too.
 #[derive(Debug)]
 enum Want {
-    /// 0001's code: `cancelled`, `deadline`, `reconfigured`.
+    /// 0001's code (`cancelled`, `deadline`, `reconfigured`) for a read or
+    /// a fee quote: no broadcast outcome.
     Protocol(&'static str),
-    /// Today's error with this message, the core's text.
-    Thrown(&'static str),
-    /// A read's result.
-    Read(&'static str),
-    /// A broadcast's `uncertain` outcome, from this broadcaster.
+    /// An error: its constructor, `name`, message and own properties in
+    /// order (each `(key, JSON)`); no broadcast outcome.
+    Thrown {
+        class: &'static str,
+        name: &'static str,
+        message: &'static str,
+        props: &'static [(&'static str, &'static str)],
+    },
+    /// A read's answer: its result (JSON), source, `verified` and trust.
+    Read {
+        result: &'static str,
+        source: &'static str,
+        verified: bool,
+        trust: Option<&'static str>,
+    },
+    /// A broadcast's `uncertain` outcome from this broadcaster, reporting
+    /// the transaction's hash: keccak256 of the call's raw bytes.
     Uncertain(&'static str),
 }
 
-fn compare_want(reply: &Reply, settled: u64, want: &Want) -> Option<String> {
-    let ok = reply.settled == settled
-        && match (want, &reply.result) {
-            (Want::Protocol(code), Err(ChainError::Protocol(got))) => got.as_str() == *code,
-            (Want::Thrown(message), Err(ChainError::Thrown(thrown))) => {
-                thrown.message.to_string_lossy() == *message
-            }
-            (
-                Want::Read(json),
-                Ok(Success::Read {
-                    result: Some(got), ..
-                }),
-            ) => same_json(got, json),
-            (
-                Want::Uncertain(source),
-                Ok(Success::Broadcast {
-                    outcome: BroadcastOutcome::Uncertain,
-                    source: got,
-                    hash: Some(_),
-                }),
-            ) => got == source,
-            _ => false,
-        };
-    (!ok).then(|| {
+/// keccak256 of a raw transaction's bytes, as `0x` and lowercase hex.
+fn keccak_hash(raw: &str) -> String {
+    use sha3::{Digest as _, Keccak256};
+    let bytes = hex::decode(raw.trim_start_matches("0x")).unwrap();
+    format!("0x{}", hex::encode(Keccak256::digest(bytes)))
+}
+
+/// The first broadcast's raw bytes in a scenario.
+fn broadcast_raw(scenario: &Json) -> Option<String> {
+    scenario
+        .get("steps")?
+        .as_array()?
+        .iter()
+        .filter_map(|step| step.get("calls").and_then(Json::as_array))
+        .flatten()
+        .find(|call| str_of(call, "fn") == "broadcastRawTransaction")
+        .map(|call| str_of(call, "raw").to_owned())
+}
+
+fn compare_want(reply: &Reply, settled: u64, want: &Want, call: &Json) -> Option<String> {
+    let shape = match (want, &reply.result) {
+        (Want::Protocol(code), Err(ChainError::Protocol(got))) => {
+            got.as_str() == *code && reply.outcome.is_none()
+        }
+        (
+            Want::Thrown {
+                class,
+                name,
+                message,
+                props,
+            },
+            Err(ChainError::Thrown(thrown)),
+        ) => {
+            reply.outcome.is_none()
+                && thrown.class.constructor() == *class
+                && thrown.class.name() == *name
+                && same_json(
+                    &thrown.message.to_json(),
+                    &JsString::from(*message).to_json(),
+                )
+                && thrown.props.len() == props.len()
+                && thrown
+                    .props
+                    .iter()
+                    .zip(props.iter())
+                    .all(|((key, value), (k, v))| {
+                        key == k && matches!(value, Prop::Json(text) if same_json(text, v))
+                    })
+        }
+        (
+            Want::Read {
+                result,
+                source,
+                verified,
+                trust,
+            },
+            Ok(Success::Read {
+                result: Some(got),
+                source: got_source,
+                verified: got_verified,
+                trust: got_trust,
+            }),
+        ) => {
+            same_json(got, result)
+                && got_source == source
+                && got_verified == verified
+                && match (got_trust, trust) {
+                    (None, None) => true,
+                    (Some(got), Some(want)) => same_json(&publish_trust(got), want),
+                    _ => false,
+                }
+        }
+        (
+            Want::Uncertain(source),
+            Ok(Success::Broadcast {
+                outcome: BroadcastOutcome::Uncertain,
+                source: got,
+                hash: Some(hash),
+            }),
+        ) => reply.outcome.is_none() && got == source && *hash == keccak_hash(str_of(call, "raw")),
+        _ => false,
+    };
+    (!(shape && reply.settled == settled)).then(|| {
         format!(
-            "{} at {} instead of the deviation's {want:?} at {settled}",
+            "{} {:?} at {} instead of the deviation's {want:?} at {settled}",
             describe(&reply.result),
+            reply.outcome,
             reply.settled
         )
     })
@@ -1724,9 +1965,9 @@ struct Expected {
     missing: &'static [&'static str],
     /// Exchanges cancelled at another time: `(record id, at)`.
     cancels: &'static [(u64, Option<u64>)],
-    /// The deviation moves the reference's exchanges in time: they are
-    /// matched whatever their start, with their delays kept.
-    shifted: bool,
+    /// Exchanges the deviation moves in time: `(record id, start)`. Their
+    /// answers keep their delays.
+    moved: &'static [(u64, u64)],
 }
 
 const EXPECTED: Expected = Expected {
@@ -1737,7 +1978,7 @@ const EXPECTED: Expected = Expected {
     extra: &[],
     missing: &[],
     cancels: &[],
-    shifted: false,
+    moved: &[],
 };
 
 // ---------------------------------------------------------------------------
@@ -1747,23 +1988,29 @@ const EXPECTED: Expected = Expected {
 const NOT_YET: &[(&str, &str)] = &[];
 
 /// Scenarios a deviation changes (design 0005, Deviations), each with the
-/// difference it must show. The design's broadcast outcomes answer
+/// difference it must show, whole. The design's broadcast outcomes answer
 /// `uncertain` where today throws an error; the core reconciles before
 /// reporting it, and the driver answers its lookups with `null` (the
-/// network doesn't know the hash).
+/// network doesn't know the hash). In the requests the reference never
+/// made, `{hash}` stands for the broadcast's transaction hash, keccak256
+/// of its raw bytes.
 const DEVIATIONS: &[Expected] = &[
     Expected {
         id: "router-myotis-broadcast-in-band-failure",
         deviation: "broadcast-outcome",
         replies: &[(0, 0, 0, Want::Uncertain("myotis"))],
-        extra: &["colibri eth_getTransactionByHash at 0"],
+        extra: &[
+            r#"colibri request chain 1 at 0 {"method":"eth_getTransactionByHash","params":["{hash}"],"deadline_ms":1000}"#,
+        ],
         ..EXPECTED
     },
     Expected {
         id: "router-myotis-broadcast-uncertain",
         deviation: "broadcast-outcome",
         replies: &[(0, 0, 0, Want::Uncertain("myotis"))],
-        extra: &["colibri eth_getTransactionByHash at 0"],
+        extra: &[
+            r#"colibri request chain 100 at 0 {"method":"eth_getTransactionByHash","params":["{hash}"],"deadline_ms":1000}"#,
+        ],
         ..EXPECTED
     },
     // A cancel ends a read at once. The reference throws its AbortError only
@@ -1788,8 +2035,8 @@ const DEVIATIONS: &[Expected] = &[
         deviation: "broadcast-outcome",
         replies: &[(0, 0, 5000, Want::Uncertain("direct"))],
         extra: &[
-            "rpc https://a.example eth_getTransactionByHash at 5000",
-            "rpc https://b.example eth_getTransactionByHash at 5000",
+            r#"rpc https://a.example at 5000 {"jsonrpc":"2.0","id":0,"method":"eth_getTransactionByHash","params":["{hash}"]}"#,
+            r#"rpc https://b.example at 5000 {"jsonrpc":"2.0","id":0,"method":"eth_getTransactionByHash","params":["{hash}"]}"#,
         ],
         ..EXPECTED
     },
@@ -1804,8 +2051,8 @@ const DEVIATIONS: &[Expected] = &[
         deviation: "broadcast-outcome",
         replies: &[(0, 0, 0, Want::Uncertain("direct"))],
         extra: &[
-            "rpc https://a.example eth_getTransactionByHash at 0",
-            "rpc https://b.example eth_getTransactionByHash at 0",
+            r#"rpc https://a.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_getTransactionByHash","params":["{hash}"]}"#,
+            r#"rpc https://b.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_getTransactionByHash","params":["{hash}"]}"#,
         ],
         ..EXPECTED
     },
@@ -1814,8 +2061,8 @@ const DEVIATIONS: &[Expected] = &[
         deviation: "broadcast-outcome",
         replies: &[(0, 0, 5000, Want::Uncertain("direct"))],
         extra: &[
-            "rpc https://a.example eth_getTransactionByHash at 5000",
-            "rpc https://b.example eth_getTransactionByHash at 5000",
+            r#"rpc https://a.example at 5000 {"jsonrpc":"2.0","id":0,"method":"eth_getTransactionByHash","params":["{hash}"]}"#,
+            r#"rpc https://b.example at 5000 {"jsonrpc":"2.0","id":0,"method":"eth_getTransactionByHash","params":["{hash}"]}"#,
         ],
         ..EXPECTED
     },
@@ -1824,8 +2071,8 @@ const DEVIATIONS: &[Expected] = &[
         deviation: "broadcast-outcome",
         replies: &[(0, 0, 5000, Want::Uncertain("direct"))],
         extra: &[
-            "rpc https://a.example eth_getTransactionByHash at 5000",
-            "rpc https://b.example eth_getTransactionByHash at 5000",
+            r#"rpc https://a.example at 5000 {"jsonrpc":"2.0","id":0,"method":"eth_getTransactionByHash","params":["{hash}"]}"#,
+            r#"rpc https://b.example at 5000 {"jsonrpc":"2.0","id":0,"method":"eth_getTransactionByHash","params":["{hash}"]}"#,
         ],
         ..EXPECTED
     },
@@ -1834,8 +2081,8 @@ const DEVIATIONS: &[Expected] = &[
         deviation: "broadcast-outcome",
         replies: &[(0, 0, 0, Want::Uncertain("direct"))],
         extra: &[
-            "rpc https://a.example eth_getTransactionByHash at 0",
-            "rpc https://b.example eth_getTransactionByHash at 0",
+            r#"rpc https://a.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_getTransactionByHash","params":["{hash}"]}"#,
+            r#"rpc https://b.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_getTransactionByHash","params":["{hash}"]}"#,
         ],
         ..EXPECTED
     },
@@ -1843,7 +2090,9 @@ const DEVIATIONS: &[Expected] = &[
         id: "boundary-broadcast-other-hash-accepted",
         deviation: "broadcast-outcome",
         replies: &[(0, 0, 0, Want::Uncertain("direct"))],
-        extra: &["rpc https://a.example eth_getTransactionByHash at 0"],
+        extra: &[
+            r#"rpc https://a.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_getTransactionByHash","params":["{hash}"]}"#,
+        ],
         ..EXPECTED
     },
     Expected {
@@ -1856,14 +2105,18 @@ const DEVIATIONS: &[Expected] = &[
         id: "boundary-broadcast-myotis-uncertain-in-band",
         deviation: "broadcast-outcome",
         replies: &[(0, 0, 0, Want::Uncertain("myotis"))],
-        extra: &["rpc https://a.example eth_getTransactionByHash at 0"],
+        extra: &[
+            r#"rpc https://a.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_getTransactionByHash","params":["{hash}"]}"#,
+        ],
         ..EXPECTED
     },
     Expected {
         id: "boundary-broadcast-myotis-odd-payload",
         deviation: "broadcast-outcome",
         replies: &[(0, 0, 0, Want::Uncertain("myotis"))],
-        extra: &["rpc https://a.example eth_getTransactionByHash at 0"],
+        extra: &[
+            r#"rpc https://a.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_getTransactionByHash","params":["{hash}"]}"#,
+        ],
         ..EXPECTED
     },
     // The change at 1000 ends the read (`reconfigured`) and cancels its
@@ -1872,14 +2125,24 @@ const DEVIATIONS: &[Expected] = &[
     Expected {
         id: "boundary-registry-change-mid-request",
         deviation: "config-change",
-        replies: &[(0, 0, 6000, Want::Read(r#""0xnew""#))],
+        replies: &[(
+            0,
+            0,
+            6000,
+            Want::Read {
+                result: r#""0xnew""#,
+                source: "direct",
+                verified: false,
+                trust: None,
+            },
+        )],
         extra: &[
-            "rpc https://a.example eth_call at 1000",
-            "rpc https://b.example eth_call at 1000",
-            "rpc https://c.example eth_call at 1000",
+            r#"rpc https://a.example at 1000 {"jsonrpc":"2.0","id":0,"method":"eth_call","params":[{"to":"0xabc"},"latest"]}"#,
+            r#"rpc https://b.example at 1000 {"jsonrpc":"2.0","id":0,"method":"eth_call","params":[{"to":"0xabc"},"latest"]}"#,
+            r#"rpc https://c.example at 1000 {"jsonrpc":"2.0","id":0,"method":"eth_call","params":[{"to":"0xabc"},"latest"]}"#,
         ],
         cancels: &[(0, Some(1000)), (1, Some(1000)), (2, Some(1000))],
-        shifted: true,
+        moved: &[(4, 6000)],
         ..EXPECTED
     },
     Expected {
@@ -1889,9 +2152,12 @@ const DEVIATIONS: &[Expected] = &[
             0,
             0,
             0,
-            Want::Thrown(
-                "All chain sources failed for eth_call (colibri: No Colibri prover configured; direct: No RPC endpoint configured)",
-            ),
+            Want::Thrown {
+                class: "Error",
+                name: "Error",
+                message: "All chain sources failed for eth_call (colibri: No Colibri prover configured; direct: No RPC endpoint configured)",
+                props: &[],
+            },
         )],
         ..EXPECTED
     },
@@ -1904,9 +2170,12 @@ const DEVIATIONS: &[Expected] = &[
             0,
             0,
             0,
-            Want::Thrown(
-                "All chain sources failed for eth_call (quorum: RPC quorum did not reach 2 matching responses)",
-            ),
+            Want::Thrown {
+                class: "Error",
+                name: "Error",
+                message: "All chain sources failed for eth_call (quorum: RPC quorum did not reach 2 matching responses)",
+                props: &[],
+            },
         )],
         ..EXPECTED
     },
@@ -1914,8 +2183,13 @@ const DEVIATIONS: &[Expected] = &[
 
 /// The score: scenarios replayed exactly (deviation scenarios with their
 /// asserted difference included), and those not replayed yet.
-const PASSING: usize = 297;
+const PASSING: usize = 301;
 const NOT_REPLAYED: usize = 0;
+/// The permitted races, counted: each is a cancel the machine made in the
+/// tick the reference's exchange settled, after what [`race`] names. Main
+/// withholds each quorum member's answer; a page's deadline failure is the
+/// machine's own timer.
+const RACES: &[(Race, usize)] = &[(Race::QuorumTail, 127), (Race::PageDeadline, 4)];
 
 #[test]
 // The score is the test's report, printed with `--nocapture`.
@@ -1927,6 +2201,8 @@ fn replays_match_the_reference() {
     let mut passed = 0;
     let mut deviating = 0;
     let mut skipped: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut races: BTreeMap<Race, usize> = BTreeMap::new();
+    let mut withheld = 0;
     for expect in DEVIATIONS {
         assert!(
             scenarios.iter().any(|s| str_of(s, "id") == expect.id),
@@ -1942,6 +2218,10 @@ fn replays_match_the_reference() {
         }
         let expect = DEVIATIONS.iter().find(|e| e.id == id);
         let outcome = replay(scenario, expect);
+        for race in &outcome.races {
+            *races.entry(*race).or_default() += 1;
+        }
+        withheld += outcome.withheld;
         if outcome.mismatches.is_empty() && outcome.missing.is_empty() {
             passed += 1;
             deviating += usize::from(expect.is_some());
@@ -1961,9 +2241,12 @@ fn replays_match_the_reference() {
     let skipped_total: usize = skipped.values().sum();
     eprintln!(
         "chain replay: {passed} passed ({deviating} of them with their deviation's difference), \
-         {skipped_total} not yet replayed ({skipped:?}), {} failed",
+         {skipped_total} not yet replayed ({skipped:?}), {} failed; races {races:?}, \
+         {withheld} answers withheld",
         report.len()
     );
     assert!(report.is_empty(), "{}", report.join("\n"));
     assert_eq!((passed, skipped_total), (PASSING, NOT_REPLAYED));
+    assert_eq!(races.into_iter().collect::<Vec<_>>(), RACES);
+    assert_eq!(withheld, RACES[0].1);
 }

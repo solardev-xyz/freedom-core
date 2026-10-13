@@ -370,6 +370,22 @@ mod tests {
             Thrown::error("execution gas limit reached").failure_kind(),
             Some(FailureKind::Capacity)
         );
+        // The pattern reads `safeErrorMessage`, not the raw text: runs of
+        // whitespace collapse, long hex is elided, the text is cut at 500
+        // units (`boundary-adaptive-capacity-*`).
+        let of = |message: &str| Thrown::error(message).failure_kind();
+        assert_eq!(of("out  of gas"), Some(FailureKind::Capacity));
+        assert_eq!(of(&format!("{} out of gas", "x".repeat(510))), None);
+        assert_eq!(
+            of(&format!("0x{} out of gas", "ab".repeat(300))),
+            Some(FailureKind::Capacity)
+        );
+        assert_eq!(
+            Thrown::error("prover busy")
+                .with("failureKind", Prop::string("capacity"))
+                .failure_kind(),
+            Some(FailureKind::Capacity)
+        );
         assert_eq!(
             Thrown::rpc_timeout(5000.0).failure_kind(),
             Some(FailureKind::Timeout)
