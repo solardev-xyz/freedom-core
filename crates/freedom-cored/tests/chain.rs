@@ -1,0 +1,984 @@
+//! `chain.*` end to end (design 0005): the real binary, with the test
+//! playing main. Main answers the core's `shell.rpc`, `shell.verified` and
+//! `shell.blockscout` requests from scripts.
+
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+mod common;
+
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
+
+use base64::Engine as _;
+use common::{Core, Wire, dirs, fragmented, request, spawn};
+use serde_json::{Value, json};
+
+const MIB: usize = 1 << 20;
+
+/// A signed transaction and its hash (vectors/chain.json).
+const RAW: &str = "0xf85f8001825208941111111111111111111111111111111111111111018026a045df4733a45ed06c5628f22221a73e0b2faa3959f649cc47e6c2a15c9792ae07a00ea422e4923de6e5b4c52d7fbd39046e96acf73b2037a5f11918ec6c2a64b40a";
+const HASH: &str = "0xdff97f6d2d938656e056527357e2ee12f38c03923ab1d11bc556fb5cc123e578";
+const ADDRESS: &str = "0x1111111111111111111111111111111111111111";
+
+fn core() -> (tempfile::TempDir, Core) {
+    let (root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello_fragments();
+    (root, core)
+}
+
+/// Chain 1's snapshot: `read` as its read order, `rpc` its endpoints, a
+/// quorum of 3 agreeing on 2 with `timeout_ms`.
+fn snapshot(read: &[&str], rpc: &[&str], timeout_ms: u64) -> Value {
+    json!({
+        "chain_id": 1,
+        "display_name": "Ethereum",
+        "read_order": read,
+        "broadcast_order": ["direct"],
+        "quorum": { "k": 3, "m": 2, "timeout_ms": timeout_ms },
+        "rpc": rpc.iter().map(|e| json!({ "endpoint": e, "user_configured": false })).collect::<Vec<_>>(),
+        "prover": null,
+        "myotis": false,
+        "blockscout": null,
+    })
+}
+
+/// Reads until the response to main's request `id`: the core's own
+/// requests and cancels use another ID space, so they are skipped by type.
+fn response_to(core: &mut Core, id: u64) -> Value {
+    loop {
+        let message = core.recv();
+        if message["type"] == "response" && message["id"] == id {
+            return message;
+        }
+    }
+}
+
+fn call(core: &mut Core, id: u64, method: &str, params: Value) -> Value {
+    core.send(&request(id, method, params));
+    response_to(core, id)
+}
+
+fn configure(core: &mut Core, id: u64, chains: &[Value]) -> Value {
+    let reply = call(core, id, "chain.configure", json!({ "chains": chains }));
+    assert!(reply["result"].is_object(), "{reply}");
+    reply["result"]["generations"].clone()
+}
+
+/// `chain.request`'s params for a read.
+fn read(method: &str, params: Value) -> Value {
+    json!({
+        "chain_id": 1,
+        "method": method,
+        "params": params,
+        "include_trust": false,
+        "background": false,
+        "profile": "default",
+        "deadline_ms": 60_000,
+    })
+}
+
+/// Main's `shell.rpc` result for an answer `text`.
+fn rpc(text: &str) -> Value {
+    json!({ "result": {
+        "status": 200,
+        "body": base64::engine::general_purpose::STANDARD.encode(text),
+    } })
+}
+
+fn rpc_result(result: &str) -> Value {
+    rpc(&format!(r#"{{"jsonrpc":"2.0","id":1,"result":{result}}}"#))
+}
+
+fn failure(code: &str) -> Value {
+    json!({ "error": { "code": code, "message": "Transport failure" } })
+}
+
+/// The JSON-RPC body of a `shell.rpc` request.
+fn body(request: &Value) -> Value {
+    serde_json::from_str(request["params"]["body"].as_str().unwrap()).unwrap()
+}
+
+fn rpc_method(request: &Value) -> String {
+    if request["method"] == "shell.rpc" {
+        body(request)["method"].as_str().unwrap().to_owned()
+    } else {
+        String::new()
+    }
+}
+
+/// What main saw of the core while it played.
+#[derive(Default)]
+struct Seen {
+    /// The core's requests, in the order they arrived.
+    requests: Vec<Value>,
+    /// The IDs of the core's cancels.
+    cancels: Vec<u64>,
+}
+
+/// Plays main until the response to `id`: each of the core's requests
+/// goes to `answer`, which gives main's terminal reply (its `result` or
+/// `error`) or `None` to hold it.
+fn serve(
+    core: &mut Core,
+    id: u64,
+    mut answer: impl FnMut(&Value) -> Option<Value>,
+) -> (Value, Seen) {
+    let mut seen = Seen::default();
+    loop {
+        let message = core.recv();
+        match message["type"].as_str() {
+            Some("request") => {
+                if let Some(outcome) = answer(&message) {
+                    reply(core, &message, outcome);
+                }
+                seen.requests.push(message);
+            }
+            Some("cancel") => seen.cancels.push(message["id"].as_u64().unwrap()),
+            Some("response") if message["id"] == id => return (message, seen),
+            _ => panic!("unexpected {message}"),
+        }
+    }
+}
+
+/// Main's terminal reply to one of the core's requests.
+fn reply(core: &mut Core, request: &Value, outcome: Value) {
+    let mut message = json!({ "type": "response", "id": request["id"] });
+    for (key, value) in outcome.as_object().unwrap() {
+        message[key] = value.clone();
+    }
+    core.send(&message);
+}
+
+/// The core's next `count` requests, other messages set aside.
+fn requests_only(core: &mut Core, count: usize) -> Vec<Value> {
+    let mut requests = Vec::new();
+    while requests.len() < count {
+        let message = core.recv();
+        if message["type"] == "request" {
+            requests.push(message);
+        }
+    }
+    requests
+}
+
+#[test]
+fn a_quorum_read_through_main() {
+    let (_root, mut core) = core();
+    let generations = configure(
+        &mut core,
+        2,
+        &[snapshot(&["quorum"], &["a", "b", "c"], 5000)],
+    );
+    assert_eq!(generations, json!({ "1": 1 }));
+    let mut params = read("eth_call", json!([{ "to": ADDRESS }, "latest"]));
+    params["include_trust"] = json!(true);
+    core.send(&request(3, "chain.request", params));
+    // Each member answers the same value, spelled differently; the first
+    // two to arrive agree.
+    let answers = [
+        r#"{"b":1,"a":[1e2]}"#,
+        r#"{"a":[100],"b":1}"#,
+        r#"{"a":[100],"b":1}"#,
+    ];
+    let mut next = 0;
+    let (reply, seen) = serve(&mut core, 3, |request| {
+        assert_eq!(request["method"], "shell.rpc");
+        let params = &request["params"];
+        assert_eq!(params["policy"], "plain");
+        assert_eq!(params["max_bytes"], 18 * MIB);
+        assert_eq!(params["generation"], 1);
+        let deadline = params["deadline_ms"].as_u64().unwrap();
+        assert!(deadline > 0 && deadline <= 5000, "{deadline}");
+        let body = body(request);
+        assert_eq!(body["jsonrpc"], "2.0");
+        assert_eq!(body["method"], "eth_call");
+        assert_eq!(body["params"], json!([{ "to": ADDRESS }, "latest"]));
+        next += 1;
+        Some(rpc_result(answers[next - 1]))
+    });
+    let endpoints: Vec<&str> = seen
+        .requests
+        .iter()
+        .map(|r| r["params"]["endpoint"].as_str().unwrap())
+        .collect();
+    assert_eq!(endpoints, ["a", "b", "c"]);
+    let result = &reply["result"];
+    // The first agreeing answer's own text, embedded as it came: its keys
+    // in its order, its number as it spelled it.
+    let agreed = result["result"].as_object().unwrap();
+    assert_eq!(agreed.keys().collect::<Vec<_>>(), ["b", "a"], "{reply}");
+    assert_eq!(agreed["a"][0].as_f64(), Some(100.0));
+    assert!(agreed["a"][0].is_f64(), "1e2 stays a double: {reply}");
+    assert_eq!(result["source"], "quorum");
+    assert_eq!(result["verified"], true);
+    assert_eq!(result["undefined_keys"], json!([]));
+    assert_eq!(result["generation"], 1);
+    // Endpoint references, for main to substitute with hosts.
+    let trust = &result["trust"];
+    assert!(
+        trust["agreed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["ref"].is_string()),
+        "{trust}"
+    );
+    // The vault still answers.
+    assert!(call(&mut core, 1000, "vault.status", json!({}))["result"].is_object());
+}
+
+#[test]
+fn direct_after_a_quorum_timeout() {
+    let (_root, mut core) = core();
+    configure(
+        &mut core,
+        2,
+        &[snapshot(&["quorum", "direct"], &["a", "b", "c", "d"], 500)],
+    );
+    core.send(&request(
+        3,
+        "chain.request",
+        read("eth_blockNumber", json!([])),
+    ));
+    let started = Instant::now();
+    // The quorum's members never answer; Direct asks the endpoint the
+    // quorum didn't.
+    let (reply, seen) = serve(&mut core, 3, |request| {
+        (request["params"]["endpoint"] == "d").then(|| rpc_result(r#""0x10""#))
+    });
+    assert!(started.elapsed() >= Duration::from_millis(500));
+    let endpoints: Vec<&str> = seen
+        .requests
+        .iter()
+        .map(|r| r["params"]["endpoint"].as_str().unwrap())
+        .collect();
+    assert_eq!(endpoints, ["a", "b", "c", "d"]);
+    assert_eq!(
+        reply["result"],
+        json!({ "result": "0x10", "source": "direct", "verified": false, "undefined_keys": [], "generation": 1 })
+    );
+    // The members' exchanges were cancelled when they timed out.
+    let mut members: Vec<u64> = seen.requests[..3]
+        .iter()
+        .map(|r| r["id"].as_u64().unwrap())
+        .collect();
+    let mut cancels = seen.cancels.clone();
+    while cancels.len() < 3 {
+        let message = core.recv();
+        assert_eq!(message["type"], "cancel", "{message}");
+        cancels.push(message["id"].as_u64().unwrap());
+    }
+    members.sort_unstable();
+    cancels.sort_unstable();
+    assert_eq!(cancels, members);
+}
+
+#[test]
+fn myotis_reads_through_shell_verified() {
+    let (_root, mut core) = core();
+    let mut chain = snapshot(&["myotis", "direct"], &["a"], 5000);
+    chain["myotis"] = json!(true);
+    configure(&mut core, 2, &[chain]);
+    let ready = call(
+        &mut core,
+        3,
+        "chain.availability",
+        json!({ "chain_id": 1, "ready": true }),
+    );
+    assert_eq!(ready["result"], json!({}));
+    let mut params = read("eth_getBalance", json!([ADDRESS, "latest"]));
+    params["include_trust"] = json!(true);
+    core.send(&request(4, "chain.request", params));
+    let (reply, seen) = serve(&mut core, 4, |request| {
+        assert_eq!(request["method"], "shell.verified");
+        assert_eq!(
+            request["params"],
+            json!({ "myotis": "account", "chain_id": 1, "address": ADDRESS, "generation": 1 })
+        );
+        Some(json!({ "result": {
+            "payload": { "verify_method": "proof", "balance_wei": "1000", "exists": true },
+            "block_before": 21_000_000,
+            "block_after": 21_000_000,
+        } }))
+    });
+    assert_eq!(seen.requests.len(), 1);
+    let result = &reply["result"];
+    assert_eq!(result["result"], "0x3e8", "{reply}");
+    assert_eq!(result["source"], "myotis");
+    assert_eq!(result["verified"], true);
+    assert!(result["trust"].is_object(), "{reply}");
+    // A failure class falls through to Direct.
+    core.send(&request(
+        5,
+        "chain.request",
+        read("eth_getCode", json!([ADDRESS, "latest"])),
+    ));
+    let (reply, seen) = serve(&mut core, 5, |request| match request["method"].as_str() {
+        Some("shell.verified") => Some(json!({ "result": { "failure": "queue_full" } })),
+        _ => Some(rpc_result(r#""0x6001""#)),
+    });
+    assert_eq!(seen.requests[0]["params"]["myotis"], "code");
+    assert_eq!(reply["result"]["result"], "0x6001");
+    assert_eq!(reply["result"]["source"], "direct");
+}
+
+#[test]
+fn a_fee_quote() {
+    let (_root, mut core) = core();
+    configure(&mut core, 2, &[snapshot(&["direct"], &["a"], 5000)]);
+    core.send(&request(
+        3,
+        "chain.fee_quote",
+        json!({ "chain_id": 1, "deadline_ms": 30_000 }),
+    ));
+    let (reply, seen) = serve(&mut core, 3, |request| {
+        Some(match rpc_method(request).as_str() {
+            "eth_gasPrice" => rpc_result(r#""0x3b9aca00""#),
+            "eth_maxPriorityFeePerGas" => rpc_result(r#""0x5f5e100""#),
+            other => panic!("{other}"),
+        })
+    });
+    // Direct asks one endpoint for both.
+    assert!(seen.requests.iter().all(|r| r["params"]["endpoint"] == "a"));
+    assert_eq!(
+        reply["result"],
+        json!({
+            "type": "eip1559",
+            "baseFee": "900000000",
+            "maxPriorityFeePerGas": "100000000",
+            "maxFeePerGas": "1900000000",
+            "effectiveGasPrice": "1000000000",
+            "source": "direct",
+            "verified": false,
+            "generation": 1,
+        })
+    );
+}
+
+fn broadcast(id: u64) -> Value {
+    request(
+        id,
+        "chain.broadcast",
+        json!({ "chain_id": 1, "raw": RAW, "deadline_ms": 60_000 }),
+    )
+}
+
+/// The bytes an attempt sends: `eth_sendRawTransaction` of `RAW`.
+fn sends_raw(request: &Value) -> bool {
+    (request["method"] == "shell.rpc"
+        && body(request)["method"] == "eth_sendRawTransaction"
+        && body(request)["params"] == json!([RAW]))
+        || (request["method"] == "shell.verified"
+            && request["params"]["myotis"] == "broadcast"
+            && request["params"]["raw"] == RAW)
+}
+
+#[test]
+fn a_broadcast_is_sent_or_rejected() {
+    let (_root, mut core) = core();
+    let mut chain = snapshot(&["direct"], &["a", "b"], 5000);
+    chain["myotis"] = json!(true);
+    chain["broadcast_order"] = json!(["myotis", "direct"]);
+    configure(&mut core, 2, &[chain]);
+    call(
+        &mut core,
+        3,
+        "chain.availability",
+        json!({ "chain_id": 1, "ready": true }),
+    );
+    // Myotis sent nothing; the first endpoint refuses; the second accepts.
+    core.send(&broadcast(4));
+    let (reply, seen) = serve(&mut core, 4, |request| {
+        assert!(sends_raw(request), "{request}");
+        Some(
+            match (
+                request["method"].as_str(),
+                request["params"]["endpoint"].as_str(),
+            ) {
+                (Some("shell.verified"), _) => json!({ "result": { "not_sent": true } }),
+                (_, Some("a")) => rpc(
+                    r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"nonce too low"}}"#,
+                ),
+                _ => rpc_result(&format!("\"{HASH}\"")),
+            },
+        )
+    });
+    assert_eq!(seen.requests.len(), 3);
+    assert_eq!(
+        reply["result"],
+        json!({ "hash": HASH, "source": "direct", "outcome": "sent", "generation": 1 })
+    );
+    // Every endpoint refuses: rejected, with the last refusal.
+    core.send(&broadcast(5));
+    let (reply, _) = serve(&mut core, 5, |request| {
+        Some(match request["method"].as_str() {
+            Some("shell.verified") => json!({ "result": { "not_sent": true } }),
+            _ => rpc(
+                r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"insufficient funds for gas * price + value"}}"#,
+            ),
+        })
+    });
+    let error = &reply["error"];
+    assert_eq!(error["code"], "chain_error", "{reply}");
+    assert_eq!(
+        error["data"],
+        json!({
+            "kind": "node",
+            "constructor": "Error",
+            "message": "insufficient funds for gas * price + value",
+            "props": { "code": -32000, "data": null },
+            "undefined_keys": ["data"],
+            "outcome": "rejected",
+            "generation": 1,
+        })
+    );
+}
+
+#[test]
+fn an_ambiguous_broadcast_is_reconciled() {
+    let (_root, mut core) = core();
+    configure(&mut core, 2, &[snapshot(&["direct"], &["a"], 5000)]);
+    // The attempt's reply is lost; the lookup finds the transaction.
+    core.send(&broadcast(3));
+    let (reply, seen) = serve(&mut core, 3, |request| {
+        Some(match rpc_method(request).as_str() {
+            "eth_sendRawTransaction" => failure("network"),
+            "eth_getTransactionByHash" => {
+                assert_eq!(body(request)["params"], json!([HASH]));
+                rpc_result(&format!(r#"{{"hash":"{HASH}","nonce":"0x0"}}"#))
+            }
+            other => panic!("{other}"),
+        })
+    });
+    assert_eq!(seen.requests.len(), 2);
+    assert_eq!(
+        reply["result"],
+        json!({ "hash": HASH, "source": "reconcile", "outcome": "sent", "generation": 1 })
+    );
+    // The network doesn't know it: uncertain, never a failure.
+    core.send(&broadcast(4));
+    let (reply, _) = serve(&mut core, 4, |request| {
+        Some(match rpc_method(request).as_str() {
+            "eth_sendRawTransaction" => failure("timeout"),
+            _ => rpc_result("null"),
+        })
+    });
+    assert_eq!(
+        reply["result"],
+        json!({ "hash": HASH, "source": "direct", "outcome": "uncertain", "generation": 1 })
+    );
+}
+
+/// Main's record of a broadcast in flight (design 0005, Main's record):
+/// marked when its executors start an exchange that sends the raw bytes.
+#[derive(Default)]
+struct Record {
+    marked: bool,
+}
+
+impl Record {
+    fn start(&mut self, request: &Value) {
+        self.marked |= sends_raw(request);
+    }
+
+    /// Main's report when the core is lost without a reply: `uncertain` if
+    /// marked, `not_sent` otherwise, never `rejected`.
+    fn report(&self) -> &'static str {
+        if self.marked { "uncertain" } else { "not_sent" }
+    }
+}
+
+/// Kills the core: what it wrote before it died never answers `id`, and
+/// main fences the dead core's requests, starting none of them.
+fn lose(core: &mut Core, id: u64) {
+    let _ = core.child.kill();
+    for message in core.rest() {
+        assert!(
+            message["type"] != "response" || message["id"] != id,
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn main_reports_a_lost_core_from_its_record() {
+    // The core dies after main started the attempt: uncertain.
+    let (_first, mut core) = core();
+    configure(&mut core, 2, &[snapshot(&["direct"], &["a"], 5000)]);
+    core.send(&broadcast(3));
+    let mut record = Record::default();
+    let attempt = core.recv();
+    assert!(sends_raw(&attempt), "{attempt}");
+    record.start(&attempt);
+    lose(&mut core, 3);
+    assert_eq!(record.report(), "uncertain");
+    // It dies before main starts anything: not sent, whatever it wrote.
+    let (_second, mut core) = self::core();
+    configure(&mut core, 2, &[snapshot(&["direct"], &["a"], 5000)]);
+    core.send(&broadcast(3));
+    let record = Record::default();
+    lose(&mut core, 3);
+    assert_eq!(record.report(), "not_sent");
+}
+
+#[test]
+fn a_configuration_change_ends_the_chains_requests() {
+    let (_root, mut core) = core();
+    configure(&mut core, 2, &[snapshot(&["direct"], &["a"], 5000)]);
+    core.send(&request(
+        3,
+        "chain.request",
+        read("eth_blockNumber", json!([])),
+    ));
+    let held = core.recv();
+    assert_eq!(held["params"]["generation"], 1);
+    // The change: the read ends at once, under the generation it ran in,
+    // before configure's own reply; its exchange is cancelled.
+    core.send(&request(
+        4,
+        "chain.configure",
+        json!({ "chains": [snapshot(&["direct"], &["b"], 5000)] }),
+    ));
+    let ended = core.recv();
+    assert_eq!(ended["id"], 3, "{ended}");
+    assert_eq!(
+        ended["error"],
+        json!({
+            "code": "reconfigured",
+            "message": "The chain's configuration changed",
+            "data": { "generation": 1 },
+        })
+    );
+    let configured = core.recv();
+    assert_eq!(configured["id"], 4);
+    assert_eq!(configured["result"], json!({ "generations": { "1": 2 } }));
+    let cancel = core.recv();
+    assert_eq!(cancel, json!({ "type": "cancel", "id": held["id"] }));
+    // Main's not_sent for the stale exchange is dropped.
+    reply(&mut core, &held, json!({ "result": { "not_sent": true } }));
+    // Main sends the read again: it runs under the new generation.
+    core.send(&request(
+        5,
+        "chain.request",
+        read("eth_blockNumber", json!([])),
+    ));
+    let (reply, seen) = serve(&mut core, 5, |request| {
+        assert_eq!(request["params"]["endpoint"], "b");
+        assert_eq!(request["params"]["generation"], 2);
+        Some(rpc_result(r#""0x2""#))
+    });
+    assert_eq!(seen.requests.len(), 1);
+    assert_eq!(reply["result"]["generation"], 2);
+}
+
+#[test]
+fn a_cancel_ends_a_read_and_its_exchanges() {
+    let (_root, mut core) = core();
+    configure(
+        &mut core,
+        2,
+        &[snapshot(&["quorum"], &["a", "b", "c"], 5000)],
+    );
+    core.send(&request(
+        3,
+        "chain.request",
+        read("eth_blockNumber", json!([])),
+    ));
+    let members: Vec<Value> = requests_only(&mut core, 3);
+    core.send(&json!({ "type": "cancel", "id": 3 }));
+    // The reply, and a cancel for every member, quorum members included
+    // (deviation `abandoned-exchanges`).
+    let mut cancels = Vec::new();
+    let mut cancelled = None;
+    while cancelled.is_none() || cancels.len() < 3 {
+        let message = core.recv();
+        match message["type"].as_str() {
+            Some("cancel") => cancels.push(message["id"].clone()),
+            Some("response") => cancelled = Some(message),
+            _ => panic!("unexpected {message}"),
+        }
+    }
+    let cancelled = cancelled.unwrap();
+    assert_eq!(cancelled["id"], 3);
+    assert_eq!(cancelled["error"]["code"], "cancelled", "{cancelled}");
+    assert_eq!(cancelled["error"]["data"], json!({ "generation": 1 }));
+    let asked: Vec<Value> = members.iter().map(|m| m["id"].clone()).collect();
+    assert_eq!(cancels, asked);
+    // Their terminal replies are still main's to send, and are dropped.
+    for member in &members {
+        reply(&mut core, member, failure("cancelled"));
+    }
+    assert!(call(&mut core, 1000, "vault.status", json!({}))["result"].is_object());
+}
+
+#[test]
+fn the_overall_deadline() {
+    let (_root, mut core) = core();
+    configure(&mut core, 2, &[snapshot(&["direct"], &["a"], 60_000)]);
+    let mut params = read("eth_blockNumber", json!([]));
+    params["deadline_ms"] = json!(300);
+    let started = Instant::now();
+    core.send(&request(3, "chain.request", params.clone()));
+    let held = core.recv();
+    assert!(held["params"]["deadline_ms"].as_u64().unwrap() > 300);
+    // The exchange is cancelled and the read replies `deadline`.
+    let first = core.recv();
+    let elapsed = started.elapsed();
+    let second = core.recv();
+    let (reply, cancel) = if first["type"] == "cancel" {
+        (second, first)
+    } else {
+        (first, second)
+    };
+    assert_eq!(reply["id"], 3, "{reply}");
+    assert_eq!(reply["error"]["code"], "deadline");
+    assert_eq!(reply["error"]["data"], json!({ "generation": 1 }));
+    assert!(elapsed >= Duration::from_millis(300), "{elapsed:?}");
+    assert_eq!(cancel, json!({ "type": "cancel", "id": held["id"] }));
+    // No time left: `deadline` before any I/O.
+    params["deadline_ms"] = json!(0);
+    let reply = call(&mut core, 4, "chain.request", params);
+    assert_eq!(reply["error"]["code"], "deadline");
+    assert_eq!(reply["error"]["data"]["generation"], 1);
+    // Over 120 s is main's bug.
+    let mut over = read("eth_blockNumber", json!([]));
+    over["deadline_ms"] = json!(120_001);
+    let reply = call(&mut core, 5, "chain.request", over);
+    assert_eq!(reply["error"]["code"], "invalid_argument");
+}
+
+#[test]
+fn admission_is_busy_past_64_running_and_256_waiting() {
+    let (_root, mut core) = core();
+    configure(&mut core, 2, &[snapshot(&["direct"], &["a"], 60_000)]);
+    for i in 0..321 {
+        core.send(&request(
+            10 + i,
+            "chain.request",
+            read("eth_blockNumber", json!([])),
+        ));
+    }
+    // 64 run and ask main; 256 wait; the last is busy at once.
+    let mut asked = 0;
+    let busy = loop {
+        let message = core.recv();
+        match message["type"].as_str() {
+            Some("request") => asked += 1,
+            Some("response") => break message,
+            _ => panic!("unexpected {message}"),
+        }
+    };
+    assert_eq!(busy["id"], 10 + 320, "{busy}");
+    assert_eq!(
+        busy["error"],
+        json!({ "code": "busy", "message": "Too many chain requests", "data": { "generation": 1 } })
+    );
+    while asked < 64 {
+        let message = core.recv();
+        assert_eq!(message["type"], "request", "{message}");
+        asked += 1;
+    }
+    // The waiting requests start as running ones end; meanwhile the vault
+    // answers.
+    assert!(call(&mut core, 1000, "vault.status", json!({}))["result"].is_object());
+}
+
+/// Main answers the next `shell.rpc` with an `eth_call` result of `len`
+/// hex digits, its reply fragmented (it is over one frame as base64), and
+/// reads until both the core's reply to `id` and main's returned credit
+/// have come.
+fn large_answer(core: &mut Core, id: u64, len: usize) -> Vec<Wire> {
+    let rpc = match core.recv_wire() {
+        Wire::Message(message) if message["type"] == "request" => message,
+        other => panic!("unexpected {other:?}"),
+    };
+    let text = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"result":"0x{}"}}"#,
+        "ab".repeat(len / 2)
+    );
+    let response = json!({ "type": "response", "id": rpc["id"], "result": {
+        "status": 200,
+        "body": base64::engine::general_purpose::STANDARD.encode(&text),
+    } });
+    // Fragments of half a frame each.
+    let pieces = response.to_string().len().div_ceil(MIB / 2);
+    for frame in fragmented(&response, pieces) {
+        core.send_raw(&frame);
+    }
+    let mut wires = Vec::new();
+    let (mut replied, mut credit) = (false, false);
+    while !(replied && credit) {
+        let wire = core.recv_wire();
+        replied |= matches!(&wire, Wire::Last(_))
+            || matches!(&wire, Wire::Message(m) if m["type"] == "response" && m["id"] == id);
+        credit |= wire == Wire::Credit;
+        wires.push(wire);
+    }
+    wires
+}
+
+#[test]
+fn a_large_answer_goes_out_in_fragments() {
+    let (_root, mut core) = core();
+    configure(&mut core, 2, &[snapshot(&["direct"], &["a"], 5000)]);
+    core.send(&request(
+        3,
+        "chain.request",
+        read("eth_call", json!([{ "to": ADDRESS }, "latest"])),
+    ));
+    // The core takes main's fragmented answer and returns its credit; its
+    // own reply is fragmented.
+    let wires = large_answer(&mut core, 3, 3 * MIB);
+    let mut payload = Vec::new();
+    let mut declared = None;
+    for wire in &wires {
+        match wire {
+            Wire::Begin { id, bytes } => {
+                assert_eq!(*id, 3);
+                declared = Some(*bytes);
+            }
+            Wire::Fragment(bytes) | Wire::Last(bytes) => {
+                assert!(bytes.len() <= MIB);
+                payload.extend_from_slice(bytes);
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(Some(payload.len()), declared);
+    let reply: Value = serde_json::from_slice(&payload).unwrap();
+    assert_eq!(reply["id"], 3);
+    let result = &reply["result"];
+    assert_eq!(result["result"].as_str().unwrap().len(), 3 * MIB + 2);
+    assert_eq!(result["source"], "direct");
+    assert_eq!(result["generation"], 1);
+    // Main hands it over and returns the core's credit: the next large
+    // reply may begin.
+    core.send_credit();
+    core.send(&request(
+        4,
+        "chain.request",
+        read("eth_call", json!([{ "to": ADDRESS }, "latest"])),
+    ));
+    let wires = large_answer(&mut core, 4, 2 * MIB);
+    assert!(matches!(
+        wires.iter().find(|w| matches!(w, Wire::Begin { .. })),
+        Some(Wire::Begin { id: 4, .. })
+    ));
+}
+
+#[test]
+fn too_large_without_fragments() {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    // A main that takes no fragments; the core still takes main's.
+    core.hello();
+    configure(&mut core, 2, &[snapshot(&["direct"], &["a"], 5000)]);
+    core.send(&request(
+        3,
+        "chain.request",
+        read("eth_call", json!([{ "to": ADDRESS }, "latest"])),
+    ));
+    let wires = large_answer(&mut core, 3, 2 * MIB);
+    let reply = wires
+        .iter()
+        .find_map(|w| match w {
+            Wire::Message(m) if m["type"] == "response" => Some(m.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(!wires.iter().any(|w| matches!(w, Wire::Begin { .. })));
+    assert_eq!(reply["id"], 3);
+    assert_eq!(
+        reply["error"],
+        json!({ "code": "too_large", "message": "Response too large", "data": { "generation": 1 } })
+    );
+}
+
+#[test]
+fn errors_take_their_wire_forms() {
+    let (_root, mut core) = core();
+    configure(&mut core, 2, &[snapshot(&["direct"], &["a"], 5000)]);
+    // A node's error passes through, tagged `node`.
+    core.send(&request(
+        3,
+        "chain.request",
+        read("eth_call", json!([{ "to": ADDRESS }, "latest"])),
+    ));
+    let (reply, _) = serve(&mut core, 3, |_| {
+        Some(rpc(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted","data":"0x08c379a0"}}"#,
+        ))
+    });
+    assert_eq!(
+        reply["error"],
+        json!({
+            "code": "chain_error",
+            "message": "Chain request failed",
+            "data": {
+                "kind": "node",
+                "constructor": "Error",
+                "message": "execution reverted",
+                "props": { "code": 3, "data": "0x08c379a0" },
+                "undefined_keys": [],
+                "generation": 1,
+            },
+        })
+    );
+    // The core's own texts, tagged `core`: before any I/O.
+    let reply = call(&mut core, 4, "chain.request", read("eth_sign", json!([])));
+    assert_eq!(reply["error"]["data"]["kind"], "core");
+    assert_eq!(
+        reply["error"]["data"]["message"],
+        "Unsupported read method: eth_sign"
+    );
+    let mut unknown = read("eth_blockNumber", json!([]));
+    unknown["chain_id"] = json!(5);
+    let reply = call(&mut core, 5, "chain.request", unknown);
+    assert_eq!(reply["error"]["data"]["message"], "Unsupported chain ID: 5");
+    // A chain not configured has no generation yet.
+    assert_eq!(reply["error"]["data"]["generation"], 0);
+    // Every endpoint failing: the aggregate, with today's text.
+    core.send(&request(
+        6,
+        "chain.request",
+        read("eth_blockNumber", json!([])),
+    ));
+    let (reply, _) = serve(&mut core, 6, |_| Some(failure("network")));
+    assert_eq!(reply["error"]["data"]["kind"], "core");
+    assert_eq!(reply["error"]["data"]["constructor"], "TypeError");
+    assert_eq!(reply["error"]["data"]["message"], "fetch failed");
+    // Main's own mistakes: 0001's codes, no generation.
+    let reply = call(&mut core, 7, "chain.request", json!({ "chain_id": 1 }));
+    assert_eq!(
+        reply["error"],
+        json!({ "code": "invalid_argument", "message": "Invalid parameters" })
+    );
+}
+
+#[test]
+fn chain_and_naming_ids_interleave_in_one_increasing_space() {
+    let (_root, mut core) = core();
+    core.call(2, "naming.configure", common::naming_snapshot());
+    configure(
+        &mut core,
+        3,
+        &[snapshot(&["quorum"], &["c1", "c2", "c3"], 5000)],
+    );
+    let answers: BTreeMap<String, String> = common::naming_recorded();
+    // Lookups (even IDs) and reads (odd ones), alternating.
+    let mut pending: Vec<u64> = (10..16).collect();
+    for i in 0..3u64 {
+        core.send(&request(
+            10 + 2 * i,
+            "naming.resolve_content",
+            json!({ "name": format!("n{i}.eth"), "private": false }),
+        ));
+        core.send(&request(
+            11 + 2 * i,
+            "chain.request",
+            read("eth_blockNumber", json!([])),
+        ));
+    }
+    let mut last = 0;
+    let (mut naming, mut chain) = (0, 0);
+    while !pending.is_empty() {
+        let message = core.recv();
+        match message["type"].as_str() {
+            Some("request") => {
+                let id = message["id"].as_u64().unwrap();
+                // Main's reused_id rule: the core's IDs only increase.
+                assert!(id > last, "{id} after {last}");
+                last = id;
+                if message["method"] == "shell.prefetch" {
+                    reply(&mut core, &message, json!({ "result": {} }));
+                } else if message["params"]["generations"].is_object() {
+                    naming += 1;
+                    let method = body(&message)["method"].as_str().unwrap().to_owned();
+                    let text = &answers[&method];
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+                    reply(
+                        &mut core,
+                        &message,
+                        json!({ "result": { "status": 200, "body": encoded } }),
+                    );
+                } else {
+                    chain += 1;
+                    assert_eq!(message["params"]["policy"], "plain");
+                    reply(&mut core, &message, rpc_result(r#""0x5""#));
+                }
+            }
+            Some("response") => {
+                let id = message["id"].as_u64().unwrap();
+                pending.retain(|p| *p != id);
+                if id % 2 == 1 {
+                    assert_eq!(message["result"]["result"], "0x5", "{message}");
+                } else {
+                    assert!(message["result"].is_object() || message["error"].is_object());
+                }
+            }
+            Some("cancel") | Some("event") => {}
+            _ => panic!("unexpected {message}"),
+        }
+    }
+    assert!(naming > 0 && chain >= 6, "{naming} {chain}");
+}
+
+#[test]
+fn main_holds_at_most_256_requests_across_naming_and_chain() {
+    let (_root, mut core) = core();
+    let mut many = common::naming_snapshot();
+    many["rpc"] = (1..=64)
+        .map(|i| json!({ "endpoint": format!("e{i}") }))
+        .collect();
+    core.call(2, "naming.configure", many);
+    configure(&mut core, 3, &[snapshot(&["direct"], &["c1"], 60_000)]);
+    // 32 lookups ask for far more than 256 head probes.
+    for i in 0..32u64 {
+        core.send(&request(
+            100 + i,
+            "naming.resolve_content",
+            json!({ "name": format!("n{i}.eth"), "private": false }),
+        ));
+    }
+    let mut outstanding: Vec<Value> = requests_only(&mut core, 256);
+    // A read now finds no slot.
+    core.send(&request(
+        200,
+        "chain.request",
+        read("eth_blockNumber", json!([])),
+    ));
+    // Nothing more goes while main holds 256, the read's exchange
+    // included: the vault's reply comes first.
+    core.send(&request(201, "vault.status", json!({})));
+    loop {
+        let message = core.recv();
+        assert_ne!(message["type"], "request", "{message}");
+        if message["type"] == "response" && message["id"] == 201 {
+            break;
+        }
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    // Each answer frees one slot, which goes to naming or to chain: the
+    // read's exchange goes once it wins one.
+    let read = loop {
+        let probe = outstanding.remove(0);
+        reply(&mut core, &probe, failure("network"));
+        let next = loop {
+            let message = core.recv();
+            match message["type"].as_str() {
+                Some("request") => break message,
+                Some("cancel") | Some("response") => {}
+                _ => panic!("unexpected {message}"),
+            }
+        };
+        if next["params"]["policy"] == "plain" {
+            break next;
+        }
+        outstanding.push(next);
+    };
+    assert_eq!(read["params"]["endpoint"], "c1");
+    reply(&mut core, &read, rpc_result(r#""0x9""#));
+    let answered = response_to(&mut core, 200);
+    assert_eq!(answered["result"]["result"], "0x9", "{answered}");
+}
