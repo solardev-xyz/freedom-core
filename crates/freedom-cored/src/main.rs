@@ -14,6 +14,7 @@ mod journal;
 mod log;
 mod naming;
 mod nodes;
+mod requests;
 mod rng;
 mod serve;
 mod signing;

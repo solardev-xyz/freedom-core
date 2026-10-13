@@ -19,6 +19,7 @@ use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
 use crate::exit::Exit;
+use crate::requests::{self, Owner, Requests};
 use crate::transport::{self, Credits, Link, Pending};
 use crate::vault::{FileSnapshot, Finished, NodeRecovery, Out, Vault};
 use crate::worker::Worker;
@@ -144,8 +145,10 @@ pub fn run(options: &Options) -> Exit {
     let (events_tx, events) = mpsc::channel();
     let credits = Arc::new(Credits::default());
     let link = Link::new();
-    // The core's requests to main still waiting for their answers.
+    // The core's requests to main still waiting for their answers: the
+    // reader's set, and the gate naming and chain send them through.
     let pending = Arc::new(Pending::default());
+    let requests = Requests::new(requests::MAX_OUTSTANDING, Arc::clone(&pending));
     let writer = match transport::spawn_writer(events_tx.clone(), Arc::clone(&link)) {
         Ok(writer) => writer,
         Err(_) => return Exit::Internal,
@@ -158,7 +161,7 @@ pub fn run(options: &Options) -> Exit {
     let Ok(naming) = naming::spawn(
         writer.queue.clone(),
         events_tx.clone(),
-        Arc::clone(&pending),
+        Arc::clone(&requests),
     ) else {
         return Exit::Internal;
     };
@@ -204,6 +207,7 @@ pub fn run(options: &Options) -> Exit {
             fc_vault::state::DEFAULT_AUTO_LOCK_MS,
         ),
         worker,
+        requests,
         naming,
         #[cfg(debug_assertions)]
         test,
@@ -315,8 +319,8 @@ pub fn run(options: &Options) -> Exit {
             Err(RecvTimeoutError::Disconnected) => break Exit::Ok,
         }
     };
-    // Naming starts no more I/O, whatever ended the loop.
-    core.naming.close();
+    // No more requests to main, whatever ended the loop.
+    core.requests.close();
     // Wipe the vault and revoke pre-commit work. Work past its commit point
     // finishes and replies before exit (bounded). Then let the writer flush
     // what's queued, but never wait on a peer that stopped reading: exiting
@@ -403,6 +407,8 @@ struct Core {
     last_request_id: u64,
     vault: Vault,
     worker: Worker,
+    /// The core's requests to main: where main's responses go back to.
+    requests: Arc<Requests>,
     naming: naming::Handle,
     /// The `test.*` methods' thread, when the test hooks enable it (debug
     /// builds only).
@@ -547,10 +553,17 @@ impl Core {
         Flow::Exit(Exit::Protocol)
     }
 
-    /// Main's response to one of the core's requests. Only the naming
-    /// thread sends requests (`shell.*`): it checks that a response answers
-    /// one of them.
+    /// Main's response to one of the core's requests (`shell.*`), routed
+    /// to the thread that made it. One that answers no request is
+    /// unsolicited, a protocol error (0001).
     fn response(&mut self, id: u64, outcome: Result<&RawValue, ErrorBody>) -> Flow {
+        let Some(owner) = self.requests.answered(id) else {
+            log::error(
+                "protocol error",
+                serde_json::json!({ "category": "unsolicited_response" }),
+            );
+            return Flow::Exit(Exit::Protocol);
+        };
         let outcome = match outcome {
             Ok(result) => match RawValue::from_string(result.get().to_owned()) {
                 Ok(result) => Ok(result),
@@ -558,10 +571,13 @@ impl Core {
             },
             Err(error) => Err(error),
         };
-        if self
-            .naming
-            .send(naming::In::Response { id, outcome }, self.credit.take())
-        {
+        let sent = match owner {
+            Owner::Naming => self
+                .naming
+                .send(naming::In::Response { id, outcome }, self.credit.take()),
+            Owner::Chain => false,
+        };
+        if sent {
             Flow::Continue
         } else {
             Flow::Exit(Exit::Internal)
@@ -585,8 +601,8 @@ impl Core {
         let flow = match method {
             "core.hello" => self.hello(id, params),
             "core.shutdown" => {
-                // No naming request goes after the acknowledgement.
-                self.naming.close();
+                // No request to main goes after the acknowledgement.
+                self.requests.close();
                 match self.result(id, &serde_json::json!({})) {
                     Flow::Continue => Flow::Exit(Exit::Ok),
                     exit => exit,
