@@ -263,6 +263,9 @@ fn admission_bounds_running_and_waiting_requests() {
     assert_eq!((world.machine.running(), world.machine.waiting()), (2, 1));
     assert_eq!(protocol(world.reply(fourth)), Some(Protocol::Busy));
     assert_eq!(world.reply(fourth).settled, 0);
+    // Under the chain's current generation, like every reply: main's fence
+    // must not take it for an overtaken one.
+    assert_eq!(world.reply(fourth).generation, 1);
     assert_eq!(world.rpcs().len(), 2);
     // The first finishes at 1 s: the waiting one starts then.
     world.run(1_000);
@@ -276,6 +279,30 @@ fn admission_bounds_running_and_waiting_requests() {
     assert_eq!(protocol(world.reply(third)), Some(Protocol::Deadline));
     assert_eq!(world.reply(third).settled, 10_000);
     assert!(!world.replied(second));
+}
+
+#[test]
+fn replies_made_at_once_carry_the_current_generation() {
+    let config = chain(1, &["direct"], &["a"], ("3", "2", "5000"));
+    let mut world = World::new(Bounds::default(), std::slice::from_ref(&config));
+    let mut changed = config;
+    changed.rpc.clear();
+    world.machine.configure(&[changed]);
+    // An unsupported method and a call with no time left, under generation
+    // 2; a chain not configured has none.
+    let refused = world.submit(read(1, "eth_sign", "[]"), None);
+    let expired = world.submit(read(1, "eth_call", CALL), Some(0));
+    let unknown = world.submit(read(5, "eth_call", CALL), None);
+    assert_eq!(world.reply(refused).generation, 2);
+    assert_eq!(
+        (
+            protocol(world.reply(expired)),
+            world.reply(expired).generation
+        ),
+        (Some(Protocol::Deadline), 2)
+    );
+    assert_eq!(world.reply(unknown).generation, 0);
+    assert!(world.requests.is_empty());
 }
 
 #[test]
@@ -566,6 +593,93 @@ fn an_answer_over_the_requests_budget_ends_it() {
     let (io, ..) = world.rpcs()[1].clone();
     assert!(world.answer(io, ok("\"0x1\"")));
     assert_eq!(result(world.reply(id)), Some("\"0x1\""));
+}
+
+#[test]
+fn a_driver_reserves_before_it_reads_a_reply() {
+    let bounds = Bounds {
+        request_bytes: 10_000,
+        ..Bounds::default()
+    };
+    let mut world = World::new(bounds, &[chain(1, &["direct"], &["a"], ("3", "2", "5000"))]);
+    let id = world.submit(read(1, "eth_call", CALL), None);
+    let (io, ..) = world.rpcs()[0].clone();
+    assert!(world.machine.wants(io));
+    // What reading main's message takes, reserved first; the answer's
+    // charge is the reservation, settled to what the answer holds.
+    let before = world.machine.held();
+    let mut reading = world.machine.reserve_reply(io, 6_000).unwrap();
+    assert_eq!(world.machine.held(), before + 6_000);
+    reading.settle(3_000).unwrap();
+    assert_eq!(world.machine.held(), before + 3_000);
+    let answer = ok("\"0x1\"");
+    let bytes = answer.bytes();
+    let decoded = world.machine.reserve_reply(io, bytes).unwrap();
+    drop(reading);
+    assert!(world.machine.complete_reserved(io, answer, decoded));
+    world.collect();
+    assert_eq!(result(world.reply(id)), Some("\"0x1\""));
+    // A reservation over the request's bound ends it with `budget`, unread.
+    let id = world.submit(read(1, "eth_call", CALL), None);
+    let (io, ..) = world.rpcs()[1].clone();
+    assert_eq!(
+        world.machine.reserve_reply(io, 20_000).err(),
+        Some(fc_chain::machine::OverBudget)
+    );
+    world.machine.complete_unread(io);
+    world.collect();
+    assert_eq!(protocol(world.reply(id)), Some(Protocol::Budget));
+    // Its I/O is wanted no more, and a reservation for it charges nothing.
+    assert!(!world.machine.wants(io));
+    let nothing = world.machine.reserve_reply(io, usize::MAX).unwrap();
+    assert_eq!(nothing.bytes(), 0);
+    world.machine.set_output_backlog(0);
+    world.collect();
+    assert_eq!(world.machine.held(), 0);
+}
+
+#[test]
+fn a_broadcast_keeps_its_floor_when_reading_its_reply_crosses_the_budget() {
+    let bounds = Bounds {
+        request_bytes: 4_000,
+        ..Bounds::default()
+    };
+    let mut world = World::new(bounds, &[broadcaster(&["direct"], &["a", "b"])]);
+    let id = world.submit(send(), None);
+    let (io, ..) = world.rpcs()[0].clone();
+    // The attempt went to main; reading its reply would cross the budget.
+    assert!(world.machine.reserve_reply(io, 1 << 20).is_err());
+    world.machine.complete_unread(io);
+    world.collect();
+    // Possibly sent: uncertain, never not sent, and nothing more is tried.
+    assert_eq!(
+        outcome(world.reply(id)),
+        (BroadcastOutcome::Uncertain, Some("direct"))
+    );
+    assert_eq!(world.rpcs().len(), 1);
+}
+
+#[test]
+fn an_unread_reply_still_frees_a_verifier_slot() {
+    let mut world = World::new(
+        Bounds::default(),
+        &[chain(1, &["myotis"], &["a"], ("3", "2", "5000"))],
+    );
+    world.machine.availability(1, true);
+    let id = world.submit(read(1, "eth_call", CALL), None);
+    let io = world.requests[0].0;
+    assert!(world.machine.runs(id));
+    world.machine.cancel(id);
+    world.collect();
+    assert_eq!(protocol(world.reply(id)), Some(Protocol::Cancelled));
+    // The cancelled read's operation keeps the slot until main's reply,
+    // which nobody reads.
+    assert_eq!(world.machine.state_tables().myotis_slots, vec![(1, 1, 0)]);
+    assert!(!world.machine.wants(io));
+    assert!(!world.machine.runs(id));
+    world.machine.complete_unread(io);
+    world.collect();
+    assert!(world.machine.state_tables().myotis_slots.is_empty());
 }
 
 #[test]

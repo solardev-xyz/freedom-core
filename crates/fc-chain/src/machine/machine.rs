@@ -228,6 +228,42 @@ fn reply_heap_bytes(result: &Result<Success, ChainError>) -> usize {
         }
 }
 
+/// What a request receives for a reply nobody reads: a transport failure,
+/// never a proof that nothing was sent; it is never polled anyway (its
+/// request has ended, or is over its budget and ends first).
+fn unread() -> Delivered {
+    Delivered {
+        answer: Answer::Failed(Transport::Network),
+        charge: Charge::none(),
+        discarded: true,
+    }
+}
+
+/// Reading main's reply would cross its request's budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverBudget;
+
+/// Bytes reserved against a request's budget for main's reply to one of
+/// its I/O requests, before the driver allocates them
+/// ([`Machine::reserve_reply`]). Released when dropped, or carried into the
+/// answer's charge ([`Machine::complete_reserved`]).
+#[derive(Debug)]
+pub struct Reservation(Charge);
+
+impl Reservation {
+    /// The bytes it holds.
+    pub fn bytes(&self) -> usize {
+        self.0.bytes()
+    }
+
+    /// Makes it `bytes`, before what they cover is allocated: a shrink is
+    /// released, a growth charged. `Err` when the growth crosses the
+    /// request's bound or the total's: the request is over.
+    pub fn settle(&mut self, bytes: usize) -> Result<(), OverBudget> {
+        self.0.settle(bytes).map_err(|()| OverBudget)
+    }
+}
+
 impl Machine {
     pub fn new(now: Ms, bounds: Bounds) -> Self {
         Self {
@@ -320,15 +356,19 @@ impl Machine {
     pub fn submit(&mut self, call: Call, deadline_ms: Option<Ms>) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
+        let chain_id = call.chain_id();
+        // A reply made at once is computed under the chain's current
+        // generation, so main's fence doesn't take it for an overtaken one
+        // (design 0005, Generations); 0 for a chain not configured.
+        let current = self.generation_of(chain_id);
         // Refusals before any I/O, as the router throws them.
         if let Call::Read { method, .. } = &call
             && !is_read_method(method)
         {
             let error = Thrown::error(&unsupported_read_method_text(method));
-            self.reply(id, Err(ChainError::Thrown(error)), None, 0);
+            self.reply(id, Err(ChainError::Thrown(error)), None, current);
             return id;
         }
-        let chain_id = call.chain_id();
         let configured = self.ctx.state.borrow().chains.contains_key(&chain_id);
         if !configured {
             let error = Thrown::error(&format!("Unsupported chain ID: {chain_id}"));
@@ -353,7 +393,12 @@ impl Machine {
         let Some(input) = input else {
             self.ctx.budget.borrow_mut().forget(id);
             let outcome = call.is_broadcast().then_some(BroadcastOutcome::NotSent);
-            self.reply(id, Err(ChainError::Protocol(Protocol::Busy)), outcome, 0);
+            self.reply(
+                id,
+                Err(ChainError::Protocol(Protocol::Busy)),
+                outcome,
+                current,
+            );
             return id;
         };
         if room {
@@ -745,6 +790,46 @@ impl Machine {
         emitted
     }
 
+    /// The request that made I/O request `id`, while it runs: only then
+    /// does anyone read main's reply to it.
+    fn reader_of(&self, id: u64) -> Option<u64> {
+        let owner = self.ctx.rt.owner_of(id)?;
+        self.running.iter().any(|r| r.id == owner).then_some(owner)
+    }
+
+    /// Whether request `id` is running: only then can its I/O still be
+    /// wanted. A driver retires the I/O it holds back for a request that
+    /// isn't, however its reply has gone.
+    pub fn runs(&self, id: u64) -> bool {
+        self.running.iter().any(|r| r.id == id)
+    }
+
+    /// Whether a running request waits for main's reply to I/O request
+    /// `id`. Main's reply to anything else (an I/O request cancelled, or
+    /// one whose request has ended) is read no further: the driver
+    /// completes it with [`Machine::complete_unread`].
+    pub fn wants(&self, id: u64) -> bool {
+        self.reader_of(id).is_some()
+    }
+
+    /// Reserves `bytes` against the budget of the request that made I/O
+    /// request `id`, before the driver allocates them to read main's reply
+    /// (`memory-budgets`: received messages once handed over, and what
+    /// reading them makes). `Err` when that crosses its bound or the
+    /// total's: the request is over, and ends with `budget` before it is
+    /// polled again (a broadcast through its outcome table, the attempt
+    /// still possibly sent); the driver completes `id` with
+    /// [`Machine::complete_unread`]. Nothing is charged for a reply nobody
+    /// wants.
+    pub fn reserve_reply(&self, id: u64, bytes: usize) -> Result<Reservation, OverBudget> {
+        let Some(owner) = self.reader_of(id) else {
+            return Ok(Reservation(Charge::none()));
+        };
+        budget::charge(&self.ctx.budget, owner, bytes)
+            .map(Reservation)
+            .map_err(|_| OverBudget)
+    }
+
     /// Main's terminal reply to I/O request `id`. It counts against its
     /// request's budget (`memory-budgets`); one that crosses it is dropped,
     /// and the request ends at the next poll. One whose request has ended
@@ -752,6 +837,26 @@ impl Machine {
     /// freeing its slot. False when nothing waits for it (cancelled, or
     /// unknown), or when it crossed the budget.
     pub fn complete(&mut self, id: u64, answer: Answer) -> bool {
+        match self.reserve_reply(id, 0) {
+            Ok(reservation) => self.complete_reserved(id, answer, reservation),
+            Err(OverBudget) => {
+                drop(answer);
+                self.complete_unread(id);
+                false
+            }
+        }
+    }
+
+    /// Main's terminal reply to I/O request `id`, read within
+    /// `reservation` ([`Machine::reserve_reply`]): the reservation becomes
+    /// the answer's charge, settled to what the answer holds. Otherwise as
+    /// [`Machine::complete`].
+    pub fn complete_reserved(
+        &mut self,
+        id: u64,
+        answer: Answer,
+        mut reservation: Reservation,
+    ) -> bool {
         // Main enforces `max_bytes`; an answer over the cap anyway is the
         // `too_large` failure it should have been (`response-caps`).
         let answer = match answer {
@@ -760,50 +865,43 @@ impl Machine {
             }
             answer => answer,
         };
-        let owner = self.ctx.rt.owner_of(id).unwrap_or(0);
-        if !self.running.iter().any(|r| r.id == owner) {
+        if self.reader_of(id).is_none() {
             // Its caller has ended: nobody will read the payload, which is
             // dropped now rather than held uncharged. Main's terminal reply
             // still completes the operation, so a verifier's slot is freed
             // at the next poll.
-            drop(answer);
-            return self.ctx.rt.complete(
-                id,
-                Delivered {
-                    answer: Answer::NotSent,
-                    charge: Charge::none(),
-                    discarded: true,
-                },
-            );
+            drop((answer, reservation));
+            return self.ctx.rt.complete(id, unread());
         }
-        let request = owner;
-        match budget::charge(&self.ctx.budget, request, answer.bytes()) {
-            Ok(charge) => self.ctx.rt.complete(
+        match reservation.0.settle(answer.bytes()) {
+            Ok(()) => self.ctx.rt.complete(
                 id,
                 Delivered {
                     answer,
-                    charge,
+                    charge: reservation.0,
                     discarded: false,
                 },
             ),
-            Err(_) => {
+            Err(()) => {
                 // Over its request's budget: the payload is dropped, but
                 // main's one terminal reply still completes the operation,
                 // so a verifier's slot is freed. The request ends with
                 // `budget` (a broadcast through its outcome table) before
                 // it is polled again.
-                drop(answer);
-                self.ctx.rt.complete(
-                    id,
-                    Delivered {
-                        answer: Answer::NotSent,
-                        charge: Charge::none(),
-                        discarded: true,
-                    },
-                );
+                drop((answer, reservation));
+                self.ctx.rt.complete(id, unread());
                 false
             }
         }
+    }
+
+    /// Main's terminal reply to I/O request `id`, unread: nobody wants it
+    /// ([`Machine::wants`]), or reading it would cross its request's budget
+    /// ([`Machine::reserve_reply`]). It completes the operation, freeing a
+    /// verifier's slot, and delivers nothing that could be taken for proof
+    /// that nothing was sent.
+    pub fn complete_unread(&mut self, id: u64) -> bool {
+        self.ctx.rt.complete(id, unread())
     }
 
     /// Schedules a driver event at `at` (see the executor).

@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
@@ -24,14 +24,15 @@ use fc_naming::session::machine::{
 use fc_naming::session::random::Random;
 use fc_naming::session::rpc::Transport;
 use fc_protocol::error::{ErrorBody, ErrorCode};
-use fc_protocol::message::{self, Context};
+use fc_protocol::message;
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
+use crate::requests::{self, Dispatch, Owner, Requests, Start};
 use crate::serve::Event;
 use crate::transport;
-use crate::transport::{Allowance, Credit, Out, Pending};
+use crate::transport::{Allowance, Credit, Out};
 
 /// The methods the naming thread answers.
 pub const METHODS: &[&str] = &[
@@ -72,11 +73,11 @@ pub enum In {
 /// reader counts it until this thread has handled it.
 type Mail = (In, Option<Credit>);
 
-/// The event loop's side of the naming thread. The writer's wake-up holds
-/// only a weak reference, so dropping this ends the thread.
+/// The event loop's side of the naming thread. The writer's and the
+/// gate's wake-ups hold only weak references, so dropping this ends the
+/// thread.
 pub struct Handle {
     tx: Arc<Sender<Mail>>,
-    closing: Arc<Mutex<bool>>,
 }
 
 impl Handle {
@@ -84,42 +85,38 @@ impl Handle {
     pub fn send(&self, message: In, credit: Option<Credit>) -> bool {
         self.tx.send((message, credit)).is_ok()
     }
+}
 
-    /// The core is exiting: from now on no `shell.*` request is handed to
-    /// the writer. The thread admits requests under the same lock, so none
-    /// can follow what the caller writes next (the shutdown reply).
-    pub fn close(&self) {
-        if let Ok(mut closing) = self.closing.lock() {
-            *closing = true;
+/// What wakes the thread to send what waits: room in its share of the
+/// writer, or a free slot at main.
+fn waker(tx: &Arc<Sender<Mail>>) -> impl Fn() + Send + 'static {
+    let wake: Weak<Sender<Mail>> = Arc::downgrade(tx);
+    move || {
+        if let Some(tx) = wake.upgrade() {
+            let _ = tx.send((In::Drained, None));
         }
     }
 }
 
-/// Starts the naming thread. It writes to `out`, records its `shell.*`
-/// requests in `pending` until their terminal responses, and reports a
-/// protocol error from main, or its own end, to the event loop.
+/// Starts the naming thread. It writes to `out`, sends its `shell.*`
+/// requests through `requests` (which routes main's responses back), and
+/// reports a protocol error from main, or its own end, to the event loop.
 pub fn spawn(
     out: Sender<Out>,
     events: Sender<Event>,
-    pending: Arc<Pending>,
+    requests: Arc<Requests>,
 ) -> std::io::Result<Handle> {
     let (tx, rx) = mpsc::channel();
     let tx = Arc::new(tx);
-    let closing = Arc::new(Mutex::new(false));
-    let gate = Arc::clone(&closing);
     // Naming's share of the writer (design 0004, Bounds: the writer).
     let allowance = Allowance::new(usize::MAX, transport::MAX_QUEUED_NAMING_BYTES);
-    let wake: Weak<Sender<Mail>> = Arc::downgrade(&tx);
-    allowance.on_room(move || {
-        if let Some(tx) = wake.upgrade() {
-            let _ = tx.send((In::Drained, None));
-        }
-    });
+    allowance.on_room(waker(&tx));
+    requests.on_room(Owner::Naming, waker(&tx));
     std::thread::Builder::new()
         .name("naming".into())
         .spawn(move || {
             let _notice = transport::DeathNotice::new(events.clone(), "naming");
-            let event = match run(&rx, out, allowance, gate, pending) {
+            let event = match run(&rx, out, allowance, requests) {
                 Stop::Protocol(category) => Event::ProtocolError(category),
                 Stop::Writer => Event::WriterFailed,
                 // The event loop has gone: nothing to report to.
@@ -127,7 +124,7 @@ pub fn spawn(
             };
             let _ = events.send(event);
         })?;
-    Ok(Handle { tx, closing })
+    Ok(Handle { tx })
 }
 
 /// Uniform values in `[0, 1)` from the OS generator: the shuffle needs no
@@ -178,8 +175,7 @@ fn run(
     rx: &Receiver<Mail>,
     out: Sender<Out>,
     allowance: Arc<Allowance>,
-    closing: Arc<Mutex<bool>>,
-    pending: Arc<Pending>,
+    requests: Arc<Requests>,
 ) -> Stop {
     let started = Instant::now();
     let mut machine = Machine::new(0, empty_config(), Box::new(OsRandom));
@@ -192,16 +188,13 @@ fn run(
         machine,
         out,
         allowance,
-        closing,
+        requests,
         outbox: VecDeque::new(),
         max_backlog: MAX_NAMING_BACKLOG,
         callers: BTreeMap::new(),
         outgoing: BTreeMap::new(),
-        pending,
         by_io: BTreeMap::new(),
-        next_id: 1,
         queued: VecDeque::new(),
-        max_outstanding: MAX_OUTSTANDING,
     };
     let now = || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     loop {
@@ -269,16 +262,15 @@ const FAILURE_CLASSES: &[&str] = &[
 /// requests' small busy replies.
 const MAX_NAMING_BACKLOG: usize = 16 * 1024 * 1024;
 
-/// At most this many `shell.*` requests outstanding at main (design 0004,
-/// Bounds: Work); more wait here, first in, first out.
-const MAX_OUTSTANDING: usize = 256;
-
 struct Naming {
     machine: Machine,
     out: Sender<Out>,
     allowance: Arc<Allowance>,
-    /// Set by [`Handle::close`]: no request is admitted after it.
-    closing: Arc<Mutex<bool>>,
+    /// The core's requests to main, naming's and chain's: one ID counter,
+    /// main's limit of outstanding requests (design 0004, Bounds: Work),
+    /// and the gate closed at shutdown. Past the limit, requests wait here,
+    /// first in, first out.
+    requests: Arc<Requests>,
     /// Frames waiting for room in the writer, in order.
     outbox: VecDeque<Zeroizing<Vec<u8>>>,
     /// See MAX_NAMING_BACKLOG.
@@ -286,17 +278,12 @@ struct Naming {
     /// Requests waiting for a slot: the machine's request id, the request,
     /// its attempt's generations, and its session's deadline.
     queued: VecDeque<(u64, Request, Generations, Ms)>,
-    max_outstanding: usize,
     /// The machine's callers, by the request ID main gave them.
     callers: BTreeMap<u64, u64>,
     /// This thread's `shell.*` requests, by their message ID.
     outgoing: BTreeMap<u64, Outgoing>,
-    /// The same IDs, for the reader: main's fragmented response must name
-    /// one (design 0005, Frames).
-    pending: Arc<Pending>,
     /// Message IDs by the machine's request id.
     by_io: BTreeMap<u64, u64>,
-    next_id: u64,
 }
 
 impl Naming {
@@ -461,13 +448,13 @@ impl Naming {
         }
     }
 
-    /// Main's reply to a `shell.*` request. One for a request the machine
-    /// cancelled is dropped; one for no request at all is a protocol error.
+    /// Main's reply to a `shell.*` request, which the event loop routed
+    /// here. One for a request the machine cancelled is dropped; one for no
+    /// request of naming's is a protocol error.
     fn response(&mut self, id: u64, outcome: Result<Box<RawValue>, ErrorBody>) -> Flow {
         let Some(outgoing) = self.outgoing.remove(&id) else {
             return Err(Stop::Protocol("unsolicited_response"));
         };
-        self.pending.remove(id);
         let Some(io) = outgoing.io else {
             return Ok(());
         };
@@ -531,14 +518,15 @@ impl Naming {
         Ok(())
     }
 
-    /// Sends queued requests, first in, first out, while a slot is free,
-    /// no other frame waits, and the writer has room. A request leaves the
-    /// queue only when it is sent or settled here, so until then a cancel
-    /// removes it, and its deadline is what is left when it goes. True when
-    /// one settled here.
+    /// Sends queued requests, first in, first out, while no other frame
+    /// waits, a slot at main is free, and the writer has room; the gate
+    /// wakes the thread when one is. A request leaves the queue only when
+    /// it is sent or settled here, so until then a cancel removes it, and
+    /// its deadline is what is left when it goes. True when one settled
+    /// here.
     fn dispatch(&mut self) -> Result<bool, Stop> {
         let mut settled = false;
-        while self.outgoing.len() < self.max_outstanding && self.outbox.is_empty() {
+        while self.outbox.is_empty() {
             let Some((io, request, generations, deadline)) = self.queued.front() else {
                 break;
             };
@@ -552,43 +540,37 @@ impl Naming {
                 settled = true;
                 continue;
             }
-            let id = self.next_id;
             let (method, kind, params) = shell_request(request, *generations, left);
-            let mut payload = Zeroizing::new(Vec::with_capacity(256));
-            if message::write_request(&mut *payload, id, method, &params, &Context::shell())
-                .is_err()
-            {
-                return Err(Stop::Protocol("unwritable_request"));
+            let params =
+                serde_json::to_vec(&params).map_err(|_| Stop::Protocol("unwritable_request"))?;
+            // Its frame is made outside the gate's lock. Naming's requests
+            // have no latest start: their deadline is in their params.
+            let sent = self.requests.send(
+                Owner::Naming,
+                &self.allowance,
+                &self.out,
+                || requests::request_frame(method, &params, None),
+                || Start::Anytime,
+            );
+            match sent {
+                Dispatch::Sent(id) => {
+                    self.queued.pop_front();
+                    self.outgoing.insert(id, Outgoing { io: Some(io), kind });
+                    self.by_io.insert(io, id);
+                }
+                // Over 0001's frame: never sent, it completes as too large
+                // (design 0004, Requests the core makes).
+                Dispatch::TooLarge => {
+                    self.queued.pop_front();
+                    self.machine.complete(io, too_large(kind));
+                    settled = true;
+                }
+                // The core is exiting, main holds all it takes, or the
+                // writer share is full: it waits. (Naming's requests are
+                // never late.)
+                Dispatch::Closed | Dispatch::Full | Dispatch::NoRoom | Dispatch::Late => break,
+                Dispatch::WriterGone => return Err(Stop::Writer),
             }
-            // Over 0001's frame: never sent, it completes as too large
-            // (design 0004, Requests the core makes).
-            let Some(frame) = transport::frame(&payload) else {
-                self.queued.pop_front();
-                self.machine.complete(io, too_large(kind));
-                settled = true;
-                continue;
-            };
-            // Admitted under the closing lock: once the core is exiting,
-            // nothing more goes.
-            let Ok(closing) = self.closing.lock() else {
-                break;
-            };
-            if *closing {
-                break;
-            }
-            let Some(hold) = self.allowance.take(frame.len()) else {
-                break;
-            };
-            self.queued.pop_front();
-            self.next_id += 1;
-            self.outgoing.insert(id, Outgoing { io: Some(io), kind });
-            self.by_io.insert(io, id);
-            // Before the writer has it, so main's answer can't come first.
-            self.pending.insert(id);
-            self.out
-                .send(Out::Frame { frame, hold })
-                .map_err(|_| Stop::Writer)?;
-            drop(closing);
         }
         Ok(settled)
     }
@@ -1108,6 +1090,7 @@ impl Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::Pending;
 
     /// The frames the thread wrote, as JSON.
     /// What the writer got; reading a frame frees its allowance.
@@ -1137,18 +1120,22 @@ mod tests {
             machine: Machine::new(0, config, Box::new(OsRandom)),
             out: tx,
             allowance: Allowance::new(usize::MAX, writer_bytes),
-            closing: Arc::new(Mutex::new(false)),
+            requests: Requests::new(max_outstanding, Arc::new(Pending::default())),
             outbox: VecDeque::new(),
             max_backlog: MAX_NAMING_BACKLOG,
             callers: BTreeMap::new(),
             outgoing: BTreeMap::new(),
-            pending: Arc::new(Pending::default()),
             by_io: BTreeMap::new(),
-            next_id: 1,
             queued: VecDeque::new(),
-            max_outstanding,
         };
         (naming, rx)
+    }
+
+    /// Main's response, as the event loop routes it: the gate retires the
+    /// request, then naming takes the answer.
+    fn respond(naming: &mut Naming, id: u64, outcome: Result<Box<RawValue>, ErrorBody>) -> Flow {
+        assert_eq!(naming.requests.answered(id), Some(Owner::Naming));
+        naming.response(id, outcome)
     }
 
     const SNAPSHOT: &str = r#"{"rpc":[{"endpoint":"e1"},{"endpoint":"e2"},{"endpoint":"e3"},{"endpoint":"e4"}],
@@ -1201,10 +1188,10 @@ mod tests {
         // An answer frees a slot for the next, sent with what is left.
         let body = base64::engine::general_purpose::STANDARD
             .encode(r#"{"jsonrpc":"2.0","id":1,"result":"0x1312d00"}"#);
-        let answer = RawValue::from_string(format!(r#"{{"status":200,"body":"{body}"}}"#))
+        let body_answer = RawValue::from_string(format!(r#"{{"status":200,"body":"{body}"}}"#))
             .unwrap_or_else(|_| unreachable!());
         assert!(naming.advance(4).is_ok());
-        assert!(naming.response(first[0], Ok(answer)).is_ok());
+        assert!(respond(&mut naming, first[0], Ok(body_answer)).is_ok());
         assert!(naming.flush().is_ok());
         let frames = written(&rx);
         let second = requests(&frames);
@@ -1213,9 +1200,9 @@ mod tests {
         assert_eq!(naming.queued.len(), 1);
         // The reader knows exactly the requests still waiting for main: a
         // fragmented answer must name one.
-        assert!(!naming.pending.contains(first[0]));
-        assert!(naming.pending.contains(first[1]));
-        assert!(naming.pending.contains(second[0]));
+        assert!(!naming.requests.is_pending(first[0]));
+        assert!(naming.requests.is_pending(first[1]));
+        assert!(naming.requests.is_pending(second[0]));
     }
 
     #[test]

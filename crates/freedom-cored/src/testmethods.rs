@@ -3,8 +3,9 @@
 //! so (`FREEDOM_CORED_TEST_METHODS` set); otherwise they are unknown
 //! methods.
 //!
-//! They stand in for the chain thread's side of the transport (design 0005,
-//! Frames) until it exists, so the tests can drive responses of any size:
+//! They make responses of any size, so the transport's tests (design 0005,
+//! Frames) don't depend on what chain data answers. They behave as the
+//! chain thread does:
 //! - **their own thread,** which takes every message as it arrives,
 //!   whatever the writer's state;
 //! - **their own share of the writer,** one message cap

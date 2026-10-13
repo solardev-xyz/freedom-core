@@ -9,6 +9,8 @@
 //!   its commit point, before the rename or unlink.
 //! - `FREEDOM_CORED_TEST_COMMIT_MARKER` names a file created the moment a job
 //!   claims its commit point (before that stall), so tests can wait for it.
+//! - `FREEDOM_CORED_TEST_CHAIN_TOTAL_BYTES` replaces the chain total's
+//!   256 MiB (design 0005, Bounds), so a test can bring it near full.
 //! - `FREEDOM_CORED_TEST_METHODS` enables the `test.*` methods
 //!   (`testmethods`), which make responses of any size. Release builds
 //!   don't compile them, nor this hook.
@@ -50,6 +52,14 @@ pub fn kdf_deadline(default: Duration) -> Duration {
 }
 
 #[cfg(debug_assertions)]
+pub fn chain_bounds(mut bounds: fc_chain::machine::Bounds) -> fc_chain::machine::Bounds {
+    if let Some(total) = millis("FREEDOM_CORED_TEST_CHAIN_TOTAL_BYTES") {
+        bounds.total_bytes = usize::try_from(total).unwrap_or(usize::MAX);
+    }
+    bounds
+}
+
+#[cfg(debug_assertions)]
 pub fn test_methods() -> bool {
     std::env::var_os("FREEDOM_CORED_TEST_METHODS").is_some()
 }
@@ -66,4 +76,9 @@ pub fn commit_delay() {}
 #[cfg(not(debug_assertions))]
 pub fn kdf_deadline(default: Duration) -> Duration {
     default
+}
+
+#[cfg(not(debug_assertions))]
+pub fn chain_bounds(bounds: fc_chain::machine::Bounds) -> fc_chain::machine::Bounds {
+    bounds
 }

@@ -31,6 +31,8 @@ path = "src/main.rs"
 [dependencies]
 # Response bodies from main's shell.* executors travel as base64.
 base64 = "0.22.1"
+# The chain-data machine the chain thread drives (design 0005).
+fc-chain = { path = "../fc-chain" }
 fc-evm = { path = "../fc-evm" }
 fc-keys = { path = "../fc-keys" }
 fc-naming = { path = "../fc-naming" }

@@ -6,6 +6,7 @@
 //! freedom-cored recover   --data-dir <identity dir> --lock-dir <lock dir>
 //! ```
 
+mod chain;
 mod exit;
 mod fsx;
 mod gate;
@@ -14,6 +15,7 @@ mod journal;
 mod log;
 mod naming;
 mod nodes;
+mod requests;
 mod rng;
 mod serve;
 mod signing;

@@ -287,6 +287,18 @@ impl Core {
         }
     }
 
+    /// The next frame, if one comes within `within`.
+    pub fn recv_wire_within(&mut self, within: Duration) -> Option<Wire> {
+        match self.output.recv_timeout(within) {
+            Ok(Output::Frame(value)) => Some(Wire::Message(value)),
+            Ok(Output::Wire(wire)) => Some(wire),
+            Ok(Output::Line(line)) => panic!("expected a frame, got line {line:?}"),
+            Ok(Output::Malformed(what)) => panic!("malformed frame: {what}"),
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
+            Err(mpsc::RecvTimeoutError::Disconnected) => self.closed("a frame"),
+        }
+    }
+
     pub fn send(&mut self, message: &Value) {
         self.send_raw(&frame(message));
     }
@@ -330,12 +342,14 @@ impl Core {
         )
     }
 
-    /// Every frame left, until the core closes stdout.
+    /// Every whole message left, until the core closes stdout; a bulk
+    /// credit returned meanwhile is passed over.
     pub fn rest(&mut self) -> Vec<Value> {
         let mut frames = Vec::new();
         loop {
             match self.output.recv_timeout(READ_TIMEOUT) {
                 Ok(Output::Frame(value)) => frames.push(value),
+                Ok(Output::Wire(Wire::Credit)) => {}
                 Ok(Output::Wire(wire)) => panic!("expected a whole message, got {wire:?}"),
                 Ok(Output::Line(line)) => panic!("expected a frame, got line {line:?}"),
                 Ok(Output::Malformed(what)) => panic!("malformed frame: {what}"),

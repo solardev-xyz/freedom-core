@@ -6,6 +6,7 @@
 //! keep the loop from handling EOF, shutdown or lock. KDF work will run on
 //! worker threads and report back here.
 
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
@@ -19,10 +20,11 @@ use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
 use crate::exit::Exit;
+use crate::requests::{self, Owner, Requests};
 use crate::transport::{self, Credits, Link, Pending};
 use crate::vault::{FileSnapshot, Finished, NodeRecovery, Out, Vault};
 use crate::worker::Worker;
-use crate::{gate, hardening, log, naming};
+use crate::{chain, gate, hardening, log, naming};
 #[cfg(debug_assertions)]
 use crate::{testhooks, testmethods};
 
@@ -70,9 +72,11 @@ pub enum Event {
     JobDone(u64, Finished),
 }
 
-/// The methods this build implements, in `core.hello`'s capabilities. Only
-/// these names, and in debug builds the test methods', are ever logged;
-/// anything else is logged as `<unknown>`.
+/// The methods `core.hello`'s capabilities name: every method this build
+/// implements but the `chain.*` methods, which design 0005 doesn't add to
+/// them (it adds `fragments` only). Only these names, the chain methods,
+/// and in debug builds the test methods', are ever logged; anything else is
+/// logged as `<unknown>`.
 const CAPABILITIES: &[&str] = &[
     "core.hello",
     "core.shutdown",
@@ -144,8 +148,10 @@ pub fn run(options: &Options) -> Exit {
     let (events_tx, events) = mpsc::channel();
     let credits = Arc::new(Credits::default());
     let link = Link::new();
-    // The core's requests to main still waiting for their answers.
+    // The core's requests to main still waiting for their answers: the
+    // reader's set, and the gate naming and chain send them through.
     let pending = Arc::new(Pending::default());
+    let requests = Requests::new(requests::MAX_OUTSTANDING, Arc::clone(&pending));
     let writer = match transport::spawn_writer(events_tx.clone(), Arc::clone(&link)) {
         Ok(writer) => writer,
         Err(_) => return Exit::Internal,
@@ -158,7 +164,17 @@ pub fn run(options: &Options) -> Exit {
     let Ok(naming) = naming::spawn(
         writer.queue.clone(),
         events_tx.clone(),
-        Arc::clone(&pending),
+        Arc::clone(&requests),
+    ) else {
+        return Exit::Internal;
+    };
+    // Chain data runs on its own thread too (design 0005), and fragments
+    // its large replies for a main that offered fragments.
+    let Ok(chain) = chain::spawn(
+        writer.queue.clone(),
+        events_tx.clone(),
+        Arc::clone(&link),
+        Arc::clone(&requests),
     ) else {
         return Exit::Internal;
     };
@@ -204,7 +220,9 @@ pub fn run(options: &Options) -> Exit {
             fc_vault::state::DEFAULT_AUTO_LOCK_MS,
         ),
         worker,
+        requests,
         naming,
+        chain,
         #[cfg(debug_assertions)]
         test,
     };
@@ -237,8 +255,7 @@ pub fn run(options: &Options) -> Exit {
                 // A message forwarded to the naming thread takes the credit
                 // along; otherwise it goes once the frame is handled.
                 core.credit = Some(credit);
-                let flow = core.handle_frame(&frame);
-                drop(frame);
+                let flow = core.handle_frame(frame);
                 core.credit = None;
                 if let Flow::Exit(exit) = flow {
                     break exit;
@@ -252,8 +269,7 @@ pub fn run(options: &Options) -> Exit {
                 // As a frame's: forwarded with the message, or dropped once
                 // it is handled, which returns main's bulk credit.
                 core.credit = Some(credit);
-                let flow = core.handle_fragmented(id, &payload);
-                drop(payload);
+                let flow = core.handle_fragmented(id, payload);
                 core.credit = None;
                 if let Flow::Exit(exit) = flow {
                     break exit;
@@ -315,8 +331,8 @@ pub fn run(options: &Options) -> Exit {
             Err(RecvTimeoutError::Disconnected) => break Exit::Ok,
         }
     };
-    // Naming starts no more I/O, whatever ended the loop.
-    core.naming.close();
+    // No more requests to main, whatever ended the loop.
+    core.requests.close();
     // Wipe the vault and revoke pre-commit work. Work past its commit point
     // finishes and replies before exit (bounded). Then let the writer flush
     // what's queued, but never wait on a peer that stopped reading: exiting
@@ -403,7 +419,10 @@ struct Core {
     last_request_id: u64,
     vault: Vault,
     worker: Worker,
+    /// The core's requests to main: where main's responses go back to.
+    requests: Arc<Requests>,
     naming: naming::Handle,
+    chain: chain::Handle,
     /// The `test.*` methods' thread, when the test hooks enable it (debug
     /// builds only).
     #[cfg(debug_assertions)]
@@ -435,12 +454,21 @@ struct HelloResult<'a> {
     node_recovery: &'a NodeRecovery,
 }
 
+/// Where `text`, borrowed from `payload`, lies in it.
+fn span(payload: &[u8], text: &RawValue) -> Range<usize> {
+    let start = (text.get().as_ptr() as usize).wrapping_sub(payload.as_ptr() as usize);
+    start..start.saturating_add(text.get().len())
+}
+
 /// A method name that is safe to log: known names only.
 fn loggable(method: &str) -> &'static str {
     #[cfg(debug_assertions)]
-    let known = CAPABILITIES.iter().chain(testmethods::METHODS);
+    let known = CAPABILITIES
+        .iter()
+        .chain(chain::METHODS)
+        .chain(testmethods::METHODS);
     #[cfg(not(debug_assertions))]
-    let known = CAPABILITIES.iter();
+    let known = CAPABILITIES.iter().chain(chain::METHODS);
     known.copied().find(|m| *m == method).unwrap_or("<unknown>")
 }
 
@@ -457,7 +485,7 @@ fn message_category(error: &MessageError) -> &'static str {
 }
 
 impl Core {
-    fn handle_frame(&mut self, frame: &Frame) -> Flow {
+    fn handle_frame(&mut self, frame: Frame) -> Flow {
         if frame.kind != KIND_JSON {
             log::error(
                 "protocol error",
@@ -508,19 +536,26 @@ impl Core {
                 );
                 Flow::Exit(Exit::Protocol)
             }
-            // A cancel names a vault request or a naming one; each side
-            // ignores IDs it doesn't hold.
+            // A cancel names a vault request, a naming one or a chain one;
+            // each ignores IDs it doesn't hold.
             Message::Cancel { id } => {
-                if !self
-                    .naming
-                    .send(naming::In::Cancel { id }, self.credit.take())
+                if !self.chain.send(chain::In::Cancel { id }, None)
+                    || !self
+                        .naming
+                        .send(naming::In::Cancel { id }, self.credit.take())
                 {
                     return Flow::Exit(Exit::Internal);
                 }
                 let outs = self.vault.cancel(id);
                 self.dispatch(outs)
             }
-            Message::Response { id, outcome } => self.response(id, outcome),
+            Message::Response { id, outcome } => {
+                let outcome = match outcome {
+                    Ok(result) => Ok(span(&frame.payload, result)),
+                    Err(error) => Err(span(&frame.payload, error.raw())),
+                };
+                self.response(id, outcome, frame.payload)
+            }
             Message::Event { .. } => {
                 log::warn("ignoring an event from main", serde_json::json!({}));
                 Flow::Continue
@@ -530,12 +565,18 @@ impl Core {
 
     /// A fragmented response, reassembled: it must be the response its begin
     /// named.
-    fn handle_fragmented(&mut self, id: u64, payload: &[u8]) -> Flow {
-        let category = match Message::decode(payload) {
+    fn handle_fragmented(&mut self, id: u64, payload: Zeroizing<Vec<u8>>) -> Flow {
+        let category = match Message::decode(&payload) {
             Ok(Message::Response {
                 id: answered,
                 outcome,
-            }) if answered == id && self.hello_done => return self.response(id, outcome),
+            }) if answered == id && self.hello_done => {
+                let outcome = match outcome {
+                    Ok(result) => Ok(span(&payload, result)),
+                    Err(error) => Err(span(&payload, error.raw())),
+                };
+                return self.response(id, outcome, payload);
+            }
             Ok(_) if !self.hello_done => "not_hello_first",
             Ok(_) => "fragmented_not_its_response",
             Err(e) => message_category(&e),
@@ -547,21 +588,79 @@ impl Core {
         Flow::Exit(Exit::Protocol)
     }
 
-    /// Main's response to one of the core's requests. Only the naming
-    /// thread sends requests (`shell.*`): it checks that a response answers
-    /// one of them.
-    fn response(&mut self, id: u64, outcome: Result<&RawValue, ErrorBody>) -> Flow {
-        let outcome = match outcome {
-            Ok(result) => match RawValue::from_string(result.get().to_owned()) {
-                Ok(result) => Ok(result),
-                Err(_) => return Flow::Exit(Exit::Internal),
-            },
-            Err(error) => Err(error),
+    /// Main's response to one of the core's requests (`shell.*`), routed
+    /// to the thread that made it: the span of its `result` or its `error`
+    /// in `message`, the response as it was read. One that answers no
+    /// request is unsolicited, a protocol error (0001).
+    fn response(
+        &mut self,
+        id: u64,
+        outcome: Result<Range<usize>, Range<usize>>,
+        message: Zeroizing<Vec<u8>>,
+    ) -> Flow {
+        let Some(owner) = self.requests.answered(id) else {
+            log::error(
+                "protocol error",
+                serde_json::json!({ "category": "unsolicited_response" }),
+            );
+            return Flow::Exit(Exit::Protocol);
         };
-        if self
-            .naming
-            .send(naming::In::Response { id, outcome }, self.credit.take())
-        {
+        let sent = match (owner, outcome) {
+            // Naming copies its result out of the message, and reads its
+            // error whole.
+            (Owner::Naming, outcome) => {
+                let span = match &outcome {
+                    Ok(span) | Err(span) => span.clone(),
+                };
+                let Some(text) = message
+                    .get(span)
+                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                else {
+                    return Flow::Exit(Exit::Internal);
+                };
+                let outcome = match outcome {
+                    Ok(_) => match RawValue::from_string(text.to_owned()) {
+                        Ok(result) => Ok(result),
+                        Err(_) => return Flow::Exit(Exit::Internal),
+                    },
+                    Err(_) => {
+                        let error = serde_json::from_str::<&RawValue>(text)
+                            .map_err(|e| MessageError::Malformed(e.to_string()))
+                            .and_then(ErrorBody::from_raw);
+                        match error {
+                            Ok(error) => Err(error),
+                            Err(e) => {
+                                log::error(
+                                    "protocol error",
+                                    serde_json::json!({ "category": message_category(&e) }),
+                                );
+                                return Flow::Exit(Exit::Protocol);
+                            }
+                        }
+                    }
+                };
+                self.naming
+                    .send(naming::In::Response { id, outcome }, self.credit.take())
+            }
+            // The chain thread takes the message itself, uncopied, and
+            // charges it to the request that asked before reading any of it,
+            // its result or its error (57-M4; round 2).
+            (Owner::Chain, Ok(result)) => self.chain.send(
+                chain::In::Response {
+                    id,
+                    reply: chain::Shell::Result { message, result },
+                },
+                self.credit.take(),
+            ),
+            (Owner::Chain, Err(error)) => self.chain.send(
+                chain::In::Response {
+                    id,
+                    reply: chain::Shell::Failed { message, error },
+                },
+                self.credit.take(),
+            ),
+        };
+        if sent {
             Flow::Continue
         } else {
             Flow::Exit(Exit::Internal)
@@ -585,8 +684,8 @@ impl Core {
         let flow = match method {
             "core.hello" => self.hello(id, params),
             "core.shutdown" => {
-                // No naming request goes after the acknowledgement.
-                self.naming.close();
+                // No request to main goes after the acknowledgement.
+                self.requests.close();
                 match self.result(id, &serde_json::json!({})) {
                     Flow::Continue => Flow::Exit(Exit::Ok),
                     exit => exit,
@@ -604,6 +703,25 @@ impl Core {
                 };
                 if self.naming.send(
                     naming::In::Request {
+                        id,
+                        method: loggable(method),
+                        params,
+                    },
+                    self.credit.take(),
+                ) {
+                    Flow::Continue
+                } else {
+                    Flow::Exit(Exit::Internal)
+                }
+            }
+            method if chain::handles(method) => {
+                let params = match params.map(|p| RawValue::from_string(p.to_owned())) {
+                    Some(Ok(params)) => Some(params),
+                    Some(Err(_)) => return Flow::Exit(Exit::Internal),
+                    None => None,
+                };
+                if self.chain.send(
+                    chain::In::Request {
                         id,
                         method: loggable(method),
                         params,
