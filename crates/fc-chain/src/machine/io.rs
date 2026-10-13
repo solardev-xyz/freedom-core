@@ -130,14 +130,21 @@ pub enum ColibriClass {
     Error,
 }
 
-/// A Colibri operation's outcome.
+/// A Colibri operation's outcome (design 0005, Verified operations).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ColibriReply {
     /// The verified result, as JSON.
     Result(String),
-    /// A revert the prover verified: code 3 and its hex data.
+    /// A verified result of `undefined`, which JSON can't carry: the read's
+    /// result is `undefined`, as today.
+    Undefined,
+    /// A revert the prover verified: code 3 and its hex data. `capacity`
+    /// when the adapter's error is also a capacity failure: the read
+    /// rejects with the revert, and the app's Colibri route is blocked as
+    /// for any capacity failure.
     Revert {
         data: String,
+        capacity: bool,
     },
     Failure(ColibriClass),
 }
@@ -198,8 +205,10 @@ impl Answer {
                 _ => 0,
             },
             Self::Colibri(reply) => match reply {
-                ColibriReply::Result(text) | ColibriReply::Revert { data: text } => text.capacity(),
-                ColibriReply::Failure(_) => 0,
+                ColibriReply::Result(text) | ColibriReply::Revert { data: text, .. } => {
+                    text.capacity()
+                }
+                ColibriReply::Undefined | ColibriReply::Failure(_) => 0,
             },
         }
     }

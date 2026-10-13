@@ -370,6 +370,10 @@ fn verified_answer(record: &Json, before: Option<String>, after: Option<String>)
         if let Some(result) = text_field(answer, "result_json") {
             return Some(Answer::Colibri(ColibriReply::Result(result)));
         }
+        // `{ undefined_keys: ["result"] }`: the adapter resolved `undefined`.
+        if answer.get("result_undefined").and_then(Json::as_bool) == Some(true) {
+            return Some(Answer::Colibri(ColibriReply::Undefined));
+        }
         let thrown = answer.get("thrown")?;
         let code = thrown_prop(thrown, "code")
             .and_then(|e| e.get("json"))
@@ -378,10 +382,15 @@ fn verified_answer(record: &Json, before: Option<String>, after: Option<String>)
             .and_then(|e| e.get("json"))
             .and_then(Json::as_str)
             .and_then(|t| serde_json::from_str::<String>(t).ok());
+        // A verified revert, with `capacity: true` when main's
+        // `isCapacityFailure` also holds for the error.
         if code == Some("3")
             && let Some(data) = data.filter(|d| is_hex_data(d))
         {
-            return Some(Answer::Colibri(ColibriReply::Revert { data }));
+            return Some(Answer::Colibri(ColibriReply::Revert {
+                data,
+                capacity: capacity(thrown),
+            }));
         }
         let class = if capacity(thrown) {
             ColibriClass::Capacity
@@ -2179,11 +2188,31 @@ const DEVIATIONS: &[Expected] = &[
         )],
         ..EXPECTED
     },
+    // A verified revert that is also a capacity failure: rebuilt as
+    // `execution reverted` with its code and data, where the reference
+    // rethrows the adapter's error with its own text. The route is blocked
+    // alike, so the same call again never asks Colibri.
+    Expected {
+        id: "boundary-colibri-revert-capacity",
+        deviation: "adapter-error-text",
+        replies: &[(
+            0,
+            0,
+            0,
+            Want::Thrown {
+                class: "Error",
+                name: "Error",
+                message: "execution reverted",
+                props: &[("code", "3"), ("data", r#""0x""#)],
+            },
+        )],
+        ..EXPECTED
+    },
 ];
 
 /// The score: scenarios replayed exactly (deviation scenarios with their
 /// asserted difference included), and those not replayed yet.
-const PASSING: usize = 301;
+const PASSING: usize = 303;
 const NOT_REPLAYED: usize = 0;
 /// The permitted races, counted: each is a cancel the machine made in the
 /// tick the reference's exchange settled, after what [`race`] names. Main

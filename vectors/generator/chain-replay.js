@@ -1879,6 +1879,20 @@ function boundaryScenarios(ethers, tx) {
       colibri: { error: { message: 'execution reverted', code: 3, data: revert.error.data } },
       rpc: Object.fromEntries(ABC.map((u) => [u, revert])),
     }, req(100, 'eth_call', [{ to: '0xabc', data: '0x12345678' }, 'latest'])),
+    // A verified revert whose error is also a capacity failure: the read
+    // rejects with the revert, and the app's Colibri route is blocked, so
+    // the same call again never asks Colibri.
+    scenario('boundary-colibri-revert-capacity', `${D_}: Verified operations, Colibri's outcomes`, {
+      ...w(1, net(['colibri']), []),
+      colibri: { error: { message: 'out of gas', code: 3, data: '0x' } },
+    }, req(1, 'eth_call', [{ to: '0xabc', data: '0x1234' }, 'latest'], swap),
+    req(1, 'eth_call', [{ to: '0xabc', data: '0x1234' }, 'latest'], swap)),
+    // Colibri resolves undefined: a verified result of undefined, its own
+    // `result` property present.
+    scenario('boundary-colibri-undefined-result', `${D_}: Verified operations, Colibri's outcomes`, {
+      ...w(1, net(['colibri']), []),
+      colibri: ok(undefined),
+    }, req(1, 'eth_blockNumber', []), req(1, 'eth_blockNumber', [], { include_trust: true })),
     scenario('boundary-quorum-reverts-one-answer', `${D_}: Quorum, errors`, {
       ...w(1, net(['quorum', 'direct']), ABC),
       rpc: { [A]: revert, [B]: revert, [C]: ok('0x01', 20) },
