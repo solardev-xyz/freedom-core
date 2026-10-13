@@ -668,6 +668,7 @@ fn an_unread_reply_still_frees_a_verifier_slot() {
     world.machine.availability(1, true);
     let id = world.submit(read(1, "eth_call", CALL), None);
     let io = world.requests[0].0;
+    assert!(world.machine.runs(id));
     world.machine.cancel(id);
     world.collect();
     assert_eq!(protocol(world.reply(id)), Some(Protocol::Cancelled));
@@ -675,6 +676,7 @@ fn an_unread_reply_still_frees_a_verifier_slot() {
     // which nobody reads.
     assert_eq!(world.machine.state_tables().myotis_slots, vec![(1, 1, 0)]);
     assert!(!world.machine.wants(io));
+    assert!(!world.machine.runs(id));
     world.machine.complete_unread(io);
     world.collect();
     assert!(world.machine.state_tables().myotis_slots.is_empty());

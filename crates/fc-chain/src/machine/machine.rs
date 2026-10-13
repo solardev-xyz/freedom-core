@@ -797,6 +797,13 @@ impl Machine {
         self.running.iter().any(|r| r.id == owner).then_some(owner)
     }
 
+    /// Whether request `id` is running: only then can its I/O still be
+    /// wanted. A driver retires the I/O it holds back for a request that
+    /// isn't, however its reply has gone.
+    pub fn runs(&self, id: u64) -> bool {
+        self.running.iter().any(|r| r.id == id)
+    }
+
     /// Whether a running request waits for main's reply to I/O request
     /// `id`. Main's reply to anything else (an I/O request cancelled, or
     /// one whose request has ended) is read no further: the driver

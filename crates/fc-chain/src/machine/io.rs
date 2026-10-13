@@ -171,10 +171,16 @@ impl Answer {
     pub fn bytes(&self) -> usize {
         match self {
             Self::Rpc { body, .. } => body.capacity(),
+            // The vector's places too, which it keeps whoever fills them.
             Self::Blockscout { headers, body, .. } => headers
                 .iter()
                 .map(|(k, v)| k.capacity() + v.capacity())
                 .sum::<usize>()
+                .saturating_add(
+                    headers
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<(String, String)>()),
+                )
                 .saturating_add(body.capacity()),
             Self::NotSent | Self::Failed(_) => 0,
             Self::Myotis(reply) => match reply {
@@ -264,6 +270,19 @@ pub(crate) fn rpc_body(id: u64, method: &str, params: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pages_answer_counts_its_headers_places() {
+        let mut headers = Vec::with_capacity(8);
+        headers.push(("retry-after".to_owned(), "3".to_owned()));
+        let answer = Answer::Blockscout {
+            status: 429,
+            headers,
+            body: Vec::new(),
+        };
+        let strings = "retry-after".len() + "3".len();
+        assert!(answer.bytes() >= strings + 8 * std::mem::size_of::<(String, String)>());
+    }
 
     #[test]
     fn a_body_is_made_in_a_buffer_of_its_length() {
