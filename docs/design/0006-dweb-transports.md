@@ -59,15 +59,18 @@ This design settles where each part goes:
 | `dweb.open` | `{ url, method, headers, backend, private, deadline_ms, attempts_used? }` | a [plan](#plans), with `generations` and `attempts` |
 
 - **`url`** is the request URL as Chromium hands it to the handler, with the scheme `bzz`, `ipfs` or `ipns`.
-- **`method`** is `GET` or `HEAD`; anything else is planned as today's 405.
-- **`headers`** are the request's headers as name–value pairs, in order. The core applies the scheme's header policy to them. The IPFS small-text rule is chosen from them as today: the trimmed first `Accept` token, compared case-insensitively, equals `text/html`. A string that merely starts with `text/html`, such as `text/html;q=0.9`, doesn't count.
-- **`backend`** is the node main will use, as references with no URLs:
-  - for `bzz:`, `{ ant: "bundled" | "external" | "absent" }`;
-  - for IPFS, `{ ipfs: "native" | "gateway" | "absent" }`.
+- **`method`** is `GET` or `HEAD`, read as today's `(method || 'GET').toUpperCase()`, so `get` and an empty method are GET. Anything else is planned as today's 405.
+- **`headers`** are the request's headers as name–value pairs, in order. The core applies the scheme's header policy to them. The IPFS small-text rule is chosen from them as today:
+  - repeated `Accept` headers are joined with `", "`;
+  - the first comma-separated token is trimmed (JavaScript's `trim`, which also strips no-break spaces and a byte-order mark) and lowercased;
+  - it must equal `text/html` exactly. A token that merely starts with `text/html`, such as `text/html;q=0.9`, doesn't count.
+- **`backend`** is the node main will use, as a reference with no URL: its mode, and whether it is up.
+  - For `bzz:`, `{ ant: "bundled" | "external", up }`.
+  - For IPFS, `{ ipfs: "native" | "gateway", up }`.
 
-  The core picks timers and the content label from it. `absent` keeps each scheme's order today:
-  - **For `bzz:`,** the method, path and host checks come first, then an absent Ant is an immediate 503, before any name is resolved.
-  - **For IPFS,** canonicalization and the name's result come first: a transport mismatch or missing contenthash is still a 404, and an unsupported codec a 415. Only a plan that would reach the node becomes the 503, as at today's dispatch.
+  The core picks timers and the content label from the mode. A backend that isn't up keeps each scheme's order today, and its mode's text:
+  - **For `bzz:`,** the method, path and host checks come first. Then an Ant that isn't up, in either mode, is an immediate 503, "Swarm node is not ready", before any name is resolved.
+  - **For IPFS,** canonicalization and the name's result come first: a transport mismatch or missing contenthash is still a 404, and an unsupported codec a 415. Only a plan that would reach the node becomes the 503, as at today's dispatch: "freedom-ipfs node is not running" for the native node, and "external IPFS gateway is not running" for the gateway.
 - **Binding:** main captures the backend instance when it admits the request and keeps it, retries included, so a settings change mid-request can't redirect the fetch.
 - **`private`** marks a private window's request. The core passes it to naming and never logs the URL.
 - **`attempts_used`** is naming's resubmission count (0004), sent again when main re-plans an overtaken plan.
@@ -97,7 +100,7 @@ A plan is one of three things:
   ```
 
 - **`{ redirect: { status, location, headers } }`:** answered without a node. Today that covers IPFS's gateway-form URLs: a 307 to the canonical `ipfs://` form, with `Access-Control-Allow-Origin: *` as today.
-- **`{ error: { status, code, message } }`:** answered without a node, as today's 400, 404, 405, 415 and 502 are.
+- **`{ error: { status, code, message } }`:** answered without a node, as today's 400, 404, 405, 415 and 502 are, and the 503 of a backend that isn't up.
 
 What the fields mean:
 
@@ -107,7 +110,12 @@ What the fields mean:
   - **Native IPFS** has a 15 s queue bound and 30 s to the headers, and no retry.
   - **The external IPFS gateway** has no header timeout, as today, and no retry.
   - **`body_idle_ms`** is new for all of them (deviation `body-idle`, [Main's executor](#main-executes-the-plan)).
-- **`response`** names the optional response operations main runs, in order ([below](#response-operations)). They depend on the bytes, so they stay in main. The security operations aren't optional: main runs them on every response, whatever the plan says.
+- **`response`** names the response operations main runs, in order ([below](#response-operations)). They depend on the bytes, so they stay in main. Plans name today's operations in today's order:
+  - Ant: `canonicalize_redirect`, then `strip_page_state`;
+  - the external IPFS gateway: `strip_decoded_encoding`, `strip_page_state`, then `canonicalize_redirect`;
+  - the native IPFS node: `strip_page_state`, then `small_text` for a GET navigation.
+
+  The security operations aren't optional: main runs them on every response, whatever the plan says.
 - **`trust`** carries the name's trust from naming and a **content** label from `backend`, for display only:
   - `node_asserted`: the bundled Ant, which validates the chunks it fetches, and the native IPFS node, which hash-checks blocks;
   - `unverified`: an external Ant, or an IPFS path gateway.
@@ -120,16 +128,20 @@ All of this is today's behavior, ported with vectors:
 
 - **`bzz:` hosts:**
   - a 64- or 128-hex reference maps to `/bzz/<ref><path><search>`;
-  - a name host (`.eth`, `.wei`, `.gwei`, `.tez`) is resolved through naming, with a published base path joined in;
+  - any other host is a name when `(isDwebNameHost(host) || isPotentialEnsName(host)) && !hasEmptyLabel(host)`, and is resolved through naming, with a published base path joined in:
+    - `isDwebNameHost` is a `.eth`, `.box`, `.wei`, `.gwei` or `.tez` suffix, in any case, `.tez` only with no empty label;
+    - `isPotentialEnsName` is any dotted host with no empty label and no whitespace, `/:@?#%\` or control character, so `bzz://example.com/` asks ENS;
+    - a `.tez` name goes to the Tezos resolver, any other to ENS (`resolveContentName`);
+    - anything else is a 400;
   - a contenthash for another transport is a 404, an unsupported codec a 415, and a conflict or error a 502;
   - encoded `/` or `\` in the path is a 400.
-- **`bzz:` headers:** today's allowlist (`accept*`, the `if-*` validators, `range`, `user-agent`), plus Swarm's retrieval-timeout and redundancy headers.
+- **`bzz:` headers:** today's allowlist (`accept`, `accept-encoding`, `accept-language`, the `if-*` validators, `range`, `user-agent`), plus Swarm's retrieval-timeout and redundancy headers (`30s`, `3`, `true`). `accept-charset` isn't forwarded.
 - **`ipfs:` and `ipns:` hosts:**
   - CIDv0 and base58 CIDv1 re-encode to base32;
   - libp2p-key IPNS names re-encode to base36;
   - a host Chromium's parser has already lowercased beyond recovery gets the actionable 400;
   - gateway-form URLs get the canonical 307, or a 400 when no case-safe form exists;
-  - name hosts resolve as for `bzz:`.
+  - name hosts resolve as for `bzz:`, except that under `ipns:` only a dweb name (`isDwebNameHost`) resolves. Any other host that fits IPNS's host pattern (a key or a DNSLink name: up to 253 letters, digits, `.`, `_` and `-`, starting with a letter or digit) goes to the node as `/ipns/<host>`.
 - **`ipfs:` headers:** today's strip-list (`host`, `origin`, `referer`, `cookie`, `authorization`, hop-by-hop). The asymmetry with `bzz:`'s allowlist is kept (parity); unifying them is an [open question](#open-questions).
 - **The response operations** each scheme needs, and in which order.
 - **Errors:** today's statuses and JSON bodies, `{ code, message }`.
@@ -141,16 +153,16 @@ All of this is today's behavior, ported with vectors:
 | `chain.html` | `{ chain_id, contract, origin, deadline_ms }` | `{ html_base64, hash, source, trust, class, generation }` |
 
 - **A request on 0005's machine:** an `eth_call` of `html()` (selector `0x33c34ac3`) at `latest`, interactive for `origin`, as today. The core then checks the answer as today's `onchain-html.js` does, with vectors:
-  - the encoded answer may be at most `MAX_HTML_BYTES + 95` bytes before any decode, or the result is 413 (`too_large`);
+  - the encoded answer may be at most `MAX_HTML_BYTES + 95` bytes before any decode, or the result is 413 (`too_large`). The size is read from the answer's length, `(length - 2) / 2`, before the hex check, so an oversized answer that isn't hex is a 413 too;
   - the ABI string is decoded with ethers' function-result rules, then checked as UTF-8;
   - the decoded document may be at most 8 MiB (413);
   - `hash = keccak256(utf8(html))`.
 
   This replaces the worker thread and its ethers decode.
 - **`html_base64`** carries the document's UTF-8 bytes. Base64 keeps the reply within 0005's message cap at 10.7 MiB, where a JSON string of control characters could grow six-fold.
-- **`class`** is a stateless classification. It is the gate's input, not its decision:
-  - `trusted`: the trust is `verified` or `user-configured`;
-  - `conflict`: the quorum had dissenters and the trust isn't `verified`;
+- **`class`** is a stateless classification. It is the gate's input, not its decision. It reads the router's `trust`, or, when that is missing or falsy, `{ level: verified === true ? "verified" : "unverified", dissented: [] }`, and decides in this order:
+  - `trusted`: the level is `verified` or `user-configured`. This is checked first, so a `user-configured` result with dissenters is `trusted`;
+  - `conflict`: not trusted, and `dissented` is a non-empty array;
   - `untrusted`: anything else.
 - **Main decides, in today's order** (`onchain-app-protocol.js:399-470`):
   1. a GET carrying a staged document's approval token serves that document, consuming the token, with no chain read and no core call;
@@ -172,17 +184,63 @@ All of this is today's behavior, ported with vectors:
 
 A plan is input to check, not permission to dial. Main refuses a plan unless it passes the checks for its variant. A refused plan gets a 502 and is logged as a core fault.
 
+The plan is checked as the JSON main receives, against the request main admitted (URL, method, `backend`). The first failing check names the refusal, in this order: `shape`, `method`, `node`, `path`, `header`, `retry`, `timers`, `response`, `trust`, `redirect`, `error`. `fc-dweb`'s `validate_plan` and main's executor pass the same vectors.
+
+- **`shape`:** exactly one of `fetch`, `redirect` and `error`, each with exactly the fields shown in [Plans](#plans). The containers have to be of the right type: a string `path`, `headers` as pairs of strings, an array `response`, and objects for `retry`, `timers` and `trust`.
 - **`fetch`:**
-  - `node` names the backend main admitted;
-  - main sends the request's own method;
-  - `path`, after URL normalization, stays in the node's namespace, with no `..` escape, scheme or authority:
-    - for Ant, `/bzz/<64 or 128 hex>` and below, with no encoded `/` or `\` (`bzz:`'s rule today);
-    - for IPFS, `/ipfs/<cid>` or `/ipns/<name>` and below, where encoded separators pass to the node as today;
-  - the headers are among the scheme's policy names, and Swarm's retrieval-timeout and redundancy headers carry today's fixed values;
-  - `retry` and `timers` are within today's values: at most 10 attempts, each delay at most 15 s, a queue bound of at most 15 s, at most 30 s to the headers, a body idle of at most 60 s;
-  - every named response operation is one the backend allows.
-- **`redirect`:** the status is 307, the `Location` is the canonical `ipfs:` or `ipns:` form of the request, and the only header is `Access-Control-Allow-Origin: *`.
-- **`error`:** the status is one of today's (400, 404, 405, 415, 502, 503), and the body is `{ code, message }` with a bounded message.
+  - **`method`:** the request's method, uppercased as above, is GET or HEAD. Main sends that method.
+  - **`node`:** names the backend main admitted for the scheme (`ant` for `bzz:`, `ipfs` for `ipfs:` and `ipns:`), and that backend is up.
+  - **`path`:** normalized, and in the request's own namespace. That rules out any `..` escape, scheme or authority:
+    - the path is unchanged when read back as an HTTP client would send it: dot segments resolved, `\` read as `/`, and the path and query sets percent-encoded;
+    - for `bzz:`, `/bzz/<64 or 128 hex>` and below, with no encoded `/` or `\` anywhere before the query (`bzz:`'s rule today, applied to the node's path, published base path included);
+    - for `ipfs:`, `/ipfs/<ref>` and below; for `ipns:`, `/ipns/<ref>` and below. The reference is letters, digits, `.`, `_` and `-`;
+    - **the path also stays within the namespace once decoded:**
+      - decode `%2E`, `%2F` and `%5C`, in any case, in a single pass;
+      - read both `/` and `\` as separators;
+      - no segment may then be `.` or `..`, so the decoded path stays beneath `/<namespace>/<ref>`.
+
+      A normalized path has no literal dot segments, so any found here come from escapes. An encoded separator that doesn't climb, such as `a%2Fb` in a file name, still passes to the IPFS node as today. The query isn't judged;
+    - a base path that changes which IPFS reference is asked can't be told from the path; the namespace can.
+  - **`header`:**
+    - names are lowercase tokens;
+    - values are RFC 9110 field values (section 5.5): visible ASCII, spaces, tabs and `obs-text` (0x80 to 0xFF). No other control character is allowed (C0, including NUL, CR and LF, or DEL), and no space or tab at either end;
+    - the names are within the scheme's policy: `bzz:`'s allowlist plus Swarm's three headers, each exactly once at its fixed value; anything off IPFS's strip-list.
+  - **`retry`:** within today's values:
+    - at most 10 attempts;
+    - one delay per retry, each a whole number of milliseconds of at most 15 s;
+    - statuses only among 500, 502, 503 and 504, each once;
+    - IPFS has no retry: one attempt, no statuses, `on_error` false.
+  - **`timers`:** each a positive whole number of milliseconds:
+    - a queue bound of at most 15 s, or none;
+    - at most 30 s to the headers, which only the external gateway may leave unbounded;
+    - a body idle of at most 60 s, never unbounded.
+  - **`response`:** each operation known and named once, and one the backend allows:
+    - Ant: `canonicalize_redirect` and `strip_page_state`;
+    - the native node: `strip_page_state` and `small_text`;
+    - the external gateway: all four.
+  - **`trust`:** `name` is a string or null, and `content` is the backend's label.
+- **`redirect`:** only for `ipfs:` and `ipns:`:
+  - the status is 307;
+  - the `Location` is exactly the canonical form today's `gatewayFormRedirect` gives the request's URL;
+  - the only header is `Access-Control-Allow-Origin: *`.
+
+  A backend that isn't up can still redirect.
+- **`error`:** the status is one of today's (400, 404, 405, 415, 502, 503), `code` equals it, and the message is a string of at most 131,072 UTF-16 code units (twice the URL bound).
+
+Validation is stricter than today's dialing (deviation `plan-paths`). Today the handlers dial each of these plans; validation refuses them with a 502:
+- **For `bzz:`:**
+  - a published base path containing `%2F` or `%5C`: today's rule checks only the request URL's path;
+  - a relative base path, which glues onto the reference (`/bzz/<ref>docs/page`);
+  - a climbing base path, or a resolver `decoded` of `..`, which leave `/bzz/<ref>`;
+  - a resolver `decoded` that isn't a 64- or 128-hex reference at all.
+- **For either scheme:**
+  - literal-backslash dot segments, such as `bzz://<ref>/a/..\..\..\stamps`, dialled today as `/stamps`, or `ipfs://<cid>/a/..\..\..\ipns\x`, dialled today as `/ipns/x`. Node's URL parser keeps a `\` in a path whose scheme isn't special, and the HTTP client then resolves it;
+  - a target outside the request's own namespace, including a resolver `decoded` of `../ipns/…`.
+- **For IPFS:** an encoded separator that forms a `.` or `..` segment once decoded, such as `..%2F`, `%2E%2E%2F` or `%2E%2E%5C`, in any case. That holds even when the result would stay beneath the reference, as in `a%2F..%2Fb`. (`bzz:` already refuses any encoded separator.)
+
+Pages can't produce the backslash forms, because Chromium canonicalizes standard-scheme URLs first.
+
+Field values are stricter than `Headers` too (deviation `plan-headers`). A request header whose value holds a control character other than an interior tab, such as a vertical tab in `Accept`, is passed on today; validation refuses the plan with a 502.
 
 ### Transport
 
@@ -203,17 +261,22 @@ A plan is input to check, not permission to dial. Main refuses a plan unless it 
 These stay in main, because they depend on the bytes. Each is today's code.
 
 **Always run,** whatever the plan names:
-- **`strip_page_state`** (O-12): removes `Set-Cookie`, `Set-Cookie2` and `Service-Worker-Allowed` from every dweb response.
+- **`strip_page_state`** (O-12): removes `Set-Cookie`, `Set-Cookie2` and `Service-Worker-Allowed` from every dweb response. Today the native IPFS node's answers pass unstripped (deviation `native-page-state`).
 - **`strip_decoded_encoding`**, for every response from the external IPFS gateway: removes the decoded body's `content-encoding` and `content-length` and the hop-by-hop headers.
 
 **Run when the plan names them:**
-- **`canonicalize_redirect`** (`lib/gateway-location.js`): rewrites a gateway-space `Location` relative to the gateway request's directory, comparing decoded path segments, and leaves cross-origin and up-directory `Location`s untouched (#95). On a rewrite, `bzz:` cancels and drops the body and removes the length and encoding headers.
-- **`small_text`** (IPFS navigations only). It relabels a body as `text/plain` with `nosniff` only when all of these hold:
+- **`canonicalize_redirect`** (`lib/gateway-location.js`): rewrites a gateway-space `Location` relative to the gateway request's directory, comparing decoded path segments, and leaves cross-origin and up-directory `Location`s untouched (#95).
+  - **Ant:** only a 301, 302, 303, 307 or 308 is rewritten. On a rewrite, `bzz:` cancels and drops the body and removes the length and encoding headers.
+  - **The external gateway:** any 3xx is rewritten in place, and the body is kept.
+  - **The native node:** today its redirects pass as they are, so its plans don't name the operation.
+- **`small_text`** (IPFS navigations only). Plans name it only for the native node. On the external gateway it never fires today, because `ipfs-manager.js` drops `Content-Length` before the rule reads it. It relabels a body as `text/plain` with `nosniff` only when all of these hold:
   - the request is a GET and the status 200;
-  - the parsed media type is exactly `application/octet-stream`;
-  - there is no `X-Content-Type-Options` header at all, no `Content-Disposition` and no range;
-  - a body is present, with an integer declared length between 1 and 4096 bytes that matches the body at EOF;
-  - the body is valid UTF-8 without forbidden control characters.
+  - the parsed media type is exactly `application/octet-stream`: the first `;`-separated part, trimmed and lowercased;
+  - there is no `X-Content-Type-Options` header at all, no `Content-Disposition` and no `Content-Range` response header;
+  - a body is present, with an integer declared length between 1 and 4096 bytes that matches the body at EOF:
+    - the length is `Number()`'s reading of the `Content-Length` value, so `0x2`, `2.0`, `2e0` and ` 2 ` all count as 2;
+    - a missing header reads as 0;
+  - the body is valid UTF-8, without control characters other than tab, line feed, form feed and carriage return.
 
   Otherwise the buffered bytes are replayed intact.
   - **Its buffer:** the sniff reads until it has more than 4096 bytes or EOF. It holds at most 4 KiB plus one upstream chunk (64 KiB from the native node), because a lying length can deliver a whole chunk at once. Every byte is replayed.
@@ -235,9 +298,9 @@ These stay in main, because they depend on the bytes. Each is today's code.
   - each fetch owns its node handle, its sniff buffer (at most 4 KiB plus one upstream chunk) and its retry state, and frees them on every terminal path: done, error, cancel, or the session closing;
   - a plan is checked against the generations once more after any wait in main's queue, so a plan that waited is never used stale.
 - **Local failures map to HTTP:** `busy` → 503, `deadline` → 504, `too_large` → 414 or 431 as above, and a refused plan → 502.
-- **Readiness keeps each scheme's order** (`backend: absent`):
-  - **For `bzz:`,** the method, path and host checks come first, so a POST is still a 405 and an encoded separator in a `bzz:` path still a 400 with Ant absent. Then an absent Ant is an immediate 503, before any name is resolved.
-  - **For IPFS,** the name's result comes first, and only a plan bound for the node gets the 503.
+- **Readiness keeps each scheme's order** (`backend` with `up: false`):
+  - **For `bzz:`,** the method, path and host checks come first, so a POST is still a 405 and an encoded separator in a `bzz:` path still a 400 with Ant down. Then an Ant that isn't up, in either mode, is an immediate 503, before any name is resolved.
+  - **For IPFS,** the name's result comes first, and only a plan bound for the node gets the 503, with its mode's text. A gateway-form URL still gets its 307.
 
 ### Other callers
 
@@ -313,6 +376,9 @@ Before step 4 moves a handler:
 | `web3-cancel` | an aborted navigation leaves the chain read running | `cancel` reaches it | |
 | `web3-decode` | ethers in a worker | the core | the same document, hash and 413s; the worker goes |
 | `hash-host-hop` | hash hosts need no lookup | one planning round trip | measured ([Latency](#latency)) |
+| `native-page-state` | the native IPFS node's answers pass with `Set-Cookie`, `Set-Cookie2` and `Service-Worker-Allowed` | stripped, as from Ant and the external gateway | the native node can't set cookies or widen a service worker's scope on the `ipfs://` origin |
+| `plan-paths` | dialled: a `bzz:` published base path with an encoded separator, a relative one, or a climbing one; a `bzz:` resolver `decoded` that isn't a 64- or 128-hex reference, `..` included; literal-backslash dot segments; a target outside the request's own namespace, such as a `decoded` of `../ipns/…`; an IPFS path with an encoded separator that forms a `.` or `..` segment once decoded ([Validation](#validation-before-any-dial)) | refused by validation, which judges the path as decoded too | such plans get 502 where today they are dialled. Pages can't produce the backslash forms, because Chromium canonicalizes standard-scheme URLs first |
+| `plan-headers` | a header value with a control character other than an interior tab, which `Headers` accepts, is passed on | refused by validation (RFC 9110 field values) | such plans get 502 where today the header is sent |
 
 ## Implementation steps
 
