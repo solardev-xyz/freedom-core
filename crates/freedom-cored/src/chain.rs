@@ -260,18 +260,33 @@ struct Queued {
     /// machine's own timer for it ends then. `None` for a Myotis
     /// operation, which main runs whole while its request runs.
     own: Option<Ms>,
-    /// When it expires here, unsent, if it is still waiting: its own
-    /// deadline, or for a transaction sent (a broadcast's attempt, Direct
-    /// or Myotis) its broadcast's attempt cutoff, 10 s before the deadline,
-    /// if earlier (design 0005, Deadlines). It expires before a timer due
-    /// at the same instant fires.
+    /// The latest it may start for itself: its own deadline, or for a
+    /// transaction sent (a broadcast's attempt, Direct or Myotis) its
+    /// broadcast's attempt cutoff, 10 s before the deadline, if earlier
+    /// (design 0005, Deadlines).
     until: Option<Ms>,
     /// Its chain request's deadline. The machine's own timer for that ends
     /// the request, and the request's waiting I/O retires.
     deadline: Option<Ms>,
+    /// Whether it sends a transaction ([`Request::sends_transaction`]).
+    sends: bool,
 }
 
 impl Queued {
+    /// When it expires here, unsent, if it is still waiting: at `until`,
+    /// before any timer due at the same instant (the machine's own for its
+    /// exchange), only when that is earlier than its chain request's
+    /// deadline. From that deadline on, the machine's own timer for the
+    /// request goes first: a read or a fee quote ends with `deadline`, and
+    /// this retires unread (PR #57 daemon review, round 5). A transaction's
+    /// attempt expires at its cutoff all the same, so one that never went
+    /// counts as not sent in its broadcast's outcome.
+    fn expiry(&self) -> Option<Ms> {
+        let until = self.until?;
+        let first = self.sends || self.deadline.is_none_or(|deadline| until < deadline);
+        first.then_some(until)
+    }
+
     /// Whether it may still start at `now` ([`Requests::send`]): not at or
     /// after its own deadline, its broadcast's attempt cutoff or its chain
     /// request's deadline, whichever comes first. Its `deadline_ms` is
@@ -472,7 +487,7 @@ impl Chain {
 
     /// When the first request waiting here runs out of time.
     fn next_expiry(&self) -> Option<Ms> {
-        self.queued.iter().filter_map(|q| q.until).min()
+        self.queued.iter().filter_map(Queued::expiry).min()
     }
 
     /// Completes the requests waiting here whose time ran out by `at`:
@@ -480,7 +495,7 @@ impl Chain {
     fn expire(&mut self, at: Ms) {
         let mut i = 0;
         while i < self.queued.len() {
-            if self.queued[i].until.is_some_and(|until| until <= at)
+            if self.queued[i].expiry().is_some_and(|until| until <= at)
                 && let Some(queued) = self.queued.remove(i)
             {
                 self.machine
@@ -741,7 +756,8 @@ impl Chain {
                     // A transaction is sent only before its broadcast's
                     // attempt cutoff; reconciliation reads run on to the
                     // deadline.
-                    let cutoff = if request.sends_transaction() {
+                    let sends = request.sends_transaction();
+                    let cutoff = if sends {
                         caller.and_then(|caller| caller.cutoff)
                     } else {
                         None
@@ -755,6 +771,7 @@ impl Chain {
                         own,
                         until: earliest(own, cutoff),
                         deadline,
+                        sends,
                     });
                 }
                 Effect::Cancel { id: io, .. } => {

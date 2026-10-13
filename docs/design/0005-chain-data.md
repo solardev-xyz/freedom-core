@@ -227,8 +227,9 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
 - **The latest start is checked last,** as the final step before the request is handed to the writer.
   - **The check** runs under the gate the core's requests share, once the request's frame is made. Its clock reading is the one that also writes the request's `deadline_ms`.
   - **A request past it** never goes.
-    - Past its exchange's end or the cutoff, it completes as not sent, so a broadcast attempt that never went counts as not sent.
-    - Past its chain request's deadline, that request ends with `deadline` (a broadcast, with its outcome) and its unsent I/O retires, freeing a verifier's slot.
+    - Past its exchange's end, when that comes before its chain request's deadline, it completes as not sent.
+    - Past its chain request's deadline, that request ends with `deadline` (a broadcast, with its outcome) and its unsent I/O retires, freeing a verifier's slot. This holds when its exchange ends at that same instant too: the deadline goes first, so a read replies `deadline`, not a source's failure.
+    - Past the cutoff, a transaction's attempt completes as not sent, even at its deadline, so a broadcast attempt that never went counts as not sent.
   - **Its `deadline_ms`** is what is left, at that reading, of the earlier of its exchange's end and its chain request's deadline.
   - **Not covered:** the time a request then spends in the writer's queue and in the pipe. For a broadcast attempt, the 10 s reserve covers that; any request's `deadline_ms` bounds what main does with it. A request is a whole frame, written in the order it comes, and never waits behind a fragmented reply or for main's credit ([Frames](#frames)).
 - **Main's watchdog** is the deadline plus 15 s (0001).

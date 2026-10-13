@@ -1863,6 +1863,99 @@ fn an_exchange_never_starts_past_its_reads_deadline() {
 }
 
 #[test]
+fn an_exchange_ending_with_its_reads_deadline_replies_deadline() {
+    // Daemon review, round 5: a queued exchange's own end, 500 ms, ties
+    // with its read's deadline. The read's deadline goes first: the read
+    // replies `deadline`, not the source error a never-sent exchange
+    // makes. A deadline a millisecond earlier ends it the same way.
+    for deadline_ms in [500, 499] {
+        let mut t = test_with(Bounds::default(), usize::MAX, 1, true);
+        let mut config = chain_snapshot(&["direct"], &["a"]);
+        config["quorum"]["timeout_ms"] = json!(500);
+        t.configure(json!([config]));
+        let held = occupy(&t);
+        let (id, mut params) = read(3, "eth_blockNumber", json!([]));
+        params["deadline_ms"] = json!(deadline_ms);
+        t.call(id, "chain.request", &params);
+        assert_eq!(t.chain.queued[0].own, Some(500));
+        assert_eq!(t.chain.queued[0].deadline, Some(deadline_ms));
+        t.at(deadline_ms);
+        let frames = t.written();
+        assert!(requests(&frames).is_empty(), "{frames:?}");
+        let reply = frames.iter().find(|f| f["id"] == 3).unwrap();
+        assert_eq!(reply["error"]["code"], "deadline", "{deadline_ms}: {reply}");
+        assert_eq!(reply["error"]["data"], json!({ "generation": 1 }));
+        assert!(t.chain.queued.is_empty());
+        assert_eq!(t.chain.requests.answered(held), Some(Owner::Naming));
+    }
+}
+
+#[test]
+fn a_broadcast_attempt_tied_with_its_deadline_is_not_sent() {
+    // The tie for a broadcast's attempt: with no reconciliation room, its
+    // cutoff is its deadline. The attempt that never went still expires
+    // first, so the broadcast's outcome table reports `not_sent`, not an
+    // outstanding, possibly sent, attempt.
+    let bounds = Bounds {
+        reconcile_ms: 0,
+        ..Bounds::default()
+    };
+    let mut t = test_with(bounds, usize::MAX, 1, true);
+    t.configure(json!([chain_snapshot(&["direct"], &["a"])]));
+    let held = occupy(&t);
+    t.call(
+        3,
+        "chain.broadcast",
+        &json!({ "chain_id": 1, "raw": "0x01", "deadline_ms": 500 }),
+    );
+    assert!(t.chain.queued[0].sends);
+    assert_eq!(t.chain.queued[0].until, Some(500));
+    assert_eq!(t.chain.queued[0].deadline, Some(500));
+    t.at(500);
+    let frames = t.written();
+    assert_eq!(sends(&frames), 0);
+    let reply = frames.iter().find(|f| f["id"] == 3).unwrap();
+    assert_eq!(reply["error"]["data"]["outcome"], "not_sent", "{reply}");
+    assert!(t.chain.queued.is_empty());
+    assert_eq!(t.chain.requests.answered(held), Some(Owner::Naming));
+}
+
+#[test]
+fn a_reconciliation_read_tied_with_its_broadcasts_deadline_reports_through_the_table() {
+    // A broadcast's reconciliation read whose exchange ends with the
+    // broadcast's deadline: the deadline goes first, and the broadcast
+    // reports through its outcome table. Its attempt went and was never
+    // answered: `uncertain`.
+    let mut t = test_with(Bounds::default(), usize::MAX, 2, true);
+    let mut config = chain_snapshot(&["direct"], &["a"]);
+    config["quorum"]["timeout_ms"] = json!(10_000);
+    t.configure(json!([config]));
+    t.call(
+        3,
+        "chain.broadcast",
+        &json!({ "chain_id": 1, "raw": "0x01", "deadline_ms": 10_500 }),
+    );
+    assert_eq!(sends(&t.written()), 1);
+    let held = occupy(&t);
+    // The cutoff: the attempt in flight counts as possibly sent, and the
+    // lookup waits for a slot, its exchange ending at the deadline.
+    t.at(500);
+    assert_eq!(t.chain.queued.len(), 1, "{:?}", t.written());
+    assert!(!t.chain.queued[0].sends);
+    assert_eq!(t.chain.queued[0].own, Some(10_500));
+    assert_eq!(t.chain.queued[0].deadline, Some(10_500));
+    t.written();
+    t.at(10_500);
+    let frames = t.written();
+    assert!(requests(&frames).is_empty(), "{frames:?}");
+    let reply = frames.iter().find(|f| f["id"] == 3).unwrap();
+    assert_eq!(reply["result"]["outcome"], "uncertain", "{reply}");
+    assert_eq!(reply["result"]["source"], "direct", "{reply}");
+    assert!(t.chain.queued.is_empty());
+    assert_eq!(t.chain.requests.answered(held), Some(Owner::Naming));
+}
+
+#[test]
 fn a_myotis_read_never_starts_past_its_reads_deadline() {
     // MEDIUM (c): a Myotis read's operation has no deadline of its own,
     // but its read's ends at 200 ms, passing while its near-one-frame
