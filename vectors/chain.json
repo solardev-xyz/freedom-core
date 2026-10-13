@@ -14361,6 +14361,7 @@
       },
       {
         "id": "text-multibyte-under-cap",
+        "deviation": "blockscout-page-bytes",
         "params": "[{\"address\":\"0xdbf3ea6f5bee45c02255b2c26a16f300502f68da\",\"topics\":[\"0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef\",\"0x000000000000000000000000abababababababababababababababababababab\"],\"fromBlock\":\"0x64\",\"toBlock\":\"0xc8\"}]",
         "to_block": 200,
         "pages": [
@@ -14383,6 +14384,30 @@
             "message": "refused the query",
             "cool_ms": 60000
           }
+        }
+      },
+      {
+        "id": "page-multibyte-over-byte-cap",
+        "deviation": "blockscout-page-bytes",
+        "params": "[{\"address\":\"0xdbf3ea6f5bee45c02255b2c26a16f300502f68da\",\"topics\":[\"0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef\",\"0x000000000000000000000000abababababababababababababababababababab\"],\"fromBlock\":\"0x64\",\"toBlock\":\"0xc8\"}]",
+        "to_block": 200,
+        "pages": [
+          {
+            "url": "https://gnosis.blockscout.com/api/v2/addresses/0xabababababababababababababababababababab/token-transfers?type=ERC-20&filter=from&token=0xdbf3ea6f5bee45c02255b2c26a16f300502f68da&block_number=201&index=0",
+            "status": 200,
+            "content_length": null,
+            "x_ratelimit_reset": null,
+            "retry_after": null,
+            "body_repeat": {
+              "prefix": "{\"items\":[],\"next_page_params\":null,\"pad\":\"",
+              "unit": "é",
+              "count": 4194304,
+              "suffix": "\"}"
+            }
+          }
+        ],
+        "js": {
+          "transfers_json": "[]"
         }
       },
       {
@@ -16299,6 +16324,86 @@
             "name": "Error",
             "message_json": "\"Nonce too low\"",
             "code_json": "-32003",
+            "data_json": null
+          }
+        },
+        "design": {
+          "class": "ambiguous"
+        }
+      },
+      {
+        "client": "boundary",
+        "status": 200,
+        "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32003,\"message\":\"nonce too low\"}}",
+        "js": {
+          "error": {
+            "name": "Error",
+            "message_json": "\"nonce too low\"",
+            "code_json": "-32003",
+            "data_json": null
+          }
+        },
+        "design": {
+          "class": "ambiguous"
+        }
+      },
+      {
+        "client": "boundary",
+        "status": 200,
+        "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32010,\"message\":\"transaction too large\"}}",
+        "js": {
+          "error": {
+            "name": "Error",
+            "message_json": "\"transaction too large\"",
+            "code_json": "-32010",
+            "data_json": null
+          }
+        },
+        "design": {
+          "class": "ambiguous"
+        }
+      },
+      {
+        "client": "boundary",
+        "status": 200,
+        "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32010,\"message\":\"transaction underpriced\"}}",
+        "js": {
+          "error": {
+            "name": "Error",
+            "message_json": "\"transaction underpriced\"",
+            "code_json": "-32010",
+            "data_json": null
+          }
+        },
+        "design": {
+          "class": "ambiguous"
+        }
+      },
+      {
+        "client": "boundary",
+        "status": 200,
+        "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32003,\"message\":\"oversized data\"}}",
+        "js": {
+          "error": {
+            "name": "Error",
+            "message_json": "\"oversized data\"",
+            "code_json": "-32003",
+            "data_json": null
+          }
+        },
+        "design": {
+          "class": "ambiguous"
+        }
+      },
+      {
+        "client": "boundary",
+        "status": 200,
+        "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32010,\"message\":\"FeeTooLow\"}}",
+        "js": {
+          "error": {
+            "name": "Error",
+            "message_json": "\"FeeTooLow\"",
+            "code_json": "-32010",
             "data_json": null
           }
         },

@@ -84,148 +84,110 @@ impl RefusalReason {
 
 use RefusalReason as R;
 
-/// geth's phrases: geth, Nethermind 2, reth and the providers; Nethermind
-/// up to 1.36 sends `nonce too low` with `-32010`, reth some with `-32003`.
-const GETH_CODES: &[i64] = &[-32000, -32003, -32010];
-/// Nethermind's own wordings.
-const NETHERMIND_CODES: &[i64] = &[-32000, -32010];
-const ERIGON_CODES: &[i64] = &[-32000];
+// Each wording carries exactly the codes its clients document for it, as the
+// vectors list them; a known wording with another code is ambiguous.
+/// The common code.
+const C0: &[i64] = &[-32000];
+/// reth sends some of geth's phrases with `-32003`.
+const C0_RETH: &[i64] = &[-32000, -32003];
+/// Nethermind up to 1.36 sends some wordings with `-32010`.
+const C0_NM136: &[i64] = &[-32000, -32010];
 
 /// `(codes, message prefix, reason)`.
 const REFUSALS: &[(&[i64], &str, RefusalReason)] = &[
     // geth's phrases.
-    (GETH_CODES, "insufficient funds", R::InsufficientFunds),
-    (GETH_CODES, "nonce too low", R::NonceTooLow),
+    (C0_RETH, "insufficient funds", R::InsufficientFunds),
+    (C0_NM136, "nonce too low", R::NonceTooLow),
     (
-        GETH_CODES,
+        C0,
         "replacement transaction underpriced",
         R::ReplacementUnderpriced,
     ),
-    (GETH_CODES, "transaction underpriced", R::Underpriced),
-    (GETH_CODES, "intrinsic gas too low", R::IntrinsicGasTooLow),
+    (C0, "transaction underpriced", R::Underpriced),
+    (C0, "intrinsic gas too low", R::IntrinsicGasTooLow),
+    (C0, "exceeds block gas limit", R::ExceedsBlockGasLimit),
     (
-        GETH_CODES,
-        "exceeds block gas limit",
-        R::ExceedsBlockGasLimit,
-    ),
-    (
-        GETH_CODES,
+        C0,
         "max fee per gas less than block base fee",
         R::FeeCapBelowBaseFee,
     ),
     (
-        GETH_CODES,
+        C0_RETH,
         "max priority fee per gas higher than max fee per gas",
         R::TipAboveFeeCap,
     ),
-    (GETH_CODES, "invalid sender", R::InvalidSender),
+    (C0, "invalid sender", R::InvalidSender),
     // Erigon's RPC check, then reth's.
-    (GETH_CODES, "invalid chain id", R::InvalidChainId),
-    (GETH_CODES, "invalid chain ID", R::InvalidChainId),
-    (GETH_CODES, "oversized data", R::OversizedData),
+    (C0, "invalid chain id", R::InvalidChainId),
+    (C0, "invalid chain ID", R::InvalidChainId),
+    (C0, "oversized data", R::OversizedData),
     (
-        GETH_CODES,
+        C0_RETH,
         "transaction type not supported",
         R::TransactionTypeNotSupported,
     ),
     // Nethermind 2.
+    (C0, "gas limit reached", R::ExceedsBlockGasLimit),
+    (C0, "transaction too large", R::OversizedData),
     (
-        NETHERMIND_CODES,
-        "gas limit reached",
-        R::ExceedsBlockGasLimit,
-    ),
-    (NETHERMIND_CODES, "transaction too large", R::OversizedData),
-    (
-        NETHERMIND_CODES,
+        C0,
         "unsupported transaction type",
         R::TransactionTypeNotSupported,
     ),
+    (C0, "failed to recover sender", R::InvalidSender),
     (
-        NETHERMIND_CODES,
-        "failed to recover sender",
-        R::InvalidSender,
-    ),
-    (
-        NETHERMIND_CODES,
+        C0,
         "transaction invalid, InvalidTxChainId",
         R::InvalidChainId,
     ),
     (
-        NETHERMIND_CODES,
+        C0,
         "transaction invalid, InvalidTxSignature",
         R::InvalidSender,
     ),
     (
-        NETHERMIND_CODES,
+        C0,
         "transaction invalid, intrinsic gas too low",
         R::IntrinsicGasTooLow,
     ),
     // Nethermind 1.
-    (NETHERMIND_CODES, "InsufficientFunds", R::InsufficientFunds),
-    (NETHERMIND_CODES, "FeeTooLow", R::Underpriced),
-    (
-        NETHERMIND_CODES,
-        "ReplacementNotAllowed",
-        R::ReplacementUnderpriced,
-    ),
-    (NETHERMIND_CODES, "MaxTxSizeExceeded", R::OversizedData),
-    (
-        NETHERMIND_CODES,
-        "NotSupportedTxType",
-        R::TransactionTypeNotSupported,
-    ),
-    (NETHERMIND_CODES, "FailedToResolveSender", R::InvalidSender),
-    (
-        NETHERMIND_CODES,
-        "Invalid, InvalidTxChainId",
-        R::InvalidChainId,
-    ),
-    (
-        NETHERMIND_CODES,
-        "Invalid, InvalidTxSignature",
-        R::InvalidSender,
-    ),
-    (
-        NETHERMIND_CODES,
-        "Invalid, intrinsic gas too low",
-        R::IntrinsicGasTooLow,
-    ),
+    (C0_NM136, "InsufficientFunds", R::InsufficientFunds),
+    (C0, "FeeTooLow", R::Underpriced),
+    (C0_NM136, "ReplacementNotAllowed", R::ReplacementUnderpriced),
+    (C0, "MaxTxSizeExceeded", R::OversizedData),
+    (C0, "NotSupportedTxType", R::TransactionTypeNotSupported),
+    (C0, "FailedToResolveSender", R::InvalidSender),
+    (C0, "Invalid, InvalidTxChainId", R::InvalidChainId),
+    (C0, "Invalid, InvalidTxSignature", R::InvalidSender),
+    (C0, "Invalid, intrinsic gas too low", R::IntrinsicGasTooLow),
     // Erigon.
+    (C0, "INTERNAL_ERROR: nonce too low", R::NonceTooLow),
     (
-        ERIGON_CODES,
-        "INTERNAL_ERROR: nonce too low",
-        R::NonceTooLow,
-    ),
-    (
-        ERIGON_CODES,
+        C0,
         "INTERNAL_ERROR: insufficient funds",
         R::InsufficientFunds,
     ),
+    (C0, "INTERNAL_ERROR: IntrinsicGas", R::IntrinsicGasTooLow),
     (
-        ERIGON_CODES,
-        "INTERNAL_ERROR: IntrinsicGas",
-        R::IntrinsicGasTooLow,
-    ),
-    (
-        ERIGON_CODES,
+        C0,
         "INTERNAL_ERROR: gas limit is too high",
         R::ExceedsBlockGasLimit,
     ),
-    (ERIGON_CODES, "FEE_TOO_LOW: underpriced", R::Underpriced),
+    (C0, "FEE_TOO_LOW: underpriced", R::Underpriced),
     (
-        ERIGON_CODES,
+        C0,
         "FEE_TOO_LOW: replacement transaction underpriced",
         R::ReplacementUnderpriced,
     ),
-    (ERIGON_CODES, "INVALID: invalid sender", R::InvalidSender),
-    (ERIGON_CODES, "INVALID: oversized data", R::OversizedData),
+    (C0, "INVALID: invalid sender", R::InvalidSender),
+    (C0, "INVALID: oversized data", R::OversizedData),
     (
-        ERIGON_CODES,
+        C0,
         "INVALID: fork supporting this transaction type is not activated yet",
         R::TransactionTypeNotSupported,
     ),
     (
-        ERIGON_CODES,
+        C0,
         "INVALID: max priority fee per gas higher than max fee per gas",
         R::TipAboveFeeCap,
     ),

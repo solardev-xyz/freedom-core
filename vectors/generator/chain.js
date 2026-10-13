@@ -1742,7 +1742,10 @@ function scanScenarios(blockscout) {
     // Text length is counted in UTF-16 code units, after decoding.
     { id: 'text-at-cap', params: bySender, toBlock: 200, pages: [{ status: 200, body_repeat: { prefix: '"', unit: 'a', count: 8388606, suffix: '"' } }] },
     { id: 'text-over-cap', params: bySender, toBlock: 200, pages: [{ status: 200, body_repeat: { prefix: '"', unit: 'a', count: 8388607, suffix: '"' } }] },
-    { id: 'text-multibyte-under-cap', params: bySender, toBlock: 200, pages: [{ status: 200, body_repeat: { prefix: '"', unit: 'é', count: 4194304, suffix: '"' } }] },
+    { id: 'text-multibyte-under-cap', params: bySender, toBlock: 200, deviation: 'blockscout-page-bytes', pages: [{ status: 200, body_repeat: { prefix: '"', unit: 'é', count: 4194304, suffix: '"' } }] },
+    // A valid page under 8 Mi UTF-16 units but over 8 MiB of bytes: the
+    // reference reads it; the core refuses it (deviation blockscout-page-bytes).
+    { id: 'page-multibyte-over-byte-cap', params: bySender, toBlock: 200, deviation: 'blockscout-page-bytes', pages: [{ status: 200, body_repeat: { prefix: '{"items":[],"next_page_params":null,"pad":"', unit: 'é', count: 4194304, suffix: '"}' } }] },
     { id: 'no-log-index', filter: { chainId: 1, token, sender, recipient: null, fromBlock: 100, toBlock: 200 }, toBlock: 200, pages: [] },
   ];
 }
@@ -1781,6 +1784,7 @@ async function buildScans(blockscout) {
     assert.equal(pages.length, 0, `${scenario.id}: pages left unread`);
     out.push({
       id: scenario.id,
+      ...(scenario.deviation ? { deviation: scenario.deviation } : {}),
       ...(scenario.params ? { params: scenario.params } : { filter_json: jsonText(filter) }),
       to_block: scenario.toBlock,
       pages: scenario.pages.map((entry, index) => {
@@ -2039,6 +2043,12 @@ const BROADCAST_ERRORS = [
   ['boundary', -32001, 'nonce too low', null],
   ['boundary', -32602, 'nonce too low', null],
   ['boundary', -32003, 'Nonce too low', null],
+  // A known wording with a code no client documents for it.
+  ['boundary', -32003, 'nonce too low', null],
+  ['boundary', -32010, 'transaction too large', null],
+  ['boundary', -32010, 'transaction underpriced', null],
+  ['boundary', -32003, 'oversized data', null],
+  ['boundary', -32010, 'FeeTooLow', null],
   ['boundary', -32000, ' nonce too low', null],
   ['boundary', -32000, 'error: nonce too low', null],
   ['boundary', -32000, 'nonce too lo', null],

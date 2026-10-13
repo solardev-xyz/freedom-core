@@ -693,6 +693,11 @@ fn page_text(reply: PageReply<'_>) -> Result<String, BlockscoutError> {
     if length.is_finite() && length > MAX_PAGE_SIZE as f64 {
         return Err(BlockscoutError::new("answer over 8 MiB"));
     }
+    // The reference counts UTF-16 units; the core also caps the bytes,
+    // whatever the headers say (deviation `blockscout-page-bytes`).
+    if reply.body.len() > MAX_PAGE_SIZE {
+        return Err(BlockscoutError::new("answer over 8 MiB"));
+    }
     let text = decode_text(reply.body);
     if text.chars().map(char::len_utf16).sum::<usize>() > MAX_PAGE_SIZE {
         return Err(BlockscoutError::new("answer over 8 MiB"));

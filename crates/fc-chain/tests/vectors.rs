@@ -874,8 +874,17 @@ fn blockscout_scans() {
     let blockscout = &vectors["blockscout"];
     let base = str_of(&blockscout["constants"], "log_index_url");
     let scans = blockscout["scans"].as_array().unwrap();
+    let mut deviations = 0;
     for case in scans {
         let name = id(case);
+        let byte_cap = match deviation(case) {
+            None => false,
+            Some("blockscout-page-bytes") => {
+                deviations += 1;
+                true
+            }
+            Some(other) => panic!("unknown deviation {other}"),
+        };
         let filter = match opt_str(case, "params") {
             Some(params) => log_index_filter(LOG_INDEX_CHAIN_ID, params).unwrap(),
             None => filter_of(str_of(case, "filter_json")),
@@ -912,6 +921,15 @@ fn blockscout_scans() {
                 body: page_body(page),
             };
             let last = i + 1 == pages.len();
+            if byte_cap {
+                // Under the reference's UTF-16 cap, over the core's bytes:
+                // whatever the reference made of it, the core refuses it.
+                match scan.on_page(reply) {
+                    Err(error) => assert_eq!(error.message, "answer over 8 MiB", "{name}"),
+                    other => panic!("{name}: {other:?}"),
+                }
+                continue;
+            }
             match scan.on_page(reply) {
                 Ok(ScanStep::Next) => assert!(!last, "{name}: more pages expected"),
                 Ok(ScanStep::Done(transfers)) => {
@@ -929,7 +947,7 @@ fn blockscout_scans() {
             }
         }
     }
-    assert!(scans.len() > 40);
+    assert!(scans.len() > 40 && deviations == 2, "{deviations}");
 }
 
 #[test]
