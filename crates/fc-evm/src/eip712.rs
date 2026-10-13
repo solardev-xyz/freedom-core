@@ -591,6 +591,7 @@ pub fn typed_data_hash(domain: &Value, types: &Value, message: &Value) -> Result
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::time::Instant;
 
     #[test]
     fn split_array_matches_ethers() {
@@ -666,63 +667,126 @@ mod tests {
         );
     }
 
-    fn timed(
-        domain: &Value,
-        types: &Value,
-        message: &Value,
-    ) -> (Result<[u8; 32], Error>, std::time::Duration) {
-        let started = std::time::Instant::now();
-        let result = typed_data_hash(domain, types, message);
-        (result, started.elapsed())
+    /// Types and a message, under an empty domain.
+    type Input = (Value, Value);
+
+    fn hash((types, message): &Input) -> Result<[u8; 32], Error> {
+        typed_data_hash(&json!({}), types, message)
     }
 
-    #[test]
-    fn accepted_inputs_near_the_limits_are_fast() {
-        // The review's case at the name limit: an array of empty instances
-        // of a type with a 256-character name. Just under the value cap it
-        // is accepted quickly; one past it, refused.
-        let name = format!("E{}", "x".repeat(255));
+    /// Asserts that hashing `inputs` takes about as long as hashing
+    /// `baseline`, the same amount of work while the work is linear: less
+    /// than 5 times as long. Each check below is built so that the
+    /// regression it guards against takes far longer than that.
+    ///
+    /// There is no wall-clock bound. Each try times the two back to back,
+    /// so they share the machine's speed and load, each side repeated to
+    /// take about 100 ms, many scheduler slices; one try in five must pass.
+    fn assert_as_long_as(inputs: &[Input], baseline: &[Input]) {
+        let time = |inputs: &[Input], times: u32| {
+            let started = Instant::now();
+            for _ in 0..times {
+                for input in inputs {
+                    let result = hash(input);
+                    assert!(result.is_ok(), "{result:?}");
+                }
+            }
+            started.elapsed().as_secs_f64()
+        };
+        // Once each to warm up, and to see how long the inputs take.
+        let once = time(inputs, 1);
+        time(baseline, 1);
+        let times = ((0.1 / once).ceil() as u32).clamp(1, 100);
+        let mut ratios = Vec::new();
+        for _ in 0..5 {
+            let ratio = time(inputs, times) / time(baseline, times);
+            if ratio < 5.0 {
+                return;
+            }
+            ratios.push(ratio);
+        }
+        panic!("{ratios:.1?} times as long as the baseline");
+    }
+
+    /// The review's case at the name limit (18-M1): an array of `count`
+    /// empty instances of a type with a 256-character name.
+    fn empty_instances(count: usize) -> Input {
+        let name = format!("E{}", "x".repeat(MAX_NAME - 1));
         let mut types = Map::new();
         types.insert(
             "M".into(),
             json!([{ "name": "items", "type": format!("{name}[]") }]),
         );
         types.insert(name, json!([]));
-        let types = Value::Object(types);
-        // The array field, and one value per instance.
-        let items = vec![json!({}); MAX_VALUES - 1];
-        let (result, elapsed) = timed(&json!({}), &types, &json!({ "items": items }));
-        assert!(result.is_ok(), "{result:?}");
-        assert!(
-            elapsed < std::time::Duration::from_millis(200),
-            "{elapsed:?}"
-        );
-        let items = vec![json!({}); MAX_VALUES];
-        assert!(typed_data_hash(&json!({}), &types, &json!({ "items": items })).is_err());
+        let message = json!({ "items": vec![json!({}); count] });
+        (Value::Object(types), message)
+    }
 
-        // 1024 fields in total (4 types of 255, and the root's 4), ~900 KB of
-        // string values.
-        let mut many = Map::new();
+    /// `count` instances of `E`, each holding an empty array of `W`, a
+    /// struct of `width` fields with 256-character names. `E`'s type hash
+    /// covers all of `W`'s text, while each instance is two values.
+    fn instances(count: usize, width: usize) -> Input {
+        let fields: Vec<Value> = (0..width)
+            .map(|i| {
+                let name = format!("f{i:03}{}", "x".repeat(MAX_NAME - 4));
+                json!({ "name": name, "type": "uint8" })
+            })
+            .collect();
+        let types = json!({
+            "M": [{ "name": "items", "type": "E[]" }],
+            "E": [{ "name": "w", "type": "W[]" }],
+            "W": fields,
+        });
+        (types, json!({ "items": vec![json!({ "w": [] }); count] }))
+    }
+
+    /// Four types of `width` string fields under the primary type, each
+    /// value 850 bytes.
+    fn strings(width: usize) -> Input {
+        let mut types = Map::new();
         let mut message = Map::new();
         let mut root = Vec::new();
         for t in 0..4 {
-            let fields: Vec<Value> = (0..255)
+            let fields: Vec<Value> = (0..width)
                 .map(|f| json!({ "name": format!("f{f}"), "type": "string" }))
                 .collect();
-            many.insert(format!("T{t}"), Value::Array(fields));
+            types.insert(format!("T{t}"), Value::Array(fields));
             root.push(json!({ "name": format!("t{t}"), "type": format!("T{t}") }));
-            let value: Map<String, Value> = (0..255)
+            let value: Map<String, Value> = (0..width)
                 .map(|f| (format!("f{f}"), json!("y".repeat(850))))
                 .collect();
             message.insert(format!("t{t}"), Value::Object(value));
         }
-        many.insert("M".into(), Value::Array(root));
-        let (result, elapsed) = timed(&json!({}), &Value::Object(many), &Value::Object(message));
+        types.insert("M".into(), Value::Array(root));
+        (Value::Object(types), Value::Object(message))
+    }
+
+    #[test]
+    fn accepted_inputs_near_the_limits_take_linear_time() {
+        // The review's case: with the array field, one value per instance
+        // reaches the value cap, which is accepted; one more is refused.
+        let at_cap = empty_instances(MAX_VALUES - 1);
+        let result = hash(&at_cap);
         assert!(result.is_ok(), "{result:?}");
-        assert!(
-            elapsed < std::time::Duration::from_millis(200),
-            "{elapsed:?}"
-        );
+        assert!(hash(&empty_instances(MAX_VALUES)).is_err());
+        // Linear in the instances: as long as 30 arrays of a thirtieth as
+        // many each.
+        let thirtieths: Vec<Input> = (0..30)
+            .map(|_| empty_instances((MAX_VALUES - 1) / 30))
+            .collect();
+        assert_as_long_as(&[at_cap], &thirtieths);
+
+        // A type's hash is computed once, not for every instance (18-M1):
+        // instances of a type whose hash covers 66 KB of text (in a subtype
+        // they leave empty) take as long as those of one covering 270 bytes.
+        assert_as_long_as(&[instances(10_000, 250)], &[instances(10_000, 1)]);
+
+        // 1024 fields in total (4 types of 255, and the root's 4), ~870 KB
+        // of string values: accepted, and linear in the fields.
+        let result = hash(&strings(255));
+        assert!(result.is_ok(), "{result:?}");
+        let tenths: Vec<Input> = (0..10).map(|_| strings(25)).collect();
+        assert_as_long_as(&[strings(250)], &tenths);
     }
 
     #[test]
