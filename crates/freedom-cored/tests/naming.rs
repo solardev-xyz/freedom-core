@@ -6,7 +6,7 @@
 
 mod common;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -181,13 +181,27 @@ fn an_unsolicited_shell_response_ends_the_core() {
 
 #[test]
 fn a_burst_while_main_is_not_reading_backs_up_rather_than_exiting() {
-    let (_root, data, locks) = dirs();
-    let mut core = spawn("serve", &data, &locks, &[]);
+    let (root, data, locks) = dirs();
+    let marker = root.path().join("naming-marks");
+    let marker_path = marker.display().to_string();
+    let mut core = spawn_env(
+        "serve",
+        &data,
+        &locks,
+        &[],
+        &[("FREEDOM_CORED_TEST_NAMING_MARKER", &marker_path)],
+    );
     core.hello();
     let mut many = snapshot();
     many["rpc"] = (1..=64)
         .map(|i| json!({ "endpoint": format!("e{i}") }))
         .collect();
+    // No probe times out while the test runs (sessions end at 120 s
+    // anyway), so the 32 sessions admitted first keep running however
+    // long the burst takes to arrive. With 5 s, a burst slower than that
+    // outlived them: their timeouts freed admission and quarantined every
+    // endpoint, and later lookups failed at once instead of being busy.
+    many["quorum"]["timeout_ms"] = json!(600_000);
     core.call(2, "naming.configure", many);
     // Main stalls: 2,048 lookups and then a vault request arrive while it
     // reads nothing. The core's shell requests and busy replies back up
@@ -201,25 +215,37 @@ fn a_burst_while_main_is_not_reading_backs_up_rather_than_exiting() {
         ));
     }
     core.send(&request(10_000, "vault.status", json!({})));
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    // Main reads again once the naming thread has made every busy reply
+    // (and, before them, the configure reply).
+    wait_for_marks(&marker, "made the busy replies", |marks| {
+        marks.iter().filter(|mark| *mark == "reply").count() >= 1 + 2048 - 32
+    });
     core.resume_reading();
     // Reading again, the vault's reply arrives (its share of the writer
-    // is its own) and every lookup was taken in.
-    let (mut status, mut busy, mut shell) = (false, 0, 0);
-    while !(status && busy == 2048 - 32 && shell == 256) {
+    // is its own) and every lookup was taken in: the first 32 run, with
+    // main holding 256 of their probes (its limit), and every later one is
+    // busy, once.
+    let mut busy = BTreeSet::new();
+    let (mut status, mut shell) = (false, 0);
+    while !(status && busy.len() == 2048 - 32 && shell == 256) {
         let message = core.recv();
         match (message["type"].as_str(), message["id"].as_u64()) {
             (Some("response"), Some(10_000)) => {
                 assert!(message["result"].is_object(), "{message}");
                 status = true;
             }
-            (Some("response"), _) if message["error"]["code"] == "busy" => busy += 1,
-            (Some("request"), _) => shell += 1,
-            // Unanswered, the probes time out and are cancelled.
-            _ => {}
+            (Some("response"), Some(id @ 132..2148)) if message["error"]["code"] == "busy" => {
+                assert!(busy.insert(id), "a second reply: {message}");
+            }
+            (Some("request"), _) => {
+                assert_eq!(message["method"], "shell.rpc", "{message}");
+                shell += 1;
+                assert!(shell <= 256, "past main's limit: {message}");
+            }
+            _ => panic!("unexpected {message}"),
         }
     }
-    // The core is alive.
+    // The core is alive, and nothing else came meanwhile.
     assert!(core.call(10_001, "vault.status", json!({}))["result"].is_object());
 }
 
