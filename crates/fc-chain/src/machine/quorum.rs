@@ -158,10 +158,11 @@ pub(crate) async fn round(
                             .logs
                             .note_failure(chain_id, &urls[i], range.span, &error, range, now);
                     }
-                    if error.failure_kind() != Some(FailureKind::Timeout) {
+                    let kind = error.failure_kind();
+                    if kind != Some(FailureKind::Timeout) {
                         answered[i] = true;
                     }
-                    errors.push(error.failure_kind());
+                    errors.push(kind);
                 }
             }
             // `rejectIfImpossible`.
