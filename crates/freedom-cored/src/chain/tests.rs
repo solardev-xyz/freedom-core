@@ -974,3 +974,100 @@ fn requests_to_main_take_the_designs_forms() {
         "a\"b\\c\n\u{1}é"
     );
 }
+
+/// Takes main's one slot with a request of naming's; its ID frees it.
+fn occupy(t: &Test) -> u64 {
+    let (out, _rx) = mpsc::channel();
+    let allowance = Allowance::new(usize::MAX, usize::MAX);
+    match t
+        .chain
+        .requests
+        .send(Owner::Naming, &allowance, &out, |id| {
+            requests::request_frame(id, "shell.rpc", b"{}")
+        }) {
+        Dispatch::Sent(id) => id,
+        other => panic!("{other:?}"),
+    }
+}
+
+fn verified(frames: &[Value]) -> Vec<&Value> {
+    frames
+        .iter()
+        .filter(|f| f["method"] == "shell.verified")
+        .collect()
+}
+
+#[test]
+fn a_queued_operation_of_an_ended_request_never_goes_and_frees_its_slot() {
+    // 57-M2: main holds all it takes; a Myotis read's operation waits here.
+    let mut t = test_with(Bounds::default(), usize::MAX, 1, true);
+    let mut config = chain_snapshot(&["myotis"], &[]);
+    config["myotis"] = json!(true);
+    t.configure(json!([config]));
+    t.call(
+        2,
+        "chain.availability",
+        &json!({ "chain_id": 1, "ready": true }),
+    );
+    let held = occupy(&t);
+    let address = "0x1111111111111111111111111111111111111111";
+    let (id, params) = read(3, "eth_getBalance", json!([address, "latest"]));
+    t.call(id, "chain.request", &params);
+    assert_eq!(t.chain.queued.len(), 1);
+    // Cancelled: it replies, and its operation leaves the queue.
+    assert!(t.chain.handle(In::Cancel { id: 3 }).is_ok());
+    assert!(t.chain.flush().is_ok());
+    let frames = t.written();
+    let reply = frames.iter().find(|f| f["id"] == 3).unwrap();
+    assert_eq!(reply["error"]["code"], "cancelled");
+    assert!(t.chain.queued.is_empty());
+    // A slot frees: nothing of the cancelled read goes.
+    assert_eq!(t.chain.requests.answered(held), Some(Owner::Naming));
+    assert!(t.chain.handle(In::Drained).is_ok());
+    assert!(t.chain.flush().is_ok());
+    assert!(verified(&t.written()).is_empty());
+    // Its Myotis slot was freed: the next read's operation goes at once.
+    let (id, params) = read(4, "eth_getBalance", json!([address, "latest"]));
+    t.call(id, "chain.request", &params);
+    let frames = t.written();
+    let ops = verified(&frames);
+    assert_eq!(ops.len(), 1, "{frames:?}");
+    assert_eq!(ops[0]["params"]["myotis"], "account");
+}
+
+#[test]
+fn a_queued_myotis_broadcast_never_starts_past_its_attempt_cutoff() {
+    // 57-M2: the attempt window closes 10 s before the deadline.
+    let mut t = test_with(Bounds::default(), usize::MAX, 1, true);
+    let mut config = chain_snapshot(&[], &[]);
+    config["myotis"] = json!(true);
+    config["broadcast_order"] = json!(["myotis"]);
+    t.configure(json!([config]));
+    t.call(
+        2,
+        "chain.availability",
+        &json!({ "chain_id": 1, "ready": true }),
+    );
+    let held = occupy(&t);
+    t.call(
+        3,
+        "chain.broadcast",
+        &json!({ "chain_id": 1, "raw": "0x01", "deadline_ms": 10_200 }),
+    );
+    assert_eq!(t.chain.queued.len(), 1);
+    assert_eq!(t.chain.queued[0].until, Some(200));
+    t.at(199);
+    assert_eq!(t.chain.queued.len(), 1);
+    // At the cutoff it is retired unsent: nothing reached main, and the
+    // broadcast says so.
+    t.at(200);
+    let frames = t.written();
+    let reply = frames.iter().find(|f| f["id"] == 3).unwrap();
+    assert_eq!(reply["error"]["code"], "chain_error", "{reply}");
+    assert_eq!(reply["error"]["data"]["outcome"], "not_sent");
+    assert!(t.chain.queued.is_empty());
+    assert_eq!(t.chain.requests.answered(held), Some(Owner::Naming));
+    assert!(t.chain.handle(In::Drained).is_ok());
+    assert!(t.chain.flush().is_ok());
+    assert!(verified(&t.written()).is_empty());
+}

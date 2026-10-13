@@ -215,8 +215,14 @@ struct Queued {
     request: Request,
     /// The generation of the chain request that made it.
     generation: u64,
-    /// When main's work for it ends: what is left then goes as its
-    /// `deadline_ms`. `None` for a Myotis operation, which main runs whole.
+    /// The machine's id of that chain request: once it has replied, the
+    /// request never goes (57-M2).
+    owner: Option<u64>,
+    /// The latest it may start: past it, it completes here unsent. An
+    /// exchange's own time (what is left of it goes as `deadline_ms`); a
+    /// Myotis broadcast's attempt cutoff, 10 s before its request's
+    /// deadline (design 0005, Deadlines). `None` for a Myotis read, which
+    /// main runs whole while its request runs.
     until: Option<Ms>,
 }
 
@@ -227,6 +233,8 @@ struct Caller {
     /// For the outcome's log line: never an origin, address or message.
     chain_id: u64,
     method: &'static str,
+    /// A broadcast's attempt cutoff: no attempt starts at or after it.
+    cutoff: Option<Ms>,
 }
 
 struct Chain {
@@ -392,10 +400,20 @@ impl Chain {
                 let Some((call, deadline_ms)) = call_params(method, params) else {
                     return self.error(id, invalid());
                 };
+                let bounds = self.machine.bounds();
+                // When its attempts stop (design 0005, Deadlines), from its
+                // arrival as the machine counts its deadline.
+                let cutoff = matches!(call, Call::Broadcast { .. }).then(|| {
+                    self.machine
+                        .now()
+                        .saturating_add(deadline_ms.min(bounds.deadline_ms))
+                        .saturating_sub(bounds.reconcile_ms)
+                });
                 let caller = Caller {
                     id,
                     chain_id: call_chain(&call),
                     method: label(&call),
+                    cutoff,
                 };
                 let call = self.machine.submit(call, Some(deadline_ms));
                 self.callers.insert(call, caller);
@@ -436,8 +454,10 @@ impl Chain {
     fn flush(&mut self) -> Flow {
         loop {
             self.effects()?;
-            let settled = self.dispatch()?;
+            let mut settled = self.retire();
+            settled |= self.dispatch()?;
             self.take_replies()?;
+            settled |= self.retire();
             if !settled {
                 return Ok(());
             }
@@ -445,9 +465,34 @@ impl Chain {
         }
     }
 
+    /// Retires the queued requests of chain requests that have replied
+    /// (cancelled, ended by their deadline, a configuration change or
+    /// their budget, or finished): they never go to main. A verifier
+    /// operation's request is held by the machine until main's terminal
+    /// reply, so one that never went completes here unread, freeing its
+    /// slot (57-M2). True when any did.
+    fn retire(&mut self) -> bool {
+        let mut retired = false;
+        let mut i = 0;
+        while i < self.queued.len() {
+            let ended = self.queued[i]
+                .owner
+                .is_some_and(|owner| !self.callers.contains_key(&owner));
+            if ended && let Some(queued) = self.queued.remove(i) {
+                self.machine.complete_unread(queued.io);
+                retired = true;
+                continue;
+            }
+            i += 1;
+        }
+        retired
+    }
+
     fn effects(&mut self) -> Flow {
         for Emitted {
-            effect, generation, ..
+            effect,
+            generation,
+            request: owner,
         } in self.machine.take_effects()
         {
             match effect {
@@ -463,12 +508,16 @@ impl Chain {
                         | Request::Verified(VerifiedOp::Colibri { deadline_ms, .. }) => {
                             Some(at.saturating_add(*deadline_ms))
                         }
-                        Request::Verified(_) => None,
+                        Request::Verified(VerifiedOp::MyotisBroadcast { .. }) => owner
+                            .and_then(|owner| self.callers.get(&owner))
+                            .and_then(|caller| caller.cutoff),
+                        Request::Verified(VerifiedOp::MyotisRead { .. }) => None,
                     };
                     self.queued.push_back(Queued {
                         io,
                         request,
                         generation: generation.unwrap_or(0),
+                        owner,
                         until,
                     });
                 }

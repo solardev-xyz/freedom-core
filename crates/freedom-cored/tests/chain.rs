@@ -1152,3 +1152,100 @@ fn arrays_are_never_proofs_that_nothing_was_sent() {
         );
     }
 }
+
+/// Fills main's 256 slots with naming's requests: four lookups over 64
+/// endpoints, 64 head probes each. Returns the probes.
+fn saturate_with_naming(core: &mut Core) -> Vec<Value> {
+    let mut many = common::naming_snapshot();
+    many["rpc"] = (1..=64)
+        .map(|i| json!({ "endpoint": format!("e{i}") }))
+        .collect();
+    call(core, 2, "naming.configure", many);
+    for i in 0..4u64 {
+        core.send(&request(
+            10 + i,
+            "naming.resolve_content",
+            json!({ "name": format!("n{i}.eth"), "private": false }),
+        ));
+    }
+    requests_only(core, 256)
+}
+
+/// Main answers every naming request with a network error until the four
+/// lookups have replied, so every slot is free again; whatever else the
+/// core asks for meanwhile is returned.
+fn drain_naming(core: &mut Core, probes: Vec<Value>) -> Vec<Value> {
+    for probe in &probes {
+        reply(core, probe, failure("network"));
+    }
+    let (mut lookups, mut other) = (0, Vec::new());
+    while lookups < 4 {
+        let message = core.recv();
+        match message["type"].as_str() {
+            Some("request") if message["params"]["generations"].is_object() => {
+                reply(core, &message, failure("network"));
+            }
+            Some("request") => other.push(message),
+            Some("response") if (10..14).contains(&message["id"].as_u64().unwrap()) => {
+                lookups += 1;
+            }
+            _ => {}
+        }
+    }
+    other
+}
+
+#[test]
+fn a_cancelled_reads_queued_operation_never_starts() {
+    // 57-M2: its operation waited for a slot; once its read has replied,
+    // it never goes, and its Myotis slot is free.
+    let (_root, mut core) = core();
+    let probes = saturate_with_naming(&mut core);
+    let mut chain = snapshot(&["myotis"], &[], 5000);
+    chain["myotis"] = json!(true);
+    configure(&mut core, 20, &[chain]);
+    call(
+        &mut core,
+        21,
+        "chain.availability",
+        json!({ "chain_id": 1, "ready": true }),
+    );
+    let balance = read("eth_getBalance", json!([ADDRESS, "latest"]));
+    core.send(&request(22, "chain.request", balance.clone()));
+    core.send(&json!({ "type": "cancel", "id": 22 }));
+    let cancelled = response_to(&mut core, 22);
+    assert_eq!(cancelled["error"]["code"], "cancelled", "{cancelled}");
+    let late = drain_naming(&mut core, probes);
+    assert!(late.is_empty(), "after its reply: {late:?}");
+    // The next read's operation goes: the slot was freed.
+    core.send(&request(30, "chain.request", balance));
+    let op = requests_only(&mut core, 1).pop().unwrap();
+    assert_eq!(op["params"]["myotis"], "account", "{op}");
+}
+
+#[test]
+fn a_broadcast_never_starts_after_its_attempt_cutoff() {
+    // 57-M2: a Myotis broadcast still queued at its cutoff (200 ms here,
+    // 10 s before its deadline) never starts: nothing was sent, and the
+    // broadcast says so.
+    let (_root, mut core) = core();
+    let probes = saturate_with_naming(&mut core);
+    configure(&mut core, 20, &[myotis_broadcaster()]);
+    call(
+        &mut core,
+        21,
+        "chain.availability",
+        json!({ "chain_id": 1, "ready": true }),
+    );
+    let mut late = broadcast(22);
+    late["params"]["deadline_ms"] = json!(10_200);
+    core.send(&late);
+    let ended = response_to(&mut core, 22);
+    assert_eq!(ended["error"]["code"], "chain_error", "{ended}");
+    assert_eq!(ended["error"]["data"]["outcome"], "not_sent");
+    let after = drain_naming(&mut core, probes);
+    assert!(
+        !after.iter().any(sends_raw),
+        "a broadcast after its cutoff: {after:?}"
+    );
+}
