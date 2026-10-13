@@ -9,6 +9,9 @@
 //!   its commit point, before the rename or unlink.
 //! - `FREEDOM_CORED_TEST_COMMIT_MARKER` names a file created the moment a job
 //!   claims its commit point (before that stall), so tests can wait for it.
+//! - `FREEDOM_CORED_TEST_METHODS` enables the `test.*` methods
+//!   (`testmethods`), which make responses of any size. Release builds
+//!   don't compile them, nor this hook.
 
 use std::time::Duration;
 
@@ -44,6 +47,11 @@ pub fn commit_delay() {
 #[cfg(debug_assertions)]
 pub fn kdf_deadline(default: Duration) -> Duration {
     millis("FREEDOM_CORED_TEST_KDF_DEADLINE_MS").map_or(default, Duration::from_millis)
+}
+
+#[cfg(debug_assertions)]
+pub fn test_methods() -> bool {
+    std::env::var_os("FREEDOM_CORED_TEST_METHODS").is_some()
 }
 
 #[cfg(not(debug_assertions))]

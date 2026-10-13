@@ -3,9 +3,11 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, dead_code)]
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -21,11 +23,48 @@ pub const READ_TIMEOUT: Duration = Duration::from_secs(60);
 /// stdout, read on a thread: either frames (serve) or lines (hold-lock,
 /// recover).
 pub enum Output {
+    /// A whole message (kind 0x01).
     Frame(Value),
+    /// The parts of a fragmented response and bulk credit (design 0005,
+    /// Frames).
+    Wire(Wire),
     Line(String),
     /// The reader stopped on a frame it couldn't parse.
     Malformed(String),
 }
+
+/// One frame as main reads it.
+#[derive(Clone, PartialEq)]
+pub enum Wire {
+    /// A whole message.
+    Message(Value),
+    /// `0x12`: a fragmented response begins.
+    Begin { id: u64, bytes: usize },
+    /// `0x10`.
+    Fragment(Vec<u8>),
+    /// `0x11`.
+    Last(Vec<u8>),
+    /// `0x13`: the core returned main's bulk credit.
+    Credit,
+}
+
+/// Fragments show their size only: a megabyte doesn't belong in a panic.
+impl std::fmt::Debug for Wire {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Wire::Message(value) => write!(f, "Message({value})"),
+            Wire::Begin { id, bytes } => write!(f, "Begin {{ id: {id}, bytes: {bytes} }}"),
+            Wire::Fragment(bytes) => write!(f, "Fragment({} bytes)", bytes.len()),
+            Wire::Last(bytes) => write!(f, "Last({} bytes)", bytes.len()),
+            Wire::Credit => f.write_str("Credit"),
+        }
+    }
+}
+
+pub const KIND_FRAGMENT: u8 = 0x10;
+pub const KIND_LAST: u8 = 0x11;
+pub const KIND_BEGIN: u8 = 0x12;
+pub const KIND_CREDIT: u8 = 0x13;
 
 pub struct Core {
     pub child: Child,
@@ -36,6 +75,8 @@ pub struct Core {
     pub events: Vec<Value>,
     /// While set, stdout isn't read: the pipe fills, as when main stalls.
     paused: Arc<(Mutex<bool>, Condvar)>,
+    /// Set: pause right after the next begin frame.
+    pause_on_begin: Arc<AtomicBool>,
 }
 
 impl Drop for Core {
@@ -76,6 +117,8 @@ pub fn spawn_env(
     let lines = command != "serve";
     let paused = Arc::new((Mutex::new(false), Condvar::new()));
     let gate = Arc::clone(&paused);
+    let pause_on_begin = Arc::new(AtomicBool::new(false));
+    let on_begin = Arc::clone(&pause_on_begin);
     std::thread::spawn(move || {
         if lines {
             for line in BufReader::new(stdout).lines() {
@@ -109,12 +152,34 @@ pub fn spawn_env(
             if stdout.read_exact(&mut payload).is_err() {
                 return;
             }
-            let output = match serde_json::from_slice(&payload) {
-                Ok(value) => Output::Frame(value),
-                Err(err) => {
-                    Output::Malformed(format!("{err}: {}", String::from_utf8_lossy(&payload)))
-                }
+            let output = match header[4] {
+                1 => match serde_json::from_slice(&payload) {
+                    Ok(value) => Output::Frame(value),
+                    Err(err) => {
+                        Output::Malformed(format!("{err}: {}", String::from_utf8_lossy(&payload)))
+                    }
+                },
+                KIND_BEGIN => match serde_json::from_slice::<Value>(&payload) {
+                    Ok(begin) if begin["id"].is_u64() && begin["bytes"].is_u64() => {
+                        Output::Wire(Wire::Begin {
+                            id: begin["id"].as_u64().unwrap(),
+                            bytes: begin["bytes"].as_u64().unwrap() as usize,
+                        })
+                    }
+                    _ => Output::Malformed(format!("begin {}", String::from_utf8_lossy(&payload))),
+                },
+                KIND_FRAGMENT => Output::Wire(Wire::Fragment(payload)),
+                KIND_LAST => Output::Wire(Wire::Last(payload)),
+                KIND_CREDIT if payload.is_empty() => Output::Wire(Wire::Credit),
+                kind => Output::Malformed(format!("frame kind {kind:#04x}")),
             };
+            // Paused before the test sees the begin, so a resume that
+            // follows it can't come first.
+            if matches!(output, Output::Wire(Wire::Begin { .. }))
+                && on_begin.swap(false, Ordering::SeqCst)
+            {
+                *gate.0.lock().unwrap() = true;
+            }
             if tx.send(output).is_err() {
                 return;
             }
@@ -132,6 +197,7 @@ pub fn spawn_env(
         stderr: Some(stderr),
         events: Vec::new(),
         paused,
+        pause_on_begin,
     }
 }
 
@@ -144,6 +210,37 @@ pub fn frame(message: &Value) -> Vec<u8> {
     frame.push(1);
     frame.extend_from_slice(&payload);
     frame
+}
+
+/// A frame of any kind.
+pub fn raw_frame(kind: u8, payload: &[u8]) -> Vec<u8> {
+    let mut frame = u32::try_from(payload.len() + 1)
+        .unwrap()
+        .to_be_bytes()
+        .to_vec();
+    frame.push(kind);
+    frame.extend_from_slice(payload);
+    frame
+}
+
+/// A fragmented response: its begin, then `pieces` fragments of about equal
+/// size, the last of kind 0x11.
+pub fn fragmented(message: &Value, pieces: usize) -> Vec<Vec<u8>> {
+    let payload = serde_json::to_vec(message).unwrap();
+    let id = message["id"].as_u64().unwrap();
+    let begin = json!({ "id": id, "bytes": payload.len() }).to_string();
+    let mut frames = vec![raw_frame(KIND_BEGIN, begin.as_bytes())];
+    let size = payload.len().div_ceil(pieces);
+    let chunks: Vec<&[u8]> = payload.chunks(size).collect();
+    for (i, chunk) in chunks.iter().enumerate() {
+        let kind = if i + 1 == chunks.len() {
+            KIND_LAST
+        } else {
+            KIND_FRAGMENT
+        };
+        frames.push(raw_frame(kind, chunk));
+    }
+    frames
 }
 
 pub fn request(id: u64, method: &str, params: Value) -> Value {
@@ -167,6 +264,29 @@ impl Core {
         self.paused.1.notify_all();
     }
 
+    /// Stops reading stdout right after the next begin frame, until
+    /// [`Core::resume_reading`]: the core then stalls in that response.
+    pub fn pause_after_begin(&self) {
+        self.pause_on_begin.store(true, Ordering::SeqCst);
+    }
+
+    /// Returns the core's bulk credit (`0x13`).
+    pub fn send_credit(&mut self) {
+        self.send_raw(&raw_frame(KIND_CREDIT, b""));
+    }
+
+    /// The next frame, whatever its kind.
+    pub fn recv_wire(&mut self) -> Wire {
+        match self.output.recv_timeout(READ_TIMEOUT) {
+            Ok(Output::Frame(value)) => Wire::Message(value),
+            Ok(Output::Wire(wire)) => wire,
+            Ok(Output::Line(line)) => panic!("expected a frame, got line {line:?}"),
+            Ok(Output::Malformed(what)) => panic!("malformed frame: {what}"),
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!("no frame within {READ_TIMEOUT:?}"),
+            Err(mpsc::RecvTimeoutError::Disconnected) => self.closed("a frame"),
+        }
+    }
+
     pub fn send(&mut self, message: &Value) {
         self.send_raw(&frame(message));
     }
@@ -180,6 +300,7 @@ impl Core {
     pub fn recv(&mut self) -> Value {
         match self.output.recv_timeout(READ_TIMEOUT) {
             Ok(Output::Frame(value)) => value,
+            Ok(Output::Wire(wire)) => panic!("expected a whole message, got {wire:?}"),
             Ok(Output::Line(line)) => panic!("expected a frame, got line {line:?}"),
             Ok(Output::Malformed(what)) => panic!("malformed frame: {what}"),
             Err(mpsc::RecvTimeoutError::Timeout) => panic!("no reply within {READ_TIMEOUT:?}"),
@@ -215,6 +336,7 @@ impl Core {
         loop {
             match self.output.recv_timeout(READ_TIMEOUT) {
                 Ok(Output::Frame(value)) => frames.push(value),
+                Ok(Output::Wire(wire)) => panic!("expected a whole message, got {wire:?}"),
                 Ok(Output::Line(line)) => panic!("expected a frame, got line {line:?}"),
                 Ok(Output::Malformed(what)) => panic!("malformed frame: {what}"),
                 Err(mpsc::RecvTimeoutError::Disconnected) => return frames,
@@ -226,7 +348,7 @@ impl Core {
     pub fn line(&mut self) -> String {
         match self.output.recv_timeout(READ_TIMEOUT) {
             Ok(Output::Line(line)) => line,
-            Ok(Output::Frame(_)) => panic!("expected a line"),
+            Ok(Output::Frame(_) | Output::Wire(_)) => panic!("expected a line"),
             Ok(Output::Malformed(what)) => panic!("malformed frame: {what}"),
             Err(mpsc::RecvTimeoutError::Timeout) => panic!("no line within {READ_TIMEOUT:?}"),
             Err(mpsc::RecvTimeoutError::Disconnected) => self.closed("a line"),
@@ -300,6 +422,15 @@ impl Core {
         self.hello_with(900_000)
     }
 
+    /// The handshake, offering fragments (design 0005, Frames).
+    pub fn hello_fragments(&mut self) -> Value {
+        self.call(
+            1,
+            "core.hello",
+            json!({ "protocol": 1, "shell_version": "test", "auto_lock_ms": 900_000, "frames": ["fragment"] }),
+        )
+    }
+
     pub fn hello_with(&mut self, auto_lock_ms: u64) -> Value {
         self.call(
             1,
@@ -337,4 +468,47 @@ pub fn dirs() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let data = root.path().join("identity");
     let locks = root.path().join("locks");
     (root, data, locks)
+}
+
+/// The answer body naming's `quorum-agree` replay scenario recorded for
+/// each JSON-RPC method.
+pub fn naming_recorded() -> BTreeMap<String, String> {
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../vectors/naming-replay.json"
+    ))
+    .unwrap();
+    let vectors: Value = serde_json::from_str(&text).unwrap();
+    let scenario = vectors["scenarios"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "quorum-agree")
+        .unwrap();
+    let mut answers = BTreeMap::new();
+    for exchange in scenario["io"].as_array().unwrap() {
+        if let (Some(method), Some(body)) = (
+            exchange["method"].as_str(),
+            exchange["answer"]["body"].as_str(),
+        ) {
+            answers
+                .entry(method.to_owned())
+                .or_insert_with(|| body.to_owned());
+        }
+    }
+    answers
+}
+
+/// A naming configuration: four RPC endpoints, a quorum of three.
+pub fn naming_snapshot() -> Value {
+    json!({
+        "reset": "none",
+        "rpc": [{ "endpoint": "e1" }, { "endpoint": "e2" }, { "endpoint": "e3" }, { "endpoint": "e4" }],
+        "direct": null,
+        "prover": null,
+        "policy": { "order": ["quorum"], "prefer_verified": false },
+        "quorum": { "k": 3, "m": 2, "timeout_ms": 5000, "anchor": "latest", "anchor_ttl_ms": 30000 },
+        "myotis_enabled": false,
+        "tezos": ["t1", "t2", "t3"],
+    })
 }

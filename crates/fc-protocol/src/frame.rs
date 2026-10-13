@@ -1,6 +1,14 @@
 //! Frames: a `u32` big-endian length of everything after it, a `u8` kind,
 //! then the payload (design 0001, "Transport and framing").
 //!
+//! The kinds:
+//! - `0x01`: one whole JSON message;
+//! - `0x10`, `0x11`, `0x12`: a fragment, the last fragment and the begin of
+//!   a fragmented response, and `0x13`: bulk credit (design 0005, Frames).
+//!   [`crate::fragment`] reassembles them;
+//! - `0x02`–`0x0F`: reserved for Phase 4's streams, and refused like every
+//!   other kind.
+//!
 //! The decoder is sans-I/O: feed it whatever the pipe returned, take out
 //! complete frames. Each payload lands in its own exactly sized `Zeroizing`
 //! buffer, so a frame that carried a password is wiped when it's dropped and
@@ -19,10 +27,30 @@ use zeroize::Zeroizing;
 
 /// The largest payload: 1 MiB.
 pub const MAX_PAYLOAD: usize = 1 << 20;
+/// The largest serialized message, fragmented or not: 32 MiB (design
+/// 0005, Frames). Only a response over [`MAX_PAYLOAD`] is fragmented.
+pub const MAX_MESSAGE: usize = 32 << 20;
 /// One JSON message.
 pub const KIND_JSON: u8 = 0x01;
 /// Kinds `0x02..=0x0F` are reserved for Phase 4 streams (protocol v2).
 pub const RESERVED_KINDS: std::ops::RangeInclusive<u8> = 0x02..=0x0F;
+/// A fragment of a response's bytes.
+pub const KIND_FRAGMENT: u8 = 0x10;
+/// A response's last fragment.
+pub const KIND_LAST: u8 = 0x11;
+/// The begin of a fragmented response: `{ "id", "bytes" }`.
+pub const KIND_BEGIN: u8 = 0x12;
+/// Bulk credit, empty: the receiver returns the sender's right to begin
+/// another fragmented response.
+pub const KIND_CREDIT: u8 = 0x13;
+
+/// Whether a frame of `kind` may appear on the wire.
+pub fn is_known_kind(kind: u8) -> bool {
+    matches!(
+        kind,
+        KIND_JSON | KIND_FRAGMENT | KIND_LAST | KIND_BEGIN | KIND_CREDIT
+    )
+}
 /// The most complete frames the decoder holds before `push` stops.
 pub const MAX_READY_FRAMES: usize = 64;
 /// Payload bytes held in complete frames at which `push` stops taking input
@@ -53,16 +81,32 @@ impl std::fmt::Debug for Frame {
     }
 }
 
-/// Appends one JSON frame for `payload` to `out`.
-pub fn encode_json(payload: &[u8], out: &mut Vec<u8>) -> Result<(), FrameError> {
-    let len = u32::try_from(payload.len() + 1).map_err(|_| FrameError::BadLength(u32::MAX))?;
-    if payload.len() > MAX_PAYLOAD {
-        return Err(FrameError::BadLength(len));
+/// The five bytes that start a frame of `kind` carrying `len` payload
+/// bytes, for a writer that sends the payload from where it lies.
+pub fn header(kind: u8, len: usize) -> Result<[u8; 5], FrameError> {
+    if !is_known_kind(kind) {
+        return Err(FrameError::UnknownKind(kind));
     }
-    out.extend_from_slice(&len.to_be_bytes());
-    out.push(KIND_JSON);
+    // The length field counts the kind byte too; checked before adding it,
+    // so no length can overflow.
+    let length = |len: usize| u32::try_from(len.saturating_add(1)).unwrap_or(u32::MAX);
+    if len > MAX_PAYLOAD {
+        return Err(FrameError::BadLength(length(len)));
+    }
+    let [a, b, c, d] = length(len).to_be_bytes();
+    Ok([a, b, c, d, kind])
+}
+
+/// Appends one frame of `kind` for `payload` to `out`.
+pub fn encode(kind: u8, payload: &[u8], out: &mut Vec<u8>) -> Result<(), FrameError> {
+    out.extend_from_slice(&header(kind, payload.len())?);
     out.extend_from_slice(payload);
     Ok(())
+}
+
+/// Appends one JSON frame for `payload` to `out`.
+pub fn encode_json(payload: &[u8], out: &mut Vec<u8>) -> Result<(), FrameError> {
+    encode(KIND_JSON, payload, out)
 }
 
 enum State {
@@ -134,7 +178,7 @@ impl Decoder {
                         if len == 0 || payload_len > MAX_PAYLOAD {
                             return Err(self.fail(FrameError::BadLength(len)));
                         }
-                        if kind != KIND_JSON {
+                        if !is_known_kind(kind) {
                             return Err(self.fail(FrameError::UnknownKind(kind)));
                         }
                         self.state = State::Payload {
@@ -300,6 +344,63 @@ mod tests {
         d.push(&stream).unwrap();
         let frame = d.pop().unwrap();
         assert_eq!(frame.payload.capacity(), 1000);
+    }
+
+    #[test]
+    fn takes_the_fragment_kinds_and_refuses_the_rest() {
+        let mut stream = Vec::new();
+        for kind in [KIND_JSON, KIND_FRAGMENT, KIND_LAST, KIND_BEGIN, KIND_CREDIT] {
+            encode(kind, b"x", &mut stream).unwrap();
+        }
+        encode(KIND_CREDIT, b"", &mut stream).unwrap();
+        let mut d = Decoder::new();
+        assert_eq!(d.push(&stream).unwrap(), stream.len());
+        let kinds: Vec<u8> = std::iter::from_fn(|| d.pop()).map(|f| f.kind).collect();
+        assert_eq!(kinds, [0x01, 0x10, 0x11, 0x12, 0x13, 0x13]);
+        // Phase 4's kinds stay reserved, and nothing else is a kind.
+        for kind in RESERVED_KINDS.chain([0x00, 0x14, 0x7f, 0xff]) {
+            let mut d = Decoder::new();
+            assert_eq!(
+                d.push(&[0, 0, 0, 1, kind]),
+                Err(FrameError::UnknownKind(kind))
+            );
+            assert_eq!(
+                encode(kind, b"", &mut Vec::new()),
+                Err(FrameError::UnknownKind(kind))
+            );
+        }
+    }
+
+    #[test]
+    fn a_header_matches_its_encoded_frame() {
+        let mut out = Vec::new();
+        encode(KIND_FRAGMENT, &[9u8; 300], &mut out).unwrap();
+        assert_eq!(header(KIND_FRAGMENT, 300).unwrap(), out[..5]);
+        assert!(header(KIND_LAST, MAX_PAYLOAD).is_ok());
+        assert!(matches!(
+            header(KIND_LAST, MAX_PAYLOAD + 1),
+            Err(FrameError::BadLength(_))
+        ));
+    }
+
+    #[test]
+    fn any_length_is_refused_without_overflow() {
+        let too_long = u32::try_from(MAX_PAYLOAD + 2).unwrap();
+        assert_eq!(
+            header(KIND_JSON, MAX_PAYLOAD + 1),
+            Err(FrameError::BadLength(too_long))
+        );
+        for len in [usize::MAX, usize::MAX - 1, u32::MAX as usize] {
+            assert_eq!(
+                header(KIND_JSON, len),
+                Err(FrameError::BadLength(u32::MAX)),
+                "{len}"
+            );
+        }
+        assert_eq!(
+            header(KIND_JSON, MAX_PAYLOAD).map(|h| u32::from_be_bytes([h[0], h[1], h[2], h[3]])),
+            Ok(u32::try_from(MAX_PAYLOAD + 1).unwrap())
+        );
     }
 
     #[test]

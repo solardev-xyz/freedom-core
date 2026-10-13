@@ -9,49 +9,8 @@ mod common;
 use std::collections::BTreeMap;
 
 use base64::Engine as _;
-use common::{dirs, request, spawn};
+use common::{dirs, naming_recorded as recorded, naming_snapshot as snapshot, request, spawn};
 use serde_json::{Value, json};
-
-/// The answer body `quorum-agree` recorded for each method.
-fn recorded() -> BTreeMap<String, String> {
-    let text = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../vectors/naming-replay.json"
-    ))
-    .unwrap();
-    let vectors: Value = serde_json::from_str(&text).unwrap();
-    let scenario = vectors["scenarios"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|s| s["id"] == "quorum-agree")
-        .unwrap();
-    let mut answers = BTreeMap::new();
-    for exchange in scenario["io"].as_array().unwrap() {
-        if let (Some(method), Some(body)) = (
-            exchange["method"].as_str(),
-            exchange["answer"]["body"].as_str(),
-        ) {
-            answers
-                .entry(method.to_owned())
-                .or_insert_with(|| body.to_owned());
-        }
-    }
-    answers
-}
-
-fn snapshot() -> Value {
-    json!({
-        "reset": "none",
-        "rpc": [{ "endpoint": "e1" }, { "endpoint": "e2" }, { "endpoint": "e3" }, { "endpoint": "e4" }],
-        "direct": null,
-        "prover": null,
-        "policy": { "order": ["quorum"], "prefer_verified": false },
-        "quorum": { "k": 3, "m": 2, "timeout_ms": 5000, "anchor": "latest", "anchor_ttl_ms": 30000 },
-        "myotis_enabled": false,
-        "tezos": ["t1", "t2", "t3"],
-    })
-}
 
 /// Plays main until the response to `id`: answers every `shell.rpc` from
 /// the recordings and counts the requests it saw.

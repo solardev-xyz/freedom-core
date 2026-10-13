@@ -19,10 +19,12 @@ use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
 use crate::exit::Exit;
-use crate::transport::{self, Credits};
+use crate::transport::{self, Credits, Link, Pending};
 use crate::vault::{FileSnapshot, Finished, NodeRecovery, Out, Vault};
 use crate::worker::Worker;
 use crate::{gate, hardening, log, naming};
+#[cfg(debug_assertions)]
+use crate::{testhooks, testmethods};
 
 /// How long the writer may take to flush on exit.
 const EXIT_DRAIN: Duration = Duration::from_secs(2);
@@ -45,8 +47,17 @@ pub struct Options {
 pub enum Event {
     /// A frame, and its place in the reader's credits.
     Frame(Frame, transport::Credit),
+    /// A fragmented response, reassembled (design 0005, Frames), and the
+    /// credit whose drop returns main's bulk credit.
+    Response {
+        id: u64,
+        payload: Zeroizing<Vec<u8>>,
+        credit: transport::Credit,
+    },
     Eof {
         at_boundary: bool,
+        /// A fragmented response was in reassembly; it is discarded.
+        in_response: bool,
     },
     /// A framing error, as a fixed category (never input text).
     ProtocolError(&'static str),
@@ -60,7 +71,8 @@ pub enum Event {
 }
 
 /// The methods this build implements, in `core.hello`'s capabilities. Only
-/// these names are ever logged; anything else is logged as `<unknown>`.
+/// these names, and in debug builds the test methods', are ever logged;
+/// anything else is logged as `<unknown>`.
 const CAPABILITIES: &[&str] = &[
     "core.hello",
     "core.shutdown",
@@ -100,6 +112,12 @@ const CAPABILITIES: &[&str] = &[
     "naming.invalidate_tezos",
 ];
 
+/// The transport features in `core.hello`'s capabilities, after the
+/// methods: `fragments`, fragmented responses with bulk credit (design
+/// 0005, Frames). The core always offers them; it sends them only to a main
+/// whose hello offered `frames: ["fragment"]`.
+const FEATURES: &[&str] = &["fragments"];
+
 pub fn run(options: &Options) -> Exit {
     hardening::harden();
     if !hardening::request_parent_death_signal(options.parent_pid) {
@@ -125,7 +143,10 @@ pub fn run(options: &Options) -> Exit {
 
     let (events_tx, events) = mpsc::channel();
     let credits = Arc::new(Credits::default());
-    let writer = match transport::spawn_writer(events_tx.clone()) {
+    let link = Link::new();
+    // The core's requests to main still waiting for their answers.
+    let pending = Arc::new(Pending::default());
+    let writer = match transport::spawn_writer(events_tx.clone(), Arc::clone(&link)) {
         Ok(writer) => writer,
         Err(_) => return Exit::Internal,
     };
@@ -134,14 +155,33 @@ pub fn run(options: &Options) -> Exit {
     };
     // Naming runs on its own thread and writes its own frames (design 0004,
     // Admission: vault control traffic never waits on naming work).
-    let Ok(naming) = naming::spawn(writer.queue.clone(), events_tx.clone()) else {
+    let Ok(naming) = naming::spawn(
+        writer.queue.clone(),
+        events_tx.clone(),
+        Arc::clone(&pending),
+    ) else {
         return Exit::Internal;
+    };
+    #[cfg(debug_assertions)]
+    let test = if testhooks::test_methods() {
+        match testmethods::spawn(writer.queue.clone(), Arc::clone(&link), events_tx.clone()) {
+            Ok(test) => Some(test),
+            Err(_) => return Exit::Internal,
+        }
+    } else {
+        None
     };
     // The status snapshot is read once, on its own thread: the gate makes
     // this process the only writer, so it never needs re-reading, and slow
     // storage can't hold up the loop (deadline, EOF, parent exit). core.hello
     // is answered once the snapshot is ready.
-    if transport::spawn_reader(events_tx.clone(), Arc::clone(&credits)).is_err()
+    if transport::spawn_reader(
+        events_tx.clone(),
+        Arc::clone(&credits),
+        Arc::clone(&link),
+        pending,
+    )
+    .is_err()
         || !spawn_snapshot(gate.identity_dir.clone(), events_tx.clone())
         || !spawn_parent_watch(options.parent_pid, events_tx)
     {
@@ -155,6 +195,7 @@ pub fn run(options: &Options) -> Exit {
         pending_hello: None,
         out: writer.queue,
         allowance: transport::Allowance::new(transport::MAX_QUEUED_REPLIES, usize::MAX),
+        link: Arc::clone(&link),
         credit: None,
         hello_done: false,
         last_request_id: 0,
@@ -164,6 +205,8 @@ pub fn run(options: &Options) -> Exit {
         ),
         worker,
         naming,
+        #[cfg(debug_assertions)]
+        test,
     };
     let hello_deadline = options.started + options.hello_timeout;
     let exit = loop {
@@ -201,8 +244,31 @@ pub fn run(options: &Options) -> Exit {
                     break exit;
                 }
             }
-            Ok(Event::Eof { at_boundary }) => {
-                if !at_boundary {
+            Ok(Event::Response {
+                id,
+                payload,
+                credit,
+            }) => {
+                // As a frame's: forwarded with the message, or dropped once
+                // it is handled, which returns main's bulk credit.
+                core.credit = Some(credit);
+                let flow = core.handle_fragmented(id, &payload);
+                drop(payload);
+                core.credit = None;
+                if let Flow::Exit(exit) = flow {
+                    break exit;
+                }
+            }
+            Ok(Event::Eof {
+                at_boundary,
+                in_response,
+            }) => {
+                if in_response {
+                    log::warn(
+                        "stdin closed in the middle of a fragmented response",
+                        serde_json::json!({}),
+                    );
+                } else if !at_boundary {
                     log::warn(
                         "stdin closed in the middle of a frame",
                         serde_json::json!({}),
@@ -275,6 +341,9 @@ pub fn run(options: &Options) -> Exit {
             Err(_) => break,
         }
     }
+    // The writer ends once the producers' queues close; the transport's own
+    // frames (main's credit) stop here.
+    link.detach();
     drop(core);
     let _ = writer.done.recv_timeout(EXIT_DRAIN);
     drop(gate);
@@ -326,6 +395,8 @@ struct Core {
     /// The loop's own share of the writer: 0001's reserved capacity, which
     /// naming traffic can't take.
     allowance: Arc<transport::Allowance>,
+    /// Bulk credit: main's hello says whether it takes fragments.
+    link: Arc<Link>,
     /// The credit of the frame being handled.
     credit: Option<transport::Credit>,
     hello_done: bool,
@@ -333,6 +404,10 @@ struct Core {
     vault: Vault,
     worker: Worker,
     naming: naming::Handle,
+    /// The `test.*` methods' thread, when the test hooks enable it (debug
+    /// builds only).
+    #[cfg(debug_assertions)]
+    test: Option<testmethods::Handle>,
 }
 
 #[derive(Deserialize)]
@@ -341,13 +416,19 @@ struct HelloParams {
     #[allow(dead_code)]
     shell_version: String,
     auto_lock_ms: u64,
+    /// The frame kinds main takes beyond whole messages: `"fragment"` for
+    /// fragmented responses with bulk credit (design 0005, Frames). Other
+    /// names are ignored.
+    #[serde(default)]
+    frames: Vec<String>,
 }
 
 #[derive(Serialize)]
 struct HelloResult<'a> {
     protocol: u32,
     core_version: &'static str,
-    capabilities: &'static [&'static str],
+    /// The methods, then the transport features.
+    capabilities: Vec<&'static str>,
     /// A node identity write that startup recovery couldn't finish
     /// (`pending_recovery`) or found broken (`corrupt`); `null` otherwise.
     /// Main keeps that node stopped.
@@ -356,11 +437,11 @@ struct HelloResult<'a> {
 
 /// A method name that is safe to log: known names only.
 fn loggable(method: &str) -> &'static str {
-    CAPABILITIES
-        .iter()
-        .copied()
-        .find(|m| *m == method)
-        .unwrap_or("<unknown>")
+    #[cfg(debug_assertions)]
+    let known = CAPABILITIES.iter().chain(testmethods::METHODS);
+    #[cfg(not(debug_assertions))]
+    let known = CAPABILITIES.iter();
+    known.copied().find(|m| *m == method).unwrap_or("<unknown>")
 }
 
 /// A fixed category for a malformed message; the parser's own text can quote
@@ -439,29 +520,51 @@ impl Core {
                 let outs = self.vault.cancel(id);
                 self.dispatch(outs)
             }
-            // Only the naming thread sends requests (shell.*): it checks
-            // that a response answers one of them.
-            Message::Response { id, outcome } => {
-                let outcome = match outcome {
-                    Ok(result) => match RawValue::from_string(result.get().to_owned()) {
-                        Ok(result) => Ok(result),
-                        Err(_) => return Flow::Exit(Exit::Internal),
-                    },
-                    Err(error) => Err(error),
-                };
-                if self
-                    .naming
-                    .send(naming::In::Response { id, outcome }, self.credit.take())
-                {
-                    Flow::Continue
-                } else {
-                    Flow::Exit(Exit::Internal)
-                }
-            }
+            Message::Response { id, outcome } => self.response(id, outcome),
             Message::Event { .. } => {
                 log::warn("ignoring an event from main", serde_json::json!({}));
                 Flow::Continue
             }
+        }
+    }
+
+    /// A fragmented response, reassembled: it must be the response its begin
+    /// named.
+    fn handle_fragmented(&mut self, id: u64, payload: &[u8]) -> Flow {
+        let category = match Message::decode(payload) {
+            Ok(Message::Response {
+                id: answered,
+                outcome,
+            }) if answered == id && self.hello_done => return self.response(id, outcome),
+            Ok(_) if !self.hello_done => "not_hello_first",
+            Ok(_) => "fragmented_not_its_response",
+            Err(e) => message_category(&e),
+        };
+        log::error(
+            "protocol error",
+            serde_json::json!({ "category": category }),
+        );
+        Flow::Exit(Exit::Protocol)
+    }
+
+    /// Main's response to one of the core's requests. Only the naming
+    /// thread sends requests (`shell.*`): it checks that a response answers
+    /// one of them.
+    fn response(&mut self, id: u64, outcome: Result<&RawValue, ErrorBody>) -> Flow {
+        let outcome = match outcome {
+            Ok(result) => match RawValue::from_string(result.get().to_owned()) {
+                Ok(result) => Ok(result),
+                Err(_) => return Flow::Exit(Exit::Internal),
+            },
+            Err(error) => Err(error),
+        };
+        if self
+            .naming
+            .send(naming::In::Response { id, outcome }, self.credit.take())
+        {
+            Flow::Continue
+        } else {
+            Flow::Exit(Exit::Internal)
         }
     }
 
@@ -512,6 +615,22 @@ impl Core {
                     Flow::Exit(Exit::Internal)
                 }
             }
+            #[cfg(debug_assertions)]
+            method if testmethods::handles(method) && self.test.is_some() => {
+                let params = match params.map(|p| RawValue::from_string(p.to_owned())) {
+                    Some(Ok(params)) => Some(params),
+                    Some(Err(_)) => return Flow::Exit(Exit::Internal),
+                    None => None,
+                };
+                let sent = self.test.as_ref().is_some_and(|test| {
+                    test.send(testmethods::In::Request { id, params }, self.credit.take())
+                });
+                if sent {
+                    Flow::Continue
+                } else {
+                    Flow::Exit(Exit::Internal)
+                }
+            }
             _ => self.error(
                 id,
                 ErrorBody::new(ErrorCode::UnknownMethod, "Unknown method"),
@@ -548,6 +667,11 @@ impl Core {
             );
         }
         self.vault.set_auto_lock_ms(params.auto_lock_ms);
+        // Granted with the handshake: main holds the core's credit from now
+        // on, and the core main's if main takes fragments.
+        if params.frames.iter().any(|kind| kind == "fragment") {
+            self.link.offer();
+        }
         if !self.snapshot_ready {
             self.pending_hello = Some(id);
             return Flow::Continue;
@@ -562,7 +686,7 @@ impl Core {
             &HelloResult {
                 protocol: fc_protocol::PROTOCOL_VERSION,
                 core_version: env!("CARGO_PKG_VERSION"),
-                capabilities: CAPABILITIES,
+                capabilities: CAPABILITIES.iter().chain(FEATURES).copied().collect(),
                 node_recovery: &self.node_recovery,
             },
         )
@@ -604,8 +728,9 @@ impl Core {
         }
     }
 
-    /// Queues a reply. A full allowance means main stopped reading stdout:
-    /// exit rather than buffer without limit.
+    /// Queues a reply: one frame, as every vault reply fits one. A full
+    /// allowance means main stopped reading stdout: exit rather than buffer
+    /// without limit.
     fn send(&self, payload: &[u8]) -> Flow {
         let Some(frame) = transport::frame(payload) else {
             return Flow::Exit(Exit::Internal);
@@ -614,7 +739,7 @@ impl Core {
             log::error("main is not reading replies", serde_json::json!({}));
             return Flow::Exit(Exit::Protocol);
         };
-        match self.out.send(transport::Out { frame, hold }) {
+        match self.out.send(transport::Out::Frame { frame, hold }) {
             Ok(()) => Flow::Continue,
             Err(_) => Flow::Exit(Exit::Protocol),
         }
