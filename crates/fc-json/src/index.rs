@@ -992,10 +992,43 @@ fn literal(s: &[u8], i: usize, word: &[u8]) -> Result<usize, IndexError> {
     }
 }
 
+/// Whether `b` ends a string token's plain run: a quote, a backslash, or
+/// a raw control character (which JSON forbids in a string). Without
+/// short-circuits, so a fold over a chunk vectorizes.
+fn breaks_string(b: u8) -> bool {
+    (b == b'"') | (b == b'\\') | (b < 0x20)
+}
+
+/// The first byte at or after `i` that [`string_end`] must look at (or the
+/// end of `s`). Whole 16-byte chunks with none are skipped a chunk at a
+/// time: the fold has no early exit, so the compiler vectorizes it, and a
+/// chunk that holds one is scanned byte by byte. A long string without
+/// escapes (a hex result, a base64 body) is passed at several GB/s instead
+/// of one byte a step.
+fn string_special(s: &[u8], mut i: usize) -> usize {
+    const CHUNK: usize = 16;
+    // Escapes often come in runs (one escape right after another): the
+    // next byte first, before a chunk's worth.
+    if s.get(i).is_none_or(|&b| breaks_string(b)) {
+        return i;
+    }
+    while let Some(chunk) = s.get(i..i + CHUNK) {
+        if chunk.iter().fold(false, |hit, &b| hit | breaks_string(b)) {
+            break;
+        }
+        i += CHUNK;
+    }
+    while s.get(i).is_some_and(|&b| !breaks_string(b)) {
+        i += 1;
+    }
+    i
+}
+
 /// The end of the string token at `i` (its opening quote).
 fn string_end(s: &[u8], mut i: usize) -> Result<usize, IndexError> {
     i += 1;
     loop {
+        i = string_special(s, i);
         match s.get(i) {
             Some(b'"') => return Ok(i + 1),
             Some(b'\\') => match s.get(i + 1) {
@@ -1009,7 +1042,6 @@ fn string_end(s: &[u8], mut i: usize) -> Result<usize, IndexError> {
                 _ => return Err(IndexError::Syntax(i + 1)),
             },
             // A raw control character, or the end of the text.
-            Some(&b) if b >= 0x20 => i += 1,
             _ => return Err(IndexError::Syntax(i)),
         }
     }
@@ -1404,5 +1436,189 @@ mod tests {
         };
         assert_eq!(props.len(), 25_000);
         assert!(sorted.starts_with(r#"{"k0":25000,"k1":25001,"k10":25010,"#));
+    }
+
+    /// The byte-at-a-time scan `string_end` replaced, kept as the oracle.
+    fn reference_string_end(s: &[u8], mut i: usize) -> Result<usize, IndexError> {
+        i += 1;
+        loop {
+            match s.get(i) {
+                Some(b'"') => return Ok(i + 1),
+                Some(b'\\') => match s.get(i + 1) {
+                    Some(b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't') => i += 2,
+                    Some(b'u')
+                        if s.get(i + 2..i + 6)
+                            .is_some_and(|digits| digits.iter().all(u8::is_ascii_hexdigit)) =>
+                    {
+                        i += 6;
+                    }
+                    _ => return Err(IndexError::Syntax(i + 1)),
+                },
+                Some(&b) if b >= 0x20 => i += 1,
+                _ => return Err(IndexError::Syntax(i)),
+            }
+        }
+    }
+
+    /// xorshift64*: the same pseudo-random cases on every run.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            usize::try_from(self.next() % n as u64).unwrap()
+        }
+    }
+
+    /// Bytes a string scan treats differently, weighted towards them: the
+    /// specials, what follows a backslash, hex digits, plain ASCII, bytes
+    /// that aren't UTF-8 on their own, and every control character.
+    fn string_byte(rng: &mut Rng) -> u8 {
+        const PICKS: &[u8] = b"\"\\\\\\nrtbfu/0aF9gZ xu";
+        match rng.below(10) {
+            0..=5 => PICKS[rng.below(PICKS.len())],
+            6 => u8::try_from(rng.below(0x20)).unwrap(),
+            7 => 0x80 + u8::try_from(rng.below(0x80)).unwrap(),
+            _ => b'a' + u8::try_from(rng.below(26)).unwrap(),
+        }
+    }
+
+    fn same_end(text: &[u8], at: usize) {
+        assert_eq!(
+            string_end(text, at),
+            reference_string_end(text, at),
+            "{:?} at {at}",
+            String::from_utf8_lossy(text)
+        );
+    }
+
+    /// `string_end` against the byte-at-a-time scan it replaced: random
+    /// strings over the bytes that matter, and every special byte at every
+    /// offset around the chunk boundaries, after plain runs of every length.
+    #[test]
+    fn string_end_matches_the_byte_scan() {
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        for _ in 0..200_000 {
+            let len = rng.below(80);
+            let mut text = vec![b'x'; rng.below(3)];
+            let at = text.len();
+            text.push(b'"');
+            text.extend((0..len).map(|_| string_byte(&mut rng)));
+            same_end(&text, at);
+        }
+        // Long plain runs, so whole chunks are skipped before the byte.
+        for run in 0..70 {
+            for special in [
+                &b"\""[..],
+                b"\\\"",
+                b"\\\\",
+                b"\\n",
+                b"\\u00e9",
+                b"\\u00e",
+                b"\\x",
+                b"\\",
+                b"\x01",
+                b"\x1f",
+                b"\xff",
+                b"",
+            ] {
+                for tail in [&b""[..], b"\"", b"abc\"", b"\\\"\""] {
+                    let mut text = b"\"".to_vec();
+                    text.extend(std::iter::repeat_n(b'a', run));
+                    text.extend_from_slice(special);
+                    text.extend_from_slice(tail);
+                    same_end(&text, 0);
+                }
+            }
+        }
+        // Runs of backslashes before a quote: an odd run escapes it.
+        for run in 0..40 {
+            for lead in 0..20 {
+                let mut text = b"\"".to_vec();
+                text.extend(std::iter::repeat_n(b'b', lead));
+                text.extend(std::iter::repeat_n(b'\\', run));
+                text.extend_from_slice(b"\"x\"");
+                same_end(&text, 0);
+            }
+        }
+    }
+
+    /// Whole documents, random and mutated, through both parsers: the
+    /// index (whose strings `string_end` scans) and the tree parser, which
+    /// scans strings itself, must still agree on every one.
+    #[test]
+    fn random_documents_parse_as_the_tree_parser_does() {
+        let mut rng = Rng(0xd1b5_4a32_d192_ed03);
+        fn value(rng: &mut Rng, depth: usize, out: &mut String) {
+            match if depth > 6 {
+                rng.below(4)
+            } else {
+                rng.below(7)
+            } {
+                0 => out.push_str(["0", "-1.5e3", "12", "true", "null", "false"][rng.below(6)]),
+                1..=3 => {
+                    out.push('"');
+                    for _ in 0..rng.below(40) {
+                        out.push_str(
+                            [
+                                "a",
+                                "\\n",
+                                "\\\"",
+                                "\\\\",
+                                "\\u00e9",
+                                "\u{e9}",
+                                "\u{1f510}",
+                                "/",
+                                " ",
+                            ][rng.below(9)],
+                        );
+                    }
+                    out.push('"');
+                }
+                4 | 5 => {
+                    out.push('[');
+                    for k in 0..rng.below(4) {
+                        if k > 0 {
+                            out.push(',');
+                        }
+                        value(rng, depth + 1, out);
+                    }
+                    out.push(']');
+                }
+                _ => {
+                    out.push('{');
+                    for k in 0..rng.below(4) {
+                        if k > 0 {
+                            out.push(',');
+                        }
+                        out.push_str(&format!("\"k{}\":", rng.below(5)));
+                        value(rng, depth + 1, out);
+                    }
+                    out.push('}');
+                }
+            }
+        }
+        for _ in 0..20_000 {
+            let mut text = String::new();
+            value(&mut rng, 0, &mut text);
+            same_verdict(&text);
+            // A mutation: a byte replaced by one that matters to a scan.
+            let mut bytes = text.into_bytes();
+            let at = rng.below(bytes.len());
+            bytes[at] = b"\"\\\x01\n}]a"[rng.below(7)];
+            if let Ok(mutated) = String::from_utf8(bytes) {
+                same_verdict(&mutated);
+            }
+        }
+        // At the depth limit and one past it.
+        let nest = |n: usize| format!("{}\"\\\\\"{}", "[".repeat(n), "]".repeat(n));
+        same_verdict(&nest(MAX_DEPTH));
+        same_verdict(&nest(MAX_DEPTH + 1));
     }
 }
