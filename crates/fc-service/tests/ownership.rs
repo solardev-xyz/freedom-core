@@ -51,6 +51,16 @@ impl Service for Svc {
         self.calls.lock().unwrap().push(req.method.to_string());
         match req.method {
             "t.later" => self.later.lock().unwrap().push(req.id),
+            // The service's own admission: 512 held, then `busy`.
+            "t.admit" => {
+                let mut later = self.later.lock().unwrap();
+                if later.len() < 512 {
+                    later.push(req.id);
+                } else {
+                    conn.reply_error(req.id, &ErrorBody::new(ErrorCode::Busy, "Busy"))
+                        .unwrap();
+                }
+            }
             // Answers the request `t.later` holds, then heads its own.
             "t.head_after" => {
                 let held = self.later.lock().unwrap().pop().unwrap();
@@ -467,6 +477,58 @@ fn shutdown_behind_parked_requests_is_handled_on_arrival() {
 }
 
 #[test]
+fn eof_ends_a_reader_waiting_for_room_to_park() {
+    let mut options = one_at_a_time();
+    options.parked_frames = 2;
+    let mut run = start(Svc::default(), options);
+    run.send(&hello());
+    run.out.message();
+    // Request 2 holds the one place; 3 and 4 fill the parking; 5 waits for
+    // room, which only an answer to 2 would make.
+    let mut frames = request(2, "t.later");
+    for id in 3..=5 {
+        frames.extend(request(id, "t.echo"));
+    }
+    run.send(&frames);
+    wait_for("t.later", || run.svc.calls.lock().unwrap().len() == 1);
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(!run.conn().is_ended());
+    // EOF ends it at once: the teardown needs no room and no writer.
+    run.main = None;
+    assert_eq!(run.exit(), Exit::Ok);
+    assert_eq!(*run.svc.ends.lock().unwrap(), [End::Eof]);
+    assert_eq!(*run.svc.calls.lock().unwrap(), ["t.later"]);
+}
+
+#[test]
+fn eof_ends_a_saturated_connection_whose_writer_is_blocked() {
+    // As the review's probe: 512 held by the service, then `busy`, with
+    // nobody reading stdout, until the 768 records and the 256 parked
+    // frames are full. The whole input fits the pump: its EOF is seen.
+    let mut run = start(Svc::default(), opts());
+    run.send(&hello());
+    run.out.message();
+    let mut frames = Vec::new();
+    for id in 2..=2002 {
+        frames.extend(request(id, "t.admit"));
+    }
+    run.send(&frames);
+    wait_for("the allowance", || {
+        run.svc.calls.lock().unwrap().len() >= conn::MAX_REQUESTS
+    });
+    std::thread::sleep(Duration::from_millis(100));
+    let started = Instant::now();
+    run.main = None;
+    assert_eq!(run.exit(), Exit::Ok);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(*run.svc.ends.lock().unwrap(), [End::Eof]);
+}
+
+#[test]
 fn credit_for_a_parked_request_is_an_overgrant() {
     let mut run = start(Svc::default(), one_at_a_time());
     run.send(&hello());
@@ -773,4 +835,77 @@ fn the_exit_watchdog_exits_70_while_the_teardown_is_unproven() {
 fn the_exit_watchdog_fires_even_when_stderr_is_not_drained() {
     let exited = run_child("blocked_stderr");
     assert_eq!(exited.map(|(code, _)| code), Some(70));
+}
+
+// ---- the stdin pump's bound ----------------------------------------------
+
+/// A handshake the test holds until the pump has had its chance to read.
+struct PausedHello {
+    entered: mpsc::Sender<()>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl Service for PausedHello {
+    fn hello(&self, _: &Hello) -> Result<serde_json::Map<String, Value>, ErrorBody> {
+        self.entered.send(()).unwrap();
+        self.release.lock().unwrap().recv().unwrap();
+        Ok(Default::default())
+    }
+    fn request(&self, _: &Connection, _: Request<'_>) {}
+    fn cancel(&self, _: &Connection, _: u64) {}
+    fn end(&self, _: &Connection, _: End) {}
+}
+
+/// stdin: the hello, then (once the reader is inside it) one byte, then as
+/// much as each read asks for, counting what the pump took.
+struct Uneven {
+    hello: Vec<u8>,
+    at_hello: mpsc::Receiver<()>,
+    taken: Arc<std::sync::atomic::AtomicUsize>,
+    reads: usize,
+}
+
+impl Read for Uneven {
+    fn read(&mut self, into: &mut [u8]) -> std::io::Result<usize> {
+        self.reads += 1;
+        if self.reads == 1 {
+            into[..self.hello.len()].copy_from_slice(&self.hello);
+            return Ok(self.hello.len());
+        }
+        if self.reads == 2 {
+            self.at_hello.recv().unwrap();
+        }
+        let n = if self.reads == 2 { 1 } else { into.len() };
+        into[..n].fill(0);
+        self.taken.fetch_add(n, Ordering::SeqCst);
+        Ok(n)
+    }
+}
+
+#[test]
+fn the_pump_holds_at_most_256_kib() {
+    use std::sync::atomic::AtomicUsize;
+    let (entered, at_hello) = mpsc::channel();
+    let (release, wait) = mpsc::channel();
+    let taken = Arc::new(AtomicUsize::new(0));
+    let input = Uneven {
+        hello: hello(),
+        at_hello,
+        taken: taken.clone(),
+        reads: 0,
+    };
+    let service = Arc::new(PausedHello {
+        entered,
+        release: Mutex::new(wait),
+    });
+    let (done, exit) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(conn::run(service, opts(), input, std::io::sink()));
+    });
+    // The reader is inside the hello: everything read now stays queued.
+    wait_for("a full queue", || taken.load(Ordering::SeqCst) >= 256 << 10);
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(taken.load(Ordering::SeqCst), 256 << 10);
+    release.send(()).unwrap();
+    let _ = exit.recv_timeout(Duration::from_secs(2));
 }

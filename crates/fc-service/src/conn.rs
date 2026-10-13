@@ -17,7 +17,8 @@
 //!   order as the writer frees room. Credit, cancels and shutdown behind
 //!   them are still handled on arrival. Only with its budget full does the
 //!   reader stop reading, which happens only when main sends requests
-//!   faster than they can be answered (0007).
+//!   faster than they can be answered (0007). Even then, an EOF the pump
+//!   has seen ends the connection at once, without waiting for the writer.
 //! - **The writer** claims one frame at a time from `fc-protocol`'s stream
 //!   [`Sender`] (events first, then control frames, then the streams
 //!   round-robin) and writes it before it claims the next. The claim is the
@@ -741,7 +742,9 @@ fn log_end(end: End) {
 fn pump_loop(link: &Link, mut input: impl Read) {
     let mut buffer = vec![0u8; 64 << 10];
     loop {
-        {
+        // Only this thread adds to the queue, so a read of at most what is
+        // left of its allowance keeps it within 256 KiB.
+        let room = {
             let mut state = link.lock();
             while state.input_bytes >= PUMPED && state.end.is_none() {
                 state = wait(&link.pump, state);
@@ -749,8 +752,11 @@ fn pump_loop(link: &Link, mut input: impl Read) {
             if state.end.is_some() {
                 return;
             }
-        }
-        let read = match input.read(&mut buffer) {
+            PUMPED - state.input_bytes
+        };
+        // `room` is at least 1, so an empty read still means EOF.
+        let limit = room.min(buffer.len());
+        let read = match input.read(buffer.get_mut(..limit).unwrap_or_default()) {
             Ok(0) => None,
             Ok(read) => Some(read),
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -822,6 +828,15 @@ struct Parked {
     frame: Frame,
     /// Main cancelled it while it waited: `cancelled` is its one reply.
     cancelled: bool,
+}
+
+/// What [`Reader::wait_for_room`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Room {
+    Free,
+    Ended,
+    /// stdin's EOF was seen.
+    Eof,
 }
 
 /// What [`Reader::admit`] did.
@@ -1062,10 +1077,11 @@ impl<'a> Reader<'a> {
         while self.parked.len() >= self.options.parked_frames.max(1)
             || (!self.parked.is_empty() && self.parked_bytes + len > self.options.parked_bytes)
         {
-            if !self.wait_for_room() {
-                return Ok(());
+            match self.wait_for_room() {
+                Room::Free => self.admit_parked()?,
+                Room::Ended => return Ok(()),
+                Room::Eof => return Err(End::Eof),
             }
-            self.admit_parked()?;
         }
         self.parked_bytes += len;
         self.parked.push_back(Parked {
@@ -1076,16 +1092,21 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
-    /// Waits until the connection holds fewer requests than its allowance;
-    /// false if it ended.
-    fn wait_for_room(&self) -> bool {
+    /// Waits until the connection holds fewer requests than its allowance,
+    /// or it ends, or stdin's EOF has been seen: EOF ends the connection
+    /// whatever input and parked requests are left, without waiting for the
+    /// writer (0007, "Progress under backpressure").
+    fn wait_for_room(&self) -> Room {
         let mut state = self.link.lock();
         loop {
             if state.end.is_some() {
-                return false;
+                return Room::Ended;
             }
             if state.sender.live() < self.link.max_requests {
-                return true;
+                return Room::Free;
+            }
+            if state.input_end {
+                return Room::Eof;
             }
             state = wait(&self.link.reader, state);
         }
