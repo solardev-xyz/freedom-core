@@ -373,9 +373,17 @@ fn auto_lock_fires() {
         json!({ "password_b64": b64("testpass1"), "mnemonic_b64": b64(ABANDON) }),
     );
     assert_eq!(core.event()["event"], "vault.unlocked");
+    let unlocked = Instant::now();
     let locked = core.event();
     assert_eq!(locked["event"], "vault.locked");
     assert_eq!(locked["data"]["reason"], "auto");
+    // Its own bound: the read guard is generous, and a late auto-lock leaves
+    // secrets unlocked. 1.5 s configured, with room for a loaded runner.
+    let after = unlocked.elapsed();
+    assert!(
+        after < Duration::from_millis(6_500),
+        "auto-lock after {after:?}"
+    );
     assert_eq!(
         core.call(3, "vault.status", json!({}))["result"]["unlocked"],
         false
