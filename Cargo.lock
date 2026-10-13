@@ -351,6 +351,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fc-dweb"
+version = "0.3.0"
+dependencies = [
+ "fc-json",
+ "hex",
+ "serde_json",
+ "sha3",
+ "thiserror",
+ "url",
+]
+
+[[package]]
 name = "fc-evm"
 version = "0.3.0"
 dependencies = [
