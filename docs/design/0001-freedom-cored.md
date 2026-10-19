@@ -457,7 +457,7 @@ The password crosses the pipe, which is no worse than today, where it is used in
   - Secret fields are base64 or hex (see [Input validation](#input-validation-and-secret-fields)), so the JSON decoder never copies them into its scratch buffer.
   - They are decoded into `Zeroizing` buffers, never through `serde_json::Value`.
   - Raw frame buffers and response buffers are wiped once decoded or written.
-  - **No buffer the core can't wipe** (#79). The reader and the writer use duplicates of the stdin and stdout descriptors (handles), never std's buffered `Stdin` and `Stdout`. std copies a write smaller than its 1 KiB `LineWriter` buffer into that buffer, and a flush resets its length but never its bytes. The chunk the reader reads into is wiped as soon as the decoder has copied the frames out of it, so a lock leaves nothing of a password frame or a secret reply behind in the core.
+  - **No buffer the core can't wipe** (#79). The reader and the writer use duplicates of the stdin and stdout descriptors (handles), never std's buffered `Stdin` and `Stdout`. std copies a write smaller than its 1 KiB `LineWriter` buffer into that buffer, and a flush resets its length but never its bytes. Each part of the chunk the reader reads into is wiped as soon as the decoder has copied it into the frames' own buffers, before any frame is handed on, since a delivery can wait for credit. So a lock leaves nothing of a password frame or a secret reply behind in the core, even while a later frame of the same read waits.
   - **Outgoing secrets go through one audited serializer that writes into a `Zeroizing` buffer:**
     - `keys.generate_mnemonic`;
     - `vault.create` and `vault.reconcile` for `create` (the onboarding phrase);

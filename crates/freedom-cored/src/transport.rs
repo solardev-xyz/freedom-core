@@ -64,10 +64,11 @@
 //! `Stdout`: std copies a write smaller than its 1 KiB `LineWriter` buffer
 //! into that buffer, and a flush resets its length, never its bytes, so a
 //! `compat.private_key` or `vault.export_mnemonic` reply stayed there until
-//! later frames happened to overwrite it. The reader wipes each chunk it
-//! read as soon as the decoder has taken it: the decoder copies every frame
-//! into the frame's own wiped buffer, and a `password_b64` mustn't wait in
-//! the chunk for a later read to cover it.
+//! later frames happened to overwrite it. The reader wipes each part of the
+//! chunk it read as soon as the decoder has copied it into the frames' own
+//! wiped buffers, before it hands on any frame: a delivery can wait for
+//! credit, and a `password_b64` mustn't wait in the chunk meanwhile, nor
+//! for a later read to cover it.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::fs::File;
@@ -620,28 +621,33 @@ impl Reader {
             }
         };
         let read = read.min(buffer.len());
-        let more = self.feed(&buffer[..read]);
-        // The decoder has copied what it needs into the frames' own wiped
-        // buffers (or holds a partial frame in one): nothing of this chunk
-        // stays here for a later read to overwrite (#79).
+        let more = self.feed(&mut buffer[..read]);
+        // `feed` wiped what the decoder took; whatever it didn't take (it
+        // stopped on an error, or the loop is gone) goes too (#79).
         buffer[..read].zeroize();
         more
     }
 
-    /// Decodes `input` and hands its frames on. False when reading must
-    /// stop.
-    fn feed(&mut self, mut input: &[u8]) -> bool {
+    /// Decodes `input` and hands its frames on, wiping each part of `input`
+    /// as soon as the decoder has copied it (#79): before any frame is
+    /// handed on, since a delivery can wait for credit. False when reading
+    /// must stop.
+    fn feed(&mut self, input: &mut [u8]) -> bool {
         // The decoder takes input up to its budget; hand its frames on, then
         // feed it the rest.
-        while !input.is_empty() {
-            let consumed = match self.decoder.push(input) {
-                Ok(consumed) => consumed,
+        let mut start = 0;
+        while start < input.len() {
+            let consumed = match self.decoder.push(&input[start..]) {
+                Ok(consumed) => consumed.min(input.len() - start),
                 Err(e) => {
                     let _ = self.events.send(Event::ProtocolError(frame_category(&e)));
                     return false;
                 }
             };
-            input = &input[consumed..];
+            // Copied into the frames' own wiped buffers (or the decoder's
+            // header): nothing of it needs to stay here.
+            input[start..start + consumed].zeroize();
+            start += consumed;
             while let Some(frame) = self.decoder.pop() {
                 if !self.deliver(frame) {
                     return false;
@@ -1307,25 +1313,23 @@ mod tests {
         ));
     }
 
-    /// The child process of [`a_written_secret_leaves_no_copy_in_memory`].
+    /// Set in the child process a memory test runs in ([`in_child`]).
     #[cfg(target_os = "linux")]
     const MEMORY_CHILD: &str = "FREEDOM_CORED_TEST_MEMORY_CHILD";
 
-    /// #79: a secret reply written to stdout leaves no copy in the process
-    /// once the core's own buffers are wiped. std's `Stdout` kept one in its
-    /// `LineWriter` buffer until later frames happened to overwrite it. The
-    /// test runs in a child process, with its stdout a pipe as the core's
-    /// is, which looks for the secret in its own memory
-    /// (`/proc/self/mem`).
+    /// Runs the test `name` (this module's) again in a child process, whose
+    /// stdout is a pipe as the core's is, and checks that it passed. True
+    /// in the child, which then runs the test's body: memory tests look for
+    /// a secret in their own process (`/proc/self/mem`), so nothing else
+    /// may run there.
     #[cfg(target_os = "linux")]
-    #[test]
-    fn a_written_secret_leaves_no_copy_in_memory() {
+    fn in_child(name: &str) -> bool {
         if std::env::var_os(MEMORY_CHILD).is_some() {
-            return memory_child();
+            return true;
         }
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
-                "transport::tests::a_written_secret_leaves_no_copy_in_memory",
+                &format!("transport::tests::{name}"),
                 "--exact",
                 "--nocapture",
                 "--test-threads=1",
@@ -1342,15 +1346,14 @@ mod tests {
             output.status.success() && stdout.contains("1 passed"),
             "child failed:\n{stdout}\n{stderr}"
         );
+        false
     }
 
-    /// Writes a frame holding a secret, then a smaller one, through the
-    /// writer as the core does; wipes every copy the core owns; then counts
-    /// the copies left in memory.
+    /// The secret of a memory test, as two halves of 48 hex digits that are
+    /// never side by side but where the test puts them, so the search holds
+    /// no copy of it.
     #[cfg(target_os = "linux")]
-    fn memory_child() {
-        // The secret, as two halves never side by side but in the frame, so
-        // the search holds no copy of it.
+    fn secret_halves() -> (Zeroizing<Vec<u8>>, Zeroizing<Vec<u8>>) {
         let half = || {
             let mut random = [0u8; 24];
             getrandom::fill(&mut random).unwrap();
@@ -1360,7 +1363,102 @@ mod tests {
                 .collect();
             Zeroizing::new(hex)
         };
-        let (first, second) = (half(), half());
+        (half(), half())
+    }
+
+    /// #79, review of #115: a chunk read whole can hold a password frame and
+    /// then frames whose delivery waits for credit. The password's bytes in
+    /// the chunk are wiped before any delivery, not after the last one: no
+    /// copy of it is left while a later frame of the same chunk waits.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn no_copy_of_a_password_while_a_later_frame_waits_for_credit() {
+        if !in_child("no_copy_of_a_password_while_a_later_frame_waits_for_credit") {
+            return;
+        }
+        /// One read that hands over its bytes and wipes its own copy.
+        struct OneRead(Zeroizing<Vec<u8>>);
+        impl Read for OneRead {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.0.len();
+                out[..n].copy_from_slice(&self.0);
+                self.0.zeroize();
+                Ok(n)
+            }
+        }
+        let (first, second) = secret_halves();
+        let mut payload = Zeroizing::new(Vec::with_capacity(512));
+        payload.extend_from_slice(
+            br#"{"type":"request","id":1,"method":"vault.unlock","params":{"password_b64":""#,
+        );
+        payload.extend_from_slice(&first);
+        payload.extend_from_slice(&second);
+        payload.extend_from_slice(br#""},"context":{"caller":"chrome"}}"#);
+        let mut input = Zeroizing::new(Vec::with_capacity(1024));
+        fc_protocol::frame::encode_json(&payload, &mut input).unwrap();
+        fc_protocol::frame::encode_json(b"{}", &mut input).unwrap();
+        fc_protocol::frame::encode_json(b"{}", &mut input).unwrap();
+        drop(payload);
+
+        // All but one of the reader's credits are taken: the password frame
+        // gets the last, and the next frame waits for it.
+        let (mut reader, events) = reader(Link::new(), &[]);
+        let held: Vec<Credit> = (0..MAX_QUEUED_FRAMES - 1)
+            .map(|_| reader.credits.acquire(1))
+            .collect();
+        let read = std::thread::spawn(move || {
+            let mut source = OneRead(input);
+            let mut chunk = Zeroizing::new(vec![0u8; READ_CHUNK]);
+            assert!(reader.read_once(&mut source, &mut chunk));
+            assert!(chunk.iter().all(|b| *b == 0));
+        });
+        let within = std::time::Duration::from_secs(10);
+        // The password frame is handled (and wiped): the second frame gets
+        // its credit, and the third waits for one.
+        let Ok(Event::Frame(password, credit)) = events.recv_timeout(within) else {
+            panic!("no password frame");
+        };
+        drop(password);
+        drop(credit);
+        let Ok(Event::Frame(waiting, credit)) = events.recv_timeout(within) else {
+            panic!("no second frame");
+        };
+        assert!(
+            events
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "the third frame doesn't wait"
+        );
+        assert_eq!(
+            copies_in_memory(&first, &second),
+            0,
+            "the password is still in the chunk while a frame waits"
+        );
+        drop((waiting, credit, held));
+        read.join().unwrap();
+        assert!(matches!(events.recv_timeout(within), Ok(Event::Frame(..))));
+    }
+
+    /// #79: a secret reply written to stdout leaves no copy in the process
+    /// once the core's own buffers are wiped. std's `Stdout` kept one in its
+    /// `LineWriter` buffer until later frames happened to overwrite it. The
+    /// test runs in a child process, with its stdout a pipe as the core's
+    /// is, which looks for the secret in its own memory
+    /// (`/proc/self/mem`).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_written_secret_leaves_no_copy_in_memory() {
+        if in_child("a_written_secret_leaves_no_copy_in_memory") {
+            memory_child();
+        }
+    }
+
+    /// Writes a frame holding a secret, then a smaller one, through the
+    /// writer as the core does; wipes every copy the core owns; then counts
+    /// the copies left in memory.
+    #[cfg(target_os = "linux")]
+    fn memory_child() {
+        let (first, second) = secret_halves();
         let mut payload = Zeroizing::new(Vec::with_capacity(256));
         payload.extend_from_slice(br#"{"type":"response","id":7,"result":{"private_key_hex":"0x"#);
         payload.extend_from_slice(&first);
@@ -1457,7 +1555,7 @@ mod tests {
         let mut input = stream[..split].to_vec();
         fc_protocol::frame::encode_json(br#"{"type":"cancel","id":3}"#, &mut input).unwrap();
         input.extend_from_slice(&stream[split..]);
-        assert!(reader.feed(&input));
+        assert!(reader.feed(&mut input));
         assert!(matches!(received.try_recv(), Ok(Event::Frame(f, _)) if f.kind == KIND_JSON));
         let Ok(Event::Response {
             id: 4,
@@ -1470,7 +1568,7 @@ mod tests {
         assert_eq!(payload.as_slice(), response);
         // Its consumer is done with it: main may begin again.
         drop(credit);
-        assert!(reader.feed(&fragmented(5, b"{}")));
+        assert!(reader.feed(&mut fragmented(5, b"{}")));
         assert!(matches!(
             received.try_recv(),
             Ok(Event::Response { id: 5, .. })
@@ -1491,7 +1589,7 @@ mod tests {
         );
         let (done, finished) = mpsc::channel();
         std::thread::spawn(move || {
-            let _ = done.send(reader.feed(&fragmented(4, response.as_bytes())));
+            let _ = done.send(reader.feed(&mut fragmented(4, response.as_bytes())));
         });
         assert_eq!(
             finished.recv_timeout(std::time::Duration::from_secs(10)),
@@ -1512,7 +1610,7 @@ mod tests {
     #[test]
     fn the_reader_refuses_a_begin_for_no_pending_request() {
         let (mut reader, received) = reader(offered(), &[4]);
-        assert!(!reader.feed(&fragmented(8, b"{}")));
+        assert!(!reader.feed(&mut fragmented(8, b"{}")));
         assert!(matches!(
             received.try_recv(),
             Ok(Event::ProtocolError("begin_unknown_id"))
@@ -1529,15 +1627,15 @@ mod tests {
         // A begin claims its request; a whole response for another one
         // still passes, and retires that one.
         let (mut first, received) = reader(offered(), &[4, 5]);
-        let (begin, _) = Splitter::begin(4, 10).unwrap();
-        assert!(first.feed(&begin));
+        let (mut begin, _) = Splitter::begin(4, 10).unwrap();
+        assert!(first.feed(&mut begin));
         assert!(!first.pending.contains(4));
-        assert!(first.feed(&whole(r#"{"type":"response","id":5,"result":{}}"#)));
+        assert!(first.feed(&mut whole(r#"{"type":"response","id":5,"result":{}}"#)));
         assert!(matches!(received.try_recv(), Ok(Event::Frame(..))));
         assert!(!first.pending.contains(5));
         // A whole response for the request whose response has begun is its
         // second.
-        assert!(!first.feed(&whole(
+        assert!(!first.feed(&mut whole(
             r#"{"type":"response","id":4,"error":{"code":"internal","message":"x"}}"#
         )));
         assert!(matches!(
@@ -1549,9 +1647,9 @@ mod tests {
         // its request names nothing pending, whether or not its consumer
         // has handled the response yet.
         let (mut second, received) = reader(offered(), &[4]);
-        assert!(second.feed(&whole(r#"{"type":"response","id":4,"result":{}}"#)));
+        assert!(second.feed(&mut whole(r#"{"type":"response","id":4,"result":{}}"#)));
         assert!(matches!(received.try_recv(), Ok(Event::Frame(..))));
-        assert!(!second.feed(&fragmented(4, b"{}")));
+        assert!(!second.feed(&mut fragmented(4, b"{}")));
         assert!(matches!(
             received.try_recv(),
             Ok(Event::ProtocolError("begin_unknown_id"))
@@ -1563,7 +1661,7 @@ mod tests {
         let (mut reader, received) = reader(offered(), &[4, 5]);
         let mut stream = fragmented(4, b"{}");
         stream.extend_from_slice(&fragmented(5, b"{}"));
-        assert!(!reader.feed(&stream));
+        assert!(!reader.feed(&mut stream));
         // The first is delivered; its credit is still held, so the second
         // begin is a protocol error.
         assert!(matches!(
@@ -1583,7 +1681,7 @@ mod tests {
         link.attach(queue);
         // Unsolicited while the core holds the credit.
         let (mut first, received) = reader(Arc::clone(&link), &[]);
-        assert!(!first.feed(&fragment::credit_frame()));
+        assert!(!first.feed(&mut fragment::credit_frame()));
         assert!(matches!(
             received.try_recv(),
             Ok(Event::ProtocolError("unsolicited_credit"))
@@ -1591,7 +1689,7 @@ mod tests {
         // Owed once a response has begun: the writer is woken.
         let (mut second, _received) = reader(Arc::clone(&link), &[]);
         assert!(link.spend_credit());
-        assert!(second.feed(&fragment::credit_frame()));
+        assert!(second.feed(&mut fragment::credit_frame()));
         assert!(link.holds_credit());
         assert!(matches!(frames.try_recv(), Ok(Out::Credit)));
     }
