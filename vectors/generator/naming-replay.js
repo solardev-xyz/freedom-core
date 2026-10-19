@@ -73,7 +73,37 @@ const BOUNDS = {
   callersPerSession: 64,
   deadlineMs: 120_000,
   retiredEndpoints: 64,
+  answerChargeBytes: 1024 * 1024,
 };
+
+/**
+ * The values and keys of a JSON text, as fc-json's counting pass counts
+ * them (one each, duplicates included); a text that isn't JSON counts one
+ * per two of its `bytes`. The harness's bodies come from JSON.stringify,
+ * so they have no duplicate keys.
+ */
+function __jsonValues(text, bytes) {
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return Math.ceil(bytes / 2);
+  }
+  let count = 0;
+  const stack = [value];
+  while (stack.length > 0) {
+    const item = stack.pop();
+    count += 1;
+    if (Array.isArray(item)) stack.push(...item);
+    else if (item !== null && typeof item === 'object') {
+      for (const [, member] of Object.entries(item)) {
+        count += 1;
+        stack.push(member);
+      }
+    }
+  }
+  return count;
+}
 
 // The core's frame check (deviation `request-size`): a request's payload
 // strings, serialized, plus 4 KiB for its envelope, within the frame.
@@ -373,7 +403,7 @@ function __admit(session) {
     },
   }),
   'memory-budgets': (b) => ({
-    text: `A session is charged for its name's copies (8 per byte of its in-flight key) as it starts, its requests (endpoint and body) as it makes them, and its answers as they arrive, at 32 per byte (their parsed JSON at worst); one an answer takes past ${b.sessionBytes} bytes ends at once: its callers get "budget", the answer is dropped, its outstanding I/O is cancelled and it makes no more. The patch holds for one step with one content lookup on JSON-RPC alone, without redirects or 429s, ended by an answer crossing (enforced); the core's replies and aliasing decodes are its own tests.`,
+    text: `A session is charged for its name's copies (8 per byte of its in-flight key) as it starts, its requests (endpoint and body) as it makes them, and its answers as they arrive, at what their parsed JSON can hold: twice their bytes, 88 per JSON value or key and 80 per escaped surrogate. An anchor answer (eth_blockNumber, eth_getBlockByNumber) is charged only until it is read, which is at once. One an answer takes past ${b.sessionBytes} bytes ends at once: its callers get "budget", the answer is dropped, its outstanding I/O is cancelled and it makes no more. The patch holds for one step with one content lookup on JSON-RPC alone, without redirects or 429s, ended by an answer crossing (enforced); the core's replies, aliasing decodes and its refusal of one answer over ${b.answerChargeBytes} bytes are its own tests.`,
     harness: ['memory-budgets'],
   }),
   'overall-deadline': (b) => ({
@@ -782,11 +812,17 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
           // The core charges one exchange's final answer: a hop or a retry
           // isn't a modelled one.
           if (redirect || answer.status === 429) violations.push('memory-budgets: the patch models no redirects or 429s');
-          charged += Buffer.byteLength(answer.body) * 32;
+          const bytes = Buffer.byteLength(answer.body);
+          const surrogates = (answer.body.match(/\\u[dD][89a-fA-F]/g) || []).length;
+          const charge = 2 * bytes + 88 * __jsonValues(answer.body, bytes) + 80 * surrogates;
+          if (charge > bounds.answerChargeBytes) violations.push('memory-budgets: an answer over the per-answer allowance is the core\'s own test');
+          charged += charge;
           if (charged > bounds.sessionBytes) {
             endStep(entries[0].step, new Error('budget'), entries);
             return;
           }
+          // An anchor answer's charge goes as it is read, at once.
+          if (batch.every((r) => r.method === 'eth_blockNumber' || r.method === 'eth_getBlockByNumber')) charged -= charge;
         }
         // Deviation `response-caps`: main delivers the body, and the core
         // refuses it as a transport failure.
@@ -1726,10 +1762,11 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
       ]),
     },
     // The session's charge: its name (152), its requests, and its answers at
-    // 32 per byte: 6,664 before the block answers at 40 ms (423 bytes, so
-    // 13,536 each), so the second of them crosses 25,000. The session ends
-    // there: the other two block requests are cancelled.
-    deviation('memory-budgets', base({ bounds: { sessionBytes: 25000 } })),
+    // twice their bytes and 88 per JSON value or key, an anchor answer only
+    // until it is read. The first block answer at 40 ms (423 bytes) crosses
+    // 4,000. The session ends there: the other block requests are
+    // cancelled.
+    deviation('memory-budgets', base({ bounds: { sessionBytes: 4000 } })),
     // Every endpoint answers after a second; the session ends at 300 ms.
     deviation('overall-deadline', base({
       bounds: { deadlineMs: 300 },

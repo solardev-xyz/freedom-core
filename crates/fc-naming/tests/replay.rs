@@ -157,6 +157,9 @@ fn bounds(world: &JsValue) -> Bounds {
     if let Some(n) = get("decodeBytes") {
         bounds.decode_bytes = n;
     }
+    if let Some(n) = get("answerChargeBytes") {
+        bounds.answer_charge_bytes = n;
+    }
     if let Some(n) = get("sessions") {
         bounds.sessions = n;
     }

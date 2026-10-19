@@ -208,13 +208,21 @@ fn request_bytes(request: &Request) -> usize {
     }
 }
 
-/// What an answer can come to hold: its body parsed as JSON (its worst-case
-/// tree, `PARSED_FACTOR` per byte), or the verifier's outcome.
+/// What an answer can come to hold: its body parsed as JSON (a bound from
+/// counting its values, with the body's own bytes and any replacement of
+/// invalid UTF-8), or the verifier's outcome.
 fn answer_bytes(answer: &Answer) -> usize {
     use super::budget::PARSED_FACTOR;
     match answer {
         Answer::Rpc { body, .. } | Answer::Gateway { body, .. } | Answer::Tezos { body, .. } => {
-            body.len().saturating_mul(PARSED_FACTOR)
+            let text = String::from_utf8_lossy(body);
+            let decoded = match &text {
+                std::borrow::Cow::Owned(owned) => owned.len(),
+                std::borrow::Cow::Borrowed(_) => 0,
+            };
+            body.len()
+                .saturating_add(decoded)
+                .saturating_add(super::budget::parsed_bound(&text))
         }
         Answer::Verified(super::ens::Verified::Result(value)) => {
             value.stringify().len().saturating_mul(PARSED_FACTOR)
@@ -223,6 +231,13 @@ fn answer_bytes(answer: &Answer) -> usize {
         Answer::Verified(super::ens::Verified::Failure(class)) => class.len(),
         Answer::Failed(_) | Answer::Done => 0,
     }
+}
+
+/// Whether a JSON-RPC body the core wrote asks for a head or a block, which
+/// only the anchor does.
+fn is_anchor_body(body: &str) -> bool {
+    body.contains(r#""method":"eth_blockNumber""#)
+        || body.contains(r#""method":"eth_getBlockByNumber""#)
 }
 
 /// One caller's terminal reply.
@@ -303,7 +318,16 @@ pub struct Machine {
     /// owner.
     origins: std::collections::BTreeMap<u64, (Generations, Ms, u64)>,
     next_owner: u64,
+    /// The anchor's head and block requests (`eth_blockNumber`,
+    /// `eth_getBlockByNumber`): their answers are read for a number or a
+    /// hash at once, so their charge is taken back as they are read (#73).
+    anchor_requests: RefCell<std::collections::BTreeSet<u64>>,
+    /// Those answers' charges, until read: by request id, the session and
+    /// the bytes.
+    anchor_charges: AnchorCharges,
 }
+
+type AnchorCharges = Rc<RefCell<std::collections::BTreeMap<u64, (u64, usize)>>>;
 
 /// Deviation `endpoint-retention`: endpoints that left the configuration
 /// join `retired` (most recent last), re-added ones leave it, and past
@@ -364,6 +388,19 @@ fn ready(sleep: &mut Sleep<Request, Answer>) -> bool {
 impl Machine {
     pub fn new(now: Ms, config: Config, random: Box<dyn Random>) -> Self {
         let ctx = Rc::new(Ctx::new(now, config, random));
+        // An anchor answer's charge goes as a future takes the answer: it
+        // reads a number or a hash from it at once, and drops the rest.
+        let anchor_charges = AnchorCharges::default();
+        {
+            let weak = Rc::downgrade(&ctx);
+            let charges = Rc::clone(&anchor_charges);
+            ctx.rt.set_consumed(move |id| {
+                let released = charges.borrow_mut().remove(&id);
+                if let (Some(ctx), Some((session, bytes))) = (weak.upgrade(), released) {
+                    ctx.budget.borrow_mut().uncharge(session, bytes);
+                }
+            });
+        }
         // A request counts against the session making it as it is made: one
         // that crosses the budget is never emitted (`memory-budgets`).
         let weak = Rc::downgrade(&ctx);
@@ -391,6 +428,8 @@ impl Machine {
             retired_tezos: std::collections::VecDeque::new(),
             origins: std::collections::BTreeMap::new(),
             next_owner: 1,
+            anchor_requests: RefCell::new(std::collections::BTreeSet::new()),
+            anchor_charges,
         }
     }
 
@@ -1109,6 +1148,19 @@ impl Machine {
             .take_effects()
             .into_iter()
             .map(|effect| {
+                match &effect {
+                    Effect::Request {
+                        id,
+                        request: Request::Rpc { body, .. },
+                        ..
+                    } if is_anchor_body(body) => {
+                        self.anchor_requests.borrow_mut().insert(*id);
+                    }
+                    Effect::Cancel { id, .. } => {
+                        self.anchor_requests.borrow_mut().remove(id);
+                    }
+                    _ => {}
+                }
                 let (generations, deadline, _) = match &effect {
                     Effect::Request { owner, .. } => {
                         self.origins.get(owner).copied().unwrap_or(current)
@@ -1129,8 +1181,15 @@ impl Machine {
     }
 
     /// Answers request `id`. The answer counts against its session's
-    /// budget (`memory-budgets`); one that crosses it is dropped, and the
-    /// session ends at the next poll.
+    /// budget (`memory-budgets`), at what its parse can hold.
+    /// - **An answer charged over `answer_charge_bytes`** is refused: its
+    ///   request fails as `too_large`, the endpoint's doing (a provider
+    ///   failure), and the session goes on with its other requests. One
+    ///   endpoint's answer so can't spend a lookup's budget (#73).
+    /// - **One that crosses the session's budget or the total** is dropped,
+    ///   and the session ends at the next poll.
+    /// - **The anchor's answers** are charged until the poll that reads
+    ///   them, which keeps only a number or a hash.
     pub fn complete(&self, id: u64, answer: Answer) -> bool {
         let session = self
             .ctx
@@ -1138,16 +1197,28 @@ impl Machine {
             .owner_of(id)
             .and_then(|owner| self.origins.get(&owner))
             .map_or(0, |origin| origin.2);
-        if session != 0 {
-            let bounds = self.ctx.bounds();
-            if !self
+        if session == 0 {
+            return self.ctx.rt.complete(id, answer);
+        }
+        let bounds = self.ctx.bounds();
+        let bytes = answer_bytes(&answer);
+        let refused = matches!(
+            answer,
+            Answer::Rpc { .. } | Answer::Gateway { .. } | Answer::Tezos { .. }
+        ) && bytes > bounds.answer_charge_bytes;
+        if refused {
+            return self
                 .ctx
-                .budget
+                .rt
+                .complete(id, Answer::Failed(super::rpc::Transport::TooLarge));
+        }
+        if !self.ctx.budget.borrow_mut().charge(session, bytes, &bounds) {
+            return false;
+        }
+        if self.anchor_requests.borrow_mut().remove(&id) {
+            self.anchor_charges
                 .borrow_mut()
-                .charge(session, answer_bytes(&answer), &bounds)
-            {
-                return false;
-            }
+                .insert(id, (session, bytes));
         }
         self.ctx.rt.complete(id, answer)
     }

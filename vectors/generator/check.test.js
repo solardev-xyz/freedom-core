@@ -349,11 +349,13 @@ test('replay\'s memory-budgets patch refuses what it can\'t model', async () => 
   empty.steps[0].call = { fn: 'resolveEnsContent', args: [''] };
   await assert.rejects(replay.runScenario(REFERENCE, ethers, FakeTimers, empty), /ended otherwise/);
   // A name is charged as the core keys it, normalized: a decomposed name
-  // and its composed form record the same trace.
+  // and its composed form record the same trace. At 3,000 bytes the first
+  // block answer crosses; charged as written, the decomposed name's 800
+  // bytes more would cross at the head answers instead.
   const named = (name) => {
     const scenario = structuredClone(definition(ethers, 'deviation-memory-budgets'));
     scenario.steps[0].call = { fn: 'resolveEnsContent', args: [name] };
-    scenario.world.bounds = { sessionBytes: 22_000 };
+    scenario.world.bounds = { sessionBytes: 3_000 };
     return replay.runScenario(REFERENCE, ethers, FakeTimers, scenario);
   };
   const decomposed = `${('e' + String.fromCharCode(0x301)).repeat(100)}.eth`;
