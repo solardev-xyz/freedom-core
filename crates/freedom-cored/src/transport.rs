@@ -57,8 +57,20 @@
 //!
 //! Lifecycle events (EOF, framing errors, writer failure, a thread dying) go
 //! through an unbounded channel that frames can't fill.
+//!
+//! **No stray copies of secret frames** (design 0001, "Secrets in memory";
+//! #79). Both threads use stdin and stdout through their own duplicates of
+//! the descriptors (handles), never through std's buffered `Stdin` and
+//! `Stdout`: std copies a write smaller than its 1 KiB `LineWriter` buffer
+//! into that buffer, and a flush resets its length, never its bytes, so a
+//! `compat.private_key` or `vault.export_mnemonic` reply stayed there until
+//! later frames happened to overwrite it. The reader wipes each chunk it
+//! read as soon as the decoder has taken it: the decoder copies every frame
+//! into the frame's own wiped buffer, and a `password_b64` mustn't wait in
+//! the chunk for a later read to cover it.
 
 use std::collections::{BTreeSet, VecDeque};
+use std::fs::File;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -69,7 +81,7 @@ use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::fragment::{self, Delivery, FragmentError, Reassembler, Splitter};
 use fc_protocol::frame::{Decoder, MAX_MESSAGE, MAX_PAYLOAD};
 use fc_protocol::message;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::serve::Event;
 
@@ -511,7 +523,13 @@ pub fn spawn_reader(
                 events: events.clone(),
                 name: "stdin",
             };
-            let mut stdin = std::io::stdin().lock();
+            let Ok(mut stdin) = unbuffered_stdin() else {
+                let _ = events.send(Event::Eof {
+                    at_boundary: false,
+                    in_response: false,
+                });
+                return;
+            };
             let mut buffer = Zeroizing::new(vec![0u8; READ_CHUNK]);
             let mut reader = Reader {
                 events,
@@ -524,35 +542,92 @@ pub fn spawn_reader(
                 // before then.
                 reassembler: Reassembler::new(),
             };
-            loop {
-                let read = match stdin.read(&mut buffer[..]) {
-                    Ok(0) => {
-                        let _ = reader.events.send(Event::Eof {
-                            at_boundary: reader.decoder.is_at_boundary(),
-                            // The partial response is discarded with the
-                            // reassembler.
-                            in_response: reader.reassembler.in_progress(),
-                        });
-                        return;
-                    }
-                    Ok(read) => read,
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(_) => {
-                        let _ = reader.events.send(Event::Eof {
-                            at_boundary: false,
-                            in_response: reader.reassembler.in_progress(),
-                        });
-                        return;
-                    }
-                };
-                if !reader.feed(&buffer[..read]) {
-                    return;
-                }
-            }
+            while reader.read_once(&mut stdin, &mut buffer) {}
         })
 }
 
+/// A duplicate of stdin's descriptor (handle), read without std's buffer.
+#[cfg(unix)]
+fn unbuffered_stdin() -> std::io::Result<File> {
+    use std::os::fd::AsFd;
+    Ok(File::from(std::io::stdin().as_fd().try_clone_to_owned()?))
+}
+
+#[cfg(windows)]
+fn unbuffered_stdin() -> std::io::Result<File> {
+    use std::os::windows::io::AsHandle;
+    Ok(File::from(
+        std::io::stdin().as_handle().try_clone_to_owned()?,
+    ))
+}
+
+/// A duplicate of stdout's descriptor (handle), written without std's
+/// buffer: each frame goes straight to the pipe, and no copy of it stays
+/// behind in a buffer the core doesn't wipe.
+#[cfg(unix)]
+fn unbuffered_stdout() -> std::io::Result<File> {
+    use std::os::fd::AsFd;
+    Ok(File::from(std::io::stdout().as_fd().try_clone_to_owned()?))
+}
+
+#[cfg(windows)]
+fn unbuffered_stdout() -> std::io::Result<File> {
+    use std::os::windows::io::AsHandle;
+    Ok(File::from(
+        std::io::stdout().as_handle().try_clone_to_owned()?,
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn unbuffered_stdin() -> std::io::Result<File> {
+    Err(std::io::Error::other(
+        "no unbuffered stdin on this platform",
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn unbuffered_stdout() -> std::io::Result<File> {
+    Err(std::io::Error::other(
+        "no unbuffered stdout on this platform",
+    ))
+}
+
 impl Reader {
+    /// Reads one chunk from `source` into `buffer`, hands its frames on, and
+    /// wipes what it read. False when reading must stop (EOF, a read error,
+    /// a framing error, the loop gone).
+    fn read_once(&mut self, source: &mut impl Read, buffer: &mut [u8]) -> bool {
+        let read = loop {
+            match source.read(buffer) {
+                Ok(0) => {
+                    let _ = self.events.send(Event::Eof {
+                        at_boundary: self.decoder.is_at_boundary(),
+                        // The partial response is discarded with the
+                        // reassembler.
+                        in_response: self.reassembler.in_progress(),
+                    });
+                    return false;
+                }
+                Ok(read) => break read,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => {
+                    let _ = self.events.send(Event::Eof {
+                        at_boundary: false,
+                        in_response: self.reassembler.in_progress(),
+                    });
+                    return false;
+                }
+            }
+        };
+        let read = read.min(buffer.len());
+        let more = self.feed(&buffer[..read]);
+        // The decoder has copied what it needs into the frames' own wiped
+        // buffers (or holds a partial frame in one): nothing of this chunk
+        // stays here for a later read to overwrite (#79).
+        buffer[..read].zeroize();
+        more
+    }
+
     /// Decodes `input` and hands its frames on. False when reading must
     /// stop.
     fn feed(&mut self, mut input: &[u8]) -> bool {
@@ -664,7 +739,10 @@ pub fn spawn_writer(events: Sender<Event>, link: Arc<Link>) -> std::io::Result<W
                 events: events.clone(),
                 name: "stdout",
             };
-            let mut stdout = std::io::stdout().lock();
+            let Ok(mut stdout) = unbuffered_stdout() else {
+                let _ = events.send(Event::WriterFailed);
+                return;
+            };
             if write_frames(&mut stdout, &frames, &link).is_err() {
                 let _ = events.send(Event::WriterFailed);
                 return;
@@ -1180,6 +1258,182 @@ mod tests {
             reassembler: Reassembler::new(),
         };
         (reader, received)
+    }
+
+    /// #79: the chunk a frame was read into holds nothing of it once the
+    /// decoder has it, whole or in part: a `password_b64` doesn't wait there
+    /// for a later, longer read to cover it.
+    #[test]
+    fn the_read_chunk_is_wiped_once_decoded() {
+        let (mut reader, received) = reader(Link::new(), &[]);
+        let message = br#"{"type":"request","id":2,"method":"vault.unlock","params":{"password_b64":"c2VjcmV0LXBhc3N3b3Jk"},"context":{"caller":"chrome"}}"#;
+        let mut input = Vec::new();
+        fc_protocol::frame::encode_json(message, &mut input).unwrap();
+        let wiped = |buffer: &[u8]| buffer.iter().all(|b| *b == 0);
+        let mut buffer = vec![0u8; READ_CHUNK];
+
+        // A whole frame in one read.
+        let mut source = std::io::Cursor::new(input.clone());
+        assert!(reader.read_once(&mut source, &mut buffer));
+        assert!(wiped(&buffer));
+        let Ok(Event::Frame(frame, _credit)) = received.try_recv() else {
+            panic!("no frame");
+        };
+        assert_eq!(&frame.payload[..], &message[..]);
+
+        // Split across two reads: the first half waits in the decoder's own
+        // buffer, not in the chunk.
+        let half = input.len() / 2;
+        let mut first = std::io::Cursor::new(input[..half].to_vec());
+        assert!(reader.read_once(&mut first, &mut buffer));
+        assert!(wiped(&buffer));
+        assert!(received.try_recv().is_err());
+        let mut second = std::io::Cursor::new(input[half..].to_vec());
+        assert!(reader.read_once(&mut second, &mut buffer));
+        assert!(wiped(&buffer));
+        let Ok(Event::Frame(frame, _credit)) = received.try_recv() else {
+            panic!("no frame");
+        };
+        assert_eq!(&frame.payload[..], &message[..]);
+
+        // EOF ends reading.
+        assert!(!reader.read_once(&mut second, &mut buffer));
+        assert!(matches!(
+            received.try_recv(),
+            Ok(Event::Eof {
+                at_boundary: true,
+                ..
+            })
+        ));
+    }
+
+    /// The child process of [`a_written_secret_leaves_no_copy_in_memory`].
+    #[cfg(target_os = "linux")]
+    const MEMORY_CHILD: &str = "FREEDOM_CORED_TEST_MEMORY_CHILD";
+
+    /// #79: a secret reply written to stdout leaves no copy in the process
+    /// once the core's own buffers are wiped. std's `Stdout` kept one in its
+    /// `LineWriter` buffer until later frames happened to overwrite it. The
+    /// test runs in a child process, with its stdout a pipe as the core's
+    /// is, which looks for the secret in its own memory
+    /// (`/proc/self/mem`).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_written_secret_leaves_no_copy_in_memory() {
+        if std::env::var_os(MEMORY_CHILD).is_some() {
+            return memory_child();
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "transport::tests::a_written_secret_leaves_no_copy_in_memory",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(MEMORY_CHILD, "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "child failed:\n{stdout}\n{stderr}"
+        );
+    }
+
+    /// Writes a frame holding a secret, then a smaller one, through the
+    /// writer as the core does; wipes every copy the core owns; then counts
+    /// the copies left in memory.
+    #[cfg(target_os = "linux")]
+    fn memory_child() {
+        // The secret, as two halves never side by side but in the frame, so
+        // the search holds no copy of it.
+        let half = || {
+            let mut random = [0u8; 24];
+            getrandom::fill(&mut random).unwrap();
+            let hex: Vec<u8> = random
+                .iter()
+                .flat_map(|b| format!("{b:02x}").into_bytes())
+                .collect();
+            Zeroizing::new(hex)
+        };
+        let (first, second) = (half(), half());
+        let mut payload = Zeroizing::new(Vec::with_capacity(256));
+        payload.extend_from_slice(br#"{"type":"response","id":7,"result":{"private_key_hex":"0x"#);
+        payload.extend_from_slice(&first);
+        payload.extend_from_slice(&second);
+        payload.extend_from_slice(br#""}}"#);
+        let secret = frame(&payload).unwrap();
+        drop(payload);
+        // No newline: std's LineWriter would pass part of it straight
+        // through.
+        assert!(!secret.contains(&b'\n'));
+        let small = frame(br#"{"type":"event","event":"vault.locked","data":{}}"#).unwrap();
+
+        let allowance = Allowance::new(16, usize::MAX);
+        let (queue, frames) = mpsc::channel();
+        for frame in [secret, small] {
+            let hold = allowance.take(frame.len()).unwrap();
+            queue.send(Out::Frame { frame, hold }).unwrap();
+        }
+        drop(queue);
+        let mut stdout = unbuffered_stdout().unwrap();
+        write_frames(&mut stdout, &frames, &Link::new()).unwrap();
+        drop(frames);
+
+        let copies = copies_in_memory(&first, &second);
+        assert_eq!(copies, 0, "the secret is still in memory");
+    }
+
+    /// How often `first` directly followed by `second` occurs in this
+    /// process's readable memory.
+    #[cfg(target_os = "linux")]
+    fn copies_in_memory(first: &[u8], second: &[u8]) -> usize {
+        use std::os::unix::fs::FileExt;
+        let needle = first.len() + second.len();
+        let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
+        let memory = std::fs::File::open("/proc/self/mem").unwrap();
+        let mut chunk = Zeroizing::new(vec![0u8; 1 << 20]);
+        let mut copies = 0;
+        for line in maps.lines() {
+            let mut fields = line.split_whitespace();
+            let (Some(range), Some(perms)) = (fields.next(), fields.next()) else {
+                continue;
+            };
+            let Some((start, end)) = range.split_once('-') else {
+                continue;
+            };
+            let (Ok(start), Ok(end)) =
+                (u64::from_str_radix(start, 16), u64::from_str_radix(end, 16))
+            else {
+                continue;
+            };
+            if !perms.starts_with('r') {
+                continue;
+            }
+            let mut at = start;
+            while at < end {
+                let want = usize::try_from((end - at).min(chunk.len() as u64)).unwrap();
+                // Some mappings ([vvar], guard pages) can't be read.
+                let Ok(got) = memory.read_at(&mut chunk[..want], at) else {
+                    break;
+                };
+                if got < needle {
+                    break;
+                }
+                copies += chunk[..got]
+                    .windows(needle)
+                    .filter(|w| w.starts_with(first) && w.ends_with(second))
+                    .count();
+                chunk[..got].zeroize();
+                // Overlapping, so a copy across two chunks is seen once.
+                at += (got - needle + 1) as u64;
+            }
+        }
+        copies
     }
 
     /// A fragmented response's frames, `chunk` bytes per fragment at most.
