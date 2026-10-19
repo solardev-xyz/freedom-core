@@ -465,7 +465,8 @@ The password crosses the pipe, which is no worse than today, where it is used in
   - **macOS:** `RLIMIT_CORE=0` plus the hardened runtime.
   - Both go through `rustix`'s safe wrappers.
 - **What isn't guaranteed:** the core can't wipe copies in main. Passwords and mnemonics pass through JS strings, and `compat` keys through ethers objects. Phase 1 stops main from keeping them resident, and Phase 2 removes the key copies.
-- **`mlock` is deferred.** If added, it lives in `freedom-cored` only, under a documented exception to the `unsafe_code` lint.
+- **No `unsafe` in the core** (#103). `freedom-cored` inherits the workspace's `forbid(unsafe_code)`, which no `#[allow]` can lift. The OS calls std lacks are in `fc-sys`, the workspace's only crate with `unsafe` code (AGENTS.md rule 6): each is one reviewed FFI call behind a safe function, today Windows' `GetDriveTypeW` for storage qualification.
+- **`mlock` is deferred.** If added, it goes into `fc-sys` too.
 
 ## Packaging and release
 
