@@ -140,10 +140,11 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
     - `truncate` (`ftruncate` stays: it needs a descriptor open for writing, which Landlock checked);
     - mode and owner: `chmod`, `fchmod`, `fchmodat`, `fchmodat2`, `chown`, `fchown`, `lchown`, `fchownat`;
     - xattrs: `setxattr`, `lsetxattr`, `fsetxattr`, `setxattrat`, and the matching `removexattr` calls;
-    - times and flags: `utime`, `utimes`, `futimesat`, `utimensat`, `file_setattr`, and the `ioctl`s that set inode flags (`FS_IOC_SETFLAGS`, `FS_IOC_FSSETXATTR`).
+    - times and attributes: `utime`, `utimes`, `futimesat`, `utimensat`, `file_setattr`;
+    - **`ioctl`, by an allowlist** of the commands the services make, compared on the command's low 32 bits, as the kernel reads it: `FIONBIO`, `FIOCLEX`, `FIONCLEX`, `FIONREAD`, and the terminal queries `TCGETS` and `TIOCGWINSZ` (`isatty`). Every other command answers `ENOTTY`, as an unknown one would. A denylist can't be complete: besides the inode-flag commands (`FS_IOC_SETFLAGS`, `FS_IOC_FSSETXATTR`), `FS_IOC_ENABLE_VERITY` takes a read-only descriptor and makes a file permanently read-only, `FS_IOC_SET_ENCRYPTION_POLICY` sets an empty directory's policy, and ext4's `SETVERSION` changes the inode generation, and filesystems add more. Landlock's ioctl right (ABI 5) covers devices only.
 
     So no file's metadata changes: not one outside the grant, nor one under a read-only grant, such as the import's source. Files in the data directory keep the modes they were created with.
-    - **Who makes them,** and none fails for it:
+    - **Who makes them,** and none fails for it (the `ioctl` list is the qualification's record of the release binaries' calls; a command outside it fails CI):
       - SQLite's unix VFS (3.51) `fchmod`s a new journal or WAL file to the database's mode, and ignores a failure: the file keeps the mode its creation gave it. It calls `fchown` only as root;
       - libgit2 1.9.6, in heartwood's bare-repository workflow, makes two path calls and no descriptor ones (shared-mode repositories would add more). Its `chmod` probe at repository creation then records `core.filemode = false`, which a bare repository ignores. Its `utimes`, which "freshens" an object that already exists, makes it write the object again. It sets object files' modes when it creates them;
       - std and tokio make them only when asked (`set_permissions`, `set_times`, `fs::copy`). fc-service, freedom-ipfs v0.4.6 and heartwood `c208df3` don't ask. `freedom-cored` does, but isn't confined (D7).
@@ -183,7 +184,7 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
   - file reads and writes outside the profile's paths, which can be parameters such as the data directory;
   - `process-exec` and `process-fork`;
   - Mach service lookups, and connections to UNIX sockets;
-  - metadata: mode, owner, xattr and time changes are write operations of their own (`file-write-mode` and the like), which a read-only rule doesn't grant;
+  - metadata: mode, owner, xattr, flag and time changes are write operations of their own (`file-write-mode`, `file-write-flags` and the like), which a read-only rule doesn't grant, and the profile grants `file-ioctl` nowhere outside the read-write grant;
   - network access. A rule can allow only loopback with a port (`(remote ip "localhost:9150")`), which fits `socks5` mode.
 - **Its cost:**
   - FFI, so `unsafe`, in one reviewed place (D6);
@@ -389,6 +390,7 @@ Through the binary, in CI's job for each OS:
   - two canary files, one in a sibling of the data directory and one in the user's home: reading and writing either fails once the service is confined;
   - on the same canaries: `truncate`, `chmod`, `chown`, `setxattr` and `utimensat` with a path all fail, and the size, mode, xattrs and times are unchanged. `stat` succeeds: the accepted residual;
   - **a read-only grant:** a file in the import's source, opened read-only. `fchmod`, `fsetxattr` and `futimens` on its descriptor fail, and the parent sees its mode, xattrs and times unchanged. On macOS, the same through the profile;
+  - **the `ioctl` allowlist:** on that descriptor, `FS_IOC_SETFLAGS`, `FS_IOC_FSSETXATTR`, `FS_IOC_ENABLE_VERITY`, `FS_IOC_SET_ENCRYPTION_POLICY` (on an empty directory in the source), ext4's `SETVERSION` and an unknown command answer `ENOTTY`, and the file is unchanged. Where CI's filesystem lacks verity or encryption, the generated filter is evaluated on those commands instead, as for the ABI guard. The qualification workload's recorded `ioctl`s are exactly the allowlist;
   - **per ABI,** with each ABI's rights on CI's kernel: on ABIs 1 and 2, seccomp's `truncate` rule holds; on ABI 1, `freedom-radicled` reports `files` as `unavailable`, and `freedom-ipfsd` passes its contract suite;
   - **qualification under the metadata rule:** SQLite creates and checkpoints its journal and WAL, and libgit2 creates a repository, writes loose objects and packs, and writes an existing object again, all without error;
   - a resolver file replaced by a rename while the service runs: still readable through its directory's grant; in `/etc`, discovery reports `unknown`;
