@@ -130,7 +130,7 @@ pub enum Event {
 
 /// The methods `core.hello`'s capabilities name: every method this build
 /// implements but the `chain.*` methods (design 0006's `chain.html`
-/// included), which design 0005 doesn't add to them (it adds `fragments`
+/// included), which design 0005 doesn't add to them (it adds features
 /// only). Every method, these and the chain methods, is a row of
 /// fc-protocol's method table, which says who may call it (#101); a test
 /// keeps the two in step. Only the table's names, and in debug builds the
@@ -175,11 +175,15 @@ const CAPABILITIES: &[&str] = &[
     "dweb.open",
 ];
 
-/// The transport features in `core.hello`'s capabilities, after the
-/// methods: `fragments`, fragmented responses with bulk credit (design
-/// 0005, Frames). The core always offers them; it sends them only to a main
-/// whose hello offered `frames: ["fragment"]`.
-const FEATURES: &[&str] = &["fragments"];
+/// The features in `core.hello`'s capabilities, after the methods (design
+/// 0005):
+/// - `fragments`: fragmented responses with bulk credit (Frames). The core
+///   always offers them; it sends them only to a main whose hello offered
+///   `frames: ["fragment"]`.
+/// - `myotis_refusal_codes`: the core reads a Myotis broadcast's `{
+///   rejected: { reason, code: -32602 } }` (The rest). Main sends that form
+///   only to a core that offers it.
+const FEATURES: &[&str] = &["fragments", "myotis_refusal_codes"];
 
 pub fn run(options: &Options) -> Exit {
     hardening::harden();

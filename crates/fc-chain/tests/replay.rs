@@ -29,9 +29,9 @@ use fc_chain::JsString;
 use fc_chain::MyotisOperation;
 use fc_chain::machine::{
     Answer, Bounds, BroadcastOutcome, Call, CapReader, ChainConfig, ChainError, ColibriClass,
-    ColibriReply, Effect, Emitted, Fired, Machine, MyotisClass, MyotisReply, Prop, Protocol,
-    Prover, QuorumConfig, Ranker, ReadOptions, Reply, Request, RpcEndpoint, StateTables, Success,
-    Thrown, Transport, VerifiedOp,
+    ColibriReply, Effect, Emitted, Fired, Machine, MyotisClass, MyotisRejection, MyotisReply, Prop,
+    Protocol, Prover, QuorumConfig, Ranker, ReadOptions, Reply, Request, RpcEndpoint, StateTables,
+    Success, Thrown, Transport, VerifiedOp,
 };
 use fc_json::index::{Index, Kind};
 use serde_json::{Map, Value as Json};
@@ -411,6 +411,7 @@ fn verified_answer(record: &Json, before: Option<String>, after: Option<String>)
         return Some(Answer::Myotis(match str_of(answer, "class") {
             "rejected" => MyotisReply::Rejected {
                 reason: thrown_message(thrown),
+                kind: MyotisRejection::Rejected,
             },
             "uncertain" | "uncertain_dispatched" => MyotisReply::Uncertain,
             class => MyotisReply::Failure(myotis_class(class)),

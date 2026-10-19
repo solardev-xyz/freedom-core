@@ -38,9 +38,9 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use fc_chain::machine::{
     Answer, Bounds, BroadcastOutcome, Call, ChainConfig, ChainError, ColibriClass, ColibriReply,
-    Effect, Emitted, Machine, Ms, MyotisClass, MyotisReply, Origin, Prop, Protocol, Prover,
-    QuorumConfig, ReadOptions, Reply as Done, Request, Reservation, RpcEndpoint, Success,
-    Transport, VerifiedOp,
+    Effect, Emitted, Machine, Ms, MyotisClass, MyotisRejection, MyotisReply, Origin, Prop,
+    Protocol, Prover, QuorumConfig, ReadOptions, Reply as Done, Request, Reservation, RpcEndpoint,
+    Success, Transport, VerifiedOp,
 };
 use fc_chain::{JsString, MyotisOperation, READ_METHODS, SINGLE_NODE_METHODS};
 use fc_protocol::error::{ErrorBody, ErrorCode};
@@ -1469,8 +1469,12 @@ enum Shape<'a> {
     },
     MyotisFailure(MyotisClass),
     Sent(&'a RawValue),
-    /// The reason, a JSON string.
-    Rejected(&'a RawValue),
+    /// The reason, a JSON string, and which of the adapter's definite
+    /// refusals it is.
+    Rejected {
+        reason: &'a RawValue,
+        kind: MyotisRejection,
+    },
     Uncertain,
     ColibriResult(&'a RawValue),
     /// `{ undefined_keys: ["result"] }`: Colibri's result was `undefined`.
@@ -1501,6 +1505,24 @@ fn is_string(raw: &RawValue) -> bool {
 /// A raw value's text, or `None` for `null`.
 fn unless_null(raw: Option<&RawValue>) -> Option<&RawValue> {
     raw.filter(|raw| raw.get() != "null")
+}
+
+/// A Myotis broadcast's `rejected`, in place (design 0005, The rest):
+/// `{ reason }`, the adapter's `rejected` (`-32000`), or `{ reason, code:
+/// -32602 }`, its `invalid-params`. The reason is a JSON string; `code` is
+/// present only for `-32602`, written as `JSON.stringify` writes it, so
+/// anything else, `-32000` included, is malformed.
+fn rejected(raw: &RawValue) -> Option<Shape<'_>> {
+    let object = RawObject::<2>::parse(raw.get())?;
+    let reason = object.get("reason").filter(|reason| is_string(reason))?;
+    let kind = if object.are(&["reason"]) {
+        MyotisRejection::Rejected
+    } else if object.are(&["reason", "code"]) && object.get("code")?.get() == "-32602" {
+        MyotisRejection::InvalidParams
+    } else {
+        return None;
+    };
+    Some(Shape::Rejected { reason, kind })
 }
 
 impl<'a> Shape<'a> {
@@ -1588,7 +1610,7 @@ impl<'a> Shape<'a> {
                 } else if members.are(&["hash"]) {
                     members.get("hash").map(Shape::Sent)
                 } else if members.are(&["rejected"]) {
-                    wrapped("rejected", "reason").map(Shape::Rejected)
+                    rejected(members.get("rejected")?)
                 } else if members.are(&["uncertain"]) {
                     (members.get("uncertain")?.get() == "true").then_some(Shape::Uncertain)
                 } else {
@@ -1696,11 +1718,11 @@ impl<'a> Shape<'a> {
                     reservation,
                 )
             }
-            Shape::Rejected(reason) => {
+            Shape::Rejected { reason, kind } => {
                 let reservation = reserve(reason.get().len())?;
                 let reason = decode_string(reason.get()).ok_or(Unread::Malformed)?;
                 (
-                    Answer::Myotis(MyotisReply::Rejected { reason }),
+                    Answer::Myotis(MyotisReply::Rejected { reason, kind }),
                     reservation,
                 )
             }
