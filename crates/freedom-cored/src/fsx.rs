@@ -11,7 +11,8 @@
 //!    abandoned (cancelled, revoked or out of time) before this point; the
 //!    temp file is then removed and the target is untouched.
 //! 5. Rename it over the target.
-//! 6. On Unix, `fsync` the directory.
+//! 6. Make the rename durable ([`sync_rename`]): on Unix, `fsync` the
+//!    directory; on Windows, flush the renamed file.
 //!
 //! Errors from every flush are reported, never ignored. A failure before the
 //! rename is an error and leaves the target untouched. Once the rename (or
@@ -20,8 +21,8 @@
 //! callers must never report a committed change as failed.
 //!
 //! **Guarantee:** the target survives a process crash on every OS, and power
-//! loss on local Unix filesystems. Windows rename is best-effort under power
-//! loss.
+//! loss on local Unix filesystems. On Windows, durability under power loss
+//! is best effort.
 //!
 //! **Leftover temp files.** A process killed between steps 1 and 5 leaves its
 //! temp file behind; for the vault that is an encrypted copy of the
@@ -90,7 +91,30 @@ pub fn replace(
         let _ = std::fs::remove_file(&temp_path);
         return Err(error);
     }
-    Ok(flushed(sync_dir(dir)))
+    Ok(flushed(sync_rename(dir, target)))
+}
+
+/// Makes a rename of `target` in `dir` durable, as far as the OS allows
+/// (design 0001, "Writes and durability"; #85).
+/// - **Unix:** `fsync` the directory.
+/// - **Windows:** flush the renamed file through a write handle
+///   (`FlushFileBuffers`). NTFS journals a rename with the file's own
+///   metadata, so flushing the file commits the journal through the rename.
+///   std can't open a directory to flush it. `MoveFileExW`'s
+///   `WRITE_THROUGH` documents its guarantee only for moves done as a copy
+///   and a delete.
+pub fn sync_rename(dir: &Path, target: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        let _ = dir;
+        // Write access: Windows refuses to flush a read-only handle.
+        OpenOptions::new().write(true).open(target)?.sync_all()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = target;
+        sync_dir(dir)
+    }
 }
 
 /// Removes `target` durably, if `commit` allows it: unlink, then `fsync` the
@@ -128,22 +152,24 @@ fn flushed(sync: std::io::Result<()>) -> Done {
 /// Tightens an existing secret file to mode `0600` in place. This changes
 /// metadata, not content, so quick unlock's fingerprint is unaffected. Only
 /// regular files owned by the current user are touched; symlinks and
-/// foreign files are left alone. Returns whether the mode was changed.
+/// foreign files are left alone. It is judged and changed through one
+/// handle ([`open_regular`]; `fchmod`), never by path twice. Returns whether
+/// the mode was changed.
 #[cfg(unix)]
 pub fn tighten(path: &Path) -> std::io::Result<bool> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(e),
+    let file = match open_regular(path, false)? {
+        Regular::File(file) => file,
+        Regular::Missing | Regular::Other => return Ok(false),
     };
-    if !metadata.is_file() || metadata.uid() != rustix::process::getuid().as_raw() {
+    let metadata = file.metadata()?;
+    if metadata.uid() != rustix::process::getuid().as_raw() {
         return Ok(false);
     }
     if metadata.mode() & 0o777 == 0o600 {
         return Ok(false);
     }
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     Ok(true)
 }
 

@@ -180,7 +180,8 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   - Main binds its pending-request map, timers and event handlers to the child's generation, a counter local to main. A late callback from a retired child is ignored.
 - **Exactly one terminal response per request:** a result, or an error such as `cancelled` or `deadline`. The core owns deadlines (see below). Main keeps every pending entry, even after its own caller has gone away, until that terminal response arrives. So a slow reply is never a protocol error; only an unsolicited or a second response is.
 - **Handshake:**
-  - The first message must be main's `core.hello`: `{ protocol: 1, shell_version, auto_lock_ms }`. Main sends `auto_lock_ms = 900000` (15 minutes), as `vault.js` does today.
+  - The first message must be main's `core.hello`: `{ protocol: 1, shell_version, auto_lock_ms, node_roots? }`. Main sends `auto_lock_ms = 900000` (15 minutes), as `vault.js` does today.
+  - `node_roots: { bee?, radicle? }` gives each node's root as an absolute path: Bee's `data_dir`, Radicle's `home`. The core tightens the node identity files under those roots ([Existing files](#writes-and-durability)). A root that isn't absolute is ignored, and so is the whole field in an older core.
   - The core replies `{ protocol: 1, core_version, capabilities }`, or with `protocol_mismatch`.
   - Main and core ship pinned together, so a mismatch is a packaging bug, and main fails loudly.
 - **Caller context:** main fills it in and never takes it from the renderer. Kinds use shell-neutral names, so a Chromium browser process can fill them in later.
@@ -267,12 +268,19 @@ A reply can still go missing (core crash, hang watchdog), so every mutation can 
 2. Write it, then `fsync` it. On Windows, `FlushFileBuffers`.
 3. **For the vault:** read the temp file back, decrypt it with the new password, and compare the mnemonic before going on. On any mismatch or error, delete the temp file and keep the old vault.
 4. Rename it over the target.
-5. On Unix, `fsync` the directory.
+5. Make the rename durable. On Unix, `fsync` the directory. On Windows, flush the renamed file through a write handle (`FlushFileBuffers`).
 6. Return errors from any flush; never ignore them.
 
 - **Guarantee:** the vault survives a process crash on every OS, and power loss on local Unix filesystems.
-- **Windows:** `MoveFileExW` with `REPLACE_EXISTING | WRITE_THROUGH` is best-effort under power loss.
-- **Existing files:** at adoption (the first core start on a profile), the core tightens existing secret files to `0600` in place with `chmod`, which doesn't change the content. It first checks that each is a regular file, not a symlink, owned by the current user. This covers the vault, the Bee keystore and config, and the Radicle keys.
+- **Windows** (#85): durability under power loss is best effort.
+  - The rename is std's.
+  - The flush of the renamed file commits NTFS's journal through the rename, since NTFS journals a rename with the file's own metadata. std can't open a directory to flush it.
+  - The design first named `MoveFileExW` with `REPLACE_EXISTING | WRITE_THROUGH`. Its documented guarantee covers only moves done as a copy and a delete, and it would need FFI.
+  - A failed flush is reported like a failed directory flush: `durable: false` for a vault write; for node files, it is logged.
+- **Existing files:** at adoption, the core tightens existing secret files to `0600` in place with `fchmod`, which doesn't change the content. It first checks, on the open handle, that each is a regular file the current user owns; a symlink is never followed.
+  - **The vault** is tightened at every start, before the snapshot.
+  - **Node files** are the files of each node's journal layout (Bee's keystore and config, Radicle's keys and config). They are tightened under the roots main gives in `core.hello`'s `node_roots`, on a thread of their own, so slow storage can't hold up the handshake (#85).
+  - **Until main sends `node_roots`,** node files that JS wrote keep their mode until the next `nodes.write_identity`.
 - **Delete:** unlink, then `fsync` the directory before replying. A delete commits at the unlink.
 - **Leftover temp files** (#81). A process killed between steps 1 and 4 leaves its temp file behind, for the vault an encrypted copy of the mnemonic. The core removes the temp files of its own atomic writes in the identity directory (the vault and the node journal's records) at startup, under the gate, before any job runs. `vault.delete` also removes the vault's, once its unlink has committed.
 - **Reading** (#83). The vault, the journal's records and node files are opened once, and judged on the open handle: anything but a regular file (a directory, a FIFO, a socket, a device; a symlink, except for Radicle's config, which JS follows) is refused before a byte is read, and no more than the size bound is read. The open itself can't wait: it is non-blocking on Unix. A file swapped in between a check and the read can therefore neither block the worker nor be read whole.

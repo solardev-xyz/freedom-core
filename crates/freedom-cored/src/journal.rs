@@ -419,7 +419,7 @@ fn valid_journal(journal: &Journal, identity_dir: &Path) -> bool {
 }
 
 /// Absolute, with no `.` or `..` components.
-fn normalized_absolute(path: &Path) -> bool {
+pub fn normalized_absolute(path: &Path) -> bool {
     path.is_absolute()
         && path.components().all(|c| {
             matches!(
@@ -473,6 +473,7 @@ fn stage(file: &FileSpec<'_>) -> std::io::Result<JournalFile> {
 fn install(journal: &Journal) -> std::io::Result<bool> {
     let mut corrupt = false;
     let mut dirs: Vec<&Path> = Vec::new();
+    let mut installed: Vec<&Path> = Vec::new();
     for file in &journal.files {
         if regular_digest(&file.target)?.as_deref() == Some(file.sha256.as_str()) {
             // Already in place; a leftover staged copy is not needed.
@@ -485,6 +486,7 @@ fn install(journal: &Journal) -> std::io::Result<bool> {
             corrupt = true;
             continue;
         }
+        installed.push(&file.target);
         if let Some(dir) = file.target.parent()
             && !dirs.contains(&dir)
         {
@@ -494,7 +496,27 @@ fn install(journal: &Journal) -> std::io::Result<bool> {
     for dir in dirs {
         sync_dir(dir)?;
     }
+    flush_installed(&installed);
     Ok(corrupt)
+}
+
+/// Windows: flushes each installed file, which commits NTFS's journal
+/// through its rename (`fsx::sync_rename`; #85). Durability under power
+/// loss is best effort there (design 0001), so a failure is logged, never
+/// turned into `pending_recovery`. Unix flushed the directories instead.
+fn flush_installed(installed: &[&Path]) {
+    #[cfg(windows)]
+    for target in installed {
+        let parent = target.parent().unwrap_or(target);
+        if let Err(e) = fsx::sync_rename(parent, target) {
+            crate::log::warn(
+                "could not flush an installed node identity file",
+                serde_json::json!({ "error": e.kind().to_string() }),
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = installed;
 }
 
 /// Steps 3 and 4, in the order that keeps every crash recoverable: install,

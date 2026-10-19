@@ -536,6 +536,71 @@ struct HelloParams {
     /// names are ignored.
     #[serde(default)]
     frames: Vec<String>,
+    /// Where main keeps each node's identity (`data_dir` for Bee, `home` for
+    /// Radicle), as absolute paths: their files, which JS wrote under the
+    /// umask, are tightened to 0600 (design 0001, "Writes and durability";
+    /// #85). Optional.
+    #[serde(default)]
+    node_roots: Option<NodeRoots>,
+}
+
+#[derive(Deserialize)]
+struct NodeRoots {
+    #[serde(default)]
+    bee: Option<String>,
+    #[serde(default)]
+    radicle: Option<String>,
+}
+
+impl NodeRoots {
+    /// The roots given, as absolute, normalized paths. Others are logged
+    /// and skipped: tightening is hardening, not worth failing a handshake.
+    fn valid(self) -> Vec<(&'static str, PathBuf)> {
+        [("bee", self.bee), ("radicle", self.radicle)]
+            .into_iter()
+            .filter_map(|(node, root)| {
+                let root = PathBuf::from(root?);
+                if crate::journal::normalized_absolute(&root) {
+                    Some((node, root))
+                } else {
+                    log::warn(
+                        "ignoring a node root that isn't an absolute path",
+                        serde_json::json!({ "node": node }),
+                    );
+                    None
+                }
+            })
+            .collect()
+    }
+}
+
+/// Tightens existing node identity files on their own thread, so slow
+/// storage can't hold up the handshake or the loop. Main starts nodes only
+/// after the handshake, and a node reading its files meanwhile is
+/// unaffected by a mode change.
+fn spawn_adoption(roots: Vec<(&'static str, PathBuf)>) {
+    if roots.is_empty() {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("adopt".into())
+        .spawn(move || {
+            for (node, root) in roots {
+                let changed = crate::nodes::tighten_existing(node, &root);
+                if changed > 0 {
+                    log::info(
+                        "tightened node identity files to 0600",
+                        serde_json::json!({ "node": node, "count": changed }),
+                    );
+                }
+            }
+        });
+    if spawned.is_err() {
+        log::warn(
+            "cannot start the thread that tightens node identity files",
+            serde_json::json!({}),
+        );
+    }
 }
 
 #[derive(Serialize)]
@@ -1040,6 +1105,7 @@ impl Core {
             );
         }
         self.vault.set_auto_lock_ms(params.auto_lock_ms);
+        spawn_adoption(params.node_roots.map(NodeRoots::valid).unwrap_or_default());
         // Granted with the handshake: main holds the core's credit from now
         // on, and the core main's if main takes fragments.
         if params.frames.iter().any(|kind| kind == "fragment") {

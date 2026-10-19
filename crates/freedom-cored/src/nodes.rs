@@ -193,6 +193,31 @@ fn in_layout(
     Ok(targets.into_iter().zip(contents).collect())
 }
 
+/// Tightens a node identity written before the core to `0600` in place
+/// (design 0001, "Writes and durability", existing files at adoption; #85):
+/// the files of the node's [`journal::layout`] under `root`, as the core
+/// itself writes them. JS wrote them under the umask, and nothing rewrites
+/// them until the next forced injection. Only regular files the user owns
+/// are touched, never through a symlink (`fsx::tighten`). Returns how many
+/// it changed.
+pub fn tighten_existing(node: &str, root: &Path) -> usize {
+    let Some(files) = journal::layout(node, root) else {
+        return 0;
+    };
+    let mut changed = 0;
+    for file in files {
+        match crate::fsx::tighten(&file) {
+            Ok(true) => changed += 1,
+            Ok(false) => {}
+            Err(e) => crate::log::warn(
+                "could not tighten a node identity file",
+                serde_json::json!({ "node": node, "error": e.kind().to_string() }),
+            ),
+        }
+    }
+    changed
+}
+
 /// Radicle's existing config: `None` if absent. It must be a regular file
 /// (symlinks followed, as JS's readFileSync does) of bounded size, judged on
 /// the open handle, so a FIFO can't block the worker, even one swapped in

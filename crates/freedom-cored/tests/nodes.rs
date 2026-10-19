@@ -462,3 +462,87 @@ fn an_unfinishable_recovery_is_reported_and_blocks_new_writes() {
         "new config"
     );
 }
+
+/// #85: node identity files JS wrote under the umask stay 0644 until the
+/// next forced injection. Given the node roots in `core.hello`, the core
+/// tightens them to 0600 in place, without changing their content: the
+/// node's own layout only, regular files only, never through a symlink.
+#[cfg(unix)]
+#[test]
+fn existing_node_files_are_tightened_at_adoption() {
+    use std::os::unix::fs::PermissionsExt;
+    let set = |path: &Path, mode: u32| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    let (root, data, locks) = dirs();
+    let bee = root.path().join("bee-data");
+    let radicle = root.path().join("radicle");
+    for dir in [bee.join("keys"), radicle.join("keys")] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let written = [
+        bee.join("keys/swarm.key"),
+        bee.join("config.yaml"),
+        radicle.join("keys/radicle"),
+        radicle.join("keys/radicle.pub"),
+    ];
+    for file in &written {
+        std::fs::write(file, b"as JS wrote it").unwrap();
+        set(file, 0o644);
+    }
+    // Not the node's own: a symlink in its layout, and another file.
+    let outside = root.path().join("outside.json");
+    std::fs::write(&outside, b"{}").unwrap();
+    set(&outside, 0o644);
+    std::os::unix::fs::symlink(&outside, radicle.join("config.json")).unwrap();
+    let other = bee.join("statestore.db");
+    std::fs::write(&other, b"x").unwrap();
+    set(&other, 0o644);
+
+    let mut core = spawn("serve", &data, &locks, &[]);
+    let hello = core.call(
+        1,
+        "core.hello",
+        json!({
+            "protocol": 1, "shell_version": "test", "auto_lock_ms": 900_000,
+            "node_roots": { "bee": bee, "radicle": radicle },
+        }),
+    );
+    assert_eq!(hello["result"]["protocol"], 1, "{hello}");
+    // On its own thread: wait for it.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while written.iter().any(|file| mode(file) != 0o600) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "not tightened: {:?}",
+            written.iter().map(|f| mode(f)).collect::<Vec<_>>()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    for file in &written {
+        assert_eq!(std::fs::read(file).unwrap(), b"as JS wrote it");
+    }
+    assert_eq!(mode(&outside), 0o644);
+    assert_eq!(mode(&other), 0o644);
+    // The core still answers.
+    assert_eq!(
+        core.call(2, "vault.status", json!({}))["result"]["exists"],
+        false
+    );
+}
+
+/// A node root that isn't absolute is skipped; the handshake succeeds.
+#[test]
+fn a_relative_node_root_is_ignored() {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    let hello = core.call(
+        1,
+        "core.hello",
+        json!({
+            "protocol": 1, "shell_version": "test", "auto_lock_ms": 900_000,
+            "node_roots": { "bee": "relative/bee", "radicle": "/abs/../radicle" },
+        }),
+    );
+    assert_eq!(hello["result"]["protocol"], 1, "{hello}");
+}
