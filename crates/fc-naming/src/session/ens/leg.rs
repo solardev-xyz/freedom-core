@@ -706,7 +706,10 @@ pub(crate) async fn run_leg(
         };
     }
     if error.provider_failure() {
-        ctx.mark_failure(endpoint);
+        // A request the core never sent says nothing of the endpoint.
+        if error != CallError::Rpc(RpcError::Transport(Transport::Unsent)) {
+            ctx.mark_failure(endpoint);
+        }
         return Leg::Error(error);
     }
     ctx.mark_success(endpoint);
