@@ -486,31 +486,16 @@ fn tezos_codecs() {
                 let bytes: Value = b.map_or(Value::Null, |b| {
                     serde_json::from_str(&b.stringify()).unwrap()
                 });
-                json!([k, bytes])
+                json!([k.as_str(), bytes])
             })
             .collect();
         assert_eq!(Value::Array(ours), case["js"], "{}", case["value"]);
     }
     for case in t["metadata"].as_array().unwrap() {
-        let hex = case["hex"].as_str().map(|h| JsValue::String(h.to_owned()));
+        let hex = case["hex"].as_str().map(JsValue::string);
         let ours = tezos::decode_json_bytes(hex.as_ref());
         if case["deviation"] == "json-depth" {
             assert!(ours.is_err(), "{}: deeper than MAX_DEPTH", case["hex"]);
-            continue;
-        }
-        if case["deviation"] == "lone-surrogate-keys" {
-            // Keys that differ only in lone surrogates become one key.
-            assert!(ours.is_ok(), "{}", case["hex"]);
-            continue;
-        }
-        if case["deviation"] == "lone-surrogate" {
-            // JavaScript keeps the lone surrogate; the core holds U+FFFD.
-            assert_eq!(
-                ours.unwrap(),
-                JsValue::String("\u{FFFD}".into()),
-                "{}",
-                case["hex"]
-            );
             continue;
         }
         match case["js"].get("stringified") {

@@ -850,7 +850,7 @@ fn with_placeholders(value: &JsValue) -> (JsValue, Vec<String>) {
         .iter()
         .map(|(key, value)| {
             if matches!(value, JsValue::Undefined) {
-                keys.push(key.clone());
+                keys.push(key.to_string());
                 (key.clone(), JsValue::Null)
             } else {
                 (key.clone(), value.clone())
@@ -1054,7 +1054,7 @@ fn adapter_keys(value: &JsValue) -> JsValue {
                     "resolver_address" => "resolverAddress",
                     other => other,
                 };
-                (key.to_owned(), value.clone())
+                (key.into(), value.clone())
             })
             .collect(),
     )

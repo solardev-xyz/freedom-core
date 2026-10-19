@@ -50,11 +50,11 @@ pub(crate) struct TezosState {
 }
 
 fn s(text: &str) -> JsValue {
-    JsValue::String(text.into())
+    JsValue::string(text)
 }
 
 fn obj(fields: Vec<(&str, JsValue)>) -> JsValue {
-    JsValue::Object(fields.into_iter().map(|(k, v)| (k.to_owned(), v)).collect())
+    JsValue::Object(fields.into_iter().map(|(k, v)| (k.into(), v)).collect())
 }
 
 fn reference(endpoint: &str) -> JsValue {

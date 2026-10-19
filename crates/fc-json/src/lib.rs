@@ -4,9 +4,11 @@
 //!
 //! - numbers are doubles: `1e400` is infinite, and integers above 2^53 lose
 //!   precision;
-//! - escaped lone surrogates are accepted. Rust strings can't hold them, so
-//!   they become U+FFFD, which is also what the WHATWG URL parser makes of
-//!   them;
+//! - escaped lone surrogates are accepted and kept: strings are
+//!   [`JsString`]s, which compare, key objects and stringify by UTF-16 code
+//!   unit, as V8 does, so `"\ud800"`, `"\udc00"` and `"\ufffd"` stay three
+//!   strings (#95). Read as Rust text, a lone surrogate is U+FFFD, which is
+//!   also what the WHATWG URL parser makes of it;
 //! - nesting deeper than [`MAX_DEPTH`] is refused (`TooDeep`), where V8
 //!   accepts any depth. That bound keeps every walk, comparison, copy and
 //!   drop of a value within a small stack (design 0003, Codec deviations);
@@ -20,6 +22,9 @@
 //! is kept once, with the spans of its values.
 
 pub mod index;
+mod string;
+
+pub use string::{JsString, Units};
 
 /// A parsed JSON value with JavaScript's semantics.
 #[derive(Debug, Clone, PartialEq)]
@@ -30,10 +35,10 @@ pub enum JsValue {
     Null,
     Bool(bool),
     Number(f64),
-    String(String),
+    String(JsString),
     Array(Vec<JsValue>),
     /// Properties in JavaScript's order, each key once.
-    Object(Vec<(String, JsValue)>),
+    Object(Vec<(JsString, JsValue)>),
 }
 
 /// Dropped without recursion: children go onto an explicit stack, so no
@@ -81,7 +86,7 @@ impl JsValue {
         let mut stack = vec![self];
         while let Some(value) = stack.pop() {
             match value {
-                Self::String(text) => held = held.saturating_add(block(text.capacity())),
+                Self::String(text) => held = held.saturating_add(string_held(text)),
                 Self::Array(items) => {
                     held = held.saturating_add(block(
                         items.capacity().saturating_mul(std::mem::size_of::<Self>()),
@@ -92,10 +97,10 @@ impl JsValue {
                     held = held.saturating_add(block(
                         props
                             .capacity()
-                            .saturating_mul(std::mem::size_of::<(String, Self)>()),
+                            .saturating_mul(std::mem::size_of::<(JsString, Self)>()),
                     ));
                     for (key, value) in props {
-                        held = held.saturating_add(block(key.capacity()));
+                        held = held.saturating_add(string_held(key));
                         stack.push(value);
                     }
                 }
@@ -106,7 +111,8 @@ impl JsValue {
     }
 
     /// A property, as `object[key]` reads it (`None` when absent or when this
-    /// isn't an object).
+    /// isn't an object). A Rust `str` holds no lone surrogate, so it never
+    /// finds a key that has one.
     pub fn get(&self, key: &str) -> Option<&JsValue> {
         match self {
             JsValue::Object(props) => props.iter().find(|(k, _)| k == key).map(|(_, v)| v),
@@ -114,11 +120,25 @@ impl JsValue {
         }
     }
 
+    /// A string's text, each lone surrogate as U+FFFD.
     pub fn as_str(&self) -> Option<&str> {
+        match self {
+            JsValue::String(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// A string, as JavaScript holds it.
+    pub fn as_js_string(&self) -> Option<&JsString> {
         match self {
             JsValue::String(s) => Some(s),
             _ => None,
         }
+    }
+
+    /// A string value from Rust text.
+    pub fn string(text: impl Into<JsString>) -> Self {
+        JsValue::String(text.into())
     }
 
     pub fn as_array(&self) -> Option<&[JsValue]> {
@@ -139,16 +159,17 @@ impl JsValue {
         }
     }
 
-    /// `String(value)`. An object with an own `toString` key throws, as in
-    /// JavaScript: no JSON value is callable, so `ToPrimitive` finds neither
-    /// a usable `toString` nor a primitive `valueOf`.
+    /// `String(value)`, as Rust text: a lone surrogate reads as U+FFFD. An
+    /// object with an own `toString` key throws, as in JavaScript: no JSON
+    /// value is callable, so `ToPrimitive` finds neither a usable `toString`
+    /// nor a primitive `valueOf`.
     pub fn js_string(&self) -> Result<String, ToPrimitiveError> {
         Ok(match self {
             JsValue::Undefined => "undefined".into(),
             JsValue::Null => "null".into(),
             JsValue::Bool(b) => b.to_string(),
             JsValue::Number(n) => number_to_string(*n),
-            JsValue::String(s) => s.clone(),
+            JsValue::String(s) => s.as_str().to_owned(),
             JsValue::Array(items) => join_arrays(items)?,
             JsValue::Object(_) if self.get("toString").is_some() => return Err(ToPrimitiveError),
             JsValue::Object(_) => "[object Object]".into(),
@@ -161,6 +182,12 @@ impl JsValue {
         stringify_into(self, &mut out);
         out
     }
+}
+
+/// What a string holds on the heap, as an allocator lays it out.
+fn string_held(text: &JsString) -> usize {
+    let lone = text.heap_bytes().saturating_sub(text.len());
+    allocation(text.len()).saturating_add(allocation(lone))
 }
 
 /// `Array.prototype.join(',')`, nested arrays included, without recursion:
@@ -212,9 +239,9 @@ enum Frame {
     Array(Vec<JsValue>),
     /// Properties, their index by key, and the key awaiting its value.
     Object(
-        Vec<(String, JsValue)>,
-        std::collections::BTreeMap<String, usize>,
-        Option<String>,
+        Vec<(JsString, JsValue)>,
+        std::collections::BTreeMap<JsString, usize>,
+        Option<JsString>,
     ),
 }
 
@@ -319,9 +346,9 @@ pub fn parse(text: &str) -> Result<JsValue, JsonError> {
 /// `CreateDataProperty` (a repeated key keeps its place and takes the
 /// value), indexed so many keys stay linear.
 fn set_property(
-    props: &mut Vec<(String, JsValue)>,
-    index: &mut std::collections::BTreeMap<String, usize>,
-    key: String,
+    props: &mut Vec<(JsString, JsValue)>,
+    index: &mut std::collections::BTreeMap<JsString, usize>,
+    key: JsString,
     value: JsValue,
 ) {
     if let Some(&i) = index.get(&key) {
@@ -332,15 +359,16 @@ fn set_property(
     }
 }
 
-/// An array index: the canonical decimal form of an integer below 2^32 - 1.
-fn array_index(key: &str) -> Option<u32> {
+/// An array index: the canonical decimal form of an integer below 2^32 - 1
+/// (digits only, so never a string with a lone surrogate).
+fn array_index(key: &JsString) -> Option<u32> {
     let value: u32 = key.parse().ok()?;
-    (value != u32::MAX && value.to_string() == key).then_some(value)
+    (value != u32::MAX && *key == value.to_string()).then_some(value)
 }
 
 /// JavaScript's own-property order: array indices ascending, then strings
 /// in insertion order.
-fn order_properties(props: Vec<(String, JsValue)>) -> Vec<(String, JsValue)> {
+fn order_properties(props: Vec<(JsString, JsValue)>) -> Vec<(JsString, JsValue)> {
     let (mut indices, strings): (Vec<_>, Vec<_>) = props
         .into_iter()
         .partition(|(k, _)| array_index(k).is_some());
@@ -381,7 +409,7 @@ impl Parser<'_> {
         }
     }
 
-    fn key(&mut self) -> Result<String, JsonError> {
+    fn key(&mut self) -> Result<JsString, JsonError> {
         if self.peek() != Some(b'"') {
             return Err(JsonError::Syntax(self.i));
         }
@@ -470,7 +498,7 @@ impl Parser<'_> {
         Ok(unit)
     }
 
-    fn string(&mut self) -> Result<String, JsonError> {
+    fn string(&mut self) -> Result<JsString, JsonError> {
         self.i += 1; // the opening quote
         let mut units: Vec<u16> = Vec::new();
         loop {
@@ -486,11 +514,7 @@ impl Parser<'_> {
                 .map_err(|_| JsonError::Syntax(start))?;
             units.extend(run.encode_utf16());
             match self.next() {
-                Some(b'"') => {
-                    let mut text = String::from_utf16_lossy(&units);
-                    text.shrink_to_fit();
-                    return Ok(text);
-                }
+                Some(b'"') => return Ok(JsString::from_units(&units)),
                 Some(b'\\') => {
                     let unit = match self.next() {
                         Some(b'"') => 0x22,
@@ -578,7 +602,7 @@ pub fn number_to_string(n: f64) -> String {
 fn stringify_into(value: &JsValue, out: &mut String) {
     enum Piece<'a> {
         Value(&'a JsValue),
-        Key(&'a str),
+        Key(&'a JsString),
         Text(&'static str),
     }
     let mut stack = vec![Piece::Value(value)];
@@ -586,7 +610,7 @@ fn stringify_into(value: &JsValue, out: &mut String) {
         match piece {
             Piece::Text(text) => out.push_str(text),
             Piece::Key(key) => {
-                quote(key, out);
+                key.quote_into(out);
                 out.push(':');
             }
             // `undefined` is `null` in an array; object members holding it
@@ -600,7 +624,7 @@ fn stringify_into(value: &JsValue, out: &mut String) {
                     "null".into()
                 });
             }
-            Piece::Value(JsValue::String(s)) => quote(s, out),
+            Piece::Value(JsValue::String(s)) => s.quote_into(out),
             Piece::Value(JsValue::Array(items)) => {
                 out.push('[');
                 stack.push(Piece::Text("]"));
@@ -614,7 +638,7 @@ fn stringify_into(value: &JsValue, out: &mut String) {
             Piece::Value(JsValue::Object(props)) => {
                 out.push('{');
                 stack.push(Piece::Text("}"));
-                let props: Vec<&(String, JsValue)> = props
+                let props: Vec<&(JsString, JsValue)> = props
                     .iter()
                     .filter(|(_, v)| !matches!(v, JsValue::Undefined))
                     .collect();
@@ -630,24 +654,6 @@ fn stringify_into(value: &JsValue, out: &mut String) {
     }
 }
 
-fn quote(s: &str, out: &mut String) {
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0c}' => out.push_str("\\f"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -660,9 +666,10 @@ mod tests {
                 .get("ignored"),
             Some(&JsValue::Number(f64::INFINITY))
         );
+        // A lone surrogate is kept (#95).
         assert_eq!(
             parse(r#"{"x":"\ud800","data":"0x01"}"#).unwrap().get("x"),
-            Some(&JsValue::String("\u{FFFD}".into()))
+            Some(&JsValue::String(JsString::from_units(&[0xd800])))
         );
         // Depth is bounded: 1,024 levels parse, 1,025 are refused.
         let nest = |n: usize| format!("{}{}", "[".repeat(n), "]".repeat(n));
@@ -747,6 +754,42 @@ mod tests {
         assert!(parse(r#""\u+041""#).is_err());
         assert!(parse(r#""\u-041""#).is_err());
         assert_eq!(parse(r#""\u0041""#).unwrap(), JsValue::String("A".into()));
+    }
+
+    /// #95: V8 keeps lone surrogates in strings and keys, so strings that
+    /// differ only there are different strings, and keys that differ only
+    /// there are different properties. `JSON.stringify` writes them back as
+    /// escapes.
+    #[test]
+    fn lone_surrogates_are_kept_as_v8_keeps_them() {
+        let keys = parse(r#"{"\ud800":1,"\ufffd":2,"\udc00":3,"\ud800":4}"#).unwrap();
+        let JsValue::Object(props) = &keys else {
+            panic!("{keys:?}")
+        };
+        assert_eq!(props.len(), 3);
+        assert_eq!(
+            keys.stringify(),
+            "{\"\\ud800\":4,\"\u{FFFD}\":2,\"\\udc00\":3}"
+        );
+        // Only the real U+FFFD is the key `"\u{FFFD}"`.
+        assert_eq!(keys.get("\u{FFFD}"), Some(&JsValue::Number(2.0)));
+        assert_ne!(parse(r#""\ud800""#).unwrap(), parse(r#""\udc00""#).unwrap());
+        assert_ne!(parse(r#""\ud800""#).unwrap(), parse(r#""\ufffd""#).unwrap());
+        assert_eq!(
+            parse(r#""\ud83d\ude00""#).unwrap(),
+            JsValue::string("\u{1F600}")
+        );
+        let lone = parse(r#"["a\udc00b","\ud83d"]"#).unwrap();
+        assert_eq!(lone.stringify(), r#"["a\udc00b","\ud83d"]"#);
+        assert_eq!(lone.js_string().unwrap(), "a\u{FFFD}b,\u{FFFD}");
+        // The index module, which reads the same grammar, agrees.
+        let text = r#"{"\ud800":1,"\ufffd":2}"#;
+        let index = crate::index::Index::new(text).unwrap();
+        assert_eq!(index.root().properties().len(), 2);
+        assert_eq!(
+            parse(text).unwrap().stringify(),
+            index.root().stringify(crate::index::KeyOrder::Property)
+        );
     }
 
     #[test]

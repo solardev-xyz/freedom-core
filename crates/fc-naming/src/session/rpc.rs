@@ -40,7 +40,7 @@ impl Method {
         match self {
             Method::BlockNumber => JsValue::Array(Vec::new()),
             Method::Block(block) => JsValue::Array(vec![
-                JsValue::String(match block {
+                JsValue::string(match block {
                     BlockRef::Number(n) => format!("0x{n:x}"),
                     BlockRef::Tag(tag) => tag.clone(),
                 }),
@@ -48,10 +48,10 @@ impl Method {
             ]),
             Method::Call { to, data, block } => JsValue::Array(vec![
                 JsValue::Object(vec![
-                    ("to".into(), JsValue::String(hex(to))),
-                    ("data".into(), JsValue::String(hex(data))),
+                    ("to".into(), JsValue::string(hex(to))),
+                    ("data".into(), JsValue::string(hex(data))),
                 ]),
-                JsValue::String(block.clone()),
+                JsValue::string(block.clone()),
             ]),
         }
     }
@@ -70,12 +70,12 @@ pub fn hex(bytes: &[u8]) -> String {
 /// The request body: `JSON.stringify({ method, params, id, jsonrpc })`.
 pub fn body(id: u64, method: &Method) -> String {
     JsValue::Object(vec![
-        ("method".into(), JsValue::String(method.name().into())),
+        ("method".into(), JsValue::string(method.name())),
         ("params".into(), method.params()),
         // Request ids stay far below 2^53.
         #[allow(clippy::cast_precision_loss)]
         ("id".into(), JsValue::Number(id as f64)),
-        ("jsonrpc".into(), JsValue::String("2.0".into())),
+        ("jsonrpc".into(), JsValue::string("2.0")),
     ])
     .stringify()
 }
@@ -107,7 +107,7 @@ impl NodeError {
 
     pub fn message(&self) -> String {
         match self.value.get("message") {
-            Some(JsValue::String(s)) => s.clone(),
+            Some(JsValue::String(s)) => s.to_string(),
             _ => String::new(),
         }
     }
@@ -442,7 +442,7 @@ mod tests {
 
     #[test]
     fn big_ints_validate_at_any_width() {
-        let s = |v: &str| JsValue::String(v.into());
+        let s = |v: &str| JsValue::string(v);
         // 2^160, as a difficulty ethers accepts.
         assert!(is_big_int(&s(
             "0x10000000000000000000000000000000000000000"
@@ -484,12 +484,12 @@ mod tests {
         let m = Method::BlockNumber;
         assert_eq!(
             answer(1, &m, 200, br#"{"jsonrpc":"2.0","id":1,"result":"0x10"}"#),
-            Ok(JsValue::String("0x10".into()))
+            Ok(JsValue::string("0x10"))
         );
         // A batch-shaped answer is searched by id.
         assert_eq!(
             answer(1, &m, 200, br#"[{"jsonrpc":"2.0","id":1,"result":"0x"}]"#),
-            Ok(JsValue::String("0x".into()))
+            Ok(JsValue::string("0x"))
         );
         assert_eq!(answer(1, &m, 503, b"unavailable"), Err(RpcError::Http(503)));
         assert_eq!(answer(1, &m, 200, b"<html>"), Err(RpcError::NotJson));
@@ -560,7 +560,7 @@ mod tests {
 
     #[test]
     fn numbers_follow_javascript_bigint() {
-        let n = |s: &str| get_number(&JsValue::String(s.into()));
+        let n = |s: &str| get_number(&JsValue::string(s));
         assert_eq!(n("0x1312cf8"), Some(19_999_992));
         assert_eq!(n(" 42 "), Some(42));
         assert_eq!(n("0X10"), Some(16));

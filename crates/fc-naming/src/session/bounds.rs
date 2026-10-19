@@ -93,7 +93,7 @@ impl Bounds {
         let size: usize = payloads
             .iter()
             .map(|p| {
-                crate::jsjson::JsValue::String((*p).to_owned())
+                crate::jsjson::JsValue::string((*p).to_owned())
                     .stringify()
                     .len()
             })

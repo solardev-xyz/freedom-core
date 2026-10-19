@@ -169,7 +169,7 @@ impl CallError {
             }) => match self.reason() {
                 Some(reason) => format!(
                     "execution reverted: {}",
-                    JsValue::String(reason).stringify()
+                    JsValue::string(reason).stringify()
                 ),
                 None if data.is_empty() => {
                     "execution reverted (no data present; likely require(false) occurred".into()
