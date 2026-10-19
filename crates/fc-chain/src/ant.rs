@@ -26,8 +26,9 @@ pub const ANT_INCLUDE_SOURCES: [&str; 1] = ["blockscout"];
 /// The quorum budget a scan gets: a full-history answer can take seconds.
 pub const LOG_SCAN_QUORUM_TIMEOUT_MS: u64 = 30_000;
 
-/// Ant's `is_range_limit_error` needles (Ant v0.5.64): its scan halves the
-/// window only on an error whose lowercased message contains one.
+/// Ant's `is_range_limit_error` needles (Ant v0.5.71,
+/// `ant-chain/src/discover.rs:1766`): its scan halves the window only on an
+/// error whose lowercased message contains one.
 pub const ANT_LOG_SCAN_SHRINK_NEEDLES: [&str; 12] = [
     "block range",
     "range",
