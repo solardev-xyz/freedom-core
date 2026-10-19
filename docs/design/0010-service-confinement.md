@@ -79,7 +79,7 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
 
 **No other writable place:** SQLite's temporary files stay in memory (`temp_store = MEMORY`, which 0007 already sets for memory stores) or in the data directory.
 
-**NAT64 prefix discovery** (0007's *Network-specific NAT64 prefixes*, #117, which 0008 shares) runs in `direct` mode, at startup and at least once a minute after. So its accesses last for the process's life:
+**NAT64 prefix discovery** ([0007](0007-ipfs-service.md#network-specific-nat64-prefixes), which 0008 shares) runs in `direct` mode, at startup and at least once a minute after. So its accesses last for the process's life:
 - one AAAA query for `ipv4only.arpa`, over plain DNS on port 53, to each resolver the interfaces learned, which is often on loopback (`127.0.0.53`) or a private address (a LAN router);
 - the files that list them, on Linux. Network changes replace these files, so the grant must survive a replacement ([The recommendation](#the-recommendation));
 - on macOS, SystemConfiguration's dynamic store (`State:/Network/Service/<id>/DNS`), a Mach lookup of `com.apple.SystemConfiguration.configd`;
@@ -146,7 +146,7 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
     - **Who makes them,** and none fails for it:
       - SQLite's unix VFS (3.51) `fchmod`s a new journal or WAL file to the database's mode, and ignores a failure: the file keeps the mode its creation gave it. It calls `fchown` only as root;
       - libgit2 1.9.6, in heartwood's bare-repository workflow, makes two path calls and no descriptor ones (shared-mode repositories would add more). Its `chmod` probe at repository creation then records `core.filemode = false`, which a bare repository ignores. Its `utimes`, which "freshens" an object that already exists, makes it write the object again. It sets object files' modes when it creates them;
-      - std and tokio make them only when asked (`set_permissions`, `set_times`, `fs::copy`). fc-service, freedom-ipfs v0.4.5 and heartwood `c208df3` don't ask. `freedom-cored` does, but isn't confined (D7).
+      - std and tokio make them only when asked (`set_permissions`, `set_times`, `fs::copy`). fc-service, freedom-ipfs v0.4.6 and heartwood `c208df3` don't ask. `freedom-cored` does, but isn't confined (D7).
   - **local sockets:** `socket` for any family but `AF_INET` and `AF_INET6`, and `socketpair` for anything but stream sockets. No UNIX socket (pathname or abstract), netlink or packet socket can be opened, so no local service is reachable.
     - **Who needs one:** tokio's signal driver, a stream pair. heartwood's control socket would, and 0008 turns it off upstream. Release builds resolve names without a local socket: static musl reads `/etc/resolv.conf` and `/etc/hosts` and asks the DNS server itself, and `freedom-ipfsd` has its own resolver.
     - glibc dev builds lose the NSS sources that need a socket (nscd, systemd-resolved's varlink, mDNS), and fall back to DNS.
