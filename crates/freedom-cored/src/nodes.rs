@@ -74,7 +74,7 @@ pub enum BuildError {
     /// Reading Radicle's existing config failed (not: it was malformed).
     Io(std::io::Error),
     /// Radicle's existing config isn't a regular file of at most
-    /// [`journal::MAX_FILE`] (checked before opening it).
+    /// [`journal::MAX_FILE`] (judged on the open handle).
     Config(&'static str),
 }
 
@@ -193,27 +193,45 @@ fn in_layout(
     Ok(targets.into_iter().zip(contents).collect())
 }
 
-/// Radicle's existing config: `None` if absent. It must be a regular file
-/// (symlinks followed, as JS's readFileSync does) of bounded size; this is
-/// checked before opening it, so a FIFO can't block the worker. Invalid UTF-8
-/// reads as unparseable, which starts over as `{}` like the JS catch.
-fn read_config(path: &Path) -> Result<Option<String>, BuildError> {
-    use std::io::Read;
-    let metadata = match std::fs::metadata(path) {
-        Ok(metadata) => metadata,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(BuildError::Io(e)),
+/// Tightens a node identity written before the core to `0600` in place
+/// (design 0001, "Writes and durability", existing files at adoption; #85):
+/// the files of the node's [`journal::layout`] under `root`, as the core
+/// itself writes them. JS wrote them under the umask, and nothing rewrites
+/// them until the next forced injection. Only regular files the user owns
+/// are touched, never through a symlink (`fsx::tighten`). Returns how many
+/// it changed.
+pub fn tighten_existing(node: &str, root: &Path) -> usize {
+    let Some(files) = journal::layout(node, root) else {
+        return 0;
     };
-    if !metadata.is_file() {
-        return Err(BuildError::Config("not_regular"));
+    let mut changed = 0;
+    for file in files {
+        match crate::fsx::tighten(&file) {
+            Ok(true) => changed += 1,
+            Ok(false) => {}
+            Err(e) => crate::log::warn(
+                "could not tighten a node identity file",
+                serde_json::json!({ "node": node, "error": e.kind().to_string() }),
+            ),
+        }
     }
-    if metadata.len() > journal::MAX_FILE {
-        return Err(BuildError::Config("too_large"));
-    }
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .and_then(|f| f.take(journal::MAX_FILE + 1).read_to_end(&mut bytes))
-        .map_err(BuildError::Io)?;
+    changed
+}
+
+/// Radicle's existing config: `None` if absent. It must be a regular file
+/// (symlinks followed, as JS's readFileSync does) of bounded size, judged on
+/// the open handle, so a FIFO can't block the worker, even one swapped in
+/// after a check (#83). Invalid UTF-8 reads as unparseable, which starts
+/// over as `{}` like the JS catch.
+fn read_config(path: &Path) -> Result<Option<String>, BuildError> {
+    let file = match crate::fsx::open_regular(path, true).map_err(BuildError::Io)? {
+        crate::fsx::Regular::Missing => return Ok(None),
+        crate::fsx::Regular::Other => return Err(BuildError::Config("not_regular")),
+        crate::fsx::Regular::File(file) => file,
+    };
+    let bytes = crate::fsx::read_at_most(&file, journal::MAX_FILE)
+        .map_err(BuildError::Io)?
+        .ok_or(BuildError::Config("too_large"))?;
     Ok(Some(String::from_utf8(bytes).unwrap_or_default()))
 }
 

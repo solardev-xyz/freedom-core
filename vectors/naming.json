@@ -14073,7 +14073,6 @@
       },
       {
         "hex": "225c756438303022",
-        "deviation": "lone-surrogate",
         "js": {
           "stringified": "\"\\ud800\""
         }
@@ -14123,7 +14122,6 @@
       },
       {
         "hex": "7b225c7564383030223a312c225c7564383031223a322c225c7566666664223a337d",
-        "deviation": "lone-surrogate-keys",
         "js": {
           "stringified": "{\"\\ud800\":1,\"\\ud801\":2,\"�\":3}"
         }

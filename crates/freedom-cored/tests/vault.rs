@@ -1335,3 +1335,157 @@ fn shutdown_waits_for_committed_work_and_sends_its_reply() {
     assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
     assert!(data.join(VAULT).exists());
 }
+
+/// The vault's temp files in `data`: what a write killed before its rename
+/// leaves (`.identity-vault.json.<pid>.<n>.tmp`).
+fn vault_temps(data: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(data)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(".identity-vault.json.") && n.ends_with(".tmp"))
+        .collect()
+}
+
+/// #81: a password change killed between its staged write and the rename
+/// (the user quits, or main's 3 s shutdown kill or hang watchdog fires)
+/// leaves an encrypted copy of the mnemonic as a temp file. The next start
+/// removes it, under the gate, before anything else runs; the vault itself
+/// is unchanged.
+#[test]
+fn a_write_killed_before_its_rename_leaves_no_copy_behind() {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    core.call(
+        2,
+        "vault.import",
+        json!({ "password_b64": b64("testpass1"), "mnemonic_b64": b64(ABANDON) }),
+    );
+    let before = core.call(3, "vault.status", json!({}))["result"]["fingerprint"].clone();
+    core.close_stdin();
+    assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
+
+    let marker_dir = tempfile::tempdir().unwrap();
+    let marker = marker_dir.path().join("claimed");
+    let mut env = commit_hooks(&marker);
+    env[0].1 = "60000".into();
+    let mut core = spawn_env("serve", &data, &locks, &[], &env_refs(&env));
+    core.hello();
+    core.send(&request(
+        2,
+        "vault.change_password",
+        json!({ "password_b64": b64("testpass1"), "new_password_b64": b64("testpass2") }),
+    ));
+    wait_for_claim(&marker);
+    core.child.kill().unwrap();
+    core.child.wait().unwrap();
+    assert_eq!(vault_temps(&data).len(), 1, "the staged copy is left");
+
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    assert_eq!(vault_temps(&data), Vec::<String>::new());
+    assert_eq!(
+        core.call(2, "vault.status", json!({}))["result"]["fingerprint"],
+        before
+    );
+    let unlocked = core.call(
+        3,
+        "vault.unlock",
+        json!({ "password_b64": b64("testpass1") }),
+    );
+    assert!(unlocked["result"].is_object(), "{unlocked}");
+}
+
+/// #81: `vault.delete` takes leftover copies of the vault with it.
+#[test]
+fn delete_removes_leftover_copies_of_the_vault() {
+    let (_root, data, mut core) = imported(&[]);
+    // As a write killed in an earlier run left it (startup removes those, so
+    // this one appears after it).
+    let left = data.join(".identity-vault.json.4242.0.tmp");
+    std::fs::copy(data.join(VAULT), &left).unwrap();
+    let unrelated = data.join("vault-meta.json");
+    std::fs::write(&unrelated, b"{}").unwrap();
+    let deleted = core.call(
+        3,
+        "vault.delete",
+        json!({ "password_b64": b64("testpass1") }),
+    );
+    assert_eq!(deleted["result"], json!({}), "{deleted}");
+    assert!(!data.join(VAULT).exists());
+    assert!(!left.exists());
+    assert!(unrelated.exists());
+}
+
+/// #83: whatever replaces the vault after startup (a FIFO, a symlink) is
+/// refused on the open handle, without blocking the worker: the next job
+/// still runs.
+#[cfg(unix)]
+#[test]
+fn a_vault_swapped_for_a_fifo_or_symlink_is_refused_without_blocking() {
+    let (root, data, mut core) = imported(&[]);
+    let real = root.path().join("real-vault.json");
+    std::fs::rename(data.join(VAULT), &real).unwrap();
+    let made = std::process::Command::new("mkfifo")
+        .arg(data.join(VAULT))
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let unlock = json!({ "password_b64": b64("testpass1") });
+    let refused = core.call(3, "vault.unlock", unlock.clone());
+    assert_eq!(refused["error"]["data"]["kind"], "not_regular", "{refused}");
+    std::fs::remove_file(data.join(VAULT)).unwrap();
+    std::os::unix::fs::symlink(&real, data.join(VAULT)).unwrap();
+    let refused = core.call(4, "vault.verify_password", unlock.clone());
+    assert_eq!(refused["error"]["data"]["kind"], "not_regular", "{refused}");
+    std::fs::remove_file(data.join(VAULT)).unwrap();
+    std::fs::rename(&real, data.join(VAULT)).unwrap();
+    let verified = core.call(5, "vault.verify_password", unlock);
+    assert_eq!(verified["result"], json!({}), "{verified}");
+}
+
+/// Review of #114: the vault's temp file was checked (decrypted) by name,
+/// then renamed by name, so a file swapped in between was committed. Now the
+/// check reads it through the handle that wrote it, and the rename happens
+/// only if the temp name still names that file: otherwise nothing changes,
+/// and the write fails before its commit.
+#[cfg(unix)]
+#[test]
+fn a_temp_vault_swapped_after_its_check_is_never_committed() {
+    let (root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    core.call(
+        2,
+        "vault.import",
+        json!({ "password_b64": b64("testpass1"), "mnemonic_b64": b64(ABANDON) }),
+    );
+    let before = std::fs::read(data.join(VAULT)).unwrap();
+    core.close_stdin();
+    assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
+
+    let evil = root.path().join("evil");
+    std::fs::write(&evil, "{}").unwrap();
+    let swap = format!("checked={}", evil.display());
+    let mut core = spawn_env(
+        "serve",
+        &data,
+        &locks,
+        &[],
+        &[("FREEDOM_CORED_TEST_SWAP", swap.as_str())],
+    );
+    core.hello();
+    let changed = core.call(
+        2,
+        "vault.change_password",
+        json!({ "password_b64": b64("testpass1"), "new_password_b64": b64("testpass2") }),
+    );
+    assert_eq!(changed["error"]["code"], "storage", "{changed}");
+    assert_eq!(std::fs::read(data.join(VAULT)).unwrap(), before);
+    let unlocked = core.call(
+        3,
+        "vault.unlock",
+        json!({ "password_b64": b64("testpass1") }),
+    );
+    assert!(unlocked["result"].is_object(), "{unlocked}");
+}

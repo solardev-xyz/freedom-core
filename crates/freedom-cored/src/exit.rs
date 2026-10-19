@@ -39,6 +39,7 @@ impl From<&GateError> for Exit {
             GateError::Unqualified(_)
             | GateError::LockInsideIdentity
             | GateError::Moved
+            | GateError::NotPrivate(_)
             | GateError::Storage(_) => Exit::Storage,
         }
     }

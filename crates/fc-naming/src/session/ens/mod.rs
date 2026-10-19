@@ -443,7 +443,7 @@ pub(crate) async fn with_timeout<T>(
 }
 
 pub(crate) fn s(text: &str) -> JsValue {
-    JsValue::String(text.into())
+    JsValue::string(text)
 }
 
 pub(crate) fn refs(endpoints: &[Endpoint]) -> JsValue {
@@ -461,7 +461,7 @@ pub(crate) fn number(n: i64) -> JsValue {
 }
 
 pub(crate) fn obj(fields: Vec<(&str, JsValue)>) -> JsValue {
-    JsValue::Object(fields.into_iter().map(|(k, v)| (k.to_owned(), v)).collect())
+    JsValue::Object(fields.into_iter().map(|(k, v)| (k.into(), v)).collect())
 }
 
 /// TTLs by trust level (`ttlForResult`).

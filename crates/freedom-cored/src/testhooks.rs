@@ -18,6 +18,12 @@
 //!   appends a line to for each reply it makes (`reply`), and at its end
 //!   for the waiting frames it hands to the writer (`drain <count>`), so
 //!   tests can wait for both while main isn't reading.
+//! - `FREEDOM_CORED_TEST_SWAP` (`<stage>=<path>`) renames the file at
+//!   `<path>` over the file the core is about to use at `<stage>`, once (the
+//!   rename consumes it): `journal` right after recovery read the journal,
+//!   `checked` right after a staged or temp file was checked and before its
+//!   identity is compared, `renaming` right before a staged node file is
+//!   renamed. It stands for a same-user process winning a race.
 //! - `FREEDOM_CORED_TEST_METHODS` enables the `test.*` methods
 //!   (`testmethods`), which make responses of any size. Release builds
 //!   don't compile them, nor this hook.
@@ -95,6 +101,18 @@ pub fn naming_drain(frames: usize) {
 }
 
 #[cfg(debug_assertions)]
+pub fn swap(stage: &str, path: &std::path::Path) {
+    let Ok(spec) = std::env::var("FREEDOM_CORED_TEST_SWAP") else {
+        return;
+    };
+    if let Some((wanted, replacement)) = spec.split_once('=')
+        && wanted == stage
+    {
+        let _ = std::fs::rename(replacement, path);
+    }
+}
+
+#[cfg(debug_assertions)]
 pub fn test_methods() -> bool {
     std::env::var_os("FREEDOM_CORED_TEST_METHODS").is_some()
 }
@@ -117,6 +135,9 @@ pub fn kdf_deadline(default: Duration) -> Duration {
 pub fn stall(default: Duration) -> Duration {
     default
 }
+
+#[cfg(not(debug_assertions))]
+pub fn swap(_stage: &str, _path: &std::path::Path) {}
 
 #[cfg(not(debug_assertions))]
 pub fn naming_reply() {}

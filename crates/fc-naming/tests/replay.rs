@@ -228,7 +228,7 @@ fn substitute(value: &JsValue) -> JsValue {
             if let [(key, JsValue::String(url))] = members.as_slice()
                 && key == "ref"
             {
-                return JsValue::String(host_of(url));
+                return JsValue::string(host_of(url));
             }
             JsValue::Object(
                 members
