@@ -223,7 +223,7 @@ Rust tests replay every case, in the crates (#18) and over the wire through the 
 
 ## Amendment: what the user is shown (#88)
 
-**Status:** proposed; **needs the user's decision.** It adds to the API and moves the approval UI onto the core's view; one part refuses requests ethers accepts.
+**Status:** proposed; **needs the user's decision.** It adds to the API and moves the approval UI onto the core's view; two parts refuse requests ethers accepts.
 
 ### Today
 
@@ -232,22 +232,23 @@ The core hashes and signs `{ domain, types, message }`. The approval UI builds i
 - **Undeclared fields** are shown but not signed, and the hash ignores them silently (ethers parity). A nested struct is shown as JSON, cut at 50 characters with every other value.
 - **The domain** is shown partly: `verifyingContract` cut to 10 characters, and `chainId` hidden when it is 0. A domain without `chainId` is never flagged, though its signature is valid on every chain where the verifying contract lives. Nothing compares `chainId` with the dApp's active chain.
 - **`primaryType`** is dropped by main, and the core infers the root as ethers does. A request whose `primaryType` names another type means one thing to ethers and another to a wallet that honors `primaryType` (MetaMask's `eth-sig-util` hashes the named type).
-- **`personal_sign`** is shown by decoding hex pair by pair with `parseInt`, while main signs `Buffer.from(hex, 'hex')`, which stops at the first invalid pair: `0x41zz42` is shown as `A\0B` and signed as `A`. [Migration](#migration-in-freedom-browser) step 1 already makes main validate hex strictly, and the core refuses such hex (`parse_bytes`).
+- **`personal_sign`** in the reference decodes hex for display pair by pair with `parseInt`, while main signs `Buffer.from(hex, 'hex')`, which stops at the first invalid pair: `0x41zz42` is shown as `A\0B` and signed as `A`. That mismatch is gone once main validates hex strictly ([Migration](#migration-in-freedom-browser) step 1, done on the integration branch), and the core refuses such hex anyway (`parse_bytes`). What remains is that the display decodes its own copy of the message.
 
 ### Proposal
 
 1. **A view of what was signed.** `typed_data.hash` and `sign.typed_data` also return `view`, and the approval UI renders it instead of the dApp's JSON, every field, untruncated.
-   - **Its content** is ethers' `TypedDataEncoder.getPayload(domain, types, message)`, with the core's [deviations](#deviations-from-ethers): `primary_type`; `domain` with only the fields used, in the domain type's order; `message` with only the declared fields, in declaration order, structs nested. Values are normalized as `getPayload` does: integers as decimal strings, bytes and addresses as lowercase hex, and the domain's `chainId` as a number (a hex quantity past 2^53).
-   - **Parity:** the reference's `getPayload` gives the vectors, as `TypedDataEncoder.hash` does for `hash`.
-   - **Bounds:** each value is at most its own text, or 78 digits for an integer, so the view stays within the [limits](#limits) the hash already enforces.
+   - **Its content** is ethers' `TypedDataEncoder.getPayload(domain, types, message)`, with the core's [deviations](#deviations-from-ethers): `primary_type`; `domain` with only the fields used, in the domain type's order; `message` with only the declared fields, in declaration order, structs nested. Values are normalized as `getPayload` does: integers as decimal strings, bytes and addresses as lowercase hex, and the domain's `chainId` as a hex quantity (`"0x1"`, not `1`: pinned ethers tests `Number.isSafeInteger` on a `BigInt`, which never holds).
+   - **Parity:** the reference's `getPayload` gives the vectors, as `TypedDataEncoder.hash` does for `hash`, with `chainId` cases at 0, 1, 2^53 − 1 and 2^53.
    - **`ignored`:** the message's top-level keys the types don't declare, so the UI can say that the dApp sent fields that aren't signed.
+   - **Size:** the [limits](#limits) bound the hashing work, not the view. Integers become quoted strings, so the view can outgrow its input: a `uint256[]` of 99,000 zeros beside 330,000 bytes of `bytes` is about 858 KB of request and 1,056 KB of `getPayload` output, before the reply's envelope. Signing replies leave through the vault loop, which writes whole frames of at most 1 MiB. The core therefore measures the reply's serialized size while it encodes (each value's normalized length is known then), before any key is derived, and refuses a request whose reply wouldn't fit one frame with `invalid_argument` (deviation `view-size`: ethers signs it). The alternative is fragmented replies from the vault loop, as [0005](0005-chain-data.md#frames) has for chain data, which needs bulk credit and a writer allowance there, and a fallback for a peer without fragments. Real payloads are far below the frame, so refusal is proposed.
+   - **Binding:** main asks `typed_data.hash` for the view before the prompt (it needs no key and works while locked), for every signer kind, vault, Ledger, phone and Safe alike. The confirmation token binds that hash, and `sign.typed_data` takes it as `expected_hash` and refuses a mismatch, so a vault account signs only what was shown.
 2. **`primary_type`**, an optional parameter. Main passes the dApp's `primaryType`. One that isn't the inferred root is `invalid_argument` (deviation `primary-type`: ethers ignores it), since wallets disagree on what such a request means.
-3. **`chain_id`**, an optional parameter: the dApp's active chain. The view reports `chain` as `match`, `mismatch` or `absent`, and the UI warns on the last two. It isn't refused: some protocols sign for another chain on purpose.
+3. **`chain_id`**, an optional parameter: the dApp's active chain. The view reports `chain` as `match`, `mismatch` or `absent` (the domain has no `chainId`), and the UI warns on the last two. Without the parameter it reports `unknown`, never `match`. A mismatch isn't refused: some protocols sign for another chain on purpose.
 4. **`personal_sign`:** main shows the bytes it sends to `sign.message`, decoded from the same strictly validated hex.
 
 ### Decision needed
 
-1. Whether to add `view` now, with the UI moving onto it, or with the policy phase.
+1. Whether to add `view` now, with the UI moving onto it, or with the policy phase; and, for a view over one frame, refusal (proposed) or fragmented signing replies.
 2. Whether a `primaryType` mismatch is refused (proposed) or warned.
 3. Whether a `chainId` mismatch or absence is warned (proposed) or refused.
 
