@@ -128,6 +128,26 @@ pub fn sign_soc(
 mod tests {
     use super::*;
 
+    /// A SOC signature is EIP-191 over the 32-byte SOC digest, which is
+    /// exactly an account's `sign.message` of those 32 bytes (#89). So the
+    /// guarantee that a SOC signature is bound to a real chunk holds only
+    /// for keys that sign nothing else (design 0002, "Accounts as feed
+    /// owners").
+    #[test]
+    fn a_soc_signature_is_a_personal_sign_of_its_digest() {
+        let key = SigningKey::from_slice(&[7u8; 32]).unwrap();
+        let identifier = [1u8; 32];
+        let signed = sign_soc(&key, &identifier, None, b"any payload").unwrap();
+        let mut input = [0u8; 64];
+        input[..32].copy_from_slice(&identifier);
+        input[32..].copy_from_slice(&signed.chunk_address);
+        let message = keccak256(&input);
+        assert_eq!(
+            signed.signature,
+            sign_digest(&key, &eip191_digest(&message)).unwrap()
+        );
+    }
+
     #[test]
     fn payload_bounds() {
         assert_eq!(bmt_root(&[]), Err(Error::PayloadSize(0)));

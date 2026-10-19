@@ -36,6 +36,7 @@ Each returns exactly the bytes ethers or bee-js return today, and each signing m
   - User accounts sign transactions, messages and typed data.
   - The Bee wallet and publisher keys sign **only** SOCs.
   - A SOC's chunk address is computed in the core from the chunk itself, so every SOC signature is bound to a chunk that actually hashes to that address.
+  - **Not yet true of accounts:** an account's 32-byte `sign.message` is also a SOC signature, so for an account that owns a feed the binding above doesn't hold. [Accounts as feed owners](#amendment-accounts-as-feed-owners-89) sets out the choice; it awaits a decision.
 
 **Non-goals**
 - **Approval and policy.** As in 0001's threat model, stage 1 trusts main: it runs the approval UI and decides what gets signed. A compromised main can still:
@@ -150,6 +151,7 @@ This is EIP-712 with ethers v6 `TypedDataEncoder` semantics, which is what `Wall
   - `soc_address` = keccak256(`identifier` ‖ `owner`).
 - **Parity:** the output equals bee-js's `makeContentAddressedChunk(payload, span).toSingleOwnerChunk(identifier, key)`. Main uploads `span ‖ payload` to Bee's `/soc/{owner}/{identifier}?sig=…` as bee-js does today.
 - **Why the core computes the chunk address:** an API that took the chunk address from main would let main get the Bee wallet and publisher keys to sign statements about chunks that don't exist (any identifier and chunk-address pair). Hashing the payload in the core binds every SOC signature to a real chunk. Raw-digest signing stays unavailable regardless.
+- **Accounts:** that binding holds for the Bee wallet and publisher keys, which only sign SOCs. An account also signs `sign.message`, whose 32-byte case produces exactly a SOC signature ([Accounts as feed owners](#amendment-accounts-as-feed-owners-89)).
 
 ### Errors
 
@@ -244,8 +246,55 @@ One PR per step, each after the freedom-core release that provides it.
 
 **Rollback:** a browser step can be reverted while the core still has `compat.*`. So `compat.*` leaves the core only in a release after the browser has stopped calling it, and the browser pins that release only once it no longer needs `compat.*`.
 
+## Amendment: accounts as feed owners (#89)
+
+**Status:** proposed; **needs the user's decision.** Every option that closes the hole changes what a dApp or a user relies on today.
+
+### The collision
+
+- **A SOC signature is a `personal_sign` of 32 bytes.** `swarm.sign_soc` signs EIP-191 over `keccak256(identifier ‖ chunk address)`, which is `"\x19Ethereum Signed Message:\n32" ‖ digest`. `sign.message` of those 32 bytes signs exactly that. The format is Swarm's: Bee recovers a chunk's owner from EIP-191 over that digest, and bee-js signs it the same way. Neither side can add a domain separator.
+- **Who can exploit it:** any dApp the user has connected to an account that owns a feed (`ethereum-wallet` identity mode).
+  1. Feed identifiers are public: a feed's manifest, which a name's contenthash points at, names its owner and topic, and an update's identifier is `keccak256(topic ‖ index)`. The dApp computes the next identifier of the user's feed, picks its own payload, and computes the chunk address and the digest.
+  2. It asks for `personal_sign` of the 32-byte digest. The approval UI can only show a hex blob. A dApp whose permission has signing auto-approve (`getSigningAutoApprove`) isn't even shown one: main signs at once.
+  3. The signature is a valid single-owner chunk of the user's feed. The dApp uploads it, and the feed (an ENS-named site, say) serves the dApp's content.
+- **Only this one case collides.** Another message length has another EIP-191 prefix, and typed data and transactions have their own (`0x1901`, a type byte or RLP). The other direction is safe too: a SOC request signs `keccak256(identifier ‖ chunk address)` over a real chunk, and making that equal a chosen message needs a keccak preimage.
+- **Today** the same is true of bee-js and ethers in main, so the core isn't a regression. The core's guarantee that every SOC signature is bound to a real chunk only holds for keys that sign nothing else. A test in `fc-swarm` pins the collision.
+
+### Constraints
+
+- **The 32-byte `personal_sign` is common.** dApps sign a hash with `signMessage(getBytes(hash))`, and contracts check it with OpenZeppelin's `toEthSignedMessageHash`. Neither the core nor main can tell a SOC digest from any other hash.
+- **An account-owned feed stays account-owned.** A feed is `(owner, topic)`: its updates can only ever be signed by the owner's key. Moving a user to a publisher key means a new feed, and re-pointing every name and link to it.
+- **The mode is advertised to dApps:** `swarm_getCapabilities` lists `ethereum-wallet` in `publisherIdentityModes`, with `extensions.ethereumWalletPublisherIdentity`.
+
+### Options
+
+| Option | Closes it | What breaks | Where |
+|---|---|---|---|
+| **A. Key separation:** `swarm.sign_soc` refuses account keys (`invalid_argument`, like any key outside its row) | for every account | `ethereum-wallet` mode, and feeds an account already owns: they can't be updated again | the core (the key table and one check, with a vector), then the browser |
+| **B. Exclusive accounts:** an account that owns a feed refuses a dApp's 32-byte `personal_sign` | for feed-owning accounts | 32-byte `personal_sign` from those accounts only | main, which knows the feed identities; or the core, with a persistent per-account flag set by its first SOC |
+| **C. No 32-byte `personal_sign`:** the core refuses it from every account | for every account | every dApp that signs a hash, from any account | the core |
+| **D. Warning:** main warns when a feed-owning account is asked to sign exactly 32 bytes | no: an approval still signs a feed update | nothing | main |
+
+### Recommendation
+
+A, in two steps, so no existing feed is cut off without the user's say:
+
+1. **Now (B):**
+   - main stops offering `ethereum-wallet` for new feed identities and drops it from `swarm_getCapabilities`;
+   - for an account that already owns a feed, main refuses a dApp's `personal_sign` of exactly 32 bytes, auto-approved or not, with an error that says why. Only dApp requests are affected: main's own flows (Safe, x402) sign typed data.
+2. **Later (A):** once no feed identity uses an account (each user moved theirs to a publisher key, or chose to leave it frozen), the core refuses account keys in `swarm.sign_soc`, and the key table's account row loses it.
+
+The core's part of step 1 is nothing: main holds the policy, as [Non-goals](#goals-and-non-goals) says. A core-enforced B would need the vault to remember which accounts have signed a SOC, a new piece of persistent state with its own crash and restore rules. That isn't worth it for a transition.
+
+### Decision needed
+
+1. A, B, C or D, or the phased A above.
+2. If A: what happens to existing account-owned feeds (frozen, or a guided move to a publisher key with the user re-pointing names), and when the core release that refuses account keys ships.
+3. If B: whether main refuses the 32-byte request outright or lets the user override after a warning that names the feed at risk.
+
 ## Open questions
 
 1. **Auto-lock.** Should signing restart the auto-lock timer itself? Proposed: no. Main keeps calling `vault.touch` where it does today: after vault-account signing, but not after Swarm signing. Revisit with policy.
 2. **SOC payloads larger than one chunk.** `writeFeedPayload` uploads big payloads through `/bytes` first, and the core then signs the root chunk. A later phase could chunk and hash the whole payload in the core. That isn't needed for parity.
 3. **Error strings.** dApps see main's error mapping, not ethers' exact messages. Do any callers match on ethers' message text? Check during the browser migration.
+4. **Accounts as feed owners** (#89): a decision is needed; see [the amendment](#amendment-accounts-as-feed-owners-89).
