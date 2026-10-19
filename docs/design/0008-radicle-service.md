@@ -139,7 +139,7 @@ This design moves it into **its own supervised process, `freedom-radicled`**. It
 ## Process model
 
 ```
-Electron main (profile P) ──spawn──▶ freedom-radicled serve --home <rad home> --lock-dir <locks> --parent-pid <pid>
+Electron main (profile P) ──spawn──▶ freedom-radicled serve --home <rad home> --lock-dir <locks> --network <policy> --parent-pid <pid>
      stdin  ──frames──▶
      stdout ◀──frames──
      stderr ◀──JSON log lines──
@@ -159,6 +159,7 @@ Electron main (profile P) ──spawn──▶ freedom-radicled serve --home <ra
   - everything else main has.
 
   `HOME` points at an empty directory the service owns. With libgit2's configuration search paths emptied ([upstream](#upstream-changes)), no global or system git configuration applies.
+- **The network policy** is an argument, `--network`, as in 0007's *Spawn*. It is fixed for the process's life ([Modes](#modes)).
 - **Handshake:** `rad.hello` within 10 s, as 0001.
 - **The lock:** `<lock-dir>/radicle-<sha256(canonical home)>.lock`, under 0001's rules, which also cover the canonical path, the stable lock directory, network filesystems and bind mounts.
   - Contention retries for 5 s, then exits 75. Other errors and network filesystems exit 74.
@@ -184,7 +185,7 @@ Electron main (profile P) ──spawn──▶ freedom-radicled serve --home <ra
   1. spawn;
   2. `rad.hello`;
   3. **`rad.reconcile`,** a phase of its own, with its own deadline ([Reconciliation](#reconciliation)). Its reply is the boundary main can see: the home is consistent;
-  4. `rad.start`, which runs `Embedded::start` with today's options, the [network policy](#network-policy) and no key generation, and returns `{ did, nid, alias }`;
+  4. `rad.start`, which runs `Embedded::start` with today's options, the [network policy](#network-policy) from `--network` and no key generation, and returns `{ did, nid, alias }`;
   5. `RUNNING`;
   6. main runs today's background `rad.connect_seeds` and default-repository `rad.clone`.
 
@@ -407,11 +408,11 @@ The rules this design relies on, as 0007 specifies them:
 
 | Method | Params | Result | Pool and deadline |
 |---|---|---|---|
-| `rad.hello` | `protocol`, `shell_version`, `frames` | `protocol`, `service_version`, `libradicle` build info | 10 s after spawn |
+| `rad.hello` | `protocol`, `shell_version`, `frames` | `protocol`, `service_version`, `libradicle` build info, `network` (the process's policy) | 10 s after spawn |
 | `rad.reconcile` | none | `{ was_dirty, repaired, quarantined: { count, first } }`: counts per step, and up to 16 quarantine entries | 300 s ([the bound](#reconciliation)); on failure or deadline, the process exits |
 | `rad.quarantine_list` | `page` | `{ entries, next_page }`: up to 64 entries `{ rid, qid, kind, step, unit, since }` per page | read pool; 60 s |
 | `rad.remove_repo` | `rid`, `qid` | `{ removed }`, or `not_quarantined` when no record with that `qid` exists ([the escape](#the-escape)) | write queue; 60 s |
-| `rad.start` | `alias`, `network` | `did`, `nid`, `alias` | 30 s; on failure, the process exits |
+| `rad.start` | `alias` | `did`, `nid`, `alias` | 30 s; on failure, the process exits |
 | `rad.stats` | none | `connected_peers`, `node_alive`, the repair unit in progress and its elapsed time, `quarantined_count`, pool and budget use | inline; 5 s |
 | `rad.shutdown` | none | none: the process exits | main kills after 10 s |
 | `rad.read` | `op`, `args` | head `{ content_type: "application/json", bytes }`, then the JSON as a body stream | read pool; 60 s to the head |
@@ -807,7 +808,7 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
   - nothing falls back to a direct socket;
   - if the pinned Arti can't `RESOLVE`, the setting waits, as 0007 decides.
 - **The setting:** a per-profile **Route Radicle through Tor**, off by default, using `tor-manager`'s endpoint. Whether it and 0007's IPFS setting become one switch is an [open question](#open-questions).
-- **Changing the policy restarts the process.** Nothing of the old policy survives its process, since there is no child.
+- **Changing the policy restarts the process.** Main passes the policy at spawn (`--network`), and a change spawns a new process with the new one, so [0010](0010-service-confinement.md)'s confinement can fix it before `rad.hello`. Nothing of the old policy survives its process, since there is no child.
 
 ### The address policy
 
