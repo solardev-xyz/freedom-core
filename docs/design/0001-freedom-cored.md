@@ -65,8 +65,8 @@ Stage 1 trusts Electron main: it holds the pipe, fills in the caller context, an
 **Deliberate exceptions to "no raw secret leaves the core"** (AGENTS.md rule 3 is amended to match):
 - **Permanent:** the user-requested backup exports (`vault.export_mnemonic`, `vault.export_private_key`), and the mnemonic shown during onboarding.
 - **Temporary:** the `compat.*` signing exports, removed in Phase 2.
-- **Node identities, until their custody is decided:** the files `nodes.write_identity` writes ([Multi-file writes](#multi-file-writes)), in the JS reference's formats, mode `0600`:
-  - Bee's wallet, as a keystore whose password is in `config.yaml` beside it. As in JS today, that stores a secret next to the thing it protects, against AGENTS.md rule 4, until Phase 5 (K-3);
+- **Node identities, until their custody is decided:** the files `nodes.write_identity` writes ([Multi-file writes](#multi-file-writes)), in the JS reference's formats, with the permissions in the table above (mode `0600` on Unix):
+  - Bee's wallet, as a keystore whose password is in `config.yaml` beside it. As in JS today, that stores a secret next to the thing it protects, an exception to AGENTS.md rule 4 until Phase 5 (K-3);
   - the Radicle node key, as an unencrypted OpenSSH file. Its custody is 0008's open question.
 
   A node keeps its identity across a vault lock, so these keys are not the derived-key caches a lock wipes.
