@@ -293,8 +293,8 @@ fn fail(state: &RefCell<SendState>, source: &'static str, error: Thrown) {
     state.failures.push((source, error));
 }
 
-/// Myotis's `sendRawTransaction`: `rejected` and `uncertain` end the loop,
-/// `not_sent` falls to the next broadcaster.
+/// Myotis's `sendRawTransaction`: `rejected` (either definite refusal)
+/// and `uncertain` end the loop, `not_sent` falls to the next broadcaster.
 async fn myotis(req: &Req, raw: &str, state: &RefCell<SendState>) -> Step {
     let chain_id = req.chain.chain_id;
     if !req.ctx.ready(chain_id) {
@@ -328,13 +328,14 @@ async fn myotis(req: &Req, raw: &str, state: &RefCell<SendState>) -> Step {
                 Step::Stop
             }
         }
-        Answer::Myotis(MyotisReply::Rejected { reason }) => {
+        Answer::Myotis(MyotisReply::Rejected { reason, kind }) => {
             // Its text, reserved before it is copied; the error holds the
-            // charge while any copy of it lives.
+            // charge while any copy of it lives. The adapter's error as it
+            // threw it: the refusal's code, then its marker.
             let copies = reserve!(req.ctx, reason.len().saturating_mul(2) + 64);
             let error = Thrown::error(&reason)
-                .with("code", Prop::Json("-32000".into()))
-                .with("myotisRefusal", Prop::string("rejected"));
+                .with("code", Prop::Json(kind.code().to_string().into()))
+                .with("myotisRefusal", Prop::string(kind.marker()));
             let error = within!(charged(error, copies));
             let mut state = state.borrow_mut();
             state.record("myotis", Class::Refused);

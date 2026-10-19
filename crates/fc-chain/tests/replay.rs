@@ -29,9 +29,9 @@ use fc_chain::JsString;
 use fc_chain::MyotisOperation;
 use fc_chain::machine::{
     Answer, Bounds, BroadcastOutcome, Call, CapReader, ChainConfig, ChainError, ColibriClass,
-    ColibriReply, Effect, Emitted, Fired, Machine, MyotisClass, MyotisReply, Prop, Protocol,
-    Prover, QuorumConfig, Ranker, ReadOptions, Reply, Request, RpcEndpoint, StateTables, Success,
-    Thrown, Transport, VerifiedOp,
+    ColibriReply, Effect, Emitted, Fired, Machine, MyotisClass, MyotisRejection, MyotisReply, Prop,
+    Protocol, Prover, QuorumConfig, Ranker, ReadOptions, Reply, Request, RpcEndpoint, StateTables,
+    Success, Thrown, Transport, VerifiedOp,
 };
 use fc_json::index::{Index, Kind};
 use serde_json::{Map, Value as Json};
@@ -411,6 +411,11 @@ fn verified_answer(record: &Json, before: Option<String>, after: Option<String>)
         return Some(Answer::Myotis(match str_of(answer, "class") {
             "rejected" => MyotisReply::Rejected {
                 reason: thrown_message(thrown),
+                kind: MyotisRejection::Rejected,
+            },
+            "invalid_params" => MyotisReply::Rejected {
+                reason: thrown_message(thrown),
+                kind: MyotisRejection::InvalidParams,
             },
             "uncertain" | "uncertain_dispatched" => MyotisReply::Uncertain,
             class => MyotisReply::Failure(myotis_class(class)),
@@ -2287,7 +2292,7 @@ const DEVIATIONS: &[Expected] = &[
 
 /// The score: scenarios replayed exactly (deviation scenarios with their
 /// asserted difference included), and those not replayed yet.
-const PASSING: usize = 305;
+const PASSING: usize = 306;
 const NOT_REPLAYED: usize = 0;
 /// The permitted races, counted: each is a cancel the machine made in the
 /// tick the reference's exchange settled, after what [`race`] names. Main
