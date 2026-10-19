@@ -31,7 +31,7 @@ fn hello_status_shutdown() {
         json!({ "exists": false, "unlocked": false, "epoch": null, "fingerprint": null })
     );
     assert_eq!(
-        core.call(3, "core.shutdown", json!({}))["result"],
+        core.call_shell(3, "core.shutdown", json!({}))["result"],
         json!({})
     );
     assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
@@ -66,7 +66,7 @@ fn errors_are_typed() {
     core.send(&json!({ "type": "request", "id": 3, "method": "vault.status", "params": {},
         "context": { "caller": "page", "page": { "origin": "https://a", "top_origin": "https://a", "frame": 1, "navigation": 1 } } }));
     assert_eq!(core.recv()["error"]["code"], "forbidden");
-    let again = core.call(
+    let again = core.call_shell(
         4,
         "core.hello",
         json!({ "protocol": 1, "shell_version": "t", "auto_lock_ms": 0 }),
@@ -87,7 +87,7 @@ fn status_refuses_non_regular_vault_files_without_blocking() {
     assert_eq!(status["error"]["data"]["kind"], "not_regular");
     // The loop is still responsive.
     assert_eq!(
-        core.call(3, "core.shutdown", json!({}))["result"],
+        core.call_shell(3, "core.shutdown", json!({}))["result"],
         json!({})
     );
     assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
@@ -132,7 +132,7 @@ fn handshake_rules() {
     // A protocol mismatch is answered, then the core exits.
     let (_root, data, locks) = dirs();
     let mut core = spawn("serve", &data, &locks, &[]);
-    let reply = core.call(
+    let reply = core.call_shell(
         1,
         "core.hello",
         json!({ "protocol": 2, "shell_version": "t", "auto_lock_ms": 0 }),
@@ -144,6 +144,53 @@ fn handshake_rules() {
     let (_root, data, locks) = dirs();
     let mut core = spawn("serve", &data, &locks, &["--hello-timeout-ms", "300"]);
     assert_eq!(core.exit_code(Duration::from_secs(5)), 76);
+}
+
+/// #101: fc-protocol's method table decides who may call what, once for
+/// every request. `core.hello` and `core.shutdown` are main's own (`shell`):
+/// a `chrome` caller, which a main bug could forward from a renderer, is
+/// refused, and the core neither handshakes nor shuts down for it.
+#[test]
+fn the_method_table_decides_who_may_call() {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    let hello = json!({ "protocol": 1, "shell_version": "t", "auto_lock_ms": 900_000 });
+    let refused = core.call(1, "core.hello", hello.clone());
+    assert_eq!(refused["error"]["code"], "forbidden", "{refused}");
+    assert_eq!(
+        core.call_shell(2, "core.hello", hello)["result"]["protocol"],
+        1
+    );
+
+    let shutdown = core.call(3, "core.shutdown", json!({}));
+    assert_eq!(shutdown["error"]["code"], "forbidden", "{shutdown}");
+    // Still running.
+    assert!(core.call(4, "vault.status", json!({}))["result"].is_object());
+    // Main's own methods, from the browser UI.
+    for (id, method) in [
+        (5, "vault.reconcile"),
+        (6, "nodes.op_status"),
+        (7, "compat.private_key"),
+        (8, "compat.bee_wallet_key"),
+        (9, "compat.publisher_key"),
+        (10, "dweb.open"),
+    ] {
+        let reply = core.call(id, method, json!({}));
+        assert_eq!(reply["error"]["code"], "forbidden", "{method}: {reply}");
+    }
+    // A name the table doesn't list is unknown, whoever asks.
+    for (id, method) in [(11, "compat.root_key"), (12, "core.restart")] {
+        let reply = core.call_shell(id, method, json!({}));
+        assert_eq!(
+            reply["error"]["code"], "unknown_method",
+            "{method}: {reply}"
+        );
+    }
+    assert_eq!(
+        core.call_shell(13, "core.shutdown", json!({}))["result"],
+        json!({})
+    );
+    assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
 }
 
 #[test]
@@ -379,7 +426,7 @@ fn slow_storage_at_startup_is_bounded_by_the_hello_deadline() {
         &["--hello-timeout-ms", "1000"],
         &[SLOW_SNAPSHOT],
     );
-    core.send(&request(
+    core.send(&shell_request(
         1,
         "core.hello",
         json!({ "protocol": 1, "shell_version": "test", "auto_lock_ms": 900000 }),

@@ -11,6 +11,7 @@ pub mod error;
 pub mod fragment;
 pub mod frame;
 pub mod message;
+pub mod methods;
 pub mod secret;
 pub mod stream;
 

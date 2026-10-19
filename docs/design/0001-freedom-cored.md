@@ -182,14 +182,17 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   - `"shell"`: main-internal work with no IPC event behind it, such as the x402 client and background jobs.
   - `{ "page": { origin, top_origin, frame, navigation } }`: web content. This is reserved for Phase 2, which also defines how a page's approval binds to a key and an operation.
 
-  Each method declares the caller kinds it accepts, and the core answers anything else with `forbidden`. All Phase 1 methods accept `chrome` and `shell`.
+  Each method declares the caller kinds it accepts, in `fc-protocol`'s method table, and the core checks every request against it once, before dispatching anything (#101). A method the table doesn't list is `unknown_method`; a caller it doesn't list for the method gets `forbidden`. Nothing is allowed by default.
+  - Most methods accept `chrome` and `shell`.
+  - Main's own methods accept only `shell`: `core.hello`, `core.shutdown`, `vault.reconcile`, `nodes.op_status`, `compat.*` and `dweb.open`. A main bug that forwarded a renderer's `core.shutdown` under `chrome` would otherwise wipe the vault and, through the restart, reset the in-memory throttle.
+  - No method accepts `page` yet (Phase 2).
 - **Error codes:**
   - **Request errors:** `vault_locked`, `incorrect_password`, `throttled` (with `data.retry_after_ms`), `no_vault`, `vault_exists`, `unsupported_vault_version`, `corrupt_vault`, `invalid_mnemonic`, `invalid_argument`, `weak_password`, `storage` (with `data.kind`).
   - **Protocol-level:** `forbidden`, `busy`, `cancelled`, `deadline`, `internal`.
   - Main maps each code to the exact JS string per method; see [Parity contract](#parity-contract).
 - **Schema:**
-  - `fc-protocol` defines params, results, errors and the method table (name, caller kinds, mutation or read-only, default deadline).
-  - CI regenerates `protocol/schema.json` and fails on any difference from the committed file.
+  - `fc-protocol` defines the method table (name, caller kinds, whether it writes identity data, default deadline), errors, and message types; params and results are typed where each method is handled.
+  - `protocol/schema.json` is rendered from the table and committed. A test fails on any difference, so CI catches a stale file.
   - freedom-browser's contract test checks its proxy table against that file.
 
 ### Concurrency, epochs and revocation

@@ -750,7 +750,7 @@ fn shutdown_is_honored_while_main_is_not_reading() {
     let (root, data, mut core) = imported(&[]);
     core.pause_reading();
     let mut burst = filling(3..453).concat();
-    burst.extend(frame(&request(453, "core.shutdown", json!({}))));
+    burst.extend(frame(&shell_request(453, "core.shutdown", json!({}))));
     // Stdin stays open: the exit is the shutdown's, not EOF's.
     let writer = core.send_in_background(burst);
     assert_eq!(core.exit_code(Duration::from_secs(10)), 0);
@@ -991,7 +991,11 @@ fn a_draining_backlog_does_not_starve_a_shutdown() {
     // Past the reader's credits: it reads the shutdown only as the backlog
     // drains.
     frames.extend(padded(heavy.end..heavy.end + 100));
-    frames.push(frame(&request(heavy.end + 100, "core.shutdown", json!({}))));
+    frames.push(frame(&shell_request(
+        heavy.end + 100,
+        "core.shutdown",
+        json!({}),
+    )));
     let feed = core.feed(frames);
     feed.wait_stalled(Duration::from_secs(1));
     core.resume_reading();
@@ -1322,7 +1326,7 @@ fn shutdown_waits_for_committed_work_and_sends_its_reply() {
     );
     core.send_raw(&frame(&create));
     wait_for_claim(&marker);
-    core.send_raw(&frame(&request(3, "core.shutdown", json!({}))));
+    core.send_raw(&frame(&shell_request(3, "core.shutdown", json!({}))));
     // The shutdown is acknowledged, and the committed create still delivers
     // its phrase before the process exits.
     assert_eq!(core.response(3)["result"], json!({}));

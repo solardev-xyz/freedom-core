@@ -57,12 +57,6 @@ pub fn handles(method: &str) -> bool {
     METHODS.contains(&method)
 }
 
-/// Methods only main itself calls (caller kind `shell`): pages never reach
-/// the core, and the browser UI has no use for a plan (design 0006).
-pub fn shell_only(method: &str) -> bool {
-    method == "dweb.open"
-}
-
 /// What the event loop forwards.
 pub enum In {
     Request {

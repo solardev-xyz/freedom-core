@@ -46,7 +46,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use fc_keys::freedom::{self, FreedomKeys};
 use fc_keys::{Mnemonic, WordCount, multiformats};
 use fc_protocol::error::{ErrorBody, ErrorCode};
-use fc_protocol::message::{self, CallerKind};
+use fc_protocol::message;
 use fc_protocol::secret::{SecretBytes, SecretResponse};
 use fc_vault::format::{self, SealParams};
 use fc_vault::state::{LockReason, Locked, Prepared, Ticket, VaultState};
@@ -661,27 +661,11 @@ impl Vault {
     }
 
     /// Handles a request. Inline methods reply at once; KDF methods are
-    /// queued and reply when their job finishes.
-    pub fn request(
-        &mut self,
-        id: u64,
-        method: &str,
-        raw: Option<&str>,
-        caller: CallerKind,
-    ) -> Vec<Out> {
+    /// queued and reply when their job finishes. The caller was checked
+    /// against fc-protocol's method table before this (#101): `compat.*`,
+    /// `vault.reconcile` and `nodes.op_status` are main's own.
+    pub fn request(&mut self, id: u64, method: &str, raw: Option<&str>) -> Vec<Out> {
         let mut out = Vec::new();
-        // compat.* and vault.reconcile are main-internal (design 0001).
-        let internal_only = method.starts_with("compat.")
-            || method == "vault.reconcile"
-            || method == "nodes.op_status";
-        if internal_only && caller != CallerKind::Shell {
-            self.reply_error(
-                &mut out,
-                id,
-                ErrorBody::new(ErrorCode::Forbidden, "main-internal only"),
-            );
-            return out;
-        }
         let result = match method {
             "vault.status" => self.status(id),
             "vault.lock" => {
