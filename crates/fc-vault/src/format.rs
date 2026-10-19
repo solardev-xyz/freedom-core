@@ -206,12 +206,60 @@ pub fn open(file: &str, password: &[u8]) -> Result<Opened, Error> {
 /// it checks neither the envelope version nor the decrypted mnemonic. The
 /// plaintext is wiped.
 pub fn verify_password(file: &str, password: &[u8]) -> Result<(), Error> {
+    decrypt_payload(&encrypted_payload(file)?, password).map(|_| ())
+}
+
+/// Everything [`open`] (`version`) or [`verify_password`] (not `version`)
+/// checks before it derives a key: the envelope, its version if asked,
+/// and the payload's shape (JSON, iteration count, base64 fields, IV
+/// length). A file that fails here fails whatever the password, so a caller
+/// can report it before spending a throttle attempt on it (design 0001's
+/// parity table: `no_vault`, then `unsupported_vault_version`, then
+/// `throttled`).
+pub fn check_structure(file: &str, version: bool) -> Result<(), Error> {
+    let payload_json = if version {
+        read_envelope(file)?
+    } else {
+        encrypted_payload(file)?
+    };
+    parse_payload(&payload_json).map(|_| ())
+}
+
+/// The envelope's `encrypted` payload, with no version check (what
+/// `verifyPassword` reads).
+fn encrypted_payload(file: &str) -> Result<String, Error> {
     let envelope: Envelope =
         serde_json::from_str(file).map_err(|_| Error::Corrupt("vault file is not valid JSON"))?;
-    let payload_json = envelope
+    envelope
         .encrypted
-        .ok_or(Error::Corrupt("missing encrypted payload"))?;
-    decrypt_payload(&payload_json, password).map(|_| ())
+        .ok_or(Error::Corrupt("missing encrypted payload"))
+}
+
+/// A payload's parts, checked, before any key is derived.
+struct Parts {
+    iterations: u32,
+    salt: Vec<u8>,
+    iv: Vec<u8>,
+    data: Zeroizing<Vec<u8>>,
+}
+
+fn parse_payload(payload_json: &str) -> Result<Parts, Error> {
+    let payload: Payload = serde_json::from_str(payload_json)
+        .map_err(|_| Error::Corrupt("payload is not valid JSON"))?;
+    let iterations = iterations_of(payload.key_metadata.as_ref())?;
+    check_iterations(iterations)?;
+    let salt = node_base64(&payload.salt, "salt")?;
+    let iv = node_base64(&payload.iv, "iv")?;
+    let data = Zeroizing::new(node_base64(&payload.data, "data")?);
+    if !matches!(iv.len(), 12 | 16) {
+        return Err(Error::Corrupt("iv is neither 12 nor 16 bytes"));
+    }
+    Ok(Parts {
+        iterations,
+        salt,
+        iv,
+        data,
+    })
 }
 
 /// passworder's `decrypt`: derives the key, decrypts, and requires the
@@ -220,13 +268,12 @@ fn decrypt_payload(
     payload_json: &str,
     password: &[u8],
 ) -> Result<(Zeroizing<Vec<u8>>, u32), Error> {
-    let payload: Payload = serde_json::from_str(payload_json)
-        .map_err(|_| Error::Corrupt("payload is not valid JSON"))?;
-    let iterations = iterations_of(payload.key_metadata.as_ref())?;
-    check_iterations(iterations)?;
-    let salt = node_base64(&payload.salt, "salt")?;
-    let iv = node_base64(&payload.iv, "iv")?;
-    let mut buffer = Zeroizing::new(node_base64(&payload.data, "data")?);
+    let Parts {
+        iterations,
+        salt,
+        iv,
+        data: mut buffer,
+    } = parse_payload(payload_json)?;
 
     let key = derive_key(password, &salt, iterations)?;
     // passworder reports every authentication failure as a wrong password.
@@ -505,6 +552,46 @@ mod tests {
             r#","keyMetadata":null"#,
         );
         assert!(matches!(open(&file, b"password"), Err(Error::Corrupt(_))));
+    }
+
+    /// What fails whatever the password fails here, before any key is
+    /// derived; what needs the password doesn't.
+    #[test]
+    fn check_structure_needs_no_password() {
+        let good = file_with(br#"{"mnemonic":"x"}"#, b"pw", 16, "");
+        assert!(check_structure(&good, true).is_ok());
+        assert!(check_structure(&good, false).is_ok());
+        // A wrong password only shows when decrypting.
+        assert!(matches!(
+            verify_password(&good, b"wrong"),
+            Err(Error::IncorrectPassword)
+        ));
+
+        let version_2 = good.replacen(r#""version":1"#, r#""version":2"#, 1);
+        assert!(matches!(
+            check_structure(&version_2, true),
+            Err(Error::UnsupportedVersion(v)) if v == "2"
+        ));
+        // verifyPassword checks no version.
+        assert!(check_structure(&version_2, false).is_ok());
+
+        for corrupt in [
+            "not json".to_owned(),
+            r#"{"version":1}"#.to_owned(),
+            r#"{"version":1,"encrypted":"not json"}"#.to_owned(),
+            file_with(
+                b"{}",
+                b"pw",
+                12,
+                r#","keyMetadata":{"params":{"iterations":0}}"#,
+            ),
+            good.replacen(r#"\"iv\":\""#, r#"\"iv\":\"AAAA"#, 1),
+        ] {
+            assert!(
+                matches!(check_structure(&corrupt, false), Err(Error::Corrupt(_))),
+                "{corrupt}"
+            );
+        }
     }
 
     #[test]

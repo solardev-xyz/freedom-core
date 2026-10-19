@@ -325,6 +325,7 @@ Main's proxy has to reproduce each JS handler: argument checks and defaults, the
   - The first 5 failures are free. After that, each attempt has to wait 2^(n−5) s since the last failure, capped at 5 min, and gets `throttled` with `retry_after_ms`.
   - A success resets the counter.
   - An attempt is reserved before its KDF starts. A cancelled or revoked attempt still counts if its KDF ran.
+  - **While the throttle refuses** (#82), a password check still reads the file, but without the password. A missing vault, an unsupported version (unlock, change_password and delete only) or a file that no password could open is reported before `throttled`, in the table's order. Only an attempt that would run the KDF gets `throttled`.
   - The counter lives in memory. Renderer input can't crash the core, so only main can reset it, and main is trusted.
 - **Vault reading accepts both KDF settings:** `keyMetadata` with any iteration count, and a missing `keyMetadata`, which means the legacy 10,000 iterations.
 - **Vault writing reproduces the JS envelope** (`{ version: 1, encrypted, createdAt }`, 2-space JSON, no trailing newline) with 900,000 iterations. `vectors/fixtures/vaults.json` is the reference in both directions.
