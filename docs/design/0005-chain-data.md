@@ -139,7 +139,7 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
 | `{ myotis: "call_tx", chain_id, tx }` | `ethCallTx` at `latest` | likewise |
 | `{ myotis: "estimate_tx", chain_id, tx }` | `estimateGas` at `latest` | likewise |
 | `{ myotis: "fee", chain_id }` | `feeEstimate` | likewise |
-| `{ myotis: "broadcast", chain_id, raw }` | `sendRawTransaction` | `{ hash }`, `{ rejected: { reason } }`, `{ uncertain }`, `{ not_sent }` or `{ failure: class }` |
+| `{ myotis: "broadcast", chain_id, raw }` | `sendRawTransaction` | `{ hash }`, `{ rejected: { reason } }`, `{ rejected: { reason, code: -32602 } }`, `{ uncertain }`, `{ not_sent }` or `{ failure: class }` |
 | `{ colibri: "request", chain_id, method, params, deadline_ms }` | `requestViaColibri` | `{ result }`, `{ undefined_keys: ["result"] }`, `{ revert: { data } }`, `{ revert: { data }, capacity: true }` or `{ failure: class }` |
 
 #### Myotis read outcomes
@@ -165,6 +165,11 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
 - **A broadcast's `{ failure: class }`:** main may also answer a broadcast with a class of the chain set, so that a failure that sent nothing keeps today's text:
   - `not_running`, `not_ready`, `queue_full` and `queue_deadline` count as **not sent**, and the core rebuilds their texts and codes as for a read, so the last error is today's (`boundary-broadcast-myotis-not-running-last-error`: `Gnosis Myotis client is not running`; `boundary-broadcast-myotis-not-sent-then-direct` falls to Direct);
   - every other class is **ambiguous**: the client may have dispatched the transaction.
+- **A broadcast's `{ rejected }`** is one of the adapter's two definite refusals. Neither sent anything, and either ends the attempt loop, as the router's `myotisRefusal` check does. The core rebuilds the adapter's error: the reason, then its code and marker.
+  - **`{ rejected: { reason } }`:** the client judged the transaction unpayable or its nonce used, on verified state (Myotis ABI 36). Code `-32000`, `myotisRefusal: "rejected"`.
+  - **`{ rejected: { reason, code: -32602 } }`:** bytes that are no transaction Myotis relays (ABI 44), never gossiped. Code `-32602`, `myotisRefusal: "invalid-params"` (`boundary-broadcast-myotis-invalid-params`).
+  - **Typed and bounded:** `code` is present only when it is `-32602`; any other value, `-32000` included, is a malformed reply. Nothing else of the adapter's error crosses. The reason is the adapter's own bounded text (`boundedReason`: trimmed, whitespace runs collapsed, at most 300 UTF-16 units).
+  - **Negotiated:** `core.hello`'s capabilities gain `myotis_refusal_codes`, and main sends `code` only to a core that offers it. To an older core it sends `{ rejected: { reason } }` for both refusals: the broadcast still ends `rejected` with nothing else asked, but with code `-32000` and `myotisRefusal: "rejected"`.
 - **Colibri's outcomes:**
   - **`{ result }`:** the verified result, as JSON.
   - **`{ undefined_keys: ["result"] }`:** the adapter resolved `undefined`, which JSON can't carry, so main sends this instead of a result. It has exactly that one member, and the array is exactly `["result"]`. The read succeeds with an own `result` of `undefined`, `source: "colibri"` and `verified: true`, as the router returns it today. Its reply omits `result` and lists it in `undefined_keys` ([Replies](#replies); `boundary-colibri-undefined-result`).
@@ -470,7 +475,7 @@ A node's error proves only that *these* bytes weren't admitted by *that* node *n
   - **Matching:** case-sensitive, on `String(error.message)`.
 
   `already known` is never a refusal, in any client's wording, because it says the bytes exist. Anything unmatched is ambiguous, geth's minimum-tip refusal (`transaction gas price below minimum`) among them. Under the wallet's rule a classification decides only what is shown ([Retrying an intent](#retrying-an-intent)).
-- **Myotis `rejected`** counts as a refusal; its reasons include a used nonce.
+- **Myotis `rejected`** counts as a refusal; its reasons include a used nonce, and bytes Myotis doesn't relay ([The rest](#the-rest)).
 - **Order doesn't matter.** A refusal after an attempt that may have been sent (an ambiguous one) stops the attempt loop, as Myotis's final verdict does today, but it can't erase that attempt: the outcome table looks at every attempt (`boundary-broadcast-refusal-after-ambiguous`).
 - **A refusal with nothing possibly sent** doesn't stop the loop: re-sending continues as today, since another node may admit the bytes (`boundary-broadcast-resends-until-accepted`: `nonce too low` from a, `insufficient funds` from b, accepted by c).
 
@@ -685,11 +690,11 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
   - nesting at 512 and 513 levels (`boundary-json-depth-512`, and `boundary-json-depth-513` for deviation `json-depth`);
   - canonical-equivalence pairs through the quorum: duplicate keys, number spellings, `__proto__`, lone surrogates (`boundary-agreement-*`);
   - `isCapacityFailure` on Colibri's errors: collapsed whitespace, a phrase past 500 units, elided hex and an error's own `failureKind` (`boundary-adaptive-capacity-*`).
-- **The harness** (`vectors/generator/chain-replay.js`) has 305 scenarios, each with a stable ID and a `from` field citing its source test or this document.
+- **The harness** (`vectors/generator/chain-replay.js`) has 306 scenarios, each with a stable ID and a `from` field citing its source test or this document.
   - **Values as text:** every value the reference produced or was given is recorded as JSON text, and `undefined` as a field of its own. No value can pass for an encoding, and every value `JSON.parse` makes survives: lone surrogates, any depth, `-0` and infinities.
   - **Large texts:** a text over 64 KiB is stored in its field's repeat form, a repeat unit plus a SHA-256, which keeps the 8 MiB `html()` answers small.
   - **Settle times:** ported scenarios carry the settle times their tests assert, and generation fails if a fixture drifts from them.
-- **The machine replays all 305** (`crates/fc-chain/tests/replay.rs`). A driver plays main from the records: it starts each call when the reference did, and answers each request with the answer its record got, at the time it got it, delivering answers due in one tick in the reference's microtask order (a failed fetch or a non-2xx status settles before a body is read; equal delays settle in registration order). It compares exactly:
+- **The machine replays all 306** (`crates/fc-chain/tests/replay.rs`). A driver plays main from the records: it starts each call when the reference did, and answers each request with the answer its record got, at the time it got it, delivering answers due in one tick in the reference's microtask order (a failed fetch or a non-2xx status settles before a body is read; equal delays settle in registration order). It compares exactly:
   - **every request the core owns** (`shell.rpc`'s endpoint and body with its `id` normalized, a verifier operation and its params, a Blockscout page) with its start, matched to a record of the same call, and **in the reference's order**: no request answers a ledger entry earlier than one already matched. No allowance for unordered concurrency is needed; the order holds across every call of every step. Main's own I/O (Blockscout's hops and DNS lookups, Myotis status samples) feeds the replies main sends instead;
   - **every cancel:** an exchange the reference aborted at T is cancelled at T, and no other is cancelled, except in two permitted races, each counted: a quorum member cancelled when a sibling launched in the same tick answered the same call in the tick both settled (127; the reference's abort came after the member's answer), and a Blockscout page cancelled by the scan's deadline in the tick its own fetch failed with `no answer within` (4). Main never delivers an answer to an exchange the machine cancelled first: it aborted it;
   - **every result and error,** with its settle time: key order, constructor, `name`, message, own properties, `-0` and UTF-16 strings;
