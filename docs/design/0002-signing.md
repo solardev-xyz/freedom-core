@@ -255,7 +255,7 @@ One PR per step, each after the freedom-core release that provides it.
 - **A SOC signature is a `personal_sign` of 32 bytes.** `swarm.sign_soc` signs EIP-191 over `keccak256(identifier ‖ chunk address)`, which is `"\x19Ethereum Signed Message:\n32" ‖ digest`. `sign.message` of those 32 bytes signs exactly that. The format is Swarm's: Bee recovers a chunk's owner from EIP-191 over that digest, and bee-js signs it the same way. Neither side can add a domain separator.
 - **Who can exploit it:** any dApp the user has connected to an account that owns a feed (`ethereum-wallet` identity mode).
   1. Feed identifiers are public: a feed's manifest, which a name's contenthash points at, names its owner and topic, and an update's identifier is `keccak256(topic ‖ index)`. The dApp computes the next identifier of the user's feed, picks its own payload, and computes the chunk address and the digest.
-  2. It asks for `personal_sign` of the 32-byte digest. The approval UI can only show a hex blob. A dApp whose permission has signing auto-approve (`getSigningAutoApprove`) isn't even shown one: main signs at once.
+  2. It asks for `personal_sign` of the 32-byte digest. The prompt renders a message's bytes as text, and a digest's bytes read as nothing at all: the user can't tell a feed update from any other hash. A dApp whose permission has signing auto-approve (`getSigningAutoApprove`) isn't shown a prompt: main signs at once.
   3. The signature is a valid single-owner chunk of the user's feed. The dApp uploads it, and the feed (an ENS-named site, say) serves the dApp's content.
 - **Only this one case collides.** Another message length has another EIP-191 prefix, and typed data and transactions have their own (`0x1901`, a type byte or RLP). The other direction is safe too: a SOC request signs `keccak256(identifier ‖ chunk address)` over a real chunk, and making that equal a chosen message needs a keccak preimage.
 - **Today** the same is true of bee-js and ethers in main, so the core isn't a regression. The core's guarantee that every SOC signature is bound to a real chunk only holds for keys that sign nothing else. A test in `fc-swarm` pins the collision.
@@ -263,34 +263,39 @@ One PR per step, each after the freedom-core release that provides it.
 ### Constraints
 
 - **The 32-byte `personal_sign` is common.** dApps sign a hash with `signMessage(getBytes(hash))`, and contracts check it with OpenZeppelin's `toEthSignedMessageHash`. Neither the core nor main can tell a SOC digest from any other hash.
-- **An account-owned feed stays account-owned.** A feed is `(owner, topic)`: its updates can only ever be signed by the owner's key. Moving a user to a publisher key means a new feed, and re-pointing every name and link to it.
+- **An account-owned feed stays account-owned.** A feed is `(owner, topic)`: its updates can only ever be signed by the owner's key. Moving a user to a publisher key means a new feed, and re-pointing every name and link to it. Re-pointing doesn't retire the old feed: whoever still follows it (an old link, a cache, another name) sees its next update.
+- **Ownership outlives every local record.** The owner is the key's address, whatever a profile remembers. The account still owns its feeds after a mnemonic restore (which brings back the keys, not the profile's feed records), in another profile, and in another wallet that holds the same mnemonic. A rule keyed on "this account owns a feed" is only as complete as the record it reads.
+- **Scope:** the core's checks cover the keys it holds. Ledger and phone accounts sign on their devices, and the browser never makes them feed identities.
 - **The mode is advertised to dApps:** `swarm_getCapabilities` lists `ethereum-wallet` in `publisherIdentityModes`, with `extensions.ethereumWalletPublisherIdentity`.
 
 ### Options
 
-| Option | Closes it | What breaks | Where |
+| Option | What it closes | What breaks | Where |
 |---|---|---|---|
-| **A. Key separation:** `swarm.sign_soc` refuses account keys (`invalid_argument`, like any key outside its row) | for every account | `ethereum-wallet` mode, and feeds an account already owns: they can't be updated again | the core (the key table and one check, with a vector), then the browser |
-| **B. Exclusive accounts:** an account that owns a feed refuses a dApp's 32-byte `personal_sign` | for feed-owning accounts | 32-byte `personal_sign` from those accounts only | main, which knows the feed identities; or the core, with a persistent per-account flag set by its first SOC |
-| **C. No 32-byte `personal_sign`:** the core refuses it from every account | for every account | every dApp that signs a hash, from any account | the core |
-| **D. Warning:** main warns when a feed-owning account is asked to sign exactly 32 bytes | no: an approval still signs a feed update | nothing | main |
+| **A. Key separation:** `swarm.sign_soc` refuses account keys (`invalid_argument`, like any key outside its row) | no new account-owned feed through the core. **Not the feeds accounts already own:** `sign.message` with the same key still makes their SOC signatures | `ethereum-wallet` mode, and updates to existing account-owned feeds | the core (the key table and one check, with a vector), then the browser |
+| **B. Known owners:** an account the profile records as a feed owner refuses a dApp's 32-byte `personal_sign`, for good | for the owners the record knows. Not after a restore, in another profile, or with another wallet on the same mnemonic: there the record is missing and the request is signed | 32-byte `personal_sign` from those accounts | main, from its feed records. A core flag set by an account's first SOC would have to be committed durably before that signature is released, and carried in backups, and still misses ownership made elsewhere |
+| **B′. Fail-safe:** every account refuses a dApp's 32-byte `personal_sign` unless the record says it never owned a feed: created in this profile and never a feed identity | every core-held account whose history the profile doesn't know, restored ones included. Not an account recorded as clean whose mnemonic another wallet then uses to make a feed | 32-byte `personal_sign` from owners, and from restored accounts until the user releases each one | main, with a durable per-account record |
+| **C. No 32-byte `personal_sign`:** the core refuses it from every account | every core-held account, whatever its history | every dApp that signs a hash, from any account | the core |
+| **D. Warning:** main warns when an account is asked to sign exactly 32 bytes | nothing: an approval still signs a feed update. Releasing an account from B or B′ is this option: the user accepts the risk | nothing | main |
 
 ### Recommendation
 
-A, in two steps, so no existing feed is cut off without the user's say:
+A for new feeds, and B′ for good:
 
-1. **Now (B):**
-   - main stops offering `ethereum-wallet` for new feed identities and drops it from `swarm_getCapabilities`;
-   - for an account that already owns a feed, main refuses a dApp's `personal_sign` of exactly 32 bytes, auto-approved or not, with an error that says why. Only dApp requests are affected: main's own flows (Safe, x402) sign typed data.
-2. **Later (A):** once no feed identity uses an account (each user moved theirs to a publisher key, or chose to leave it frozen), the core refuses account keys in `swarm.sign_soc`, and the key table's account row loses it.
+1. **No new account-owned feeds:** main stops offering `ethereum-wallet` for new feed identities and drops it from `swarm_getCapabilities`. Once the existing identities have moved to publisher keys (or their users chose to leave them as they are), the core refuses account keys in `swarm.sign_soc` (A), and the key table's account row loses it.
+2. **A permanent restriction (B′):** main refuses a dApp's 32-byte `personal_sign`, auto-approved or not, with an error that says why, from every account that owns a feed or might: the recorded owners for good, and accounts of unknown history (restored ones) until the user releases them one by one.
+   - **Releasing** an account is D's risk acceptance, and the UI says so: a signature made after it can't be recalled, and the wallet can't see feeds made elsewhere.
+   - **A doesn't end it.** An account that owned a feed keeps owning it after the move, so its restriction stays.
+   - **Only dApp requests** are affected: main's own flows (Safe, x402) sign typed data.
+   - **The record** must be durable, and should travel with the vault's backups, so a restore doesn't silently release an owner.
 
-The core's part of step 1 is nothing: main holds the policy, as [Non-goals](#goals-and-non-goals) says. A core-enforced B would need the vault to remember which accounts have signed a SOC, a new piece of persistent state with its own crash and restore rules. That isn't worth it for a transition.
+The core's part of step 2 is nothing: main holds the policy, as [Non-goals](#goals-and-non-goals) says. C is the strictest choice, and the only one that needs no record. It costs every account's 32-byte `personal_sign`.
 
 ### Decision needed
 
-1. A, B, C or D, or the phased A above.
-2. If A: what happens to existing account-owned feeds (frozen, or a guided move to a publisher key with the user re-pointing names), and when the core release that refuses account keys ships.
-3. If B: whether main refuses the 32-byte request outright or lets the user override after a warning that names the feed at risk.
+1. The restriction: B (recorded owners only), B′ (owners and accounts of unknown history), or C (every account). And whether the user may release an account (D's risk acceptance).
+2. A's timing, and the existing account-owned feeds: a guided move to a publisher key with names re-pointed, or left as they are. A alone protects neither.
+3. Where B's or B′'s record lives: in main's profile only, or with the vault, so that backups carry it.
 
 ## Open questions
 
