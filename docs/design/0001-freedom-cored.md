@@ -196,6 +196,11 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
 
 - **Epochs:** the vault state machine has an **epoch** counter. Unlock moves it to a new epoch. Lock, auto-lock, delete and shutdown **revoke** it immediately.
 - **Lock is control traffic.** `vault.lock`, the auto-lock timer and `core.shutdown` run on the control path. They never wait behind KDF work or a write. Their acknowledgement means the epoch is revoked and the resident secrets are wiped.
+- **The auto-lock counts time asleep** (#80). The monotonic clocks of Linux and macOS stop while the machine sleeps, so a vault left unlocked with 14 minutes to go would still have 14 minutes after days asleep. The vault's clock therefore advances, at each reading, by the larger of what the monotonic clock and the wall clock say has passed since the previous one:
+  - a wall clock set back holds nothing back, since the monotonic reading carries the clock;
+  - a wall clock set forward only locks early.
+
+  While the auto-lock runs, the loop wakes at least once a second, since its own timed wait also sleeps through a suspend. On waking, the vault therefore locks within a second once its time has passed. The throttle uses the same clock. Request deadlines stay on the monotonic clock.
 - **Secret-bearing work is tied to its epoch.** Derivations, `compat.*` and node writes are admitted against the current epoch. A worker result from a revoked epoch is wiped, never installed, and returns `vault_locked`. In particular, an unlock whose KDF finishes after a lock does not bring the secrets back.
 - **Revocation versus commit:**
   - **Before its commit point,** revocation stops vault work. Every lock (manual, auto, delete, shutdown), even while already locked, revokes all admitted vault work that hasn't reached its commit point, queued or running and of any kind: nothing admitted before a lock acknowledgement runs after it. Results are wiped, nothing is installed, and the reply is `vault_locked`.
@@ -455,6 +460,7 @@ The password crosses the pipe, which is no worse than today, where it is used in
   - Secret fields are base64 or hex (see [Input validation](#input-validation-and-secret-fields)), so the JSON decoder never copies them into its scratch buffer.
   - They are decoded into `Zeroizing` buffers, never through `serde_json::Value`.
   - Raw frame buffers and response buffers are wiped once decoded or written.
+  - **No buffer the core can't wipe** (#79). The reader and the writer use duplicates of the stdin and stdout descriptors (handles), never std's buffered `Stdin` and `Stdout`. std copies a write smaller than its 1 KiB `LineWriter` buffer into that buffer, and a flush resets its length but never its bytes. Each part of the chunk the reader reads into is wiped as soon as the decoder has copied it into the frames' own buffers, before any frame is handed on, since a delivery can wait for credit. So a lock leaves nothing of a password frame or a secret reply behind in the core, even while a later frame of the same read waits.
   - **Outgoing secrets go through one audited serializer that writes into a `Zeroizing` buffer:**
     - `keys.generate_mnemonic`;
     - `vault.create` and `vault.reconcile` for `create` (the onboarding phrase);
@@ -530,3 +536,4 @@ The password crosses the pipe, which is no worse than today, where it is used in
 1. **Hardware-wallet, phone and Safe accounts:** their records stay in `vault-meta.json`, owned by JS until Phase 5, and they keep working while the vault is locked. Is that acceptable? I think so.
 2. **Should `keys.generate_mnemonic` keep the phrase in the core** and hand back a handle? The phrase would then reach the renderer only for display, but it changes the onboarding IPC shapes. Proposed: not in Phase 1.
 3. **Windows:** code signing, and an owner-only DACL for secret files, which also matters for alternate profile roots. Tracked in #644's decisions.
+4. **Should main lock the vault on suspend or screen lock** (Electron's `powerMonitor` `suspend` and `lock-screen`)? JS doesn't, so it would be a user-visible change for the parity table. The core's auto-lock already counts time asleep (#80); this would lock at the start of a sleep, not when it ends.
