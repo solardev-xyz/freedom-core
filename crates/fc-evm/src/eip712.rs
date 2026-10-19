@@ -811,6 +811,58 @@ mod tests {
         assert!(is_identifier(&"n".repeat(256)));
     }
 
+    /// A JSON number is read as `JSON.parse` reads it, correctly rounded to
+    /// the nearest double, ties to even, before the integer rules apply
+    /// (#87). Without serde_json's `float_roundtrip`, its parser rounds
+    /// approximately, and the core could sign another integer than the one
+    /// ethers signs and the approval UI shows.
+    #[test]
+    fn numbers_are_read_as_json_parse_reads_them() {
+        let hash = |number: &str| {
+            let message: Value = serde_json::from_str(&format!(r#"{{"v":{number}}}"#)).unwrap();
+            let types = json!({ "M": [{ "name": "v", "type": "uint256" }] });
+            typed_data_hash(&json!({ "name": "N" }), &types, &message)
+        };
+        // 2^52 + 0.5 is a tie between 2^52 and 2^52 + 1: JSON.parse gives
+        // 2^52, which ethers signs.
+        assert_eq!(
+            hash("4503599627370496.5").unwrap(),
+            hash("4503599627370496").unwrap()
+        );
+        assert_eq!(
+            hash("45035996273704965e-1").unwrap(),
+            hash("4503599627370496").unwrap()
+        );
+        // 2^52 + 1.5 is a tie too, and rounds up to the even 2^52 + 2.
+        assert_eq!(
+            hash("4503599627370497.5").unwrap(),
+            hash("4503599627370498").unwrap()
+        );
+        // (2^53 - 1) + 0.5 rounds to 2^53, which is no safe integer: an
+        // error, as in ethers.
+        assert!(hash("9007199254740991.5").is_err());
+        assert!(hash("9007199254740991").is_ok());
+        // Literals between 2^52 and 2^53, where a double holds only
+        // integers: each parses as Rust's correctly rounded parser reads it.
+        let mut differ = Vec::new();
+        for i in 0..4096u64 {
+            let integer = (1u64 << 52) + i.wrapping_mul(1_099_511_627_791) % (1u64 << 52);
+            for fraction in ["5", "25", "75", "4999999999", "5000000001"] {
+                let literal = format!("{integer}.{fraction}");
+                let parsed: Value = serde_json::from_str(&literal).unwrap();
+                if parsed.as_f64() != literal.parse::<f64>().ok() {
+                    differ.push(literal);
+                }
+            }
+        }
+        assert!(
+            differ.is_empty(),
+            "{} differ: {:?}",
+            differ.len(),
+            &differ[..differ.len().min(5)]
+        );
+    }
+
     #[test]
     fn int_bounds() {
         let ok = |v: Value| encode_base(&Base::Int(8), &v, &mut Budget::default()).is_ok();

@@ -215,3 +215,30 @@ fn locked_vault_and_malformed_requests() {
         );
     }
 }
+
+/// A JSON number in the frame is read as `JSON.parse` reads it (#87):
+/// main sends `JSON.stringify` output, but a caller passing a dApp's own
+/// JSON text gets the integer ethers would sign, never an approximation.
+#[test]
+fn typed_data_numbers_are_read_as_json_parse_reads_them() {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    let mut hash = |id: u64, number: &str| {
+        let text = format!(
+            r#"{{"type":"request","id":{id},"method":"typed_data.hash","params":{{"typed_data":{{"domain":{{"name":"N"}},"types":{{"M":[{{"name":"v","type":"uint256"}}]}},"message":{{"v":{number}}}}}}},"context":{{"caller":"chrome"}}}}"#
+        );
+        core.send_raw(&raw_frame(1, text.as_bytes()));
+        core.response(id)
+    };
+    let tie = hash(2, "4503599627370496.5");
+    let even = hash(3, r#""4503599627370496""#);
+    assert!(tie["result"]["hash"].is_string(), "{tie}");
+    assert_eq!(tie["result"], even["result"]);
+    // (2^53 - 1) + 0.5 is 2^53: no safe integer.
+    let unsafe_tie = hash(4, "9007199254740991.5");
+    assert_eq!(
+        unsafe_tie["error"]["code"], "invalid_argument",
+        "{unsafe_tie}"
+    );
+}

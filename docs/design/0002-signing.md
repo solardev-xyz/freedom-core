@@ -127,7 +127,8 @@ This is EIP-712 with ethers v6 `TypedDataEncoder` semantics, which is what `Wall
   - The keys `name`, `version` (strings), `chainId` (quantity), `verifyingContract` (address) and `salt` (32 bytes). The domain type is built from the keys present, in that order.
   - A key whose value is `null` is skipped, even an unknown one. Any other key is an error.
 - **Values:**
-  - `uintN` and `intN` take a quantity string or a JSON integer within ±(2^53 − 1), range-checked for N. A JSON float or an unsafe integer is an error, as in ethers.
+  - `uintN` and `intN` take a quantity string or a JSON number whose value is an integer within ±(2^53 − 1), range-checked for N. A non-integral number or an unsafe integer is an error, as in ethers.
+  - **A JSON number is read as `JSON.parse` reads it:** correctly rounded to the nearest double, ties to even, and then judged. So `1e2` and `5.0` are 100 and 5, `4503599627370496.5` (2^52 + ½) is 2^52, and `9007199254740991.5` is 2^53, an unsafe integer. Main sends `JSON.stringify` output, which never writes such a literal, but a caller that passes a dApp's own JSON text (the mobile FFI) must get the integer ethers signs and the approval UI shows. serde_json's default parser rounds approximately (it reads that 2^52 + ½ as 2^52 + 1), so `fc-evm` enables its `float_roundtrip` feature.
   - `bytesN` takes exactly N bytes and `bytes` takes any; both are hex with `0x` or `0X`.
   - `string` takes a JSON string.
   - `address` takes `0x` and 40 hex digits: all-lowercase, all-uppercase, or EIP-55 mixed case with a valid checksum. Without `0x`, ethers tries ENS when signing and fails.
