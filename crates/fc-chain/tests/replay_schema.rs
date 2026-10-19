@@ -283,6 +283,7 @@ const SCENARIO_IDS: &[&str] = &[
     "boundary-broadcast-myotis-odd-payload",
     "boundary-broadcast-myotis-not-sent-then-direct",
     "boundary-broadcast-myotis-not-running-last-error",
+    "boundary-broadcast-myotis-invalid-params",
     "boundary-broadcast-unknown-broadcaster",
     "boundary-adaptive-quorum-deadline-not-a-timeout",
     "boundary-adaptive-capacity-survives-success",

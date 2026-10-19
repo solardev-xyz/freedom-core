@@ -82535,6 +82535,120 @@
       ]
     },
     {
+      "id": "boundary-broadcast-myotis-invalid-params",
+      "from": "design 0005: Broadcast classes",
+      "world": {
+        "chains": {
+          "100": {
+            "network": {
+              "access": {
+                "readOrder": [
+                  "myotis",
+                  "direct"
+                ],
+                "broadcastOrder": [
+                  "myotis",
+                  "direct"
+                ]
+              },
+              "quorum": {
+                "k": 3,
+                "m": 2,
+                "timeoutMs": 5000
+              }
+            },
+            "rpc": [
+              "https://a.example"
+            ],
+            "prover": [
+              "https://prover.example"
+            ]
+          }
+        },
+        "myotis": {
+          "100": {
+            "ready": true,
+            "status": {
+              "optimisticBlockNumber": 25684159
+            },
+            "ops": {
+              "broadcast": {
+                "throws": "invalid_params",
+                "reason": "invalid raw transaction: malformed type 0x2 transaction"
+              }
+            }
+          }
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "broadcastRawTransaction",
+              "chain": 100,
+              "raw": "0x02f8716407843b9aca00847735940082520894111111111111111111111111111111111111111187038d7ea4c6800080c001a05dd588e5569053e2a725666a60bf0974aa79b3c327264cd3c0c91cb39405ecaca050202f0ec3650ee1e1b82a0a8ee8282f6da6a573bcd3983fc3d323aa72a36d32",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "thrown": {
+                "class": "Error",
+                "name": "Error",
+                "message_json": "\"invalid raw transaction: malformed type 0x2 transaction\"",
+                "props": [
+                  {
+                    "key": "code",
+                    "json": "-32602"
+                  },
+                  {
+                    "key": "myotisRefusal",
+                    "json": "\"invalid-params\""
+                  }
+                ]
+              },
+              "settled": 0
+            }
+          ],
+          "state": {}
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "call": 0,
+          "t": 0,
+          "kind": "verified-op",
+          "host": "myotis",
+          "op": "broadcast",
+          "chain": 100,
+          "params_json": "{\"raw\":\"0x02f8716407843b9aca00847735940082520894111111111111111111111111111111111111111187038d7ea4c6800080c001a05dd588e5569053e2a725666a60bf0974aa79b3c327264cd3c0c91cb39405ecaca050202f0ec3650ee1e1b82a0a8ee8282f6da6a573bcd3983fc3d323aa72a36d32\"}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "thrown": {
+              "class": "Error",
+              "name": "Error",
+              "message_json": "\"invalid raw transaction: malformed type 0x2 transaction\"",
+              "props": [
+                {
+                  "key": "code",
+                  "json": "-32602"
+                },
+                {
+                  "key": "myotisRefusal",
+                  "json": "\"invalid-params\""
+                }
+              ]
+            },
+            "class": "invalid_params"
+          }
+        }
+      ]
+    },
+    {
       "id": "boundary-broadcast-unknown-broadcaster",
       "from": "design 0005: Broadcast",
       "world": {
