@@ -1784,7 +1784,7 @@ fn read_vault(dir: &Path) -> Result<Option<String>, OpError> {
     read_bounded(&dir.join(VAULT_FILE))
 }
 
-/// [`read_vault`] for any path: the vault, or its staged copy.
+/// [`read_vault`] for any path.
 fn read_bounded(path: &Path) -> Result<Option<String>, OpError> {
     let file = match fsx::open_regular(path, false) {
         Ok(fsx::Regular::Missing) => return Ok(None),
@@ -1792,10 +1792,13 @@ fn read_bounded(path: &Path) -> Result<Option<String>, OpError> {
         Ok(fsx::Regular::File(file)) => file,
         Err(e) => return Err(storage(&e)),
     };
+    read_handle(&file).map(Some)
+}
+
+/// A vault file's text through an open handle, at most [`MAX_VAULT_BYTES`].
+fn read_handle(file: &std::fs::File) -> Result<String, OpError> {
     match fsx::read_at_most(file, MAX_VAULT_BYTES) {
-        Ok(Some(bytes)) => String::from_utf8(bytes)
-            .map(Some)
-            .map_err(|_| OpError::Corrupt),
+        Ok(Some(bytes)) => String::from_utf8(bytes).map_err(|_| OpError::Corrupt),
         Ok(None) => Err(OpError::Storage("too_large")),
         Err(e) => Err(storage(&e)),
     }
@@ -1910,11 +1913,9 @@ fn write_vault(
         &dir.join(VAULT_FILE),
         contents.as_bytes(),
         |staged| {
-            let staged = match read_bounded(staged) {
-                Ok(Some(staged)) => staged,
-                Ok(None) => return Err("the staged vault is gone".into()),
-                Err(e) => return Err(format!("the staged vault can't be read: {e:?}")),
-            };
+            // Read back through the handle that wrote it.
+            let staged = read_handle(staged)
+                .map_err(|e| format!("the staged vault can't be read: {e:?}"))?;
             let opened = format::open(&staged, password).map_err(|e| e.to_string())?;
             if opened.mnemonic.phrase() == expected.as_str() {
                 Ok(())

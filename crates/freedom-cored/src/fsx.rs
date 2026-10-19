@@ -4,13 +4,16 @@
 //! 1. Create a temp file in the same directory with an exclusive create. On
 //!    Unix its mode is `0600` from creation.
 //! 2. Write it, then `fsync` it.
-//! 3. Run the caller's check against the temp file (for the vault: decrypt it
-//!    and compare the mnemonic). If the check fails, the temp file is
-//!    removed and the target is untouched.
+//! 3. Run the caller's check against the temp file, read back through the
+//!    handle that wrote it (for the vault: decrypt it and compare the
+//!    mnemonic). If the check fails, the temp file is removed and the target
+//!    is untouched.
 //! 4. Ask the caller's commit gate. It answers false when the operation was
 //!    abandoned (cancelled, revoked or out of time) before this point; the
 //!    temp file is then removed and the target is untouched.
-//! 5. Rename it over the target.
+//! 5. Rename it over the target, if the temp name still names the file
+//!    checked ([`same_file`]; Unix): a file swapped in under that name is
+//!    never committed.
 //! 6. Make the rename durable ([`sync_rename`]): on Unix, `fsync` the
 //!    directory; on Windows, flush the renamed file.
 //!
@@ -65,13 +68,15 @@ impl From<std::io::Error> for WriteError {
 }
 
 /// Atomically and durably replaces `target` with `contents`, after `check`
-/// accepts the staged file and `commit` allows the rename.
+/// accepts the staged file, read back through the handle that wrote it, and
+/// `commit` allows the rename.
 pub fn replace(
     target: &Path,
     contents: &[u8],
-    check: impl FnOnce(&Path) -> Result<(), String>,
+    check: impl FnOnce(&File) -> Result<(), String>,
     commit: impl FnOnce() -> bool,
 ) -> Result<Done, WriteError> {
+    use std::io::Seek;
     let dir = target
         .parent()
         .ok_or_else(|| std::io::Error::other("target has no parent directory"))?;
@@ -79,11 +84,20 @@ pub fn replace(
     let staged = (|| -> Result<(), WriteError> {
         temp.write_all(contents)?;
         temp.sync_all()?;
-        drop(temp);
-        check(&temp_path).map_err(WriteError::Check)?;
+        temp.rewind()?;
+        check(&temp).map_err(WriteError::Check)?;
         if !commit() {
             return Err(WriteError::Abandoned);
         }
+        // The rename moves whatever the name holds: it must still be the file
+        // written and checked (review of #114). Nothing has changed if not.
+        crate::testhooks::swap("checked", &temp_path);
+        if !same_file(&temp, &temp_path)? {
+            return Err(WriteError::Io(std::io::Error::other(
+                "the temp file was replaced before its rename",
+            )));
+        }
+        drop(temp);
         std::fs::rename(&temp_path, target)?;
         Ok(())
     })();
@@ -102,7 +116,8 @@ pub fn replace(
 ///   metadata, so flushing the file commits the journal through the rename.
 ///   std can't open a directory to flush it. `MoveFileExW`'s
 ///   `WRITE_THROUGH` documents its guarantee only for moves done as a copy
-///   and a delete.
+///   and a delete. The file is opened again by name, so a file put there
+///   meanwhile is what gets flushed: durability there is best effort.
 pub fn sync_rename(dir: &Path, target: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
@@ -179,6 +194,30 @@ pub fn tighten(_path: &Path) -> std::io::Result<bool> {
     Ok(false)
 }
 
+/// Whether `path` (not followed) names the file `handle` has open: the same
+/// device and inode. A file renamed or swapped in under the name since the
+/// handle was opened is a different file. Windows: std exposes no file
+/// identity there, so this answers true (durability and these races are
+/// best effort on Windows).
+pub fn same_file(handle: &File, path: &Path) -> std::io::Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let held = handle.metadata()?;
+        let named = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        Ok(held.dev() == named.dev() && held.ino() == named.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (handle, path);
+        Ok(true)
+    }
+}
+
 /// What [`open_regular`] found at a path.
 #[derive(Debug)]
 pub enum Regular {
@@ -196,22 +235,23 @@ pub enum Regular {
 /// (#83). The open itself can't wait: on Unix it is non-blocking (a FIFO
 /// opens at once, and is then refused), and without `follow` a symlink is
 /// refused (`O_NOFOLLOW`). Windows has no FIFOs among files, and opening a
-/// named pipe doesn't wait; without `follow`, a symlink is refused by its own
-/// metadata first, and whatever the handle then turns out to be, anything
-/// but a regular file is refused before a byte is read.
+/// named pipe doesn't wait; without `follow`, a symlink's own reparse point
+/// is opened (`FILE_FLAG_OPEN_REPARSE_POINT`), and the handle refuses it.
 pub fn open_regular(path: &Path, follow: bool) -> std::io::Result<Regular> {
-    #[cfg(not(unix))]
-    if !follow {
-        match std::fs::symlink_metadata(path) {
-            Ok(metadata) if !metadata.is_file() => return Ok(Regular::Other),
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Regular::Missing),
-            Err(e) => return Err(e),
-        }
-    }
-    match open_nonblocking(path, follow) {
+    open_regular_as(path, follow, false)
+}
+
+/// [`open_regular`], never following a symlink, open for writing as well:
+/// a file judged and then flushed (or changed) through the same handle.
+pub fn open_regular_rw(path: &Path) -> std::io::Result<Regular> {
+    open_regular_as(path, false, true)
+}
+
+fn open_regular_as(path: &Path, follow: bool, write: bool) -> std::io::Result<Regular> {
+    match open_nonblocking(path, follow, write) {
         Ok(file) => {
-            if file.metadata()?.is_file() {
+            let metadata = file.metadata()?;
+            if metadata.is_file() && !metadata.file_type().is_symlink() {
                 Ok(Regular::File(file))
             } else {
                 Ok(Regular::Other)
@@ -235,23 +275,40 @@ pub fn open_regular(path: &Path, follow: bool) -> std::io::Result<Regular> {
 }
 
 #[cfg(unix)]
-fn open_nonblocking(path: &Path, follow: bool) -> std::io::Result<File> {
+fn open_nonblocking(path: &Path, follow: bool, write: bool) -> std::io::Result<File> {
     use rustix::fs::{Mode, OFlags};
-    let mut flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let access = if write { OFlags::RDWR } else { OFlags::RDONLY };
+    let mut flags = access | OFlags::NONBLOCK | OFlags::CLOEXEC;
     if !follow {
         flags |= OFlags::NOFOLLOW;
     }
     Ok(File::from(rustix::fs::open(path, flags, Mode::empty())?))
 }
 
-#[cfg(not(unix))]
-fn open_nonblocking(path: &Path, _follow: bool) -> std::io::Result<File> {
-    File::open(path)
+/// `FILE_FLAG_OPEN_REPARSE_POINT`: open a symlink itself, not its target.
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+#[cfg(windows)]
+fn open_nonblocking(path: &Path, follow: bool, write: bool) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let mut options = OpenOptions::new();
+    options.read(true).write(write);
+    if !follow {
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options.open(path)
 }
 
-/// Reads `file` to its end, but never more than `max` bytes: `None` if it
-/// holds more (it may have grown since it was opened).
-pub fn read_at_most(file: File, max: u64) -> std::io::Result<Option<Vec<u8>>> {
+#[cfg(not(any(unix, windows)))]
+fn open_nonblocking(path: &Path, _follow: bool, write: bool) -> std::io::Result<File> {
+    OpenOptions::new().read(true).write(write).open(path)
+}
+
+/// Reads `file` to its end from where it stands, but never more than `max`
+/// bytes: `None` if it holds more (it may have grown since it was opened).
+/// The handle stays the caller's.
+pub fn read_at_most(file: &File, max: u64) -> std::io::Result<Option<Vec<u8>>> {
     let mut bytes = Vec::new();
     file.take(max.saturating_add(1)).read_to_end(&mut bytes)?;
     Ok((bytes.len() as u64 <= max).then_some(bytes))
@@ -314,7 +371,8 @@ fn create_temp(dir: &Path, target: &Path) -> std::io::Result<(PathBuf, File)> {
     for attempt in 0u32..100 {
         let path = dir.join(format!(".{name}.{}.{attempt}.tmp", std::process::id()));
         let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
+        // Read too: the check reads the file back through this handle.
+        options.read(true).write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -360,7 +418,7 @@ mod tests {
             &target,
             b"new",
             |staged| {
-                assert_eq!(std::fs::read(staged).unwrap(), b"new");
+                assert_eq!(read_at_most(staged, 10).unwrap().unwrap(), b"new");
                 Ok(())
             },
             || true,
@@ -461,7 +519,7 @@ mod tests {
         let file = dir.path().join("file");
         std::fs::write(&file, b"12345").unwrap();
         let read = |follow| match open_regular(&file, follow).unwrap() {
-            Regular::File(f) => read_at_most(f, 5).unwrap(),
+            Regular::File(f) => read_at_most(&f, 5).unwrap(),
             other => panic!("{other:?}"),
         };
         assert_eq!(read(false).as_deref(), Some(&b"12345"[..]));
@@ -470,7 +528,7 @@ mod tests {
         let Regular::File(f) = open_regular(&file, false).unwrap() else {
             panic!("not a file");
         };
-        assert_eq!(read_at_most(f, 4).unwrap(), None);
+        assert_eq!(read_at_most(&f, 4).unwrap(), None);
         assert!(matches!(
             open_regular(&dir.path().join("missing"), false).unwrap(),
             Regular::Missing
@@ -533,7 +591,7 @@ mod tests {
             .unwrap();
         assert!(made.success());
         assert_eq!(
-            read_at_most(handle, 100).unwrap().as_deref(),
+            read_at_most(&handle, 100).unwrap().as_deref(),
             Some(&b"contents"[..])
         );
 

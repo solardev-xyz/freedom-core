@@ -30,7 +30,7 @@
 //! valid digests. Anything else is set aside as `….corrupt` and reported. Only
 //! regular files are hashed or installed; symlinks are never followed.
 
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
@@ -288,9 +288,12 @@ pub fn write(
 /// that died before its commit.
 pub fn recover(identity_dir: &Path) -> std::io::Result<Recovered> {
     let path = identity_dir.join(JOURNAL);
-    let Some(bytes) = read_record(&path)? else {
+    // Read, judged and later flushed through one handle, never opened again
+    // by name: what is flushed is what was checked (review of #114).
+    let Some((bytes, handle)) = read_journal(&path)? else {
         return discard_intent(identity_dir);
     };
+    crate::testhooks::swap("journal", &path);
     let journal = match serde_json::from_slice::<Journal>(&bytes) {
         Ok(journal) if valid_journal(&journal, identity_dir) => journal,
         _ => {
@@ -318,12 +321,10 @@ pub fn recover(identity_dir: &Path) -> std::io::Result<Recovered> {
         return Ok(Recovered::Cleaned);
     }
     // Durability barrier: the journal and its directory entry must persist
-    // before any member is installed from it.
-    // Write access: Windows refuses to flush a read-only handle.
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(&path)?
-        .sync_all()?;
+    // before any member is installed from it. The handle has write access:
+    // Windows refuses to flush a read-only one.
+    handle.sync_all()?;
+    drop(handle);
     sync_dir(identity_dir)?;
     let status = conclude(identity_dir, &journal)?;
     let _ = fsx::remove(&identity_dir.join(STAGING), || true);
@@ -478,10 +479,38 @@ fn install(journal: &Journal) -> std::io::Result<bool> {
         if regular_digest(&file.target)?.as_deref() == Some(file.sha256.as_str()) {
             // Already in place; a leftover staged copy is not needed.
             remove_if_present(&file.staged)?;
-        } else if regular_digest(&file.staged)?.as_deref() == Some(file.sha256.as_str()) {
+        } else if let Some((_, checked)) =
+            digest_and_handle(&file.staged)?.filter(|(digest, _)| *digest == file.sha256)
+        {
+            // The rename moves whatever the staged name holds: it must still
+            // be the file just hashed (review of #114). If not, nothing is
+            // renamed, and the journal stays for recovery to judge again.
+            crate::testhooks::swap("checked", &file.staged);
+            if !fsx::same_file(&checked, &file.staged)? {
+                return Err(std::io::Error::other(
+                    "a staged node identity file changed after its check",
+                ));
+            }
+            crate::testhooks::swap("renaming", &file.staged);
             // Replaces whatever is at the target, a symlink included, without
             // following it.
             std::fs::rename(&file.staged, &file.target)?;
+            // A file that won the race between that check and the rename is
+            // never left installed: the target must be the file checked, with
+            // the journaled digest. Otherwise it is removed, and the node is
+            // corrupt until a fresh write.
+            let ours = fsx::same_file(&checked, &file.target)?
+                && regular_digest(&file.target)?.as_deref() == Some(file.sha256.as_str());
+            drop(checked);
+            if !ours {
+                crate::log::error(
+                    "a node identity file was swapped during its install",
+                    serde_json::json!({}),
+                );
+                remove_if_present(&file.target)?;
+                corrupt = true;
+                continue;
+            }
         } else {
             corrupt = true;
             continue;
@@ -615,9 +644,23 @@ fn read_record(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     match fsx::open_regular(path, false)? {
         fsx::Regular::Missing => Ok(None),
         fsx::Regular::Other => Err(unexpected()),
-        fsx::Regular::File(file) => fsx::read_at_most(file, MAX_FILE)?
+        fsx::Regular::File(file) => fsx::read_at_most(&file, MAX_FILE)?
             .map(Some)
             .ok_or_else(unexpected),
+    }
+}
+
+/// [`read_record`] for the journal, with its handle kept open for writing,
+/// so recovery flushes the very file it checked.
+fn read_journal(path: &Path) -> std::io::Result<Option<(Vec<u8>, File)>> {
+    let unexpected = || std::io::Error::other("unexpected node identity record");
+    match fsx::open_regular_rw(path)? {
+        fsx::Regular::Missing => Ok(None),
+        fsx::Regular::Other => Err(unexpected()),
+        fsx::Regular::File(file) => {
+            let bytes = fsx::read_at_most(&file, MAX_FILE)?.ok_or_else(unexpected)?;
+            Ok(Some((bytes, file)))
+        }
     }
 }
 
@@ -625,26 +668,35 @@ fn read_record(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
 /// symlink, judged on the open handle), hashed through a wiped buffer: node
 /// files hold private keys and passwords. `None` for anything else.
 fn regular_digest(path: &Path) -> std::io::Result<Option<String>> {
+    Ok(digest_and_handle(path)?.map(|(digest, _)| digest))
+}
+
+/// [`regular_digest`], with the handle the digest was taken through.
+fn digest_and_handle(path: &Path) -> std::io::Result<Option<(String, File)>> {
     let file = match fsx::open_regular(path, false)? {
         fsx::Regular::File(file) => file,
         fsx::Regular::Missing | fsx::Regular::Other => return Ok(None),
     };
-    let mut file = file.take(MAX_FILE + 1);
-    let mut hasher = Sha256::new();
-    let mut buffer = Zeroizing::new([0u8; 4096]);
-    let mut total = 0u64;
-    loop {
-        let read = file.read(buffer.as_mut_slice())?;
-        if read == 0 {
-            break;
+    let digest = {
+        let reader: &File = &file;
+        let mut reader = reader.take(MAX_FILE + 1);
+        let mut hasher = Sha256::new();
+        let mut buffer = Zeroizing::new([0u8; 4096]);
+        let mut total = 0u64;
+        loop {
+            let read = reader.read(buffer.as_mut_slice())?;
+            if read == 0 {
+                break;
+            }
+            total += read as u64;
+            hasher.update(&buffer[..read]);
         }
-        total += read as u64;
-        hasher.update(&buffer[..read]);
-    }
-    if total > MAX_FILE {
-        return Ok(None);
-    }
-    Ok(Some(hex(&hasher.finalize())))
+        if total > MAX_FILE {
+            return Ok(None);
+        }
+        hex(&hasher.finalize())
+    };
+    Ok(Some((digest, file)))
 }
 
 fn remove_if_present(path: &Path) -> std::io::Result<()> {

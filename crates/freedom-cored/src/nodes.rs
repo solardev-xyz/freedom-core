@@ -229,7 +229,7 @@ fn read_config(path: &Path) -> Result<Option<String>, BuildError> {
         crate::fsx::Regular::Other => return Err(BuildError::Config("not_regular")),
         crate::fsx::Regular::File(file) => file,
     };
-    let bytes = crate::fsx::read_at_most(file, journal::MAX_FILE)
+    let bytes = crate::fsx::read_at_most(&file, journal::MAX_FILE)
         .map_err(BuildError::Io)?
         .ok_or(BuildError::Config("too_large"))?;
     Ok(Some(String::from_utf8(bytes).unwrap_or_default()))

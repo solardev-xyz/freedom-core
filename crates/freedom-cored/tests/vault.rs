@@ -1439,3 +1439,49 @@ fn a_vault_swapped_for_a_fifo_or_symlink_is_refused_without_blocking() {
     let verified = core.call(5, "vault.verify_password", unlock);
     assert_eq!(verified["result"], json!({}), "{verified}");
 }
+
+/// Review of #114: the vault's temp file was checked (decrypted) by name,
+/// then renamed by name, so a file swapped in between was committed. Now the
+/// check reads it through the handle that wrote it, and the rename happens
+/// only if the temp name still names that file: otherwise nothing changes,
+/// and the write fails before its commit.
+#[cfg(unix)]
+#[test]
+fn a_temp_vault_swapped_after_its_check_is_never_committed() {
+    let (root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    core.call(
+        2,
+        "vault.import",
+        json!({ "password_b64": b64("testpass1"), "mnemonic_b64": b64(ABANDON) }),
+    );
+    let before = std::fs::read(data.join(VAULT)).unwrap();
+    core.close_stdin();
+    assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
+
+    let evil = root.path().join("evil");
+    std::fs::write(&evil, "{}").unwrap();
+    let swap = format!("checked={}", evil.display());
+    let mut core = spawn_env(
+        "serve",
+        &data,
+        &locks,
+        &[],
+        &[("FREEDOM_CORED_TEST_SWAP", swap.as_str())],
+    );
+    core.hello();
+    let changed = core.call(
+        2,
+        "vault.change_password",
+        json!({ "password_b64": b64("testpass1"), "new_password_b64": b64("testpass2") }),
+    );
+    assert_eq!(changed["error"]["code"], "storage", "{changed}");
+    assert_eq!(std::fs::read(data.join(VAULT)).unwrap(), before);
+    let unlocked = core.call(
+        3,
+        "vault.unlock",
+        json!({ "password_b64": b64("testpass1") }),
+    );
+    assert!(unlocked["result"].is_object(), "{unlocked}");
+}

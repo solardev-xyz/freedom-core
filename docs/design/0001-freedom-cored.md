@@ -266,8 +266,8 @@ A reply can still go missing (core crash, hang watchdog), so every mutation can 
 
 1. Create a temp file in the same directory with an exclusive create (`O_EXCL`). On Unix its mode is `0600` from creation.
 2. Write it, then `fsync` it. On Windows, `FlushFileBuffers`.
-3. **For the vault:** read the temp file back, decrypt it with the new password, and compare the mnemonic before going on. On any mismatch or error, delete the temp file and keep the old vault.
-4. Rename it over the target.
+3. **For the vault:** read the temp file back through the handle that wrote it, decrypt it with the new password, and compare the mnemonic before going on. On any mismatch or error, delete the temp file and keep the old vault.
+4. Rename it over the target, if the temp name still names the file written and checked (Unix: the same device and inode). If not, nothing changes, and the write fails before its commit.
 5. Make the rename durable. On Unix, `fsync` the directory. On Windows, flush the renamed file through a write handle (`FlushFileBuffers`).
 6. Return errors from any flush; never ignore them.
 
@@ -277,13 +277,15 @@ A reply can still go missing (core crash, hang watchdog), so every mutation can 
   - The flush of the renamed file commits NTFS's journal through the rename, since NTFS journals a rename with the file's own metadata. std can't open a directory to flush it.
   - The design first named `MoveFileExW` with `REPLACE_EXISTING | WRITE_THROUGH`. Its documented guarantee covers only moves done as a copy and a delete, and it would need FFI.
   - A failed flush is reported like a failed directory flush: `durable: false` for a vault write; for node files, it is logged.
+  - The renamed file is opened again by name to be flushed, and std exposes no file identity there, so the identity checks below are Unix-only.
 - **Existing files:** at adoption, the core tightens existing secret files to `0600` in place with `fchmod`, which doesn't change the content. It first checks, on the open handle, that each is a regular file the current user owns; a symlink is never followed.
   - **The vault** is tightened at every start, before the snapshot.
   - **Node files** are the files of each node's journal layout (Bee's keystore and config, Radicle's keys and config). They are tightened under the roots main gives in `core.hello`'s `node_roots`, on a thread of their own, so slow storage can't hold up the handshake (#85).
   - **Until main sends `node_roots`,** node files that JS wrote keep their mode until the next `nodes.write_identity`.
 - **Delete:** unlink, then `fsync` the directory before replying. A delete commits at the unlink.
 - **Leftover temp files** (#81). A process killed between steps 1 and 4 leaves its temp file behind, for the vault an encrypted copy of the mnemonic. The core removes the temp files of its own atomic writes in the identity directory (the vault and the node journal's records) at startup, under the gate, before any job runs. `vault.delete` also removes the vault's, once its unlink has committed.
-- **Reading** (#83). The vault, the journal's records and node files are opened once, and judged on the open handle: anything but a regular file (a directory, a FIFO, a socket, a device; a symlink, except for Radicle's config, which JS follows) is refused before a byte is read, and no more than the size bound is read. The open itself can't wait: it is non-blocking on Unix. A file swapped in between a check and the read can therefore neither block the worker nor be read whole.
+- **Reading** (#83). The vault, the journal's records and node files are opened once, and judged on the open handle: anything but a regular file (a directory, a FIFO, a socket, a device; a symlink, except for Radicle's config, which JS follows) is refused before a byte is read, and no more than the size bound is read. The open itself can't wait: it is non-blocking on Unix. On Windows a symlink's own reparse point is opened (`FILE_FLAG_OPEN_REPARSE_POINT`) and refused. A file swapped in between a check and the read can therefore neither block the worker nor be read whole. Recovery reads the journal through a read-write handle, and flushes that same handle: it never opens the journal again by name.
+- **What a same-user process can still do.** Between the identity check and `rename(2)` there are a few system calls, in which another process of the same user can still swap the file under the name. The vault and node directories are that user's own, so such a process can write the files directly anyway. What the core guarantees is what it reports: a node file is recorded as installed only if the target is the file checked, with its digest, after the rename; otherwise the target is removed and the node is corrupt.
 
 ### Multi-file writes
 
@@ -293,7 +295,8 @@ This covers node identities. **Bee:** `keys/swarm.key` plus `config.yaml`. **Rad
 2. **Commit.** Write `<identityDir>/node-identity-journal.json` atomically and durably. It holds `{ op_id, node, files: [{ target, staged, sha256 }] }`, with absolute paths.
 3. **Install.** For each file:
    - if the target already has the journaled SHA-256, it's done;
-   - otherwise rename the staged file over it.
+   - otherwise rename the staged file over it, if its name still names the file just hashed (Unix: the same device and inode); if not, nothing is renamed, the journal stays, and recovery judges it again;
+   - after the rename, the target must be the file hashed, with its digest (review of #114). If it isn't, it is removed, and the node is corrupt until a fresh write.
 
    Then `fsync` every affected directory.
 4. **Finish.** Add `op_id` to `<identityDir>/node-identity-done.json` (the last 32 operations, written atomically), then delete the journal and `fsync`.

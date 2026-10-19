@@ -546,3 +546,96 @@ fn a_relative_node_root_is_ignored() {
     );
     assert_eq!(hello["result"]["protocol"], 1, "{hello}");
 }
+
+/// Review of #114: recovery flushed the journal by opening it again by
+/// name, after checking it, so a FIFO put there meanwhile blocked
+/// `freedom-cored recover` for good. Now the handle it read and checked is
+/// the one it flushes; what is at the name afterwards doesn't matter.
+#[cfg(unix)]
+#[test]
+fn recovery_flushes_the_journal_it_checked() {
+    let (root, data, locks) = dirs();
+    let node = root.path().join("node");
+    interrupted_write(&data, &node, "op-fifo");
+    let fifo = root.path().join("fifo");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let swap = format!("journal={}", fifo.display());
+    let mut recover = spawn_env(
+        "recover",
+        &data,
+        &locks,
+        &[],
+        &[("FREEDOM_CORED_TEST_SWAP", swap.as_str())],
+    );
+    assert_eq!(recover.line(), "recovered");
+    assert_eq!(recover.exit_code(Duration::from_secs(10)), 0);
+    assert_eq!(
+        std::fs::read_to_string(node.join("keys/swarm.key")).unwrap(),
+        "new key"
+    );
+}
+
+/// Review of #114: a staged file swapped after its digest was checked was
+/// renamed into place and recorded as installed. Now the rename happens only
+/// if the staged name still names the file hashed (same device and inode),
+/// and otherwise the journal stays for recovery to judge again; the
+/// swapped-in file then fails its digest, and the node is corrupt.
+#[cfg(unix)]
+#[test]
+fn a_staged_file_swapped_after_its_check_is_never_installed() {
+    let (root, data, locks) = dirs();
+    let node = root.path().join("node");
+    interrupted_write(&data, &node, "op-swapped");
+    let evil = root.path().join("evil");
+    std::fs::write(&evil, "evil key").unwrap();
+    let swap = format!("checked={}", evil.display());
+    let mut recover = spawn_env(
+        "recover",
+        &data,
+        &locks,
+        &[],
+        &[("FREEDOM_CORED_TEST_SWAP", swap.as_str())],
+    );
+    assert_eq!(recover.exit_code(Duration::from_secs(10)), 74);
+    assert_eq!(
+        std::fs::read_to_string(node.join("keys/swarm.key")).unwrap(),
+        "old"
+    );
+    assert!(data.join("node-identity-journal.json").exists());
+    // Judged again: the staged file no longer has its digest.
+    let mut recover = spawn("recover", &data, &locks, &[]);
+    assert_eq!(recover.line(), "corrupt op-swapped");
+    assert_eq!(
+        std::fs::read_to_string(node.join("keys/swarm.key")).unwrap(),
+        "old"
+    );
+}
+
+/// Review of #114: a file that wins the race between that identity check and
+/// the rename itself is renamed into place, but never left there nor
+/// recorded as installed: the target must be the file checked, with the
+/// journaled digest, or it is removed and the node is corrupt.
+#[cfg(unix)]
+#[test]
+fn a_file_that_wins_the_rename_race_is_never_recorded_as_installed() {
+    let (root, data, locks) = dirs();
+    let node = root.path().join("node");
+    interrupted_write(&data, &node, "op-raced");
+    let evil = root.path().join("evil");
+    std::fs::write(&evil, "evil key").unwrap();
+    let swap = format!("renaming={}", evil.display());
+    let mut recover = spawn_env(
+        "recover",
+        &data,
+        &locks,
+        &[],
+        &[("FREEDOM_CORED_TEST_SWAP", swap.as_str())],
+    );
+    assert_eq!(recover.line(), "corrupt op-raced");
+    assert_eq!(recover.exit_code(Duration::from_secs(10)), 0);
+    assert!(!node.join("keys/swarm.key").exists());
+}
