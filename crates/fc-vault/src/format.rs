@@ -140,7 +140,23 @@ struct Envelope {
     /// `null` stays `Some(Null)`.
     #[serde(default, deserialize_with = "present")]
     version: Option<serde_json::Value>,
-    encrypted: Option<String>,
+    /// Any JSON value: its type is checked only after the version, as JS
+    /// reads `vault.encrypted` only once `version === 1` holds, so a later
+    /// format's envelope reports its version, not a corrupt file.
+    encrypted: Option<serde_json::Value>,
+}
+
+impl Envelope {
+    /// The passworder payload string.
+    fn payload(self) -> Result<String, Error> {
+        match self.encrypted {
+            Some(serde_json::Value::String(payload)) => Ok(payload),
+            None | Some(serde_json::Value::Null) => {
+                Err(Error::Corrupt("missing encrypted payload"))
+            }
+            Some(_) => Err(Error::Corrupt("encrypted payload is not a string")),
+        }
+    }
 }
 
 fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<serde_json::Value>, D::Error> {
@@ -178,9 +194,7 @@ pub fn read_envelope(file: &str) -> Result<String, Error> {
         Some(version) => return Err(Error::UnsupportedVersion(js_string(version))),
         None => return Err(Error::UnsupportedVersion("undefined".into())),
     }
-    envelope
-        .encrypted
-        .ok_or(Error::Corrupt("missing encrypted payload"))
+    envelope.payload()
 }
 
 /// Decrypts a vault file with `password` (UTF-8 bytes), accepting what
@@ -230,9 +244,7 @@ pub fn check_structure(file: &str, version: bool) -> Result<(), Error> {
 fn encrypted_payload(file: &str) -> Result<String, Error> {
     let envelope: Envelope =
         serde_json::from_str(file).map_err(|_| Error::Corrupt("vault file is not valid JSON"))?;
-    envelope
-        .encrypted
-        .ok_or(Error::Corrupt("missing encrypted payload"))
+    envelope.payload()
 }
 
 /// A payload's parts, checked, before any key is derived.
@@ -572,6 +584,32 @@ mod tests {
             check_structure(&version_2, true),
             Err(Error::UnsupportedVersion(v)) if v == "2"
         ));
+        // The version comes first, whatever `encrypted` holds, as in JS: a
+        // later format may well change it (review of #116).
+        for envelope in [
+            r#"{"version":2,"encrypted":7}"#,
+            r#"{"version":2,"encrypted":{"data":"x"}}"#,
+            r#"{"version":2}"#,
+        ] {
+            assert!(
+                matches!(
+                    check_structure(envelope, true),
+                    Err(Error::UnsupportedVersion(v)) if v == "2"
+                ),
+                "{envelope}"
+            );
+            assert!(
+                matches!(
+                    open(envelope, b"pw"),
+                    Err(Error::UnsupportedVersion(v)) if v == "2"
+                ),
+                "{envelope}"
+            );
+            assert!(matches!(
+                check_structure(envelope, false),
+                Err(Error::Corrupt(_))
+            ));
+        }
         // verifyPassword checks no version.
         assert!(check_structure(&version_2, false).is_ok());
 

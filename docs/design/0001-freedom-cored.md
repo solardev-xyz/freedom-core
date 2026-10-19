@@ -325,7 +325,7 @@ Main's proxy has to reproduce each JS handler: argument checks and defaults, the
   - The first 5 failures are free. After that, each attempt has to wait 2^(n−5) s since the last failure, capped at 5 min, and gets `throttled` with `retry_after_ms`.
   - A success resets the counter.
   - An attempt is reserved before its KDF starts. A cancelled or revoked attempt still counts if its KDF ran.
-  - **While the throttle refuses** (#82), a password check still reads the file, but without the password. A missing vault, an unsupported version (unlock, change_password and delete only) or a file that no password could open is reported before `throttled`, in the table's order. Only an attempt that would run the KDF gets `throttled`.
+  - **While the throttle refuses** (#82), a password check still reads the file, but without the password. A missing vault, an unsupported version (unlock, change_password and delete only) or a file that no password could open is reported before `throttled`, in the table's order. Only an attempt that would run the KDF gets `throttled`. As in JS, the version is read before anything else in the envelope, so a later format reports its version whatever its `encrypted` holds.
   - The counter lives in memory. Renderer input can't crash the core, so only main can reset it, and main is trusted.
 - **Vault reading accepts both KDF settings:** `keyMetadata` with any iteration count, and a missing `keyMetadata`, which means the legacy 10,000 iterations.
 - **Vault writing reproduces the JS envelope** (`{ version: 1, encrypted, createdAt }`, 2-space JSON, no trailing newline) with 900,000 iterations. `vectors/fixtures/vaults.json` is the reference in both directions.
@@ -375,7 +375,7 @@ Main's proxy has to reproduce each JS handler: argument checks and defaults, the
   - **Out-of-range input** gets the JS error string locally and never reaches the core.
   - **The 256 KiB limit** is a deliberate transport limit. JS has no ceiling, but no UI or generated password comes near it. A test keeps a vault with a 1,025-byte password unlockable.
 - **Defense in depth:** the core applies the same rules and answers `invalid_argument`. A malformed field is never a protocol error, so renderer input can't crash the core.
-- **Error replies stay small** (#86). An error message quotes at most 64 characters of any input. Quoted whole, a field of combining marks or quotes grows several times over, first in Rust's `{:?}` escapes and then in JSON's, and an error reply past one frame ended the core. As a backstop, a vault-loop error reply that still wouldn't fit a frame keeps its code but gets a fixed message and no data.
+- **Error replies stay small** (#86). An error message quotes at most 64 characters of any input string, an identifier included, and at most 8 names of a list. Quoted whole, a field of combining marks or quotes grows several times over, first in Rust's `{:?}` escapes and then in JSON's, and an error reply past one frame ended the core. As a backstop, a vault-loop error reply that still wouldn't fit a frame keeps its code but gets a fixed message and no data.
 - **Renderer access:** `core.hello`, `core.shutdown`, `cancel`, `vault.reconcile`, `nodes.op_status` and `compat.*` aren't reachable from any renderer channel. Only main-internal code calls them.
 
 ## Migration in freedom-browser

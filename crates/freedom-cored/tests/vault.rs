@@ -1429,6 +1429,22 @@ fn file_errors_come_before_throttled() {
         call(&mut core, "vault.verify_password", &password)["code"],
         "throttled"
     );
+    // The version comes first, whatever `encrypted` holds, as in JS (a later
+    // format may change it).
+    std::fs::write(&vault, r#"{"version":2,"encrypted":7}"#).unwrap();
+    for method in ["vault.unlock", "vault.change_password", "vault.delete"] {
+        let params = if method == "vault.change_password" {
+            &change
+        } else {
+            &password
+        };
+        let error = call(&mut core, method, params);
+        assert_eq!(
+            error["code"], "unsupported_vault_version",
+            "{method}: {error}"
+        );
+        assert_eq!(error["message"], "Unsupported vault version: 2");
+    }
 
     // Not a vault at all: corrupt, whatever the password.
     std::fs::write(&vault, "not json").unwrap();

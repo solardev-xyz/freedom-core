@@ -24,7 +24,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value};
 
-use crate::{Error, U256, keccak256, parse_address, parse_bytes, parse_signed, quoted};
+use crate::{
+    Error, U256, keccak256, parse_address, parse_bytes, parse_signed, quoted, quoted_list,
+    shortened,
+};
 
 const MAX_TYPES: usize = 256;
 const MAX_FIELDS: usize = 256;
@@ -208,7 +211,10 @@ impl Types {
                 )));
             }
             if !matches!(primitive(name), Ok(None)) {
-                return Err(err(format!("type name {name:?} is a primitive type")));
+                return Err(err(format!(
+                    "type name {} is a primitive type",
+                    quoted(name)
+                )));
             }
         }
         let mut fields = BTreeMap::new();
@@ -218,10 +224,10 @@ impl Types {
         for (name, list) in object {
             let list = list
                 .as_array()
-                .ok_or_else(|| err(format!("{name}: expected a field list")))?;
+                .ok_or_else(|| err(format!("{}: expected a field list", shortened(name))))?;
             total_fields += list.len();
             if list.len() > MAX_FIELDS || total_fields > MAX_TOTAL_FIELDS {
-                return Err(err(format!("{name}: too many fields")));
+                return Err(err(format!("{}: too many fields", shortened(name))));
             }
             let mut seen = BTreeSet::new();
             let mut parsed = Vec::with_capacity(list.len());
@@ -230,7 +236,10 @@ impl Types {
                 let field_name = field.get("name").and_then(Value::as_str);
                 let field_type = field.get("type").and_then(Value::as_str);
                 let (Some(field_name), Some(field_type)) = (field_name, field_type) else {
-                    return Err(err(format!("{name}: fields need a string name and type")));
+                    return Err(err(format!(
+                        "{}: fields need a string name and type",
+                        shortened(name)
+                    )));
                 };
                 if !is_identifier(field_name) {
                     return Err(err(format!(
@@ -239,12 +248,18 @@ impl Types {
                     )));
                 }
                 if !seen.insert(field_name) {
-                    return Err(err(format!("duplicate field {field_name:?} in {name:?}")));
+                    return Err(err(format!(
+                        "duplicate field {} in {}",
+                        quoted(field_name),
+                        quoted(name)
+                    )));
                 }
                 let (raw_base, suffix, dims) = split_array(field_type);
                 if dims.len() > MAX_DIMENSIONS {
                     return Err(err(format!(
-                        "{name}.{field_name}: too many array dimensions"
+                        "{}.{}: too many array dimensions",
+                        shortened(name),
+                        shortened(field_name)
                     )));
                 }
                 let base_text = match raw_base {
@@ -253,7 +268,7 @@ impl Types {
                     other => other,
                 };
                 if base_text == name {
-                    return Err(err(format!("circular type reference to {name:?}")));
+                    return Err(err(format!("circular type reference to {}", quoted(name))));
                 }
                 let base = match primitive(base_text)? {
                     Some(base) => base,
@@ -284,7 +299,8 @@ impl Types {
             [one] => (*one).to_owned(),
             _ => {
                 return Err(err(format!(
-                    "ambiguous primary types or unused types: {roots:?}"
+                    "ambiguous primary types or unused types: {}",
+                    quoted_list(&roots)
                 )));
             }
         };
@@ -336,7 +352,7 @@ impl Types {
         self.type_hashes
             .get(name)
             .copied()
-            .ok_or_else(|| err(format!("unknown type {name:?}")))
+            .ok_or_else(|| err(format!("unknown type {}", quoted(name))))
     }
 
     /// `encodeData` of a struct: its type hash, then each field's 32 bytes.
@@ -352,18 +368,24 @@ impl Types {
         }
         let object = value
             .as_object()
-            .ok_or_else(|| err(format!("{name}: expected an object")))?;
+            .ok_or_else(|| err(format!("{}: expected an object", shortened(name))))?;
         let fields = self
             .fields
             .get(name)
-            .ok_or_else(|| err(format!("unknown type {name:?}")))?;
+            .ok_or_else(|| err(format!("unknown type {}", quoted(name))))?;
         let mut out = Vec::with_capacity(32 * (fields.len() + 1));
         out.extend_from_slice(&self.type_hash(name)?);
         for field in fields {
             let value = object
                 .get(&field.name)
                 .filter(|v| !v.is_null())
-                .ok_or_else(|| err(format!("{name}.{}: missing", field.name)))?;
+                .ok_or_else(|| {
+                    err(format!(
+                        "{}.{}: missing",
+                        shortened(name),
+                        shortened(&field.name)
+                    ))
+                })?;
             out.extend_from_slice(&self.encode_field(
                 &field.ty.base,
                 &field.ty.dims,
@@ -429,7 +451,7 @@ fn collect(
         return Ok(());
     }
     if !in_progress.insert(name.to_owned()) {
-        return Err(err(format!("circular type reference to {name:?}")));
+        return Err(err(format!("circular type reference to {}", quoted(name))));
     }
     let mut all = BTreeSet::new();
     for child in links.get(name).into_iter().flatten() {
