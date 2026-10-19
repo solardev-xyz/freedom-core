@@ -884,6 +884,41 @@ mod tests {
         assert_eq!(int(&format!("-{half}")).unwrap(), int("0").unwrap());
         let over = format!("{}{}1e-1093", five_to(1075), "0".repeat(17));
         assert!(uint(&over).is_err());
+        // Exponents std doesn't read whole (from 655,360 on, it stops at
+        // 0x10000) are compensated exactly: 1 is signed as 1, not 0 (a
+        // wrong signature) and not refused as infinite; 2^53 + 1 is the
+        // unsafe 2^53, refused, not 0.
+        let zeros = "0".repeat(655_359);
+        assert_eq!(
+            uint(&format!("0.{zeros}1e+655360")).unwrap(),
+            uint("1").unwrap()
+        );
+        assert_eq!(
+            int(&format!("-0.{zeros}5e+655360")).unwrap(),
+            int("-5").unwrap()
+        );
+        assert_eq!(
+            uint(&format!("1{}e-1048000", "0".repeat(1_048_000))).unwrap(),
+            uint("1").unwrap()
+        );
+        assert!(uint(&format!("0.{zeros}9007199254740993e+655375")).is_err());
+        // The hashes the pinned ethers gives these spellings (JSON.parse,
+        // then TypedDataEncoder.hash): 1, and the large padded tie (2^52)
+        // and just above it (2^52 + 1).
+        let hex = |hash: [u8; 32]| crate::to_hex(&hash);
+        assert_eq!(
+            hex(uint(&format!("0.{zeros}1e+655360")).unwrap()),
+            "0x0b4d71ebb529b3a73e4ed8c1f6d477af49f3deddab5e0fc048d609ddcffb9d2c"
+        );
+        let wide = "0".repeat(655_360);
+        assert_eq!(
+            hex(uint(&format!("45035996273704965{wide}e-655361")).unwrap()),
+            "0x95aff59408c2ac285ddb313edb76e664b1a64c10be8e5a8230982322e605ae0c"
+        );
+        assert_eq!(
+            hex(uint(&format!("45035996273704965{wide}1e-655362")).unwrap()),
+            "0x99f65ce034fa0d2a2920040427c93df7b4e14f81b0fd54cb95879c8c05de870d"
+        );
         // Literals between 2^52 and 2^53, where a double holds only
         // integers, padded or not: each reads as Rust's correctly rounded
         // parser reads it.

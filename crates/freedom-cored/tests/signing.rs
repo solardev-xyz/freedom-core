@@ -284,4 +284,17 @@ fn typed_data_numbers_are_read_as_json_parse_reads_them() {
     // float_roundtrip reads as 2^52 + 1.
     let padded = hash(5, &format!("45035996273704965{}e-753", "0".repeat(752)));
     assert_eq!(padded["result"], even["result"], "{padded}");
+    // Exponents past std's 0x10000, compensated by the decimal point's
+    // position: exactly 1 both ways, and 2^53 + 1 (an unsafe 2^53).
+    let one = hash(6, r#""1""#);
+    let zeros = "0".repeat(655_359);
+    let fraction = hash(7, &format!("0.{zeros}1e+655360"));
+    assert_eq!(fraction["result"], one["result"], "{fraction}");
+    let integer = hash(8, &format!("1{}e-1048000", "0".repeat(1_048_000)));
+    assert_eq!(integer["result"], one["result"], "{integer}");
+    let unsafe_one = hash(9, &format!("0.{zeros}9007199254740993e+655375"));
+    assert_eq!(
+        unsafe_one["error"]["code"], "invalid_argument",
+        "{unsafe_one}"
+    );
 }
