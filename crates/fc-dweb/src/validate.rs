@@ -8,9 +8,10 @@ use fc_json::JsValue;
 
 use crate::bzz::{FORWARDED_REQUEST_HEADERS, SWARM_HEADERS, has_encoded_separator, is_reference};
 use crate::ipfs::{GatewayForm, REDIRECT_HEADERS, STRIPPED_REQUEST_HEADERS, gateway_form};
+use crate::open::{Opening, Request, open};
 use crate::plan::{
     BODY_IDLE_MS, BZZ_HEADERS_MS, BZZ_RETRY_DELAYS_MS, BZZ_RETRY_STATUSES, Backend, Ipfs,
-    NATIVE_QUEUE_MS, ResponseOp, Scheme, content_trust,
+    NATIVE_QUEUE_MS, Plan, ResponseOp, Scheme, content_trust,
 };
 use crate::{js, url};
 
@@ -177,11 +178,46 @@ fn fetch(body: &JsValue, request: &PlanRequest<'_>, scheme: Option<Scheme>) -> R
         return Err(Refusal::Node);
     };
     check_path(path, scheme)?;
+    // A hash host needs no lookup: the target is the request's own, rebuilt
+    // here, and no name stands behind it (#97).
+    let host = request_target(request);
+    match &host {
+        Host::Hash(expected) if path != expected => return Err(Refusal::Path),
+        Host::NoFetch => return Err(Refusal::Path),
+        Host::Hash(_) | Host::Name => {}
+    }
     check_headers(&headers, scheme)?;
     check_retry(retry, backend)?;
     check_timers(timers, backend)?;
     check_response(response, backend)?;
-    check_trust(trust, backend)
+    check_trust(trust, backend, matches!(host, Host::Name))
+}
+
+/// What the request's host means for a fetch plan.
+enum Host {
+    /// A hash host (a Swarm reference, a CID, an IPNS key): the target the
+    /// request plans to, with no lookup.
+    Hash(String),
+    /// A name host: the target comes from the name's resolution.
+    Name,
+    /// No fetch answers this request (a gateway-form URL, an invalid host).
+    NoFetch,
+}
+
+/// The request's target, as `dweb.open` plans it, with fc-dweb's own code:
+/// for a hash host it depends on the URL alone.
+fn request_target(request: &PlanRequest<'_>) -> Host {
+    let opening = open(&Request {
+        url: request.url,
+        method: request.method,
+        headers: &[],
+        backend: request.backend,
+    });
+    match opening {
+        Ok(Opening::Plan(Plan::Fetch(fetch))) => Host::Hash(fetch.path),
+        Ok(Opening::Resolve(_)) => Host::Name,
+        Ok(Opening::Plan(Plan::Redirect(_) | Plan::Error(_))) | Err(_) => Host::NoFetch,
+    }
 }
 
 /// The target: normalized, in the request's namespace, with a reference.
@@ -412,8 +448,14 @@ fn check_response(response: &[JsValue], backend: Backend) -> Result<(), Refusal>
     Ok(())
 }
 
-fn check_trust(trust: &JsValue, backend: Backend) -> Result<(), Refusal> {
-    let name_ok = matches!(trust.get("name"), Some(JsValue::Null | JsValue::String(_)));
+/// The content label is the backend's; a name label only behind a lookup
+/// (`named`): a hash host's is `null` (#97).
+fn check_trust(trust: &JsValue, backend: Backend, named: bool) -> Result<(), Refusal> {
+    let name_ok = match trust.get("name") {
+        Some(JsValue::Null) => true,
+        Some(JsValue::String(_)) => named,
+        _ => false,
+    };
     let content_ok =
         trust.get("content").and_then(JsValue::as_str) == Some(content_trust(backend).as_str());
     if name_ok && content_ok {

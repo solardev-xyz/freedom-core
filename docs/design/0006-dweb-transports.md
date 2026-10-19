@@ -223,7 +223,8 @@ The plan is checked as the JSON main receives, against the request main admitted
       - no segment may then be `.` or `..`, so the decoded path stays beneath `/<namespace>/<ref>`.
 
       A normalized path has no literal dot segments, so any found here come from escapes. An encoded separator that doesn't climb, such as `a%2Fb` in a file name, still passes to the IPFS node as today. The query isn't judged;
-    - a base path that changes which IPFS reference is asked can't be told from the path; the namespace can.
+    - a base path that changes which IPFS reference is asked can't be told from the path; the namespace can;
+    - **a hash host's target is the request's own** (#97). For a host the core needs no lookup for (a Swarm reference, a CID, an IPNS key, or a DNSLink name, which the node resolves itself), the validator rebuilds the target as `dweb.open` plans it: `/<namespace>/<canonical host><pathname><search>`, with the canonical CID or key. The plan's `path` must equal it. A request that no fetch answers (a gateway-form URL, an invalid host) refuses any fetch plan, with `path`. Only a name host's target comes from a lookup, and only its namespace and shape can be checked.
   - **`header`:**
     - names are lowercase tokens;
     - values are RFC 9110 field values (section 5.5): visible ASCII, spaces, tabs and `obs-text` (0x80 to 0xFF). No other control character is allowed (C0, including NUL, CR and LF, or DEL), and no space or tab at either end;
@@ -241,7 +242,7 @@ The plan is checked as the JSON main receives, against the request main admitted
     - Ant: `canonicalize_redirect` and `strip_page_state`;
     - the native node: `strip_page_state` and `small_text`;
     - the external gateway: all four.
-  - **`trust`:** `name` is a string or null, and `content` is the backend's label.
+  - **`trust`:** `content` is the backend's label. `name` is null, or a string for a name host only: a hash host had no lookup, so no name label can stand behind it (#97).
 - **`redirect`:** only for `ipfs:` and `ipns:`:
   - the status is 307;
   - the `Location` is exactly the canonical form today's `gatewayFormRedirect` gives the request's URL;
