@@ -1656,7 +1656,8 @@ fn hex(bytes: &[u8]) -> String {
 
 /// Startup work that touches storage, run off the event loop: adoption
 /// tightens an existing vault file to 0600 in place (metadata only; quick
-/// unlock's content fingerprint is unaffected), then the file is snapshot.
+/// unlock's content fingerprint is unaffected), temp files a killed write
+/// left are removed, then the file is snapshot.
 pub fn startup_snapshot(dir: &Path) -> (FileSnapshot, NodeRecovery) {
     // Finish an interrupted node identity write before anything else
     // (design 0001: before core.hello is answered and before any node write).
@@ -1669,7 +1670,38 @@ pub fn startup_snapshot(dir: &Path) -> (FileSnapshot, NodeRecovery) {
             serde_json::json!({ "error": e.kind().to_string() }),
         ),
     }
+    remove_leftover_temps(dir);
     (snapshot(dir), recovery)
+}
+
+/// The files the core replaces atomically in the identity directory, whose
+/// temp files a killed write can leave (#81). The vault's is an encrypted
+/// copy of the mnemonic; the journal's records hold no secret, but are
+/// litter all the same.
+const REPLACED: [&str; 5] = [
+    VAULT_FILE,
+    journal::JOURNAL,
+    journal::DONE,
+    journal::STAGING,
+    journal::UNRESOLVED,
+];
+
+/// Removes the temp files writes killed before their rename left (#81).
+/// Startup only: the gate is held and no job runs yet, so none is live.
+fn remove_leftover_temps(dir: &Path) {
+    for name in REPLACED {
+        match fsx::remove_temps(dir, name) {
+            Ok(0) => {}
+            Ok(count) => crate::log::info(
+                "removed temp files a killed write left",
+                serde_json::json!({ "count": count }),
+            ),
+            Err(e) => crate::log::warn(
+                "could not remove temp files a killed write left",
+                serde_json::json!({ "error": e.kind().to_string() }),
+            ),
+        }
+    }
 }
 
 /// What startup recovery leaves for main to act on, in `core.hello`'s
@@ -1743,24 +1775,28 @@ fn snapshot(dir: &Path) -> FileSnapshot {
     read_vault(dir).map(|contents| contents.map(|c| sha256_hex(c.as_bytes())))
 }
 
-/// Reads the vault file: `None` if missing. Only a regular file of bounded
-/// size is read, so a FIFO or a huge file can't stall anything.
+/// Reads the vault file: `None` if missing. It is opened once and judged on
+/// the open handle (#83): only a regular file is read, never through a
+/// symlink, and at most [`MAX_VAULT_BYTES`], so nothing swapped in between a
+/// check and the read (a FIFO, a symlink, a growing file) can stall the
+/// worker or be read whole.
 fn read_vault(dir: &Path) -> Result<Option<String>, OpError> {
-    let path = dir.join(VAULT_FILE);
-    let metadata = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+    read_bounded(&dir.join(VAULT_FILE))
+}
+
+/// [`read_vault`] for any path: the vault, or its staged copy.
+fn read_bounded(path: &Path) -> Result<Option<String>, OpError> {
+    let file = match fsx::open_regular(path, false) {
+        Ok(fsx::Regular::Missing) => return Ok(None),
+        Ok(fsx::Regular::Other) => return Err(OpError::Storage("not_regular")),
+        Ok(fsx::Regular::File(file)) => file,
         Err(e) => return Err(storage(&e)),
     };
-    if !metadata.is_file() {
-        return Err(OpError::Storage("not_regular"));
-    }
-    if metadata.len() > MAX_VAULT_BYTES {
-        return Err(OpError::Storage("too_large"));
-    }
-    match std::fs::read_to_string(&path) {
-        Ok(contents) => Ok(Some(contents)),
-        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Err(OpError::Corrupt),
+    match fsx::read_at_most(file, MAX_VAULT_BYTES) {
+        Ok(Some(bytes)) => String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|_| OpError::Corrupt),
+        Ok(None) => Err(OpError::Storage("too_large")),
         Err(e) => Err(storage(&e)),
     }
 }
@@ -1831,10 +1867,21 @@ fn job_delete(dir: &Path, password: &SecretBytes, control: &JobControl) -> JobOu
         return not_committed(error);
     }
     match fsx::remove(&dir.join(VAULT_FILE), || claim(control)) {
-        Ok(Some(done)) => JobOutput::Checked {
-            result: Ok(()),
-            commit: Some(Commit { done, file: None }),
-        },
+        Ok(Some(done)) => {
+            // Copies a killed write left go with the vault (#81). No other
+            // job runs, so none of them is live. The delete has committed:
+            // a failure here is only logged.
+            if let Err(e) = fsx::remove_temps(dir, VAULT_FILE) {
+                crate::log::warn(
+                    "could not remove the vault's leftover temp files",
+                    serde_json::json!({ "error": e.kind().to_string() }),
+                );
+            }
+            JobOutput::Checked {
+                result: Ok(()),
+                commit: Some(Commit { done, file: None }),
+            }
+        }
         Ok(None) => not_committed(OpError::Abandoned),
         Err(e) => not_committed(storage(&e)),
     }
@@ -1863,7 +1910,11 @@ fn write_vault(
         &dir.join(VAULT_FILE),
         contents.as_bytes(),
         |staged| {
-            let staged = std::fs::read_to_string(staged).map_err(|e| e.kind().to_string())?;
+            let staged = match read_bounded(staged) {
+                Ok(Some(staged)) => staged,
+                Ok(None) => return Err("the staged vault is gone".into()),
+                Err(e) => return Err(format!("the staged vault can't be read: {e:?}")),
+            };
             let opened = format::open(&staged, password).map_err(|e| e.to_string())?;
             if opened.mnemonic.phrase() == expected.as_str() {
                 Ok(())

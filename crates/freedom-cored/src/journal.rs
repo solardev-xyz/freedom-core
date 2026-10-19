@@ -30,7 +30,7 @@
 //! valid digests. Anything else is set aside as `….corrupt` and reported. Only
 //! regular files are hashed or installed; symlinks are never followed.
 
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
@@ -585,43 +585,42 @@ fn discard_intent(identity_dir: &Path) -> std::io::Result<Recovered> {
     Ok(Recovered::Discarded)
 }
 
-/// A bookkeeping record (journal, done list, intent): regular file, bounded.
+/// A bookkeeping record (journal, done list, intent): a regular file, never
+/// through a symlink, of at most [`MAX_FILE`], judged on the open handle
+/// (`fsx::open_regular`, #83).
 fn read_record(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    if !metadata.is_file() || metadata.len() > MAX_FILE {
-        return Err(std::io::Error::other("unexpected node identity record"));
+    let unexpected = || std::io::Error::other("unexpected node identity record");
+    match fsx::open_regular(path, false)? {
+        fsx::Regular::Missing => Ok(None),
+        fsx::Regular::Other => Err(unexpected()),
+        fsx::Regular::File(file) => fsx::read_at_most(file, MAX_FILE)?
+            .map(Some)
+            .ok_or_else(unexpected),
     }
-    let mut bytes = Vec::new();
-    File::open(path)?
-        .take(MAX_FILE + 1)
-        .read_to_end(&mut bytes)?;
-    Ok(Some(bytes))
 }
 
-/// The SHA-256 of a regular file (never through a symlink), hashed through a
-/// wiped buffer: node files hold private keys and passwords.
+/// The SHA-256 of a regular file of at most [`MAX_FILE`] (never through a
+/// symlink, judged on the open handle), hashed through a wiped buffer: node
+/// files hold private keys and passwords. `None` for anything else.
 fn regular_digest(path: &Path) -> std::io::Result<Option<String>> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
+    let file = match fsx::open_regular(path, false)? {
+        fsx::Regular::File(file) => file,
+        fsx::Regular::Missing | fsx::Regular::Other => return Ok(None),
     };
-    if !metadata.is_file() || metadata.len() > MAX_FILE {
-        return Ok(None);
-    }
-    let mut file = File::open(path)?;
+    let mut file = file.take(MAX_FILE + 1);
     let mut hasher = Sha256::new();
     let mut buffer = Zeroizing::new([0u8; 4096]);
+    let mut total = 0u64;
     loop {
         let read = file.read(buffer.as_mut_slice())?;
         if read == 0 {
             break;
         }
+        total += read as u64;
         hasher.update(&buffer[..read]);
+    }
+    if total > MAX_FILE {
+        return Ok(None);
     }
     Ok(Some(hex(&hasher.finalize())))
 }
@@ -661,7 +660,7 @@ fn hex(bytes: &[u8]) -> String {
 
 #[cfg(unix)]
 fn sync_dir(dir: &Path) -> std::io::Result<()> {
-    File::open(dir)?.sync_all()
+    std::fs::File::open(dir)?.sync_all()
 }
 
 #[cfg(not(unix))]

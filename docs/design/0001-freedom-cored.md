@@ -274,6 +274,8 @@ A reply can still go missing (core crash, hang watchdog), so every mutation can 
 - **Windows:** `MoveFileExW` with `REPLACE_EXISTING | WRITE_THROUGH` is best-effort under power loss.
 - **Existing files:** at adoption (the first core start on a profile), the core tightens existing secret files to `0600` in place with `chmod`, which doesn't change the content. It first checks that each is a regular file, not a symlink, owned by the current user. This covers the vault, the Bee keystore and config, and the Radicle keys.
 - **Delete:** unlink, then `fsync` the directory before replying. A delete commits at the unlink.
+- **Leftover temp files** (#81). A process killed between steps 1 and 4 leaves its temp file behind, for the vault an encrypted copy of the mnemonic. The core removes the temp files of its own atomic writes in the identity directory (the vault and the node journal's records) at startup, under the gate, before any job runs. `vault.delete` also removes the vault's, once its unlink has committed.
+- **Reading** (#83). The vault, the journal's records and node files are opened once, and judged on the open handle: anything but a regular file (a directory, a FIFO, a socket, a device; a symlink, except for Radicle's config, which JS follows) is refused before a byte is read, and no more than the size bound is read. The open itself can't wait: it is non-blocking on Unix. A file swapped in between a check and the read can therefore neither block the worker nor be read whole.
 
 ### Multi-file writes
 
