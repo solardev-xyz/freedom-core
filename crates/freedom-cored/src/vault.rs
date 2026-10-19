@@ -9,7 +9,8 @@
 //!   exports. That covers the 900k-round PBKDF2 and the durable write.
 //! - **Throttle:** an attempt is reserved when its job starts and settled
 //!   with the real outcome when the KDF actually ends, even if the request
-//!   was already answered.
+//!   was already answered. Every job that checks a password reserves one,
+//!   `vault.reconcile` included unless it reconciles a delete (#78).
 //! - **Commit point:** each job shares a [`JobControl`] with the loop. The
 //!   commit point is the worker's atomic claim immediately before the rename
 //!   or unlink. Until then the loop can abandon the job and answer at once
@@ -203,8 +204,13 @@ pub enum JobOutput {
         result: Result<(), OpError>,
         commit: Option<Commit>,
     },
-    /// reconcile: `None` when the operation didn't commit.
-    Reconciled(Result<Option<Reconciled>, OpError>),
+    /// reconcile: `None` when the operation didn't commit. `tried` is the
+    /// throttle outcome of its decrypt (`NotTried` when it decrypted
+    /// nothing).
+    Reconciled {
+        result: Result<Option<Reconciled>, OpError>,
+        tried: Outcome,
+    },
     /// nodes.write_identity: the journal outcome and the public identity.
     NodeWritten(Result<(journal::Outcome, serde_json::Map<String, serde_json::Value>), OpError>),
     /// nodes.op_status.
@@ -241,7 +247,7 @@ impl JobOutput {
             // Unlock and reconcile are read-only; node writes don't touch the
             // vault file.
             JobOutput::Unlocked(_)
-            | JobOutput::Reconciled(_)
+            | JobOutput::Reconciled { .. }
             | JobOutput::NodeWritten(_)
             | JobOutput::OpStatus(_) => None,
         }
@@ -300,16 +306,29 @@ enum Kind {
 }
 
 impl Kind {
-    /// Reconcile isn't throttled: it checks a password main itself sent.
+    /// Whether the job checks a password, and so reserves a throttle attempt
+    /// first.
+    ///
+    /// `vault.reconcile` does (#78): the core can't tell main's own
+    /// reconciliation from a later call with a made-up `fingerprint_before`,
+    /// and unthrottled it would be a password oracle (and, for `create`, a
+    /// way to the phrase while locked). An honest reconcile loses nothing:
+    /// it follows a restart, so the counter starts at zero, and it sends the
+    /// right password. A delete's reconcile decrypts nothing.
     fn throttled(&self) -> bool {
-        !matches!(
-            self,
+        match self {
+            Kind::Unlock { .. }
+            | Kind::Verify { .. }
+            | Kind::ChangePassword { .. }
+            | Kind::Delete { .. }
+            | Kind::ExportMnemonic { .. }
+            | Kind::ExportPrivateKey { .. } => true,
+            Kind::Reconcile { op, .. } => *op != ReconcileOp::Delete,
             Kind::Create { .. }
-                | Kind::Import { .. }
-                | Kind::Reconcile { .. }
-                | Kind::NodeWrite { .. }
-                | Kind::OpStatus { .. }
-        )
+            | Kind::Import { .. }
+            | Kind::NodeWrite { .. }
+            | Kind::OpStatus { .. } => false,
+        }
     }
 }
 
@@ -1172,7 +1191,7 @@ impl Vault {
             } => (
                 RunningKind::Reconcile { install },
                 Box::new(move |dir, control| {
-                    JobOutput::Reconciled(job_reconcile(
+                    let (result, tried) = job_reconcile(
                         dir,
                         op,
                         before.as_deref(),
@@ -1180,7 +1199,8 @@ impl Vault {
                         mnemonic.as_ref(),
                         install,
                         control,
-                    ))
+                    );
+                    JobOutput::Reconciled { result, tried }
                 }),
             ),
             Kind::NodeWrite { op_id, spec, keys } => (
@@ -1352,7 +1372,7 @@ impl Vault {
                     .map_err(|e| e.body(false));
                 (Outcome::NotTried, reply)
             }
-            (RunningKind::Reconcile { install }, JobOutput::Reconciled(result)) => {
+            (RunningKind::Reconcile { install }, JobOutput::Reconciled { result, tried }) => {
                 let reply = match result {
                     Err(error) => Err(error.body(false)),
                     Ok(None) => Ok(json_result(
@@ -1376,7 +1396,7 @@ impl Vault {
                         reconcile_reply(request, found.addresses.as_ref(), found.phrase.as_ref())
                     }
                 };
-                (Outcome::NotTried, reply)
+                (tried, reply)
             }
             _ => (Outcome::NotTried, Err(internal())),
         };
@@ -1512,10 +1532,10 @@ fn throttle_outcome(output: &JobOutput) -> Outcome {
         JobOutput::Checked { result, .. } | JobOutput::Changed { result, .. } => {
             result.as_ref().map(|_| ())
         }
-        JobOutput::Written { .. }
-        | JobOutput::Reconciled(_)
-        | JobOutput::NodeWritten(_)
-        | JobOutput::OpStatus(_) => return Outcome::NotTried,
+        JobOutput::Reconciled { tried, .. } => return *tried,
+        JobOutput::Written { .. } | JobOutput::NodeWritten(_) | JobOutput::OpStatus(_) => {
+            return Outcome::NotTried;
+        }
     };
     match result {
         Ok(_) => Outcome::Success,
@@ -1987,7 +2007,10 @@ type NewVault = (Prepared, Addresses, Option<Mnemonic>);
 /// | delete | a vault before, none now |
 ///
 /// A wrong password or a mismatch is `Ok(None)` (not committed); only
-/// storage errors are errors.
+/// storage errors are errors. The second value is the decrypt's throttle
+/// outcome: the job decrypts only when the file has the committed shape, so
+/// only then does it settle the attempt the loop reserved as anything but
+/// `NotTried` (#78).
 fn job_reconcile(
     dir: &Path,
     op: ReconcileOp,
@@ -1996,16 +2019,20 @@ fn job_reconcile(
     requested: Option<&Mnemonic>,
     install: bool,
     control: &JobControl,
-) -> Result<Option<Reconciled>, OpError> {
+) -> (Result<Option<Reconciled>, OpError>, Outcome) {
+    let untried = |result| (result, Outcome::NotTried);
     if control.abandoned() {
-        return Err(OpError::Abandoned);
+        return untried(Err(OpError::Abandoned));
     }
-    let contents = read_vault(dir)?;
+    let contents = match read_vault(dir) {
+        Ok(contents) => contents,
+        Err(error) => return untried(Err(error)),
+    };
     let now = contents.as_deref().map(|c| sha256_hex(c.as_bytes()));
     let changed = now.as_deref() != before;
     let Some(contents) = contents else {
         let deleted = op == ReconcileOp::Delete && before.is_some();
-        return Ok(deleted.then(Reconciled::default));
+        return untried(Ok(deleted.then(Reconciled::default)));
     };
     let committed_shape = match op {
         ReconcileOp::Delete => false,
@@ -2013,19 +2040,23 @@ fn job_reconcile(
         ReconcileOp::Import | ReconcileOp::ChangePassword => changed,
     };
     if !committed_shape {
-        return Ok(None);
+        return untried(Ok(None));
     }
-    let Ok(opened) = format::open(&contents, password.as_bytes()) else {
-        return Ok(None);
+    let opened = match format::open(&contents, password.as_bytes()) {
+        Ok(opened) => opened,
+        // A wrong password counts as a failed attempt, as for unlock.
+        Err(error) => return (Ok(None), OpError::from_vault(error).throttle_outcome()),
     };
-    match op {
+    // The password checked out, whatever the rest decides.
+    let tried = Outcome::Success;
+    let result = match op {
         ReconcileOp::ChangePassword => Ok(Some(Reconciled::default())),
         ReconcileOp::Import
             if requested.map(Mnemonic::phrase) != Some(opened.mnemonic.phrase()) =>
         {
             Ok(None)
         }
-        _ => {
+        _ => (|| {
             let addresses = addresses_of(&opened.mnemonic)?;
             let phrase = if op == ReconcileOp::Create {
                 Some(Mnemonic::parse(opened.mnemonic.phrase()).map_err(|_| OpError::Internal)?)
@@ -2037,8 +2068,9 @@ fn job_reconcile(
                 phrase,
                 prepared: install.then(|| Prepared::new(opened.mnemonic)),
             }))
-        }
-    }
+        })(),
+    };
+    (result, tried)
 }
 
 /// `nodes.write_identity`: builds the node's files from keys taken at job
