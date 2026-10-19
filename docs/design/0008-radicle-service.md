@@ -373,7 +373,7 @@ heartwood fetches, updates the COB cache, announces and serves on its own. So re
 
   So no panic payload, which can contain a path or a RID, reaches a log.
 - **A restart is a new generation.**
-  - The node, its policy and its key are re-read from the home, after reconciliation.
+  - The node, its stored seeding policies and its key are re-read from the home, after reconciliation. The network policy isn't stored there: it comes only from main, at spawn (`--network`), before `rad.hello`.
   - Requests captured by main before the restart fail with the old generation, as 0007's do.
   - There is no in-process restart, so instance epochs aren't needed.
   - There are no partition instances either, so 0007's lease and per-partition readiness don't apply: readiness is the node's ([Main's side](#mains-side)).
@@ -480,7 +480,8 @@ The rules this design relies on, as 0007 specifies them:
 
 Exit codes:
 - 0001's: 64, 74, 75 and 76;
-- 70 for `node_down`, or a panic outside a request.
+- 70 for `node_down`, or a panic outside a request;
+- 77 for `confinement` ([0010](0010-service-confinement.md)), before `rad.hello`. As in 0007, it is an error, not a crash: main doesn't restart it.
 
 ### Progress
 
@@ -594,6 +595,7 @@ All bounds are process-wide. The service hosts one node.
   - libgit2 runs no hooks, uses no helpers, and reads no configuration that could send it to the network: it has no global or system configuration ([Spawn](#spawn-and-lock)), and its source is a local path.
   - The working copy is read, never written: it gets no `rad` remote (deviation `import-in-process`).
   - A stop, kill or policy change during an import ends the process, and with it the import. Reconciliation at the next start handles the partial repository, and the reply is `outcome_unknown`.
+  - **If [0010](0010-service-confinement.md#the-radicle-import-d5)'s D5 chooses the one-shot import process,** the import leaves this write queue for a process of its own, which reconciles the home before it admits the import. 0010 lists what changes here.
 
 ## The blob API
 

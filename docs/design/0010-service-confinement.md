@@ -114,7 +114,8 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
 - **Its limits:**
   - **Some file calls aren't checked:**
     - before ABI 3, `truncate` on a path. A confined process can empty an outside file it can't open;
-    - on every ABI, `chmod`, `chown`, `setxattr` (POSIX ACLs included) and `utime` on a path, and metadata reads such as `stat` and `access`.
+    - on every ABI, `chmod`, `chown`, `setxattr` (POSIX ACLs included) and `utime` on a path, and metadata reads such as `stat` and `access`;
+    - on every ABI, what a descriptor does after its open. On a file the process owns, `fchmod`, `fchown`, `fsetxattr` and `futimens` work on a read-only descriptor, so a read-only grant doesn't stop them.
 
     seccomp refuses the changes (below). Metadata reads stay: names, sizes, modes and times, not contents. Landlock restricts operations, and gives no private view of the filesystem.
   - **On ABI 1, every rename or link across directories fails** with `EXDEV`, inside the grant too. libgit2 writes each loose object to `objects/tmp_object_git2_…`, then links or renames it into `objects/<xx>/`. So `freedom-radicled` can't write on ABI 1. `freedom-ipfsd`, whose SQLite files share one directory, can.
@@ -135,9 +136,17 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
 - **A denylist** of syscalls a service never makes, answered with an error rather than a kill:
   - process creation and exec: `execve`, `execveat`, and `fork`, `vfork` and `clone` without `CLONE_THREAD`. `clone3`'s flags can't be inspected, so it answers `ENOSYS`, and the C library falls back to `clone`;
   - other processes: `ptrace`, `process_vm_readv`, `process_vm_writev`, `pidfd_getfd`;
-  - **file changes Landlock doesn't check:** `truncate`, and the path forms of the metadata calls: `chmod`, `fchmodat`, `fchmodat2`, `chown`, `lchown`, `fchownat`, `setxattr`, `lsetxattr`, `removexattr`, `lremovexattr`, `setxattrat`, `removexattrat`, `file_setattr`, `utime`, `utimes`, `futimesat`, and `utimensat` with a path.
-    - The descriptor forms stay: `ftruncate`, `fchmod`, `fchown`, `fsetxattr`, `futimens`. They refuse `O_PATH` descriptors, so they reach only files that Landlock let the process open.
-    - **Who makes the path forms:** libgit2 1.9, twice, and neither fails a write. Its `chmod` probe at repository creation then records `core.filemode = false`, which a bare repository ignores. Its `utimes`, which "freshens" an object that already exists, makes it write the object again. It sets object files' modes when it creates them, not with `chmod`. SQLite uses the descriptor forms.
+  - **file changes Landlock doesn't check,** by every route, path or descriptor:
+    - `truncate` (`ftruncate` stays: it needs a descriptor open for writing, which Landlock checked);
+    - mode and owner: `chmod`, `fchmod`, `fchmodat`, `fchmodat2`, `chown`, `fchown`, `lchown`, `fchownat`;
+    - xattrs: `setxattr`, `lsetxattr`, `fsetxattr`, `setxattrat`, and the matching `removexattr` calls;
+    - times and flags: `utime`, `utimes`, `futimesat`, `utimensat`, `file_setattr`, and the `ioctl`s that set inode flags (`FS_IOC_SETFLAGS`, `FS_IOC_FSSETXATTR`).
+
+    So no file's metadata changes: not one outside the grant, nor one under a read-only grant, such as the import's source. Files in the data directory keep the modes they were created with.
+    - **Who makes them,** and none fails for it:
+      - SQLite's unix VFS (3.51) `fchmod`s a new journal or WAL file to the database's mode, and ignores a failure: the file keeps the mode its creation gave it. It calls `fchown` only as root;
+      - libgit2 1.9.6, in heartwood's bare-repository workflow, makes two path calls and no descriptor ones (shared-mode repositories would add more). Its `chmod` probe at repository creation then records `core.filemode = false`, which a bare repository ignores. Its `utimes`, which "freshens" an object that already exists, makes it write the object again. It sets object files' modes when it creates them;
+      - std and tokio make them only when asked (`set_permissions`, `set_times`, `fs::copy`). fc-service, freedom-ipfs v0.4.5 and heartwood `c208df3` don't ask. `freedom-cored` does, but isn't confined (D7).
   - **local sockets:** `socket` for any family but `AF_INET` and `AF_INET6`, and `socketpair` for anything but stream sockets. No UNIX socket (pathname or abstract), netlink or packet socket can be opened, so no local service is reachable.
     - **Who needs one:** tokio's signal driver, a stream pair. heartwood's control socket would, and 0008 turns it off upstream. Release builds resolve names without a local socket: static musl reads `/etc/resolv.conf` and `/etc/hosts` and asks the DNS server itself, and `freedom-ipfsd` has its own resolver.
     - glibc dev builds lose the NSS sources that need a socket (nscd, systemd-resolved's varlink, mDNS), and fall back to DNS.
@@ -174,6 +183,7 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
   - file reads and writes outside the profile's paths, which can be parameters such as the data directory;
   - `process-exec` and `process-fork`;
   - Mach service lookups, and connections to UNIX sockets;
+  - metadata: mode, owner, xattr and time changes are write operations of their own (`file-write-mode` and the like), which a read-only rule doesn't grant;
   - network access. A rule can allow only loopback with a port (`(remote ip "localhost:9150")`), which fits `socks5` mode.
 - **Its cost:**
   - FFI, so `unsafe`, in one reviewed place (D6);
@@ -236,8 +246,8 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
 
 | Mechanism | File reads | File writes | Child processes | Local IPC | Kernel surface | Network | Admin rights | Code | Main changes |
 |---|---|---|---|---|---|---|---|---|---|
-| Linux: Landlock | confined | confined, except path metadata | no exec of any file | abstract (ABI 6) and pathname (ABI 9) sockets | — | TCP ports (ABI 4), UDP ports (ABI 10) | no | small | none |
-| Linux: seccomp denylist | — | path metadata and `truncate` refused | refused | no local sockets | reduced | — | no | small | none |
+| Linux: Landlock | confined | confined, except metadata | no exec of any file | abstract (ABI 6) and pathname (ABI 9) sockets | — | TCP ports (ABI 4), UDP ports (ABI 10) | no | small | none |
+| Linux: seccomp denylist | — | metadata changes and `truncate` refused | refused | no local sockets | reduced | — | no | small | none |
 | macOS: Seatbelt | confined | confined | refused | confined | reduced | loopback-only possible | no | FFI, or `sandbox-exec` | D3 |
 | Windows: job and mitigations | — | — | refused | — | — | — | no | small FFI | none |
 | Windows: restricted token | confined, by ACLs | confined, by ACLs | with the job | by ACLs | — | — | no | relaunch, ACLs, a desktop | none, or a launcher |
@@ -281,7 +291,7 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
    ```
 
    - **The properties:**
-     - `files`: outside the grant, no file can be read, written or truncated, nor have its mode, owner, xattrs or times changed;
+     - `files`: outside the grant, no file can be read or written; outside the read-write grant, none can be truncated; and no file, granted or not, can have its mode, owner, xattrs, flags or times changed;
      - `exec`: no program runs, and no process is created;
      - `ipc`: no local socket or signal reaches another process;
      - `network`: in `socks5` mode, TCP reaches only Arti's port.
@@ -336,7 +346,7 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
 `rad.import_repo` reads a working copy at a path the user picks at runtime (0008, *Writes*). Landlock and Seatbelt rules are fixed once applied, and can only be narrowed. A working copy's git data may also lie outside the path the user picked. The options:
 
 1. **A one-shot import process** (recommended):
-   - Main stops the service and runs `freedom-radicled import --home … --lock-dir … --source <path>`. It takes the home gate, imports, replies as `rad.import_repo` does, and exits. Then main starts the service again.
+   - Main stops the service and runs `freedom-radicled import --home … --lock-dir … --source <path>`. The process takes the home gate, confines itself, and answers three of 0008's methods, in order: `rad.hello`, `rad.reconcile`, then `rad.import_repo`, whose `path` must be the `--source`. It exits after the import. Then main starts the service again.
    - **The repository's roots** are found before confinement, from the source's own files, without libgit2:
      - the source;
      - its git directory: `.git`, or the directory a `gitdir:` file names;
@@ -347,13 +357,22 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
    - **Every root passes main's check** ([step 7](#the-recommendation)): none is, contains, or lies inside a protected root. So a repository at the user's home is refused, since it contains Freedom's data.
    - **The grant:** read only on exactly those roots, read and write on the home, and no network: no TCP rule (ABI 4), and seccomp refuses every socket family.
    - **Unsupported layouts are refused** with `unsupported_layout`, before anything changes: a root that fails the check, or more roots or depth than the bound. Anything libgit2 then reads outside the roots, such as a configuration `include`, fails the source's open, which comes before the import starts.
+   - **A clean home first:** a stopped node doesn't prove the home clean. 0008 lets a stop reach its 5 s exit with a write or a fetch unfinished, which leaves the dirty marker, ref lock files or an unsigned namespace. So the process runs 0008's reconciliation before it admits the import:
+     - `rad.import_repo` is admitted only after `rad.reconcile` has succeeded in the same process. Before that it gets `stopped`, and nothing changes.
+     - A reconciliation that ends in `deadline` or `recovery_failed` ends the process with nothing imported, as it ends a service's start. Main shows 0008's "Radicle is still repairing its data" with Retry, or the error.
+     - Quarantines are recorded and reported as at a start.
+     - **Why repair rather than refuse a dirty home:** the procedure is this binary's own, and resumable. A refusal would make main start the service to repair, stop it, and try again, and that stop can be unclean too.
+   - **The bounds:** `rad.reconcile` keeps 0008's 300 s, with main's watchdog at 315 s. `rad.import_repo` then has its own 300 s from admission, under the process's watchdog (exit 70), with main's at 315 s. So the node is down for at most about ten minutes. Without the marker, reconciliation only removes temporary clones and ref lock files.
    - **0008's contracts hold:**
-     - **Key custody:** the import signs with the node key in the custody mode the user chose: the key file inside the home, or the sealed key `rad.start` would get. It never generates one, and with none it answers `no_identity`.
-     - **The dirty marker:** written durably before the import starts. It is removed after a proven success only if the process found none at start. Any other end leaves it, and the service's next start reconciles.
-     - **The bound:** 300 s, under the process's own watchdog (exit 70), with main's at 315 s.
+     - **Key custody:** the import, and any re-signing during reconciliation, use the node key in the custody mode the user chose: the key file inside the home, or the sealed key `rad.start` would get. The process never generates one, and with none it answers `no_identity`.
+     - **The dirty marker:** as in a service's run. Reconciliation writes it before changing anything, and it stays while the process runs. It is removed at the exit only when no write is uncertain: after a proven import, or a refusal before the mutation. Any other end leaves it, and the service's next start reconciles again.
      - **Outcomes:** a failure before the mutation starts is definitive (`invalid_argument`, `unsupported_layout`). After it, only a success is proven. An error, a crash, a kill or the deadline is `outcome_unknown`.
      - **Upstream:** libradicle's import runs on storage, without a running node. The node announces the repository with its inventory at its next start.
-   - **Cost:** the node is down for the import. Imports are rare, user-started, and bounded at 300 s.
+   - **What 0008 gains, if this is chosen:**
+     - the `import` subcommand, with its three methods and the admission rule above;
+     - `rad.import_repo` leaves the service's write queue, and with it the need to hold the node exclusively;
+     - main's `importRepo` stops the service, runs the import process, and starts the service again. It still refuses private partitions.
+   - **Cost:** the node is down for the import, and for any repair before it. Imports are rare and user-started.
 2. **A read-only grant on the user's home,** or on a root the user configures:
    - **For:** simple.
    - **Against:** a `freedom-radicled` compromise can then read the user's files, Freedom's own included. Landlock can't express "the home except these directories".
@@ -369,8 +388,9 @@ Through the binary, in CI's job for each OS:
 - **Files:**
   - two canary files, one in a sibling of the data directory and one in the user's home: reading and writing either fails once the service is confined;
   - on the same canaries: `truncate`, `chmod`, `chown`, `setxattr` and `utimensat` with a path all fail, and the size, mode, xattrs and times are unchanged. `stat` succeeds: the accepted residual;
+  - **a read-only grant:** a file in the import's source, opened read-only. `fchmod`, `fsetxattr` and `futimens` on its descriptor fail, and the parent sees its mode, xattrs and times unchanged. On macOS, the same through the profile;
   - **per ABI,** with each ABI's rights on CI's kernel: on ABIs 1 and 2, seccomp's `truncate` rule holds; on ABI 1, `freedom-radicled` reports `files` as `unavailable`, and `freedom-ipfsd` passes its contract suite;
-  - libgit2's two path calls, refused: a repository is created, and an existing object is written again, without error;
+  - **qualification under the metadata rule:** SQLite creates and checkpoints its journal and WAL, and libgit2 creates a repository, writes loose objects and packs, and writes an existing object again, all without error;
   - a resolver file replaced by a rename while the service runs: still readable through its directory's grant; in `/etc`, discovery reports `unknown`;
   - the service still passes its contract suite confined.
 - **Threads:** a test hook reads a canary from every kind of thread the real binary has: the main thread, the log writer, the reader, writer, stdin and lifecycle threads, a runtime worker and a blocking-pool thread. Each fails. A hook that starts a thread before `confine` makes the service exit 77.
@@ -400,7 +420,8 @@ Through the binary, in CI's job for each OS:
   - a working copy outside the home; a linked worktree; a separate git directory; alternates; a symlink out of the source;
   - a source that contains a protected root: refused;
   - the helper opens no socket, and a canary listener sees nothing;
-  - a kill and a timeout during the import, then a restart: the marker stays, the service reconciles, and the reply is `outcome_unknown`.
+  - a kill and a timeout during the import, then a restart: the marker stays, the service reconciles, and the reply is `outcome_unknown`;
+  - **an unclean stop before admission:** a write and a fetch unfinished at the stop's 5 s exit, leaving the marker and a ref lock file. The import process repairs them before it admits the import. A `rad.import_repo` sent before `rad.reconcile` has replied gets `stopped` and changes nothing. A reconciliation that reaches its deadline imports nothing.
 - **Windows:** the job is assigned inside libuv's job, and each mitigation reads back as set.
 - **Before shipping, measured:**
   - cold start to `hello`;
@@ -425,7 +446,7 @@ Through the binary, in CI's job for each OS:
   - the job object and mitigation policies now; then a restricted token with a relaunch, once a spike qualifies DNS, Winsock, NAT64 discovery and the desktop; AppContainer only if that fails (recommended);
   - or a restricted token now, with the relaunch, ACLs on the data directories and a desktop;
   - or AppContainer now, with a launcher, ACLs on the data directories and a loopback exemption for Arti.
-- **D5. The Radicle import:** a one-shot import process over the checked repository roots (recommended), a read-only home grant, staging by main, or handle passing.
+- **D5. The Radicle import:** a one-shot import process that reconciles the home first and reads only the checked repository roots (recommended), a read-only home grant, staging by main, or handle passing.
 - **D6. Code:**
   - the `landlock` crate (MIT or Apache-2.0) and `seccompiler` (Apache-2.0 or BSD-3-Clause), which keep their `unsafe` inside them, pinned to exact versions (today `landlock` 0.4.7 and `seccompiler` 0.5.0). Each mechanism maps to one status: Landlock's from its `RestrictionStatus` and the kernel's ABI; seccomp's from installing both filters; each Windows mitigation from its read-back;
   - or hand-written FFI. The macOS and Windows calls need FFI either way. `fc-service` makes its few Windows calls today under a reviewed `#[allow(unsafe_code)]` (#103), and #116 proposes `fc-sys` as the one home for such calls, `close_range` included. Either way, AGENTS.md rule 6 governs where the `unsafe` may live.

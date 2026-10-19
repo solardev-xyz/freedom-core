@@ -218,7 +218,7 @@ Electron main (profile P)
 
 ### Crashes, hangs and restarts
 
-- **A crash** is any exit main didn't ask for, other than 64, 74 or 75. Exit 76 (`protocol`, which includes 0001's 30 s writer stall) is a crash too, as it is for the core. On a crash:
+- **A crash** is any exit main didn't ask for, other than 64, 74, 75 or 77. Exit 76 (`protocol`, which includes 0001's 30 s writer stall) is a crash too, as it is for the core. On a crash:
   - every pending head is rejected and every open body errors as truncated, with `freedom-ipfs service exited`;
   - `up` is false until a new generation has completed `ipfs.hello` and `ipfs.start`;
   - main restarts after 0.5 s, 2 s, then 10 s;
@@ -231,6 +231,7 @@ Electron main (profile P)
   - 64 (usage);
   - 74 (`storage`);
   - 75 (`lock_held`);
+  - 77 (`confinement`): [0010](0010-service-confinement.md)'s confinement found its own policy invalid, or, if D2 fails closed, a mechanism missing;
   - a handshake protocol mismatch, which is a packaging bug;
   - an `ipfs.start` that fails with `storage`, for example a store that won't open, as `start()` returning `false` is today.
 
@@ -535,7 +536,8 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
   Main errors the body with `freedom-ipfs native request cancelled` for the first, and with today's `freedom-ipfs native read failed` for the others.
 - **Exit codes:**
   - 0001's: 64, 74, 75 and 76;
-  - 70 for `teardown_unproven`, and for a panic or unexpected end outside a request.
+  - 70 for `teardown_unproven`, and for a panic or unexpected end outside a request;
+  - 77 for `confinement` ([0010](0010-service-confinement.md)), before `ipfs.hello`.
 
 ### Stats
 
