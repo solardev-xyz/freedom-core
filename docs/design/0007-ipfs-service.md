@@ -9,7 +9,7 @@
   - `dweb/plan-executor.js` and `dweb/fetch-admission.js`;
   - `core/core-client.js` and `core/frame.js`;
   - `scripts/fetch-freedom-ipfs-native.js`.
-- **freedom-ipfs** v0.4.5 (`9316571`), the release freedom-browser pins. Line references below are to that tag:
+- **freedom-ipfs** v0.4.6 (`ee6b95c`), the release freedom-browser pins on `integration/rust-core` (`485819a9`). It changes only dependencies, so its source is v0.4.5's, which the commit above pins. Line references below are to that tag:
   - `mob` is `crates/freedom-ipfs-mobile/src/lib.rs`;
   - `rt`, `rv`, `ns` and `st` are the `lib.rs` of the routing, retrieval, namesys and store crates.
 
@@ -145,7 +145,7 @@ Electron main (profile P)
   - `FREEDOM_IPFSD_PATH` is honored only when `!app.isPackaged`, as `FREEDOM_CORED_PATH` is.
 - **The environment** is cleared except for `PATH`, `HOME`/`USERPROFILE`, `LANG`, `RUST_LOG` and `SystemRoot` (`core-client.js`'s `scrubbedEnv`). That drops:
   - the proxy variables `reqwest` would otherwise read;
-  - the `FREEDOM_IPFS_*` tuning variables freedom-ipfs's retrieval crate reads.
+  - the `FREEDOM_IPFS_*` tuning variables freedom-ipfs's routing and retrieval crates read.
 - **Handshake:** `ipfs.hello` must complete within 10 s of spawn. Both sides enforce this, as for `core.hello`.
 - **No listening socket.** The service binds nothing. Upstream's loopback HTTP gateway is never started.
 - **Hardening:** 0001's, for both kinds of process:
@@ -408,7 +408,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 { "type": "request", "id": 1, "method": "ipfs.hello",
   "params": { "protocol": 1, "shell_version": "0.9.0", "frames": ["stream"] } }
 { "type": "response", "id": 1, "result": { "protocol": 1, "service_version": "0.1.0",
-  "freedom_ipfs": { "version": "0.4.5", "git_commit": "9316571…" }, "kind": "persistent" } }
+  "freedom_ipfs": { "version": "0.4.6", "git_commit": "ee6b95c…" }, "kind": "persistent" } }
 
 { "type": "request", "id": 2, "method": "ipfs.start", "params": {
     "instance": "p-1",                                              // never reused within the process
@@ -436,7 +436,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 | `ipfs.shutdown` | none | none: the process exits | main kills after 5 s |
 
 - **`ipfs.start`:**
-  - The values above are exactly today's (v0.4.5's defaults where the add-on passes 0), sent explicitly.
+  - The values above are exactly today's (v0.4.6's defaults where the add-on passes 0), sent explicitly.
   - The persistent process accepts one `disk` instance at a time. The ephemeral process accepts only `memory` instances of at most 32 MiB, and at most 8 of them.
   - A start is admitted only within the free [budget](#budgets). Anything else is `invalid_argument`, or `busy` when the budget isn't free.
 - **`ipfs.request`:**
@@ -705,7 +705,7 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   - **`/dnsaddr`** needs TXT records. Under a proxy they come from DoH through the proxied client, as Bitswap's address expansion already uses DoH (`rv:9435`).
   - An embedded Tor client (`arti-client`) is not used: Freedom already runs Arti, and a second Tor client in the service would duplicate it.
 - **Arti** answers Tor's SOCKS `RESOLVE` extension (command `0xF0`), resolving a name through the Tor network. A qualification test checks the pinned Arti's support before the setting ships ([The gate](#the-gate), *The SOCKS contract*).
-- **freedom-ipfs v0.4.5 honors none of this:**
+- **freedom-ipfs v0.4.6 honors none of this:**
   - the clients and transports are built inside the crates;
   - QUIC is always added (`rt:1597`, `rv:8825`);
   - the DoH resolver is fixed at `mob:2226` and `rv:9436`, `9484` and `9531`;
@@ -810,7 +810,7 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
 - **Redirects re-select the route:** the service's redirect loop picks the client per hop. An onion URL that redirects to a clearnet name moves to the ordinary client, with `RESOLVE` and the gate. A clearnet URL that redirects to an onion moves to the onion client, in `socks5` mode only.
 
 **Redirect behavior** is part of parity:
-- v0.4.5's provider client follows no redirect (`rv:11136`), while its routing and DoH clients follow reqwest's default (`rt:1807`, `ns:828`).
+- v0.4.6's provider client follows no redirect (`rv:11136`), while its routing and DoH clients follow reqwest's default (`rt:1807`, `ns:828`).
 - The service keeps each client's acceptance (the provider client, none; the routing and DoH clients, up to 10 hops, as reqwest's default allows) in its own redirect loop, with the gate on every hop (deviation `redirect-gate`).
 
 ### Changing the policy
@@ -896,7 +896,7 @@ Four options. A new repository is the user's decision; this design recommends th
      - freedom-browser's fetch-and-verify script pattern, extended to a second asset;
      - the same lints, copied into its manifest, since workspace lints don't cross workspaces.
    - **Its own workspace,** excluded from the core's (`exclude = ["services"]`).
-   - **Its own `Cargo.lock` and `deny.toml`** keep the core's dependency graph as it is. v0.4.5 alone locks 453 packages, against the core's 133:
+   - **Its own `Cargo.lock` and `deny.toml`** keep the core's dependency graph as it is. v0.4.6 alone locks 457 packages, against the core's 134:
      - a libp2p advisory can't block a vault fix;
      - the core's `cargo deny` stays strict;
      - the new graph brings C code (SQLite, `ring`) and at least one license the core doesn't allow: `webpki-roots` 1.x's CDLA-Permissive-2.0, per its published metadata, which `cargo deny` will confirm.

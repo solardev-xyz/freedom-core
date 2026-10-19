@@ -412,7 +412,7 @@ freedom-ipfs and libradicle run inside Electron main today. Any Rust panic in ei
   - the proxy and onion configuration, as a new capability for both;
   - an ephemeral node, or a cache partition, for private windows, which today share the persistent IPFS cache;
   - for libradicle, a new blob API returning raw, chunked or ranged bytes, since today's binaries are dropped and text is decoded lossily.
-- **Each gets its own design,** written against the pinned upstream source: freedom-ipfs v0.4.5 and libradicle v0.8.0. The research read older sources.
+- **Each gets its own design,** written against the pinned upstream source: freedom-ipfs v0.4.6 and libradicle v0.8.0. The research read older sources.
 
 ## Tests first (4.7)
 
