@@ -17,7 +17,7 @@ use std::ops::Deref;
 ///
 /// A string without lone surrogates (the common case) holds its text and
 /// nothing else: no allocation beyond the text.
-#[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Default, PartialEq, Eq, Hash)]
 pub struct JsString {
     /// The text, each lone surrogate as U+FFFD.
     text: Box<str>,
@@ -27,7 +27,7 @@ pub struct JsString {
 
 /// Lone surrogates: the byte offset in the text of the U+FFFD that stands
 /// for each, and the surrogate, in order.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct LoneUnits(Vec<(u32, u16)>);
 
 impl JsString {
@@ -86,10 +86,22 @@ impl JsString {
 
     /// What it holds on the heap: its text, and its lone surrogates' list.
     pub fn heap_bytes(&self) -> usize {
-        let lone = self.lone.as_deref().map_or(0, |l| {
-            std::mem::size_of::<LoneUnits>() + l.0.capacity() * std::mem::size_of::<(u32, u16)>()
+        self.allocations().iter().sum()
+    }
+
+    /// The sizes of its separate heap allocations: the text, and, when it
+    /// holds lone surrogates, their box and that list's buffer. Each is a
+    /// separate allocation, so each is charged on its own
+    /// ([`crate::allocation`]). An absent one is 0.
+    pub fn allocations(&self) -> [usize; 3] {
+        let (boxed, buffer) = self.lone.as_deref().map_or((0, 0), |l| {
+            (
+                std::mem::size_of::<LoneUnits>(),
+                l.0.capacity()
+                    .saturating_mul(std::mem::size_of::<(u32, u16)>()),
+            )
         });
-        self.text.len() + lone
+        [self.text.len(), boxed, buffer]
     }
 
     /// Whether the U+FFFD at byte `at` stands for a lone surrogate.
@@ -162,6 +174,19 @@ impl Iterator for Units<'_> {
         } else {
             Some(encoded[0])
         }
+    }
+}
+
+/// JavaScript's order: by UTF-16 code units, as `<` compares strings.
+impl Ord for JsString {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.units().cmp(other.units())
+    }
+}
+
+impl PartialOrd for JsString {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -298,5 +323,30 @@ mod tests {
         assert_eq!(quote(&[0xd800]), r#""\ud800""#);
         assert_eq!(quote(&[0xfffd, 0xdc00]), "\"\u{FFFD}\\udc00\"");
         assert_eq!(quote(&units("a\"\\\n\u{1}")), r#""a\"\\\n\u0001""#);
+    }
+
+    #[test]
+    fn order_is_utf16_order() {
+        let s = |units: &[u16]| JsString::from_units(units);
+        // As in V8: '\ud800' < '\ufffd', and '\u{10000}' < '\ue000'.
+        assert!(s(&[0xd800]) < s(&[0xfffd]));
+        assert!(s(&[0xd800, 0xdc00]) < s(&[0xe000]));
+        assert!(s(&[0xdc00]) > s(&[0xd800]));
+        assert!(s(&[0x61]) < s(&[0x61, 0xd800]));
+        // Order agrees with equality for every single unit.
+        let all: Vec<JsString> = (0..=u16::MAX).map(|u| s(&[u])).collect();
+        assert!(all.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn each_allocation_is_counted() {
+        let plain = JsString::from("abc");
+        assert_eq!(plain.allocations(), [3, 0, 0]);
+        let lone = JsString::from_units(&[0xd800]);
+        let [text, boxed, buffer] = lone.allocations();
+        assert_eq!(text, 3);
+        assert_eq!(boxed, std::mem::size_of::<LoneUnits>());
+        assert!(buffer >= std::mem::size_of::<(u32, u16)>());
+        assert_eq!(lone.heap_bytes(), text + boxed + buffer);
     }
 }

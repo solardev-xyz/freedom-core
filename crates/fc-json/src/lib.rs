@@ -184,10 +184,12 @@ impl JsValue {
     }
 }
 
-/// What a string holds on the heap, as an allocator lays it out.
+/// What a string holds on the heap, as an allocator lays it out: each of
+/// its allocations charged on its own.
 fn string_held(text: &JsString) -> usize {
-    let lone = text.heap_bytes().saturating_sub(text.len());
-    allocation(text.len()).saturating_add(allocation(lone))
+    text.allocations()
+        .iter()
+        .fold(0usize, |held, &size| held.saturating_add(allocation(size)))
 }
 
 /// `Array.prototype.join(',')`, nested arrays included, without recursion:
@@ -657,6 +659,42 @@ fn stringify_into(value: &JsValue, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lone_surrogate_string_is_charged_per_allocation() {
+        let charge = |text: &JsString| -> usize {
+            text.allocations()
+                .iter()
+                .map(|&size| allocation(size))
+                .sum()
+        };
+        let value = parse(r#""\ud800""#).unwrap();
+        let JsValue::String(text) = &value else {
+            panic!("a string")
+        };
+        let [_, boxed, buffer] = text.allocations();
+        assert!(boxed > 0 && buffer > 0);
+        assert_eq!(value.held(), charge(text));
+        let copy = value.clone();
+        let JsValue::String(copied) = &copy else {
+            panic!("a string")
+        };
+        assert_eq!(copy.held(), charge(copied));
+        #[cfg(target_pointer_width = "64")]
+        {
+            // 3 bytes of text, a 24-byte box and a 32-byte list: 32 + 32 + 48.
+            assert_eq!(value.held(), 112);
+            // A clone's list is exact (8 bytes): 32 + 32 + 32.
+            assert_eq!(copy.held(), 96);
+        }
+        // Keys are charged the same way.
+        let object = parse(r#"{"\ud800":1}"#).unwrap();
+        let JsValue::Object(props) = &object else {
+            panic!("an object")
+        };
+        let slots = allocation(props.capacity() * std::mem::size_of::<(JsString, JsValue)>());
+        assert_eq!(object.held(), slots + charge(&props[0].0));
+    }
 
     #[test]
     fn parses_like_v8() {
