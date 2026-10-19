@@ -87312,6 +87312,558 @@
       ]
     },
     {
+      "id": "boundary-quorum-duplicate-endpoint",
+      "from": "design 0005: Configuration; deviation endpoint-dedup",
+      "deviation": "endpoint-dedup",
+      "world": {
+        "chains": {
+          "1": {
+            "network": {
+              "access": {
+                "readOrder": [
+                  "quorum",
+                  "direct"
+                ],
+                "broadcastOrder": [
+                  "myotis",
+                  "direct"
+                ]
+              },
+              "quorum": {
+                "k": 3,
+                "m": 2,
+                "timeoutMs": 5000
+              }
+            },
+            "rpc": [
+              "https://a.example",
+              "https://a.example",
+              "https://b.example"
+            ],
+            "prover": [
+              "https://prover.example"
+            ]
+          }
+        },
+        "rpc": {
+          "https://a.example": {
+            "result": "0xdead",
+            "delay": 100
+          },
+          "https://b.example": {
+            "result": "0xbeef",
+            "delay": 50
+          }
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_call",
+              "params_json": "[{\"to\":\"0xabc\"},\"latest\"]",
+              "include_trust": true,
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"0xdead\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"quorum\""
+                },
+                {
+                  "key": "verified",
+                  "json": "true"
+                },
+                {
+                  "key": "trust",
+                  "json": "{\"level\":\"verified\",\"method\":\"quorum\",\"block\":null,\"agreed\":[\"a.example\",\"a.example\"],\"dissented\":[\"b.example\"],\"queried\":[\"a.example\",\"a.example\",\"b.example\"],\"quorum\":{\"k\":3,\"m\":2,\"achieved\":true}}"
+                }
+              ],
+              "settled": 100
+            }
+          ],
+          "state": {}
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://a.example",
+          "method": "eth_call",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\"},\"latest\"]}",
+          "end": 100,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0xdead\"}"
+          }
+        },
+        {
+          "id": 1,
+          "step": 0,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://a.example",
+          "method": "eth_call",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\"},\"latest\"]}",
+          "end": 100,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0xdead\"}"
+          }
+        },
+        {
+          "id": 2,
+          "step": 0,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://b.example",
+          "method": "eth_call",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\"},\"latest\"]}",
+          "end": 50,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0xbeef\"}"
+          }
+        }
+      ]
+    },
+    {
+      "id": "boundary-quorum-singleton-not-verified",
+      "from": "design 0005: Evidence for labels; deviation singleton-quorum",
+      "deviation": "singleton-quorum",
+      "world": {
+        "chains": {
+          "1": {
+            "network": {
+              "access": {
+                "readOrder": [
+                  "quorum"
+                ],
+                "broadcastOrder": [
+                  "myotis",
+                  "direct"
+                ]
+              },
+              "quorum": {
+                "k": 3,
+                "m": 1,
+                "timeoutMs": 5000
+              }
+            },
+            "rpc": [
+              "https://a.example",
+              "https://b.example",
+              "https://c.example"
+            ],
+            "prover": [
+              "https://prover.example"
+            ]
+          }
+        },
+        "sourceList": [
+          {
+            "id": "mine",
+            "builtin": false
+          }
+        ],
+        "rpc": {
+          "https://a.example": {
+            "result": "0x1",
+            "delay": 100
+          },
+          "https://b.example": {
+            "result": "0x2",
+            "delay": 200
+          },
+          "https://c.example": {
+            "hang": true
+          }
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_call",
+              "params_json": "[{\"to\":\"0xabc\"},\"latest\"]",
+              "include_trust": true,
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"0x1\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"quorum\""
+                },
+                {
+                  "key": "verified",
+                  "json": "true"
+                },
+                {
+                  "key": "trust",
+                  "json": "{\"level\":\"verified\",\"method\":\"quorum\",\"block\":null,\"agreed\":[\"a.example\"],\"dissented\":[],\"queried\":[\"a.example\",\"b.example\",\"c.example\"],\"quorum\":{\"k\":3,\"m\":1,\"achieved\":true}}"
+                }
+              ],
+              "settled": 100
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 100,
+          "world": {
+            "chains": {
+              "1": {
+                "network": {
+                  "access": {
+                    "readOrder": [
+                      "quorum"
+                    ],
+                    "broadcastOrder": [
+                      "myotis",
+                      "direct"
+                    ]
+                  },
+                  "quorum": {
+                    "k": 3,
+                    "m": 1,
+                    "timeoutMs": 5000
+                  }
+                },
+                "rpc": [
+                  "https://a.example",
+                  "https://b.example",
+                  "https://c.example"
+                ],
+                "prover": [
+                  "https://prover.example"
+                ],
+                "sources": [
+                  {
+                    "id": "mine",
+                    "coverage": {
+                      "1": "https://a.example"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_call",
+              "params_json": "[{\"to\":\"0xabc\"},\"latest\"]",
+              "include_trust": true,
+              "started": 100
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"0x1\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"quorum\""
+                },
+                {
+                  "key": "verified",
+                  "json": "true"
+                },
+                {
+                  "key": "trust",
+                  "json": "{\"level\":\"verified\",\"method\":\"quorum\",\"block\":null,\"agreed\":[\"a.example\"],\"dissented\":[],\"queried\":[\"a.example\",\"b.example\",\"c.example\"],\"quorum\":{\"k\":3,\"m\":1,\"achieved\":true}}"
+                }
+              ],
+              "settled": 200
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 200,
+          "world": {
+            "rpc": {
+              "https://a.example": {
+                "rules": [
+                  {
+                    "when": {
+                      "method": "eth_gasPrice"
+                    },
+                    "then": {
+                      "result": "0x10",
+                      "delay": 100
+                    }
+                  }
+                ],
+                "else": {
+                  "result": "0x1",
+                  "delay": 100
+                }
+              },
+              "https://b.example": {
+                "rules": [
+                  {
+                    "when": {
+                      "method": "eth_gasPrice"
+                    },
+                    "then": {
+                      "result": "0x20",
+                      "delay": 200
+                    }
+                  }
+                ],
+                "else": {
+                  "result": "0x2",
+                  "delay": 200
+                }
+              },
+              "https://c.example": {
+                "hang": true
+              }
+            }
+          },
+          "calls": [
+            {
+              "fn": "getFeeQuote",
+              "chain": 1,
+              "started": 200
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "type",
+                  "json": "\"eip1559\""
+                },
+                {
+                  "key": "baseFee",
+                  "json": "\"15\""
+                },
+                {
+                  "key": "maxPriorityFeePerGas",
+                  "json": "\"1\""
+                },
+                {
+                  "key": "maxFeePerGas",
+                  "json": "\"31\""
+                },
+                {
+                  "key": "effectiveGasPrice",
+                  "json": "\"16\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"quorum\""
+                },
+                {
+                  "key": "verified",
+                  "json": "true"
+                }
+              ],
+              "settled": 400
+            }
+          ],
+          "state": {}
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://a.example",
+          "method": "eth_call",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\"},\"latest\"]}",
+          "end": 100,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1\"}"
+          }
+        },
+        {
+          "id": 1,
+          "step": 0,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://b.example",
+          "method": "eth_call",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\"},\"latest\"]}",
+          "end": 100,
+          "outcome": "aborted"
+        },
+        {
+          "id": 2,
+          "step": 0,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://c.example",
+          "method": "eth_call",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\"},\"latest\"]}",
+          "end": 100,
+          "outcome": "aborted"
+        },
+        {
+          "id": 3,
+          "step": 1,
+          "call": 0,
+          "t": 100,
+          "kind": "rpc",
+          "url": "https://a.example",
+          "method": "eth_call",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\"},\"latest\"]}",
+          "end": 200,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1\"}"
+          }
+        },
+        {
+          "id": 4,
+          "step": 1,
+          "call": 0,
+          "t": 100,
+          "kind": "rpc",
+          "url": "https://b.example",
+          "method": "eth_call",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\"},\"latest\"]}",
+          "end": 200,
+          "outcome": "aborted"
+        },
+        {
+          "id": 5,
+          "step": 1,
+          "call": 0,
+          "t": 100,
+          "kind": "rpc",
+          "url": "https://c.example",
+          "method": "eth_call",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\"},\"latest\"]}",
+          "end": 200,
+          "outcome": "aborted"
+        },
+        {
+          "id": 6,
+          "step": 2,
+          "call": 0,
+          "t": 200,
+          "kind": "rpc",
+          "url": "https://a.example",
+          "method": "eth_gasPrice",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_gasPrice\",\"params\":[]}",
+          "end": 300,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x10\"}"
+          }
+        },
+        {
+          "id": 7,
+          "step": 2,
+          "call": 0,
+          "t": 200,
+          "kind": "rpc",
+          "url": "https://b.example",
+          "method": "eth_gasPrice",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_gasPrice\",\"params\":[]}",
+          "end": 300,
+          "outcome": "aborted"
+        },
+        {
+          "id": 8,
+          "step": 2,
+          "call": 0,
+          "t": 200,
+          "kind": "rpc",
+          "url": "https://c.example",
+          "method": "eth_gasPrice",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_gasPrice\",\"params\":[]}",
+          "end": 300,
+          "outcome": "aborted"
+        },
+        {
+          "id": 9,
+          "step": 2,
+          "call": 0,
+          "t": 300,
+          "kind": "rpc",
+          "url": "https://a.example",
+          "method": "eth_maxPriorityFeePerGas",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_maxPriorityFeePerGas\",\"params\":[]}",
+          "end": 400,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1\"}"
+          }
+        },
+        {
+          "id": 10,
+          "step": 2,
+          "call": 0,
+          "t": 300,
+          "kind": "rpc",
+          "url": "https://b.example",
+          "method": "eth_maxPriorityFeePerGas",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_maxPriorityFeePerGas\",\"params\":[]}",
+          "end": 400,
+          "outcome": "aborted"
+        },
+        {
+          "id": 11,
+          "step": 2,
+          "call": 0,
+          "t": 300,
+          "kind": "rpc",
+          "url": "https://c.example",
+          "method": "eth_maxPriorityFeePerGas",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_maxPriorityFeePerGas\",\"params\":[]}",
+          "end": 400,
+          "outcome": "aborted"
+        }
+      ]
+    },
+    {
       "id": "boundary-direct-user-configured-trust",
       "from": "design 0005: Direct; Replies, endpoint references",
       "world": {

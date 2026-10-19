@@ -13,7 +13,7 @@ use super::error::{FailureKind, Fallback, Prop, QuorumMiss, Thrown};
 use super::exchange::{ResultText, digest, exchange};
 use super::logs::{Keeper, LogRange};
 use super::read::SourceResult;
-use super::trust::quorum_trust;
+use super::trust::{direct_level, quorum_trust};
 use crate::logs::{LOG_RANGE_REFUSAL_CODE, LOG_SCAN_QUORUM_ROUNDS, log_range_refusal_text};
 use crate::stable::StableDigest;
 
@@ -214,7 +214,14 @@ pub(crate) async fn round(
                     .filter(|url| !group.urls.contains(url))
                     .cloned()
                     .collect();
-                quorum_trust(&group.urls, &dissented, &urls, m)
+                // m = 1 is one endpoint's answer: Direct's level for it
+                // (deviation `singleton-quorum`).
+                let level = if chain.quorum_verifies() {
+                    "verified"
+                } else {
+                    direct_level(group.urls.iter().any(|url| chain.user_configured(url)))
+                };
+                quorum_trust(level, &group.urls, &dissented, &urls, m)
             });
             Ok(SourceResult { result, trust })
         }
