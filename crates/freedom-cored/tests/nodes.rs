@@ -500,7 +500,7 @@ fn existing_node_files_are_tightened_at_adoption() {
     set(&other, 0o644);
 
     let mut core = spawn("serve", &data, &locks, &[]);
-    let hello = core.call(
+    let hello = core.call_shell(
         1,
         "core.hello",
         json!({
@@ -536,7 +536,7 @@ fn existing_node_files_are_tightened_at_adoption() {
 fn a_relative_node_root_is_ignored() {
     let (_root, data, locks) = dirs();
     let mut core = spawn("serve", &data, &locks, &[]);
-    let hello = core.call(
+    let hello = core.call_shell(
         1,
         "core.hello",
         json!({

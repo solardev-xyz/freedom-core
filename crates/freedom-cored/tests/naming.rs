@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use common::{
-    dirs, naming_recorded as recorded, naming_snapshot as snapshot, request, spawn, spawn_env,
+    dirs, naming_recorded as recorded, naming_snapshot as snapshot, request, shell_request, spawn,
+    spawn_env,
 };
 use serde_json::{Value, json};
 
@@ -323,7 +324,7 @@ fn replies_waiting_for_the_writer_survive_shutdown() {
     wait_for_marks(&marker, "made 16 replies", |marks| {
         marks.iter().filter(|mark| *mark == "reply").count() >= 16
     });
-    core.send(&request(100, "core.shutdown", json!({})));
+    core.send(&shell_request(100, "core.shutdown", json!({})));
     // Main reads again only after shutdown has ended the naming thread,
     // which hands the replies still waiting in it to the writer.
     let marks = wait_for_marks(&marker, "drained", |marks| {
@@ -428,7 +429,11 @@ fn no_shell_request_follows_the_shutdown_reply() {
         "id": first,
         "error": { "code": "network", "message": "Network error" },
     })));
-    batch.extend(common::frame(&request(501, "core.shutdown", json!({}))));
+    batch.extend(common::frame(&shell_request(
+        501,
+        "core.shutdown",
+        json!({}),
+    )));
     core.send_raw(&batch);
     core.close_stdin();
     let rest = core.rest();

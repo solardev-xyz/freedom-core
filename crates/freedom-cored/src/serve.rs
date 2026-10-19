@@ -55,6 +55,7 @@ use std::time::{Duration, Instant};
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::frame::{Frame, KIND_JSON};
 use fc_protocol::message::{self, CallerKind, Context, Message, MessageError};
+use fc_protocol::methods::{self, Admission};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use zeroize::Zeroizing;
@@ -130,8 +131,10 @@ pub enum Event {
 /// The methods `core.hello`'s capabilities name: every method this build
 /// implements but the `chain.*` methods (design 0006's `chain.html`
 /// included), which design 0005 doesn't add to them (it adds `fragments`
-/// only). Only these names, the chain methods, and in debug builds the test
-/// methods', are ever logged; anything else is logged as `<unknown>`.
+/// only). Every method, these and the chain methods, is a row of
+/// fc-protocol's method table, which says who may call it (#101); a test
+/// keeps the two in step. Only the table's names, and in debug builds the
+/// test methods', are ever logged; anything else is logged as `<unknown>`.
 const CAPABILITIES: &[&str] = &[
     "core.hello",
     "core.shutdown",
@@ -623,14 +626,37 @@ fn span(payload: &[u8], text: &RawValue) -> Range<usize> {
 
 /// A method name that is safe to log: known names only.
 fn loggable(method: &str) -> &'static str {
+    if let Some(row) = methods::method(method) {
+        return row.name;
+    }
     #[cfg(debug_assertions)]
-    let known = CAPABILITIES
-        .iter()
-        .chain(chain::METHODS)
-        .chain(testmethods::METHODS);
-    #[cfg(not(debug_assertions))]
-    let known = CAPABILITIES.iter().chain(chain::METHODS);
-    known.copied().find(|m| *m == method).unwrap_or("<unknown>")
+    if let Some(name) = testmethods::METHODS.iter().find(|m| **m == method) {
+        return name;
+    }
+    "<unknown>"
+}
+
+/// Whether `caller` may call `method` (#101): fc-protocol's method table,
+/// checked once for every request before anything is dispatched, and in
+/// debug builds the test methods, when their hook enables them. `Err` is
+/// the refusal: a method the table doesn't list is unknown; one it lists,
+/// but not for this caller, is forbidden.
+fn admitted(method: &str, caller: CallerKind, test_methods: bool) -> Result<(), ErrorBody> {
+    match methods::admit(method, caller) {
+        Admission::Allowed(_) => Ok(()),
+        Admission::Forbidden => Err(ErrorBody::new(
+            ErrorCode::Forbidden,
+            "not callable by this caller",
+        )),
+        Admission::Unknown => {
+            #[cfg(debug_assertions)]
+            if test_methods && testmethods::handles(method) && caller != CallerKind::Page {
+                return Ok(());
+            }
+            let _ = test_methods;
+            Err(ErrorBody::new(ErrorCode::UnknownMethod, "Unknown method"))
+        }
+    }
 }
 
 /// A fixed category for a malformed message; the parser's own text can quote
@@ -681,7 +707,19 @@ impl Ahead {
         }
         match Message::decode(&frame.payload) {
             // Refused in its turn: web content can't lock or shut down.
-            Ok(Message::Request { id, context, .. }) if context.caller == CallerKind::Page => {
+            // Refused in its turn: a caller the method table doesn't allow
+            // for it (web content, or the browser UI for `core.shutdown`)
+            // can't shut down or lock ahead of the requests that wait.
+            Ok(Message::Request {
+                id,
+                method,
+                context,
+                ..
+            }) if !matches!(
+                methods::admit(&method, context.caller),
+                Admission::Allowed(_)
+            ) =>
+            {
                 Ahead::Request(id)
             }
             Ok(Message::Request { id, method, .. }) => match &*method {
@@ -990,11 +1028,12 @@ impl Core {
         context: &Context,
     ) -> Flow {
         let started = Instant::now();
-        if context.caller == CallerKind::Page {
-            return self.error(
-                id,
-                ErrorBody::new(ErrorCode::Forbidden, "not callable from web content"),
-            );
+        #[cfg(debug_assertions)]
+        let test_methods = self.test.is_some();
+        #[cfg(not(debug_assertions))]
+        let test_methods = false;
+        if let Err(refusal) = admitted(method, context.caller, test_methods) {
+            return self.error(id, refusal);
         }
         let flow = match method {
             "core.hello" => self.hello(id, params),
@@ -1007,13 +1046,8 @@ impl Core {
                 }
             }
             method if Vault::handles(method) => {
-                let outs = self.vault.request(id, method, params, context.caller);
+                let outs = self.vault.request(id, method, params);
                 self.dispatch(outs)
-            }
-            // `dweb.open` is main's own (design 0006).
-            method if naming::shell_only(method) && context.caller != CallerKind::Shell => {
-                let forbidden = ErrorBody::new(ErrorCode::Forbidden, "main-internal only");
-                self.error(id, forbidden)
             }
             method if naming::handles(method) => {
                 let params = match params.map(|p| RawValue::from_string(p.to_owned())) {
@@ -1416,6 +1450,26 @@ mod tests {
         assert_eq!(ids, [1, 2, 3]);
     }
 
+    /// #101: every method served is a row of fc-protocol's method table,
+    /// and every row is served: the capabilities, then the chain methods.
+    #[test]
+    fn every_method_has_a_row_and_every_row_a_handler() {
+        let rows: Vec<&str> = methods::METHODS.iter().map(|m| m.name).collect();
+        let served: Vec<&str> = CAPABILITIES.iter().chain(chain::METHODS).copied().collect();
+        assert_eq!(rows, served);
+        for name in rows {
+            assert!(
+                matches!(name, "core.hello" | "core.shutdown")
+                    || Vault::handles(name)
+                    || naming::handles(name)
+                    || chain::handles(name),
+                "{name}"
+            );
+            assert_eq!(loggable(name), name);
+        }
+        assert_eq!(loggable("compat.root_key"), "<unknown>");
+    }
+
     #[test]
     fn only_requests_wait_and_shutdown_and_lock_are_seen_ahead() {
         let ahead = |message: serde_json::Value| {
@@ -1432,6 +1486,11 @@ mod tests {
         assert!(matches!(
             ahead(request(7, "core.shutdown", "shell")),
             Ahead::Shutdown
+        ));
+        // #101: main's own; from the browser UI it waits, to be refused.
+        assert!(matches!(
+            ahead(request(7, "core.shutdown", "chrome")),
+            Ahead::Request(7)
         ));
         assert!(matches!(
             ahead(request(7, "vault.lock", "chrome")),

@@ -156,7 +156,7 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   - **Requests that waited go one at a time** once there is room, each as if it had just arrived: after the loop's timers, and with whatever main sends meanwhile handled between them. An auto-lock that comes due while they drain therefore locks before the next one, and a `vault.touch` among them can't postpone a lock already due. A cancel or `core.shutdown` sent meanwhile is handled within one request's time, not behind the whole backlog.
   - **Memory stays bounded:** what waits is the frames the reader holds, and for each vault request admitted before the wait (one running, 32 queued) its reply and at most one event.
   - **The core exits only on a stall.** If its frames wait while the writer writes nothing for **30 s**, main has stopped reading: the core logs "main is not reading replies" and exits 76 (`protocol`). Writer progress is any frame written, whoever made it: the 30 s count from the later of the writer's last write and the moment the frames began to wait.
-    - **Why 30 s:** it is far above a healthy main's pauses, which last milliseconds to seconds, and waiting costs nothing meanwhile. It is also the longest deadline the core gives a request (the KDF methods'), which puts it between main's [hang watchdogs](#deadlines-cancellation-and-commit): 20 s for a 5 s method, 45 s for a KDF method. So the core never gives up on main sooner than main gives up on a short request, and a main that can no longer run its timers keeps it waiting no longer than main would wait for a KDF reply.
+    - **Why 30 s:** it is far above a healthy main's pauses, which last milliseconds to seconds, and waiting costs nothing meanwhile. It also sits between main's [hang watchdogs](#deadlines-cancellation-and-commit): 15 s for an immediate method, 45 s for a vault method. So the core never gives up on main sooner than main gives up on an immediate request, and a main that can no longer run its timers keeps it waiting no longer than main would wait for a vault reply. A session's longer deadline (120 s) bounds its work, not the writer, which the 30 s alone judge.
     - **Why not exit at once,** as the core first did: a burst of requests, then a fraction of a second without reading (about 256 small replies), killed the core and locked the vault.
   - **Main must keep reading** whatever the state of its own writes, as 0005 requires of both sides ("consumers never block on the writer"). Otherwise each side's writer could wait on the other.
 - **Protocol errors** are an unknown kind, an oversized frame, invalid JSON, a response that has both or neither of `result` and `error`, or an unsolicited or duplicate response. They mean a bug in main or the core: the receiver logs it and closes the connection.
@@ -189,14 +189,17 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   - `"shell"`: main-internal work with no IPC event behind it, such as the x402 client and background jobs.
   - `{ "page": { origin, top_origin, frame, navigation } }`: web content. This is reserved for Phase 2, which also defines how a page's approval binds to a key and an operation.
 
-  Each method declares the caller kinds it accepts, and the core answers anything else with `forbidden`. All Phase 1 methods accept `chrome` and `shell`.
+  Each method declares the caller kinds it accepts, in `fc-protocol`'s method table, and the core checks every request against it once, before dispatching anything (#101). A method the table doesn't list is `unknown_method`; a caller it doesn't list for the method gets `forbidden`. Nothing is allowed by default.
+  - Most methods accept `chrome` and `shell`.
+  - Main's own methods accept only `shell`: `core.hello`, `core.shutdown`, `vault.reconcile`, `nodes.op_status`, `compat.*` and `dweb.open`. A main bug that forwarded a renderer's `core.shutdown` under `chrome` would otherwise wipe the vault and, through the restart, reset the in-memory throttle.
+  - No method accepts `page` yet (Phase 2).
 - **Error codes:**
   - **Request errors:** `vault_locked`, `incorrect_password`, `throttled` (with `data.retry_after_ms`), `no_vault`, `vault_exists`, `unsupported_vault_version`, `corrupt_vault`, `invalid_mnemonic`, `invalid_argument`, `weak_password`, `storage` (with `data.kind`).
   - **Protocol-level:** `forbidden`, `busy`, `cancelled`, `deadline`, `internal`.
   - Main maps each code to the exact JS string per method; see [Parity contract](#parity-contract).
 - **Schema:**
-  - `fc-protocol` defines params, results, errors and the method table (name, caller kinds, mutation or read-only, default deadline).
-  - CI regenerates `protocol/schema.json` and fails on any difference from the committed file.
+  - `fc-protocol` defines the method table (name, caller kinds, whether it writes identity data, default deadline), errors, and message types; params and results are typed where each method is handled.
+  - `protocol/schema.json` is rendered from the table and committed. A test fails on any difference, so CI catches a stale file.
   - freedom-browser's contract test checks its proxy table against that file.
 
 ### Concurrency, epochs and revocation
@@ -228,8 +231,11 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
 ### Deadlines, cancellation and commit
 
 - **Deadlines:**
-  - A deadline is a total budget on a monotonic clock, starting when the core admits the request (queue time included). Defaults: 30 s for KDF methods, 5 s for everything else.
-  - **The core enforces deadlines and always replies.** Main doesn't settle requests on its own timer. It runs only a hang watchdog: core deadline + 15 s. If the watchdog fires, main treats the core as hung, kills it, restarts it and [reconciles](#reconciliation).
+  - A deadline is a total budget on a monotonic clock, starting when the core admits the request (queue time included). Each method has one of three classes, in the method table (`fc_protocol::methods`, and `protocol/schema.json` generated from it):
+    - **immediate:** answered at once, on the loop or its thread, with no deadline;
+    - **vault:** 30 s, for every request on the vault queue, KDF methods included;
+    - **session:** 120 s, for naming, chain and `dweb.open` sessions, or the caller's shorter `deadline_ms` where the method takes one (0004, 0005).
+  - **The core enforces deadlines and always replies.** Main doesn't settle requests on its own timer. It runs only a hang watchdog on every request: core deadline + 15 s, or 15 s for an immediate method. If the watchdog fires, main treats the core as hung, kills it, restarts it and [reconciles](#reconciliation). The process's own lifecycle has its own bounds instead: main waits 10 s for `core.hello`'s reply, and gives `core.shutdown` 3 s before it kills the process.
 - **Before the commit point,** a deadline or `cancel` stops the operation and returns `deadline` or `cancelled`. Throttle attempts are reserved before a KDF starts, so concurrent guesses can't all slip past the check.
 - **The commit point** is the worker's atomic claim immediately before the vault rename or unlink, or before the journal write of a multi-file operation. The loop and the worker race on one atomic: either the loop abandons the job first (cancel, deadline or revocation), and the job writes nothing, or the worker claims the commit first, and from then on cancel, deadline and revocation no longer apply.
 - **After the commit point,** the reply is the real outcome of the rename or unlink, even past the deadline:
