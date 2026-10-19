@@ -44,6 +44,8 @@ def json_seeds():
     write('json_parse', 'object', '{"a":[1,2.5e3,-0,true,false,null,"x"],"b":{"c":""}}')
     write('json_parse', 'escapes', '["' + BS + 'u00e9' + BS + 'n' + BS + '"' + BS + 'ud83d' + BS + 'ude00"]')
     write('json_parse', 'lone-surrogates', '{"' + BS + 'ud800":1,"' + BS + 'udfff":2,"' + BS + 'ufffd":3}')
+    # Keys that U+FFFD makes equal, merged before and after it (review of #122).
+    write('json_parse', 'lone-surrogate-keys', '{"' + BS + 'ud800":1,"b":2,"' + BS + 'udfff":3,"' + BS + 'ud800":4}')
     write('json_parse', 'property-order', '{"b":1,"2":2,"a":3,"1":4,"b":5,"4294967295":6}')
     write('json_parse', 'numbers', '[1e400,-1e-400,9007199254740993,0.1,1E+2,-0.0]')
     write('json_parse', 'deep', '[' * 600 + ']' * 600)
