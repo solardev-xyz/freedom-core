@@ -180,7 +180,38 @@ impl Iterator for Units<'_> {
 /// JavaScript's order: by UTF-16 code units, as `<` compares strings.
 impl Ord for JsString {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        if self.lone.is_none() && other.lone.is_none() {
+            return utf8_in_utf16_order(self.text.as_bytes(), other.text.as_bytes());
+        }
         self.units().cmp(other.units())
+    }
+}
+
+/// Two well-formed UTF-8 texts in UTF-16 order, without decoding: UTF-8's
+/// byte order is UTF-16's except where a char above U+FFFF (lead byte
+/// 0xF0..=0xF4) meets one in U+E000..=U+FFFF (lead byte 0xEE or 0xEF), and
+/// there the surrogate pair sorts first. A plain loop: object keys are
+/// compared often, debug builds included.
+fn utf8_in_utf16_order(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let shared = a.len().min(b.len());
+    let mut i = 0;
+    while i < shared && a[i] == b[i] {
+        i += 1;
+    }
+    let (Some(&x), Some(&y)) = (a.get(i), b.get(i)) else {
+        return a.len().cmp(&b.len());
+    };
+    // Continuation bytes (0x80..=0xBF) are neither, so this only applies
+    // where both chars start.
+    let above = |byte: u8| byte >= 0xF0;
+    let top = |byte: u8| byte == 0xEE || byte == 0xEF;
+    if above(x) && top(y) {
+        Ordering::Less
+    } else if top(x) && above(y) {
+        Ordering::Greater
+    } else {
+        x.cmp(&y)
     }
 }
 
@@ -336,6 +367,43 @@ mod tests {
         // Order agrees with equality for every single unit.
         let all: Vec<JsString> = (0..=u16::MAX).map(|u| s(&[u])).collect();
         assert!(all.windows(2).all(|w| w[0] < w[1]));
+        // Well formed, past a shared prefix: a pair sorts before U+E000..,
+        // as its high half does, though UTF-8 would put it after.
+        let wf = |text: &str| JsString::from(text);
+        assert!(wf("ab\u{10000}") < wf("ab\u{e000}"));
+        assert!(wf("ab\u{e000}") < wf("ab\u{ffff}"));
+        assert!(wf("ab") < wf("ab\u{10000}"));
+        assert!(wf("\u{10000}a") < wf("\u{10001}"));
+        assert_eq!(
+            wf("é\u{10000}").cmp(&wf("é\u{10000}")),
+            std::cmp::Ordering::Equal
+        );
+        // Every pair of chars from each UTF-8 length and the boundaries
+        // between them, behind a shared prefix, as UTF-16 orders them.
+        let chars = [
+            0x0, 0x61, 0x7f, 0x80, 0xe9, 0x7ff, 0x800, 0xd7ff, 0xe000, 0xefff, 0xf000, 0xfffd,
+            0xffff, 0x10000, 0x1f600, 0x10ffff,
+        ]
+        .map(|c| char::from_u32(c).unwrap());
+        for x in chars {
+            for y in chars {
+                let (a, b) = (format!("k{x}z"), format!("k{y}"));
+                let units = |t: &str| t.encode_utf16().collect::<Vec<_>>();
+                assert_eq!(
+                    wf(&a).cmp(&wf(&b)),
+                    units(&a).cmp(&units(&b)),
+                    "{a:?} {b:?}"
+                );
+            }
+        }
+        for (a, b) in [
+            ("ab\u{10000}", "ab\u{e000}"),
+            ("é", "e"),
+            ("\u{10ffff}", "\u{ffff}"),
+        ] {
+            let units = |t: &str| t.encode_utf16().collect::<Vec<_>>();
+            assert_eq!(wf(a).cmp(&wf(b)), units(a).cmp(&units(b)));
+        }
     }
 
     #[test]
