@@ -50,7 +50,7 @@ use fc_vault::state::{LockReason, Locked, Prepared, Ticket, VaultState};
 use fc_vault::throttle::{Attempt, Outcome, Throttle};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::fsx::{self, Done};
 use crate::journal;
@@ -1698,9 +1698,17 @@ fn private_key_result(id: u64, key: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>,
         .map_err(|_| internal())
 }
 
+/// An error reply. One that wouldn't fit a frame, say a message quoting
+/// input past fc-evm's bounds, would end the core when framed (#86): its code
+/// stays, its message becomes a fixed one, and its data goes.
 fn error_payload(id: u64, error: &ErrorBody) -> Zeroizing<Vec<u8>> {
     let mut payload = Zeroizing::new(Vec::with_capacity(256));
-    let _ = message::write_error(&mut *payload, id, error);
+    let written = message::write_error(&mut *payload, id, error);
+    if written.is_err() || payload.len() > fc_protocol::frame::MAX_PAYLOAD {
+        payload.zeroize();
+        let fixed = ErrorBody::new(error.code, "Error too large to report");
+        let _ = message::write_error(&mut *payload, id, &fixed);
+    }
     payload
 }
 
@@ -2195,5 +2203,35 @@ fn written(result: Result<(NewVault, Commit), OpError>) -> JobOutput {
             result: Err(error),
             commit: None,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #86: an error reply too large for a frame ended the core (exit 70)
+    /// once framed. It is replaced by its code with a fixed message.
+    #[test]
+    fn an_error_too_large_for_a_frame_still_frames() {
+        let huge = ErrorBody::new(
+            ErrorCode::InvalidArgument,
+            "\"".repeat(fc_protocol::frame::MAX_PAYLOAD),
+        )
+        .with_data(serde_json::json!({ "kind": "x" }));
+        let payload = error_payload(7, &huge);
+        assert!(crate::transport::frame(&payload).is_some());
+        let reply: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(
+            reply,
+            serde_json::json!({
+                "type": "response", "id": 7,
+                "error": { "code": "invalid_argument", "message": "Error too large to report" },
+            })
+        );
+        // Others are unchanged.
+        let small = ErrorBody::new(ErrorCode::InvalidArgument, "Invalid parameters");
+        let reply: serde_json::Value = serde_json::from_slice(&error_payload(8, &small)).unwrap();
+        assert_eq!(reply["error"]["message"], "Invalid parameters");
     }
 }

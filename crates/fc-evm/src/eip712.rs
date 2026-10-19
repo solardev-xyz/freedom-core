@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value};
 
-use crate::{Error, U256, keccak256, parse_address, parse_bytes, parse_signed};
+use crate::{Error, U256, keccak256, parse_address, parse_bytes, parse_signed, quoted};
 
 const MAX_TYPES: usize = 256;
 const MAX_FIELDS: usize = 256;
@@ -134,9 +134,9 @@ fn primitive(base: &str) -> Result<Option<Base>, Error> {
     let width = |digits: &str, max: u32, step: u32| -> Result<u32, Error> {
         let width: u32 = digits
             .parse()
-            .map_err(|_| err(format!("invalid width in {base:?}")))?;
+            .map_err(|_| err(format!("invalid width in {}", quoted(base))))?;
         if width == 0 || width > max || !width.is_multiple_of(step) || digits != width.to_string() {
-            return Err(err(format!("invalid width in {base:?}")));
+            return Err(err(format!("invalid width in {}", quoted(base))));
         }
         Ok(width)
     };
@@ -202,7 +202,10 @@ impl Types {
         }
         for name in object.keys() {
             if !is_identifier(name) {
-                return Err(err(format!("type name {name:?} is not an identifier")));
+                return Err(err(format!(
+                    "type name {} is not an identifier",
+                    quoted(name)
+                )));
             }
             if !matches!(primitive(name), Ok(None)) {
                 return Err(err(format!("type name {name:?} is a primitive type")));
@@ -231,7 +234,8 @@ impl Types {
                 };
                 if !is_identifier(field_name) {
                     return Err(err(format!(
-                        "field name {field_name:?} is not an identifier"
+                        "field name {} is not an identifier",
+                        quoted(field_name)
                     )));
                 }
                 if !seen.insert(field_name) {
@@ -256,7 +260,7 @@ impl Types {
                     None => {
                         let count = parents
                             .get_mut(base_text)
-                            .ok_or_else(|| err(format!("unknown type {base_text:?}")))?;
+                            .ok_or_else(|| err(format!("unknown type {}", quoted(base_text))))?;
                         *count += 1;
                         children.insert(base_text.to_owned());
                         Base::Struct(base_text.to_owned())
@@ -444,7 +448,7 @@ fn collect(
 fn number(value: &Value) -> Result<(bool, U256), Error> {
     match value {
         Value::String(text) => {
-            parse_signed(text).ok_or_else(|| err(format!("{text:?} is not a quantity")))
+            parse_signed(text).ok_or_else(|| err(format!("{} is not a quantity", quoted(text))))
         }
         Value::Number(n) => {
             let integral = if let Some(i) = n.as_i64() {
@@ -543,7 +547,10 @@ fn domain_hash(value: &Value) -> Result<[u8; 32], Error> {
         .ok_or_else(|| err("domain: expected an object"))?;
     for (key, value) in domain {
         if !value.is_null() && !DOMAIN_FIELDS.iter().any(|(name, _)| name == key) {
-            return Err(err(format!("invalid typed-data domain key: {key:?}")));
+            return Err(err(format!(
+                "invalid typed-data domain key: {}",
+                quoted(key)
+            )));
         }
     }
     let present: Vec<(&str, &str, &Value)> = DOMAIN_FIELDS

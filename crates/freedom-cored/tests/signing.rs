@@ -215,3 +215,67 @@ fn locked_vault_and_malformed_requests() {
         );
     }
 }
+
+/// #86: errors that quoted malformed input whole could outgrow one frame:
+/// a `uint256` field of 300,000 combining marks became a 2.4 MB error reply,
+/// and the core exited 70. `typed_data.hash` needs no unlock. Now every
+/// quote is bounded, and the core answers and lives on.
+#[test]
+fn errors_quoting_malformed_input_stay_small() {
+    let (root, data, locks) = dirs();
+    let _root = root;
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    let marks = "\u{300}".repeat(300_000);
+    let quotes = "\"".repeat(400_000);
+    let controls = "\u{1}".repeat(150_000);
+    let typed = |value: &str| {
+        json!({ "typed_data": {
+            "domain": { "name": "x" },
+            "types": { "M": [{ "name": "v", "type": "uint256" }] },
+            "message": { "v": value },
+        } })
+    };
+    let typed_type = |field_type: &str| {
+        json!({ "typed_data": {
+            "domain": { "name": "x" },
+            "types": { "M": [{ "name": "v", "type": field_type }] },
+            "message": { "v": 1 },
+        } })
+    };
+    let account = json!({ "kind": "account", "index": 0 });
+    let mut tx = json!({ "type": 2, "chain_id": "0x1", "nonce": "0x0", "gas_limit": "0x5208",
+        "to": format!("0x{}", "11".repeat(20)), "value": "0x0", "data": "0x",
+        "max_fee_per_gas": "0x1", "max_priority_fee_per_gas": "0x1" });
+    tx[&controls] = json!(1);
+    let mut unknown = json!({ "key": account, "message": "0x01" });
+    unknown[&controls] = json!(1);
+    let requests = [
+        ("typed_data.hash", typed(&marks)),
+        ("typed_data.hash", typed(&quotes)),
+        ("typed_data.hash", typed_type(&marks)),
+        (
+            "typed_data.hash",
+            typed_type(&format!("uint{}", "0".repeat(500_000))),
+        ),
+        (
+            "typed_data.hash",
+            json!({ "typed_data": {
+                "domain": { &quotes: 1 },
+                "types": { "M": [{ "name": "v", "type": "uint8" }] },
+                "message": { "v": 1 },
+            } }),
+        ),
+        ("sign.transaction", json!({ "key": account, "tx": tx })),
+        ("sign.message", unknown),
+    ];
+    for (id, (method, params)) in (2..).zip(requests) {
+        let reply = core.call(id, method, params);
+        assert_eq!(reply["error"]["code"], "invalid_argument", "{method}");
+        let message = reply["error"]["message"].as_str().unwrap();
+        assert!(message.len() < 1024, "{method}: {} bytes", message.len());
+    }
+    // Still running, and still answering.
+    let status = core.call(20, "vault.status", json!({}));
+    assert_eq!(status["result"]["unlocked"], false, "{status}");
+}

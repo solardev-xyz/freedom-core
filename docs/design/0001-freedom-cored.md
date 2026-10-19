@@ -375,6 +375,7 @@ Main's proxy has to reproduce each JS handler: argument checks and defaults, the
   - **Out-of-range input** gets the JS error string locally and never reaches the core.
   - **The 256 KiB limit** is a deliberate transport limit. JS has no ceiling, but no UI or generated password comes near it. A test keeps a vault with a 1,025-byte password unlockable.
 - **Defense in depth:** the core applies the same rules and answers `invalid_argument`. A malformed field is never a protocol error, so renderer input can't crash the core.
+- **Error replies stay small** (#86). An error message quotes at most 64 characters of any input. Quoted whole, a field of combining marks or quotes grows several times over, first in Rust's `{:?}` escapes and then in JSON's, and an error reply past one frame ended the core. As a backstop, a vault-loop error reply that still wouldn't fit a frame keeps its code but gets a fixed message and no data.
 - **Renderer access:** `core.hello`, `core.shutdown`, `cancel`, `vault.reconcile`, `nodes.op_status` and `compat.*` aren't reachable from any renderer channel. Only main-internal code calls them.
 
 ## Migration in freedom-browser

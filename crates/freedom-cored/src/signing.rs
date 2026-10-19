@@ -61,7 +61,10 @@ fn object<'a>(
         .keys()
         .find(|key| !required.contains(&key.as_str()) && !optional.contains(&key.as_str()))
     {
-        return Err(invalid(format!("unknown field {unknown}")));
+        return Err(invalid(format!(
+            "unknown field {}",
+            fc_evm::shortened(unknown)
+        )));
     }
     if let Some(missing) = required.iter().find(|key| !object.contains_key(**key)) {
         return Err(invalid(format!("missing field {missing}")));

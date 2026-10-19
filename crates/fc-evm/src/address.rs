@@ -1,6 +1,6 @@
 use sha3::{Digest, Keccak256};
 
-use crate::Error;
+use crate::{Error, quoted};
 
 pub fn keccak256(data: &[u8]) -> [u8; 32] {
     Keccak256::digest(data).into()
@@ -14,16 +14,16 @@ pub fn parse_address(text: &str) -> Result<[u8; 20], Error> {
     let digits = text
         .strip_prefix("0x")
         .filter(|digits| digits.len() == 40 && digits.bytes().all(|b| b.is_ascii_hexdigit()))
-        .ok_or_else(|| Error::Value(format!("address {text:?}")))?;
+        .ok_or_else(|| Error::Value(format!("address {}", quoted(text))))?;
     let mut out = [0u8; 20];
     for (i, byte) in out.iter_mut().enumerate() {
         *byte = u8::from_str_radix(&digits[2 * i..2 * i + 2], 16)
-            .map_err(|_| Error::Value(format!("address {text:?}")))?;
+            .map_err(|_| Error::Value(format!("address {}", quoted(text))))?;
     }
     let has_upper = digits.bytes().any(|b| b.is_ascii_uppercase());
     let has_lower = digits.bytes().any(|b| b.is_ascii_lowercase());
     if has_upper && has_lower && checksum_address(&out)[2..] != *digits {
-        return Err(Error::Value(format!("address checksum {text:?}")));
+        return Err(Error::Value(format!("address checksum {}", quoted(text))));
     }
     Ok(out)
 }
