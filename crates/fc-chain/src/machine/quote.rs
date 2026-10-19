@@ -173,5 +173,12 @@ async fn other(req: &Req, source: &str) -> Result<FeeQuote, Thrown> {
     ))
     .await
     .map_or(None, |answer| answer.result);
-    quote_within(req, source, json(&gas.result), json(&priority)).await
+    let quote = quote_within(req, source, json(&gas.result), json(&priority)).await?;
+    // A quorum with m = 1 is one endpoint's answer (deviation
+    // `singleton-quorum`).
+    Ok(if source == "quorum" && !req.chain.quorum_verifies() {
+        quote.unverified()
+    } else {
+        quote
+    })
 }

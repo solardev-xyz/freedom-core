@@ -24,20 +24,32 @@ fn quorum_label(k: usize, m: f64, achieved: bool) -> String {
     )
 }
 
-/// A quorum's agreement.
+/// A quorum's agreement, at `level`: `verified`, or Direct's level for a
+/// quorum with m = 1 (deviation `singleton-quorum`).
 pub(crate) fn quorum_trust(
+    level: &str,
     agreed: &[String],
     dissented: &[String],
     queried: &[String],
     m: f64,
 ) -> String {
     format!(
-        "{{\"level\":\"verified\",\"method\":\"quorum\",\"block\":null,\"agreed\":{},\"dissented\":{},\"queried\":{},\"quorum\":{}}}",
+        "{{\"level\":\"{level}\",\"method\":\"quorum\",\"block\":null,\"agreed\":{},\"dissented\":{},\"queried\":{},\"quorum\":{}}}",
         refs(agreed),
         refs(dissented),
         refs(queried),
         quorum_label(queried.len(), m, true)
     )
+}
+
+/// Direct's level for one endpoint's answer: `user-configured` for an
+/// endpoint a source the user added covers, otherwise `unverified`.
+pub(crate) fn direct_level(user_configured: bool) -> &'static str {
+    if user_configured {
+        "user-configured"
+    } else {
+        "unverified"
+    }
 }
 
 /// `directResponse`'s label: one endpoint's answer, or a quorum member's
@@ -47,11 +59,7 @@ pub(crate) fn direct_trust(
     url: &str,
     evidence: Option<&Fallback>,
 ) -> String {
-    let level = if user_configured {
-        "user-configured"
-    } else {
-        "unverified"
-    };
+    let level = direct_level(user_configured);
     let (agreed, dissented, queried, quorum) = match evidence {
         Some(fallback) => (
             refs(&fallback.agreed),

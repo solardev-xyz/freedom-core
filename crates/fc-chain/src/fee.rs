@@ -9,7 +9,9 @@
 //!   is negative or above the gas price.
 //! - Otherwise **EIP-1559**: `baseFee = gasPrice - priority`, `maxFeePerGas
 //!   = 2 * baseFee + priority`.
-//! - Decimal strings; `verified` for myotis, colibri and quorum.
+//! - Decimal strings; `verified` for myotis, colibri and quorum. The
+//!   machine unverifies a quorum's quote when its m is 1 (deviation
+//!   `singleton-quorum`).
 //!
 //! A gas price of 2^4096 or more fails the source (deviation
 //! `bigint-width`), where the router would quote it.
@@ -74,6 +76,16 @@ impl FeeQuote {
                     + flag(*verified)
             }
         }
+    }
+
+    /// The same quote, not `verified`: a quorum with m = 1 is one
+    /// endpoint's answer (design 0005, deviation `singleton-quorum`).
+    #[must_use]
+    pub fn unverified(mut self) -> Self {
+        match &mut self {
+            Self::Legacy { verified, .. } | Self::Eip1559 { verified, .. } => *verified = false,
+        }
+        self
     }
 
     /// What its texts hold on the heap.
