@@ -235,6 +235,7 @@ The formats Ant and Bee share, with Ant's reading where they differ, since the b
 - **A single-owner chunk (SOC)** is `id(32) ‖ signature(65) ‖ span(8) ‖ payload`, 105 to 4,201 bytes (`ac/soc.rs:8`–`30`).
   - **Its address** is `keccak256(id ‖ owner)`.
   - **The signature** is over the EIP-191 digest of `keccak256(id ‖ wrapped CAC address)`, as `r ‖ s ‖ v`. The core follows Ant: `v` from 27 to 30, and a high `s` refused (`ac/lib.rs:202`–`227`). That needs signature recovery in `fc-evm`.
+  - **The replicas owner:** Bee signs dispersed replicas with a published key, whose address is `0xdc5b…17b5`. Ant accepts a SOC from that owner only when its identifier, after the first byte, equals the wrapped chunk's address (`ac/soc.rs:70`–`75`, `122`–`124`; ethersphere/bee#5640). The core does the same, so no feed of that owner verifies.
   - The wrapped chunk may carry any span, so it can be the root of a larger tree.
 - **What `/chunks/<address>` returns:** the chunk's wire bytes, a CAC's or a whole SOC's, as `binary/octet-stream` (`ag/retrieval.rs:307`–`403`). Bee does the same.
 - **Where a SOC is accepted: only as a feed update,** at the address the walk computed from the feed's topic, owner and index ([The Swarm walk](#the-swarm-walk)).
@@ -453,6 +454,7 @@ The core builds every head from verified data, by the bundled node's rules. The 
   - **`Content-Disposition`:** `inline; filename="<name>"`, from the `Filename` metadata or else the path's last segment, with `\` and `"` escaped.
   - **`ETag`:** `"<the resolved file reference in hex>"`, feeds included.
   - **`Cache-Control`:** `public, max-age=31536000, immutable`, or `no-cache` when a feed was crossed.
+  - **Feed headers,** when a feed was crossed: `swarm-feed-index`, the verified update's index as 16 hex digits; `swarm-feed-resolved-version`, `v1` or `v2`; and `Swarm-Feed-Index` added to `Access-Control-Expose-Headers` (`ag/retrieval.rs:4792`–`4824`). A 416 carries none.
   - **`Accept-Ranges: bytes`** on a GET; **`Content-Length`**; `Content-Range` on a 206.
   - **Redirects:** a 308 whose `Location` is Ant's: `/bzz/<root>/<path>/` followed by the plan's `query`. Main's `canonicalize_redirect` rewrites it as it rewrites Ant's today, so `bzz://<root>/docs?state=1` is redirected to `./docs/?state=1`.
   - **Not found:** a 404 with Ant's JSON body; an error document is served with 200, as Ant serves it.
