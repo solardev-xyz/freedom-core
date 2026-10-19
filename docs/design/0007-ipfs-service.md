@@ -91,7 +91,7 @@ This design moves it into **its own supervised process, `freedom-ipfsd`**:
 - **libradicle (4.4):** its own design (0008). It reuses this one's process model, streams and client.
 - **Persistent libp2p identity, content providing and a DHT server:** freedom-ipfs is a read-only client, and stays one.
 - **Mobile:** iOS and Android keep linking freedom-ipfs in process.
-- **An OS sandbox.** Process separation is a crash domain and a resource boundary, not a sandbox.
+- **An OS sandbox.** Process separation is a crash domain and a resource boundary, not a sandbox. Confining the service with the OS is [0010](0010-service-confinement.md)'s proposal, which awaits the user's decisions.
 
 ## Today
 
@@ -158,6 +158,7 @@ Electron main (profile P)
   - Windows: Windows Error Reporting's dialog and dump collection are turned off for the process where the API allows it. This is best-effort.
 
   These are application guarantees. The OS can still page the ephemeral process's memory to swap or a hibernation file. A private window promises nothing against OS-level memory forensics.
+- **Confinement** (Landlock and seccomp, a Seatbelt profile, a job object) is [0010](0010-service-confinement.md)'s proposal, for the user to decide.
 
 ### Lifetime lock
 

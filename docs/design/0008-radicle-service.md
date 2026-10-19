@@ -90,7 +90,7 @@ This design moves it into **its own supervised process, `freedom-radicled`**. It
 - **New Radicle features:** no patch creation and no repository creation beyond today's `importRepo`.
 - **Mobile:** iOS keeps linking libradicle through UniFFI.
 - **Content verification (4.5):** not here. heartwood verifies refs against signed sigrefs itself.
-- **An OS sandbox.** Process separation is a crash domain and a resource boundary, not a sandbox.
+- **An OS sandbox.** Process separation is a crash domain and a resource boundary, not a sandbox. Confining the service with the OS is [0010](0010-service-confinement.md)'s proposal, which awaits the user's decisions.
 
 ## Today
 
@@ -176,6 +176,7 @@ Electron main (profile P) ──spawn──▶ freedom-radicled serve --home <ra
 - **Process hardening** is 0001's, because the process holds a key:
   - Linux: `PR_SET_DUMPABLE=0`;
   - macOS: no core files, plus the hardened runtime from signing.
+- **Confinement** by the OS is [0010](0010-service-confinement.md)'s proposal, for the user to decide. Its import question (D5) is this design's `rad.import_repo`.
 
 ### Start, stop and reconciliation
 
