@@ -815,7 +815,7 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
 - **In both modes**, untrusted targets follow 0007's rule ([Addresses](0007-ipfs-service.md#addresses)):
   - only a globally reachable unicast address passes. Loopback, private, link-local, shared (CGNAT), multicast, broadcast, documentation, benchmarking and reserved ranges are refused;
   - an IPv6 form that embeds an IPv4 address (mapped, NAT64, 6to4, ISATAP) is judged by that address, and the forms 0007 refuses whole stay refused;
-  - in `direct` mode the service learns the network's NAT64 prefixes as 0007 does;
+  - in `direct` mode the service learns the network's NAT64 prefixes as 0007 does, refuses IPv6 outside the fixed forms while it can't, and has the same limits ([What the gate can't see](0007-ipfs-service.md#what-the-gate-cant-see));
   - one table and one classifier serve both services.
 - **When the check runs:**
   - on IP literals, before the dial;

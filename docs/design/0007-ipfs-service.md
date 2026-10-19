@@ -764,7 +764,8 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   - multicast, broadcast, and the documentation, benchmarking and reserved ranges;
   - the IETF protocol blocks (`192.0.0.0/24`, `2001::/23`);
   - IPv6 outside global unicast (`2000::/3`);
-  - every IPv6 form whose embedded IPv4 address is refused, or whose embedding the service can't read.
+  - every IPv6 form that reaches the IPv4 address it embeds, when that address is refused or the embedding can't be read ([IPv6 forms that embed IPv4](#ipv6-forms-that-embed-ipv4));
+  - while the network's NAT64 prefixes aren't known, IPv6 addresses outside the fixed forms ([Network-specific NAT64 prefixes](#network-specific-nat64-prefixes)).
 - **Onion targets:**
   - in `direct` mode, refused before any socket exists, as the session's onion gate refuses them (`OnionGateRefusal`);
   - in `socks5` mode, handed to the proxy as names, never resolved locally. They are the one separately authorized case of a name the service doesn't resolve.
@@ -795,7 +796,7 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   - filter the answers;
   - pin the chosen address for `CONNECT`, keeping SNI and `Host`.
 
-  The address policy is then the same promise in both modes, enforced by the service itself.
+  The address policy is then the same promise in both modes, enforced by the service itself, for every address the service resolves and pins. Translation on the exit's own network is outside it ([What the gate can't see](#what-the-gate-cant-see)).
 - **(b), rejected:** delegate the policy to the proxy. Tor's exits refuse private destinations by default, but that is an exit operator's setting and Arti's configuration, neither of which the service can guarantee. And a SOCKS reply doesn't prove which address was connected.
 - **If the pinned Arti can't `RESOLVE`,** the setting doesn't ship until it can, unless the user accepts (b) as an explicit deviation ([Open questions](#open-questions)).
 
@@ -888,22 +889,46 @@ On the right network, each of these forms reaches the IPv4 address it embeds. So
 - **Local-use NAT64 `64:ff9b:1::/48`:** the operator picks the prefix length inside it, so the embedding can't be read.
 - **Teredo `2001::/32`:** it embeds a server address and an obfuscated client address and port, and Teredo is out of use.
 
-**DNS64.** A network with NAT64 often synthesizes AAAA answers for names that have only A records (RFC 6147). Synthesized answers are under the translation prefix, so the resolver classifies each one by its embedded IPv4 address. A name whose A record is private stays refused through its synthesized AAAA record.
+**Tunnel forms whose embedding depends on configuration** are classified as the IPv6 address alone:
+- **6rd** (RFC 5969): the provider's prefix has any length, and the IPv4 bits may be shortened by a prefix common to the domain, so only the provider's configuration says where they are;
+- **6over4** (RFC 2529): the interface identifier is the IPv4 address padded with zeros, which an ordinary address such as `2a00:1::1` also looks like;
+- **6a44** (RFC 6751): the embedded addresses belong to the provider's relay and its client sites.
+
+Their embedded IPv4 address is a tunnel endpoint inside a provider's or site's network, and the packet is delivered to the IPv6 host. Refusing them would refuse global peers on a guess. 6to4 and ISATAP differ: their embedding sits at a fixed place, and a non-global one means a tunnel into a private network, so the table's rule applies.
+
+**DNS64.** A network with NAT64 often synthesizes AAAA answers for names that have only A records (RFC 6147). An answer under the well-known prefix or a [learned prefix](#network-specific-nat64-prefixes) is classified by its embedded IPv4 address, so a name whose A record is private stays refused through it. Synthesis under a prefix the service can't learn is outside the promise ([What the gate can't see](#what-the-gate-cant-see)).
 
 ##### Network-specific NAT64 prefixes
 
-An IPv6-only network can translate through a network-specific prefix of its own (RFC 6052). Addresses under it look like ordinary global unicast.
+An IPv6-only network can translate through a network-specific prefix of its own (RFC 6052). Addresses under it look like ordinary global unicast, and, unlike the well-known prefix, it may translate to private IPv4 addresses. So in `direct` mode the service learns these prefixes as RFC 7050 describes, and fails closed for IPv6 while it doesn't know them.
 
-- **How the service learns them,** in `direct` mode, as RFC 7050 describes:
-  - It resolves `ipv4only.arpa` for AAAA records when an instance starts, and again once the previous answer's TTL has expired, at most once a minute.
-  - Each answer that embeds `192.0.0.170` or `192.0.0.171`, at one of RFC 6052's positions, gives a prefix and its length.
-  - It keeps at most 4 prefixes per instance.
-- **What it can't learn:**
-  - a prefix announced only in router advertisements (PREF64, RFC 8781), which the service can't read portably;
-  - explicit address mappings (SIIT-EAM, RFC 7757).
+- **Discovery asks the access network.** It sends one query, AAAA for `ipv4only.arpa`, to the resolvers the operating system is configured with, because only the access network's DNS64 synthesizes for it. The service's other resolvers (hickory's, and the configured DoH endpoint) needn't see that network's DNS64.
+  - **It is a discovery-only path:** that one name and type, over plain DNS. Each system resolver is a configured target for that query alone, as the DoH endpoint is for DoH. Its answers are parsed, never dialed, and the path resolves nothing else.
+  - **Each answer** that embeds `192.0.0.170` or `192.0.0.171` at one of RFC 6052's positions gives a prefix and its length. An answer that embeds neither teaches nothing.
+  - **The result belongs to the process,** not to an instance: it describes the network, and the query carries nothing of a partition's.
+- **The fixed forms** are those whose prefix is fixed: IPv4-mapped, the well-known NAT64 prefix and 6to4. Any other global IPv6 address could sit under a network-specific prefix.
+- **States:**
+  - **pending** until the first query settles. An IPv6 target outside the fixed forms waits for it, within its own deadline;
+  - **known,** after an answer: a set of prefixes, empty when the answer is NODATA or NXDOMAIN, which means the network advertises none (RFC 7050 §3). The same holds when the OS has no resolver configured;
+  - **unknown,** after a query that failed (a timeout, `SERVFAIL`, a malformed answer);
+  - **incomplete,** when an answer holds more than 16 distinct prefixes.
 
-  An address under such a prefix is classified as the global unicast address it looks like. On such networks the policy can promise no more.
-- **In `socks5` mode** nothing is learned: the proxy's exit makes every connection, so the local network's translator is never used. The well-known prefix rule applies in both modes.
+  In **unknown** and **incomplete**, an IPv6 target outside the fixed forms is refused, and `ipfs.stats` says why. IPv4 targets, and IPv6 targets under the fixed forms, are judged as always. A dual-stack network keeps IPv4, and an IPv6-only network whose resolver fails couldn't reach much anyway.
+- **Learned prefixes are kept** for the process's life, so a refresh adds prefixes and never removes one. A prefix only adds refusals, so keeping an old one, or a false one from the network's resolver, errs on the safe side. The bound of 16 counts all of them; past it, the state is **incomplete** until the process restarts.
+- **Refresh:**
+  - when the last answer's TTL expires, and at least once a minute, so a network change leaves at most about a minute when a new network's prefix is unknown;
+  - after a failure, with backoff from 5 s to 1 min. A failed refresh keeps every known prefix: it never turns a known one back into a native address.
+
+###### What the gate can't see
+
+The promise is exact for addresses the service can read: an IPv4 address, or an IPv6 address whose embedding its form or a learned prefix fixes. Translation the service can't read is outside it:
+- **a prefix announced only in router advertisements** (PREF64, RFC 8781), which the service can't read portably;
+- **explicit address mappings** (SIIT-EAM, RFC 7757);
+- **DNS64 that maps different IPv4 ranges to different prefixes** (RFC 7050 §5.1), for example private A records under a prefix the `ipv4only.arpa` answer doesn't show. The heuristic can't find that prefix, and RFC 7050 says so;
+- **for up to a minute after a network change,** a new network's prefix;
+- **in `socks5` mode,** translation on the exit's network. Nothing is learned there: the exit makes every connection, so the local translator is never used, and the exit's is out of the service's sight. The well-known prefix rule still applies in both modes.
+
+An address under such a prefix is classified as the global unicast address it looks like. The deviation `address-policy` records this limit.
 
 #### The resolver contract
 
@@ -1134,7 +1159,13 @@ As 0006's 4.7 did, before anything moves:
     - ISATAP: `2a00:1::200:5efe:a9fe:a9fe` and `2a00:1::5efe:7f00:1` are refused, `2a00:1::200:5efe:808:808` passes;
     - IPv4-compatible `::808:808`, IPv4-translated `::ffff:0:808:808`, local-use NAT64 `64:ff9b:1::808:808` and Teredo `2001:0:4136:e378:8000:63bf:3fff:fdd2` are refused whole;
     - a learned network-specific prefix of each length (32, 40, 48, 56, 64 and 96), with `169.254.169.254` and `8.8.8.8` embedded at RFC 6052's positions: refused and passed;
-    - an `ipv4only.arpa` answer that embeds neither well-known address teaches nothing, and a fifth prefix isn't kept;
+    - an `ipv4only.arpa` answer that embeds neither well-known address teaches nothing, and NODATA gives a known, empty set;
+    - discovery goes only to the system resolvers, for `ipv4only.arpa` only, and no answer from it is dialed;
+    - **the startup race:** an IPv6 dial made while discovery is pending waits for it, and an address under the prefix that the first answer teaches is refused;
+    - **failure:** after a failed query, an IPv6 target outside the fixed forms is refused and an IPv4 one passes; after a failed refresh, every known prefix is still applied;
+    - **the bound:** an answer with 17 distinct prefixes makes the state incomplete, and `2a00:1:11::a9fe:a9fe` under the 17th is refused, not passed as global unicast;
+    - a refresh that drops a prefix doesn't forget it;
+    - 6rd, 6over4 and 6a44 addresses with private embedded addresses (`2a00:1:c0a8:101::1`, `2a00:1::c0a8:101`) are judged as IPv6 alone, and pass;
     - a DNS64 answer `64:ff9b::7f00:1` for an ordinary name, locally and through `RESOLVE`: refused, and no connection is made;
     - `/ip6zone/eth0/ip6/fe80::1` and `/unix/…` multiaddrs are refused.
   - **Failures:** an unavailable proxy, a proxy that refuses `RESOLVE` (the attempt fails, and no name is sent in `CONNECT`), and an unsupported transport in `socks5` mode.
@@ -1236,7 +1267,7 @@ Every body already passes through main today, so the pipe adds one copy into the
 | `env-proxy` | `reqwest` reads proxy variables from main's environment; libp2p ignores them | the environment is cleared, and the proxy is configuration | the HTTP half no longer follows `HTTPS_PROXY` and similar |
 | `proxy` | none | an optional SOCKS5 policy for all traffic, failing closed | new: Route IPFS through Tor |
 | `onion-targets` | no rule for them | refused before any socket in `direct`; through the proxy in `socks5` | a refusal proves nothing was sent |
-| `address-policy` | none | untrusted targets refused unless globally reachable unicast, with IPv6 forms that embed IPv4 judged by their IPv4 address; configured endpoints exempt | providers on local networks are unreachable unless configured |
+| `address-policy` | none | untrusted targets refused unless globally reachable unicast, with IPv6 forms that embed IPv4 judged by their IPv4 address; configured endpoints exempt; IPv6 outside the fixed forms refused while NAT64 discovery is unknown | providers on local networks are unreachable unless configured; translation the service can't read is [not covered](#what-the-gate-cant-see) |
 | `redirect-gate` | redirects follow each client's policy | the same acceptance, with every hop through the gate | a redirect to a refused target fails the attempt |
 | `read-ahead` | one 64 KiB read in main, plus a two-chunk channel | a 128 KiB window per stream | about the same buffering, now bounded by credit |
 | `exit-text` | `Native event dispatcher exited with code N`, `Native gateway stopped unexpectedly` | `freedom-ipfs service exited` | in 502 bodies and logs only |
