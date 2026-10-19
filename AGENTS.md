@@ -16,7 +16,7 @@ The code holds users' keys and money. Every rule below exists for that reason.
        - Bee's wallet, as a keystore whose password is in the node's `config.yaml`;
        - the Radicle node key, as an unencrypted OpenSSH file (derived from the seed, or design 0008's random device key).
 
-       Both are in the formats the JS reference writes, mode `0600` on Unix (on Windows they inherit the profile directory's ACL, as 0001 says). Phase 5 moves Bee's password out of `config.yaml` (0001, K-3). Radicle custody is design 0008's open question, the user's to decide. No other node key may be written this way.
+       Both are in the formats the JS reference writes, mode `0600` on Unix (on Windows they inherit their containing directory's ACL; 0001 describes the default profile's guarantee and the limit for alternate roots). Phase 5 moves Bee's password out of `config.yaml` (0001, K-3). Radicle custody is design 0008's open question, the user's to decide. No other node key may be written this way.
      Any new exception needs a design change.
    - Signing APIs take a key reference, never key bytes.
    - Secret types zeroize on drop.
