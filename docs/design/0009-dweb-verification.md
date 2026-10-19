@@ -454,7 +454,7 @@ The core builds every head from verified data, by the bundled node's rules. The 
   - **`Content-Disposition`:** `inline; filename="<name>"`, from the `Filename` metadata or else the path's last segment, with `\` and `"` escaped.
   - **`ETag`:** `"<the resolved file reference in hex>"`, feeds included.
   - **`Cache-Control`:** `public, max-age=31536000, immutable`, or `no-cache` when a feed was crossed.
-  - **Feed headers,** when a feed was crossed: `swarm-feed-index`, the verified update's index as 16 hex digits; `swarm-feed-resolved-version`, `v1` or `v2`; and `Swarm-Feed-Index` added to `Access-Control-Expose-Headers` (`ag/retrieval.rs:4792`–`4824`). A 416 carries none.
+  - **Feed headers,** when a feed was crossed and the answer serves content: a 200 (an error document included) or a 206 (zero-length and multipart included), to a GET or a HEAD. They are `swarm-feed-index`, the verified update's index as 16 hex digits; `swarm-feed-resolved-version`, `v1` or `v2`; and `Swarm-Feed-Index` added to `Access-Control-Expose-Headers` (`ag/retrieval.rs:4792`–`4824`). A 308, a 404 and a 416 carry none: Ant returns them before it applies the headers (`ag/retrieval.rs:2804`–`2807`, `2835`–`2842`). The response vectors include a feed-backed 308, 404 and 416.
   - **`Accept-Ranges: bytes`** on a GET; **`Content-Length`**; `Content-Range` on a 206.
   - **Redirects:** a 308 whose `Location` is Ant's: `/bzz/<root>/<path>/` followed by the plan's `query`. Main's `canonicalize_redirect` rewrites it as it rewrites Ant's today, so `bzz://<root>/docs?state=1` is redirected to `./docs/?state=1`.
   - **Not found:** a 404 with Ant's JSON body; an error document is served with 200, as Ant serves it.
