@@ -15,7 +15,8 @@
 //! The machine reproduces the reference's requests, timings and results
 //! (`vectors/chain-replay.json`), with design 0005's deviations:
 //! `overall-deadline`, `admission`, `abandoned-exchanges`,
-//! `order-validation`, `quorum-clamps`, `config-change`, `memory-budgets`,
+//! `order-validation`, `endpoint-dedup`, `singleton-quorum`,
+//! `quorum-clamps`, `config-change`, `memory-budgets`,
 //! `monotonic-time`, `state-retention`, `rpc-id`, `adapter-error-text`,
 //! `cancel-promptly`, `paired-endpoint-text` and `broadcast-outcome`. It
 //! keeps no wall clock: every instant is the executor's monotonic

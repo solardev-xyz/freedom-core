@@ -2094,6 +2094,47 @@ function boundaryScenarios(ethers, tx) {
         { world: { chains: { 1: chainEntry(net(['quorum'], { k: '2', m: 'x', timeoutMs: 'abc' }), ABC, [PROVER]) }, rpc: Object.fromEntries(ABC.map((u) => [u, ok('0x1', 4000)])) }, calls: [req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], { include_trust: true })] },
       ],
     },
+    // An endpoint listed twice (#90): the reference counts each entry as a
+    // member, so a's answer agrees with itself and reaches m = 2 alone,
+    // verified. The core keeps each endpoint once (deviation
+    // endpoint-dedup): a and b disagree, and Direct reuses a's answer,
+    // unverified.
+    {
+      ...scenario('boundary-quorum-duplicate-endpoint', `${D_}: Configuration; deviation endpoint-dedup`, {
+        ...w(1, net(['quorum', 'direct']), [A, A, B]),
+        rpc: { [A]: ok('0xdead', 100), [B]: ok('0xbeef', 50) },
+      }, req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], { include_trust: true })),
+      deviation: 'endpoint-dedup',
+    },
+    // A quorum with m = 1 (#91): one endpoint's answer, which the reference
+    // labels verified, a read's and a fee quote's alike. The core labels it
+    // as Direct would (deviation singleton-quorum): unverified, or
+    // user-configured for an endpoint a source the user added covers.
+    {
+      ...scenario('boundary-quorum-singleton-not-verified', `${D_}: Evidence for labels; deviation singleton-quorum`, {
+        ...w(1, net(['quorum'], { k: 3, m: 1, timeoutMs: 5000 }), ABC),
+        sourceList: [{ id: 'mine', builtin: false }],
+        rpc: { [A]: ok('0x1', 100), [B]: ok('0x2', 200), [C]: { hang: true } },
+      }),
+      steps: [
+        { calls: [req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], { include_trust: true })] },
+        {
+          world: { chains: { 1: chainEntry(net(['quorum'], { k: 3, m: 1, timeoutMs: 5000 }), ABC, [PROVER], { sources: [{ id: 'mine', coverage: { 1: A } }] }) } },
+          calls: [req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], { include_trust: true })],
+        },
+        {
+          world: {
+            rpc: {
+              [A]: { rules: [{ when: { method: 'eth_gasPrice' }, then: ok('0x10', 100) }], else: ok('0x1', 100) },
+              [B]: { rules: [{ when: { method: 'eth_gasPrice' }, then: ok('0x20', 200) }], else: ok('0x2', 200) },
+              [C]: { hang: true },
+            },
+          },
+          calls: [fee(1)],
+        },
+      ],
+      deviation: 'singleton-quorum',
+    },
     // Trust labels: a user's own endpoint, a keyed one, and an endpoint URL
     // that doesn't parse (its host '' is left out of every list).
     {

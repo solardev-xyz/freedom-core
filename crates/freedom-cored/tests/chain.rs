@@ -1949,3 +1949,26 @@ fn a_page_is_checked_without_unescaping_anything_first() {
         "the escaped header cost {escaped} MiB, the plain one {plain} MiB"
     );
 }
+
+#[test]
+fn the_endpoint_bound_counts_entries_before_repeats_merge() {
+    let (_root, mut core) = core();
+    let repeated = |n: usize| {
+        let mut chain = snapshot(&["quorum"], &[], 5_000);
+        chain["rpc"] = json!(vec![
+            json!({ "endpoint": "a", "user_configured": false });
+            n
+        ]);
+        chain
+    };
+    // 64 entries, all one endpoint: admitted, and merged to one.
+    configure(&mut core, 2, &[repeated(64)]);
+    // A 65th entry is refused at the wire bound, though it repeats an earlier one.
+    let reply = call(
+        &mut core,
+        3,
+        "chain.configure",
+        json!({ "chains": [repeated(65)] }),
+    );
+    assert_eq!(reply["error"]["code"], "invalid_argument", "{reply}");
+}

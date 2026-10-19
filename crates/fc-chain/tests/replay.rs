@@ -1866,6 +1866,8 @@ enum Want {
     /// A broadcast's `uncertain` outcome from this broadcaster, reporting
     /// the transaction's hash: keccak256 of the call's raw bytes.
     Uncertain(&'static str),
+    /// A fee quote, whole, as JSON in the router's key order.
+    Quote(&'static str),
 }
 
 /// keccak256 of a raw transaction's bytes, as `0x` and lowercase hex.
@@ -1948,6 +1950,9 @@ fn compare_want(reply: &Reply, settled: u64, want: &Want, call: &Json) -> Option
                 hash: Some(hash),
             }),
         ) => reply.outcome.is_none() && got == source && *hash == keccak_hash(str_of(call, "raw")),
+        (Want::Quote(want), Ok(Success::FeeQuote(quote))) => {
+            reply.outcome.is_none() && quote.to_json() == *want
+        }
         _ => false,
     };
     (!(shape && reply.settled == settled)).then(|| {
@@ -2208,11 +2213,81 @@ const DEVIATIONS: &[Expected] = &[
         )],
         ..EXPECTED
     },
+    // An endpoint listed twice is one member (#90): a and b disagree, so
+    // the quorum misses and Direct reuses a's answer, unverified. The
+    // reference counted a twice, verified. Its second exchange with a is
+    // never made.
+    Expected {
+        id: "boundary-quorum-duplicate-endpoint",
+        deviation: "endpoint-dedup",
+        replies: &[(
+            0,
+            0,
+            100,
+            Want::Read {
+                result: r#""0xdead""#,
+                source: "direct",
+                verified: false,
+                trust: Some(
+                    r#"{"level":"unverified","method":"direct","block":null,"agreed":["a.example"],"dissented":["b.example"],"queried":["a.example","b.example"],"quorum":{"k":2,"m":2,"achieved":false}}"#,
+                ),
+            },
+        )],
+        missing: &[
+            r#"rpc https://a.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_call","params":[{"to":"0xabc"},"latest"]}"#,
+        ],
+        ..EXPECTED
+    },
+    // A quorum with m = 1 is one endpoint's answer (#91): the same
+    // requests and result, labelled as Direct would label a's answer, and
+    // the fee quote it makes unverified. The reference called all three
+    // verified.
+    Expected {
+        id: "boundary-quorum-singleton-not-verified",
+        deviation: "singleton-quorum",
+        replies: &[
+            (
+                0,
+                0,
+                100,
+                Want::Read {
+                    result: r#""0x1""#,
+                    source: "quorum",
+                    verified: false,
+                    trust: Some(
+                        r#"{"level":"unverified","method":"quorum","block":null,"agreed":["a.example"],"dissented":[],"queried":["a.example","b.example","c.example"],"quorum":{"k":3,"m":1,"achieved":true}}"#,
+                    ),
+                },
+            ),
+            (
+                1,
+                0,
+                200,
+                Want::Read {
+                    result: r#""0x1""#,
+                    source: "quorum",
+                    verified: false,
+                    trust: Some(
+                        r#"{"level":"user-configured","method":"quorum","block":null,"agreed":["a.example"],"dissented":[],"queried":["a.example","b.example","c.example"],"quorum":{"k":3,"m":1,"achieved":true}}"#,
+                    ),
+                },
+            ),
+            (
+                2,
+                0,
+                400,
+                Want::Quote(
+                    r#"{"type":"eip1559","baseFee":"15","maxPriorityFeePerGas":"1","maxFeePerGas":"31","effectiveGasPrice":"16","source":"quorum","verified":false}"#,
+                ),
+            ),
+        ],
+        ..EXPECTED
+    },
 ];
 
 /// The score: scenarios replayed exactly (deviation scenarios with their
 /// asserted difference included), and those not replayed yet.
-const PASSING: usize = 303;
+const PASSING: usize = 305;
 const NOT_REPLAYED: usize = 0;
 /// The permitted races, counted: each is a cancel the machine made in the
 /// tick the reference's exchange settled, after what [`race`] names. Main

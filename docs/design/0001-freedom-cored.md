@@ -241,7 +241,7 @@ A reply can still go missing (core crash, hang watchdog), so every mutation can 
   | `change_password` | the fingerprint changed and the vault decrypts with the **new** password | returns `{}`; the vault stays locked after the restart |
   | `delete` | a vault existed and is now absent | returns `{}` |
 
-  Otherwise `vault.reconcile` returns `not_committed`, and main reports the original error.
+  Otherwise `vault.reconcile` returns `not_committed`, and main reports the original error. If the throttle applies (see below), it returns `throttled` with `retry_after_ms`; main keeps the operation pending and reconciles again later.
 - **A committed result goes back to the original caller as a success.** `identity-manager.js` continues its normal success path: it writes `vault-meta.json`, and in Quick Setup the renderer stores the random password. So a core-only failure can no longer turn a written vault into a reported failure.
 - **A crash of main itself** between the core's commit and main's metadata write is the same window JS has today (vault file written, then metadata). It isn't new and isn't addressed here.
 - **`install` respects locks that happened since.** Main tracks every lock it requested and every `vault.locked` event, across core generations. It passes `install: true` only if no lock happened after the mutation started. Otherwise the core works out the result with temporary secrets, wipes them, and leaves the vault locked. An acknowledged lock is never undone.
@@ -251,7 +251,10 @@ A reply can still go missing (core crash, hang watchdog), so every mutation can 
   - **Quick Setup:** while the pending record exists, main finishes the operation itself. It reconciles, writes `vault-meta.json`, and keeps the random password so that onboarding can still enable quick unlock when the renderer comes back.
   - **Nothing destructive is ever inferred from metadata or a missing credential.** A Quick Setup vault without its credential may be funded, because users can remove the credential deliberately (`quick-unlock.js:295`). If the pending record is lost too, when main itself dies, the vault stays exactly as it is, as in today's JS. Onboarding shows the normal "vault exists" paths: unlock, or restore with the recovery phrase. Overwriting a vault always remains an explicit user decision.
 - **No accidental rewrites:** the core never rewrites the vault file except through create, import, change_password and delete. Startup, status, unlock and verify read it and never write it, so quick unlock's content fingerprint survives. Tightening the file's mode to `0600` changes metadata, not content.
-- **`vault.reconcile` doesn't count toward throttling.** It verifies a password main itself sent in the operation it is reconciling.
+- **`vault.reconcile` shares the unlock throttle** ([parity rules](#parity-contract)) for `create`, `import` and `change_password`. It reserves an attempt as any password check does, and its decrypt settles it: a wrong password as a failure, a right one as a success. When the file doesn't have the committed shape, it decrypts nothing and the attempt costs nothing. A `delete` decrypts nothing and takes no attempt.
+  - **Why:** the core can't tell main's own reconciliation from a later call with made-up pre-state, such as `create` with `fingerprint_before: null` against a vault that has existed for months (#78). Unthrottled, any path from renderer input into reconcile would be an unthrottled password oracle, and for `create` a way to the phrase, or with `install` to an unlock, around K-4.
+  - **An honest reconcile loses nothing:** it runs on a restarted core, whose counter starts at zero, and it sends the password of the operation it reconciles, so its decrypt succeeds.
+  - **What reconcile then returns** (the onboarding phrase for `create`, an unlock with `install`) is no more than a caller holding the same password gets from `vault.unlock` and `vault.export_mnemonic`, under the same throttle. The core doesn't also try to bound it by the vault's age: `createdAt` is wall-clock and unauthenticated, and a pending record can be reconciled long after the operation ([If the core can't be restarted](#reconciliation)).
 
 ## Writes and durability
 
@@ -321,11 +324,11 @@ Main's proxy has to reproduce each JS handler: argument checks and defaults, the
 - **`keys.generate_mnemonic`** takes `words: 12 | 15 | 18 | 21 | 24`. Main maps the JS `strength` argument (128, 160, 192, 224, 256), with 256 as the default, as in `derivation.js:40`. Any other strength gets the JS error locally.
 - **Vault passwords are raw UTF-8,** with no normalization, so NFC and NFD forms are different passwords. Main produces the bytes with `Buffer.from(password, 'utf8')`, which is what passworder does, so a lone surrogate becomes U+FFFD exactly as today. The 8-character minimum is checked on the UTF-16 length in main and again in the core; replacing a lone surrogate with U+FFFD leaves that length unchanged.
 - **Throttling** (new, K-4):
-  - One counter is shared by failed `unlock`, `verify_password`, `change_password` (the current password), `delete` and both exports.
+  - One counter is shared by failed `unlock`, `verify_password`, `change_password` (the current password), `delete`, both exports, and the decrypt of `vault.reconcile` ([Reconciliation](#reconciliation)).
   - The first 5 failures are free. After that, each attempt has to wait 2^(n−5) s since the last failure, capped at 5 min, and gets `throttled` with `retry_after_ms`.
   - A success resets the counter.
   - An attempt is reserved before its KDF starts. A cancelled or revoked attempt still counts if its KDF ran.
-  - **While the throttle refuses** (#82), a password check still reads the file, but without the password. A missing vault, an unsupported version (unlock, change_password and delete only) or a file that no password could open is reported before `throttled`, in the table's order. Only an attempt that would run the KDF gets `throttled`. As in JS, the version is read before anything else in the envelope, so a later format reports its version whatever its `encrypted` holds.
+  - **While the throttle refuses** (#82), a password check still reads the file, but without the password. A missing vault, an unsupported version (unlock, change_password and delete only) or a file that no password could open is reported before `throttled`, in the table's order. Only an attempt that would run the KDF gets `throttled`. `vault.reconcile` is the exception: it answers `throttled` at once, since an honest one never meets the throttle ([Reconciliation](#reconciliation)). As in JS, the version is read before anything else in the envelope, so a later format reports its version whatever its `encrypted` holds.
   - The counter lives in memory. Renderer input can't crash the core, so only main can reset it, and main is trusted.
 - **Vault reading accepts both KDF settings:** `keyMetadata` with any iteration count, and a missing `keyMetadata`, which means the legacy 10,000 iterations.
 - **Vault writing reproduces the JS envelope** (`{ version: 1, encrypted, createdAt }`, 2-space JSON, no trailing newline) with 900,000 iterations. `vectors/fixtures/vaults.json` is the reference in both directions.
@@ -511,6 +514,7 @@ The password crosses the pipe, which is no worse than today, where it is used in
     - the stall exit, with an injected clock and, in the binary, with a shortened bound.
   - **Reconciliation:**
     - a lost reply for every mutation, including create and delete, then `vault.reconcile` in each state;
+    - made-up pre-state: wrong passwords through any op count toward the throttle, and once it applies the right one gets `throttled`, with no phrase and no unlock;
     - an acknowledged lock between commit and the lost reply, after which the vault stays locked;
     - a directory `fsync` failure after rename or unlink, reported as success with `durable: false`;
     - recovery unavailable, then the pending-recovery record is completed after restart.
