@@ -132,7 +132,7 @@ This is EIP-712 with ethers v6 `TypedDataEncoder` semantics, which is what `Wall
   - `string` takes a JSON string.
   - `address` takes `0x` and 40 hex digits: all-lowercase, all-uppercase, or EIP-55 mixed case with a valid checksum. Without `0x`, ethers tries ENS when signing and fails.
   - Arrays: `T[]` and `T[n]`, with the length checked for `T[n]`. Structs nest.
-  - An extra message field is ignored, as in ethers. The approval UI shows the message main received.
+  - An extra message field is ignored, as in ethers. The approval UI shows the message main received. [What the user is shown](#amendment-what-the-user-is-shown-88) proposes that it show what was signed instead.
 
 ### `swarm.sign_soc`
 
@@ -220,6 +220,36 @@ Rust tests replay every case, in the crates (#18) and over the wire through the 
 - **Dependencies:** none new. `k256` (RFC 6979, low-s, recovery id), `sha3`, `serde_json` and `thiserror` are already in the workspace.
 - **`freedom-cored`:** the five methods, executed as described in [Execution](#key-references-callers-and-execution), with secrets zeroized after use. Each method is in `fc-protocol`'s method table with its callers (`chrome`, `shell`) and is advertised in `core.hello`'s capabilities.
 - Both crates compile for iOS and Android, as CI requires of logic crates.
+
+## Amendment: what the user is shown (#88)
+
+**Status:** proposed; **needs the user's decision.** It adds to the API and moves the approval UI onto the core's view; one part refuses requests ethers accepts.
+
+### Today
+
+The core hashes and signs `{ domain, types, message }`. The approval UI builds its own view from the dApp's JSON (`formatTypedDataForDisplay` in `dapp-sign.js`). The two can differ:
+
+- **Undeclared fields** are shown but not signed, and the hash ignores them silently (ethers parity). A nested struct is shown as JSON, cut at 50 characters with every other value.
+- **The domain** is shown partly: `verifyingContract` cut to 10 characters, and `chainId` hidden when it is 0. A domain without `chainId` is never flagged, though its signature is valid on every chain where the verifying contract lives. Nothing compares `chainId` with the dApp's active chain.
+- **`primaryType`** is dropped by main, and the core infers the root as ethers does. A request whose `primaryType` names another type means one thing to ethers and another to a wallet that honors `primaryType` (MetaMask's `eth-sig-util` hashes the named type).
+- **`personal_sign`** is shown by decoding hex pair by pair with `parseInt`, while main signs `Buffer.from(hex, 'hex')`, which stops at the first invalid pair: `0x41zz42` is shown as `A\0B` and signed as `A`. [Migration](#migration-in-freedom-browser) step 1 already makes main validate hex strictly, and the core refuses such hex (`parse_bytes`).
+
+### Proposal
+
+1. **A view of what was signed.** `typed_data.hash` and `sign.typed_data` also return `view`, and the approval UI renders it instead of the dApp's JSON, every field, untruncated.
+   - **Its content** is ethers' `TypedDataEncoder.getPayload(domain, types, message)`, with the core's [deviations](#deviations-from-ethers): `primary_type`; `domain` with only the fields used, in the domain type's order; `message` with only the declared fields, in declaration order, structs nested. Values are normalized as `getPayload` does: integers as decimal strings, bytes and addresses as lowercase hex, and the domain's `chainId` as a number (a hex quantity past 2^53).
+   - **Parity:** the reference's `getPayload` gives the vectors, as `TypedDataEncoder.hash` does for `hash`.
+   - **Bounds:** each value is at most its own text, or 78 digits for an integer, so the view stays within the [limits](#limits) the hash already enforces.
+   - **`ignored`:** the message's top-level keys the types don't declare, so the UI can say that the dApp sent fields that aren't signed.
+2. **`primary_type`**, an optional parameter. Main passes the dApp's `primaryType`. One that isn't the inferred root is `invalid_argument` (deviation `primary-type`: ethers ignores it), since wallets disagree on what such a request means.
+3. **`chain_id`**, an optional parameter: the dApp's active chain. The view reports `chain` as `match`, `mismatch` or `absent`, and the UI warns on the last two. It isn't refused: some protocols sign for another chain on purpose.
+4. **`personal_sign`:** main shows the bytes it sends to `sign.message`, decoded from the same strictly validated hex.
+
+### Decision needed
+
+1. Whether to add `view` now, with the UI moving onto it, or with the policy phase.
+2. Whether a `primaryType` mismatch is refused (proposed) or warned.
+3. Whether a `chainId` mismatch or absence is warned (proposed) or refused.
 
 ## Migration in freedom-browser
 
