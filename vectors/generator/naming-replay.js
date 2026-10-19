@@ -246,6 +246,22 @@ const PATCHES = {
       },
     },
   }),
+  'reverse-normalized': () => ({
+    text: 'An ENS primary name that is not its own ENSIP-15 normalization is not shown as the address\'s name: the reverse result is UNVERIFIED with the claimed name, on the quorum, Colibri and Myotis paths alike.',
+    source: {
+      'ens-resolver.js': {
+        edits: [
+          ["  if (decoded.status === REVERSE_OUTCOME.name) {\n    return {",
+            "  if (decoded.status === REVERSE_OUTCOME.name) {\n    if (!__isNormalizedName(decoded.detail)) {\n      return unverifiedReverseResult(normalizedAddress, NAME_SYSTEMS.ens, decoded.detail, `Reverse record for ${normalizedAddress} claims a name that isn't normalized`, outcome.trust);\n    }\n    return {"],
+          ["  if (!name) return { ...noReverseResult(normalizedAddress), trust };\n  return { success: true, address: normalizedAddress, name, system: 'ens', trust };",
+            "  if (!name) return { ...noReverseResult(normalizedAddress), trust };\n  if (!__isNormalizedName(name)) {\n    return unverifiedReverseResult(normalizedAddress, NAME_SYSTEMS.ens, name, `Reverse record for ${normalizedAddress} claims a name that isn't normalized`, trust);\n  }\n  return { success: true, address: normalizedAddress, name, system: 'ens', trust };"],
+          ["  if (ensRec.status === 'ok' && ensRec.name) {\n    return {",
+            "  if (ensRec.status === 'ok' && ensRec.name) {\n    if (!__isNormalizedName(ensRec.name)) {\n      return unverifiedReverseResult(normalizedAddress, NAME_SYSTEMS.ens, ensRec.name, `Reverse record for ${normalizedAddress} claims a name that isn't normalized`, ensTrust);\n    }\n    return {"],
+        ],
+        append: ["function __isNormalizedName(name) {\n  if (typeof name !== 'string' || Buffer.byteLength(name) > 1024) return false;\n  try {\n    return ens_normalize(name) === name;\n  } catch {\n    return false;\n  }\n}"],
+      },
+    },
+  }),
   'tezos-expiry': () => ({
     text: 'Tezos expiries are read as RFC 3339; anything else is unreadable (NaN), as an unparsable date is today.',
     source: {
@@ -1452,6 +1468,11 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
   const coder = ethers.AbiCoder.defaultAbiCoder();
   const revert = (data) => ({ rpc_error: { code: 3, message: 'execution reverted', data } });
   const ADDRESS = { data: coder.encode(['bytes', 'address'], [coder.encode(['address'], ['0x' + 'ab'.repeat(20)]), '0x' + '22'.repeat(20)]) };
+  // A primary name that isn't normalized: a capital I where vitalik.eth
+  // has an l (#75).
+  const lookalike = { data: coder.encode(['string', 'address', 'address'], ['vitaIik.eth', '0x' + '22'.repeat(20), '0x' + '33'.repeat(20)]) };
+  const reverse = { fn: 'resolveEnsReverse', args: ['0x' + 'ab'.repeat(20)] };
+  const via = (methods) => ({ ...QUORUM_NETWORK, verification: { order: methods, preferVerified: false } });
   const offchain = (urls, callData = '0x0102', extraData = '0x09') => revert('0x556f1830' + coder.encode(
     ['address', 'string[]', 'bytes', 'bytes4', 'bytes'], [UR, urls, callData, '0xdeadbeef', extraData]).slice(2));
   // An OffchainLookup whose URL array points every entry at one string,
@@ -1735,6 +1756,23 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
       bounds: { deadlineMs: 300 },
       hosts: Object.fromEntries(ENDPOINTS.map((url) => [new URL(url).host, { delay: 1000 }])),
     })),
+    // The forward check passed for the name as written, but it isn't its
+    // own normalization: shown as UNVERIFIED with its claim, on each path.
+    deviation('reverse-normalized', base({ calls: { reverse: lookalike } }), [{ call: reverse }]),
+    {
+      ...deviation('reverse-normalized', base({
+        network: via(['colibri']),
+        colibri: { prover: 'https://prover.example', calls: { reverse: lookalike } },
+      }), [{ call: reverse }]),
+      id: 'deviation-reverse-normalized-colibri',
+    },
+    {
+      ...deviation('reverse-normalized', base({
+        network: via(['myotis']),
+        myotis: { enabled: true, ready: true, block: 23_456_789, calls: { reverse: lookalike } },
+      }), [{ call: reverse }]),
+      id: 'deviation-reverse-normalized-myotis',
+    },
   ];
 }
 
