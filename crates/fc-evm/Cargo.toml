@@ -11,12 +11,10 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# A number's spelling, reread with a correctly rounded parser (`parse_json`).
+fc-json = { path = "../fc-json" }
 k256 = { version = "0.14", default-features = false, features = ["arithmetic", "ecdsa"] }
-# `float_roundtrip`: a JSON number is read as JSON.parse reads it, correctly
-# rounded to the nearest double (#87). The default parser rounds
-# approximately, so typed data could be signed for another integer than
-# ethers signs.
-serde_json = { version = "1", features = ["float_roundtrip"] }
+serde_json = "1"
 sha3 = { version = "0.12", features = ["zeroize"] }
 thiserror = "2"
 

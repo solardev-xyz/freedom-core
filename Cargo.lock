@@ -369,6 +369,7 @@ dependencies = [
 name = "fc-evm"
 version = "0.5.0"
 dependencies = [
+ "fc-json",
  "fc-keys",
  "hex",
  "k256",

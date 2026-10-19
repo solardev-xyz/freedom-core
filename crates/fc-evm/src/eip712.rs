@@ -811,47 +811,98 @@ mod tests {
         assert!(is_identifier(&"n".repeat(256)));
     }
 
+    /// The decimal digits of 5^n.
+    fn five_to(n: u32) -> String {
+        let mut digits = vec![1u8]; // little-endian
+        for _ in 0..n {
+            let mut carry = 0u8;
+            for digit in &mut digits {
+                let product = *digit * 5 + carry;
+                *digit = product % 10;
+                carry = product / 10;
+            }
+            if carry > 0 {
+                digits.push(carry);
+            }
+        }
+        digits.iter().rev().map(|d| char::from(b'0' + d)).collect()
+    }
+
     /// A JSON number is read as `JSON.parse` reads it, correctly rounded to
     /// the nearest double, ties to even, before the integer rules apply
-    /// (#87). Without serde_json's `float_roundtrip`, its parser rounds
-    /// approximately, and the core could sign another integer than the one
-    /// ethers signs and the approval UI shows.
+    /// (#87): `parse_json` rereads each double from its spelling. serde_json
+    /// rounds approximately, and its `float_roundtrip` parser still
+    /// misrounds padded spellings and halfway subnormals, so the core could
+    /// sign another integer than the one ethers signs and the approval UI
+    /// shows, or refuse one ethers accepts.
     #[test]
     fn numbers_are_read_as_json_parse_reads_them() {
-        let hash = |number: &str| {
-            let message: Value = serde_json::from_str(&format!(r#"{{"v":{number}}}"#)).unwrap();
-            let types = json!({ "M": [{ "name": "v", "type": "uint256" }] });
+        let hash = |kind: &str, number: &str| {
+            let message = crate::parse_json(&format!(r#"{{"v":{number}}}"#)).unwrap();
+            let types = json!({ "M": [{ "name": "v", "type": kind }] });
             typed_data_hash(&json!({ "name": "N" }), &types, &message)
         };
+        let uint = |number: &str| hash("uint256", number);
+        let int = |number: &str| hash("int256", number);
         // 2^52 + 0.5 is a tie between 2^52 and 2^52 + 1: JSON.parse gives
         // 2^52, which ethers signs.
         assert_eq!(
-            hash("4503599627370496.5").unwrap(),
-            hash("4503599627370496").unwrap()
+            uint("4503599627370496.5").unwrap(),
+            uint("4503599627370496").unwrap()
         );
         assert_eq!(
-            hash("45035996273704965e-1").unwrap(),
-            hash("4503599627370496").unwrap()
+            uint("45035996273704965e-1").unwrap(),
+            uint("4503599627370496").unwrap()
         );
+        // The same tie with its integer significand padded by 752 zeros and
+        // a compensating exponent, which float_roundtrip reads as 2^52 + 1;
+        // and just above the tie, which rounds up.
+        let zeros = "0".repeat(752);
+        let padded = format!("45035996273704965{zeros}e-753");
+        assert_eq!(uint(&padded).unwrap(), uint("4503599627370496").unwrap());
+        assert_eq!(
+            int(&format!("-{padded}")).unwrap(),
+            int("-4503599627370496").unwrap()
+        );
+        let above = format!("45035996273704965{}1e-754", "0".repeat(752));
+        assert_eq!(uint(&above).unwrap(), uint("4503599627370497").unwrap());
         // 2^52 + 1.5 is a tie too, and rounds up to the even 2^52 + 2.
         assert_eq!(
-            hash("4503599627370497.5").unwrap(),
-            hash("4503599627370498").unwrap()
+            uint("4503599627370497.5").unwrap(),
+            uint("4503599627370498").unwrap()
         );
         // (2^53 - 1) + 0.5 rounds to 2^53, which is no safe integer: an
         // error, as in ethers.
-        assert!(hash("9007199254740991.5").is_err());
-        assert!(hash("9007199254740991").is_ok());
+        assert!(uint("9007199254740991.5").is_err());
+        assert!(uint("9007199254740991").is_ok());
+        // 2^-1075, halfway between 0 and the smallest subnormal, is 0 (ties
+        // to even), which ethers accepts; float_roundtrip reads the
+        // subnormal and refuses it. Just above halfway is the subnormal: no
+        // integer, refused by both.
+        let half = format!("{}{}e-1092", five_to(1075), "0".repeat(17));
+        assert_eq!(uint(&half).unwrap(), uint("0").unwrap());
+        assert_eq!(int(&format!("-{half}")).unwrap(), int("0").unwrap());
+        let over = format!("{}{}1e-1093", five_to(1075), "0".repeat(17));
+        assert!(uint(&over).is_err());
         // Literals between 2^52 and 2^53, where a double holds only
-        // integers: each parses as Rust's correctly rounded parser reads it.
+        // integers, padded or not: each reads as Rust's correctly rounded
+        // parser reads it.
         let mut differ = Vec::new();
-        for i in 0..4096u64 {
+        for i in 0..2048u64 {
             let integer = (1u64 << 52) + i.wrapping_mul(1_099_511_627_791) % (1u64 << 52);
             for fraction in ["5", "25", "75", "4999999999", "5000000001"] {
-                let literal = format!("{integer}.{fraction}");
-                let parsed: Value = serde_json::from_str(&literal).unwrap();
-                if parsed.as_f64() != literal.parse::<f64>().ok() {
-                    differ.push(literal);
+                for literal in [
+                    format!("{integer}.{fraction}"),
+                    format!(
+                        "{integer}{fraction}{}e-{}",
+                        "0".repeat(40),
+                        fraction.len() + 40
+                    ),
+                ] {
+                    let parsed = crate::parse_json(&literal).unwrap();
+                    if parsed.as_f64() != literal.parse::<f64>().ok() {
+                        differ.push(literal);
+                    }
                 }
             }
         }

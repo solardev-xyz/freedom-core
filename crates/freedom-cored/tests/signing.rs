@@ -122,6 +122,45 @@ fn every_vector_case_over_the_wire() {
         }
     }
     assert!(checked > 150, "only {checked} cases");
+    // Typed data as JSON text, sent in the frame as written (#87): the core
+    // reads each number as JSON.parse does, whatever its spelling.
+    for case in vectors["typedDataText"].as_array().unwrap() {
+        let Some((_, key)) = keys.iter().find(|(k, _)| *k == case["keyId"]) else {
+            continue;
+        };
+        let label = case["id"].as_str().unwrap();
+        let text = case["typed_data_json"].as_str().unwrap();
+        let mut send = |method: &str, params: String| {
+            id += 1;
+            let frame = format!(
+                r#"{{"type":"request","id":{id},"method":"{method}","params":{params},"context":{{"caller":"chrome"}}}}"#
+            );
+            core.send_raw(&raw_frame(1, frame.as_bytes()));
+            core.response(id)
+        };
+        let signed = send(
+            "sign.typed_data",
+            format!(r#"{{"key":{key},"typed_data":{text}}}"#),
+        );
+        let hashed = send("typed_data.hash", format!(r#"{{"typed_data":{text}}}"#));
+        if case["result"]["status"] == "error" {
+            for reply in [&signed, &hashed] {
+                assert_eq!(
+                    reply["error"]["code"], "invalid_argument",
+                    "{label}: {reply}"
+                );
+            }
+            continue;
+        }
+        assert_eq!(
+            signed["result"]["signature"], case["result"]["signature"],
+            "{label}: {signed}"
+        );
+        assert_eq!(
+            hashed["result"]["hash"], case["result"]["hash"],
+            "{label}: {hashed}"
+        );
+    }
 }
 
 #[test]
@@ -241,4 +280,8 @@ fn typed_data_numbers_are_read_as_json_parse_reads_them() {
         unsafe_tie["error"]["code"], "invalid_argument",
         "{unsafe_tie}"
     );
+    // The same tie with a padded integer significand, which serde_json's
+    // float_roundtrip reads as 2^52 + 1.
+    let padded = hash(5, &format!("45035996273704965{}e-753", "0".repeat(752)));
+    assert_eq!(padded["result"], even["result"], "{padded}");
 }
