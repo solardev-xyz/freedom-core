@@ -902,15 +902,19 @@ Their embedded IPv4 address is a tunnel endpoint inside a provider's or site's n
 
 An IPv6-only network can translate through a network-specific prefix of its own (RFC 6052). Addresses under it look like ordinary global unicast, and, unlike the well-known prefix, it may translate to private IPv4 addresses. So in `direct` mode the service learns these prefixes as RFC 7050 describes, and fails closed for IPv6 while it doesn't know them.
 
-- **Discovery asks the access network.** It sends one query, AAAA for `ipv4only.arpa`, to the resolvers the operating system is configured with, because only the access network's DNS64 synthesizes for it. The service's other resolvers (hickory's, and the configured DoH endpoint) needn't see that network's DNS64.
-  - **It is a discovery-only path:** that one name and type, over plain DNS. Each system resolver is a configured target for that query alone, as the DoH endpoint is for DoH. Its answers are parsed, never dialed, and the path resolves nothing else.
+- **Discovery asks the access networks.** It sends one query, AAAA for `ipv4only.arpa`, to each resolver it can learn for each interface, and takes the union of the answers, because only an access network's own DNS64 synthesizes for it (RFC 8880 §7.1). The service's other resolvers (hickory's, and the configured DoH endpoint) needn't see that DNS64.
+  - **Which resolvers,** per OS. A manual DNS setting, a VPN's resolver or a local recursive resolver can stand in front of an interface's own, so the service reads the interface-learned servers where the OS keeps them, not only the effective list:
+    - **Windows:** each adapter's DNS servers (`GetAdaptersAddresses`), and, where a manual setting overrides DHCP, the servers DHCP gave the interface (`DhcpNameServer` under the interface's `Tcpip` parameters);
+    - **macOS:** each network service's DNS state in the SystemConfiguration dynamic store (`State:/Network/Service/<id>/DNS`), which holds what the service learned, not only `/etc/resolv.conf`'s primary resolver;
+    - **Linux:** `/etc/resolv.conf`, plus every link's servers in `/run/systemd/resolve/resolv.conf` when systemd-resolved runs. Servers that NetworkManager or another manager learned but doesn't publish there can't be read portably.
+  - **It is a discovery-only path:** that one name and type, over plain DNS. Each of these resolvers is a configured target for that query alone, as the DoH endpoint is for DoH. Its answers are parsed, never dialed, and the path resolves nothing else.
   - **Each answer** that embeds `192.0.0.170` or `192.0.0.171` at one of RFC 6052's positions gives a prefix and its length. An answer that embeds neither teaches nothing.
   - **The result belongs to the process,** not to an instance: it describes the network, and the query carries nothing of a partition's.
 - **The fixed forms** are those whose prefix is fixed: IPv4-mapped, the well-known NAT64 prefix and 6to4. Any other global IPv6 address could sit under a network-specific prefix.
 - **States:**
   - **pending** until the first query settles. An IPv6 target outside the fixed forms waits for it, within its own deadline;
-  - **known,** after an answer: a set of prefixes, empty when the answer is NODATA or NXDOMAIN, which means the network advertises none (RFC 7050 §3). The same holds when the OS has no resolver configured;
-  - **unknown,** after a query that failed (a timeout, `SERVFAIL`, a malformed answer);
+  - **known,** once every resolver learned has answered: the union of their prefixes. NODATA or NXDOMAIN from all of them gives an empty set, which means none of them advertises a prefix (RFC 7050 §3), not that no network does. The same holds when the OS lists no resolver;
+  - **unknown,** while any resolver learned has failed (a timeout, `SERVFAIL`, a malformed answer). Another's answer doesn't settle it;
   - **incomplete,** when an answer holds more than 16 distinct prefixes.
 
   In **unknown** and **incomplete**, an IPv6 target outside the fixed forms is refused, and `ipfs.stats` says why. IPv4 targets, and IPv6 targets under the fixed forms, are judged as always. A dual-stack network keeps IPv4, and an IPv6-only network whose resolver fails couldn't reach much anyway.
@@ -923,6 +927,7 @@ An IPv6-only network can translate through a network-specific prefix of its own 
 
 The promise is exact for addresses the service can read: an IPv4 address, or an IPv6 address whose embedding its form or a learned prefix fixes. Translation the service can't read is outside it:
 - **a prefix announced only in router advertisements** (PREF64, RFC 8781), which the service can't read portably;
+- **a prefix only an unread resolver advertises:** an interface's own resolver that the OS doesn't expose as above (on Linux, one that a network manager learned but didn't publish), hidden behind a manual setting, a VPN's resolver or a local recursive resolver that doesn't forward to the DNS64;
 - **explicit address mappings** (SIIT-EAM, RFC 7757);
 - **DNS64 that maps different IPv4 ranges to different prefixes** (RFC 7050 §5.1), for example private A records under a prefix the `ipv4only.arpa` answer doesn't show. The heuristic can't find that prefix, and RFC 7050 says so;
 - **for up to a minute after a network change,** a new network's prefix;
@@ -1160,7 +1165,10 @@ As 0006's 4.7 did, before anything moves:
     - IPv4-compatible `::808:808`, IPv4-translated `::ffff:0:808:808`, local-use NAT64 `64:ff9b:1::808:808` and Teredo `2001:0:4136:e378:8000:63bf:3fff:fdd2` are refused whole;
     - a learned network-specific prefix of each length (32, 40, 48, 56, 64 and 96), with `169.254.169.254` and `8.8.8.8` embedded at RFC 6052's positions: refused and passed;
     - an `ipv4only.arpa` answer that embeds neither well-known address teaches nothing, and NODATA gives a known, empty set;
-    - discovery goes only to the system resolvers, for `ipv4only.arpa` only, and no answer from it is dialed;
+    - discovery goes only to the resolvers it learned, for `ipv4only.arpa` only, and no answer from it is dialed;
+    - **two interfaces:** one interface's resolver advertises a prefix and the other's answers NODATA, as with a VPN beside the physical link: the prefix is known, and an address under it with `169.254.169.254` embedded is refused;
+    - **a manual DNS override:** the effective resolver answers NODATA while the interface-learned one (DHCP's on Windows, the service's state on macOS, a link's in systemd-resolved) advertises a prefix: the prefix is known;
+    - **one resolver failing** while another answers: the state stays unknown;
     - **the startup race:** an IPv6 dial made while discovery is pending waits for it, and an address under the prefix that the first answer teaches is refused;
     - **failure:** after a failed query, an IPv6 target outside the fixed forms is refused and an IPv4 one passes; after a failed refresh, every known prefix is still applied;
     - **the bound:** an answer with 17 distinct prefixes makes the state incomplete, and `2a00:1:11::a9fe:a9fe` under the 17th is refused, not passed as global unicast;
