@@ -17,6 +17,9 @@
 //!   connection) has its instance torn down as soon as it exists. The 5 s
 //!   bound runs from that first fence, through the build and the teardown:
 //!   a build that outlasts it ends the process (70), as a teardown would.
+//! - **The start's success** (`{ instance }`) is queued as a head without a
+//!   body: the same response on the wire, but cancellable until written. A
+//!   cancel that beats the writer gets `cancelled`, and the instance goes.
 //! - **The teardown,** for `ipfs.stop`, a cancelled start and the end of the
 //!   connection alike:
 //!   1. **Fence:** the ID is retired at once, on the reader thread: a later
@@ -223,6 +226,18 @@ impl Instances {
         &self.kind
     }
 
+    /// Whether `instance_id` is live: built, with its start answered.
+    #[cfg(test)]
+    pub fn is_live(&self, instance_id: &str) -> bool {
+        matches!(
+            self.lock().active.get(instance_id),
+            Some(Slot {
+                state: State::Live(_),
+                ..
+            })
+        )
+    }
+
     fn lock(&self) -> MutexGuard<'_, Table> {
         self.table
             .lock()
@@ -378,8 +393,11 @@ impl Instances {
             log::info("instance started", json!({ "instance": instance_id }));
             slot.state = State::Live(Box::new(instance));
             // Queued under the lock: a stop or a cancel handled after this
-            // finds a live instance whose start is answered.
-            let _ = conn.reply(id, &json!({ "instance": instance_id }));
+            // finds a live instance whose start is answered. A head without
+            // a body, not a reply: a cancel that arrives before the writer
+            // takes it still drops it, answers `cancelled`, and reaches
+            // `cancel` below, which retires the instance.
+            let _ = conn.head(id, &json!({ "instance": instance_id }), false);
             return;
         }
         slot.state = State::Stopping { stops };
@@ -530,7 +548,8 @@ impl Instances {
                 }
             }
             State::Live(_) => {
-                // Its `{ instance }` was queued but not written.
+                // Its `{ instance }` head was queued but not written: the
+                // connection dropped it for `cancelled`.
                 let instance_id = instance_id.clone();
                 let instance = slot.retire(Vec::new());
                 drop(table);
