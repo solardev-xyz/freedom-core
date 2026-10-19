@@ -4,7 +4,7 @@
 //! main receives it; the browser's executor mirrors it, with the same
 //! vectors.
 
-use fc_json::JsValue;
+use fc_json::{JsString, JsValue};
 
 use crate::bzz::{FORWARDED_REQUEST_HEADERS, SWARM_HEADERS, has_encoded_separator, is_reference};
 use crate::ipfs::{GatewayForm, REDIRECT_HEADERS, STRIPPED_REQUEST_HEADERS, gateway_form};
@@ -103,7 +103,7 @@ pub fn validate_plan(plan: &JsValue, request: &PlanRequest<'_>) -> Result<(), Re
 }
 
 /// An object with exactly these keys.
-fn exact<'v>(value: &'v JsValue, keys: &[&str]) -> Result<&'v [(String, JsValue)], Refusal> {
+fn exact<'v>(value: &'v JsValue, keys: &[&str]) -> Result<&'v [(JsString, JsValue)], Refusal> {
     let JsValue::Object(props) = value else {
         return Err(Refusal::Shape);
     };

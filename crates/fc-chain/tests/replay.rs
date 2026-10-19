@@ -136,13 +136,13 @@ fn publish_trust(trust: &str) -> String {
                         list.iter()
                             .filter_map(|entry| match host(entry) {
                                 Some(h) if h.is_empty() => None,
-                                Some(h) => Some(fc_json::JsValue::String(h)),
+                                Some(h) => Some(fc_json::JsValue::string(h)),
                                 None => Some(entry.clone()),
                             })
                             .collect(),
                     )
                 }
-                ("prover", entry) => host(entry).map_or(item.clone(), fc_json::JsValue::String),
+                ("prover", entry) => host(entry).map_or(item.clone(), fc_json::JsValue::string),
                 _ => item.clone(),
             };
             (key.clone(), item)

@@ -923,7 +923,7 @@ fn every_callers_error_counts_against_the_session() {
     let error = message(alone.reply(a)).unwrap().to_owned();
     assert!(error.contains(&name));
     // As it is sent: a JSON string.
-    let reply = reply_size(&JsValue::String(error.clone()));
+    let reply = reply_size(&JsValue::string(error.clone()));
     let peak = alone.peak.max(8 * format!("content:{name}").len());
     for (room, outcome) in [(3 * reply, error.as_str()), (3 * reply - 1, "budget")] {
         let mut bounded = failing.clone();
@@ -966,7 +966,7 @@ fn replies_hold_their_room_until_written() {
 #[test]
 fn a_configuration_changes_replies_count_against_the_session() {
     let name = format!("{}.eth", "a".repeat(2_000));
-    let reply = reply_size(&JsValue::String(format!(
+    let reply = reply_size(&JsValue::string(format!(
         "Name resolution configuration changed while resolving {name}"
     )));
     let callers = |world: &mut World| -> Vec<u64> {
@@ -1025,7 +1025,7 @@ fn an_exhausted_callers_reply_counts_against_the_session() {
     let text = "Myotis availability changed repeatedly while resolving vitalik.eth";
     let (probe, exhausted) = start(None);
     let held = probe.held_before_reply[&exhausted];
-    let size = reply_size(&JsValue::String(text.to_owned()));
+    let size = reply_size(&JsValue::string(text.to_owned()));
     for (room, expected) in [(size, text), (size - 1, "budget")] {
         let (world, exhausted) = start(Some(held + room));
         assert_eq!(message(world.reply(exhausted)), Some(expected));

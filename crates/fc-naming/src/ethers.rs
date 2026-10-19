@@ -25,7 +25,7 @@ pub fn make_error(message: &str, code: &str, info: &[(&str, String)]) -> String 
 
 /// ethers' `stringify` of a string: `JSON.stringify`.
 pub fn string(value: &str) -> String {
-    JsValue::String(value.to_owned()).stringify()
+    JsValue::string(value.to_owned()).stringify()
 }
 
 /// `hexlify`: `0x` and lowercase hex.

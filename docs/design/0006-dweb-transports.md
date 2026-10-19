@@ -173,7 +173,7 @@ All of this is today's behavior, ported with vectors:
   - `hash = keccak256(utf8(html))`.
 
   This replaces the worker thread and its ethers decode.
-- **The answer's `result`** is the string `JSON.parse` would make: anything but a string is malformed, and its escapes are decoded. A lone surrogate becomes U+FFFD, which no check tells apart from it: one unit to the size check, and no hex digit.
+- **The answer's `result`** is the string `JSON.parse` would make: anything but a string is malformed, and its escapes are decoded. A lone surrogate is kept, and read as text it is U+FFFD: one unit to the size check, and no hex digit.
 - **Memory:** what the answer sizes is charged to the request before it is allocated (0005, Bounds): the unescaped string, when it has escapes; the decode's one buffer, the ABI data's bytes, which the document is then cut from in place; and the trust's index. The document stays charged until its reply is made, and counts as output after that. An 8 MiB document so costs 8 MiB beside its answer, and a request without room for it ends with `budget` before the buffer is made.
 - **`html_base64`** carries the document's UTF-8 bytes. Base64 keeps the reply within 0005's message cap at 10.7 MiB, where a JSON string of control characters could grow six-fold.
 - **`hash`** is `0x` and 64 lowercase hex digits, as ethers writes it.

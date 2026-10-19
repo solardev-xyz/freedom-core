@@ -245,7 +245,7 @@ fn reply_bytes(outcome: &Outcome) -> usize {
     let (tree, wire) = match outcome {
         Ok(value) => (value.held(), value.stringify().len()),
         Err(thrown) => {
-            let message = JsValue::String(thrown.message.clone());
+            let message = JsValue::string(thrown.message.clone());
             (message.held(), message.stringify().len())
         }
     };
@@ -340,7 +340,7 @@ fn sized(outcome: Outcome, bounds: &super::bounds::Bounds) -> Outcome {
     match outcome {
         Ok(value) if !bounds.reply_fits(value.stringify().len()) => Err(Thrown::too_large()),
         Err(thrown)
-            if !bounds.reply_fits(JsValue::String(thrown.message.clone()).stringify().len()) =>
+            if !bounds.reply_fits(JsValue::string(thrown.message.clone()).stringify().len()) =>
         {
             Err(Thrown::too_large())
         }
@@ -753,11 +753,11 @@ impl Machine {
         if !valid {
             let result = JsValue::Object(vec![
                 ("success".into(), JsValue::Bool(false)),
-                ("address".into(), JsValue::String(address.into())),
-                ("reason".into(), JsValue::String("INVALID_ADDRESS".into())),
+                ("address".into(), JsValue::string(address)),
+                ("reason".into(), JsValue::string("INVALID_ADDRESS")),
                 (
                     "error".into(),
-                    JsValue::String(format!("Invalid address: {address}")),
+                    JsValue::string(format!("Invalid address: {address}")),
                 ),
             ]);
             return self.reply(Ok(result), options.attempts_used);

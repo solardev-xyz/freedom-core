@@ -118,7 +118,7 @@ impl Backend {
             Self::Ipfs { mode, up } => ("ipfs", mode.as_str(), up),
         };
         object(vec![
-            (node, JsValue::String(mode.to_owned())),
+            (node, JsValue::string(mode.to_owned())),
             ("up", JsValue::Bool(up)),
         ])
     }
@@ -288,7 +288,7 @@ impl ErrorPlan {
     pub fn body(&self) -> String {
         object(vec![
             ("code", number(self.status)),
-            ("message", JsValue::String(self.message.clone())),
+            ("message", JsValue::string(self.message.clone())),
         ])
         .stringify()
     }
@@ -306,7 +306,7 @@ fn number(value: impl Into<f64>) -> JsValue {
 }
 
 fn object(props: Vec<(&str, JsValue)>) -> JsValue {
-    JsValue::Object(props.into_iter().map(|(k, v)| (k.to_owned(), v)).collect())
+    JsValue::Object(props.into_iter().map(|(k, v)| (k.into(), v)).collect())
 }
 
 fn pairs(headers: &[(String, String)]) -> JsValue {
@@ -314,7 +314,7 @@ fn pairs(headers: &[(String, String)]) -> JsValue {
         headers
             .iter()
             .map(|(n, v)| {
-                JsValue::Array(vec![JsValue::String(n.clone()), JsValue::String(v.clone())])
+                JsValue::Array(vec![JsValue::string(n.clone()), JsValue::string(v.clone())])
             })
             .collect(),
     )
@@ -331,8 +331,8 @@ impl Plan {
             Self::Fetch(fetch) => object(vec![(
                 "fetch",
                 object(vec![
-                    ("node", JsValue::String(fetch.node.as_str().to_owned())),
-                    ("path", JsValue::String(fetch.path.clone())),
+                    ("node", JsValue::string(fetch.node.as_str().to_owned())),
+                    ("path", JsValue::string(fetch.path.clone())),
                     ("headers", pairs(&fetch.headers)),
                     (
                         "retry",
@@ -367,7 +367,7 @@ impl Plan {
                             fetch
                                 .response
                                 .iter()
-                                .map(|op| JsValue::String(op.as_str().to_owned()))
+                                .map(|op| JsValue::string(op.as_str().to_owned()))
                                 .collect(),
                         ),
                     ),
@@ -380,11 +380,11 @@ impl Plan {
                                     .trust
                                     .name
                                     .clone()
-                                    .map_or(JsValue::Null, JsValue::String),
+                                    .map_or(JsValue::Null, JsValue::string),
                             ),
                             (
                                 "content",
-                                JsValue::String(fetch.trust.content.as_str().to_owned()),
+                                JsValue::string(fetch.trust.content.as_str().to_owned()),
                             ),
                         ]),
                     ),
@@ -394,7 +394,7 @@ impl Plan {
                 "redirect",
                 object(vec![
                     ("status", number(redirect.status)),
-                    ("location", JsValue::String(redirect.location.clone())),
+                    ("location", JsValue::string(redirect.location.clone())),
                     ("headers", pairs(&redirect.headers)),
                 ]),
             )]),
@@ -403,7 +403,7 @@ impl Plan {
                 object(vec![
                     ("status", number(error.status)),
                     ("code", number(error.status)),
-                    ("message", JsValue::String(error.message.clone())),
+                    ("message", JsValue::string(error.message.clone())),
                 ]),
             )]),
         }

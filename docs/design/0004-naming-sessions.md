@@ -545,7 +545,7 @@ The 4 MiB decode budget caps aliasing: an `OffchainLookup` whose URL array repea
 
 ## Deviations
 
-Each deviation gets a boundary vector in the implementation PR, generated from the same harness with the reference patched in memory where the deviation has no natural trigger. Each patch is recorded in its vector. 0003's codec deviations (`name-length`, `json-depth`, `lone-surrogate`, `lone-surrogate-keys`, and the core's JSON error text) still apply.
+Each deviation gets a boundary vector in the implementation PR, generated from the same harness with the reference patched in memory where the deviation has no natural trigger. Each patch is recorded in its vector. 0003's codec deviations (`name-length`, `json-depth`, and the core's JSON error text) still apply; its lone-surrogate deviations are gone, as strings now keep them (#95).
 
 | ID | Today | The core | Failure and cache behavior |
 |---|---|---|---|

@@ -447,14 +447,11 @@ function buildTezos({ tezos }) {
     hexOf('{"\\ud800":1,"\\ud801":2,"\\ufffd":3}'),
   ].map((hex) => {
     const result = attempt(() => ti.decodeJsonBytes(hex));
-    // A lone surrogate survives in a JS string; a Rust string holds U+FFFD
-    // (design 0003, jsjson).
-    const loneSurrogate = typeof result.value === 'string' && /[\uD800-\uDFFF]/.test(result.value.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, ''));
     // Recorded as JSON.stringify, so non-JSON doubles (Infinity) survive.
+    // Lone surrogates survive in the core's strings too (#95), and
+    // JSON.stringify writes them as escapes.
     const text = Buffer.from(hex, 'hex').toString('utf8');
-    const deviation = /^\[{513}/.test(text) ? 'json-depth'
-      : /\\ud8/i.test(text) && text.startsWith('{') ? 'lone-surrogate-keys'
-      : loneSurrogate ? 'lone-surrogate' : null;
+    const deviation = /^\[{513}/.test(text) ? 'json-depth' : null;
     return {
       hex,
       ...(deviation ? { deviation } : {}),
