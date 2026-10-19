@@ -238,21 +238,24 @@ Electron main (profile P)
   - Within a generation, instances have their own [epochs](#instance-ids).
 - **Panics:**
   - **A startup panic hook replaces Rust's default** before any other work. It writes one fixed JSON line to stderr, `{"panic": "<task kind>"}`, never the payload or a backtrace, in both kinds of process. Payloads can carry paths, names and CIDs, and stderr is forwarded to main's persistent log.
-  - **Request work** runs on tasks marked as request tasks, built with `panic = "unwind"`. A panic there is caught at its join handle, after the hook's fixed line:
-    - before the head, it becomes that request's `internal` error;
-    - after the head, the stream's `internal` abort.
-  - **A caught request panic retires its instance.** The panic may have struck while the task held the instance's store, a cache, a Bitswap want or an in-flight table. A lock left poisoned or an invariant half-updated would then fail or corrupt every later request on that instance. So at the join handle, which knows the request's instance, after the request's own reply, the service:
-    1. runs the instance's [teardown](#instances-and-their-teardown) from step 1, exactly as for `ipfs.stop`: it fences the ID, revokes the network capability, cancels the instance's other requests (`stopped`, as in any teardown), and waits for quiescence under the same 5 s watchdog. If quiescence isn't proven, the process exits 70;
-    2. then sends the event `ipfs.instance_retired { instance, reason: "panic" }`. Main marks the pair retired and restarts as [above](#crashes-hangs-and-restarts).
+  - **Request work** runs on tasks marked as request tasks, built with `panic = "unwind"`. A panic there is caught at its join handle, after the hook's fixed line. The request is owed `internal` unless it is already settled, and the writer, which holds the request's [protocol state](#frames), decides what that means:
+    - **no head queued yet:** the request's `internal` error;
+    - **head queued but not written:** the head is dropped, as for a cancel, and `internal` is the request's only reply;
+    - **head written, stream open:** the stream's `internal` abort, which purges its queued data, as any abort does;
+    - **already settled** (an error or `cancelled` sent, `end` written, or an abort queued): nothing more is sent, and the earlier outcome stands. This covers a panic in a request future's destructor after a cancel, which `fc-service` also runs as request work.
+  - **A caught request panic retires its instance,** whether or not anything was still owed. The panic may have struck while the task held the instance's store, a cache, a Bitswap want or an in-flight table. A lock left poisoned or an invariant half-updated would then fail or corrupt every later request on that instance. So the join handle, which knows the request's instance, acts in this order:
+    1. **Fence first.** Before it queues any reply or waits for anything, it runs steps 1 and 2 of the instance's [teardown](#instances-and-their-teardown): the ID is retired and the network capability revoked. The teardown's 5 s watchdog is armed at the same moment. From then on, a request for the instance gets `stopped`, including one main sends after it has seen the `internal`.
+    2. **The request's terminal,** as the writer decides it above. It is queued, not awaited: the teardown doesn't wait for stdout.
+    3. **The rest of the teardown,** from step 3, exactly as for `ipfs.stop`: the instance's other requests are cancelled (`stopped`, as in any teardown), and quiescence is awaited. If it isn't proven within the 5 s, the process exits 70.
+    4. **The event** `ipfs.instance_retired { instance, reason: "panic" }`. Main marks the pair retired and restarts as [above](#crashes-hangs-and-restarts).
 
-    A request panic on an instance that is already being torn down adds nothing: that teardown goes on. The store keeps what was committed. A transaction the panic interrupted is rolled back when the store closes, as after a kill.
-  - **Other instances are untouched.** In the ephemeral process, the instances share only process-wide state, and a request task can hold only these parts of it:
+    A request panic on an instance that is already being torn down adds nothing: that teardown goes on. The store keeps what was committed. A transaction the panic interrupted is rolled back when the store closes, as after a kill. Between the panic and its join handle seeing it, a request that meets a lock the panic poisoned fails with `internal`: only the teardown recovers a poisoned lock ([Upstream changes](#upstream-changes-in-freedom-ipfs)).
+  - **Other instances are untouched.** In the ephemeral process, the instances share only process-wide state. A request task holds these parts of it, each as an owned guard whose drop releases it, so an unwinding task returns it ([Budgets](#budgets)):
     - its admission slot;
     - retrieval permits;
-    - budget reservations;
-    - its stream's entry in the writer.
+    - the dynamic reservations of its work, such as its block fetches.
 
-    Each is an owned guard whose drop releases it, so an unwinding task returns it ([Budgets](#budgets)). No lock of the service's is held across a call into freedom-ipfs, so an upstream panic can't poison one.
+    **The stream's protocol state isn't the task's.** The writer's record of the request is the writer's: its queued head and that head's reservation, its queued data in the writer's data queue, and the stream's credit account. The task holds only a producer handle, and dropping it on unwind removes none of this. The record lives until the request's terminal frame is written, as for any request, so the terminal the writer decides on can still be sent, and credit is checked against the account until the abort is written. No lock of the service's is held across a call into freedom-ipfs, so an upstream panic can't poison one.
   - **Why the instance, and not just the request or the whole process:**
     - **Not just the request:** Rust unwinds memory-safely, but it doesn't restore an instance's own invariants. The store, caches, swarm state and in-flight tables belong to the instance.
     - **Not the whole process:** the instance is the unit that owns that state, and its teardown already proves that none of it survives. Restarting the ephemeral process would end every private window's instance for one partition's fault.
@@ -263,7 +266,7 @@ Electron main (profile P)
 
     | Where the panic is | The request | Its instance | The process |
     |---|---|---|---|
-    | a request task | `internal`: an error before the head, an abort after it | retired: torn down, then `ipfs.instance_retired` | goes on |
+    | a request task | `internal` unless already settled: an error before the head is written, an abort after it | fenced first, then torn down, then `ipfs.instance_retired` | goes on |
     | a task the service spawned for an instance or for the process | — | — | exits 70, from the hook |
     | a library's task on an instance's runtime | — | — | exits 70, from the hook |
     | any other thread: blocking work a library spawned, the teardown thread, the watchdogs | — | — | exits 70, from the hook |
@@ -999,7 +1002,11 @@ As 0006's 4.7 did, before anything moves:
 - **Request panic cases,** with a panic injected through the test hooks:
   - **while the task holds the store, a cache, a Bitswap want or an in-flight entry:** the request gets `internal`, the instance's other requests get `stopped`, the teardown proves quiescence, and `ipfs.instance_retired` follows. The replacement instance serves the same CID;
   - **after the head:** the stream aborts with `internal`;
-  - **process-wide state:** admission, retrieval permits, budget reservations and the writer's stream entries return to their baseline;
+  - **with the head queued but not written:** the head is dropped, and `internal` is the only reply;
+  - **with data queued:** the queued data is purged, the abort is written, and credit for the stream is checked against its account until then;
+  - **after the terminal is settled** (a panic in a request future's destructor after a cancel, or after `end` was written): the earlier outcome stands, nothing more is sent, and the instance is still retired;
+  - **the fence comes first:** with the join handle paused before it queues the reply, a request for the same instance gets `stopped`, and no work for it is admitted;
+  - **process-wide state:** admission, retrieval permits and dynamic reservations return to their baseline; the writer's record of the stream, its queued head and data, and its credit account do so once its terminal is written;
   - **in the ephemeral process:** a panic in one partition's instance retires that instance only. Another partition's request in flight completes, and the panicking partition's next request starts a new instance;
   - **a teardown held back past 5 s after a panic:** exit 70;
   - **a panic on a blocking thread a library spawned for a request,** outside the request task: exit 70;
