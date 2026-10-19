@@ -16,6 +16,15 @@ on:
       - "crates/fc-service/**"
       - "Cargo.toml"
       - "rust-toolchain.toml"
+      # Root tool configuration that applies under services/: Clippy and
+      # rustfmt look for theirs up the directory tree.
+      - "clippy.toml"
+      - ".clippy.toml"
+      - "rustfmt.toml"
+      - ".rustfmt.toml"
+      # The notices generator copies the toolchain runtime's texts from
+      # notices/ into the service's THIRD-PARTY-NOTICES.
+      - "notices/**"
       - "scripts/third-party-notices.py"
       - "scripts/test_*.py"
       - ".github/workflows/services.yml"
@@ -26,6 +35,15 @@ on:
       - "crates/fc-service/**"
       - "Cargo.toml"
       - "rust-toolchain.toml"
+      # Root tool configuration that applies under services/: Clippy and
+      # rustfmt look for theirs up the directory tree.
+      - "clippy.toml"
+      - ".clippy.toml"
+      - "rustfmt.toml"
+      - ".rustfmt.toml"
+      # The notices generator copies the toolchain runtime's texts from
+      # notices/ into the service's THIRD-PARTY-NOTICES.
+      - "notices/**"
       - "scripts/third-party-notices.py"
       - "scripts/test_*.py"
       - ".github/workflows/services.yml"
