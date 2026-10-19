@@ -3,13 +3,13 @@
 **Status:** proposed. Roadmap Phase 4 (item 4.2). Builds on [0001](0001-freedom-cored.md) (process model, lifetime lock, framing, hardening), [0005](0005-chain-data.md) (credit) and [0006](0006-dweb-transports.md) (plans, and the outline in *Service processes*).
 
 **The references:**
-- **freedom-browser** at `c5bd66d5` (#704, `claude/dweb-plans`):
+- **freedom-browser** at `c5bd66d5` (#704, `claude/dweb-plans`), and at `485819a9` (`integration/rust-core`) for the delegated routers (#724):
   - `ipfs/freedom-ipfs-native-binding.js`, `ipfs/freedom-ipfs-native-node.js` and `ipfs/freedom-ipfs-event-worker.js`;
   - `ipfs-manager.js` and its `ipfsBackend()`;
   - `dweb/plan-executor.js` and `dweb/fetch-admission.js`;
   - `core/core-client.js` and `core/frame.js`;
   - `scripts/fetch-freedom-ipfs-native.js`.
-- **freedom-ipfs** v0.4.5 (`9316571`), the release freedom-browser pins. Line references below are to that tag:
+- **freedom-ipfs** v0.4.6 (`ee6b95c`), the release freedom-browser pins on `integration/rust-core` (`485819a9`). It changes only dependencies, so its source is v0.4.5's, which the commit above pins. Line references below are to that tag:
   - `mob` is `crates/freedom-ipfs-mobile/src/lib.rs`;
   - `rt`, `rv`, `ns` and `st` are the `lib.rs` of the routing, retrieval, namesys and store crates.
 
@@ -101,8 +101,8 @@ This design moves it into **its own supervised process, `freedom-ipfsd`**:
   - The add-on needs GLIBC ≥ 2.38 on Linux (#350).
 - **Lifecycle:**
   - `FreedomIpfsNativeNode` serializes `start` and `stop`, and runs the add-on's `*Async` calls on the libuv pool.
-  - Start is `nodeNewWithDataDirAsync(dataDir, 256 MiB)`, then `nodeStartNativeGatewayOnlineAsync(handle, '', AUTO, 0, 3, 0, 15000)`:
-    - the default delegated router (`https://delegated-ipfs.dev/routing/v1`);
+  - Start is `nodeNewWithDataDirAsync(dataDir, 256 MiB)`, then `nodeStartNativeGatewayOnlineAsync(handle, DELEGATED_ROUTERS, AUTO, 0, 3, 0, 15000)`:
+    - two delegated routers, `https://delegated-ipfs.dev/routing/v1` and `https://cid.contact/routing/v1`, as one comma-separated string (#724);
     - a 3 s DHT query timeout;
     - the default 8 header permits;
     - a 15 s request queue.
@@ -118,6 +118,10 @@ This design moves it into **its own supervised process, `freedom-ipfsd`**:
   - `<userData>/ipfs-data/freedom-ipfs/freedom-ipfs.sqlite3`, in WAL mode, holds blocks, provider records, failing providers and resolved names.
   - `FREEDOM_IPFS_DATA` moves it.
   - No lock guards it beyond the profile lock.
+- **Routing,** in `AUTO` mode: the string is split at commas, and the list feeds both kinds of lookup (`mob:2200`–`2227`, `mob:2274`–`2299`):
+  - **Providers:** both routers are asked in parallel, and their providers merged (`rt:357`–`426`). The light DHT stays the fallback (`rt:636`–`700`).
+  - **IPNS names:** the same list, both routers in parallel, then the DHT (`ns:412`–`447`, `ns:514`–`530`).
+  - **One router's 404 masks the other's failure** ([freedom-ipfs#30](https://github.com/solardev-xyz/freedom-ipfs/issues/30)). cid.contact holds no IPNS records and answers 404, so when delegated-ipfs.dev can't be reached, an `/ipns/` load reports "not found" rather than a network error. No miss is cached, so a retry recovers.
 - **Network:**
   - Delegated routing, DoH and HTTP providers go through `reqwest`.
   - Bitswap and the light DHT go through libp2p over TCP, QUIC and WebSocket. libp2p resolves names through its own resolver.
@@ -145,7 +149,7 @@ Electron main (profile P)
   - `FREEDOM_IPFSD_PATH` is honored only when `!app.isPackaged`, as `FREEDOM_CORED_PATH` is.
 - **The environment** is cleared except for `PATH`, `HOME`/`USERPROFILE`, `LANG`, `RUST_LOG` and `SystemRoot` (`core-client.js`'s `scrubbedEnv`). That drops:
   - the proxy variables `reqwest` would otherwise read;
-  - the `FREEDOM_IPFS_*` tuning variables freedom-ipfs's retrieval crate reads.
+  - the `FREEDOM_IPFS_*` tuning variables freedom-ipfs's routing and retrieval crates read.
 - **Handshake:** `ipfs.hello` must complete within 10 s of spawn. Both sides enforce this, as for `core.hello`.
 - **No listening socket.** The service binds nothing. Upstream's loopback HTTP gateway is never started.
 - **Hardening:** 0001's, for both kinds of process:
@@ -441,12 +445,13 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 { "type": "request", "id": 1, "method": "ipfs.hello",
   "params": { "protocol": 1, "shell_version": "0.9.0", "frames": ["stream"] } }
 { "type": "response", "id": 1, "result": { "protocol": 1, "service_version": "0.1.0",
-  "freedom_ipfs": { "version": "0.4.5", "git_commit": "9316571…" }, "kind": "persistent" } }
+  "freedom_ipfs": { "version": "0.4.6", "git_commit": "ee6b95c…" }, "kind": "persistent" } }
 
 { "type": "request", "id": 2, "method": "ipfs.start", "params": {
     "instance": "p-1",                                              // never reused within the process
     "store":   { "kind": "disk", "max_bytes": 268435456 },        // or { "kind": "memory", "max_bytes": 33554432 }
-    "routing": { "mode": "auto", "delegated_routers": ["https://delegated-ipfs.dev/routing/v1"],
+    "routing": { "mode": "auto",
+                 "delegated_routers": ["https://delegated-ipfs.dev/routing/v1", "https://cid.contact/routing/v1"],
                  "dht_query_timeout_s": 3, "dht_max_providers": 32 },
     "gateway": { "max_concurrent_requests": 8, "request_queue_timeout_ms": 15000 },
     "network": { "mode": "direct" } } }                            // or { "mode": "socks5", "ip": "127.0.0.1", "port": 9150 }
@@ -469,7 +474,8 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 | `ipfs.shutdown` | none | none: the process exits | main kills after 5 s |
 
 - **`ipfs.start`:**
-  - The values above are exactly today's (v0.4.5's defaults where the add-on passes 0), sent explicitly.
+  - The values above are exactly today's (v0.4.6's defaults where the add-on passes 0), sent explicitly.
+  - `delegated_routers` serves provider and IPNS lookups alike, as the add-on's one string does. If upstream takes separate IPNS endpoints ([freedom-ipfs#30](https://github.com/solardev-xyz/freedom-ipfs/issues/30)), `routing` gains a list for them.
   - The persistent process accepts one `disk` instance at a time. The ephemeral process accepts only `memory` instances of at most 32 MiB, and at most 8 of them.
   - A start is admitted only within the free [budget](#budgets). Anything else is `invalid_argument`, or `busy` when the budget isn't free.
 - **`ipfs.request`:**
@@ -740,7 +746,7 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   - **`/dnsaddr`** needs TXT records. Under a proxy they come from DoH through the proxied client, as Bitswap's address expansion already uses DoH (`rv:9435`).
   - An embedded Tor client (`arti-client`) is not used: Freedom already runs Arti, and a second Tor client in the service would duplicate it.
 - **Arti** answers Tor's SOCKS `RESOLVE` extension (command `0xF0`), resolving a name through the Tor network. A qualification test checks the pinned Arti's support before the setting ships ([The gate](#the-gate), *The SOCKS contract*).
-- **freedom-ipfs v0.4.5 honors none of this:**
+- **freedom-ipfs v0.4.6 honors none of this:**
   - the clients and transports are built inside the crates;
   - QUIC is always added (`rt:1597`, `rv:8825`);
   - the DoH resolver is fixed at `mob:2226` and `rv:9436`, `9484` and `9531`;
@@ -988,7 +994,7 @@ An address under such a prefix is classified as the global unicast address it lo
 - **Redirects re-select the route:** the service's redirect loop picks the client per hop. An onion URL that redirects to a clearnet name moves to the ordinary client, with `RESOLVE` and the gate. A clearnet URL that redirects to an onion moves to the onion client, in `socks5` mode only.
 
 **Redirect behavior** is part of parity:
-- v0.4.5's provider client follows no redirect (`rv:11136`), while its routing and DoH clients follow reqwest's default (`rt:1807`, `ns:828`).
+- v0.4.6's provider client follows no redirect (`rv:11136`), while its routing and DoH clients follow reqwest's default (`rt:1807`, `ns:828`).
 - The service keeps each client's acceptance (the provider client, none; the routing and DoH clients, up to 10 hops, as reqwest's default allows) in its own redirect loop, with the gate on every hop (deviation `redirect-gate`).
 
 ### Changing the policy
@@ -1075,7 +1081,7 @@ Four options. A new repository is the user's decision; this design recommends th
      - freedom-browser's fetch-and-verify script pattern, extended to a second asset;
      - the same lints, copied into its manifest, since workspace lints don't cross workspaces.
    - **Its own workspace,** excluded from the core's (`exclude = ["services"]`).
-   - **Its own `Cargo.lock` and `deny.toml`** keep the core's dependency graph as it is. v0.4.5 alone locks 453 packages, against the core's 133:
+   - **Its own `Cargo.lock` and `deny.toml`** keep the core's dependency graph as it is. v0.4.6 alone locks 457 packages, against the core's 134:
      - a libp2p advisory can't block a vault fix;
      - the core's `cargo deny` stays strict;
      - the new graph brings C code (SQLite, `ring`) and at least one license the core doesn't allow: `webpki-roots` 1.x's CDLA-Permissive-2.0, per its published metadata, which `cargo deny` will confirm.
@@ -1250,7 +1256,8 @@ As 0006's 4.7 did, before anything moves:
 
 | Item | Today | The service |
 |---|---|---|
-| configuration | `AUTO`, the default router, DHT 3 s, 8 permits, 15 s queue, 256 MiB | the same values, sent explicitly |
+| configuration | `AUTO`, two delegated routers (delegated-ipfs.dev and cid.contact), DHT 3 s, 8 permits, 15 s queue, 256 MiB | the same values, sent explicitly |
+| IPNS lookups | both routers, then the DHT; one router's 404 reads as "not found" even when the other failed (freedom-ipfs#30) | the same, until upstream fixes it |
 | cache file | `<ipfs-data>/freedom-ipfs/freedom-ipfs.sqlite3` | the same file |
 | responses | `GatewayCore` via the C ABI | `GatewayCore` directly: the same status, headers and bytes |
 | request ID and top-level path | main's counter, and the path | the envelope ID, and the path |

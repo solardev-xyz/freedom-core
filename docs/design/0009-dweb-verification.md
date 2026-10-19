@@ -8,9 +8,9 @@
   - `swarm/bzz-protocol.js` and `swarm/ant-api-main-dials.js`; `ant-manager.js` (`startExternalAnt` and reused daemons);
   - `ipfs/ipfs-protocol.js`, `ipfs/gateway-transport.js` and `ipfs-manager.js` (`ipfsBackend`, `requestExternalGateway`, `probeExternalGateway`);
   - `swarm/permission-manifests.js`, which reads manifests through the `bzz:` handler.
-- **Ant** v0.5.64 (`b14fad3`, freedom-hq/ant), the release freedom-browser pins. `ac`, `ar` and `ag` below are the `src/` directories of `ant-crypto`, `ant-retrieval` and `ant-gateway`.
+- **Ant** v0.5.71 (`910452d`, freedom-hq/ant), the release freedom-browser pins on `integration/rust-core` (`485819a9`). `ac`, `ar` and `ag` below are the `src/` directories of `ant-crypto`, `ant-retrieval` and `ant-gateway`.
 - **Bee** at `a93fb7a7` (v2.8.2-rc1 and four commits), for the formats Ant reads and writes.
-- **freedom-ipfs** v0.4.5 (`9316571`), the native node 0007 moves into `freedom-ipfsd`: `freedom-ipfs-core`, `freedom-ipfs-unixfs` and `freedom-ipfs-gateway` (`GatewayCore`).
+- **freedom-ipfs** v0.4.6 (`ee6b95c`), the native node 0007 moves into `freedom-ipfsd`: `freedom-ipfs-core`, `freedom-ipfs-unixfs` and `freedom-ipfs-gateway` (`GatewayCore`).
 - **IPFS specifications,** as published on 2026-10-13: the Trustless Gateway, CAR v1, UnixFS and IPNS Record specifications.
 
 Vectors are generated from the bundled nodes, Ant and freedom-ipfs, as 0003–0006's were generated from the JS ([Tests first](#tests-first)).
@@ -235,6 +235,7 @@ The formats Ant and Bee share, with Ant's reading where they differ, since the b
 - **A single-owner chunk (SOC)** is `id(32) ‖ signature(65) ‖ span(8) ‖ payload`, 105 to 4,201 bytes (`ac/soc.rs:8`–`30`).
   - **Its address** is `keccak256(id ‖ owner)`.
   - **The signature** is over the EIP-191 digest of `keccak256(id ‖ wrapped CAC address)`, as `r ‖ s ‖ v`. The core follows Ant: `v` from 27 to 30, and a high `s` refused (`ac/lib.rs:202`–`227`). That needs signature recovery in `fc-evm`.
+  - **The replicas owner:** Bee signs dispersed replicas with a published key, whose address is `0xdc5b…17b5`. Ant accepts a SOC from that owner only when its identifier, after the first byte, equals the wrapped chunk's address (`ac/soc.rs:70`–`75`, `122`–`124`; ethersphere/bee#5640). The core does the same, so no feed of that owner verifies.
   - The wrapped chunk may carry any span, so it can be the root of a larger tree.
 - **What `/chunks/<address>` returns:** the chunk's wire bytes, a CAC's or a whole SOC's, as `binary/octet-stream` (`ag/retrieval.rs:307`–`403`). Bee does the same.
 - **Where a SOC is accepted: only as a feed update,** at the address the walk computed from the feed's topic, owner and index ([The Swarm walk](#the-swarm-walk)).
@@ -248,7 +249,7 @@ The formats Ant and Bee share, with Ant's reading where they differ, since the b
 - **An intermediate chunk** is `span ‖ references`: the span is the number of file bytes beneath it, and the payload holds 2 to 128 references of 32 bytes. Trailing all-zero references are padding. A chunk whose span is at most its payload's length is a leaf.
 - **Geometry:** for a node with `n` data references and span `T`, `branch` is the smallest `4096 · b^k` with `T − (n − 1) · branch ≤ branch`. The first `n − 1` children cover `branch` bytes each, and the last the rest (`ar/joiner.rs:1314`–`1335`). Every leaf but the last is full, so byte `o` of the file is in leaf `⌊o / 4096⌋`.
   - The core takes each child's logical length from this geometry, as Ant's joiner does, never from the child's own span. [The leaf check](#leaves) covers a leaf whose span or payload length differs from the length its parent gives it.
-- **Erasure coding:** an intermediate chunk with parities has its span's top byte set to `0x80 | level`, for levels 1 to 4. Its payload is the data references followed by parity references. Their counts come from Bee's `ReferenceCount` (the span, the level and whether the tree is encrypted; `ar/rs.rs:328`–`344`, `ar/joiner.rs:631`–`640`).
+- **Erasure coding:** an intermediate chunk with parities has its span's top byte set to `0x80 | level`, for levels 1 to 4. Its payload is the data references followed by parity references. Their counts come from Bee's `ReferenceCount` (the span, the level and whether the tree is encrypted; `ar/rs.rs:315`–`391`, `ar/joiner.rs:631`–`640`).
   - The core parses this and ignores the parities. It never needs them: a node that recovered a missing chunk from parities serves the original data, which checks against the original address.
   - `/bytes` is unchanged by erasure coding.
   - **It lowers the branching:** an intermediate chunk holds at most 119, 107, 97 or 39 data references at levels 1 to 4 (Bee's table, which Ant follows), so a level-1 chunk covers less of the file ([Performance](#performance)).
@@ -256,24 +257,24 @@ The formats Ant and Bee share, with Ant's reading where they differ, since the b
 
 ### Manifests and feeds
 
-- **A mantaray node** (`ar/mantaray.rs:1286`–`1470`; Bee `pkg/manifest/mantaray/marshal.go`):
+- **A mantaray node** (`ar/mantaray.rs:1355`–`1543`; Bee `pkg/manifest/mantaray/marshal.go`):
   - a 32-byte obfuscation key in the clear; everything after it XORed with the key, repeated. Bee and bee-js write a zero key for unencrypted manifests;
   - the version hash (the first 31 bytes of `keccak256("mantaray:0.2")`, or of `0.1`);
   - the reference size: 32, 64 in an encrypted manifest, or 0 in an empty node, which Ant accepts and the core reads as Ant does;
   - the node's entry, all zeros when it has none;
   - a 32-byte bitmap of forks, one bit per first byte;
   - each fork, in byte order: a type byte, a prefix length (1 to 30), a 30-byte prefix, the child's reference, and, when the type has bit 16, a 2-byte length and a flat JSON object of strings.
-- **A node is stored as a file,** so one larger than 4 KiB is a chunk tree. Ant caps a node at 32 MiB (`ar/mantaray.rs:1001`–`1062`); the core caps it at 1 MiB (deviation `manifest-node-cap`).
+- **A node is stored as a file,** so one larger than 4 KiB is a chunk tree. Ant caps a node at 32 MiB (`ar/mantaray.rs:1016`–`1106`); the core caps it at 1 MiB (deviation `manifest-node-cap`).
 - **Lookup:** from the root, take the fork for the path's next byte, require its prefix to begin the rest of the path, load the child, and repeat until the path is used up; the node reached gives the entry and its metadata. A path longer than one prefix is chained across nodes. Each step loads one node: one chunk, usually.
 - **The root's metadata** (`website-index-document`, `website-error-document`, and the feed keys) is on its `/` fork.
-- **Parity:** the core reads manifests exactly as Ant v0.5.64 reads them, held to vectors from Ant, malformed manifests included.
-- **Feeds:** a root whose `/` fork carries `swarm-feed-owner` and `swarm-feed-topic` (and `swarm-feed-type` absent or `Sequence`; Ant refuses epoch feeds) is a feed manifest (`ar/feed.rs:94`–`211`).
+- **Parity:** the core reads manifests exactly as Ant v0.5.71 reads them, held to vectors from Ant, malformed manifests included.
+- **Feeds:** a root whose `/` fork carries `swarm-feed-owner` and `swarm-feed-topic` (and `swarm-feed-type` absent or `Sequence`; Ant refuses epoch feeds) is a feed manifest (`ar/feed.rs:95`–`231`).
   - The update at index `i` is the SOC with `id = keccak256(topic ‖ u64_be(i))` and the feed's owner.
-  - **v1 updates** wrap 48 or 80 bytes, `span ‖ timestamp(8, big-endian) ‖ reference`; **v2 updates** wrap the content's root chunk itself. Ant tries v1 first, then fails (`ar/feed.rs:843`–`906`); the core does the same.
+  - **v1 updates** wrap 48 or 80 bytes, `span ‖ timestamp(8, big-endian) ‖ reference`; **v2 updates** wrap the content's root chunk itself. Ant tries v1 first, then fails (`ar/feed.rs:1444`–`1511`); the core does the same.
 
 ### The Swarm walk
 
-For `bzz://<root><path>`, in Ant's resolution order (`ar/mantaray.rs:424`–`528`):
+For `bzz://<root><path>`, in Ant's resolution order (`ar/mantaray.rs:486`–`592`):
 
 1. **The root:** `/chunks/<root>`, checked as a CAC; and its tree, when the root is an intermediate chunk. If it isn't a manifest, Ant serves the reference's bytes, and so does the core.
 2. **A feed root:**
@@ -311,7 +312,7 @@ The walk proves both outcomes: the entry found, or its absence from a verified m
    - **A stall:** while the core still needs bytes, main's body idle timer ends a piece that sends nothing for 60 s. Once the core has what it needs, it has already cancelled the piece, so a stall after that costs nothing.
 5. **HEAD** stops after step 1.
 
-Ant's `/bytes` supports a single range on 64-hex references (206 with `Content-Range`), as Bee's does through Go's `ServeContent` (`ag/retrieval.rs:2390`–`2583`).
+Ant's `/bytes` supports a single range on 64-hex references (206 with `Content-Range`), as Bee's does through Go's `ServeContent` (`ag/retrieval.rs:2384`–`2572`).
 
 ### Encrypted references
 
@@ -448,11 +449,12 @@ Reported by the research for this design on 2026-10-13, from code and from probe
 
 The core builds every head from verified data, by the bundled node's rules. The vectors record the bundled node's answers header by header, and the core must reproduce them.
 
-- **`bzz:`, Ant v0.5.64's rules** (`ag/retrieval.rs`, `ant-p2p/src/behaviour.rs`), with Ant configured as Freedom configures it:
+- **`bzz:`, Ant v0.5.71's rules** (`ag/retrieval.rs`, `ant-p2p/src/behaviour.rs`), with Ant configured as Freedom configures it:
   - **`Content-Type`:** the entry's `Content-Type` metadata as written, or `application/octet-stream`. Ant doesn't sniff.
   - **`Content-Disposition`:** `inline; filename="<name>"`, from the `Filename` metadata or else the path's last segment, with `\` and `"` escaped.
   - **`ETag`:** `"<the resolved file reference in hex>"`, feeds included.
   - **`Cache-Control`:** `public, max-age=31536000, immutable`, or `no-cache` when a feed was crossed.
+  - **Feed headers,** when a feed was crossed and the answer serves content: a 200 (an error document included) or a 206 (zero-length and multipart included), to a GET or a HEAD. They are `swarm-feed-index`, the verified update's index as 16 hex digits; `swarm-feed-resolved-version`, `v1` or `v2`; and `Swarm-Feed-Index` added to `Access-Control-Expose-Headers` (`ag/retrieval.rs:4792`–`4824`). A 308, a 404 and a 416 carry none: Ant returns them before it applies the headers (`ag/retrieval.rs:2804`–`2807`, `2836`–`2843`). The response vectors include a feed-backed 308, 404 and 416.
   - **`Accept-Ranges: bytes`** on a GET; **`Content-Length`**; `Content-Range` on a 206.
   - **Redirects:** a 308 whose `Location` is Ant's: `/bzz/<root>/<path>/` followed by the plan's `query`. Main's `canonicalize_redirect` rewrites it as it rewrites Ant's today, so `bzz://<root>/docs?state=1` is redirected to `./docs/?state=1`.
   - **Not found:** a 404 with Ant's JSON body; an error document is served with 200, as Ant serves it.
@@ -627,7 +629,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
     - it drives a pinned Ant and a pinned Kubo on loopback, seeded with the fixtures and cut off from their networks, and runs freedom-ipfs's `GatewayCore` over a memory store seeded the same way (0007's test hooks);
     - it records every exchange, and the core's tests replay them with no node running;
     - **everything that varies is pinned:** the exact Kubo release and the other versions are in the file's `meta`; the clock is fixed, which sets IPNS validity and feed timestamps; and every random input (encryption keys and padding, obfuscation keys, IPNS keys) comes from a seed recorded with the case. The core's tests pass the same `now`.
-  - **Swarm,** recorded from Ant v0.5.64's splitter and manifest writer, and cross-checked against Bee's for the formats Bee also writes:
+  - **Swarm,** recorded from Ant v0.5.71's splitter and manifest writer, and cross-checked against Bee's for the formats Bee also writes:
     - files of 0, 1, 4095, 4096, 4097, 524,288, 524,289 and 67,108,865 bytes, from a single chunk to three levels of intermediate chunks;
     - each with erasure coding at every redundancy level, and encrypted;
     - manifests with an index document, an error document, nested paths, a path that is a prefix of another, prefixes longer than one fork can hold, Unicode names, every metadata field Ant reads, an obfuscated node, and an empty node with a zero reference size;
@@ -721,12 +723,12 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 - **freedom-ipfs:**
   - **`fc-ipfs` carries its own bounded decoders** ([Bounded decoding](#bounded-decoding)). The native ones (`freedom-ipfs-unixfs/src/lib.rs:42`–`85`, `1100`–`1110`) are private, and they allocate while decoding, so they couldn't run under the core's reservations even if they were public.
   - Whether the native node should adopt a bounded reader shared with `fc-ipfs`, so both modes read the same way by construction, is an [open question](#open-questions).
-- **What `fc-ipfs` takes from freedom-ipfs:** `freedom-ipfs-core`'s `verify_block` and block limit, by a git dependency pinned to v0.4.5 (allowed from solardev-xyz). Not its whole-buffer CAR parser: the core reads CARs as streams. Not `freedom-ipfs-unixfs`'s resolver, which pulls blocks through a synchronous provider, and so can't suspend while main fetches.
+- **What `fc-ipfs` takes from freedom-ipfs:** `freedom-ipfs-core`'s `verify_block` and block limit, by a git dependency pinned to v0.4.6 (allowed from solardev-xyz). Not its whole-buffer CAR parser: the core reads CARs as streams. Not `freedom-ipfs-unixfs`'s resolver, which pulls blocks through a synchronous provider, and so can't suspend while main fetches.
 
 ## Parity
 
 - **Unverified mode is today's,** byte for byte: verification off, a gateway without support, and every bundled backend plan exactly as 0006 does.
-- **A verified response is the bundled node's,** not the external node's: what Ant v0.5.64 answers for `bzz:`, and what freedom-ipfs v0.4.5's `GatewayCore` answers for `ipfs:` and `ipns:`, over the same content. The vectors hold the core to it, header by header, with the exceptions listed in [Heads](#heads).
+- **A verified response is the bundled node's,** not the external node's: what Ant v0.5.71 answers for `bzz:`, and what freedom-ipfs v0.4.6's `GatewayCore` answers for `ipfs:` and `ipns:`, over the same content. The vectors hold the core to it, header by header, with the exceptions listed in [Heads](#heads).
 - **Qualified: for content both accept.** Where the verifier is deliberately stricter than the pinned reader, the difference is a listed deviation with vectors of its own, kept apart from the native-generated ones ([Tests first](#tests-first)):
   - `unixfs-sizes` and `hamt-lookup`, for malformed UnixFS files and HAMT directories;
   - `soc-references`, for single-owner chunks off the feed path;
@@ -766,7 +768,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
    - `fc-evm`: signature recovery, for single-owner chunks;
    - `fc-swarm`: chunk and SOC checks (the empty chunk included; SOCs only where a feed update is expected), intermediate chunks with erasure coding, logical leaf lengths from the parent, encrypted chunks, mantaray nodes and lookup (empty nodes included), feed identifiers;
    - `fc-ipfs` (new, logic): CIDs and the native node's block check; the bounded protobuf and CBOR readers, with their counting first pass; a streaming CAR reader; dag-pb and UnixFS with the stricter size rules; hash-directed HAMT lookup; offsets; IPNS records, V2-only included;
-   - **new dependencies,** each justified in its PR (AGENTS.md rule 7): `freedom-ipfs-core` (git, pinned to v0.4.5) and the `cid`, `multihash` and `unsigned-varint` crates it brings, which `freedom-mobile-ffi` already links through freedom-ipfs; `mime_guess` 2.0.5, for `GatewayCore`'s types; `ed25519-dalek`, already on the preferred list. MurmurHash3 and the DAG-CBOR subset an IPNS record needs are small enough to write, against vectors.
+   - **new dependencies,** each justified in its PR (AGENTS.md rule 7): `freedom-ipfs-core` (git, pinned to v0.4.6) and the `cid`, `multihash` and `unsigned-varint` crates it brings, which `freedom-mobile-ffi` already links through freedom-ipfs; `mime_guess` 2.0.5, for `GatewayCore`'s types; `ed25519-dalek`, already on the preferred list. MurmurHash3 and the DAG-CBOR subset an IPNS record needs are small enough to write, against vectors.
 3. **`fc-dweb`:** verify plans (with their `query`) and their validation; the verifier machine, with its walks, heads, ranges (the exact-206 and whole-200 policies), conditionals and failures; the structure cache with its partition epochs; the IPNS floors.
 4. **`fc-protocol`:** streams in both directions, protocol version 2 (on #72).
 5. **`freedom-cored`:** the dweb thread and hashing pool, `dweb.verify`, `shell.dweb_get`, `dweb.forget`, admission, budgets and cancel, with tests through the binary.
