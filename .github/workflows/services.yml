@@ -1,0 +1,107 @@
+name: Services
+
+# The service processes (design 0007) are workspaces of their own under
+# services/, with their own lockfiles and `cargo deny` policies. This workflow
+# builds and checks them apart from the core, desktop targets only, and runs
+# only when a service or what it builds from changes, plus daily. So a
+# service's dependency graph or a new advisory against it never fails a
+# core-only change (none of these checks is required on main).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/freedom-ipfsd/**"
+      - "crates/fc-protocol/**"
+      - "crates/fc-service/**"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - "scripts/third-party-notices.py"
+      - "scripts/test_*.py"
+      - ".github/workflows/services.yml"
+  pull_request:
+    paths:
+      - "services/freedom-ipfsd/**"
+      - "crates/fc-protocol/**"
+      - "crates/fc-service/**"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - "scripts/third-party-notices.py"
+      - "scripts/test_*.py"
+      - ".github/workflows/services.yml"
+  schedule:
+    # Daily, so new advisories against unchanged dependencies still surface.
+    - cron: "47 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: services-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_DENY_VERSION: "0.20.2"
+  CARGO_DENY_SHA256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+
+jobs:
+  ipfsd-lint:
+    name: freedom-ipfsd fmt + clippy
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/freedom-ipfsd
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: services/freedom-ipfsd -> target
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+  ipfsd-test:
+    name: freedom-ipfsd test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: services/freedom-ipfsd
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: services/freedom-ipfsd -> target
+      # --all-features: the test hooks (`testhooks`) the binary's tests use.
+      - run: cargo test --locked --workspace --all-features
+
+  ipfsd-deny:
+    name: freedom-ipfsd cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Install cargo-deny
+        run: |
+          tarball="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL -o "$tarball" "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${tarball}"
+          echo "${CARGO_DENY_SHA256}  ${tarball}" | sha256sum --check
+          tar -xzf "$tarball" --strip-components=1 -C "$HOME/.cargo/bin" "cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl/cargo-deny"
+      - working-directory: services/freedom-ipfsd
+        run: cargo deny --locked check
+      - name: services/freedom-ipfsd/THIRD-PARTY-NOTICES is current
+        run: |
+          (cd services/freedom-ipfsd && cargo fetch --locked)
+          python3 scripts/third-party-notices.py --binary freedom-ipfsd --check

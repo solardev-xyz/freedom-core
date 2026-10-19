@@ -32,15 +32,16 @@ ignore = [
 [licenses]
 confidence-threshold = 0.9
 unused-allowed-license = "allow"
+# webpki-roots (Mozilla's root certificates, through reqwest and
+# libp2p-websocket): data under the Community Data License Agreement,
+# permissive (0007, "Where the code lives"). Scoped to that crate, so another
+# CDLA dependency needs its own review.
+exceptions = [{ allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" }]
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
-    # webpki-roots (Mozilla's root certificates, through reqwest and
-    # libp2p-websocket): data under the Community Data License Agreement,
-    # permissive (0007, "Where the code lives").
-    "CDLA-Permissive-2.0",
     "CC0-1.0",
     "ISC",
     "MIT",
