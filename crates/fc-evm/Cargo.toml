@@ -11,6 +11,8 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# A number's spelling, reread with a correctly rounded parser (`parse_json`).
+fc-json = { path = "../fc-json" }
 k256 = { version = "0.14", default-features = false, features = ["arithmetic", "ecdsa"] }
 serde_json = "1"
 sha3 = { version = "0.12", features = ["zeroize"] }
