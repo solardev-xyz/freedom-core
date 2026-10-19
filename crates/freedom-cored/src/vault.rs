@@ -24,6 +24,11 @@
 //!   installs only with a ticket taken at its start.
 //! - **Deadlines** (30 s from admission) are enforced by the loop's wakeup,
 //!   for queued and running work alike, independently of the worker.
+//! - **The auto-lock counts sleep** ([`Clock`], #80): a vault left unlocked
+//!   locks on waking once its time has passed, however long the machine
+//!   slept. While unlocked, the loop wakes at least every
+//!   [`SUSPEND_CHECK`], since its own timed wait may sleep through a
+//!   suspend.
 //! - **The file snapshot** follows the core's own commits (the fingerprint
 //!   of the bytes written, or none after a delete); the worker never re-reads
 //!   the file after a job.
@@ -49,6 +54,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
+use crate::clock::Clock;
 use crate::fsx::{self, Done};
 use crate::journal;
 use crate::nodes::{self, NodeSpec};
@@ -65,6 +71,11 @@ const KDF_DEADLINE: Duration = Duration::from_secs(30);
 const MAX_QUEUED: usize = 32;
 /// Most indices per `keys.addresses` request.
 const MAX_INDICES: usize = 64;
+/// While the auto-lock runs, the loop wakes at least this often (#80). Its
+/// timed wait runs on a clock that stops while the machine sleeps, so after
+/// a suspend it could otherwise wait out the rest of the auto-lock delay
+/// before it looks at [`Clock`] again.
+pub const SUSPEND_CHECK: Duration = Duration::from_secs(1);
 
 const MSG_NO_VAULT: &str = "No vault found. Create one first.";
 const MSG_NO_VAULT_SHORT: &str = "No vault found";
@@ -402,7 +413,8 @@ pub struct Vault {
     state: VaultState,
     throttle: Throttle,
     auto_lock_ms: u64,
-    epoch_zero: Instant,
+    /// The auto-lock's and the throttle's time, sleep included.
+    clock: Clock,
     queue: VecDeque<Pending>,
     running: Option<Running>,
     next_job: u64,
@@ -580,7 +592,7 @@ impl Vault {
             state: VaultState::new(),
             throttle: Throttle::new(),
             auto_lock_ms,
-            epoch_zero: Instant::now(),
+            clock: Clock::new(),
             queue: VecDeque::new(),
             running: None,
             next_job: 1,
@@ -598,7 +610,7 @@ impl Vault {
     }
 
     fn now_ms(&self) -> u64 {
-        u64::try_from(self.epoch_zero.elapsed().as_millis()).unwrap_or(u64::MAX)
+        self.clock.now_ms()
     }
 
     /// Whether this module handles `method`.
@@ -766,9 +778,11 @@ impl Vault {
     }
 
     /// When the loop must wake: the auto-lock, or the earliest deadline.
+    /// While the auto-lock runs, that is at most [`SUSPEND_CHECK`] away.
     pub fn next_wakeup(&self) -> Option<Instant> {
         let auto_lock = self.state.auto_lock_deadline().map(|deadline| {
-            Instant::now() + Duration::from_millis(deadline.saturating_sub(self.now_ms()))
+            let left = Duration::from_millis(deadline.saturating_sub(self.now_ms()));
+            Instant::now() + left.min(SUSPEND_CHECK)
         });
         // A committed job's deadline no longer applies.
         let running = self
@@ -2101,5 +2115,61 @@ fn written(result: Result<(NewVault, Commit), OpError>) -> JobOutput {
             result: Err(error),
             commit: None,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ABANDON: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+    /// A vault unlocked now, with a 15-minute auto-lock.
+    fn unlocked() -> Vault {
+        let mut vault = Vault::new(PathBuf::from("/nonexistent"), 15 * 60 * 1000);
+        let prepared = Prepared::new(Mnemonic::parse(ABANDON).unwrap());
+        let now = vault.now_ms();
+        let ticket = vault.state.ticket();
+        vault
+            .state
+            .install(ticket, prepared, vault.auto_lock_ms, now)
+            .unwrap();
+        vault
+    }
+
+    fn locked_auto(outs: &[Out]) -> bool {
+        outs.iter().any(|out| {
+            matches!(out, Out::Send(payload)
+            if serde_json::from_slice::<serde_json::Value>(payload).is_ok_and(|m| {
+                m["event"] == "vault.locked" && m["data"]["reason"] == "auto"
+            }))
+        })
+    }
+
+    /// #80: the lid closes with 14 minutes left; three days later the vault
+    /// locks on waking, not 14 minutes after it.
+    #[test]
+    fn the_auto_lock_counts_time_asleep() {
+        let mut vault = unlocked();
+        vault.clock.sleep(Duration::from_secs(60));
+        assert!(!locked_auto(&vault.tick()), "one minute in: still unlocked");
+        assert!(vault.state.is_unlocked());
+        vault.clock.sleep(Duration::from_secs(3 * 24 * 60 * 60));
+        assert!(locked_auto(&vault.tick()));
+        assert!(!vault.state.is_unlocked());
+    }
+
+    /// #80: while unlocked, the loop never waits longer than SUSPEND_CHECK,
+    /// so it sees a suspend within that much of waking, however much of the
+    /// auto-lock delay is left.
+    #[test]
+    fn the_loop_looks_at_the_clock_while_unlocked() {
+        let vault = unlocked();
+        let wake = vault.next_wakeup().unwrap();
+        assert!(wake <= Instant::now() + SUSPEND_CHECK, "{wake:?}");
+        // Locked, nothing to wait for.
+        let mut vault = vault;
+        vault.lock();
+        assert_eq!(vault.next_wakeup(), None);
     }
 }
