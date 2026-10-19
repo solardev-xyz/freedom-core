@@ -31,7 +31,7 @@ This design moves it into **its own supervised process, `freedom-ipfsd`**:
 - **The binary calls the gateway crate directly.**
   - It uses `GatewayCore::handle`, with no C ABI, no handles that are raw pointers and no event worker.
   - Its own code forbids `unsafe` and panics.
-  - A panic inside freedom-ipfs on a request's task fails that request only. A panic anywhere else ends the process, through a hook that logs a fixed code and never the payload.
+  - A panic inside freedom-ipfs on a request's task fails that request and retires its instance, which is torn down and replaced: the panic may have left the instance's shared state half-updated. A panic anywhere else ends the process. Either way a hook logs a fixed code, never the payload.
 - **Instances are owned and fenced.**
   - Each instance owns its tasks, swarms, blocking work and network capability, and carries an ID that is never reused.
   - A stop, an eviction or a policy change does all of these, in order:
@@ -217,6 +217,10 @@ Electron main (profile P)
   - `up` is false until a new generation has completed `ipfs.hello` and `ipfs.start`;
   - main restarts after 0.5 s, 2 s, then 10 s;
   - three crashes within 60 s stop the restarts, and the status shows today's text: "Node unavailable. Restart IPFS from the nodes menu."
+- **An instance retired after a request panic** (*Panics*, below) counts as a crash of its process, for the back-off and for the three in 60 s:
+  - **the persistent instance:** `up` is false until a replacement has started. Main sends `ipfs.start` for a new ID after the back-off, in the same process;
+  - **a private instance:** the partition's next request starts a new one cold, as after a restart;
+  - **the third within 60 s** stops that process as three crashes do. Main sends `ipfs.shutdown`, and the status shows the same text.
 - **No restart for:**
   - 64 (usage);
   - 74 (`storage`);
@@ -237,9 +241,35 @@ Electron main (profile P)
   - **Request work** runs on tasks marked as request tasks, built with `panic = "unwind"`. A panic there is caught at its join handle, after the hook's fixed line:
     - before the head, it becomes that request's `internal` error;
     - after the head, the stream's `internal` abort.
+  - **A caught request panic retires its instance.** The panic may have struck while the task held the instance's store, a cache, a Bitswap want or an in-flight table. A lock left poisoned or an invariant half-updated would then fail or corrupt every later request on that instance. So at the join handle, which knows the request's instance, after the request's own reply, the service:
+    1. runs the instance's [teardown](#instances-and-their-teardown) from step 1, exactly as for `ipfs.stop`: it fences the ID, revokes the network capability, cancels the instance's other requests (`stopped`, as in any teardown), and waits for quiescence under the same 5 s watchdog. If quiescence isn't proven, the process exits 70;
+    2. then sends the event `ipfs.instance_retired { instance, reason: "panic" }`. Main marks the pair retired and restarts as [above](#crashes-hangs-and-restarts).
+
+    A request panic on an instance that is already being torn down adds nothing: that teardown goes on. The store keeps what was committed. A transaction the panic interrupted is rolled back when the store closes, as after a kill.
+  - **Other instances are untouched.** In the ephemeral process, the instances share only process-wide state, and a request task can hold only these parts of it:
+    - its admission slot;
+    - retrieval permits;
+    - budget reservations;
+    - its stream's entry in the writer.
+
+    Each is an owned guard whose drop releases it, so an unwinding task returns it ([Budgets](#budgets)). No lock of the service's is held across a call into freedom-ipfs, so an upstream panic can't poison one.
+  - **Why the instance, and not just the request or the whole process:**
+    - **Not just the request:** Rust unwinds memory-safely, but it doesn't restore an instance's own invariants. The store, caches, swarm state and in-flight tables belong to the instance.
+    - **Not the whole process:** the instance is the unit that owns that state, and its teardown already proves that none of it survives. Restarting the ephemeral process would end every private window's instance for one partition's fault.
   - **Every other task the service spawns itself** (the Bitswap swarm's task, background retrieval, the instance's own tasks, the reader and writer) belongs to an instance's task set or to the process ([Instances](#instances-and-their-teardown)). The service observes each of these tasks' end. A panic, or an unexpected end, of one exits the process with 70, so it is a crash and main restarts it.
   - **Tasks the libraries spawn on an instance's runtime** (hyper's and libp2p's connection tasks) have no join handle the service holds, so their ordinary completion isn't observed. Their lifetime ends with the instance's runtime, whose shutdown is proven ([teardown](#instances-and-their-teardown)). A panic in one is still caught by the hook, and the hook exits the process with 70: any panic outside a request task is fatal, whether or not its task is tracked.
   - **A panic on any non-runtime thread** exits with 70 from the hook.
+  - **In all:**
+
+    | Where the panic is | The request | Its instance | The process |
+    |---|---|---|---|
+    | a request task | `internal`: an error before the head, an abort after it | retired: torn down, then `ipfs.instance_retired` | goes on |
+    | a task the service spawned for an instance or for the process | — | — | exits 70, from the hook |
+    | a library's task on an instance's runtime | — | — | exits 70, from the hook |
+    | any other thread: blocking work a library spawned, the teardown thread, the watchdogs | — | — | exits 70, from the hook |
+    | (after a request panic) the teardown, not proven within 5 s | — | — | exits 70, from the watchdog |
+
+    Only a request task's panic is ever caught. Every other panic ends the process in the hook, before unwinding reaches anything that could catch it.
   - The service's own code is under the workspace lints: no `unsafe`, `unwrap`, `expect` or `panic!`.
 
 ### Inside the process
@@ -447,6 +477,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
   - A request is one JSON frame, within 0006's bounds of 64 KiB for the URL and 64 KiB for the headers.
 - **No caller context.**
   - Every request is main's, for a request main has already admitted and fenced. The service has no per-caller policy.
+- **One event from the service:** `ipfs.instance_retired { instance, reason }`, where `reason` is `"panic"`. The service sends it after retiring an instance on its own ([Panics](#crashes-hangs-and-restarts)), once its teardown has proven quiescence. It is never sent for a stop that main asked for.
   - The instance is the only partition. Main picks it from the session's partition, never from page input.
 
 ### Instance IDs
@@ -455,6 +486,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 - **Every captured backend binds a pair:** the generation and the instance ID. `ipfsBackend()` captures it at admission, and every continuation carries it: the wait for a plan, the `request()` call, its body.
 - **Retirement is synchronous in main.** When a stop, an eviction, a partition close or a policy change begins, main marks the pair retired before sending `ipfs.stop`. A continuation that reaches a retired pair fails at once with `freedom-ipfs native node is not running`, and nothing is sent.
 - **The service checks too:** a request naming an ID that is retired or unknown gets `stopped`. A late request from before a change can therefore never reach the instance that replaced it, in either direction.
+- **The service can retire an instance itself,** after a request panic. It fences the ID at once, so later requests get `stopped`. On `ipfs.instance_retired`, main marks the pair retired, as it does when it begins a stop. Continuations still holding it fail before sending, and leases on a private instance end as their requests do.
 
 ### Cancel, deadlines and admission
 
@@ -476,7 +508,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 | `deadline` | no head within `headers_ms` | `freedom-ipfs native request timeout` |
 | `cancelled` | main's `cancel` | `freedom-ipfs native request aborted` before the head; `…cancelled` for a body |
 | `busy` | admission is full, or a reservation can't be had in time ([Budgets](#budgets)) | `BackendBusy`, `freedom-ipfs native node is busy`, which the executor answers 503 (new) |
-| `internal` | a panic on the request's task | `freedom-ipfs native gateway error` |
+| `internal` | a panic on the request's task, which then retires its instance | `freedom-ipfs native gateway error` |
 | `storage` | `ipfs.start`: the store won't open (`data.kind`) | the manager's `Failed to start freedom-ipfs native node` |
 | `protocol_mismatch` | `ipfs.hello` | a startup error; no restart |
 
@@ -684,7 +716,7 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   - each instance's Bitswap swarm has its own fresh identity, and DHT queries use a new one each time, as upstream does;
   - so a private partition shares no PeerID with the profile's node or another partition;
   - it does share the machine's IP address, unless the [network policy](#network-policy) sends traffic through Tor.
-- **Restarts:** the ephemeral process follows the same rules. Its instances come back lazily, cold and under new IDs.
+- **Restarts:** the ephemeral process follows the same rules. Its instances come back lazily, cold and under new IDs. So does a private instance retired after a request panic; the other partitions' instances keep running.
 - **The nodes panel** keeps showing the persistent node only.
 
 ## Network policy
@@ -873,6 +905,7 @@ Each is a pull request to freedom-ipfs, and none changes mobile's behavior by de
    - **A runtime per instance,** built by the builder. `Instance::shutdown` drains the task set and blocking regions, then hands the runtime back to its caller for dropping and joining on a teardown thread, and closes the store after. Its quiescence report counts as proof only once that join has returned; a timed runtime shutdown is never reported as quiescent.
    - **A blocking-region counter** around each `block_in_place`.
    - **`Instance::shutdown()`,** which runs steps 2–4 of the [teardown](#instances-and-their-teardown) and reports whether quiescence was reached.
+   - **Shutdown after a panic:** `Instance::shutdown` and the store's close work after a request task has panicked. A lock that the panic poisoned is recovered (`PoisonError::into_inner`) for the teardown only, never to serve another request.
 8. **Shared limiters and accounting:**
    - the builder takes process-wide limiters for block fetches, HTTP provider requests, Bitswap connections and DHT queries;
    - **a reservation API:**
@@ -963,6 +996,15 @@ As 0006's 4.7 did, before anything moves:
   - a stop whose quiescence is held back past 5 s: exit 70 and a restart;
   - a plan delayed across a stop and start with a different policy: the old continuation fails, and nothing reaches the new instance;
   - a background swarm task panicking: exit 70.
+- **Request panic cases,** with a panic injected through the test hooks:
+  - **while the task holds the store, a cache, a Bitswap want or an in-flight entry:** the request gets `internal`, the instance's other requests get `stopped`, the teardown proves quiescence, and `ipfs.instance_retired` follows. The replacement instance serves the same CID;
+  - **after the head:** the stream aborts with `internal`;
+  - **process-wide state:** admission, retrieval permits, budget reservations and the writer's stream entries return to their baseline;
+  - **in the ephemeral process:** a panic in one partition's instance retires that instance only. Another partition's request in flight completes, and the panicking partition's next request starts a new instance;
+  - **a teardown held back past 5 s after a panic:** exit 70;
+  - **a panic on a blocking thread a library spawned for a request,** outside the request task: exit 70;
+  - **three request panics within 60 s:** the restarts stop, with "Node unavailable. Restart IPFS from the nodes menu.";
+  - **the log** has only the hook's fixed line for each panic.
 - **Private cases:**
   - a first private load;
   - concurrent first loads in one partition: one start;
@@ -1001,7 +1043,7 @@ As 0006's 4.7 did, before anything moves:
 - **Ring cases:** one-byte frames and full-window bursts never allocate more than 128 KiB per stream in main.
 - **Rust tests through the binary,** using test-only methods behind a cargo feature, as `freedom-cored`'s `testhooks`. These seed a memory or offline instance from CAR fixtures, and inject a panic, a stall or a slow teardown.
   - **The protocol:** frames, credit, cancel races, deadline, and one terminal per request and per stream.
-  - **Isolation:** a panic on one request is `internal` for that request only.
+  - **Isolation:** a panic on one request is `internal` for that request, and retires its instance only.
   - **The lock:** contention gives 75, a network filesystem gives 74, and `hold-lock`.
   - **Parent death,** the 5 s exit watchdog, and parent death while the writer is backed up.
   - **The stall:** exit 76.
@@ -1071,6 +1113,7 @@ Every body already passes through main today, so the pipe adds one copy into the
 |---|---|---|
 | handshake; `ipfs.start` | 10 s; 10 s | kill; startup error |
 | instance teardown | 5 s to quiescence | exit 70, and a restart |
+| request panics | each retires its instance; it counts as a crash for main's back-off | the third within 60 s stops the process, as three crashes do |
 | `ipfs.shutdown` | kill 5 s after it | kill (the cache tolerates it) |
 | exit after stdin EOF | 5 s, a watchdog thread | `std::process::exit` |
 | lock contention | 5 s of retries | exit 75 |
