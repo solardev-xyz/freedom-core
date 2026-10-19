@@ -241,14 +241,14 @@ mod tests {
         assert!(
             committed == schema_json(),
             "protocol/schema.json is stale; regenerate it with:\n  \
-             FC_PROTOCOL_WRITE_SCHEMA=1 cargo test -p fc-protocol the_committed_schema_is_current\n\
+             FC_PROTOCOL_WRITE_SCHEMA=1 cargo test -p fc-protocol write_schema_when_asked\n\
              expected:\n{}",
             schema_json()
         );
     }
 
-    /// `FC_PROTOCOL_WRITE_SCHEMA=1` writes the file (run it before the test
-    /// above when the table changes).
+    /// With `FC_PROTOCOL_WRITE_SCHEMA=1`, writes the file: run this test by
+    /// name when the table changes, then the one above passes.
     #[test]
     fn write_schema_when_asked() {
         if std::env::var_os("FC_PROTOCOL_WRITE_SCHEMA").is_some() {
