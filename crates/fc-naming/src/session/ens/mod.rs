@@ -125,6 +125,22 @@ pub struct Config {
     pub bounds: crate::session::bounds::Bounds,
 }
 
+impl Config {
+    /// The configuration with each RPC and Tezos endpoint reference once,
+    /// in its first place. The reference dedupes its URLs
+    /// (`getEffectiveRpcEndpoints`, the Tezos list) and main gives one
+    /// reference per URL, so a repeat never comes from main. Kept anyway, a
+    /// repeated endpoint would count twice in a quorum, as legs and anchor
+    /// heads, and could agree with itself (#90's rule, for naming).
+    pub(crate) fn with_distinct_endpoints(mut self) -> Self {
+        let mut seen = std::collections::HashSet::new();
+        self.rpc.retain(|endpoint| seen.insert(endpoint.clone()));
+        let mut seen = std::collections::HashSet::new();
+        self.tezos.retain(|endpoint| seen.insert(endpoint.clone()));
+        self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Direct {
     pub endpoint: Endpoint,

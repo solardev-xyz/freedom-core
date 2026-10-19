@@ -170,6 +170,7 @@ Literal labels such as Myotis' `myotis-p2p` are plain strings and never substitu
   - `policy` is `resolutionPolicy()` (including the legacy `primary` mapping);
   - `quorum` is the raw `network.quorum` values;
   - `tezos` is `getRpcEndpoints()` (with `TEZOS_RPC` prepended).
+- **Each endpoint once:** the core keeps an `rpc` or `tezos` reference listed again only in its first place. Main's lists are deduplicated already, so this never changes what main sends; it keeps one endpoint from counting twice in a quorum, as two legs or two anchor heads, if a list ever repeats one.
 - **The core applies today's clamps and defaults** where today's code applies them. `resolveViaQuorum` clamps K and M from 1, `getPinnedBlock` from 2, and then the anchor's effective M.
 - **References are derived:** a reference is a keyed hash of the URL, under a key main generates per core process. A re-added URL gets back its reference, so quarantine (keyed by reference) survives a list change, as today's URL-keyed map does. Main keeps the reverse mapping for the 1,024 most recent references, which is far more than a configuration ever holds.
 - **Reads happen where today's code reads:** a session reads the current snapshot at the same points today's code calls `registry.getNetwork` and `getEndpoints`.
