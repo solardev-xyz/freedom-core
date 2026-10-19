@@ -292,6 +292,104 @@ fn the_core_keeps_using_the_directory_it_locked() {
     );
 }
 
+/// #84: `flock` works on a read-only handle, so another local user who can
+/// open the lock file can hold the gate and keep the core from starting.
+/// The lock and identity directories are private (`0700`), the lock file
+/// `0600`; what an earlier build or the umask left wider is tightened.
+#[cfg(unix)]
+#[test]
+fn the_gate_is_private_to_the_user() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode =
+        |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+    let set = |path: &std::path::Path, mode: u32| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    let lock_file = |locks: &std::path::Path| {
+        let entries: Vec<_> = std::fs::read_dir(locks)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        entries[0].clone()
+    };
+
+    let (_root, data, locks) = dirs();
+    let mut holder = spawn("hold-lock", &data, &locks, &[]);
+    assert_eq!(holder.line(), "locked");
+    assert_eq!(mode(&data), 0o700);
+    assert_eq!(mode(&locks), 0o700);
+    assert_eq!(mode(&lock_file(&locks)), 0o600);
+    holder.close_stdin();
+    assert_eq!(holder.exit_code(Duration::from_secs(5)), 0);
+
+    // As an earlier build and the default umask left them.
+    set(&data, 0o755);
+    set(&locks, 0o755);
+    set(&lock_file(&locks), 0o644);
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    assert_eq!(mode(&data), 0o700);
+    assert_eq!(mode(&locks), 0o700);
+    assert_eq!(mode(&lock_file(&locks)), 0o600);
+}
+
+/// A symlink in the lock file's place is never followed: the core refuses
+/// to start (74), and the file it points to is untouched.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_lock_file_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let (root, data, locks) = dirs();
+    let mut holder = spawn("hold-lock", &data, &locks, &[]);
+    assert_eq!(holder.line(), "locked");
+    holder.close_stdin();
+    assert_eq!(holder.exit_code(Duration::from_secs(5)), 0);
+    let lock = std::fs::read_dir(&locks)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::remove_file(&lock).unwrap();
+    let elsewhere = root.path().join("elsewhere");
+    std::fs::write(&elsewhere, b"").unwrap();
+    std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &lock).unwrap();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    assert_eq!(core.exit_code(Duration::from_secs(10)), 74);
+    assert_eq!(
+        std::fs::metadata(&elsewhere).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+}
+
+/// Someone else's lock directory is refused (74). Only root can make one,
+/// so elsewhere this checks nothing.
+#[cfg(unix)]
+#[test]
+fn a_lock_dir_of_another_user_is_refused() {
+    if !running_as_root() {
+        return;
+    }
+    let (_root, data, locks) = dirs();
+    std::fs::create_dir_all(&locks).unwrap();
+    // Some sandboxes map no UID 65534 (EINVAL): nothing to check there.
+    if std::os::unix::fs::chown(&locks, Some(65534), None).is_err() {
+        return;
+    }
+    let mut core = spawn("serve", &data, &locks, &[]);
+    assert_eq!(core.exit_code(Duration::from_secs(10)), 74);
+}
+
+#[cfg(unix)]
+fn running_as_root() -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // The test's own files are owned by whoever runs it.
+    let probe = tempfile::tempdir().unwrap();
+    std::fs::metadata(probe.path()).unwrap().uid() == 0
+}
+
 #[test]
 fn the_lock_dir_must_be_outside_the_identity_dir() {
     let (_root, data, _locks) = dirs();

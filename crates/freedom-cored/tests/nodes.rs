@@ -462,3 +462,180 @@ fn an_unfinishable_recovery_is_reported_and_blocks_new_writes() {
         "new config"
     );
 }
+
+/// #85: node identity files JS wrote under the umask stay 0644 until the
+/// next forced injection. Given the node roots in `core.hello`, the core
+/// tightens them to 0600 in place, without changing their content: the
+/// node's own layout only, regular files only, never through a symlink.
+#[cfg(unix)]
+#[test]
+fn existing_node_files_are_tightened_at_adoption() {
+    use std::os::unix::fs::PermissionsExt;
+    let set = |path: &Path, mode: u32| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    let (root, data, locks) = dirs();
+    let bee = root.path().join("bee-data");
+    let radicle = root.path().join("radicle");
+    for dir in [bee.join("keys"), radicle.join("keys")] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let written = [
+        bee.join("keys/swarm.key"),
+        bee.join("config.yaml"),
+        radicle.join("keys/radicle"),
+        radicle.join("keys/radicle.pub"),
+    ];
+    for file in &written {
+        std::fs::write(file, b"as JS wrote it").unwrap();
+        set(file, 0o644);
+    }
+    // Not the node's own: a symlink in its layout, and another file.
+    let outside = root.path().join("outside.json");
+    std::fs::write(&outside, b"{}").unwrap();
+    set(&outside, 0o644);
+    std::os::unix::fs::symlink(&outside, radicle.join("config.json")).unwrap();
+    let other = bee.join("statestore.db");
+    std::fs::write(&other, b"x").unwrap();
+    set(&other, 0o644);
+
+    let mut core = spawn("serve", &data, &locks, &[]);
+    let hello = core.call(
+        1,
+        "core.hello",
+        json!({
+            "protocol": 1, "shell_version": "test", "auto_lock_ms": 900_000,
+            "node_roots": { "bee": bee, "radicle": radicle },
+        }),
+    );
+    assert_eq!(hello["result"]["protocol"], 1, "{hello}");
+    // On its own thread: wait for it.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while written.iter().any(|file| mode(file) != 0o600) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "not tightened: {:?}",
+            written.iter().map(|f| mode(f)).collect::<Vec<_>>()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    for file in &written {
+        assert_eq!(std::fs::read(file).unwrap(), b"as JS wrote it");
+    }
+    assert_eq!(mode(&outside), 0o644);
+    assert_eq!(mode(&other), 0o644);
+    // The core still answers.
+    assert_eq!(
+        core.call(2, "vault.status", json!({}))["result"]["exists"],
+        false
+    );
+}
+
+/// A node root that isn't absolute is skipped; the handshake succeeds.
+#[test]
+fn a_relative_node_root_is_ignored() {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    let hello = core.call(
+        1,
+        "core.hello",
+        json!({
+            "protocol": 1, "shell_version": "test", "auto_lock_ms": 900_000,
+            "node_roots": { "bee": "relative/bee", "radicle": "/abs/../radicle" },
+        }),
+    );
+    assert_eq!(hello["result"]["protocol"], 1, "{hello}");
+}
+
+/// Review of #114: recovery flushed the journal by opening it again by
+/// name, after checking it, so a FIFO put there meanwhile blocked
+/// `freedom-cored recover` for good. Now the handle it read and checked is
+/// the one it flushes; what is at the name afterwards doesn't matter.
+#[cfg(unix)]
+#[test]
+fn recovery_flushes_the_journal_it_checked() {
+    let (root, data, locks) = dirs();
+    let node = root.path().join("node");
+    interrupted_write(&data, &node, "op-fifo");
+    let fifo = root.path().join("fifo");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let swap = format!("journal={}", fifo.display());
+    let mut recover = spawn_env(
+        "recover",
+        &data,
+        &locks,
+        &[],
+        &[("FREEDOM_CORED_TEST_SWAP", swap.as_str())],
+    );
+    assert_eq!(recover.line(), "recovered");
+    assert_eq!(recover.exit_code(Duration::from_secs(10)), 0);
+    assert_eq!(
+        std::fs::read_to_string(node.join("keys/swarm.key")).unwrap(),
+        "new key"
+    );
+}
+
+/// Review of #114: a staged file swapped after its digest was checked was
+/// renamed into place and recorded as installed. Now the rename happens only
+/// if the staged name still names the file hashed (same device and inode),
+/// and otherwise the journal stays for recovery to judge again; the
+/// swapped-in file then fails its digest, and the node is corrupt.
+#[cfg(unix)]
+#[test]
+fn a_staged_file_swapped_after_its_check_is_never_installed() {
+    let (root, data, locks) = dirs();
+    let node = root.path().join("node");
+    interrupted_write(&data, &node, "op-swapped");
+    let evil = root.path().join("evil");
+    std::fs::write(&evil, "evil key").unwrap();
+    let swap = format!("checked={}", evil.display());
+    let mut recover = spawn_env(
+        "recover",
+        &data,
+        &locks,
+        &[],
+        &[("FREEDOM_CORED_TEST_SWAP", swap.as_str())],
+    );
+    assert_eq!(recover.exit_code(Duration::from_secs(10)), 74);
+    assert_eq!(
+        std::fs::read_to_string(node.join("keys/swarm.key")).unwrap(),
+        "old"
+    );
+    assert!(data.join("node-identity-journal.json").exists());
+    // Judged again: the staged file no longer has its digest.
+    let mut recover = spawn("recover", &data, &locks, &[]);
+    assert_eq!(recover.line(), "corrupt op-swapped");
+    assert_eq!(
+        std::fs::read_to_string(node.join("keys/swarm.key")).unwrap(),
+        "old"
+    );
+}
+
+/// Review of #114: a file that wins the race between that identity check and
+/// the rename itself is renamed into place, but never left there nor
+/// recorded as installed: the target must be the file checked, with the
+/// journaled digest, or it is removed and the node is corrupt.
+#[cfg(unix)]
+#[test]
+fn a_file_that_wins_the_rename_race_is_never_recorded_as_installed() {
+    let (root, data, locks) = dirs();
+    let node = root.path().join("node");
+    interrupted_write(&data, &node, "op-raced");
+    let evil = root.path().join("evil");
+    std::fs::write(&evil, "evil key").unwrap();
+    let swap = format!("renaming={}", evil.display());
+    let mut recover = spawn_env(
+        "recover",
+        &data,
+        &locks,
+        &[],
+        &[("FREEDOM_CORED_TEST_SWAP", swap.as_str())],
+    );
+    assert_eq!(recover.line(), "corrupt op-raced");
+    assert_eq!(recover.exit_code(Duration::from_secs(10)), 0);
+    assert!(!node.join("keys/swarm.key").exists());
+}
