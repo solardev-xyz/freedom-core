@@ -14,7 +14,9 @@
 //!   runtime) runs as a control job on the process runtime's blocking pool,
 //!   under `ipfs.start`'s 10 s deadline. A start that is fenced while it
 //!   builds (a stop, main's cancel, the deadline, the end of the
-//!   connection) has its instance torn down as soon as it exists.
+//!   connection) has its instance torn down as soon as it exists. The 5 s
+//!   bound runs from that first fence, through the build and the teardown:
+//!   a build that outlasts it ends the process (70), as a teardown would.
 //! - **The teardown,** for `ipfs.stop`, a cancelled start and the end of the
 //!   connection alike:
 //!   1. **Fence:** the ID is retired at once, on the reader thread: a later
@@ -157,6 +159,11 @@ enum State {
     Starting {
         /// Retired before its start answered, and why.
         fenced: Option<Fence>,
+        /// The 5 s bound, armed at the first fence and carried through the
+        /// build and the teardown, never restarted. None before a fence,
+        /// and for a fence by the end of the connection, whose exit
+        /// watchdog is the bound ([`arm`]).
+        bound: Option<Watchdog>,
         /// `ipfs.stop` requests to answer once its teardown is proven.
         stops: Vec<u64>,
     },
@@ -242,6 +249,7 @@ impl Instances {
                     start: id,
                     state: State::Starting {
                         fenced: None,
+                        bound: None,
                         stops: Vec::new(),
                     },
                 },
@@ -317,11 +325,16 @@ impl Instances {
         let built = self.open(&start, seq);
         let instance_id = start.instance;
         let mut table = self.lock();
-        let (fenced, stops) = match table.active.get_mut(&instance_id) {
+        let (fenced, bound, stops) = match table.active.get_mut(&instance_id) {
             Some(Slot {
-                state: State::Starting { fenced, stops },
+                state:
+                    State::Starting {
+                        fenced,
+                        bound,
+                        stops,
+                    },
                 ..
-            }) => (*fenced, std::mem::take(stops)),
+            }) => (*fenced, bound.take(), std::mem::take(stops)),
             // Only this job leaves `Starting`.
             _ => return,
         };
@@ -350,6 +363,10 @@ impl Instances {
                 }
                 drop(table);
                 self.changed.notify_all();
+                // The fence's bound, once the cleanup is done.
+                if let Some(bound) = bound {
+                    bound.disarm();
+                }
                 return;
             }
             Ok(instance) => instance,
@@ -370,11 +387,9 @@ impl Instances {
         if fenced == Some(Fence::Stopped) {
             let _ = conn.reply_error(id, &stopped());
         }
-        // The ID was fenced while it built; the bound runs from now, when
-        // there is something to tear down.
-        let watchdog = self.bound();
+        // Fenced while it built: the bound armed at the fence goes on.
         log::info("instance stopping", json!({ "instance": instance_id }));
-        self.tear_down(conn, &instance_id, instance, watchdog);
+        self.tear_down(conn, &instance_id, instance, bound);
     }
 
     /// Opens the store and builds the instance on a runtime of its own.
@@ -434,17 +449,19 @@ impl Instances {
     }
 
     /// The start's deadline passed: a start still building is fenced and
-    /// answered `deadline`; its instance goes once built.
+    /// answered `deadline`; its instance goes once built, within the bound.
     fn start_expired(&self, conn: &Connection, id: u64, instance_id: &str) {
         let mut table = self.lock();
+        let ended = table.ended;
         if let Some(Slot {
             start,
-            state: State::Starting { fenced, .. },
+            state: State::Starting { fenced, bound, .. },
         }) = table.active.get_mut(instance_id)
             && *start == id
             && fenced.is_none()
         {
             *fenced = Some(Fence::Deadline);
+            *bound = arm(ended);
             let _ = conn.reply_error(
                 id,
                 &ErrorBody::new(ErrorCode::Deadline, "the instance didn't start in time"),
@@ -473,10 +490,13 @@ impl Instances {
         match &mut slot.state {
             State::Starting {
                 fenced: fenced @ None,
+                bound,
                 stops,
             } => {
-                // Answered once its build ends and its teardown is proven.
+                // Answered once its build ends and its teardown is proven,
+                // within the bound armed now, at the fence.
                 *fenced = Some(Fence::Stopped);
+                *bound = arm(false);
                 stops.push(id);
             }
             State::Live(_) => {
@@ -495,7 +515,7 @@ impl Instances {
 
     /// Main cancelled request `id` before its reply was written. For an
     /// `ipfs.start`, main has its `cancelled`: the instance goes, built or
-    /// not. A stop's teardown goes on.
+    /// not, within the bound armed at the fence. A stop's teardown goes on.
     pub fn cancel(self: &Arc<Self>, conn: &Connection, id: u64) {
         let mut table = self.lock();
         let Some((instance_id, slot)) = table.active.iter_mut().find(|(_, slot)| slot.start == id)
@@ -503,8 +523,11 @@ impl Instances {
             return;
         };
         match &mut slot.state {
-            State::Starting { fenced, .. } => {
-                fenced.get_or_insert(Fence::Cancelled);
+            State::Starting { fenced, bound, .. } => {
+                if fenced.is_none() {
+                    *fenced = Some(Fence::Cancelled);
+                    *bound = arm(false);
+                }
             }
             State::Live(_) => {
                 // Its `{ instance }` was queued but not written.
@@ -526,10 +549,7 @@ impl Instances {
     /// second watchdog would fire with it, and two exits racing can cut
     /// each other's report.
     fn bound(&self) -> Option<Watchdog> {
-        if self.lock().ended {
-            return None;
-        }
-        Some(Watchdog::arm(UNPROVEN, TEARDOWN_BOUND, Exit::Internal))
+        arm(self.lock().ended)
     }
 
     /// Steps 3 to 5 of a retired instance's teardown, as a control job; the
@@ -626,7 +646,9 @@ impl Instances {
             let mut live = Vec::new();
             for (instance_id, slot) in table.active.iter_mut() {
                 if let State::Starting { fenced, .. } = &mut slot.state {
-                    // Its job tears it down once built.
+                    // Its job tears it down once built. A start fenced
+                    // earlier keeps its bound; one fenced now is bounded by
+                    // the connection's exit watchdog.
                     fenced.get_or_insert(Fence::Stopped);
                 } else if let Some(instance) = slot.retire(Vec::new()) {
                     live.push((instance_id.clone(), instance));
@@ -652,6 +674,12 @@ impl Instances {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
         }
     }
+}
+
+/// A teardown's bound (see [`Instances::bound`]), from a caller that holds
+/// the table and knows whether the connection has ended.
+fn arm(ended: bool) -> Option<Watchdog> {
+    (!ended).then(|| Watchdog::arm(UNPROVEN, TEARDOWN_BOUND, Exit::Internal))
 }
 
 fn refuse(conn: &Connection, id: u64, code: ErrorCode, message: &str) {

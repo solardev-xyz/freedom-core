@@ -313,3 +313,68 @@ fn a_start_past_its_deadline_is_answered_deadline_and_torn_down() {
     let stderr = ipfsd.stderr();
     assert!(stderr.contains("\"instance stopped\""), "{stderr}");
 }
+
+/// Review of #129, M1: a start fenced while its build is held past the 5 s
+/// bound. The bound runs from the fence, through the build: the process
+/// exits 70 at it, with nothing answered after the fence, rather than when
+/// the build (8 s) ends.
+#[cfg(feature = "testhooks")]
+fn a_fenced_build_held_past_5_s_exits_70(
+    env: &[(&str, &str)],
+    fence: impl FnOnce(&mut Ipfsd, u64),
+    after: Duration,
+) {
+    let mut ipfsd =
+        Ipfsd::ephemeral(&[&[("FREEDOM_IPFSD_TEST_START_DELAY_MS", "8000")], env].concat());
+    ipfsd.hello();
+    let sent = Instant::now();
+    let start = ipfsd.request("ipfs.start", memory("e-1"));
+    fence(&mut ipfsd, start);
+    assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(70));
+    let took = sent.elapsed();
+    assert!(
+        took >= after + Duration::from_secs(5) && took < Duration::from_secs(8),
+        "{took:?}"
+    );
+    assert!(ipfsd.stdout_closes_within(EXIT_TIMEOUT));
+    assert_eq!(ipfsd.leftover(), Vec::<serde_json::Value>::new());
+    let stderr = ipfsd.stderr();
+    assert!(stderr.contains("teardown_unproven"), "{stderr}");
+}
+
+#[cfg(feature = "testhooks")]
+#[test]
+fn a_stop_while_a_build_is_held_past_5_s_exits_70() {
+    a_fenced_build_held_past_5_s_exits_70(
+        &[],
+        |ipfsd, _| {
+            ipfsd.request("ipfs.stop", json!({ "instance": "e-1" }));
+        },
+        Duration::ZERO,
+    );
+}
+
+#[cfg(feature = "testhooks")]
+#[test]
+fn a_cancel_while_a_build_is_held_past_5_s_exits_70() {
+    a_fenced_build_held_past_5_s_exits_70(
+        &[],
+        |ipfsd, start| {
+            ipfsd.cancel(start);
+            assert_eq!(ipfsd.reply(start)["error"]["code"], "cancelled");
+        },
+        Duration::ZERO,
+    );
+}
+
+#[cfg(feature = "testhooks")]
+#[test]
+fn a_deadline_while_a_build_is_held_past_5_s_exits_70() {
+    a_fenced_build_held_past_5_s_exits_70(
+        &[("FREEDOM_IPFSD_TEST_START_DEADLINE_MS", "200")],
+        |ipfsd, start| {
+            assert_eq!(ipfsd.reply(start)["error"]["code"], "deadline");
+        },
+        Duration::from_millis(200),
+    );
+}
