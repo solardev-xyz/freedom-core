@@ -812,12 +812,11 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
 
 - **Untrusted targets** are addresses learned from peers: node announcements and the address book they fill.
 - **Configured targets** are the shipped seed book, `preferredSeeds` and `connect` in `config.json`, and Arti's endpoint.
-- **In both modes**, untrusted targets in these ranges are refused:
-  - loopback, `0.0.0.0/8` and `::`;
-  - private ranges (RFC 1918, `fc00::/7`);
-  - link-local (`169.254.0.0/16`, `fe80::/10`);
-  - CGNAT (`100.64.0.0/10`);
-  - multicast, broadcast and the documentation ranges.
+- **In both modes**, untrusted targets follow 0007's rule ([Addresses](0007-ipfs-service.md#addresses)):
+  - only a globally reachable unicast address passes. Loopback, private, link-local, shared (CGNAT), multicast, broadcast, documentation, benchmarking and reserved ranges are refused;
+  - an IPv6 form that embeds an IPv4 address (mapped, NAT64, 6to4, ISATAP) is judged by that address, and the forms 0007 refuses whole stay refused;
+  - in `direct` mode the service learns the network's NAT64 prefixes as 0007 does;
+  - one table and one classifier serve both services.
 - **When the check runs:**
   - on IP literals, before the dial;
   - on DNS names, on every resolved address, locally in `direct` mode and through `RESOLVE` in `socks5` mode, before the connection. The connection goes to a checked address.
@@ -1034,7 +1033,7 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
     - an answer that changes between checks;
     - an empty answer, and an answer whose every address is refused. In both, no `CONNECT` carries the name;
   - `.onion` refused in `direct`;
-  - a test peer announcing loopback and private addresses, which are never dialled;
+  - a test peer announcing loopback and private addresses, and the IPv6 forms that embed them (0007's embedded-IPv4 cases), none of which is dialled;
   - I2P addresses, which are refused;
   - a `config.json` with a conflicting proxy, an onion `Forward` and an I2P route, which change nothing;
   - in `direct` mode, one lookup per connection, connected to the checked address.
@@ -1116,7 +1115,7 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 | `stop-budget` | no Radicle budget | 10 s, then kill | quit can't wait on Radicle |
 | `env` | the add-on inherits main's environment | cleared; `HOME` an empty directory; no git configuration | `RAD_*`, `SSH_AUTH_SOCK` and git configuration no longer apply |
 | `proxy` | none | an optional SOCKS5 policy, names resolved through the proxy and checked, failing closed | new: Route Radicle through Tor |
-| `address-policy` | none | untrusted private, loopback and link-local targets refused | configured local seeds still work |
+| `address-policy` | none | untrusted targets refused unless globally reachable unicast, with IPv6 forms that embed IPv4 judged by their IPv4 address (0007) | configured local seeds still work |
 | `address-families` | as `config.json` and the default features allow | IPv4, IPv6, DNS and onion; no I2P; every routing field set in memory | a conflicting `config.json` can't change routing |
 | `health` | none | `rad.stats` every 5 s | a dead node is noticed and restarted |
 
