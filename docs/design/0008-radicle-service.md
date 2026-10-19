@@ -674,12 +674,12 @@ All bounds are process-wide. The service hosts one node.
 
 **How this fits AGENTS.md:**
 - **Rule 3** ("No raw private key or seed leaves the core"):
-  - The Radicle key leaves the core today, as a file, through 0001's `nodes.write_identity`. AGENTS.md's list of exceptions doesn't name node identity writes.
+  - The Radicle key leaves the core today, as a file, through 0001's `nodes.write_identity`. AGENTS.md's list of exceptions names node identity writes, until their custody is decided.
   - This design adds no new release of key material. It moves the file's reader from main to the service, and the random device key's writer from libradicle to the core.
 - **Rule 4:**
   - Secret files are atomic and `0600`: this now holds for both kinds of key, since the core writes both.
-  - The lock-wipes-caches rule doesn't cover a node identity that outlives a lock, as above.
-- **A prerequisite:** reconciling rules 3 and 4 with node identities (listing them, and their lifetime across locks) comes before any custody mode is chosen. It is the user's decision ([Open questions](#open-questions)).
+  - The lock-wipes-caches rule doesn't cover a node identity that outlives a lock, as above, and AGENTS.md now says so.
+- **The prerequisite is met:** rules 3 and 4 list node identities and their lifetime across locks. The custody mode is still the user's decision ([Open questions](#open-questions)).
 
 **Options for the user:**
 1. **The key file (this design's default, today's behavior):** no change to the core's key release, and the node starts at launch without the vault being unlocked.
@@ -1158,7 +1158,7 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 
 1. **Where the code lives:** a separate workspace here (recommended), upstream libradicle, or a new repository (the user's decision).
 2. **Key custody:** keep the key file (this design), or move to a sealed host key with no file at rest? The latter needs a new exception to rule 3, and an unlocked vault for every start (the user's decision).
-3. **AGENTS.md, a prerequisite to the custody choice:** should rules 3 and 4 name node identities: 0001's node identity writes (Bee and Radicle), and keys that outlive a vault lock? (The user's decision.)
+3. **AGENTS.md, a prerequisite to the custody choice:** rules 3 and 4 now name node identities: 0001's node identity writes (Bee and Radicle), and keys that outlive a vault lock. If the custody choice changes the Radicle key's route (a sealed release instead of a file), rule 3's exception changes with it.
 4. **The device key:** this design has the core write the random key on profiles without a vault. Is a device identity that isn't derived from the wallet still wanted there, or should Radicle require a vault?
 5. **The control socket:** is it acceptable that the `rad` CLI can no longer attach to Freedom's node, or should a developer setting keep it?
 6. **The raw endpoint for pages:** is the inert-type allowlist right? Should pages get `/raw/` at all, or only the viewer?
