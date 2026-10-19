@@ -93,6 +93,12 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
 - **Taking the lock:**
   - The core opens the file for read and write, creating it if needed, never truncating it, and with close-on-exec, which is Rust's default.
   - It then takes `File::try_lock` (`flock` on Unix, `LockFileEx` on Windows).
+- **The gate is private to the user (Unix).** `flock` works on a read-only handle, so anyone who can open the lock file can hold the gate, and every core start would exit 75 (#84). So:
+  - the lock directory and the identity directory are created `0700`, and existing ones lose their group and other permission bits;
+  - the lock file is created `0600` and never opened through a symlink, and an existing one is tightened to `0600`;
+  - a lock or identity directory, or a lock file, that isn't the current user's own is refused with exit 74 (`storage`).
+
+  **Windows:** both inherit the per-user `%APPDATA%` ACL, as the vault does ([Threat model](#threat-model)). An open handle from before an upgrade isn't revoked: the file is never replaced, since replacing a lock file breaks exclusion.
 - **Outcomes:**
   - **Contention:** retry for 5 s (Windows can release a lock a little after process exit), then exit 75 (`lock_held`).
   - **Any other locking error:** exit 74 (`storage`). The core never runs without the lock.
