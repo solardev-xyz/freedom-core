@@ -715,5 +715,6 @@ fn store_error_kind(error: &StoreError) -> &'static str {
         StoreError::Sqlite(_) => "sqlite",
         StoreError::Core(_) => "core",
         StoreError::Json(_) => "json",
+        StoreError::PageCap { .. } => "page_cap",
     }
 }

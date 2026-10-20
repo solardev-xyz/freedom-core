@@ -33,9 +33,10 @@ fc-service = { path = "../../crates/fc-service" }
 # freedom-ipfs, pinned to a commit on `integration/rust-core` until a release
 # carries the upstream changes 0007 lists (deny.toml allows solardev-xyz).
 # It holds the builder (#26), the native-request parser (#25), owned
-# instances (#28) and v0.4.6. src/build_info.rs reports the same commit.
-freedom-ipfs-gateway = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "aad612637861bf23b7ebf07cc14976b8c035a905" }
-freedom-ipfs-store = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "aad612637861bf23b7ebf07cc14976b8c035a905" }
+# instances (#28), shared limits, memory reservations and cache capacities
+# (item 8: #35-#37) and v0.4.6. src/build_info.rs reports the same commit.
+freedom-ipfs-gateway = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "b5485ee8434a4389075e5d851bd6b87637b79afc" }
+freedom-ipfs-store = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "b5485ee8434a4389075e5d851bd6b87637b79afc" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The process runtime (0007, "Inside the process"). freedom-ipfs requires
