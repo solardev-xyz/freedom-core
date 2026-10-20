@@ -22,6 +22,10 @@
 //! - `FREEDOM_IPFSD_TEST_HTML_PREFETCH_ASSETS` turns upstream's HTML
 //!   prefetch on (off by default, as 0007 keeps it), for that many assets,
 //!   one at a time: background work, to fill an instance's background queue.
+//! - `FREEDOM_IPFSD_TEST_PROGRESS_COUNTS=1` adds `test_progress` to each
+//!   `ipfs.stats` reply, in either process: how many targets and events the
+//!   instance's recorder and the process's default recorder hold, so a test
+//!   can tell what was recorded, and where, even where `progress` is null.
 //! - `FREEDOM_IPFSD_TEST_REQUEST_HOOKS=1` lets an `ipfs.request`'s own
 //!   headers ask for a fault in its work, so one process can serve held,
 //!   panicking and ordinary requests side by side:
@@ -61,6 +65,27 @@ pub fn hold_teardown(instance: &Instance) {
 
 #[cfg(not(feature = "testhooks"))]
 pub fn hold_teardown(_instance: &Instance) {}
+
+/// What `instance`'s recorder and the process's default recorder hold, if
+/// a test asks (`FREEDOM_IPFSD_TEST_PROGRESS_COUNTS=1`).
+pub fn progress_counts(
+    instance: &freedom_ipfs_gateway::progress::ProgressRecorder,
+) -> Option<serde_json::Value> {
+    #[cfg(feature = "testhooks")]
+    if std::env::var_os("FREEDOM_IPFSD_TEST_PROGRESS_COUNTS").is_some() {
+        let counts = |recorder: &freedom_ipfs_gateway::progress::ProgressRecorder| {
+            let snapshot = serde_json::to_value(recorder.snapshot()).unwrap_or_default();
+            serde_json::json!({ "active_count": snapshot["active_count"],
+                "event_count": snapshot["event_count"] })
+        };
+        let default = freedom_ipfs_gateway::progress::default_recorder();
+        return Some(
+            serde_json::json!({ "instance": counts(instance), "default": counts(&default) }),
+        );
+    }
+    let _ = instance;
+    None
+}
 
 /// The process's memory budget: `default`, unless a test replaces it.
 pub fn memory_budget(default: usize) -> usize {

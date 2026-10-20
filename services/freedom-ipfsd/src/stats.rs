@@ -17,8 +17,9 @@
 //!     failure's code and its fixed message, or a `gateway_busy` head's.
 //!
 //!   The event-queue fields went with the queue (deviation `stats-fields`).
-//! - **`progress`:** `null` until upstream's progress recorder leaves the
-//!   FFI crate (upstream item 4; deviation `stats-progress`).
+//! - **`progress`:** in the persistent process, the instance's recorder's
+//!   snapshot, cut to fit the reply's frame ([`crate::progress`]); `null`
+//!   in the ephemeral process, which records none.
 //! - **`store`:** `block_count` and `total_bytes`.
 //! - **`budget`:** each budget's use and limit: the memory budget, the
 //!   retrieval admission's four limits, the request admission, the writer's
@@ -43,7 +44,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
-use fc_protocol::stream::WRITER_DATA_CAP;
+use fc_protocol::stream::{SendError, WRITER_DATA_CAP};
 use fc_service::conn::Connection;
 use fc_service::panic::{Labeled, TaskKind, with_kind};
 use serde_json::value::RawValue;
@@ -53,8 +54,8 @@ use tokio::task::AbortHandle;
 
 use crate::budget::Budgets;
 use crate::instances::Instances;
-use crate::params;
 use crate::requests::{MAX_ADMITTED, Requests};
+use crate::{params, progress, testhooks};
 
 /// `ipfs.stats`'s deadline (0007, "Methods").
 pub const STATS_DEADLINE: Duration = Duration::from_secs(5);
@@ -161,6 +162,8 @@ pub struct Stats {
     budgets: Arc<Budgets>,
     /// [`STATS_DEADLINE`], but in tests.
     deadline: Duration,
+    /// The process records progress: the persistent one.
+    progress: bool,
     /// The jobs outstanding, by request ID: each is removed when its
     /// closure is dropped.
     jobs: Mutex<HashMap<u64, Job>>,
@@ -196,11 +199,17 @@ impl Drop for JobSlot {
 }
 
 impl Stats {
-    pub fn new(runtime: Handle, budgets: Arc<Budgets>, deadline: Duration) -> Arc<Stats> {
+    pub fn new(
+        runtime: Handle,
+        budgets: Arc<Budgets>,
+        deadline: Duration,
+        progress: bool,
+    ) -> Arc<Stats> {
         Arc::new(Stats {
             runtime,
             budgets,
             deadline,
+            progress,
             jobs: Mutex::new(HashMap::new()),
             started: AtomicU64::new(0),
             ran: AtomicU64::new(0),
@@ -270,13 +279,16 @@ impl Stats {
                 return;
             }
         };
-        let Some((store, counters, background)) = instances.with_live(&instance_id, |running| {
-            (
-                running.instance.node().store().clone(),
-                running.counters.clone(),
-                running.instance.node().background_queue().clone(),
-            )
-        }) else {
+        let Some((store, counters, background, recorder)) =
+            instances.with_live(&instance_id, |running| {
+                (
+                    running.instance.node().store().clone(),
+                    running.counters.clone(),
+                    running.instance.node().background_queue().clone(),
+                    running.instance.progress().clone(),
+                )
+            })
+        else {
             let _ = conn.reply_error(
                 id,
                 &ErrorBody::new(
@@ -345,13 +357,25 @@ impl Stats {
                     }
                     _ => Value::Null,
                 };
-                let _ = reply.reply_by(
-                    id,
-                    &json!({ "gateway": gateway, "progress": Value::Null, "store": store,
-                        "budget": budget }),
-                    deadline,
-                    &late(),
-                );
+                // Here, not on the reader thread: a snapshot copies what
+                // the recorder holds.
+                let progress = if stats.progress {
+                    serde_json::to_value(recorder.snapshot()).unwrap_or(Value::Null)
+                } else {
+                    Value::Null
+                };
+                let mut result = json!({ "gateway": gateway, "progress": progress,
+                    "store": store, "budget": budget });
+                if let Some(counts) = testhooks::progress_counts(&recorder) {
+                    result["test_progress"] = counts;
+                }
+                let result = progress::fit(id, result);
+                // Fitted, it is within a frame; were it not, it would still
+                // be answered.
+                if let Err(SendError::TooLarge) = reply.reply_by(id, &result, deadline, &late()) {
+                    let too_large = ErrorBody::new(ErrorCode::Internal, "the stats are too large");
+                    let _ = reply.reply_error_by(id, &too_large, deadline, &late());
+                }
             });
         });
         // Its abort, recorded before anything can stop it: a cancel is

@@ -280,7 +280,7 @@ mod tests {
             inner: IpfsService::new(
                 instances.clone(),
                 requests,
-                Stats::new(runtime.handle().clone(), budgets, STATS_DEADLINE),
+                Stats::new(runtime.handle().clone(), budgets, STATS_DEADLINE, false),
             ),
             seen,
         });
@@ -395,7 +395,12 @@ mod tests {
                 requests.clone(),
                 budgets.clone(),
             );
-            let stats = Stats::new(runtime.handle().clone(), budgets.clone(), stats_deadline);
+            let stats = Stats::new(
+                runtime.handle().clone(),
+                budgets.clone(),
+                stats_deadline,
+                false,
+            );
             let cancel_gate = Arc::new(Mutex::new(None));
             let service = Arc::new(Delayed {
                 inner: IpfsService::new(instances.clone(), requests.clone(), stats.clone()),
