@@ -122,7 +122,7 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   2. The core revokes the vault epoch (see [Concurrency](#concurrency-epochs-and-revocation)) and finishes or abandons in-flight work according to its commit state.
   3. It exits 0.
 
-  After 3 s, main kills the core. Killing is safe because every write follows [Writes and durability](#writes-and-durability).
+  After 3 s, main kills the core. Killing is safe because every write follows [Writes and durability](#writes-and-durability). The core's own exit fits inside that: work past its commit point gets 2 s to finish. The writer then gets up to 2 s more to flush, which only a main that isn't reading uses up.
 - **Parent death:**
   - The core's I/O task, which is independent of vault work, exits on stdin EOF. EOF in the middle of a frame counts as EOF.
   - **Unix backstop:** main passes its PID as `--parent-pid`. At start the core exits if `getppid()` differs, which means main has already died. On Linux it then sets `PR_SET_PDEATHSIG` and re-checks `getppid()` to close the race. After that it polls `getppid()` every 2 s.
@@ -238,12 +238,13 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   - **The core enforces deadlines and always replies.** Main doesn't settle requests on its own timer. It runs only a hang watchdog on every request: core deadline + 15 s, or 15 s for an immediate method. If the watchdog fires, main treats the core as hung, kills it, restarts it and [reconciles](#reconciliation). The process's own lifecycle has its own bounds instead: main waits 10 s for `core.hello`'s reply, and gives `core.shutdown` 3 s before it kills the process.
 - **Before the commit point,** a deadline or `cancel` stops the operation and returns `deadline` or `cancelled`. Throttle attempts are reserved before a KDF starts, so concurrent guesses can't all slip past the check.
 - **The commit point** is the worker's atomic claim immediately before the vault rename or unlink, or before the journal write of a multi-file operation. The loop and the worker race on one atomic: either the loop abandons the job first (cancel, deadline or revocation), and the job writes nothing, or the worker claims the commit first, and from then on cancel, deadline and revocation no longer apply.
+  - **A claim comes in the first two thirds of the deadline,** 20 s of the vault class's 30 s. A later claim stops the job uncommitted, answered `deadline`. So what follows a claim has at least 10 s, plus the watchdog's 15 s, before main gives up on the core (#127). That work is a rename and a directory flush, or a node write's journal and its fsyncs.
 - **After the commit point,** the reply is the real outcome of the rename or unlink, even past the deadline:
   - **If it happened,** the reply is success. A later failure, such as a directory `fsync` error, doesn't turn into an error reply. It is reported as success with `durable: false`, and logged.
   - **If the rename or unlink itself failed,** nothing changed, and the reply is that error.
 
   So every error reply means "not committed", and only a missing reply needs reconciliation.
-- **Shutdown** revokes everything before its commit point. Work past its commit point finishes and sends its reply before the process exits, within a bounded wait. Main's hang watchdog and reconciliation cover anything slower.
+- **Shutdown** revokes everything before its commit point. Work past its commit point finishes and sends its reply before the process exits, within 2 s, inside main's 3 s grace. Work slower than that is cut off at exit, as a kill would cut it off; the next start's recovery and main's reconciliation cover it.
 - **Read-only operations** can be cancelled at any time.
 
 ### Reconciliation
