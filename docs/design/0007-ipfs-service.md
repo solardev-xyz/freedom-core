@@ -513,6 +513,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 - **`headers_ms`:**
   - It runs from admission, so queue time and routing count. On expiry the request's token is cancelled and the reply is `deadline`.
   - A head that is queued, though not yet written, when `headers_ms` runs out is in time: the service's part is done.
+  - So is any reply the work gives in a head's place, checked against `headers_ms` as a head is: a memory refusal (`busy`) or a head too large for a frame (`internal`), queued after it, is `deadline`.
   - After the head there is no deadline in the service. Main's 60 s body-idle timer (0006) cancels a stalled body.
 - **Admission:** at most 512 requests per process, counting heads, open streams, and work still ending after a cancel. Beyond that the reply is `busy`.
   - **A slot is held until both its work has ended and its terminal is written:** the reply, the stream's `end`, or its abort. That covers "only when its work has ended" and "counting open streams" together.
@@ -574,7 +575,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 The store's figures are SQLite queries, which can wait behind a statement in progress, so they run as a job on the process runtime's blocking pool:
 - **The 5 s deadline** runs from when the reader handles the request. The job's reply is queued only before it, checked under the connection's lock as a head is; from then on the reply is `deadline`, whichever of the job and its watcher runs first.
 - **At most 4 stats jobs are outstanding in the process.** Main asks every 5 s and gives up at 20 s, so it never has more asked. A job counts until its closure is dropped, whether it ran or was aborted before it started, never just because its request was answered. Past the bound, the reply is `busy`.
-- **A cancel or the deadline fences the job,** which then runs no SQL, and aborts it if it hasn't started.
+- **A cancel or the deadline fences the job,** which then runs no SQL, and aborts it if it hasn't started. A job that starts past its deadline runs no SQL either, and its reply is `deadline`, whether or not its watcher has run. SQL already running finishes, and its reply is checked as above.
 
 The 5 s health check calls `ipfs.stats`. `checkHealth()` stays synchronous, because `ipfsBackend()` calls it at admission. It reads a snapshot that is true while all of these hold:
 - the generation is live;
@@ -629,7 +630,7 @@ Upstream's constants are per instance, and some limit bookkeeping rather than wo
   - **The put into a store:**
     - SQLite copies a block into its own pages, which the store's fixed reservation and page cap cover. The fetched buffer keeps its own dynamic reservation until its last owner drops it.
     - A write that meets the page cap fails with `SQLITE_FULL`, whether it is a block, a name or a provider record, and that entry isn't cached. A block is still served, from its transient buffer.
-  - **Pending replies:** each head reserves what it holds, before it is encoded: its JSON, encoded in a buffer of exactly that size, and its frame header. The reservation lasts until the writer has written and flushed the head, or the reply that took its place, and freed its buffers. A head that doesn't fit the writer's 64 KiB buffer is written from its own buffer, never copied.
+  - **Pending replies:** each head reserves what it holds, before it is encoded: its JSON, encoded in a buffer of exactly that size, and its frame header. The reservation lasts until the writer has written and flushed the head, or the reply that took its place, and freed its buffers. A head that doesn't fit the writer's 64 KiB buffer is written from its own buffer, never copied. If the writer fails, what is queued is freed first, every head's JSON with it, and the reservations only then; nothing more is queued.
   - **The writer's data queue:** 16 MiB, reserved at process start.
 - **When admitted work can't reserve:**
   - **before its head,** it waits up to its remaining `headers_ms`, then answers `busy` (503).
