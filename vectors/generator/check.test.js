@@ -19,17 +19,18 @@ FILES.push('streams.json', 'generator/streams.js');
 
 function corruptedCheck(filename, corrupt) {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
-  for (const file of FILES) {
-    const destination = path.join(copy, file);
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.copyFileSync(path.join(SOURCE, file), destination);
-  }
-  const destination = path.join(copy, filename);
-  const contents = JSON.parse(fs.readFileSync(destination, 'utf8'));
-  corrupt(contents);
-  fs.writeFileSync(destination, JSON.stringify(contents, null, 2) + '\n');
   let result;
+  // Everything after the directory exists, setup included, is undone.
   try {
+    for (const file of FILES) {
+      const destination = path.join(copy, file);
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      fs.copyFileSync(path.join(SOURCE, file), destination);
+    }
+    const destination = path.join(copy, filename);
+    const contents = JSON.parse(fs.readFileSync(destination, 'utf8'));
+    corrupt(contents);
+    fs.writeFileSync(destination, JSON.stringify(contents, null, 2) + '\n');
     result = spawnSync(process.execPath, [path.join(copy, 'generator/generate.js'),
       'check', '--freedom-browser', REFERENCE], { encoding: 'utf8', timeout: 60000 });
   } finally {
