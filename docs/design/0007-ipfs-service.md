@@ -302,7 +302,8 @@ Electron main (profile P)
 - **Logs:**
   - JSON lines on stderr, forwarded to main's log.
   - The service logs its own lifecycle and failures with codes, never a path, name or CID.
-  - Upstream's tracing feeds only the progress recorder, as the add-on's subscriber does today.
+  - In the persistent process, upstream's tracing feeds only the progress recorders, as the add-on's subscriber does today: the process installs upstream's subscriber (`init_progress_tracing`, the progress layer and nothing else) before anything of freedom-ipfs runs. Each instance records into its own recorder (`Instance::progress`): its runtime's threads and its requests' spans carry it, so nothing of one instance's reaches another's, or the process's default recorder.
+  - The ephemeral process installs no subscriber at all, so nothing is recorded, not even in memory ([Private windows](#private-windows)).
 
 ### Instances and their teardown
 
@@ -562,7 +563,10 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
   - It is cancelled on main's `cancel`, whenever the connection accepts one: the request isn't settled, so its admission doesn't end, until the service's cancel callback has run.
   - `bytes_read` counts body bytes as they are queued for main, so a send cut short by a cancel counts what it queued.
   - An outcome is counted as the work ends, a moment after its terminal is queued, and before its admission ends. `started` and `freed` are counted under the admission table's lock, so `max_active_handles` never passes what was admitted.
-- **`progress`:** upstream's progress snapshot. The persistent process only. Until upstream item 4 moves the recorder out of the FFI crate, it is `null` in both processes: deviation `stats-progress`.
+- **`progress`:** the instance's progress snapshot, as `progressSnapshotJson()` gives it today: its active targets and its latest 512 events. A request's target is its envelope ID, the native request's ID as main sets it today; an event's `request_id` is the gateway's own count.
+  - **The persistent process only.** In the ephemeral process, which records nothing, it is `null`.
+  - **The reply fits one frame.** A snapshot's events are bounded by count, but neither they nor its active targets are bounded by bytes. If the reply would pass 1 MiB, it keeps as many active targets as fit, in order, then as many of the newest events as fit. `active_count` and `event_count` stay the recorder's, so a reader can tell what was cut.
+  - Main has no `clearProgress`, and neither does the service: a target closes when its request ends or its span closes.
 - **`store`:** `block_count` and `total_bytes`, or `null` if the store can't say.
 - **`budget`:** each [budget's](#budgets) use and limit:
   - `memory` (`used`);
@@ -631,6 +635,7 @@ Upstream's constants are per instance, and some limit bookkeeping rather than wo
     - SQLite copies a block into its own pages, which the store's fixed reservation and page cap cover. The fetched buffer keeps its own dynamic reservation until its last owner drops it.
     - A write that meets the page cap fails with `SQLITE_FULL`, whether it is a block, a name or a provider record, and that entry isn't cached. A block is still served, from its transient buffer.
   - **Pending replies:** each head reserves what it holds, before it is encoded: its JSON, encoded in a buffer of exactly that size, and its frame header. The reservation lasts until the writer has written and flushed the head, or the reply that took its place, and freed its buffers. A head that doesn't fit the writer's 64 KiB buffer is written from its own buffer, never copied. If the writer fails, what is queued is freed first, every head's JSON with it, and the reservations only then; nothing more is queued.
+    - Stats replies aren't charged. At most 4 are outstanding, each within one frame (1 MiB), and the snapshot each copies is library memory, as the recorder's own is. Charging them would fail the health check under memory pressure, exactly when main most needs it.
   - **The writer's data queue:** 16 MiB, reserved at process start.
 - **When admitted work can't reserve:**
   - **before its head,** it waits up to its remaining `headers_ms`, then answers `busy` (503).
@@ -754,7 +759,7 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   - `SqliteBlockStore::in_memory`, with `temp_store = MEMORY` ([upstream](#upstream-changes-in-freedom-ipfs)), so SQLite writes no temp files;
   - no data directory and no lock;
   - logs without paths, and panic lines without payloads;
-  - no progress snapshot;
+  - no progress recorded: the process installs no tracing subscriber, so no path or CID is recorded, even in memory, and `ipfs.stats` reports `progress: null`;
   - no core dumps ([Spawn](#spawn)).
 
   The OS's swap and hibernation files are outside this guarantee.
@@ -1375,7 +1380,6 @@ Every body already passes through main today, so the pipe adds one copy into the
 | `read-ahead` | one 64 KiB read in main, plus a two-chunk channel | a 128 KiB window per stream | about the same buffering, now bounded by credit |
 | `exit-text` | `Native event dispatcher exited with code N`, `Native gateway stopped unexpectedly` | `freedom-ipfs service exited` | in 502 bodies and logs only |
 | `stats-fields` | the event-queue fields in the diagnostics | dropped, with the queue; budget use added | the panel shows the rest |
-| `stats-progress` | the progress snapshot in the diagnostics | `null` until upstream item 4 lands | the panel shows no progress until then |
 | `targets` | the add-on ships for darwin-arm64, linux-arm64, linux-x64 and win32-x64, and needs GLIBC ≥ 2.38 | the service builds for this repository's five targets, static on Linux | IPFS on darwin-x64 and older distributions (#350), if the musl build holds |
 
 ## Implementation steps
