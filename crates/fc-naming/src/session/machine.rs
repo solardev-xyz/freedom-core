@@ -1209,6 +1209,12 @@ impl Machine {
         if session == 0 {
             return self.ctx.rt.complete(id, answer);
         }
+        // A second answer to a request is refused before it is charged: the
+        // executor wouldn't take it, and a charge that crossed a budget
+        // would still end the session.
+        if !self.ctx.rt.awaits(id) {
+            return false;
+        }
         let bounds = self.ctx.bounds();
         let bytes = answer_bytes(&answer);
         let refused = matches!(
@@ -1224,10 +1230,7 @@ impl Machine {
         if !self.ctx.budget.borrow_mut().charge(session, bytes, &bounds) {
             return false;
         }
-        // An answer the executor doesn't take (the request already has
-        // one) holds nothing.
         if !self.ctx.rt.complete(id, answer) {
-            self.ctx.budget.borrow_mut().uncharge(session, bytes);
             return false;
         }
         if anchor {
@@ -1524,10 +1527,17 @@ mod tests {
         assert!(machine.anchor_charges.borrow().is_empty());
     }
 
-    /// A second answer to one request isn't taken, and holds nothing.
-    #[test]
-    fn an_answer_not_taken_is_not_charged() {
-        let mut machine = machine(four_endpoints());
+    fn head(pad: usize) -> Answer {
+        let pad = "x".repeat(pad);
+        Answer::Rpc {
+            status: 200,
+            body: format!(r#"{{"jsonrpc":"2.0","id":1,"result":"0x1312d00","pad":"{pad}"}}"#)
+                .into_bytes(),
+        }
+    }
+
+    /// A lookup's first anchor request, with what the machine holds.
+    fn first_request(machine: &mut Machine) -> (u64, usize) {
         machine.resolve_content("vitalik.eth");
         machine.poll();
         let id = machine
@@ -1538,14 +1548,41 @@ mod tests {
                 Effect::Cancel { .. } => None,
             })
             .unwrap();
-        let answer = || Answer::Rpc {
-            status: 200,
-            body: br#"{"jsonrpc":"2.0","id":1,"result":"0x1312d00"}"#.to_vec(),
+        (id, machine.held())
+    }
+
+    /// A second answer to one request isn't taken and holds nothing, even
+    /// one whose charge would cross the session's budget or the total
+    /// (#132 review).
+    #[test]
+    fn a_second_answer_is_refused_before_it_is_charged() {
+        let tight = |session: bool| {
+            let mut config = four_endpoints();
+            if session {
+                config.bounds.session_bytes = 4096;
+            } else {
+                config.bounds.total_bytes = 4096;
+                config.bounds.resume_bytes = 3000;
+            }
+            config
         };
-        assert!(machine.complete(id, answer()));
-        let held = machine.held();
-        assert!(!machine.complete(id, answer()));
-        assert_eq!(machine.held(), held);
-        assert_eq!(machine.anchor_charges.borrow().len(), 1);
+        for config in [four_endpoints(), tight(true), tight(false)] {
+            let mut machine = machine(config);
+            let (id, _) = first_request(&mut machine);
+            assert!(machine.complete(id, head(0)));
+            let held = machine.held();
+            // Under the answer allowance, and under 4,096 alone.
+            assert!(answer_bytes(&head(1200)) < 4096);
+            for pad in [0, 1200] {
+                assert!(!machine.complete(id, head(pad)));
+                assert_eq!(machine.held(), held);
+                assert_eq!(machine.anchor_charges.borrow().len(), 1);
+            }
+            // The first answer is read, and the lookup goes on.
+            machine.poll();
+            assert!(machine.anchor_charges.borrow().is_empty());
+            assert_eq!(machine.running(), 1);
+            assert!(machine.take_replies().is_empty());
+        }
     }
 }

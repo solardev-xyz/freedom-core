@@ -170,6 +170,11 @@ impl<Q, A> Rt<Q, A> {
         }
     }
 
+    /// Whether outstanding request `id` still waits for its answer.
+    pub fn awaits(&self, id: u64) -> bool {
+        matches!(self.inner.borrow().io.get(&id), Some((_, None)))
+    }
+
     /// The owner of outstanding request `id`.
     pub fn owner_of(&self, id: u64) -> Option<u64> {
         self.inner.borrow().io.get(&id).map(|(owner, _)| *owner)
