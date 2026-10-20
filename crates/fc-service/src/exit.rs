@@ -78,8 +78,16 @@ thread_local! {
     static HELD: Cell<Held> = const { Cell::new(Held::No) };
 }
 
+/// Run by the timer as it ends the process, in tests: what an exit callback
+/// on its thread would do.
 #[cfg(test)]
-static CLAIMS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static TIMER_EXITING: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+
+/// Claims begun, and claims won: tests wait on them to order two exits.
+#[cfg(test)]
+static ATTEMPTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static ACQUIRED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Claims the process's exit for the calling thread. It returns only to the
 /// first caller. Any later caller waits, parked, for the first to end the
@@ -95,7 +103,7 @@ static CLAIMS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::
 /// ending the process and std can't exit twice on one thread, so it aborts.
 pub fn claim() {
     #[cfg(test)]
-    CLAIMS.fetch_add(1, Ordering::SeqCst);
+    ATTEMPTS.fetch_add(1, Ordering::SeqCst);
     match HELD.try_with(Cell::get).unwrap_or(Held::No) {
         Held::Timed => park_forever(),
         Held::Ending => std::process::abort(),
@@ -105,6 +113,8 @@ pub fn claim() {
         park_forever();
     }
     let _ = HELD.try_with(|held| held.set(Held::Ending));
+    #[cfg(test)]
+    ACQUIRED.fetch_add(1, Ordering::SeqCst);
 }
 
 fn park_forever() -> ! {
@@ -129,6 +139,13 @@ pub(crate) fn exit_reporting(exit: Exit, bound: Duration, report: impl FnOnce())
         .name("exit".into())
         .spawn(move || {
             std::thread::sleep(bound);
+            // It ends the process on the owner's behalf, so it is an owner
+            // too: coming back (a panic in an exit callback) must not park.
+            let _ = HELD.try_with(|held| held.set(Held::Ending));
+            #[cfg(test)]
+            if let Some(exiting) = TIMER_EXITING.get() {
+                exiting();
+            }
             std::process::exit(code)
         });
     if armed.is_ok() {
@@ -177,16 +194,12 @@ mod tests {
                     exit_reporting(Exit::Internal, Duration::from_secs(10), || {
                         let pad = "a".repeat(256 * 1024);
                         crate::log::line(format!("{{\"first\":\"{pad}\"}}\n").into_bytes());
-                        let until = Instant::now() + Duration::from_secs(5);
-                        while CLAIMS.load(Ordering::SeqCst) < 2 && Instant::now() < until {
-                            std::thread::sleep(Duration::from_millis(5));
-                        }
+                        // Until the second exit has begun its claim.
+                        reach(&ATTEMPTS, 2, 99);
                     })
                 });
-                let until = Instant::now() + Duration::from_secs(5);
-                while CLAIMS.load(Ordering::SeqCst) < 1 && Instant::now() < until {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
+                // Until the first exit owns the process.
+                reach(&ACQUIRED, 1, 98);
                 exit_reporting(Exit::Protocol, Duration::from_secs(10), || {
                     crate::log::line(b"{\"second\":true}\n".to_vec());
                 })
@@ -201,6 +214,16 @@ mod tests {
             "again_after_claim" => {
                 claim();
                 exit_reporting(Exit::Protocol, Duration::from_secs(60), || {})
+            }
+            // The timer, ending the process for an owner still reporting,
+            // comes back as an exit callback on its thread would.
+            "again_in_timer" => {
+                let _ = TIMER_EXITING.set(|| {
+                    exit_reporting(Exit::Protocol, Duration::from_secs(60), || {});
+                });
+                exit_reporting(Exit::Internal, Duration::from_millis(300), || {
+                    std::thread::sleep(Duration::from_secs(60));
+                })
             }
             // A thread-local destructor that comes back while its thread
             // exits the process.
@@ -218,6 +241,29 @@ mod tests {
                 exit_reporting(Exit::Internal, Duration::from_secs(60), || {})
             }
             other => panic!("unknown mode {other}"),
+        }
+    }
+
+    /// Waits until `counter` reaches `n`; past 5 s the child exits with
+    /// `fail`, a code no exit here uses, so a wait that never ends can't
+    /// pass for the outcome under test.
+    fn reach(counter: &std::sync::atomic::AtomicUsize, n: usize, fail: i32) {
+        let until = Instant::now() + Duration::from_secs(5);
+        while counter.load(Ordering::SeqCst) < n {
+            if Instant::now() >= until {
+                std::process::exit(fail);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Whether `code` is a `std::process::abort`: a signal on Unix, and
+    /// `__fastfail`'s status (or the CRT's 3) on Windows.
+    fn aborted(code: Option<i32>) -> bool {
+        if cfg!(windows) {
+            matches!(code, Some(c) if c as u32 == 0xC000_0409 || c == 3)
+        } else {
+            code.is_none()
         }
     }
 
@@ -280,10 +326,14 @@ mod tests {
     fn the_owner_coming_back_still_ends_the_process() {
         let (code, stderr) = run_child("again_in_report", Duration::from_secs(30));
         assert_eq!(code, Some(70), "{stderr}");
-        for mode in ["again_after_claim", "again_in_exit"] {
+        let mut modes = vec!["again_after_claim", "again_in_timer"];
+        // Thread-local destructors run inside `exit` on glibc only.
+        if cfg!(all(target_os = "linux", target_env = "gnu")) {
+            modes.push("again_in_exit");
+        }
+        for mode in modes {
             let (code, stderr) = run_child(mode, Duration::from_secs(30));
-            // Aborted: a signal, so no code.
-            assert_eq!(code, None, "{mode}: {stderr}");
+            assert!(aborted(code), "{mode}: {code:?} {stderr}");
         }
     }
 
