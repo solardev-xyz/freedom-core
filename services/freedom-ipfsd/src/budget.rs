@@ -41,8 +41,6 @@ pub const MEMORY_HOT_CACHE: u64 = 4 << 20;
 /// The page size the page cap is counted in: SQLite's default for a new
 /// database, which every memory store is.
 pub const PAGE_SIZE: u64 = 4096;
-/// A disk store's hot cache: upstream's `min(max_bytes, 16 MiB)`.
-pub const DISK_HOT_CACHE: u64 = 16 << 20;
 
 /// The process's budgets.
 pub struct Budgets {
@@ -82,12 +80,16 @@ pub struct Fixed {
 }
 
 impl Fixed {
-    /// For a store of `store`'s kind and target, under `gateway`.
+    /// For a store of `store`'s kind and target, under `gateway`. The hot
+    /// cache's part is upstream's own figure for the options
+    /// ([`StoreOptions::hot_cache_fixed_bytes`]): what the opened store's
+    /// hot cache holds, its own structures included, which a tiny target
+    /// doesn't cover.
     pub fn of(store: Store, gateway: &GatewayConfig) -> Fixed {
-        let (store_part, hot, options) = match store {
+        let (store_part, options) = match store {
+            // Upstream's hot cache: `min(max_bytes, 16 MiB)`.
             Store::Disk { max_bytes } => (
                 DISK_PAGE_CACHE,
-                max_bytes.min(DISK_HOT_CACHE),
                 StoreOptions {
                     max_bytes,
                     hot_cache_bytes: None,
@@ -100,7 +102,6 @@ impl Fixed {
                 let pages = cap.div_ceil(PAGE_SIZE);
                 (
                     usize::try_from(pages.saturating_mul(PAGE_SIZE)).unwrap_or(usize::MAX),
-                    MEMORY_HOT_CACHE,
                     StoreOptions {
                         max_bytes,
                         hot_cache_bytes: Some(MEMORY_HOT_CACHE),
@@ -112,7 +113,7 @@ impl Fixed {
         };
         Fixed {
             store: store_part,
-            caches: usize::try_from(hot)
+            caches: usize::try_from(options.hot_cache_fixed_bytes())
                 .unwrap_or(usize::MAX)
                 .saturating_add(gateway.cache_capacity()),
             options,
@@ -157,5 +158,27 @@ mod tests {
         // as one persistent instance and the writer fit the persistent one.
         assert!(8 * private.total() + WRITER_DATA_CAP <= EPHEMERAL_MEMORY);
         assert!(persistent.total() + WRITER_DATA_CAP <= PERSISTENT_MEMORY);
+    }
+
+    /// Review of #141, m3: a tiny disk target's hot cache still holds its
+    /// own structures, and the figure is the opened store's.
+    #[test]
+    fn a_tiny_hot_cache_is_counted_as_upstream_opens_it() {
+        let gateway = GatewayConfig::default();
+        for max_bytes in [0, 1, 4096, 16 << 20, 1 << 30] {
+            let fixed = Fixed::of(Store::Disk { max_bytes }, &gateway);
+            let dir = tempfile::tempdir().unwrap();
+            let store = freedom_ipfs_store::SqliteBlockStore::open_with(
+                dir.path().join("store.sqlite3"),
+                fixed.options,
+            )
+            .unwrap();
+            assert_eq!(
+                fixed.caches,
+                store.hot_cache_capacity() as usize + gateway.cache_capacity(),
+                "{max_bytes}"
+            );
+            assert!(store.close(std::time::Duration::from_secs(2)));
+        }
     }
 }

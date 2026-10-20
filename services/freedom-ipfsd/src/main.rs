@@ -49,6 +49,7 @@ use crate::budget::Budgets;
 use crate::instances::{Instances, Kind, STORE_FILE};
 use crate::requests::Requests;
 use crate::service::IpfsService;
+use crate::stats::{STATS_DEADLINE, Stats};
 
 /// The gate's namespace: `<lock-dir>/ipfs-<sha256(data dir)>.lock`.
 const NAMESPACE: &str = "ipfs";
@@ -150,12 +151,8 @@ fn serve(kind: Kind, parent_pid: Option<u32>, started: Instant) -> Exit {
         requests.clone(),
         budgets.clone(),
     );
-    let service = Arc::new(IpfsService::new(
-        instances,
-        requests,
-        budgets,
-        runtime.handle().clone(),
-    ));
+    let stats = Stats::new(runtime.handle().clone(), budgets, STATS_DEADLINE);
+    let service = Arc::new(IpfsService::new(instances, requests, stats));
     let mut options = Options::new(SERVICE, PROTOCOL, started);
     options.parent_pid = parent_pid;
     let exit = conn::run(service, options, std::io::stdin(), std::io::stdout());

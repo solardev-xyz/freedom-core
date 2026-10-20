@@ -441,52 +441,107 @@ fn stats_count_the_gateways_busy_heads() {
     shut_down(ipfsd);
 }
 
+// A pending head's charge, held while it waits and while it is written,
+// is tested in the service's own tests (`service.rs`), where the writer is
+// held at acknowledged points.
+
+/// Review of #141, m1 and m2: `bytes_read` counts every body byte queued
+/// for main, a send's prefix before a cancel included, and the cancel is
+/// counted.
 #[test]
-fn a_pending_head_holds_its_size_until_the_writer_takes_it() {
+fn bytes_read_counts_what_a_cancelled_send_queued() {
     let dirs = Dirs::new();
-    // One credit window of body: more than a pipe's buffer.
-    let body = vec![5u8; 128 << 10];
-    let cids = seed(&dirs, &[body.clone(), b"small".to_vec()]);
+    let cids = seed(&dirs, &[vec![3u8; 600 << 10]]);
     let mut ipfsd = Ipfsd::persistent(&dirs, &[]);
     ipfsd.hello();
     assert_eq!(ipfsd.start(disk("p-1"))["result"]["instance"], "p-1");
-    // Main stops reading: the writer blocks inside the first body, so the
-    // second's head waits in its queue, and its size is held meanwhile.
-    ipfsd.pause_reading();
-    let first = ipfsd.request("ipfs.request", get("p-1", &format!("/ipfs/{}", cids[0])));
-    std::thread::sleep(Duration::from_millis(500));
-    let second = ipfsd.request("ipfs.request", get("p-1", &format!("/ipfs/{}", cids[1])));
-    // Asked a few times over a second and a half, so the last one sees the
-    // second's head queued, however slowly its work runs.
-    let during: Vec<u64> = (0..6)
-        .map(|_| {
-            std::thread::sleep(Duration::from_millis(250));
-            ipfsd.request("ipfs.stats", json!({ "instance": "p-1" }))
-        })
-        .collect();
-    std::thread::sleep(Duration::from_millis(200));
-    ipfsd.resume_reading();
-    let used: Vec<usize> = during
-        .iter()
-        .map(|id| {
-            ipfsd.reply(*id)["result"]["budget"]["memory"]["used"]
-                .as_u64()
-                .unwrap() as usize
-        })
-        .collect();
-    let held = used[used.len() - 1];
-    assert!(
-        (WRITER + PERSISTENT + 64..WRITER + PERSISTENT + 4096).contains(&held),
-        "a head's size, held: {}",
-        held - (WRITER + PERSISTENT)
+    let id = ipfsd.request("ipfs.request", get("p-1", &format!("/ipfs/{}", cids[0])));
+    assert_eq!(ipfsd.reply(id)["result"]["body"], true);
+    // The window, then one byte of credit, taken; then a cancel.
+    let mut received = 0;
+    while received < 128 << 10 {
+        let frame = ipfsd.stream(id);
+        assert_eq!(frame["stream"], "data", "{frame}");
+        received += unhex(frame["hex"].as_str().unwrap()).len();
+    }
+    ipfsd.credit(id, 1);
+    let frame = ipfsd.stream(id);
+    received += unhex(frame["hex"].as_str().unwrap()).len();
+    ipfsd.cancel(id);
+    assert_eq!(ipfsd.stream(id)["code"], "cancelled");
+    let gateway = gateway_after(&mut ipfsd, 1);
+    assert_eq!(received, (128 << 10) + 1);
+    assert_eq!(
+        (&gateway["bytes_read"], &gateway["total_cancelled"]),
+        (&json!(received), &json!(1)),
+        "{gateway}"
     );
-    assert_eq!(ipfsd.body(first).0, body);
-    assert_eq!(ipfsd.reply(second)["result"]["status"], 200);
-    assert_eq!(ipfsd.body(second).0, b"small");
-    // Written: released.
+    shut_down(ipfsd);
+}
+
+/// Review of #141, concurrency 1: a head over 64 KiB (a 30,000-byte UTF-8
+/// name, percent-encoded in its headers) is served whole, and its charge
+/// is released once it is written.
+#[test]
+fn a_large_head_is_served_and_its_charge_released() {
+    let dirs = Dirs::new();
+    let name = "\u{800}".repeat(10_000);
+    let raw = seed_blocks(&dirs, &[(RAW, b"small".to_vec())]);
+    let root = seed_blocks(
+        &dirs,
+        &[(DAG_PB, pb_directory(&[(&name, raw[0].0.clone(), 5)]))],
+    );
+    let mut ipfsd = Ipfsd::persistent(&dirs, &[]);
+    ipfsd.hello();
+    assert_eq!(ipfsd.start(disk("p-1"))["result"]["instance"], "p-1");
+    let id = ipfsd.request(
+        "ipfs.request",
+        json!({ "instance": "p-1", "method": "HEAD", "path": format!("/ipfs/{}/{name}", root[0].1),
+            "headers": [], "headers_ms": 30000 }),
+    );
+    let head = ipfsd.reply(id);
+    assert_eq!(head["result"]["status"], 200, "{head}");
+    assert!(serde_json::to_vec(&head).unwrap().len() > 64 << 10);
+    gateway_after(&mut ipfsd, 1);
     assert_eq!(
         stats(&mut ipfsd, "p-1")["budget"]["memory"]["used"],
         WRITER + PERSISTENT
     );
     shut_down(ipfsd);
+}
+
+/// Review of #141, m3: a disk target smaller than its hot cache's own
+/// structures is admitted at exactly the fixed reservation the opened store
+/// takes, and refused one byte short of it.
+#[test]
+fn a_tiny_disk_target_starts_at_exactly_its_fixed_reservation() {
+    let hot = freedom_ipfs_store::StoreOptions {
+        max_bytes: 1,
+        hot_cache_bytes: None,
+        max_page_count: None,
+        cache_kib: Some(8 << 10),
+    }
+    .hot_cache_fixed_bytes() as usize;
+    assert!(hot > 1, "{hot}");
+    // The writer, the page cache, the hot cache and the gateway's caches.
+    let exact = WRITER + 8 * MIB + hot + 3 * MIB;
+    let tiny = start_params("p-1", json!({ "kind": "disk", "max_bytes": 1 }));
+    for (limit, admitted) in [(exact - 1, false), (exact, true)] {
+        let dirs = Dirs::new();
+        let limit = budget(limit);
+        let mut ipfsd = Ipfsd::persistent(&dirs, &[("FREEDOM_IPFSD_TEST_MEMORY_BUDGET", &limit)]);
+        ipfsd.hello();
+        let started = ipfsd.start(tiny.clone());
+        if admitted {
+            assert_eq!(started["result"]["instance"], "p-1", "{started}");
+            assert_eq!(stats(&mut ipfsd, "p-1")["budget"]["memory"]["used"], exact);
+        } else {
+            // Refused at admission, taking nothing, its ID included: not
+            // admitted and then failed by the builder.
+            assert_eq!(started["error"]["code"], "busy", "{started}");
+            let again = ipfsd.start(tiny.clone());
+            assert_eq!(again["error"]["code"], "busy", "{again}");
+        }
+        shut_down(ipfsd);
+    }
 }
