@@ -812,7 +812,8 @@ fn too_large(kind: Kind) -> Answer {
     match kind {
         Kind::Verified => Answer::Verified(Verified::Failure("too_large".into())),
         Kind::Prefetch => Answer::Done,
-        Kind::Rpc | Kind::Gateway | Kind::Tezos => Answer::Failed(Transport::TooLarge),
+        // Never sent: not the endpoint's failure (#74).
+        Kind::Rpc | Kind::Gateway | Kind::Tezos => Answer::Failed(Transport::Unsent),
     }
 }
 
@@ -1438,8 +1439,10 @@ mod tests {
         assert!(naming.outbox.is_empty() && naming.queued.is_empty());
     }
 
+    /// A name of a whole frame is refused before any request (#74): it
+    /// used to reach a verified operation too large to send.
     #[test]
-    fn a_request_too_large_to_send_completes_here() {
+    fn a_name_too_large_to_resolve_makes_no_request() {
         let (mut naming, rx) = naming(256, usize::MAX);
         let myotis = SNAPSHOT
             .replace(r#""order":["quorum"]"#, r#""order":["myotis"]"#)
@@ -1451,8 +1454,8 @@ mod tests {
                 .request(2, "naming.availability", Some(ready))
                 .is_ok()
         );
-        // Its verified operation carries a name of a whole frame (main's
-        // own request can come within bytes of one).
+        // A name of a whole frame (main's own request can come within
+        // bytes of one).
         let name = format!("{}.eth", "a".repeat(1 << 20));
         let params = serde_json::json!({ "name": name }).to_string();
         assert!(
@@ -1462,12 +1465,22 @@ mod tests {
         );
         assert!(naming.advance(0).is_ok());
         assert!(naming.flush().is_ok());
-        // Never sent; the lookup fails, and its reply fits a frame.
+        // Refused at once; nothing is sent, and the reply fits a frame.
         let frames = written(&rx);
         assert!(!frames.iter().any(|f| f["method"] == "shell.verified"));
         let reply = frames.iter().find(|f| f["id"] == 3).unwrap();
         assert_eq!(reply["error"]["code"], "resolution_failed");
+        assert_eq!(reply["error"]["data"]["message"], "name exceeds 1024 bytes");
         assert!(naming.outgoing.is_empty());
+    }
+
+    /// A request the core never sends (over the frame) completes as
+    /// `unsent`, which counts against no endpoint (#74).
+    #[test]
+    fn a_request_too_large_to_send_is_unsent() {
+        for kind in [Kind::Rpc, Kind::Gateway, Kind::Tezos] {
+            assert_eq!(too_large(kind), Answer::Failed(Transport::Unsent));
+        }
     }
 
     #[test]

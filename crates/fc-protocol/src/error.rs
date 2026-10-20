@@ -45,6 +45,10 @@ pub enum ErrorCode {
     ProtocolMismatch,
     UnknownMethod,
     Internal,
+    // Service errors (design 0007, Errors).
+    /// A service instance is retired, unknown or stopping: main's backend
+    /// fails with `freedom-ipfs native node is not running`.
+    Stopped,
 }
 
 /// The `error` member of a response: a closed shape, so a member it
@@ -96,6 +100,32 @@ mod tests {
             (ErrorCode::Budget, "budget"),
             (ErrorCode::Reconfigured, "reconfigured"),
             (ErrorCode::TooLarge, "too_large"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(code).ok(),
+                Some(serde_json::Value::from(wire))
+            );
+            assert_eq!(
+                serde_json::from_value::<ErrorCode>(wire.into()).ok(),
+                Some(code)
+            );
+        }
+    }
+
+    #[test]
+    fn service_codes_on_the_wire() {
+        // Design 0007, Errors: `stopped` beside 0001's codes, which the
+        // services share (`invalid_argument`, `deadline`, `cancelled`,
+        // `busy`, `internal`, `storage`, `protocol_mismatch`).
+        for (code, wire) in [
+            (ErrorCode::Stopped, "stopped"),
+            (ErrorCode::InvalidArgument, "invalid_argument"),
+            (ErrorCode::Deadline, "deadline"),
+            (ErrorCode::Cancelled, "cancelled"),
+            (ErrorCode::Busy, "busy"),
+            (ErrorCode::Internal, "internal"),
+            (ErrorCode::Storage, "storage"),
+            (ErrorCode::ProtocolMismatch, "protocol_mismatch"),
         ] {
             assert_eq!(
                 serde_json::to_value(code).ok(),

@@ -550,8 +550,15 @@ pub(crate) fn prefetch_uri(resolved: &[u8]) -> Option<String> {
 }
 
 /// `fastNormalize`: lowercase ASCII hosts pass; anything else goes
-/// through ENSIP-15.
+/// through ENSIP-15. Either way a name over [`crate::MAX_NAME_BYTES`] is
+/// refused before any I/O (design 0003, Input size; #74): the ASCII path
+/// skipped that check, and a long name's calls outgrew the frame.
 pub(crate) fn fast_normalize(trimmed: &str) -> Result<String, Thrown> {
+    if trimmed.len() > crate::MAX_NAME_BYTES {
+        return Err(Thrown::new(
+            crate::Error::NameTooLong(crate::MAX_NAME_BYTES).to_string(),
+        ));
+    }
     let lowered = trimmed.to_lowercase();
     if !lowered.is_empty()
         && lowered
