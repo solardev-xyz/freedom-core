@@ -20,7 +20,8 @@
 //! - **The side that sends bodies** ([`Sender`], the service): per-stream
 //!   FIFOs behind a control queue, debit at queueing against a 128 KiB
 //!   window, checked credit, an abort that purges, cancel against an
-//!   unwritten head, and coalescing into frames of up to 64 KiB.
+//!   unwritten head, the outcome a panic or a teardown owes a request
+//!   ([`Sender::settle`]), and coalescing into frames of up to 64 KiB.
 //! - **The side that receives them** ([`Receiver`], main): checked
 //!   receive accounting, one 128 KiB ring per stream, pulls of up to
 //!   64 KiB that return credit, and retirement on a local cancel.
@@ -43,7 +44,7 @@ mod receiver;
 mod sender;
 
 pub use receiver::{Delivery, Pulled, Receiver, Replied, Retire, StreamInfo, StreamState};
-pub use sender::{Cancel, Credited, SendError, Sender, Written};
+pub use sender::{Cancel, Credited, SendError, Sender, Settled, Written};
 
 /// The stream ID that starts every stream frame's payload: 8 bytes,
 /// big-endian.

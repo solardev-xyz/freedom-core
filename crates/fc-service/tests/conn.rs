@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::frame::{Decoder, Frame, KIND_JSON, Kinds};
-use fc_protocol::stream::{Delivery, Receiver, Side, StreamFrame, credit_frame};
+use fc_protocol::stream::{Abort, AbortCode, Delivery, Receiver, Side, StreamFrame, credit_frame};
 use fc_service::Exit;
 use fc_service::conn::{self, Connection, End, Hello, Options, Request, Service};
 use serde_json::{Value, json};
@@ -96,6 +96,28 @@ impl Service for Toy {
                 conn.push(request.id, b"first bytes").unwrap();
             }
             "t.fail" => conn.fail(Exit::Internal),
+            // Settles another request as a panic would.
+            "t.settle" => {
+                let target = params["id"].as_u64().unwrap();
+                let settled = conn.settle(
+                    target,
+                    &ErrorBody::new(ErrorCode::Internal, "internal"),
+                    &Abort::new(AbortCode::Internal, "internal"),
+                );
+                conn.reply(request.id, &json!({ "settled": format!("{settled:?}") }))
+                    .unwrap();
+            }
+            // Reports, as an event, once another request is settled on the
+            // wire.
+            "t.watch" => {
+                let target = params["id"].as_u64().unwrap();
+                let conn = conn.clone();
+                conn.reply(request.id, &Value::Null).unwrap();
+                std::thread::spawn(move || {
+                    block_on(conn.settled(target));
+                    conn.event("t.settled", &json!({ "id": target })).unwrap();
+                });
+            }
             _ => conn
                 .reply_error(
                     request.id,
@@ -289,6 +311,46 @@ fn a_body_streams_under_credit() {
     main.close();
     assert_eq!(main.exit(), Exit::Ok);
     assert_eq!(main.ends(), [End::Eof]);
+}
+
+#[test]
+fn a_settle_owes_what_is_written_and_settled_waits_for_the_terminal() {
+    let mut main = start(options());
+    main.hello();
+    // Answered already: a settle is late.
+    main.request(2, "t.echo", json!(2));
+    assert_eq!(main.message()["result"]["echo"], 2);
+    main.request(3, "t.settle", json!({ "id": 2 }));
+    assert_eq!(main.message()["result"]["settled"], "Ok(Already)");
+
+    // An open stream: the abort purges it, and the watcher sees it end
+    // only once the abort is written.
+    main.request(4, "t.hang", Value::Null);
+    assert_eq!(main.message()["result"]["body"], true);
+    assert!(matches!(
+        StreamFrame::from_frame(&main.frame().unwrap()).unwrap(),
+        StreamFrame::Data { id: 4, .. }
+    ));
+    main.request(5, "t.watch", json!({ "id": 4 }));
+    assert_eq!(main.message()["id"], 5);
+    main.request(6, "t.settle", json!({ "id": 4 }));
+    match StreamFrame::from_frame(&main.frame().unwrap()).unwrap() {
+        StreamFrame::Abort { id: 4, abort } => assert_eq!(abort.code, AbortCode::Internal),
+        other => panic!("{other:?}"),
+    }
+    // The settle's reply and the watcher's event, in either order.
+    let next = [main.message(), main.message()];
+    assert!(
+        next.iter().any(|m| m["result"]["settled"] == "Ok(Aborted)"),
+        "{next:?}"
+    );
+    assert!(
+        next.iter()
+            .any(|m| *m == json!({ "type": "event", "event": "t.settled", "data": { "id": 4 } })),
+        "{next:?}"
+    );
+    main.close();
+    assert_eq!(main.exit(), Exit::Ok);
 }
 
 #[test]

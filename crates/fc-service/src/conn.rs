@@ -70,7 +70,7 @@ use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::frame::{self, Decoder, Frame, KIND_JSON, Kinds};
 use fc_protocol::message::{check_id, write_error, write_event, write_result};
 use fc_protocol::stream::{
-    Abort, Cancel, Credited, MAX_DATA, SendError, Sender, Side, StreamError, StreamFrame,
+    Abort, Cancel, Credited, MAX_DATA, SendError, Sender, Settled, Side, StreamError, StreamFrame,
     WRITER_DATA_CAP, Written,
 };
 use serde::{Deserialize, Serialize};
@@ -295,7 +295,8 @@ struct State {
     closed: bool,
     /// The reader is in a service callback.
     dispatching: bool,
-    /// Send futures waiting for room.
+    /// Send futures waiting for room, and settled futures for a request's
+    /// end.
     waiters: Vec<Waker>,
     /// The writer holds a frame it hasn't finished writing.
     writing: bool,
@@ -527,6 +528,30 @@ impl Connection {
         })
     }
 
+    /// Settles request `id` with an outcome the service owes it, unless it
+    /// is settled already (0007, "Panics"): `error` is its one reply if
+    /// nothing of it was written (a queued head is dropped, as for a
+    /// cancel), `abort` ends its stream if the stream is open. See
+    /// [`Sender::settle`].
+    pub fn settle(&self, id: u64, error: &ErrorBody, abort: &Abort) -> Result<Settled, SendError> {
+        let mut json = Vec::new();
+        write_error(&mut json, id, error).map_err(|_| SendError::TooLarge)?;
+        self.queue(Need::Owed, |state| {
+            let result = state.sender.settle(id, json, abort);
+            // A purge made room under the writer's cap.
+            let room = result.is_ok();
+            (result, room)
+        })
+    }
+
+    /// Resolves once nothing of request `id` is held any more: its reply,
+    /// or its stream's terminal, is written (or it was never held), or the
+    /// connection has ended. A service keeps a request's admission until
+    /// then (0007, "Admission": heads and open streams count).
+    pub fn settled(&self, id: u64) -> SettledFuture<'_> {
+        SettledFuture { conn: self, id }
+    }
+
     /// Queues an event for main, ahead of replies and streams.
     pub fn event<T: Serialize>(&self, event: &str, data: &T) -> Result<(), EventError> {
         let mut json = Vec::new();
@@ -581,6 +606,27 @@ pub struct ConnectionStats {
     pub held_bytes: usize,
     /// Events waiting.
     pub events: usize,
+}
+
+/// The future of [`Connection::settled`].
+pub struct SettledFuture<'a> {
+    conn: &'a Connection,
+    id: u64,
+}
+
+impl Future for SettledFuture<'_> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let mut state = self.conn.link.lock();
+        if state.end.is_some() || !state.sender.is_live(self.id) {
+            return Poll::Ready(());
+        }
+        if !state.waiters.iter().any(|w| w.will_wake(cx.waker())) {
+            state.waiters.push(cx.waker().clone());
+        }
+        Poll::Pending
+    }
 }
 
 /// The future of [`Connection::send`].
@@ -1340,7 +1386,9 @@ fn claim(link: &Link, frame: &mut Vec<u8>) -> Option<Claimed> {
             let live = state.sender.live();
             if let Some(written) = state.sender.next_frame(frame) {
                 let freed = state.sender.live() < live;
-                let wakers = if matches!(written, Written::Data { .. }) {
+                // Data made room for producers; a request that ended
+                // settles its waiters ([`Connection::settled`]).
+                let wakers = if freed || matches!(written, Written::Data { .. }) {
                     std::mem::take(&mut state.waiters)
                 } else {
                     Vec::new()
