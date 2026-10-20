@@ -504,6 +504,131 @@ pub fn seed(dirs: &Dirs, blocks: &[Vec<u8>]) -> Vec<String> {
     cids
 }
 
+/// An HTTP provider on loopback whose fetches never end: it accepts, and
+/// never says a word.
+pub struct Server {
+    pub port: u16,
+    accepted: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Server {
+    pub fn start() -> Server {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = accepted.clone();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                held.push(stream);
+            }
+        });
+        Server { port, accepted }
+    }
+
+    /// The connections it accepted.
+    pub fn accepted(&self) -> usize {
+        self.accepted.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Records `provider` as the HTTP provider of `cids` in the persistent store
+/// of `dirs`, before the service opens it: an offline instance asks it for
+/// them.
+pub fn seed_provider(dirs: &Dirs, cids: &[String], provider: &Server) {
+    std::fs::create_dir_all(&dirs.data).unwrap();
+    let store =
+        freedom_ipfs_store::SqliteBlockStore::open(dirs.data.join("freedom-ipfs.sqlite3"), 1 << 30)
+            .unwrap();
+    let record = freedom_ipfs_store::CachedProviderRecord {
+        id: None,
+        addrs: vec![format!("/ip4/127.0.0.1/tcp/{}/http", provider.port)],
+    };
+    for cid in cids {
+        let cid = cid.parse().unwrap();
+        store
+            .put_provider_records(
+                &cid,
+                std::slice::from_ref(&record),
+                Duration::from_secs(3600),
+            )
+            .unwrap();
+    }
+    assert!(store.close(Duration::from_secs(2)));
+}
+
+/// A protobuf varint.
+fn varint(mut n: u64, out: &mut Vec<u8>) {
+    while n >= 0x80 {
+        out.push((n as u8) | 0x80);
+        n >>= 7;
+    }
+    out.push(n as u8);
+}
+
+fn field(tag: u8, bytes: &[u8], out: &mut Vec<u8>) {
+    out.push(tag);
+    varint(bytes.len() as u64, out);
+    out.extend_from_slice(bytes);
+}
+
+/// A dag-pb node: `links` (name, CID bytes, size), then UnixFS `data`.
+fn pb_node(links: &[(&str, Vec<u8>, u64)], data: &[u8]) -> Vec<u8> {
+    let mut node = Vec::new();
+    for (name, cid, size) in links {
+        let mut link = Vec::new();
+        field(0x0a, cid, &mut link);
+        field(0x12, name.as_bytes(), &mut link);
+        link.push(0x18);
+        varint(*size, &mut link);
+        field(0x12, &link, &mut node);
+    }
+    field(0x0a, data, &mut node);
+    node
+}
+
+/// A UnixFS file of `leaves` (CID bytes, size), in order.
+pub fn pb_file(leaves: &[(Vec<u8>, u64)]) -> Vec<u8> {
+    let mut data = vec![0x08, 2];
+    data.push(0x18);
+    varint(leaves.iter().map(|(_, size)| size).sum(), &mut data);
+    for (_, size) in leaves {
+        data.push(0x20);
+        varint(*size, &mut data);
+    }
+    let links: Vec<(&str, Vec<u8>, u64)> = leaves
+        .iter()
+        .map(|(cid, size)| ("", cid.clone(), *size))
+        .collect();
+    pb_node(&links, &data)
+}
+
+/// A UnixFS directory of `entries` (name, CID bytes, size).
+pub fn pb_directory(entries: &[(&str, Vec<u8>, u64)]) -> Vec<u8> {
+    pb_node(entries, &[0x08, 1])
+}
+
+/// Puts `blocks` (codec, bytes) into the persistent store of `dirs`, before
+/// the service opens it, and returns their CIDs as bytes and as text.
+pub fn seed_blocks(dirs: &Dirs, blocks: &[(u64, Vec<u8>)]) -> Vec<(Vec<u8>, String)> {
+    std::fs::create_dir_all(&dirs.data).unwrap();
+    let store =
+        freedom_ipfs_store::SqliteBlockStore::open(dirs.data.join("freedom-ipfs.sqlite3"), 1 << 30)
+            .unwrap();
+    let cids = blocks
+        .iter()
+        .map(|(codec, data)| {
+            let cid = freedom_ipfs_core::cid_from_data(*codec, data);
+            store.put_block(&cid, data).unwrap();
+            (cid.to_bytes(), cid.to_string())
+        })
+        .collect();
+    assert!(store.close(Duration::from_secs(2)));
+    cids
+}
+
 /// `ipfs.request`'s params for a `GET` of `path` on `instance`.
 pub fn get(instance: &str, path: &str) -> Value {
     json!({ "instance": instance, "method": "GET", "path": path, "headers": [],

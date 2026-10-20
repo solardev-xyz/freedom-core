@@ -49,9 +49,8 @@ fn a_persistent_instance_starts_and_stops() {
         ipfsd.start(disk("p-2"))["result"],
         json!({ "instance": "p-2" })
     );
-    // Stats come with the budgets (PR 3b).
     let reply = ipfsd.call("ipfs.stats", json!({ "instance": "p-2" }));
-    assert_eq!(reply["error"]["code"], "unknown_method", "{reply}");
+    assert!(reply["result"]["gateway"].is_object(), "{reply}");
     ipfsd.shutdown();
     assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
     let stderr = ipfsd.stderr();

@@ -58,13 +58,15 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::Poll;
+use std::time::Duration;
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::stream::{Abort, AbortCode, SendError};
-use fc_service::conn::{Connection, Headed};
+use fc_service::conn::{Connection, Headed, SendBytes};
 use fc_service::panic::{Labeled, TaskKind};
 use freedom_ipfs_gateway::{
-    CancellationToken, GatewayCore, GatewayCoreRequest, NativeRequest, parse_native_request,
+    CancellationToken, GatewayCore, GatewayCoreRequest, MemoryBudget, MemoryWait, NativeRequest,
+    parse_native_request, with_memory_wait,
 };
 use futures_core::Stream;
 use serde_json::json;
@@ -75,7 +77,8 @@ use tokio::time::Instant;
 
 use crate::instances::Instances;
 use crate::params;
-use crate::testhooks::{Phase, RequestHooks};
+use crate::stats::GatewayCounters;
+use crate::testhooks::{self, Phase, RequestHooks};
 
 /// The most requests admitted at once in the process (0007, "Admission").
 pub const MAX_ADMITTED: usize = 512;
@@ -87,6 +90,8 @@ const WATCHER: TaskKind = TaskKind::named("request-watch");
 pub struct Requests {
     /// The process runtime: the watchers.
     runtime: Handle,
+    /// The process's memory budget: what a pending head reserves.
+    budget: MemoryBudget,
     table: Mutex<HashMap<u64, Entry>>,
 }
 
@@ -96,12 +101,17 @@ struct Entry {
     instance: String,
     /// Its work's token.
     token: CancellationToken,
+    /// Its instance's counters.
+    counters: Arc<GatewayCounters>,
+    /// Main has cancelled it.
+    cancelled: bool,
 }
 
 impl Requests {
-    pub fn new(runtime: Handle) -> Arc<Requests> {
+    pub fn new(runtime: Handle, budget: MemoryBudget) -> Arc<Requests> {
         Arc::new(Requests {
             runtime,
+            budget,
             table: Mutex::new(HashMap::new()),
         })
     }
@@ -113,7 +123,6 @@ impl Requests {
     }
 
     /// The requests admitted now.
-    #[cfg(test)]
     pub fn admitted(&self) -> usize {
         self.lock().len()
     }
@@ -166,31 +175,50 @@ impl Requests {
         }
         // Its instance, live, and its token: recorded before the work is
         // spawned, so a teardown or a cancel handled from here on finds it.
-        let Some((context, core)) = instances.with_live(&wire.instance, |instance, core| {
-            (instance.context().clone(), core.clone())
+        let Some((context, core, counters)) = instances.with_live(&wire.instance, |running| {
+            (
+                running.instance.context().clone(),
+                running.core.clone(),
+                running.counters.clone(),
+            )
         }) else {
             drop(table);
             return refuse(conn, id, ErrorCode::Stopped, NOT_LIVE);
         };
         let token = context.request_token();
-        table.insert(
+        record(
+            &mut table,
             id,
             Entry {
                 instance: wire.instance.clone(),
                 token: token.clone(),
+                counters: counters.clone(),
+                cancelled: false,
             },
         );
         drop(table);
         let slot = Slot {
             requests: self.clone(),
             id,
+            counters: counters.clone(),
         };
         // Outside the service's locks, as every call into freedom-ipfs is.
         // An instance fenced since has refused it: `stopped`. One fenced
         // after cancels it, and its watcher settles it.
         let work = Labeled::new(
             TaskKind::REQUEST,
-            serve(conn.clone(), id, core, parsed.request, head_only, deadline),
+            serve(
+                Work {
+                    conn: conn.clone(),
+                    id,
+                    core,
+                    head_only,
+                    deadline,
+                    budget: self.budget.clone(),
+                    counters: counters.clone(),
+                },
+                parsed.request,
+            ),
         );
         let Ok(join) = context.spawn_request(token.clone(), work) else {
             // Admitted until its refusal is written, as any request is.
@@ -212,6 +240,7 @@ impl Requests {
                 token,
                 join,
                 deadline,
+                counters,
             }),
         )));
     }
@@ -219,8 +248,12 @@ impl Requests {
     /// Main cancelled request `id`: its `cancelled` reply or abort is
     /// queued; its work ends at its next await.
     pub fn cancel(&self, id: u64) {
-        if let Some(entry) = self.lock().get(&id) {
+        if let Some(entry) = self.lock().get_mut(&id) {
             entry.token.cancel();
+            if !entry.cancelled {
+                entry.cancelled = true;
+                entry.counters.cancelled();
+            }
         }
     }
 
@@ -241,16 +274,31 @@ impl Requests {
     }
 }
 
+/// Records request `id`'s admission, and counts it started under the
+/// table's lock, as its end is counted ([`Slot`]): an instance's active
+/// requests are always its entries here.
+fn record(table: &mut HashMap<u64, Entry>, id: u64, entry: Entry) {
+    entry.counters.started();
+    table.insert(id, entry);
+}
+
 /// A request's admission: released when dropped, by its watcher once the
 /// work has ended and the request is settled on the wire, or on unwind.
 struct Slot {
     requests: Arc<Requests>,
     id: u64,
+    counters: Arc<GatewayCounters>,
 }
 
 impl Drop for Slot {
     fn drop(&mut self) {
-        self.requests.lock().remove(&self.id);
+        let mut table = self.requests.lock();
+        table.remove(&self.id);
+        // Under the table's lock, as its start was counted.
+        self.counters.freed();
+        drop(table);
+        #[cfg(test)]
+        tests::after_free(&self.requests);
     }
 }
 
@@ -261,8 +309,9 @@ struct Watched {
     conn: Connection,
     instance: String,
     token: CancellationToken,
-    join: JoinHandle<Option<()>>,
+    join: JoinHandle<Option<Outcome>>,
     deadline: Instant,
+    counters: Arc<GatewayCounters>,
 }
 
 /// Watches a request's work to its end (see the module's documentation),
@@ -276,26 +325,31 @@ async fn watch(watched: Watched) {
         token,
         join,
         deadline,
+        counters,
     } = watched;
     let id = slot.id;
     let ended = until_deadline(join, deadline, || {
         // Only before the head: once one is queued, the reply is taken.
         if conn.reply_error(id, &late()).is_ok() {
             token.cancel();
+            counters.failed("deadline", LATE);
         }
     })
     .await;
     match ended {
         // Its work settled it.
-        Ok(Some(())) => {}
+        Ok(Some(Outcome::Completed)) => counters.completed(),
+        Ok(Some(Outcome::Failed(code, message))) => counters.failed(code, message),
+        Ok(Some(Outcome::Settled)) => {}
         Err(error) if error.is_panic() => {
+            counters.failed("internal", PANICKED);
             // 1. The fence, before anything is queued or awaited.
             let retiring = instances.fence_after_panic(&instance);
             // 2. The request's terminal, queued, not awaited.
             let _ = conn.settle(
                 id,
-                &ErrorBody::new(ErrorCode::Internal, "the request's work panicked"),
-                &Abort::new(AbortCode::Internal, "the request's work panicked"),
+                &ErrorBody::new(ErrorCode::Internal, PANICKED),
+                &Abort::new(AbortCode::Internal, PANICKED),
             );
             // 3 and 4. The rest of the teardown, then the event.
             if let Some(retiring) = retiring {
@@ -335,22 +389,86 @@ async fn until_deadline<T>(
     .await
 }
 
-/// The work of request `id`: the gateway's response, its head, then its
-/// body under credit. Every way out leaves the request settled, or settled
-/// already by someone else (a cancel, the deadline, a teardown), or the
-/// connection closing.
-async fn serve(
+/// How a request's work ended, for its instance's counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    /// Its body's `end` queued, or its head without a body.
+    Completed,
+    /// With an error the work gave it: its code and fixed message.
+    Failed(&'static str, &'static str),
+    /// Settled by someone else (a cancel, the deadline, a teardown), or the
+    /// connection closing.
+    Settled,
+}
+
+/// What a request's work needs besides the request.
+struct Work {
     conn: Connection,
     id: u64,
     core: GatewayCore,
-    request: GatewayCoreRequest,
     head_only: bool,
+    /// `headers_ms`'s end.
     deadline: Instant,
-) {
+    budget: MemoryBudget,
+    counters: Arc<GatewayCounters>,
+}
+
+/// How long before the head's deadline a wait for memory gives up, so the
+/// work's `busy` usually beats the watcher's `deadline`: 50 ms, or half of
+/// a shorter `headers_ms`. A scheduling allowance, not the arbiter: the
+/// refusal is queued against the deadline itself ([`busy`]).
+const MEMORY_MARGIN: Duration = Duration::from_millis(50);
+/// How long a stream's next fetch waits for memory (0007, "Budgets").
+pub const STREAM_MEMORY_WAIT: Duration = Duration::from_secs(10);
+/// Upstream's header naming an error response's cause.
+const ERROR_CODE_HEADER: &str = "x-freedom-ipfs-error-code";
+/// What a body's error says when a fetch couldn't reserve memory: upstream
+/// gives the body no typed error, only its text.
+const MEMORY_REFUSED: &str = "memory budget";
+const BUSY: &str = "the memory budget is exhausted";
+
+/// The work of a request: the gateway's response, its head, then its body
+/// under credit. Every way out leaves the request settled, or settled
+/// already by someone else (a cancel, the deadline, a teardown), or the
+/// connection closing.
+///
+/// **Memory** (0007, "When admitted work can't reserve"): before the head,
+/// the gateway's fetches wait for memory until a moment before
+/// `headers_ms` ends ([`MEMORY_MARGIN`]), and what the head will hold
+/// ([`fc_service::conn::head_len`]) is reserved within the same time, held
+/// until the writer has written it. A refusal is `busy` if that is queued
+/// before `headers_ms` ends, and `deadline` otherwise, as a head would be.
+/// (If upstream moves on to another source after a refusal, its answer can
+/// come after `headers_ms`: the reply is then `deadline` too.) After the
+/// head, each next read of the body waits for its fetches' memory up to
+/// 10 s, then the stream aborts `busy`.
+async fn serve(work: Work, request: GatewayCoreRequest) -> Outcome {
+    let Work {
+        conn,
+        id,
+        core,
+        head_only,
+        deadline,
+        budget,
+        counters,
+    } = work;
     let hooks = RequestHooks::of(&request);
     hooks.at(Phase::Request).await;
-    let response = core.handle(request).await;
+    let memory_deadline = memory_deadline(deadline);
+    let response = with_memory_wait(MemoryWait::until(memory_deadline), core.handle(request)).await;
     let status = response.status().as_u16();
+    let cause = response
+        .headers()
+        .get(ERROR_CODE_HEADER)
+        .and_then(|value| value.to_str().ok());
+    if status == 503 && cause == Some("memory_budget") {
+        // The gateway's fetches couldn't reserve in time: `busy`, not the
+        // gateway's 503 head.
+        return busy(&conn, id, deadline);
+    }
+    if status == 503 && cause == Some("gateway_busy") {
+        counters.gateway_busy();
+    }
     // Main's rule today: no body for HEAD, 204, 205 and 304.
     let body = !head_only && !matches!(status, 204 | 205 | 304);
     let headers: Vec<(String, String)> = response
@@ -364,54 +482,142 @@ async fn serve(
         })
         .collect();
     let head = json!({ "status": status, "headers": headers, "body": body });
+    // What the pending head holds, reserved before it is encoded, and held
+    // until the writer has written it (0007, "Pending replies").
+    let size = match fc_service::conn::head_len(id, &head) {
+        Ok(size) => size,
+        Err(_) => return too_large(&conn, id, deadline),
+    };
+    let Ok(charge) = budget.reserve_until(size, memory_deadline).await else {
+        return busy(&conn, id, deadline);
+    };
     // Queued only before the deadline, checked as it is queued: however
     // late this work runs, and however late its watcher, a head after
     // `headers_ms` is never sent, and one queued in time stands.
-    match conn.head_by(id, &head, body, deadline.into_std(), &late()) {
+    match conn.head_by(
+        id,
+        &head,
+        body,
+        deadline.into_std(),
+        &late(),
+        Some(Box::new(charge)),
+    ) {
         Ok(Headed::Queued) => {}
         // `deadline` is its reply: the work ends here.
-        Ok(Headed::Late) => return,
-        Err(SendError::TooLarge) => {
-            let _ = conn.reply_error(
-                id,
-                &ErrorBody::new(ErrorCode::Internal, "the response's head is too large"),
-            );
-            return;
-        }
+        Ok(Headed::Late) => return Outcome::Failed("deadline", LATE),
+        Err(SendError::TooLarge) => return too_large(&conn, id, deadline),
         // Settled already (a cancel, the deadline), or closing.
-        Err(_) => return,
+        Err(_) => return Outcome::Settled,
     }
     if !body {
-        return;
+        return Outcome::Completed;
     }
     hooks.at(Phase::Body).await;
+    let stream_wait = testhooks::stream_memory_wait(STREAM_MEMORY_WAIT);
     let mut data = response.into_body().into_data_stream();
-    while let Some(chunk) = std::future::poll_fn(|cx| Pin::new(&mut data).poll_next(cx)).await {
-        match chunk {
-            Ok(bytes) if bytes.is_empty() => {}
-            Ok(bytes) => {
-                if conn.send(id, &bytes).await.is_err() {
+    loop {
+        let next = with_memory_wait(
+            MemoryWait::until(Instant::now() + stream_wait),
+            std::future::poll_fn(|cx| Pin::new(&mut data).poll_next(cx)),
+        )
+        .await;
+        match next {
+            None => break,
+            Some(Ok(bytes)) if bytes.is_empty() => {}
+            Some(Ok(bytes)) => {
+                let send = Counted {
+                    send: conn.send(id, &bytes),
+                    counted: 0,
+                    counters: &counters,
+                };
+                if send.await.is_err() {
                     // Aborted (a cancel, a teardown), or closing.
-                    return;
+                    return Outcome::Settled;
                 }
             }
-            Err(_) => {
-                let _ = conn.abort(
-                    id,
-                    &Abort::new(AbortCode::BodyStreamError, "the response's body failed"),
-                );
-                return;
+            Some(Err(error)) => {
+                let (code, abort, message) = if error.to_string().contains(MEMORY_REFUSED) {
+                    ("busy", AbortCode::Busy, BUSY)
+                } else {
+                    (
+                        "body_stream_error",
+                        AbortCode::BodyStreamError,
+                        "the response's body failed",
+                    )
+                };
+                return match conn.abort(id, &Abort::new(abort, message)) {
+                    Ok(()) => Outcome::Failed(code, message),
+                    Err(_) => Outcome::Settled,
+                };
             }
         }
     }
-    let _ = conn.finish(id);
+    match conn.finish(id) {
+        Ok(()) => Outcome::Completed,
+        Err(_) => Outcome::Settled,
+    }
+}
+
+/// A send that counts its bytes in `bytes_read` as they are queued: so
+/// what it queued is counted whether it then completes, fails, or is
+/// dropped with its work (a cancel).
+struct Counted<'a> {
+    send: SendBytes<'a>,
+    counted: usize,
+    counters: &'a GatewayCounters,
+}
+
+impl Future for Counted<'_> {
+    type Output = Result<(), SendError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        let this = &mut *self;
+        let polled = Pin::new(&mut this.send).poll(cx);
+        let sent = this.send.sent();
+        this.counters.read(sent.saturating_sub(this.counted));
+        this.counted = sent;
+        polled
+    }
+}
+
+/// When a request's waits for memory give up: [`MEMORY_MARGIN`] before its
+/// head's deadline, or half way to a nearer one.
+fn memory_deadline(deadline: Instant) -> Instant {
+    let left = deadline.saturating_duration_since(Instant::now());
+    deadline - MEMORY_MARGIN.min(left / 2)
+}
+
+/// Answers `busy` before the head, its memory not had in time, if that is
+/// queued before `deadline`: as for a head, `deadline` from then on.
+fn busy(conn: &Connection, id: u64, deadline: Instant) -> Outcome {
+    let busy = ErrorBody::new(ErrorCode::Busy, BUSY);
+    match conn.reply_error_by(id, &busy, deadline.into_std(), &late()) {
+        Ok(Headed::Queued) => Outcome::Failed("busy", BUSY),
+        Ok(Headed::Late) => Outcome::Failed("deadline", LATE),
+        Err(_) => Outcome::Settled,
+    }
+}
+
+/// Answers a head that can't be one frame, if that is queued before
+/// `deadline`: as for a head, `deadline` from then on.
+fn too_large(conn: &Connection, id: u64, deadline: Instant) -> Outcome {
+    let message = "the response's head is too large";
+    let internal = ErrorBody::new(ErrorCode::Internal, message);
+    match conn.reply_error_by(id, &internal, deadline.into_std(), &late()) {
+        Ok(Headed::Queued) => Outcome::Failed("internal", message),
+        Ok(Headed::Late) => Outcome::Failed("deadline", LATE),
+        Err(_) => Outcome::Settled,
+    }
 }
 
 const STOPPED: &str = "the instance was stopped";
+const PANICKED: &str = "the request's work panicked";
+
+const LATE: &str = "no head within headers_ms";
 
 /// The reply to a request with no head within `headers_ms`.
 fn late() -> ErrorBody {
-    ErrorBody::new(ErrorCode::Deadline, "no head within headers_ms")
+    ErrorBody::new(ErrorCode::Deadline, LATE)
 }
 const NOT_LIVE: &str = "the instance is retired, unknown or stopping";
 
@@ -421,4 +627,81 @@ fn stopped() -> ErrorBody {
 
 fn refuse(conn: &Connection, id: u64, code: ErrorCode, message: &str) {
     let _ = conn.reply_error(id, &ErrorBody::new(code, message));
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use std::sync::mpsc;
+
+    use super::*;
+
+    type Hook = Box<dyn FnOnce() + Send>;
+
+    /// Runs once, on the thread dropping a slot of the `Requests` it names,
+    /// after the slot's admission has ended.
+    static AFTER_FREE: Mutex<Option<(usize, Hook)>> = Mutex::new(None);
+
+    pub(super) fn after_free(requests: &Arc<Requests>) {
+        let mut hook = AFTER_FREE.lock().unwrap_or_else(|p| p.into_inner());
+        if hook
+            .as_ref()
+            .is_some_and(|(of, _)| *of == Arc::as_ptr(requests) as usize)
+            && let Some((_, hook)) = hook.take()
+        {
+            hook();
+        }
+    }
+
+    fn entry(counters: &Arc<GatewayCounters>) -> Entry {
+        Entry {
+            instance: "e-1".into(),
+            token: CancellationToken::new(),
+            counters: counters.clone(),
+            cancelled: false,
+        }
+    }
+
+    /// Review of #141: a request admitted in the place of one whose slot
+    /// is being dropped never counts as one more active than admitted.
+    #[test]
+    fn max_active_follows_admission_when_a_slot_is_reused() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let requests = Requests::new(runtime.handle().clone(), MemoryBudget::new(1));
+        let counters = Arc::new(GatewayCounters::default());
+        for id in 1..=MAX_ADMITTED as u64 {
+            record(&mut requests.lock(), id, entry(&counters));
+        }
+        // Request 1's slot is dropped, and held just after its end is
+        // counted: request 513 takes its place then.
+        let (freed, seen) = mpsc::channel();
+        let (resume, held) = mpsc::channel::<()>();
+        *AFTER_FREE.lock().unwrap() = Some((
+            Arc::as_ptr(&requests) as usize,
+            Box::new(move || {
+                freed.send(()).unwrap();
+                held.recv().unwrap();
+            }),
+        ));
+        let slot = Slot {
+            requests: requests.clone(),
+            id: 1,
+            counters: counters.clone(),
+        };
+        let dropping = std::thread::spawn(move || drop(slot));
+        seen.recv_timeout(Duration::from_secs(10)).unwrap();
+        record(&mut requests.lock(), 513, entry(&counters));
+        resume.send(()).unwrap();
+        dropping.join().unwrap();
+        let gateway = counters.snapshot();
+        assert_eq!(requests.admitted(), MAX_ADMITTED);
+        assert_eq!(gateway["active_native_handles"], MAX_ADMITTED);
+        assert_eq!(gateway["max_active_handles"], MAX_ADMITTED, "{gateway}");
+        requests.lock().clear();
+        runtime.shutdown_background();
+    }
 }

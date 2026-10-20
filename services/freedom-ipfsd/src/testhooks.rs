@@ -15,6 +15,13 @@
 //! - `FREEDOM_IPFSD_TEST_PANIC=start` panics in each `ipfs.start`'s job,
 //!   with a payload that names a path, as a fault in the service's own work
 //!   would.
+//! - `FREEDOM_IPFSD_TEST_MEMORY_BUDGET` replaces the process's memory budget
+//!   (bytes), so a test can fill it.
+//! - `FREEDOM_IPFSD_TEST_STREAM_MEMORY_WAIT_MS` replaces the 10 s a
+//!   stream's next fetch waits for memory.
+//! - `FREEDOM_IPFSD_TEST_HTML_PREFETCH_ASSETS` turns upstream's HTML
+//!   prefetch on (off by default, as 0007 keeps it), for that many assets,
+//!   one at a time: background work, to fill an instance's background queue.
 //! - `FREEDOM_IPFSD_TEST_REQUEST_HOOKS=1` lets an `ipfs.request`'s own
 //!   headers ask for a fault in its work, so one process can serve held,
 //!   panicking and ordinary requests side by side:
@@ -54,6 +61,42 @@ pub fn hold_teardown(instance: &Instance) {
 
 #[cfg(not(feature = "testhooks"))]
 pub fn hold_teardown(_instance: &Instance) {}
+
+/// The process's memory budget: `default`, unless a test replaces it.
+pub fn memory_budget(default: usize) -> usize {
+    #[cfg(feature = "testhooks")]
+    if let Some(bytes) = millis("FREEDOM_IPFSD_TEST_MEMORY_BUDGET") {
+        return usize::try_from(bytes).unwrap_or(default);
+    }
+    default
+}
+
+/// How long a stream's next fetch waits for memory: `default`, unless a
+/// test replaces it.
+pub fn stream_memory_wait(default: Duration) -> Duration {
+    #[cfg(feature = "testhooks")]
+    if let Some(ms) = millis("FREEDOM_IPFSD_TEST_STREAM_MEMORY_WAIT_MS") {
+        return Duration::from_millis(ms);
+    }
+    default
+}
+
+/// The instance's gateway configuration, with HTML prefetch on if a test
+/// asks for it.
+pub fn gateway_config(
+    config: freedom_ipfs_gateway::GatewayConfig,
+) -> freedom_ipfs_gateway::GatewayConfig {
+    #[cfg(feature = "testhooks")]
+    if let Some(assets) = millis("FREEDOM_IPFSD_TEST_HTML_PREFETCH_ASSETS") {
+        let assets = usize::try_from(assets).unwrap_or(0);
+        return config.with_html_prefetch(freedom_ipfs_gateway::GatewayHtmlPrefetchConfig::new(
+            assets,
+            64 << 10,
+            1,
+        ));
+    }
+    config
+}
 
 /// Stalls an `ipfs.start`, as `FREEDOM_IPFSD_TEST_START_DELAY_MS` says.
 pub fn start_delay() {

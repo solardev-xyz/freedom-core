@@ -513,6 +513,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 - **`headers_ms`:**
   - It runs from admission, so queue time and routing count. On expiry the request's token is cancelled and the reply is `deadline`.
   - A head that is queued, though not yet written, when `headers_ms` runs out is in time: the service's part is done.
+  - So is any reply the work gives in a head's place, checked against `headers_ms` as a head is: a memory refusal (`busy`) or a head too large for a frame (`internal`), queued after it, is `deadline`.
   - After the head there is no deadline in the service. Main's 60 s body-idle timer (0006) cancels a stalled body.
 - **Admission:** at most 512 requests per process, counting heads, open streams, and work still ending after a cancel. Beyond that the reply is `busy`.
   - **A slot is held until both its work has ended and its terminal is written:** the reply, the stream's `end`, or its abort. That covers "only when its work has ended" and "counting open streams" together.
@@ -526,7 +527,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 | `stopped` | the instance is retired, unknown or stopping | `freedom-ipfs native node is not running` |
 | `deadline` | no head within `headers_ms` | `freedom-ipfs native request timeout` |
 | `cancelled` | main's `cancel` | `freedom-ipfs native request aborted` before the head; `…cancelled` for a body |
-| `busy` | admission is full, or a reservation can't be had in time ([Budgets](#budgets)) | `BackendBusy`, `freedom-ipfs native node is busy`, which the executor answers 503 (new) |
+| `busy` | admission is full, or a reservation can't be had in time ([Budgets](#budgets)), or 4 stats jobs are outstanding ([Stats](#stats)) | `BackendBusy`, `freedom-ipfs native node is busy`, which the executor answers 503 (new) |
 | `internal` | a panic on the request's task, which then retires its instance | `freedom-ipfs native gateway error` |
 | `storage` | `ipfs.start`: the store won't open (`data.kind`) | the manager's `Failed to start freedom-ipfs native node` |
 | `protocol_mismatch` | `ipfs.hello` | a startup error; no restart |
@@ -555,9 +556,26 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
   - `last_native_error_code` and `last_native_error_message`.
 
   The service counts these itself. The event-queue fields go, with the queue: deviation `stats-fields`.
-- **`progress`:** upstream's progress snapshot. The persistent process only.
-- **`store`:** `block_count` and `total_bytes`.
-- **`budget`:** each [budget's](#budgets) use and limit.
+  - A request is started when admitted, and freed when its admission ends.
+  - It is completed when its work queues its `end`, or a head without a body.
+  - It has failed when the service gives it an error or an abort: `deadline`, `busy`, `internal` or `body_stream_error`. The last error is that failure's code and fixed message, or `gateway_busy` for such a head.
+  - It is cancelled on main's `cancel`, whenever the connection accepts one: the request isn't settled, so its admission doesn't end, until the service's cancel callback has run.
+  - `bytes_read` counts body bytes as they are queued for main, so a send cut short by a cancel counts what it queued.
+  - An outcome is counted as the work ends, a moment after its terminal is queued, and before its admission ends. `started` and `freed` are counted under the admission table's lock, so `max_active_handles` never passes what was admitted.
+- **`progress`:** upstream's progress snapshot. The persistent process only. Until upstream item 4 moves the recorder out of the FFI crate, it is `null` in both processes: deviation `stats-progress`.
+- **`store`:** `block_count` and `total_bytes`, or `null` if the store can't say.
+- **`budget`:** each [budget's](#budgets) use and limit:
+  - `memory` (`used`);
+  - `requests` (`admitted`) and `writer` (`queued`);
+  - `block_fetches`, `http_provider_requests` and `dht_queries` (`in_flight`), and `bitswap_connections` (`in_use`, `waiting` and `denied`);
+  - the instance's `background` queue (`outstanding` and `dropped`).
+
+  Each has its `limit`. All but `background` are the process's, as the budgets are.
+
+The store's figures are SQLite queries, which can wait behind a statement in progress, so they run as a job on the process runtime's blocking pool:
+- **The 5 s deadline** runs from when the reader handles the request. The job's reply is queued only before it, checked under the connection's lock as a head is; from then on the reply is `deadline`, whichever of the job and its watcher runs first.
+- **At most 4 stats jobs are outstanding in the process.** Main asks every 5 s and gives up at 20 s, so it never has more asked. A job counts until its closure is dropped, whether it ran or was aborted before it started, never just because its request was answered. Past the bound, the reply is `busy`.
+- **A cancel or the deadline fences the job,** which then runs no SQL, and aborts it if it hasn't started. A job that starts past its deadline runs no SQL either, and its reply is `deadline`, whether or not its watcher has run. SQL already running finishes, and its reply is checked as above.
 
 The 5 s health check calls `ipfs.stats`. `checkHealth()` stays synchronous, because `ipfsBackend()` calls it at admission. It reads a snapshot that is true while all of these hold:
 - the generation is live;
@@ -588,6 +606,10 @@ Upstream's constants are per instance, and some limit bookkeeping rather than wo
   - **its caches:** the hot cache, the gateway's small-body cache (2 MiB) and the UnixFS metadata cache (1 MiB), each built with a fixed capacity and reserved at it.
 
   An instance starts only if its fixed reservation fits.
+  - The service reserves it at admission, before the store opens, from the store's options and the gateway configuration.
+  - The hot cache's part is the store's own figure for its options (`StoreOptions::hot_cache_fixed_bytes`): what the opened cache holds, its own structures included, so a target smaller than they are is counted as upstream opens it.
+  - The caches' part is handed to upstream's builder, which reserves it again as it builds. If other work takes it in that moment, the start's job fails it with `busy`, and the ID is retired, as after any failed start.
+  - The page cap counts SQLite's default 4096-byte pages.
 - **In all:**
   - a private instance reserves 43 MiB (36 + 4 + 2 + 1), so eight reserve 344 MiB;
   - the persistent instance reserves 27 MiB (8 + 16 + 2 + 1);
@@ -608,11 +630,16 @@ Upstream's constants are per instance, and some limit bookkeeping rather than wo
   - **The put into a store:**
     - SQLite copies a block into its own pages, which the store's fixed reservation and page cap cover. The fetched buffer keeps its own dynamic reservation until its last owner drops it.
     - A write that meets the page cap fails with `SQLITE_FULL`, whether it is a block, a name or a provider record, and that entry isn't cached. A block is still served, from its transient buffer.
-  - **Pending replies:** each head reserves its encoded size until it is written.
+  - **Pending replies:** each head reserves what it holds, before it is encoded: its JSON, encoded in a buffer of exactly that size, and its frame header. The reservation lasts until the writer has written and flushed the head, or the reply that took its place, and freed its buffers. A head that doesn't fit the writer's 64 KiB buffer is written from its own buffer, never copied. If the writer fails, what is queued is freed first, every head's JSON with it, and the reservations only then; nothing more is queued.
   - **The writer's data queue:** 16 MiB, reserved at process start.
 - **When admitted work can't reserve:**
-  - **before its head,** it waits up to its remaining `headers_ms`, then answers `busy` (503);
-  - **after its head,** a stream's next block fetch waits up to 10 s, then the stream aborts with `busy`, a truncation;
+  - **before its head,** it waits up to its remaining `headers_ms`, then answers `busy` (503).
+    - The reply is `busy` when the refusal is queued before `headers_ms` ends, and `deadline` otherwise: the refusal is checked against the head's deadline under the connection's lock, as a head is. Upstream's 503 `memory_budget` is that refusal.
+    - The waits end 50 ms before `headers_ms` does (or half way, if less is left), so `busy` is the usual answer. The margin is a scheduling allowance, not a guarantee: a refusal whose work runs late is `deadline`.
+    - If upstream moves on to another source after a refusal, as delegated routing's Bitswap fallback does, its answer can come after `headers_ms`. The reply is then `deadline`.
+  - **after its head,** a stream's next block fetch waits up to 10 s, then the stream aborts with `busy`, a truncation.
+    - The 10 s start with each read of the body, and that read's fetches share them.
+    - Upstream gives a body no typed error, so the service tells a refusal by its text (`memory budget`).
   - **background work** is dropped at once.
 - **What it doesn't charge:** the disk store's file, which lives on disk, not in memory; and allocator and library overhead it can't see.
 - **What a store's `max_bytes` means:** a target for block data that drives LRU eviction.
@@ -1322,8 +1349,9 @@ Every body already passes through main today, so the pipe adds one copy into the
 | retrieval admission, per process | 256 block fetches, 16 HTTP provider requests, 32 Bitswap connections, 4 DHT queries | work waits under its deadline |
 | background queue | 64 items per instance | new background work is dropped |
 | memory budget | persistent 192 MiB; ephemeral 448 MiB, by reservation ([Budgets](#budgets)) | new work `busy`; admitted work waits as below; evict idle private instances |
-| a reservation for admitted work | before the head: the rest of `headers_ms`; after it: 10 s per block | `busy`; a stream aborts with `busy` |
-| `ipfs.stats` | 5 s; main's watchdog at 20 s | on the watchdog, kill |
+| a reservation for admitted work | before the head: the rest of `headers_ms`; after it: 10 s per block | `busy` (`deadline` if queued after `headers_ms`); a stream aborts with `busy` |
+| `ipfs.stats` | 5 s from when the reader handles it; main's watchdog at 20 s | `deadline`; on the watchdog, kill |
+| stats jobs, per process | 4 outstanding, each until its closure is dropped | `busy` |
 | abort JSON, after the stream ID | 1 KiB | protocol error |
 | persistent cache | 256 MiB of block data on disk (a target), 16 MiB hot | upstream's LRU eviction |
 | private instances | 8 per ephemeral process; a 36 MiB page cap (32 MiB block target) and 4 MiB hot each | a new partition evicts an unpinned instance, else 503 `busy`; existing partitions are unaffected |
@@ -1347,6 +1375,7 @@ Every body already passes through main today, so the pipe adds one copy into the
 | `read-ahead` | one 64 KiB read in main, plus a two-chunk channel | a 128 KiB window per stream | about the same buffering, now bounded by credit |
 | `exit-text` | `Native event dispatcher exited with code N`, `Native gateway stopped unexpectedly` | `freedom-ipfs service exited` | in 502 bodies and logs only |
 | `stats-fields` | the event-queue fields in the diagnostics | dropped, with the queue; budget use added | the panel shows the rest |
+| `stats-progress` | the progress snapshot in the diagnostics | `null` until upstream item 4 lands | the panel shows no progress until then |
 | `targets` | the add-on ships for darwin-arm64, linux-arm64, linux-x64 and win32-x64, and needs GLIBC ≥ 2.38 | the service builds for this repository's five targets, static on Linux | IPFS on darwin-x64 and older distributions (#350), if the musl build holds |
 
 ## Implementation steps

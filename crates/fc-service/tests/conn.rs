@@ -43,12 +43,49 @@ fn body(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i % 251) as u8).collect()
 }
 
+/// A head's charge: counts itself out when dropped.
+struct Charged(Arc<Mutex<usize>>);
+
+impl Drop for Charged {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap() -= 1;
+    }
+}
+
+/// A charge whose drop calls back into its connection, as a reservation's
+/// drop can, by waking work that looks at the connection: it deadlocks if
+/// dropped under the connection's lock.
+struct Reentrant(Connection, mpsc::Sender<()>);
+
+impl Drop for Reentrant {
+    fn drop(&mut self) {
+        let _ = self.0.stats();
+        let _ = self.1.send(());
+    }
+}
+
 #[derive(Default)]
 struct Toy {
     headed: Mutex<Vec<Headed>>,
+    /// Heads' charges not yet released.
+    charged: Arc<Mutex<usize>>,
     cancels: Mutex<Vec<u64>>,
+    /// Holds the next cancel callback until it receives.
+    cancel_gate: Mutex<Option<mpsc::Receiver<()>>>,
+    /// Reentrant charges, as each is dropped.
+    reentered: Mutex<Option<mpsc::Sender<()>>>,
     ends: Mutex<Vec<End>>,
     conn: Mutex<Option<Connection>>,
+}
+
+/// `now` moved by `in_ms` (negative: into the past).
+fn deadline_in(in_ms: i64) -> Instant {
+    let now = Instant::now();
+    if in_ms >= 0 {
+        now + Duration::from_millis(in_ms.unsigned_abs())
+    } else {
+        now - Duration::from_millis(in_ms.unsigned_abs())
+    }
 }
 
 impl Service for Toy {
@@ -73,25 +110,62 @@ impl Service for Toy {
             "t.nobody" => conn
                 .head(request.id, &json!({ "body": false }), false)
                 .unwrap(),
-            // A head due `in_ms` from now (negative: past due).
+            // A head due `in_ms` from now (negative: past due), with
+            // `pad` in it if given, and a charge that counts itself (or,
+            // with `reenter`, one that calls back into the connection).
             "t.head_by" => {
-                let in_ms = params["in_ms"].as_i64().unwrap();
-                let now = Instant::now();
-                let deadline = if in_ms >= 0 {
-                    now + Duration::from_millis(in_ms.unsigned_abs())
+                let deadline = deadline_in(params["in_ms"].as_i64().unwrap());
+                let charge: conn::Charge = if params["reenter"] == true {
+                    let reentered = self.reentered.lock().unwrap().clone().unwrap();
+                    Box::new(Reentrant(conn.clone(), reentered))
                 } else {
-                    now - Duration::from_millis(in_ms.unsigned_abs())
+                    *self.charged.lock().unwrap() += 1;
+                    Box::new(Charged(self.charged.clone()))
                 };
-                let headed = conn
-                    .head_by(
+                let head = json!({ "body": false, "pad": params["pad"] });
+                let headed = conn.head_by(
+                    params["id"].as_u64().unwrap_or(request.id),
+                    &head,
+                    false,
+                    deadline,
+                    &ErrorBody::new(ErrorCode::Deadline, "late"),
+                    Some(charge),
+                );
+                if let Ok(headed) = headed {
+                    self.headed.lock().unwrap().push(headed);
+                }
+            }
+            // A reply, or with `error` an error, due `in_ms` from now.
+            "t.reply_by" => {
+                let deadline = deadline_in(params["in_ms"].as_i64().unwrap());
+                let late = ErrorBody::new(ErrorCode::Deadline, "late");
+                let replied = if params["error"] == true {
+                    conn.reply_error_by(
                         request.id,
-                        &json!({ "body": false }),
-                        false,
+                        &ErrorBody::new(ErrorCode::Busy, "busy"),
                         deadline,
-                        &ErrorBody::new(ErrorCode::Deadline, "late"),
+                        &late,
                     )
-                    .unwrap();
-                self.headed.lock().unwrap().push(headed);
+                } else {
+                    conn.reply_by(request.id, &json!({ "in_time": true }), deadline, &late)
+                };
+                self.headed.lock().unwrap().push(replied.unwrap());
+            }
+            // A body of `len` bytes in one send, reported once the send
+            // ends: how much of it was queued.
+            "t.send_all" => {
+                let len = params["len"].as_u64().unwrap() as usize;
+                let (conn, id) = (conn.clone(), request.id);
+                conn.head(id, &json!({ "body": true }), true).unwrap();
+                std::thread::spawn(move || {
+                    let bytes = body(len);
+                    let mut send = std::pin::pin!(conn.send(id, &bytes));
+                    let ended = block_on(send.as_mut());
+                    let _ = conn.event(
+                        "t.sent",
+                        &json!({ "sent": send.sent(), "ok": ended.is_ok() }),
+                    );
+                });
             }
             "t.event" => {
                 conn.event("t.happened", &json!({ "n": 1 })).unwrap();
@@ -150,6 +224,10 @@ impl Service for Toy {
     }
 
     fn cancel(&self, _conn: &Connection, id: u64) {
+        let gate = self.cancel_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.recv_timeout(Duration::from_secs(10)).unwrap();
+        }
         self.cancels.lock().unwrap().push(id);
     }
 
@@ -421,6 +499,9 @@ impl Gate {
 struct Gated {
     pipe: std::io::PipeWriter,
     gate: Gate,
+    /// The held write fails once released, as a write to a main that has
+    /// gone does.
+    fail: bool,
 }
 
 impl Write for Gated {
@@ -438,6 +519,9 @@ impl Write for Gated {
             self.gate.state.1.notify_all();
             while !state.1 {
                 state = self.gate.state.1.wait(state).unwrap();
+            }
+            if self.fail {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
             }
         }
         self.pipe.write(bytes)
@@ -462,7 +546,11 @@ fn settled_waits_for_a_terminal_still_being_written() {
     ] {
         let gate = Gate::new(kind);
         let held = gate.clone();
-        let mut main = start_with(options(), move |pipe| Gated { pipe, gate: held });
+        let mut main = start_with(options(), move |pipe| Gated {
+            pipe,
+            gate: held,
+            fail: false,
+        });
         main.hello();
         match case {
             "reply" => main.request(2, "t.echo", json!(2)),
@@ -512,10 +600,319 @@ fn a_head_is_queued_only_before_its_deadline() {
         (&late["id"], &late["error"]["code"]),
         (&json!(3), &json!("deadline"))
     );
+    // The toy records what it queued after the call returns.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while main.toy.headed.lock().unwrap().len() < 2 {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
     assert_eq!(
         *main.toy.headed.lock().unwrap(),
         [Headed::Queued, Headed::Late]
     );
+    // Each head's charge went with it: the written head's once written,
+    // and the late one's at once.
+    released(&main.toy.charged);
+    main.close();
+    assert_eq!(main.exit(), Exit::Ok);
+}
+
+/// Waits until every counted charge has been released.
+fn released(charged: &Mutex<usize>) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while *charged.lock().unwrap() > 0 {
+        assert!(Instant::now() < deadline, "a charge was never released");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn a_queued_head_holds_its_charge_until_the_writer_takes_it() {
+    let gate = Gate::new(KIND_JSON);
+    let held = gate.clone();
+    let mut main = start_with(options(), move |pipe| Gated {
+        pipe,
+        gate: held,
+        fail: false,
+    });
+    main.hello();
+    // The writer is held inside request 2's reply, so request 3's head
+    // waits in the queue with its charge.
+    main.request(2, "t.echo", json!(2));
+    gate.held();
+    main.request(3, "t.head_by", json!({ "in_ms": 60_000 }));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while main.toy.headed.lock().unwrap().is_empty() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(*main.toy.charged.lock().unwrap(), 1, "held while queued");
+    gate.release();
+    assert_eq!(main.message()["id"], 2);
+    assert_eq!(main.message()["id"], 3);
+    released(&main.toy.charged);
+    main.close();
+    assert_eq!(main.exit(), Exit::Ok);
+}
+
+/// Review of #141: a head's charge lasts until the writer has written and
+/// flushed it, not only claimed it.
+#[test]
+fn a_heads_charge_lasts_until_it_is_written() {
+    let gate = Gate::new(KIND_JSON);
+    let held = gate.clone();
+    let mut main = start_with(options(), move |pipe| Gated {
+        pipe,
+        gate: held,
+        fail: false,
+    });
+    main.hello();
+    main.request(2, "t.head_by", json!({ "in_ms": 60_000 }));
+    // The writer is inside the head's write.
+    gate.held();
+    assert_eq!(*main.toy.charged.lock().unwrap(), 1, "held while written");
+    gate.release();
+    assert_eq!(main.message()["id"], 2);
+    released(&main.toy.charged);
+    main.close();
+    assert_eq!(main.exit(), Exit::Ok);
+}
+
+/// Review of #141: a head is encoded in a buffer of exactly
+/// `head_len`'s size, which counts the frame on the wire, and one larger
+/// than the writer's buffer is written whole.
+/// Records the size of each write.
+struct Recorded {
+    pipe: std::io::PipeWriter,
+    writes: Arc<Mutex<Vec<usize>>>,
+}
+
+impl Write for Recorded {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let written = self.pipe.write(bytes)?;
+        self.writes.lock().unwrap().push(written);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.pipe.flush()
+    }
+}
+
+#[test]
+fn head_len_is_what_a_head_holds_on_the_wire() {
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    let recorded = writes.clone();
+    let mut main = start_with(options(), move |pipe| Recorded {
+        pipe,
+        writes: recorded,
+    });
+    main.hello();
+    for (id, pad) in [(2, "small".to_owned()), (3, "\u{800}".repeat(40_000))] {
+        main.request(id, "t.head_by", json!({ "in_ms": 60_000, "pad": pad }));
+        let frame = main.frame().unwrap();
+        let head: Value = serde_json::from_slice(&frame.payload).unwrap();
+        assert_eq!(head["result"]["pad"], pad);
+        let expected = conn::head_len(id, &json!({ "body": false, "pad": pad })).unwrap();
+        assert_eq!(expected, 5 + frame.payload.len(), "{id}");
+    }
+    assert!(conn::head_len(4, &json!({ "pad": "x".repeat(1 << 20) })).is_err());
+    // The large head: its 5-byte frame header written alone, then the
+    // head's own buffer, never copied into the writer's.
+    assert!(
+        writes.lock().unwrap().contains(&5),
+        "{:?}",
+        writes.lock().unwrap()
+    );
+    released(&main.toy.charged);
+    main.close();
+    assert_eq!(main.exit(), Exit::Ok);
+}
+
+/// Review of #141: a charge is never dropped under the connection's lock,
+/// on any path: a head queued and written, a late head, a head for a
+/// request already answered, and a head still queued when the writer
+/// fails.
+/// The child runs one case and exits; a deadlock is a child that hangs.
+#[test]
+fn a_charge_is_dropped_outside_the_connections_lock() {
+    for case in ["written", "late", "answered", "writer_failed"] {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "reentrant_charge_case", "--test-threads=1"])
+            .env("FC_SERVICE_REENTRANT_CASE", case)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if Instant::now() > deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(
+            status.is_some_and(|status| status.success()),
+            "{case}: {status:?}"
+        );
+    }
+}
+
+/// One case of [`a_charge_is_dropped_outside_the_connections_lock`], when
+/// run as its child; nothing otherwise.
+#[test]
+fn reentrant_charge_case() {
+    let Ok(case) = std::env::var("FC_SERVICE_REENTRANT_CASE") else {
+        return;
+    };
+    // The writer fails inside request 2's reply, with request 3's head
+    // queued behind it.
+    let gate = Gate::new(KIND_JSON);
+    let held = gate.clone();
+    let failing = case == "writer_failed";
+    let mut main = start_with(options(), move |pipe| Gated {
+        pipe,
+        gate: held,
+        fail: failing,
+    });
+    main.hello();
+    let (reentered, dropped) = mpsc::channel();
+    *main.toy.reentered.lock().unwrap() = Some(reentered);
+    match case.as_str() {
+        "written" => {
+            main.request(3, "t.head_by", json!({ "in_ms": 60_000, "reenter": true }));
+            assert_eq!(main.message()["id"], 3);
+        }
+        "late" => {
+            main.request(3, "t.head_by", json!({ "in_ms": -1, "reenter": true }));
+            assert_eq!(main.message()["error"]["code"], "deadline");
+        }
+        "answered" => {
+            main.request(2, "t.echo", json!(2));
+            gate.release();
+            assert_eq!(main.message()["id"], 2);
+            // The toy heads request 2, answered already: refused.
+            let params = json!({ "in_ms": 60_000, "reenter": true, "id": 2 });
+            main.request(3, "t.head_by", params);
+        }
+        _ => {
+            main.request(2, "t.echo", json!(2));
+            gate.held();
+            main.request(3, "t.head_by", json!({ "in_ms": 60_000, "reenter": true }));
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while main.toy.headed.lock().unwrap().is_empty() {
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            gate.release();
+        }
+    }
+    dropped.recv_timeout(Duration::from_secs(10)).unwrap();
+    gate.release();
+    main.close();
+    let _ = main.exit();
+}
+
+#[test]
+fn a_reply_by_is_queued_only_before_its_deadline() {
+    let mut main = start(options());
+    main.hello();
+    main.request(2, "t.reply_by", json!({ "in_ms": 60_000 }));
+    assert_eq!(main.message()["result"]["in_time"], true);
+    main.request(3, "t.reply_by", json!({ "in_ms": -1 }));
+    assert_eq!(main.message()["error"]["code"], "deadline");
+    main.request(4, "t.reply_by", json!({ "in_ms": 60_000, "error": true }));
+    assert_eq!(main.message()["error"]["code"], "busy");
+    main.request(5, "t.reply_by", json!({ "in_ms": -1, "error": true }));
+    assert_eq!(main.message()["error"]["code"], "deadline");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while main.toy.headed.lock().unwrap().len() < 4 {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        *main.toy.headed.lock().unwrap(),
+        [Headed::Queued, Headed::Late, Headed::Queued, Headed::Late]
+    );
+    main.close();
+    assert_eq!(main.exit(), Exit::Ok);
+}
+
+/// Review of #141: a request isn't settled while its accepted cancel is
+/// being handed to the service, even once its abort is written, so the
+/// service's record of it is still there for the callback.
+#[test]
+fn a_cancelled_request_is_settled_only_after_the_cancel_callback() {
+    let mut main = start(options());
+    main.hello();
+    main.request(2, "t.hang", Value::Null);
+    assert_eq!(main.message()["result"]["body"], true);
+    main.frame().unwrap();
+    let conn = main.toy.conn.lock().unwrap().clone().unwrap();
+    let (release, gate) = mpsc::channel();
+    *main.toy.cancel_gate.lock().unwrap() = Some(gate);
+    main.json(json!({ "type": "cancel", "id": 2 }));
+    match StreamFrame::from_frame(&main.frame().unwrap()).unwrap() {
+        StreamFrame::Abort { id: 2, abort } => assert_eq!(abort.code.as_str(), "cancelled"),
+        other => panic!("{other:?}"),
+    }
+    // Its abort is written and flushed, its callback still running.
+    let mut settled = std::pin::pin!(conn.settled(2));
+    let waker = std::task::Waker::noop();
+    let deadline = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < deadline {
+        assert!(
+            settled
+                .as_mut()
+                .poll(&mut Context::from_waker(waker))
+                .is_pending(),
+            "settled while its cancel was being handed over"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    release.send(()).unwrap();
+    block_on(settled);
+    assert_eq!(*main.toy.cancels.lock().unwrap(), [2]);
+    main.close();
+    assert_eq!(main.exit(), Exit::Ok);
+}
+
+/// Review of #141: a send that fails says how much of it was queued.
+#[test]
+fn a_failed_send_says_how_much_it_queued() {
+    let mut main = start(options());
+    main.hello();
+    main.request(2, "t.send_all", json!({ "len": 200_000 }));
+    assert_eq!(main.message()["result"]["body"], true);
+    let mut received = 0;
+    while received < 128 << 10 {
+        match StreamFrame::from_frame(&main.frame().unwrap()).unwrap() {
+            StreamFrame::Data { id: 2, bytes } => received += bytes.len(),
+            other => panic!("{other:?}"),
+        }
+    }
+    // One more byte of credit, taken, then a cancel.
+    main.send(&credit_frame(2, 1).unwrap());
+    match StreamFrame::from_frame(&main.frame().unwrap()).unwrap() {
+        StreamFrame::Data { id: 2, bytes } => received += bytes.len(),
+        other => panic!("{other:?}"),
+    }
+    main.json(json!({ "type": "cancel", "id": 2 }));
+    let mut sent = None;
+    while sent.is_none() {
+        let frame = main.frame().unwrap();
+        if frame.kind == KIND_JSON {
+            let event: Value = serde_json::from_slice(&frame.payload).unwrap();
+            sent = Some(event["data"].clone());
+        }
+    }
+    assert_eq!(sent.unwrap(), json!({ "sent": received, "ok": false }));
+    assert_eq!(received, (128 << 10) + 1);
     main.close();
     assert_eq!(main.exit(), Exit::Ok);
 }

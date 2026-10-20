@@ -57,7 +57,7 @@
 //! reader decodes `{ type, id, method, params }` and ignores a `context`.
 
 use std::borrow::Cow;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::io::{Read, Write};
 use std::pin::Pin;
@@ -234,6 +234,11 @@ pub trait Service: Send + Sync + 'static {
     /// Main cancelled request `id` before its reply or its stream's
     /// terminal was written. Its `cancelled` reply or abort is already
     /// queued: stop its work. (A late cancel never reaches the service.)
+    ///
+    /// The request isn't settled ([`Connection::settled`]) until this
+    /// returns, even if its `cancelled` reply or abort is written
+    /// meanwhile: a service that keeps a request's record until it is
+    /// settled always finds it here.
     fn cancel(&self, conn: &Connection, id: u64);
 
     /// The connection ended: tear down. Called once, on [`run`]'s thread,
@@ -243,7 +248,9 @@ pub trait Service: Send + Sync + 'static {
     /// ([`Connection::reply`], [`Connection::reply_error`], a head without a
     /// body, [`Connection::finish`], [`Connection::abort`]) may still be
     /// queued, and the writer writes it for at most 1 s after this returns;
-    /// new streams, data and events are refused. A teardown that fails
+    /// new streams, data and events are refused. After a failed write to
+    /// stdout nothing more can be written, so nothing is queued at all:
+    /// every call is `Closed`. A teardown that fails
     /// calls [`Connection::fail`]: its exit becomes the process's result
     /// (70 for quiescence it can't prove).
     fn end(&self, conn: &Connection, end: End);
@@ -283,6 +290,9 @@ struct Link {
     /// [`Service::end`] has returned.
     torn_down: AtomicBool,
     max_requests: usize,
+    /// A failed writer has freed what was queued.
+    #[cfg(test)]
+    abandoned_freed: AtomicBool,
 }
 
 struct State {
@@ -295,6 +305,9 @@ struct State {
     closed: bool,
     /// The reader is in a service callback.
     dispatching: bool,
+    /// The request whose accepted cancel the reader is handing to the
+    /// service: it isn't settled until [`Service::cancel`] returns.
+    cancelling: Option<u64>,
     /// Send futures waiting for room, and settled futures for a request's
     /// end.
     waiters: Vec<Waker>,
@@ -304,6 +317,8 @@ struct State {
     /// stream's end or abort) that frame is: the request isn't settled
     /// until the write and its flush are done ([`Connection::settled`]).
     writing_terminal: Option<u64>,
+    /// What queued heads hold until the writer takes them, by request.
+    charges: HashMap<u64, Charge>,
     /// When the writer last claimed or finished a frame.
     progress: Instant,
     writer_done: bool,
@@ -327,9 +342,11 @@ impl Link {
                 end: None,
                 closed: false,
                 dispatching: false,
+                cancelling: None,
                 waiters: Vec::new(),
                 writing: false,
                 writing_terminal: None,
+                charges: HashMap::new(),
                 progress: Instant::now(),
                 writer_done: false,
                 input: VecDeque::new(),
@@ -343,6 +360,8 @@ impl Link {
             result: AtomicU8::new(Exit::Ok.code()),
             torn_down: AtomicBool::new(false),
             max_requests: options.max_requests.max(1),
+            #[cfg(test)]
+            abandoned_freed: AtomicBool::new(false),
         }
     }
 
@@ -462,7 +481,9 @@ impl Connection {
     ) -> Result<T, SendError> {
         let (result, wakers) = {
             let mut state = self.link.lock();
-            if state.closed || (state.end.is_some() && need == Need::Open) {
+            // Nothing more is written once the writer is done, so nothing
+            // more is queued.
+            if state.closed || state.writer_done || (state.end.is_some() && need == Need::Open) {
                 return Err(SendError::Closed);
             }
             let (result, room) = op(&mut state);
@@ -492,6 +513,59 @@ impl Connection {
         self.queue(Need::Owed, |state| (state.sender.reply(id, json), false))
     }
 
+    /// Answers request `id` with `result`, as [`Connection::reply`] does,
+    /// only if it is queued before `deadline`: from `deadline` on, `late`
+    /// is queued as its one reply instead, unless something answered it
+    /// already. The check and the queueing are one step under the
+    /// connection's lock, as for [`Connection::head_by`]: however late its
+    /// producer runs, the reply is never queued after its deadline, and one
+    /// queued in time stands.
+    pub fn reply_by<T: Serialize>(
+        &self,
+        id: u64,
+        result: &T,
+        deadline: Instant,
+        late: &ErrorBody,
+    ) -> Result<Headed, SendError> {
+        let mut json = Vec::new();
+        write_result(&mut json, id, result).map_err(|_| SendError::TooLarge)?;
+        self.reply_json_by(id, json, deadline, late)
+    }
+
+    /// Answers request `id` with `error`, as [`Connection::reply_error`]
+    /// does, only if it is queued before `deadline`: as
+    /// [`Connection::reply_by`].
+    pub fn reply_error_by(
+        &self,
+        id: u64,
+        error: &ErrorBody,
+        deadline: Instant,
+        late: &ErrorBody,
+    ) -> Result<Headed, SendError> {
+        let mut json = Vec::new();
+        write_error(&mut json, id, error).map_err(|_| SendError::TooLarge)?;
+        self.reply_json_by(id, json, deadline, late)
+    }
+
+    fn reply_json_by(
+        &self,
+        id: u64,
+        json: Vec<u8>,
+        deadline: Instant,
+        late: &ErrorBody,
+    ) -> Result<Headed, SendError> {
+        let mut late_json = Vec::new();
+        write_error(&mut late_json, id, late).map_err(|_| SendError::TooLarge)?;
+        self.queue(Need::Owed, move |state| {
+            let queued = if Instant::now() < deadline {
+                state.sender.reply(id, json).map(|()| Headed::Queued)
+            } else {
+                state.sender.reply(id, late_json).map(|()| Headed::Late)
+            };
+            (queued, false)
+        })
+    }
+
     /// Answers request `id` with a head, `result`. With `body`, it opens a
     /// stream once written; data may be pushed behind it now.
     pub fn head<T: Serialize>(&self, id: u64, result: &T, body: bool) -> Result<(), SendError> {
@@ -508,6 +582,15 @@ impl Connection {
     /// connection's lock, so however late its producer runs, a head is never
     /// queued after its deadline, and one queued in time stands (0007,
     /// "`headers_ms`").
+    ///
+    /// The head is encoded in a buffer of exactly [`head_len`]'s size,
+    /// and the writer writes that buffer as it is, without a copy. A queued
+    /// head keeps `charge` until the writer has written and flushed it, or
+    /// the reply a cancel or a settle put in its place, or the connection
+    /// is done: such as the memory reservation of [`head_len`]'s bytes
+    /// (0007, "Pending replies"). Otherwise `charge` is dropped before this
+    /// returns. A charge is never dropped under the connection's lock, so
+    /// its drop may wake work that calls back into the connection.
     pub fn head_by<T: Serialize>(
         &self,
         id: u64,
@@ -515,20 +598,32 @@ impl Connection {
         body: bool,
         deadline: Instant,
         late: &ErrorBody,
+        charge: Option<Charge>,
     ) -> Result<Headed, SendError> {
-        let mut json = Vec::new();
-        write_result(&mut json, id, result).map_err(|_| SendError::TooLarge)?;
+        let mut charge = charge;
+        let mut displaced = None;
+        let json = encode_result(id, result)?;
         let mut late_json = Vec::new();
         write_error(&mut late_json, id, late).map_err(|_| SendError::TooLarge)?;
         let need = if body { Need::Open } else { Need::Owed };
-        self.queue(need, |state| {
+        let queued = self.queue(need, |state| {
             let queued = if Instant::now() < deadline {
                 state.sender.head(id, json, body).map(|()| Headed::Queued)
             } else {
                 state.sender.reply(id, late_json).map(|()| Headed::Late)
             };
+            if let Ok(Headed::Queued) = queued
+                && let Some(charge) = charge.take()
+            {
+                displaced = state.charges.insert(id, charge);
+            }
             (queued, false)
-        })
+        });
+        // Outside the lock: a head that wasn't queued, and whatever a
+        // charge for the same ID left behind (never, while IDs are unique).
+        drop(displaced);
+        drop(charge);
+        queued
     }
 
     /// Queues as much of `bytes` as stream `id`'s window and the writer's cap
@@ -633,6 +728,52 @@ impl Connection {
     }
 }
 
+/// What a queued head holds until the writer has written it
+/// ([`Connection::head_by`]): dropped then, outside the connection's lock.
+pub type Charge = Box<dyn Send>;
+
+/// A JSON frame's header: its length and kind.
+const JSON_HEADER: usize = 5;
+
+/// What a head of `result` for request `id` holds from its encoding until
+/// the writer has written it ([`Connection::head_by`]): its JSON, in a
+/// buffer of exactly its length, and its frame header. A service reserves
+/// this much for a pending head (0007, "Pending replies"), as long as
+/// `result` serializes the same way each time. `TooLarge` past one frame.
+pub fn head_len<T: Serialize>(id: u64, result: &T) -> Result<usize, SendError> {
+    Ok(result_len(id, result)?.saturating_add(JSON_HEADER))
+}
+
+/// The length of `result`'s response envelope, counted without encoding
+/// it: at most one frame's payload.
+fn result_len<T: Serialize>(id: u64, result: &T) -> Result<usize, SendError> {
+    struct Count(usize);
+    impl Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len());
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    write_result(&mut count, id, result).map_err(|_| SendError::TooLarge)?;
+    if count.0 > frame::MAX_PAYLOAD {
+        return Err(SendError::TooLarge);
+    }
+    Ok(count.0)
+}
+
+/// `result`'s response envelope, in a buffer of exactly its length, so
+/// what the buffer holds is what [`head_len`] counts.
+fn encode_result<T: Serialize>(id: u64, result: &T) -> Result<Vec<u8>, SendError> {
+    let mut json = Vec::with_capacity(result_len(id, result)?);
+    write_result(&mut json, id, result).map_err(|_| SendError::TooLarge)?;
+    Ok(json)
+}
+
 /// What [`Connection::head_by`] queued.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Headed {
@@ -666,7 +807,10 @@ impl Future for SettledFuture<'_> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let mut state = self.conn.link.lock();
         let held = state.sender.is_live(self.id) || state.writing_terminal == Some(self.id);
-        if state.end.is_some() || !held {
+        // An accepted cancel being handed to the service holds it, even
+        // once the connection has ended: the callback is never cut short.
+        let cancelling = state.cancelling == Some(self.id);
+        if !cancelling && (state.end.is_some() || !held) {
             return Poll::Ready(());
         }
         if !state.waiters.iter().any(|w| w.will_wake(cx.waker())) {
@@ -682,6 +826,15 @@ pub struct SendBytes<'a> {
     id: u64,
     bytes: &'a [u8],
     sent: usize,
+}
+
+impl SendBytes<'_> {
+    /// How many of its bytes are queued so far: all of them once it has
+    /// resolved `Ok`, and those queued before it failed otherwise. (Poll it
+    /// pinned in place, as `(&mut send).await`, to ask afterwards.)
+    pub fn sent(&self) -> usize {
+        self.sent
+    }
 }
 
 impl Future for SendBytes<'_> {
@@ -1240,6 +1393,9 @@ impl<'a> Reader<'a> {
                 .map_err(|e| End::Protocol(e.category()))?;
             let cancelled = outcome == Cancel::Cancelled;
             state.dispatching = cancelled;
+            if cancelled {
+                state.cancelling = Some(id);
+            }
             // A purge made room under the writer's cap.
             let wakers = if cancelled {
                 std::mem::take(&mut state.waiters)
@@ -1252,7 +1408,14 @@ impl<'a> Reader<'a> {
         wake(wakers);
         if cancelled {
             self.service.cancel(self.conn, id);
+            // The request may be settled now: wake those waiting for it.
+            let waiters = {
+                let mut state = self.link.lock();
+                state.cancelling = None;
+                std::mem::take(&mut state.waiters)
+            };
             self.leave();
+            wake(waiters);
         }
         Ok(())
     }
@@ -1383,6 +1546,12 @@ struct Claimed {
     wakers: Vec<Waker>,
     /// It ended a request: the reader may admit a parked one.
     freed: bool,
+    /// A message too large for the writer's buffer, written as it was
+    /// queued, after the frame header in the buffer.
+    payload: Option<Vec<u8>>,
+    /// What its head held, released once the frame is written and flushed
+    /// and its buffers freed: the head, or what replaced it.
+    charge: Option<Charge>,
 }
 
 /// The request a frame belongs to.
@@ -1399,23 +1568,36 @@ fn written_id(written: Written) -> u64 {
 
 fn write_loop(link: &Link, mut output: impl Write) {
     let mut frame = Vec::with_capacity(MAX_DATA + 64);
-    while let Some(claimed) = claim(link, &mut frame) {
-        if claimed.freed {
+    while let Some(Claimed {
+        wakers,
+        freed,
+        payload,
+        charge,
+    }) = claim(link, &mut frame)
+    {
+        if freed {
             link.reader.notify_one();
         }
-        wake(claimed.wakers);
+        wake(wakers);
         // Outside the lock: a write may block for as long as main doesn't
         // read, and nothing else waits for it.
-        if output
+        let written = output
             .write_all(&frame)
-            .and_then(|()| output.flush())
-            .is_err()
-        {
+            .and_then(|()| {
+                payload
+                    .as_ref()
+                    .map_or(Ok(()), |json| output.write_all(json))
+            })
+            .and_then(|()| output.flush());
+        frame.clear();
+        // A 1 MiB event's buffer isn't kept.
+        frame.shrink_to(MAX_DATA + 64);
+        // What paid for the frame's buffers goes once they have.
+        drop(payload);
+        drop(charge);
+        if written.is_err() {
             return writer_failed(link);
         }
-        frame.clear();
-        // A 1 MiB reply's buffer isn't kept.
-        frame.shrink_to(MAX_DATA + 64);
         let mut state = link.lock();
         state.writing = false;
         state.progress = Instant::now();
@@ -1445,13 +1627,15 @@ fn claim(link: &Link, frame: &mut Vec<u8>) -> Option<Claimed> {
                     return Some(Claimed {
                         wakers: Vec::new(),
                         freed: false,
+                        payload: None,
+                        charge: None,
                     });
                 }
                 frame.clear();
                 continue;
             }
             let live = state.sender.live();
-            if let Some(written) = state.sender.next_frame(frame) {
+            if let Some((written, json)) = state.sender.next_frame_owned(frame) {
                 let freed = state.sender.live() < live;
                 // A terminal: its request is settled once it is written
                 // and flushed, not now ([`Connection::settled`]).
@@ -1462,14 +1646,38 @@ fn claim(link: &Link, frame: &mut Vec<u8>) -> Option<Claimed> {
                 } else {
                     Vec::new()
                 };
+                // A head, or the reply that took its place.
+                let charge = match written {
+                    Written::Head { id } | Written::Reply { id } | Written::Cancelled { id } => {
+                        state.charges.remove(&id)
+                    }
+                    _ => None,
+                };
+                // A message that fits the buffer as it is joins its header
+                // there; a larger one is written from its own buffer, so
+                // the writer's never grows for it.
+                let payload = match json {
+                    Some(json) if json.len() <= frame.capacity() - frame.len() => {
+                        frame.extend_from_slice(&json);
+                        None
+                    }
+                    json => json,
+                };
                 state.writing = true;
                 state.progress = Instant::now();
-                return Some(Claimed { wakers, freed });
+                return Some(Claimed {
+                    wakers,
+                    freed,
+                    payload,
+                    charge,
+                });
             }
         }
         if state.closed || failed {
             state.writer_done = true;
+            let charges = std::mem::take(&mut state.charges);
             drop(state);
+            drop(charges);
             link.ended.notify_all();
             return None;
         }
@@ -1479,12 +1687,27 @@ fn claim(link: &Link, frame: &mut Vec<u8>) -> Option<Claimed> {
 
 /// A failed write to stdout: main is gone (0007: the guaranteed path, as
 /// stdin EOF is).
+///
+/// Nothing more is written, so nothing more is queued ([`Connection`]'s
+/// calls are `Closed` once the writer is done), and what is queued goes:
+/// the stream state, with every queued head's and reply's JSON and every
+/// queued body byte, is taken out of the connection and freed, and only
+/// then what the heads held, so a reservation is never free while the
+/// buffer it pays for still is. Both outside the lock.
 fn writer_failed(link: &Link) {
     link.end(End::Eof);
     let mut state = link.lock();
     state.writing = false;
     state.writer_done = true;
+    let abandoned = std::mem::replace(&mut state.sender, Sender::with_data_cap(0));
+    let events = std::mem::take(&mut state.events);
+    let charges = std::mem::take(&mut state.charges);
     drop(state);
+    drop(abandoned);
+    drop(events);
+    #[cfg(test)]
+    link.abandoned_freed.store(true, Ordering::SeqCst);
+    drop(charges);
     link.ended.notify_all();
 }
 
@@ -1518,5 +1741,85 @@ fn lifecycle_loop(link: &Link, options: &Options) {
             continue;
         }
         state = wait_timeout(&link.ended, state, tick);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    /// Review of #141, round 2: when the writer fails, every queued head's
+    /// JSON is freed before what its head held: a charge dropped while its
+    /// buffer still lived would let others spend those bytes again. A
+    /// small head, then a 100,046-byte one, and the first write fails.
+    #[test]
+    fn a_failed_writer_frees_queued_heads_before_their_charges() {
+        struct Broken;
+        impl Write for Broken {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        /// Records, as it is dropped, whether the queued buffers were freed.
+        struct Witness(Arc<Link>, Arc<Mutex<Vec<bool>>>);
+        impl Drop for Witness {
+            fn drop(&mut self) {
+                let freed = self.0.abandoned_freed.load(Ordering::SeqCst);
+                self.1.lock().unwrap().push(freed);
+            }
+        }
+        let mut options = Options::new("t", 1, Instant::now());
+        options.exit_watchdog = None;
+        let link = Arc::new(Link::new(&options));
+        let conn = Connection { link: link.clone() };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        for (id, pad) in [(1, "small".to_owned()), (2, "x".repeat(100_000))] {
+            link.lock().sender.request(id).unwrap();
+            let head = serde_json::json!({ "pad": pad });
+            let charge: Charge = Box::new(Witness(link.clone(), seen.clone()));
+            let late = ErrorBody::new(ErrorCode::Deadline, "late");
+            let deadline = Instant::now() + Duration::from_secs(60);
+            assert_eq!(
+                conn.head_by(id, &head, false, deadline, &late, Some(charge)),
+                Ok(Headed::Queued)
+            );
+        }
+        // Its JSON is 100,046 bytes, with its frame header 100,051.
+        assert_eq!(
+            head_len(2, &serde_json::json!({ "pad": "x".repeat(100_000) })),
+            Ok(100_051)
+        );
+        write_loop(&link, Broken);
+        // The first head's charge went with its own frame, once written
+        // (here: failed); the second's only after the queue was freed.
+        assert_eq!(*seen.lock().unwrap(), [false, true]);
+        let mut frame = Vec::new();
+        let state = link.lock();
+        assert_eq!((state.sender.live(), state.sender.held()), (0, 0));
+        drop(state);
+        assert!(link.lock().sender.next_frame_owned(&mut frame).is_none());
+        // And nothing more is queued.
+        assert_eq!(conn.reply(3, &()), Err(SendError::Closed));
+    }
+
+    /// Review of #141: a head's buffer is exactly its length, which
+    /// `head_len` counts with its frame header, however large it is.
+    #[test]
+    fn a_head_is_encoded_in_a_buffer_of_its_length() {
+        for pad in ["", "small", &"\u{800}".repeat(40_000)] {
+            let head = serde_json::json!({ "status": 200, "pad": pad });
+            let json = encode_result(7, &head).unwrap();
+            assert_eq!(json.capacity(), json.len());
+            assert_eq!(head_len(7, &head).unwrap(), json.len() + JSON_HEADER);
+            let mut expected = Vec::new();
+            write_result(&mut expected, 7, &head).unwrap();
+            assert_eq!(json, expected);
+        }
     }
 }
