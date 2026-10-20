@@ -28,8 +28,13 @@ function corruptedCheck(filename, corrupt) {
   const contents = JSON.parse(fs.readFileSync(destination, 'utf8'));
   corrupt(contents);
   fs.writeFileSync(destination, JSON.stringify(contents, null, 2) + '\n');
-  const result = spawnSync(process.execPath, [path.join(copy, 'generator/generate.js'),
-    'check', '--freedom-browser', REFERENCE], { encoding: 'utf8', timeout: 60000 });
+  let result;
+  try {
+    result = spawnSync(process.execPath, [path.join(copy, 'generator/generate.js'),
+      'check', '--freedom-browser', REFERENCE], { encoding: 'utf8', timeout: 60000 });
+  } finally {
+    fs.rmSync(copy, { recursive: true, force: true });
+  }
   assert.equal(result.error, undefined, result.error?.message);
   assert.equal(result.status, 1, result.stdout + result.stderr);
   return result.stderr;
