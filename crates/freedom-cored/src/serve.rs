@@ -439,7 +439,8 @@ pub fn run(options: &Options) -> Exit {
     // the loop: none of them ran.
     let outs = core.vault.shutdown();
     let _ = core.dispatch(outs);
-    let until = Instant::now() + COMMIT_DRAIN;
+    let draining = Instant::now();
+    let until = draining + COMMIT_DRAIN;
     while core.vault.committing() {
         let Some(left) = until.checked_duration_since(Instant::now()) else {
             break;
@@ -457,7 +458,7 @@ pub fn run(options: &Options) -> Exit {
     if core.vault.committing() {
         log::error(
             "a committed vault job did not finish before exit",
-            serde_json::json!({}),
+            serde_json::json!({ "waited_ms": draining.elapsed().as_millis() }),
         );
     }
     // What waits for room goes past the allowance: the drain below bounds it

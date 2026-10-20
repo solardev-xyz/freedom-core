@@ -1903,7 +1903,7 @@ fn claim(control: &JobControl) -> bool {
     if claimed {
         crate::testhooks::commit_delay();
     } else {
-        crate::testhooks::refused_claim_delay();
+        crate::testhooks::refused_claim_hold();
     }
     claimed
 }

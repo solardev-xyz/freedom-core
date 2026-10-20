@@ -12,8 +12,10 @@
 //!   its commit point, before the rename or unlink.
 //! - `FREEDOM_CORED_TEST_COMMIT_MARKER` names a file created the moment a job
 //!   claims its commit point (before that stall), so tests can wait for it.
-//! - `FREEDOM_CORED_TEST_REFUSED_CLAIM_DELAY_MS` stalls a job whose claim
-//!   was refused, before it cleans up: a slow disk under that cleanup.
+//! - `FREEDOM_CORED_TEST_REFUSED_CLAIM_HOLD` names a file: a job whose claim
+//!   was refused waits, before it cleans up, until that file exists (at
+//!   most 120 s). It stands for a slow disk under that cleanup, held for as
+//!   long as the test needs.
 //! - `FREEDOM_CORED_TEST_CHAIN_TOTAL_BYTES` replaces the chain total's
 //!   256 MiB (design 0005, Bounds), so a test can bring it near full.
 //! - `FREEDOM_CORED_TEST_NAMING_MARKER` names a file the naming thread
@@ -52,9 +54,12 @@ pub fn job_delay() {
 }
 
 #[cfg(debug_assertions)]
-pub fn refused_claim_delay() {
-    if let Some(ms) = millis("FREEDOM_CORED_TEST_REFUSED_CLAIM_DELAY_MS") {
-        std::thread::sleep(Duration::from_millis(ms));
+pub fn refused_claim_hold() {
+    if let Some(release) = std::env::var_os("FREEDOM_CORED_TEST_REFUSED_CLAIM_HOLD") {
+        let until = std::time::Instant::now() + Duration::from_secs(120);
+        while !std::path::Path::new(&release).exists() && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 
@@ -136,7 +141,7 @@ pub fn job_delay() {}
 pub fn commit_delay() {}
 
 #[cfg(not(debug_assertions))]
-pub fn refused_claim_delay() {}
+pub fn refused_claim_hold() {}
 
 #[cfg(not(debug_assertions))]
 pub fn kdf_deadline(default: Duration) -> Duration {

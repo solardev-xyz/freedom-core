@@ -1372,14 +1372,15 @@ fn shutdown_waits_for_committed_work_and_sends_its_reply() {
 
 #[test]
 fn shutdown_stops_waiting_for_committed_work_after_two_seconds() {
-    // A commit stalled 4.5 s: the 2 s the core waits on exit run out first,
-    // where the old 5 s waited it out. So the outcome tells them apart, not
-    // the test's own clock (#127). The stalled create never renames: the
-    // next start's recovery covers it, as it would a kill.
+    // A commit stalled far past any drain: the core gives up after its 2 s
+    // and exits (#127). The core measures that wait itself and logs it, so
+    // the test reads the core's own clock, never its own. The stalled
+    // create never renames: the next start's recovery covers it, as it
+    // would a kill.
     let marker_dir = tempfile::tempdir().unwrap();
     let marker = marker_dir.path().join("claimed");
     let mut env = commit_hooks(&marker);
-    env[0].1 = "4500".into();
+    env[0].1 = "60000".into();
     let (_root, data, locks) = dirs();
     let mut core = spawn_env("serve", &data, &locks, &[], &env_refs(&env));
     core.hello();
@@ -1392,29 +1393,38 @@ fn shutdown_stops_waiting_for_committed_work_after_two_seconds() {
     wait_for_claim(&marker);
     core.send_raw(&frame(&shell_request(3, "core.shutdown", json!({}))));
     assert_eq!(core.response(3)["result"], json!({}));
-    assert_eq!(core.exit_code(Duration::from_secs(15)), 0);
+    assert_eq!(core.exit_code(Duration::from_secs(30)), 0);
     assert!(!data.join(VAULT).exists());
     let stderr = core.stderr();
-    assert!(
-        stderr.contains("a committed vault job did not finish before exit"),
-        "{stderr}"
-    );
+    let gave_up: Value = stderr
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|line| line["msg"] == "a committed vault job did not finish before exit")
+        .unwrap_or_else(|| panic!("{stderr}"));
+    let waited = gave_up["waited_ms"].as_u64().unwrap();
+    assert!((2000..5000).contains(&waited), "{gave_up}");
 }
 
 #[test]
 fn a_refused_claim_is_answered_by_its_deadline_whatever_its_cleanup_takes() {
     // Claims end at 4 s of a 6 s deadline. The job reaches its commit point
-    // at about 4.2 s, is refused, then stalls 5 s before it cleans up. The
-    // loop still answers at the 6 s deadline, not when the worker is done.
+    // at about 4.2 s and is refused, then holds before its cleanup until the
+    // test releases it. The deadline's reply comes while it holds: the loop
+    // answers by the deadline, not when the worker is done.
+    let hold_dir = tempfile::tempdir().unwrap();
+    let release = hold_dir.path().join("release");
+    let release_env = release.display().to_string();
     let env = [
         ("FREEDOM_CORED_TEST_KDF_DEADLINE_MS", "6000"),
         ("FREEDOM_CORED_TEST_JOB_DELAY_MS", "4200"),
-        ("FREEDOM_CORED_TEST_REFUSED_CLAIM_DELAY_MS", "5000"),
+        (
+            "FREEDOM_CORED_TEST_REFUSED_CLAIM_HOLD",
+            release_env.as_str(),
+        ),
     ];
     let (_root, data, locks) = dirs();
     let mut core = spawn_env("serve", &data, &locks, &[], &env);
     core.hello();
-    let sent = Instant::now();
     let create = request(
         2,
         "vault.create",
@@ -1422,15 +1432,17 @@ fn a_refused_claim_is_answered_by_its_deadline_whatever_its_cleanup_takes() {
     );
     core.send_raw(&frame(&create));
     assert_eq!(core.response(2)["error"]["code"], "deadline");
-    // Answered by the deadline, before the worker's 9 s or more.
-    let took = sent.elapsed();
-    assert!(took < Duration::from_millis(8500), "{took:?}");
-    // Nothing more for 2 once the worker is done; the loop serves the next.
-    std::thread::sleep(Duration::from_millis(4000));
+    // Released, the worker cleans up and returns. A vault job queued
+    // behind it starts only then, so its reply comes after any second
+    // reply to 2 would have: the next response must be its own.
+    std::fs::write(&release, b"go").unwrap();
+    let verify = core.call(
+        3,
+        "vault.verify_password",
+        json!({ "password_b64": b64("testpass1") }),
+    );
+    assert_eq!(verify["id"], 3);
     assert!(!data.join(VAULT).exists());
-    let status = core.call(3, "vault.status", json!({}));
-    assert_eq!(status["id"], 3);
-    assert_eq!(status["result"]["exists"], false);
 }
 
 /// The vault's temp files in `data`: what a write killed before its rename
