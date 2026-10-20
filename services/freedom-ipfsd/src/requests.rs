@@ -11,9 +11,10 @@
 //!   `stopped`; with 512 requests admitted in the process, `busy`. A
 //!   request is admitted from here until its work has ended **and** nothing
 //!   of it is held on the wire any more (its reply, or its stream's
-//!   terminal, written): heads, open streams and work still ending after a
-//!   cancel all count. Its record ([`Slot`]) is an owned guard, dropped
-//!   only then.
+//!   terminal, written and flushed): heads, open streams and work still
+//!   ending after a cancel all count, and so does a refusal of a spawn an
+//!   instance fenced. Its record ([`Slot`]) is an owned guard, dropped only
+//!   then.
 //! - **The work** runs on its instance's runtime, in the instance's task
 //!   set, under its own token, a child of the instance's root, and marked
 //!   as request work for the panic hook ([`TaskKind::REQUEST`]): the
@@ -25,7 +26,11 @@
 //!   and awaits the work's join handle ([`watch`]):
 //!   - **the deadline:** `headers_ms` runs from admission. If no head is
 //!     queued by then, the reply is `deadline` and the work's token is
-//!     cancelled. After the head there is no deadline here.
+//!     cancelled. The work checks it too, as it queues its head
+//!     ([`Connection::head_by`]): a head produced after it is never sent,
+//!     whichever runtime runs first, and a head queued in time stands
+//!     however late the watcher runs. After the head there is no deadline
+//!     here.
 //!   - **a cancel** (main's) reaches the work through its token
 //!     ([`Requests::cancel`]); the connection has queued `cancelled`.
 //!   - **work that ended without its outcome** (its token cancelled by its
@@ -56,7 +61,7 @@ use std::task::Poll;
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::stream::{Abort, AbortCode, SendError};
-use fc_service::conn::Connection;
+use fc_service::conn::{Connection, Headed};
 use fc_service::panic::{Labeled, TaskKind};
 use freedom_ipfs_gateway::{
     CancellationToken, GatewayCore, GatewayCoreRequest, NativeRequest, parse_native_request,
@@ -105,6 +110,12 @@ impl Requests {
         self.table
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The requests admitted now.
+    #[cfg(test)]
+    pub fn admitted(&self) -> usize {
+        self.lock().len()
     }
 
     /// `ipfs.request`, on the reader thread: refused, or admitted with its
@@ -179,11 +190,17 @@ impl Requests {
         // after cancels it, and its watcher settles it.
         let work = Labeled::new(
             TaskKind::REQUEST,
-            serve(conn.clone(), id, core, parsed.request, head_only),
+            serve(conn.clone(), id, core, parsed.request, head_only, deadline),
         );
         let Ok(join) = context.spawn_request(token.clone(), work) else {
-            drop(slot);
-            return refuse(conn, id, ErrorCode::Stopped, NOT_LIVE);
+            // Admitted until its refusal is written, as any request is.
+            refuse(conn, id, ErrorCode::Stopped, NOT_LIVE);
+            let conn = conn.clone();
+            drop(self.runtime.spawn(Labeled::new(WATCHER, async move {
+                conn.settled(id).await;
+                drop(slot);
+            })));
+            return;
         };
         drop(self.runtime.spawn(Labeled::new(
             WATCHER,
@@ -263,13 +280,7 @@ async fn watch(watched: Watched) {
     let id = slot.id;
     let ended = until_deadline(join, deadline, || {
         // Only before the head: once one is queued, the reply is taken.
-        if conn
-            .reply_error(
-                id,
-                &ErrorBody::new(ErrorCode::Deadline, "no head within headers_ms"),
-            )
-            .is_ok()
-        {
+        if conn.reply_error(id, &late()).is_ok() {
             token.cancel();
         }
     })
@@ -334,6 +345,7 @@ async fn serve(
     core: GatewayCore,
     request: GatewayCoreRequest,
     head_only: bool,
+    deadline: Instant,
 ) {
     let hooks = RequestHooks::of(&request);
     hooks.at(Phase::Request).await;
@@ -352,8 +364,13 @@ async fn serve(
         })
         .collect();
     let head = json!({ "status": status, "headers": headers, "body": body });
-    match conn.head(id, &head, body) {
-        Ok(()) => {}
+    // Queued only before the deadline, checked as it is queued: however
+    // late this work runs, and however late its watcher, a head after
+    // `headers_ms` is never sent, and one queued in time stands.
+    match conn.head_by(id, &head, body, deadline.into_std(), &late()) {
+        Ok(Headed::Queued) => {}
+        // `deadline` is its reply: the work ends here.
+        Ok(Headed::Late) => return,
         Err(SendError::TooLarge) => {
             let _ = conn.reply_error(
                 id,
@@ -391,6 +408,11 @@ async fn serve(
 }
 
 const STOPPED: &str = "the instance was stopped";
+
+/// The reply to a request with no head within `headers_ms`.
+fn late() -> ErrorBody {
+    ErrorBody::new(ErrorCode::Deadline, "no head within headers_ms")
+}
 const NOT_LIVE: &str = "the instance is retired, unknown or stopping";
 
 fn stopped() -> ErrorBody {
