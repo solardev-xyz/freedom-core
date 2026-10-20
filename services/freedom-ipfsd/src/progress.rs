@@ -69,27 +69,30 @@ pub fn fit(id: u64, mut result: Value) -> Value {
     let base = fc_service::conn::head_len(id, &result)
         .map_or(usize::MAX, |len| len.saturating_sub(JSON_HEADER));
     let mut room = MAX_PAYLOAD.saturating_sub(base);
-    let mut fits = |item: &Value| {
-        // Its JSON, and the comma before it.
-        let len = encoded_len(item).saturating_add(1);
-        let fits = len <= room;
-        if fits {
-            room -= len;
-        }
-        fits
-    };
-    let active: Vec<Value> = active.into_iter().take_while(|item| fits(item)).collect();
-    let mut kept: Vec<Value> = events
-        .into_iter()
-        .rev()
-        .take_while(|item| fits(item))
-        .collect();
+    let active = keep(active.into_iter(), &mut room);
+    let mut kept = keep(events.into_iter().rev(), &mut room);
     kept.reverse();
     if let Some(progress) = result.get_mut("progress").and_then(Value::as_object_mut) {
         progress.insert("active".into(), Value::Array(active));
         progress.insert("events".into(), Value::Array(kept));
     }
     result
+}
+
+/// The items of `items`, in its order, while they fit in `room` as one
+/// list: each its JSON, and every one but the first a comma before it.
+fn keep(items: impl Iterator<Item = Value>, room: &mut usize) -> Vec<Value> {
+    let mut kept = Vec::new();
+    for item in items {
+        let comma = usize::from(!kept.is_empty());
+        let len = encoded_len(&item).saturating_add(comma);
+        if len > *room {
+            break;
+        }
+        *room -= len;
+        kept.push(item);
+    }
+    kept
 }
 
 /// The length of `value`'s JSON, counted without encoding it.
@@ -148,6 +151,51 @@ mod tests {
         assert_eq!(fit(7, small.clone()), small);
         let none = json!({ "progress": null, "store": null });
         assert_eq!(fit(7, none.clone()), none);
+    }
+
+    /// `result` with the path of `progress[list][0]` padded so that the
+    /// reply for `id` is exactly one frame.
+    fn exactly_a_frame(id: u64, mut result: Value, list: &str) -> Value {
+        let short = frame_len(id, &result);
+        result["progress"][list][0]["path"] = Value::String("x".repeat(MAX_PAYLOAD - short));
+        assert_eq!(frame_len(id, &result), MAX_PAYLOAD);
+        result
+    }
+
+    /// Review of #143: a reply that is exactly one frame is unchanged: a
+    /// list's first item has no comma before it. With the largest ID, and
+    /// with a target and an event.
+    #[test]
+    fn a_reply_of_exactly_a_frame_is_unchanged() {
+        let one = |active: Value, events: Value| {
+            json!({ "gateway": {}, "budget": {}, "store": null,
+                "progress": { "active_count": active.as_array().unwrap().len(),
+                    "event_count": events.as_array().unwrap().len(),
+                    "active": active, "events": events } })
+        };
+        let max = fc_protocol::message::MAX_ID;
+        for (id, result, list) in [
+            (
+                max,
+                one(json!([{ "id": 1, "path": "" }]), json!([])),
+                "active",
+            ),
+            (7, one(json!([]), json!([{ "path": "" }])), "events"),
+            (
+                max,
+                one(json!([{ "path": "a" }]), json!([{ "path": "" }])),
+                "events",
+            ),
+        ] {
+            let exact = exactly_a_frame(id, result, list);
+            assert_eq!(fit(id, exact.clone()), exact, "{id} {list}");
+            // One byte more, and the item that made it so goes.
+            let mut over = exact.clone();
+            let path = format!("{}x", over["progress"][list][0]["path"].as_str().unwrap());
+            over["progress"][list][0]["path"] = Value::String(path);
+            let fitted = fit(id, over);
+            assert_eq!(fitted["progress"][list], json!([]), "{id} {list}");
+        }
     }
 
     /// Review point: a snapshot past one frame keeps its active targets,
