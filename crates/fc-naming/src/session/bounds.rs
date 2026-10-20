@@ -45,7 +45,7 @@ pub struct Bounds {
     /// answer whose parse could hold more is refused as `too_large`, its
     /// endpoint's failure, whatever its session holds, so one endpoint's
     /// answer can't spend a lookup's budget. Valid answers sit far below
-    /// it: a 200 KB anchor block is charged about 460 KB.
+    /// it: a 200 KB anchor block is charged about 660 KB.
     pub answer_charge_bytes: usize,
     /// What all sessions may hold: a session whose charge crosses it fails,
     /// and new sessions are busy until the total is under `resume_bytes`.

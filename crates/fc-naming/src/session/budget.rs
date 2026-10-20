@@ -38,8 +38,8 @@ pub(crate) const SURROGATE_BYTES: usize = 80;
 /// pass that allocates nothing (#73), and [`SURROGATE_BYTES`] for each
 /// escaped surrogate. A text that isn't JSON is parsed only up to its
 /// error, at most a value per two bytes. A block of 1,000 transaction
-/// hashes (about 69 KB) is so charged about 160 KB, where the flat factor
-/// charged 2.2 MB.
+/// hashes (about 69 KB) is so bounded at about 160 KB; with its body, the
+/// answer is charged about 230 KB, where the flat factor charged 2.2 MB.
 pub(crate) fn parsed_bound(text: &str) -> usize {
     let values = crate::jsjson::index::Index::values_in(text).unwrap_or(text.len().div_ceil(2));
     text.len()

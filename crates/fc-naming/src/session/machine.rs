@@ -322,8 +322,8 @@ pub struct Machine {
     /// `eth_getBlockByNumber`): their answers are read for a number or a
     /// hash at once, so their charge is taken back as they are read (#73).
     anchor_requests: RefCell<std::collections::BTreeSet<u64>>,
-    /// Those answers' charges, until read: by request id, the session and
-    /// the bytes.
+    /// Those answers' charges, until read or cancelled: by request id, the
+    /// session and the bytes.
     anchor_charges: AnchorCharges,
 }
 
@@ -1158,6 +1158,12 @@ impl Machine {
                     }
                     Effect::Cancel { id, .. } => {
                         self.anchor_requests.borrow_mut().remove(id);
+                        // An anchor answer delivered but never read: its
+                        // future was dropped, so its charge goes now.
+                        let released = self.anchor_charges.borrow_mut().remove(id);
+                        if let Some((session, bytes)) = released {
+                            self.ctx.budget.borrow_mut().uncharge(session, bytes);
+                        }
                     }
                     _ => {}
                 }
@@ -1191,6 +1197,9 @@ impl Machine {
     /// - **The anchor's answers** are charged until the poll that reads
     ///   them, which keeps only a number or a hash.
     pub fn complete(&self, id: u64, answer: Answer) -> bool {
+        // An anchor request leaves the set on every path; only an answer
+        // charged and taken moves on to `anchor_charges`.
+        let anchor = self.anchor_requests.borrow_mut().remove(&id);
         let session = self
             .ctx
             .rt
@@ -1215,12 +1224,18 @@ impl Machine {
         if !self.ctx.budget.borrow_mut().charge(session, bytes, &bounds) {
             return false;
         }
-        if self.anchor_requests.borrow_mut().remove(&id) {
+        // An answer the executor doesn't take (the request already has
+        // one) holds nothing.
+        if !self.ctx.rt.complete(id, answer) {
+            self.ctx.budget.borrow_mut().uncharge(session, bytes);
+            return false;
+        }
+        if anchor {
             self.anchor_charges
                 .borrow_mut()
                 .insert(id, (session, bytes));
         }
-        self.ctx.rt.complete(id, answer)
+        true
     }
 
     pub fn schedule(&self, at: Ms, token: u64) {
@@ -1408,5 +1423,129 @@ mod tests {
         retire(&mut retired, &list(&["b", "c"]), &list(&["c", "d"]), 2);
         retire(&mut retired, &list(&["c", "d"]), &list(&["d"]), 2);
         assert_eq!(retired, list(&["b", "c"]));
+    }
+
+    fn four_endpoints() -> Config {
+        Config {
+            rpc: (0..4).map(|i| format!("https://e{i}.example")).collect(),
+            direct: None,
+            order: vec!["quorum".into()],
+            prefer_verified: false,
+            quorum: crate::jsjson::parse(r#"{"k":3,"m":2,"anchor":"latest"}"#).unwrap(),
+            myotis_enabled: false,
+            prover: None,
+            tezos: Vec::new(),
+            bounds: Default::default(),
+        }
+    }
+
+    fn machine(config: Config) -> Machine {
+        Machine::new(
+            0,
+            config,
+            Box::new(super::super::random::Mulberry32::new(7)),
+        )
+    }
+
+    /// An anchor answer refused as too large is never charged, and its
+    /// request id is forgotten with it (#132 review).
+    #[test]
+    fn a_refused_anchor_answer_leaves_no_bookkeeping() {
+        let mut machine = machine(four_endpoints());
+        let pad = vec!["[]"; 20_000].join(",");
+        let huge = format!(r#"{{"jsonrpc":"2.0","id":1,"result":"0x1312d00","pad":[{pad}]}}"#);
+        for round in 0..3 {
+            machine.resolve_content(&format!("leak{round}.eth"));
+            let mut turns = 0;
+            while turns == 0 || machine.running() > 0 {
+                machine.poll();
+                for emitted in machine.take_effects() {
+                    if let Effect::Request {
+                        id,
+                        request: Request::Rpc { body, .. },
+                        ..
+                    } = emitted.effect
+                    {
+                        assert!(is_anchor_body(&body));
+                        let answer = Answer::Rpc {
+                            status: 200,
+                            body: huge.as_bytes().to_vec(),
+                        };
+                        assert!(machine.complete(id, answer));
+                    }
+                }
+                machine.take_replies();
+                turns += 1;
+                assert!(turns < 10);
+            }
+            assert_eq!(machine.held(), 0);
+            assert!(machine.anchor_requests.borrow().is_empty());
+            assert!(machine.anchor_charges.borrow().is_empty());
+            // Past the endpoints' quarantine.
+            machine.fire_next((round + 1) * 60_001);
+        }
+    }
+
+    /// An anchor answer delivered but never read (its lookup ended first)
+    /// is uncharged as its request is cancelled (#132 review).
+    #[test]
+    fn an_anchor_answer_never_read_goes_with_its_cancel() {
+        let mut config = four_endpoints();
+        let mut machine = machine(config.clone());
+        machine.resolve_content("vitalik.eth");
+        machine.poll();
+        let mut delivered = 0;
+        for emitted in machine.take_effects() {
+            if let Effect::Request { id, .. } = emitted.effect {
+                let answer = Answer::Rpc {
+                    status: 200,
+                    body: br#"{"jsonrpc":"2.0","id":1,"result":"0x1312d00"}"#.to_vec(),
+                };
+                assert!(machine.complete(id, answer));
+                delivered += 1;
+            }
+        }
+        assert_eq!(delivered, 4);
+        assert_eq!(machine.anchor_charges.borrow().len(), 4);
+        assert!(machine.held() > 0);
+        // A real configuration change ends the lookup before it reads them.
+        config.prefer_verified = true;
+        machine.configure(config, false);
+        let cancelled = machine
+            .take_effects()
+            .into_iter()
+            .filter(|emitted| matches!(emitted.effect, Effect::Cancel { .. }))
+            .count();
+        assert_eq!(cancelled, 4);
+        machine.take_replies();
+        assert_eq!(machine.running(), 0);
+        assert_eq!(machine.held(), 0);
+        assert!(machine.anchor_requests.borrow().is_empty());
+        assert!(machine.anchor_charges.borrow().is_empty());
+    }
+
+    /// A second answer to one request isn't taken, and holds nothing.
+    #[test]
+    fn an_answer_not_taken_is_not_charged() {
+        let mut machine = machine(four_endpoints());
+        machine.resolve_content("vitalik.eth");
+        machine.poll();
+        let id = machine
+            .take_effects()
+            .into_iter()
+            .find_map(|emitted| match emitted.effect {
+                Effect::Request { id, .. } => Some(id),
+                Effect::Cancel { .. } => None,
+            })
+            .unwrap();
+        let answer = || Answer::Rpc {
+            status: 200,
+            body: br#"{"jsonrpc":"2.0","id":1,"result":"0x1312d00"}"#.to_vec(),
+        };
+        assert!(machine.complete(id, answer()));
+        let held = machine.held();
+        assert!(!machine.complete(id, answer()));
+        assert_eq!(machine.held(), held);
+        assert_eq!(machine.anchor_charges.borrow().len(), 1);
     }
 }
