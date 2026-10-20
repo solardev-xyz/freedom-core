@@ -300,6 +300,10 @@ struct State {
     waiters: Vec<Waker>,
     /// The writer holds a frame it hasn't finished writing.
     writing: bool,
+    /// The request whose terminal (its reply, a head without a body, its
+    /// stream's end or abort) that frame is: the request isn't settled
+    /// until the write and its flush are done ([`Connection::settled`]).
+    writing_terminal: Option<u64>,
     /// When the writer last claimed or finished a frame.
     progress: Instant,
     writer_done: bool,
@@ -325,6 +329,7 @@ impl Link {
                 dispatching: false,
                 waiters: Vec::new(),
                 writing: false,
+                writing_terminal: None,
                 progress: Instant::now(),
                 writer_done: false,
                 input: VecDeque::new(),
@@ -496,6 +501,36 @@ impl Connection {
         self.queue(need, |state| (state.sender.head(id, json, body), false))
     }
 
+    /// Answers request `id` with a head, as [`Connection::head`] does, only
+    /// if it is queued before `deadline`: from `deadline` on, `late` is
+    /// queued as the request's one reply instead, unless something answered
+    /// it already. The check and the queueing are one step under the
+    /// connection's lock, so however late its producer runs, a head is never
+    /// queued after its deadline, and one queued in time stands (0007,
+    /// "`headers_ms`").
+    pub fn head_by<T: Serialize>(
+        &self,
+        id: u64,
+        result: &T,
+        body: bool,
+        deadline: Instant,
+        late: &ErrorBody,
+    ) -> Result<Headed, SendError> {
+        let mut json = Vec::new();
+        write_result(&mut json, id, result).map_err(|_| SendError::TooLarge)?;
+        let mut late_json = Vec::new();
+        write_error(&mut late_json, id, late).map_err(|_| SendError::TooLarge)?;
+        let need = if body { Need::Open } else { Need::Owed };
+        self.queue(need, |state| {
+            let queued = if Instant::now() < deadline {
+                state.sender.head(id, json, body).map(|()| Headed::Queued)
+            } else {
+                state.sender.reply(id, late_json).map(|()| Headed::Late)
+            };
+            (queued, false)
+        })
+    }
+
     /// Queues as much of `bytes` as stream `id`'s window and the writer's cap
     /// allow, without waiting.
     pub fn push(&self, id: u64, bytes: &[u8]) -> Result<usize, SendError> {
@@ -545,9 +580,11 @@ impl Connection {
     }
 
     /// Resolves once nothing of request `id` is held any more: its reply,
-    /// or its stream's terminal, is written (or it was never held), or the
-    /// connection has ended. A service keeps a request's admission until
-    /// then (0007, "Admission": heads and open streams count).
+    /// or its stream's terminal, has been written and flushed to stdout (or
+    /// it was never held), or the connection has ended. A terminal the
+    /// writer has claimed but is still writing (main isn't reading) holds
+    /// it. A service keeps a request's admission until then (0007,
+    /// "Admission": heads and open streams count).
     pub fn settled(&self, id: u64) -> SettledFuture<'_> {
         SettledFuture { conn: self, id }
     }
@@ -596,6 +633,15 @@ impl Connection {
     }
 }
 
+/// What [`Connection::head_by`] queued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Headed {
+    /// The head, in time.
+    Queued,
+    /// Its deadline had passed: the late reply, in its place.
+    Late,
+}
+
 /// What a connection's writer holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConnectionStats {
@@ -619,7 +665,8 @@ impl Future for SettledFuture<'_> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let mut state = self.conn.link.lock();
-        if state.end.is_some() || !state.sender.is_live(self.id) {
+        let held = state.sender.is_live(self.id) || state.writing_terminal == Some(self.id);
+        if state.end.is_some() || !held {
             return Poll::Ready(());
         }
         if !state.waiters.iter().any(|w| w.will_wake(cx.waker())) {
@@ -1338,6 +1385,18 @@ struct Claimed {
     freed: bool,
 }
 
+/// The request a frame belongs to.
+fn written_id(written: Written) -> u64 {
+    match written {
+        Written::Head { id }
+        | Written::Reply { id }
+        | Written::Cancelled { id }
+        | Written::Data { id, .. }
+        | Written::End { id }
+        | Written::Abort { id, .. } => id,
+    }
+}
+
 fn write_loop(link: &Link, mut output: impl Write) {
     let mut frame = Vec::with_capacity(MAX_DATA + 64);
     while let Some(claimed) = claim(link, &mut frame) {
@@ -1360,6 +1419,14 @@ fn write_loop(link: &Link, mut output: impl Write) {
         let mut state = link.lock();
         state.writing = false;
         state.progress = Instant::now();
+        // A terminal written and flushed: its request is settled now.
+        let settled = if state.writing_terminal.take().is_some() {
+            std::mem::take(&mut state.waiters)
+        } else {
+            Vec::new()
+        };
+        drop(state);
+        wake(settled);
     }
 }
 
@@ -1386,9 +1453,11 @@ fn claim(link: &Link, frame: &mut Vec<u8>) -> Option<Claimed> {
             let live = state.sender.live();
             if let Some(written) = state.sender.next_frame(frame) {
                 let freed = state.sender.live() < live;
-                // Data made room for producers; a request that ended
-                // settles its waiters ([`Connection::settled`]).
-                let wakers = if freed || matches!(written, Written::Data { .. }) {
+                // A terminal: its request is settled once it is written
+                // and flushed, not now ([`Connection::settled`]).
+                state.writing_terminal = freed.then(|| written_id(written));
+                // Data made room for producers.
+                let wakers = if matches!(written, Written::Data { .. }) {
                     std::mem::take(&mut state.waiters)
                 } else {
                     Vec::new()

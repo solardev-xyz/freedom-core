@@ -16,7 +16,7 @@ use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::frame::{Decoder, Frame, KIND_JSON, Kinds};
 use fc_protocol::stream::{Abort, AbortCode, Delivery, Receiver, Side, StreamFrame, credit_frame};
 use fc_service::Exit;
-use fc_service::conn::{self, Connection, End, Hello, Options, Request, Service};
+use fc_service::conn::{self, Connection, End, Headed, Hello, Options, Request, Service};
 use serde_json::{Value, json};
 
 /// Blocks on a future with the current thread as its waker: enough for the
@@ -45,6 +45,7 @@ fn body(len: usize) -> Vec<u8> {
 
 #[derive(Default)]
 struct Toy {
+    headed: Mutex<Vec<Headed>>,
     cancels: Mutex<Vec<u64>>,
     ends: Mutex<Vec<End>>,
     conn: Mutex<Option<Connection>>,
@@ -62,14 +63,35 @@ impl Service for Toy {
     }
 
     fn request(&self, conn: &Connection, request: Request<'_>) {
+        *self.conn.lock().unwrap() = Some(conn.clone());
         let params: Value = request
             .params
             .map(|raw| serde_json::from_str(raw.get()).unwrap())
             .unwrap_or(Value::Null);
         match request.method {
-            "t.echo" => {
-                *self.conn.lock().unwrap() = Some(conn.clone());
-                conn.reply(request.id, &json!({ "echo": params })).unwrap();
+            "t.echo" => conn.reply(request.id, &json!({ "echo": params })).unwrap(),
+            "t.nobody" => conn
+                .head(request.id, &json!({ "body": false }), false)
+                .unwrap(),
+            // A head due `in_ms` from now (negative: past due).
+            "t.head_by" => {
+                let in_ms = params["in_ms"].as_i64().unwrap();
+                let now = Instant::now();
+                let deadline = if in_ms >= 0 {
+                    now + Duration::from_millis(in_ms.unsigned_abs())
+                } else {
+                    now - Duration::from_millis(in_ms.unsigned_abs())
+                };
+                let headed = conn
+                    .head_by(
+                        request.id,
+                        &json!({ "body": false }),
+                        false,
+                        deadline,
+                        &ErrorBody::new(ErrorCode::Deadline, "late"),
+                    )
+                    .unwrap();
+                self.headed.lock().unwrap().push(headed);
             }
             "t.event" => {
                 conn.event("t.happened", &json!({ "n": 1 })).unwrap();
@@ -153,13 +175,22 @@ fn options() -> Options {
 }
 
 fn start(options: Options) -> Main {
+    start_with(options, |pipe| pipe)
+}
+
+/// As [`start`], with stdout wrapped by `output`.
+fn start_with<W: Write + Send + 'static>(
+    options: Options,
+    output: impl FnOnce(std::io::PipeWriter) -> W,
+) -> Main {
     let (stdin_reader, stdin_writer) = std::io::pipe().unwrap();
     let (mut stdout_reader, stdout_writer) = std::io::pipe().unwrap();
     let toy = Arc::new(Toy::default());
     let (exit_tx, exit) = mpsc::channel();
     let service = toy.clone();
+    let output = output(stdout_writer);
     std::thread::spawn(move || {
-        let _ = exit_tx.send(conn::run(service, options, stdin_reader, stdout_writer));
+        let _ = exit_tx.send(conn::run(service, options, stdin_reader, output));
     });
     let (chunk_tx, chunks) = mpsc::channel();
     std::thread::spawn(move || {
@@ -348,6 +379,142 @@ fn a_settle_owes_what_is_written_and_settled_waits_for_the_terminal() {
         next.iter()
             .any(|m| *m == json!({ "type": "event", "event": "t.settled", "data": { "id": 4 } })),
         "{next:?}"
+    );
+    main.close();
+    assert_eq!(main.exit(), Exit::Ok);
+}
+
+/// Holds the writer inside the first write of request 2's frame of `kind`,
+/// before any of its bytes reach the pipe, until released.
+#[derive(Clone)]
+struct Gate {
+    kind: u8,
+    state: Arc<(Mutex<(bool, bool)>, std::sync::Condvar)>,
+}
+
+impl Gate {
+    fn new(kind: u8) -> Gate {
+        Gate {
+            kind,
+            state: Arc::default(),
+        }
+    }
+
+    /// Waits until the writer is held.
+    fn held(&self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut state = self.state.0.lock().unwrap();
+        while !state.0 {
+            let left = deadline
+                .checked_duration_since(Instant::now())
+                .expect("the write never began");
+            state = self.state.1.wait_timeout(state, left).unwrap().0;
+        }
+    }
+
+    fn release(&self) {
+        self.state.0.lock().unwrap().1 = true;
+        self.state.1.notify_all();
+    }
+}
+
+struct Gated {
+    pipe: std::io::PipeWriter,
+    gate: Gate,
+}
+
+impl Write for Gated {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let ours = bytes.len() > 4
+            && bytes[4] == self.gate.kind
+            && if self.gate.kind == KIND_JSON {
+                serde_json::from_slice::<Value>(&bytes[5..]).is_ok_and(|m| m["id"] == 2)
+            } else {
+                bytes.get(5..13) == Some(&2u64.to_be_bytes()[..])
+            };
+        if ours {
+            let mut state = self.gate.state.0.lock().unwrap();
+            state.0 = true;
+            self.gate.state.1.notify_all();
+            while !state.1 {
+                state = self.gate.state.1.wait(state).unwrap();
+            }
+        }
+        self.pipe.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.pipe.flush()
+    }
+}
+
+/// Review of #140: a request isn't settled while the writer is still
+/// writing its terminal: a reply, a head without a body, a stream's end or
+/// its abort.
+#[test]
+fn settled_waits_for_a_terminal_still_being_written() {
+    use fc_protocol::frame::{KIND_ABORT, KIND_END};
+    for (case, kind) in [
+        ("reply", KIND_JSON),
+        ("head without a body", KIND_JSON),
+        ("end", KIND_END),
+        ("abort", KIND_ABORT),
+    ] {
+        let gate = Gate::new(kind);
+        let held = gate.clone();
+        let mut main = start_with(options(), move |pipe| Gated { pipe, gate: held });
+        main.hello();
+        match case {
+            "reply" => main.request(2, "t.echo", json!(2)),
+            "head without a body" => main.request(2, "t.nobody", Value::Null),
+            "end" => {
+                main.request(2, "t.body", json!({ "len": 0 }));
+                assert_eq!(main.message()["id"], 2);
+            }
+            _ => {
+                main.request(2, "t.hang", Value::Null);
+                assert_eq!(main.message()["id"], 2);
+                main.frame().unwrap();
+                main.json(json!({ "type": "cancel", "id": 2 }));
+            }
+        }
+        gate.held();
+        let conn = main.toy.conn.lock().unwrap().clone().unwrap();
+        let waker = std::task::Waker::noop();
+        let mut settled = std::pin::pin!(conn.settled(2));
+        let early = settled
+            .as_mut()
+            .poll(&mut Context::from_waker(waker))
+            .is_ready();
+        gate.release();
+        main.frame().unwrap();
+        // Written and flushed: settled now.
+        block_on(settled);
+        main.close();
+        assert_eq!(main.exit(), Exit::Ok);
+        assert!(
+            !early,
+            "{case}: settled while its terminal was being written"
+        );
+    }
+}
+
+#[test]
+fn a_head_is_queued_only_before_its_deadline() {
+    let mut main = start(options());
+    main.hello();
+    main.request(2, "t.head_by", json!({ "in_ms": 60_000 }));
+    assert_eq!(main.message()["result"]["body"], false);
+    // Past its deadline: the late reply instead.
+    main.request(3, "t.head_by", json!({ "in_ms": -1 }));
+    let late = main.message();
+    assert_eq!(
+        (&late["id"], &late["error"]["code"]),
+        (&json!(3), &json!("deadline"))
+    );
+    assert_eq!(
+        *main.toy.headed.lock().unwrap(),
+        [Headed::Queued, Headed::Late]
     );
     main.close();
     assert_eq!(main.exit(), Exit::Ok);
