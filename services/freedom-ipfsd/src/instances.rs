@@ -59,17 +59,21 @@ use fc_service::conn::Connection;
 use fc_service::log;
 use fc_service::panic::{Labeled, TaskKind, with_kind};
 use fc_service::watchdog::Watchdog;
+use freedom_ipfs_core::Reservation;
 use freedom_ipfs_gateway::{
-    GatewayConfig, GatewayCore, Instance, InstanceConfig, OnlineNode, Quiescence,
+    GatewayConfig, GatewayCore, Instance, InstanceConfig, InstanceStartError, OnlineNode,
+    Quiescence,
 };
 use freedom_ipfs_store::{SqliteBlockStore, StoreError};
 use serde_json::json;
 use serde_json::value::RawValue;
 use tokio::runtime::Handle;
 
+use crate::budget::{Budgets, Fixed};
 use crate::network::NetworkPolicy;
 use crate::params::{self, Start, Store};
 use crate::requests::Requests;
+use crate::stats::GatewayCounters;
 use crate::testhooks;
 
 /// The teardown's bound (0007): past it, `teardown_unproven` and exit 70.
@@ -144,6 +148,8 @@ pub struct Instances {
     runtime: Handle,
     /// The process's requests: a teardown settles its instance's.
     requests: Arc<Requests>,
+    /// The process's budgets: every instance's builder gets them.
+    budgets: Arc<Budgets>,
     table: Mutex<Table>,
     /// An instance left the table, or a teardown failed.
     changed: Condvar,
@@ -167,6 +173,10 @@ struct Slot {
     /// The `ipfs.start` request that admitted it.
     start: u64,
     state: State,
+    /// Its store's fixed reservation (0007, "Budgets"): released with the
+    /// slot, once its teardown is proven or nothing was built. Its caches'
+    /// is upstream's instance's, which keeps it as long.
+    _store: Reservation,
 }
 
 enum State {
@@ -192,9 +202,11 @@ enum State {
 /// A live instance, and the one gateway its requests share: the gateway's
 /// header permits and queue are the instance's (0007: today's 8 permits and
 /// 15 s queue).
-struct Running {
-    instance: Instance,
-    core: GatewayCore,
+pub struct Running {
+    pub instance: Instance,
+    pub core: GatewayCore,
+    /// Its `ipfs.stats` gateway counters.
+    pub counters: Arc<GatewayCounters>,
 }
 
 /// An instance fenced after a request panic, to tear down
@@ -243,11 +255,17 @@ impl Slot {
 }
 
 impl Instances {
-    pub fn new(kind: Kind, runtime: Handle, requests: Arc<Requests>) -> Arc<Instances> {
+    pub fn new(
+        kind: Kind,
+        runtime: Handle,
+        requests: Arc<Requests>,
+        budgets: Arc<Budgets>,
+    ) -> Arc<Instances> {
         Arc::new(Instances {
             kind,
             runtime,
             requests,
+            budgets,
             table: Mutex::new(Table::default()),
             changed: Condvar::new(),
         })
@@ -279,16 +297,12 @@ impl Instances {
     /// is live: built, its start answered, not retired. A request's work is
     /// spawned here, under the table's lock, so a fence handled after it
     /// finds the request.
-    pub fn with_live<R>(
-        &self,
-        instance_id: &str,
-        f: impl FnOnce(&Instance, &GatewayCore) -> R,
-    ) -> Option<R> {
+    pub fn with_live<R>(&self, instance_id: &str, f: impl FnOnce(&Running) -> R) -> Option<R> {
         match self.lock().active.get(instance_id) {
             Some(Slot {
                 state: State::Live(running),
                 ..
-            }) => Some(f(&running.instance, &running.core)),
+            }) => Some(f(running)),
             _ => None,
         }
     }
@@ -300,12 +314,26 @@ impl Instances {
             Ok(start) => start,
             Err(message) => return refuse(conn, id, ErrorCode::InvalidArgument, message),
         };
-        let seq = {
+        let fixed = Fixed::of(start.store, &gateway_config(&start));
+        let (seq, caches) = {
             let mut table = self.lock();
             if let Err((code, message)) = self.admit(&table, &start) {
                 drop(table);
                 return refuse(conn, id, code, message);
             }
+            // Within the free budget, or `busy`: its store's and its
+            // caches' fixed reservations, at once. The caches' part goes to
+            // upstream's instance, which reserves it as it is built.
+            let Ok(mut store) = self.budgets.memory.try_reserve(fixed.total()) else {
+                drop(table);
+                return refuse(
+                    conn,
+                    id,
+                    ErrorCode::Busy,
+                    "the memory budget can't hold the instance's fixed reservation",
+                );
+            };
+            let caches = store.split(fixed.caches);
             table.admitted += 1;
             table.active.insert(
                 start.instance.clone(),
@@ -316,9 +344,10 @@ impl Instances {
                         bound: None,
                         stops: Vec::new(),
                     },
+                    _store: store,
                 },
             );
-            table.admitted
+            (table.admitted, caches)
         };
         log::info(
             "instance starting",
@@ -333,7 +362,9 @@ impl Instances {
         })));
         let (instances, conn) = (self.clone(), conn.clone());
         drop(self.runtime.spawn_blocking(move || {
-            with_kind(CONTROL, || instances.build(&conn, id, start, seq));
+            with_kind(CONTROL, || {
+                instances.build(&conn, id, start, seq, fixed, caches);
+            });
         }));
     }
 
@@ -383,10 +414,18 @@ impl Instances {
 
     /// The start's job: builds the instance, then makes it live, or tears it
     /// down if it was fenced meanwhile.
-    fn build(&self, conn: &Connection, id: u64, start: Start, seq: u64) {
+    fn build(
+        &self,
+        conn: &Connection,
+        id: u64,
+        start: Start,
+        seq: u64,
+        fixed: Fixed,
+        caches: Option<Reservation>,
+    ) {
         testhooks::start_delay();
         testhooks::panic_at("start");
-        let built = self.open(&start, seq);
+        let built = self.open(&start, seq, fixed, caches);
         let instance_id = start.instance;
         let mut table = self.lock();
         let (fenced, bound, stops) = match table.active.get_mut(&instance_id) {
@@ -441,7 +480,11 @@ impl Instances {
         };
         if fenced.is_none() {
             log::info("instance started", json!({ "instance": instance_id }));
-            slot.state = State::Live(Box::new(Running { instance, core }));
+            slot.state = State::Live(Box::new(Running {
+                instance,
+                core,
+                counters: Arc::default(),
+            }));
             // Queued under the lock: a stop or a cancel handled after this
             // finds a live instance whose start is answered. A head without
             // a body, not a reply: a cancel that arrives before the writer
@@ -462,12 +505,18 @@ impl Instances {
 
     /// Opens the store and builds the instance on a runtime of its own, and
     /// the one gateway its requests share.
-    fn open(&self, start: &Start, seq: u64) -> Result<(Instance, GatewayCore), ErrorBody> {
+    fn open(
+        &self,
+        start: &Start,
+        seq: u64,
+        fixed: Fixed,
+        caches: Option<Reservation>,
+    ) -> Result<(Instance, GatewayCore), ErrorBody> {
         let store = match (&self.kind, start.store) {
-            (Kind::Persistent { store }, Store::Disk { max_bytes }) => {
-                SqliteBlockStore::open(store, max_bytes)
+            (Kind::Persistent { store }, Store::Disk { .. }) => {
+                SqliteBlockStore::open_with(store, fixed.options)
             }
-            (_, Store::Memory { max_bytes }) => SqliteBlockStore::in_memory(max_bytes),
+            (_, Store::Memory { .. }) => SqliteBlockStore::in_memory_with(fixed.options),
             // Refused at admission.
             (Kind::Ephemeral, Store::Disk { .. }) => {
                 return Err(ErrorBody::new(
@@ -488,23 +537,37 @@ impl Instances {
         match start.network {
             NetworkPolicy::Direct => {}
         }
-        let built = OnlineNode::builder(store.clone())
+        let builder = OnlineNode::builder(store.clone())
             .routing_mode(start.routing.mode)
             .delegated_routers(start.routing.delegated_routers.iter().cloned())
             .dht_query_timeout(start.routing.dht_query_timeout)
             .dht_max_providers(start.routing.dht_max_providers)
-            .gateway_config(
-                GatewayConfig::new(start.gateway.max_concurrent_requests)
-                    .with_request_queue_timeout(start.gateway.request_queue_timeout),
-            )
-            .build_instance(self.kind.runtime(seq));
+            .gateway_config(testhooks::gateway_config(gateway_config(start)))
+            .shared_limits(self.budgets.limits.clone())
+            .memory_budget(self.budgets.memory.clone());
+        // The caches' part, reserved at admission, handed to upstream's
+        // instance, which reserves it again as it is built (only what the
+        // builder says it needs).
+        drop(caches);
+        let built = builder.build_instance(self.kind.runtime(seq));
         match built {
             Ok(instance) => {
                 testhooks::hold_teardown(&instance);
                 let core = instance.gateway_core();
                 Ok((instance, core))
             }
-            Err(_) => {
+            Err(InstanceStartError::FixedReservation { .. }) => {
+                let _ = store.close(STORE_CLOSE);
+                log::warn(
+                    "an instance's caches didn't fit the memory budget",
+                    json!({ "instance": start.instance }),
+                );
+                Err(ErrorBody::new(
+                    ErrorCode::Busy,
+                    "the memory budget can't hold the instance's fixed reservation",
+                ))
+            }
+            Err(InstanceStartError::Runtime(_)) => {
                 let _ = store.close(STORE_CLOSE);
                 log::error(
                     "an instance's runtime didn't start",
@@ -526,6 +589,7 @@ impl Instances {
         if let Some(Slot {
             start,
             state: State::Starting { fenced, bound, .. },
+            ..
         }) = table.active.get_mut(instance_id)
             && *start == id
             && fenced.is_none()
@@ -793,6 +857,13 @@ impl Instances {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
         }
     }
+}
+
+/// The gateway configuration an instance is built with: `ipfs.start`'s,
+/// upstream's defaults otherwise (its caches' capacities among them).
+fn gateway_config(start: &Start) -> GatewayConfig {
+    GatewayConfig::new(start.gateway.max_concurrent_requests)
+        .with_request_queue_timeout(start.gateway.request_queue_timeout)
 }
 
 /// A teardown's bound (see [`Instances::bound`]), from a caller that holds

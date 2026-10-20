@@ -7,29 +7,41 @@
 //! - `ipfs.request`: [`Requests`].
 //! - `ipfs.shutdown` ends the connection (fc-service); [`Service::end`]
 //!   then tears down every instance, and the process exits 0.
-//! - `ipfs.stats` comes with the budgets (PR 3b). Until then, as any other
-//!   method, it is `unknown_method`.
+//! - `ipfs.stats`: [`crate::stats`].
 
 use std::sync::Arc;
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_service::conn::{Connection, End, Hello, Request, Service};
 use serde_json::{Map, Value, json};
+use tokio::runtime::Handle;
 
+use crate::budget::Budgets;
 use crate::build_info;
 use crate::instances::Instances;
 use crate::requests::Requests;
+use crate::stats;
 
 pub struct IpfsService {
     instances: Arc<Instances>,
     requests: Arc<Requests>,
+    budgets: Arc<Budgets>,
+    /// The process runtime: `ipfs.stats`'s control job.
+    runtime: Handle,
 }
 
 impl IpfsService {
-    pub fn new(instances: Arc<Instances>, requests: Arc<Requests>) -> IpfsService {
+    pub fn new(
+        instances: Arc<Instances>,
+        requests: Arc<Requests>,
+        budgets: Arc<Budgets>,
+        runtime: Handle,
+    ) -> IpfsService {
         IpfsService {
             instances,
             requests,
+            budgets,
+            runtime,
         }
     }
 }
@@ -57,6 +69,15 @@ impl Service for IpfsService {
                 self.requests
                     .request(&self.instances, conn, request.id, request.params);
             }
+            "ipfs.stats" => stats::stats(
+                &self.instances,
+                &self.requests,
+                &self.budgets,
+                &self.runtime,
+                conn,
+                request.id,
+                request.params,
+            ),
             _ => {
                 let _ = conn.reply_error(
                     request.id,
@@ -214,11 +235,22 @@ mod tests {
             .enable_time()
             .build()
             .unwrap();
-        let requests = Requests::new(runtime.handle().clone());
-        let instances = Instances::new(Kind::Ephemeral, runtime.handle().clone(), requests.clone());
+        let budgets = Arc::new(Budgets::new(&Kind::Ephemeral).unwrap());
+        let requests = Requests::new(runtime.handle().clone(), budgets.memory.clone());
+        let instances = Instances::new(
+            Kind::Ephemeral,
+            runtime.handle().clone(),
+            requests.clone(),
+            budgets.clone(),
+        );
         let (seen, events) = mpsc::channel();
         let service = Arc::new(Observed {
-            inner: IpfsService::new(instances.clone(), requests),
+            inner: IpfsService::new(
+                instances.clone(),
+                requests,
+                budgets,
+                runtime.handle().clone(),
+            ),
             seen,
         });
         let (input, mut main_out) = std::io::pipe().unwrap();
@@ -313,10 +345,20 @@ mod tests {
                 .enable_time()
                 .build()
                 .unwrap();
-            let requests = Requests::new(runtime.handle().clone());
-            let instances =
-                Instances::new(Kind::Ephemeral, runtime.handle().clone(), requests.clone());
-            let service = Arc::new(IpfsService::new(instances.clone(), requests.clone()));
+            let budgets = Arc::new(Budgets::new(&Kind::Ephemeral).unwrap());
+            let requests = Requests::new(runtime.handle().clone(), budgets.memory.clone());
+            let instances = Instances::new(
+                Kind::Ephemeral,
+                runtime.handle().clone(),
+                requests.clone(),
+                budgets.clone(),
+            );
+            let service = Arc::new(IpfsService::new(
+                instances.clone(),
+                requests.clone(),
+                budgets,
+                runtime.handle().clone(),
+            ));
             let (input, mut main_out) = std::io::pipe().unwrap();
             let (main_in, output) = std::io::pipe().unwrap();
             let replies = messages(main_in);
@@ -445,7 +487,7 @@ mod tests {
         let mut harness = Harness::new(usize::MAX / 2);
         let context = harness
             .instances
-            .with_live("e-1", |instance, _| instance.context().clone())
+            .with_live("e-1", |running| running.instance.context().clone())
             .unwrap();
         let work = Workers::hold(context.handle());
         let watchers = Workers::hold(harness.runtime.handle());
@@ -469,7 +511,7 @@ mod tests {
         let mut harness = Harness::new(usize::MAX / 2);
         let context = harness
             .instances
-            .with_live("e-1", |instance, _| instance.context().clone())
+            .with_live("e-1", |running| running.instance.context().clone())
             .unwrap();
         let work = Workers::hold(context.handle());
         harness.head(3, 10);
