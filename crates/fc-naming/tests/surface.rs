@@ -670,6 +670,26 @@ fn late_failures_leave_forgotten_endpoints_alone() {
     assert_eq!(probed.len(), ENDPOINTS.len());
 }
 
+/// An endpoint listed twice is one endpoint: the machine runs exactly as
+/// for the list without the repeat, so it is never two anchor heads or
+/// two legs that agree with each other.
+#[test]
+fn a_repeated_endpoint_counts_once() {
+    let run = |rpc: &[&str]| {
+        let mut config = config();
+        config.rpc = rpc.iter().map(|e| (*e).to_owned()).collect();
+        let mut world = World::new(config);
+        let a = world.machine.resolve_content("vitalik.eth");
+        world.run(10_000);
+        let reply = format!("{:?}", world.reply(a).outcome);
+        let sent: Vec<Option<String>> = world.sent.iter().map(|s| s.endpoint.clone()).collect();
+        (reply, sent)
+    };
+    let [a, b, c, d] = ENDPOINTS;
+    assert_eq!(run(&[a, a, b, c, d]), run(&[a, b, c, d]));
+    assert_eq!(run(&[a, b, a, c, b, d]), run(&[a, b, c, d]));
+}
+
 #[test]
 fn enabling_myotis_is_live_state_not_a_configuration_change() {
     let mut config = config();
