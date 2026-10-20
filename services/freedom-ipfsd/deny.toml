@@ -27,6 +27,13 @@ ignore = [
     # libp2p-quic): unmaintained, with no safe upgrade. Its code runs at
     # compile time only, and nothing of it ships.
     { id = "RUSTSEC-2024-0436", reason = "unmaintained proc macro, compile time only; no upgrade exists" },
+    # webpki-roots 0.26.11, through libp2p-websocket: the last 0.26 release,
+    # a semver shim whose only item is `pub use parent::TLS_SERVER_ROOTS`
+    # from webpki-roots 1. Its roots are 1's, and 1 is at 1.0.10 here, which
+    # removes the distrusted emSign root (RUSTSEC-2026-0381). An ignore is by
+    # advisory, not by version, so `[bans]` keeps webpki-roots 1 at 1.0.10
+    # or later.
+    { id = "RUSTSEC-2026-0381", reason = "only webpki-roots 0.26.11, a shim re-exporting 1's roots; 1 is held at >= 1.0.10 by [bans]" },
 ]
 
 [licenses]
@@ -58,6 +65,10 @@ ignore = true
 multiple-versions = "warn"
 wildcards = "deny"
 allow-wildcard-paths = true
+# webpki-roots 1 before 1.0.10 trusts the distrusted emSign root
+# (RUSTSEC-2026-0381). The advisory is ignored above for 0.26.11's sake, so
+# this ban is what keeps 1 patched.
+deny = [{ crate = "webpki-roots:>=1, <1.0.10", reason = "trusts the distrusted emSign root (RUSTSEC-2026-0381)" }]
 
 [sources]
 unknown-registry = "deny"
