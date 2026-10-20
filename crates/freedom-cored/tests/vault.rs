@@ -1284,8 +1284,8 @@ fn a_committed_job_past_its_deadline_does_not_spin_the_loop() {
     let marker_dir = tempfile::tempdir().unwrap();
     let marker = marker_dir.path().join("claimed");
     let mut env = commit_hooks(&marker);
-    env[0].1 = "6000".into();
-    env.push(("FREEDOM_CORED_TEST_KDF_DEADLINE_MS", "4000".into()));
+    env[0].1 = "9000".into();
+    env.push(("FREEDOM_CORED_TEST_KDF_DEADLINE_MS", "6000".into()));
     let (_root, data, locks) = dirs();
     let mut core = spawn_env("serve", &data, &locks, &[], &env_refs(&env));
     core.hello();
@@ -1297,12 +1297,13 @@ fn a_committed_job_past_its_deadline_does_not_spin_the_loop() {
     );
     core.send_raw(&frame(&create));
     wait_for_claim(&marker);
+    // A claim comes in the first two thirds of the deadline, or not at all.
     assert!(
-        sent.elapsed() < Duration::from_millis(3800),
+        sent.elapsed() < Duration::from_millis(4000),
         "the KDF took too long for this test"
     );
-    // Past the 4 s deadline, with the rename still stalled: measure CPU.
-    std::thread::sleep(Duration::from_millis(4200).saturating_sub(sent.elapsed()));
+    // Past the 6 s deadline, with the rename still stalled: measure CPU.
+    std::thread::sleep(Duration::from_millis(6200).saturating_sub(sent.elapsed()));
     let before = core.cpu_ticks();
     std::thread::sleep(Duration::from_millis(500));
     let spent = core.cpu_ticks() - before;
@@ -1312,10 +1313,43 @@ fn a_committed_job_past_its_deadline_does_not_spin_the_loop() {
 }
 
 #[test]
+fn a_claim_late_in_its_deadline_is_refused_and_nothing_is_written() {
+    // With a 6 s deadline, claims end at 4 s. The job starts at 4.2 s, so
+    // it reaches its commit point within the deadline but past its claim
+    // time: it stops uncommitted, answered `deadline` (#127).
+    let marker_dir = tempfile::tempdir().unwrap();
+    let marker = marker_dir.path().join("claimed");
+    let mut env = commit_hooks(&marker);
+    env.push(("FREEDOM_CORED_TEST_KDF_DEADLINE_MS", "6000".into()));
+    env.push(("FREEDOM_CORED_TEST_JOB_DELAY_MS", "4200".into()));
+    let (_root, data, locks) = dirs();
+    let mut core = spawn_env("serve", &data, &locks, &[], &env_refs(&env));
+    core.hello();
+    let create = request(
+        2,
+        "vault.create",
+        json!({ "password_b64": b64("testpass1"), "words": 12 }),
+    );
+    core.send_raw(&frame(&create));
+    assert_eq!(core.response(2)["error"]["code"], "deadline");
+    // Once the worker is done, nothing was claimed or written, and the
+    // next reply is the next request's.
+    std::thread::sleep(Duration::from_millis(6500));
+    assert!(!marker.exists());
+    assert!(!data.join(VAULT).exists());
+    assert!(vault_temps(&data).is_empty());
+    let status = core.call(3, "vault.status", json!({}));
+    assert_eq!(status["id"], 3);
+    assert_eq!(status["result"]["exists"], false);
+}
+
+#[test]
 fn shutdown_waits_for_committed_work_and_sends_its_reply() {
     let marker_dir = tempfile::tempdir().unwrap();
     let marker = marker_dir.path().join("claimed");
-    let env = commit_hooks(&marker);
+    // Within the 2 s the core waits on exit.
+    let mut env = commit_hooks(&marker);
+    env[0].1 = "1000".into();
     let (_root, data, locks) = dirs();
     let mut core = spawn_env("serve", &data, &locks, &[], &env_refs(&env));
     core.hello();
@@ -1334,6 +1368,41 @@ fn shutdown_waits_for_committed_work_and_sends_its_reply() {
     assert!(reply["result"]["mnemonic_b64"].is_string(), "{reply}");
     assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
     assert!(data.join(VAULT).exists());
+}
+
+#[test]
+fn shutdown_stops_waiting_for_committed_work_after_two_seconds() {
+    // Past the 2 s the core waits on exit, it exits anyway, inside main's
+    // 3 s grace (#127). The stalled create never renames: the next start's
+    // recovery covers it, as it would a kill.
+    let marker_dir = tempfile::tempdir().unwrap();
+    let marker = marker_dir.path().join("claimed");
+    let mut env = commit_hooks(&marker);
+    env[0].1 = "10000".into();
+    let (_root, data, locks) = dirs();
+    let mut core = spawn_env("serve", &data, &locks, &[], &env_refs(&env));
+    core.hello();
+    let create = request(
+        2,
+        "vault.create",
+        json!({ "password_b64": b64("testpass1"), "words": 12 }),
+    );
+    core.send_raw(&frame(&create));
+    wait_for_claim(&marker);
+    let sent = Instant::now();
+    core.send_raw(&frame(&shell_request(3, "core.shutdown", json!({}))));
+    assert_eq!(core.response(3)["result"], json!({}));
+    assert_eq!(core.exit_code(Duration::from_secs(8)), 0);
+    let took = sent.elapsed();
+    assert!(took >= Duration::from_millis(1900), "{took:?}");
+    // Well under the old 5 s; 2 s and the exit itself.
+    assert!(took < Duration::from_secs(4), "{took:?}");
+    assert!(!data.join(VAULT).exists());
+    let stderr = core.stderr();
+    assert!(
+        stderr.contains("a committed vault job did not finish before exit"),
+        "{stderr}"
+    );
 }
 
 /// The vault's temp files in `data`: what a write killed before its rename

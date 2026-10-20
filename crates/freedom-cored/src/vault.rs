@@ -24,7 +24,10 @@
 //!   admitted before a lock acknowledgement runs after it. Unlock also
 //!   installs only with a ticket taken at its start.
 //! - **Deadlines** (30 s from admission) are enforced by the loop's wakeup,
-//!   for queued and running work alike, independently of the worker.
+//!   for queued and running work alike, independently of the worker. A job
+//!   may claim its commit point only in the first two thirds of its
+//!   deadline. A later claim stops it uncommitted, answered `deadline`, so
+//!   what follows a claim has at least 10 s plus main's 15 s margin (#127).
 //! - **The auto-lock counts sleep** ([`Clock`], #80): a vault left unlocked
 //!   locks on waking once its time has passed, however long the machine
 //!   slept. While unlocked, the loop wakes at least every
@@ -350,21 +353,32 @@ struct Pending {
 }
 
 /// Shared by the loop and the worker for one job: who wins the race between
-/// abandoning it and committing it.
-pub struct JobControl(AtomicU8);
+/// abandoning it and committing it, and until when it may commit.
+pub struct JobControl {
+    state: AtomicU8,
+    /// The last moment the worker may claim the commit point: two thirds
+    /// into the job's deadline. What follows a claim (a rename and a
+    /// directory flush, or a node write's fsyncs) then has the last third
+    /// and main's watchdog margin, 25 s by default, however late it came
+    /// (#127).
+    claim_by: Instant,
+}
 
 const JOB_RUNNING: u8 = 0;
 const JOB_ABANDONED: u8 = 1;
 const JOB_COMMITTED: u8 = 2;
 
 impl JobControl {
-    fn new() -> Arc<Self> {
-        Arc::new(JobControl(AtomicU8::new(JOB_RUNNING)))
+    fn new(claim_by: Instant) -> Arc<Self> {
+        Arc::new(JobControl {
+            state: AtomicU8::new(JOB_RUNNING),
+            claim_by,
+        })
     }
 
     /// Loop: stops the job unless it already committed. True if stopped.
     fn abandon(&self) -> bool {
-        self.0
+        self.state
             .compare_exchange(
                 JOB_RUNNING,
                 JOB_ABANDONED,
@@ -374,9 +388,15 @@ impl JobControl {
             .is_ok()
     }
 
-    /// Worker: claims the commit point. False if the job was abandoned.
+    /// Worker: claims the commit point. False if the job was abandoned, or
+    /// if it is past its claim time: it then stops as if abandoned, and the
+    /// loop answers `deadline`.
     fn commit(&self) -> bool {
-        self.0
+        if Instant::now() >= self.claim_by {
+            self.abandon();
+            return false;
+        }
+        self.state
             .compare_exchange(
                 JOB_RUNNING,
                 JOB_COMMITTED,
@@ -389,12 +409,12 @@ impl JobControl {
     /// Whether the worker claimed the commit point (deadlines and revocation
     /// no longer apply).
     fn committed(&self) -> bool {
-        self.0.load(Ordering::Acquire) == JOB_COMMITTED
+        self.state.load(Ordering::Acquire) == JOB_COMMITTED
     }
 
     /// Worker: whether to stop early (skip the KDF).
     fn abandoned(&self) -> bool {
-        self.0.load(Ordering::Acquire) == JOB_ABANDONED
+        self.state.load(Ordering::Acquire) == JOB_ABANDONED
     }
 }
 
@@ -1112,7 +1132,7 @@ impl Vault {
             };
             let job_id = self.next_job;
             self.next_job += 1;
-            let control = JobControl::new();
+            let control = JobControl::new(pending.deadline - self.kdf_deadline / 3);
             let (kind, job) = self.job_for(pending.kind, Arc::clone(&control));
             self.running = Some(Running {
                 job: job_id,
@@ -1238,6 +1258,12 @@ impl Vault {
         let request = running.request;
         // A result after the deadline is abandoned, unless it committed.
         if !running.answered && Instant::now() >= running.deadline && running.control.abandon() {
+            running.answered = true;
+            self.reply_error(&mut out, request, deadline_exceeded());
+        }
+        // The worker stopped itself, past its claim time: the deadline's
+        // answer, a little early. (The loop answers whenever it abandons.)
+        if !running.answered && running.control.abandoned() {
             running.answered = true;
             self.reply_error(&mut out, request, deadline_exceeded());
         }

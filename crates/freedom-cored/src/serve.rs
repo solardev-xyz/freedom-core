@@ -72,9 +72,11 @@ use crate::{testhooks, testmethods};
 /// How long the writer may take to flush on exit.
 const EXIT_DRAIN: Duration = Duration::from_secs(2);
 /// How long exiting waits for a vault job past its commit point to finish
-/// and reply. A commit is a rename or unlink plus a directory flush; main's
-/// hang watchdog and reconciliation cover anything slower.
-const COMMIT_DRAIN: Duration = Duration::from_secs(5);
+/// and reply: inside main's 3 s shutdown grace, so the core exits on its
+/// own (#127). A commit is a rename or unlink plus a directory flush, or a
+/// node write's few fsyncs; the next start's recovery covers anything
+/// slower, as it would a kill.
+const COMMIT_DRAIN: Duration = Duration::from_secs(2);
 /// How long the loop's frames may wait with the writer writing nothing
 /// before the core decides main has stopped reading, and exits (design
 /// 0001, Transport and framing):
@@ -440,10 +442,6 @@ pub fn run(options: &Options) -> Exit {
     let until = Instant::now() + COMMIT_DRAIN;
     while core.vault.committing() {
         let Some(left) = until.checked_duration_since(Instant::now()) else {
-            log::error(
-                "a committed vault job did not finish before exit",
-                serde_json::json!({}),
-            );
             break;
         };
         match events.recv_timeout(left) {
@@ -454,6 +452,13 @@ pub fn run(options: &Options) -> Exit {
             Ok(_) => {}
             Err(_) => break,
         }
+    }
+    // However the wait ended: past the drain, or the wait itself timing out.
+    if core.vault.committing() {
+        log::error(
+            "a committed vault job did not finish before exit",
+            serde_json::json!({}),
+        );
     }
     // What waits for room goes past the allowance: the drain below bounds it
     // by time instead.
