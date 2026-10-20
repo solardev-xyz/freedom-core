@@ -437,6 +437,7 @@ pub fn run(options: &Options) -> Exit {
     // what's queued, but never wait on a peer that stopped reading: exiting
     // releases the gate. Requests still waiting their turn are dropped with
     // the loop: none of them ran.
+    crate::testhooks::exiting();
     let outs = core.vault.shutdown();
     let _ = core.dispatch(outs);
     let draining = Instant::now();

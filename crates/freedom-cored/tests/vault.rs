@@ -1283,8 +1283,16 @@ fn past_the_commit_point_the_reply_is_the_real_outcome() {
 fn a_committed_job_past_its_deadline_does_not_spin_the_loop() {
     let marker_dir = tempfile::tempdir().unwrap();
     let marker = marker_dir.path().join("claimed");
+    // The committed job holds until the test releases it, so the sample
+    // below always falls between the deadline and its end. The marker
+    // proves the claim came within the core's cutoff.
+    let release = marker_dir.path().join("release");
     let mut env = commit_hooks(&marker);
-    env[0].1 = "9000".into();
+    env[0].1 = "0".into();
+    env.push((
+        "FREEDOM_CORED_TEST_COMMIT_HOLD",
+        release.display().to_string(),
+    ));
     env.push(("FREEDOM_CORED_TEST_KDF_DEADLINE_MS", "6000".into()));
     let (_root, data, locks) = dirs();
     let mut core = spawn_env("serve", &data, &locks, &[], &env_refs(&env));
@@ -1297,17 +1305,14 @@ fn a_committed_job_past_its_deadline_does_not_spin_the_loop() {
     );
     core.send_raw(&frame(&create));
     wait_for_claim(&marker);
-    // A claim comes in the first two thirds of the deadline, or not at all.
-    assert!(
-        sent.elapsed() < Duration::from_millis(4000),
-        "the KDF took too long for this test"
-    );
-    // Past the 6 s deadline, with the rename still stalled: measure CPU.
-    std::thread::sleep(Duration::from_millis(6200).saturating_sub(sent.elapsed()));
+    // Past the 6 s deadline (counted from before the send, so the core's
+    // own count is no further), with the rename still held: measure CPU.
+    std::thread::sleep(Duration::from_millis(7000).saturating_sub(sent.elapsed()));
     let before = core.cpu_ticks();
     std::thread::sleep(Duration::from_millis(500));
     let spent = core.cpu_ticks() - before;
     assert!(spent < 20, "the loop spun: {spent} ticks in 0.5 s");
+    std::fs::write(&release, b"go").unwrap();
     let reply = core.response(2);
     assert!(reply["result"]["mnemonic_b64"].is_string(), "{reply}");
 }
@@ -1332,24 +1337,34 @@ fn a_claim_late_in_its_deadline_is_refused_and_nothing_is_written() {
     );
     core.send_raw(&frame(&create));
     assert_eq!(core.response(2)["error"]["code"], "deadline");
-    // Once the worker is done, nothing was claimed or written, and the
-    // next reply is the next request's.
-    std::thread::sleep(Duration::from_millis(6500));
+    // A vault job queued behind it starts only once the worker is done, so
+    // its reply means the refused job has cleaned up: nothing was claimed
+    // or written, and no second reply to 2 came first.
+    let verify = core.call(
+        3,
+        "vault.verify_password",
+        json!({ "password_b64": b64("testpass1") }),
+    );
+    assert_eq!(verify["id"], 3);
     assert!(!marker.exists());
     assert!(!data.join(VAULT).exists());
     assert!(vault_temps(&data).is_empty());
-    let status = core.call(3, "vault.status", json!({}));
-    assert_eq!(status["id"], 3);
-    assert_eq!(status["result"]["exists"], false);
 }
 
 #[test]
 fn shutdown_waits_for_committed_work_and_sends_its_reply() {
     let marker_dir = tempfile::tempdir().unwrap();
     let marker = marker_dir.path().join("claimed");
-    // Within the 2 s the core waits on exit.
+    // The committed job holds until the core begins to exit (the release
+    // file is never written), so the shutdown always finds it committed
+    // and unfinished, and it finishes well within the 2 s drain.
+    let release = marker_dir.path().join("never");
     let mut env = commit_hooks(&marker);
-    env[0].1 = "1000".into();
+    env[0].1 = "0".into();
+    env.push((
+        "FREEDOM_CORED_TEST_COMMIT_HOLD",
+        release.display().to_string(),
+    ));
     let (_root, data, locks) = dirs();
     let mut core = spawn_env("serve", &data, &locks, &[], &env_refs(&env));
     core.hello();
