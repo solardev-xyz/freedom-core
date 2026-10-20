@@ -528,7 +528,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 | `stopped` | the instance is retired, unknown or stopping | `freedom-ipfs native node is not running` |
 | `deadline` | no head within `headers_ms` | `freedom-ipfs native request timeout` |
 | `cancelled` | main's `cancel` | `freedom-ipfs native request aborted` before the head; `…cancelled` for a body |
-| `busy` | admission is full, or a reservation can't be had in time ([Budgets](#budgets)), or 4 stats jobs are outstanding ([Stats](#stats)) | `BackendBusy`, `freedom-ipfs native node is busy`, which the executor answers 503 (new) |
+| `busy` | admission is full, or a reservation can't be had in time ([Budgets](#budgets)), or 4 stats calls are outstanding ([Stats](#stats)) | `BackendBusy`, `freedom-ipfs native node is busy`, which the executor answers 503 (new) |
 | `internal` | a panic on the request's task, which then retires its instance | `freedom-ipfs native gateway error` |
 | `storage` | `ipfs.start`: the store won't open (`data.kind`) | the manager's `Failed to start freedom-ipfs native node` |
 | `protocol_mismatch` | `ipfs.hello` | a startup error; no restart |
@@ -578,7 +578,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 
 The store's figures are SQLite queries, which can wait behind a statement in progress, so they run as a job on the process runtime's blocking pool:
 - **The 5 s deadline** runs from when the reader handles the request. The job's reply is queued only before it, checked under the connection's lock as a head is; from then on the reply is `deadline`, whichever of the job and its watcher runs first.
-- **At most 4 stats jobs are outstanding in the process.** Main asks every 5 s and gives up at 20 s, so it never has more asked. A job counts until its closure is dropped, whether it ran or was aborted before it started, never just because its request was answered. Past the bound, the reply is `busy`.
+- **At most 4 stats calls are outstanding in the process.** Main asks every 5 s and gives up at 20 s, so it never has more asked. A call counts from its admission until its reply has been written and flushed: the reply holds the call's place, as a head holds its charge ([Pending replies](#budgets)). A call whose job ends without that reply (aborted before it ran, fenced, or answered `deadline`) is freed when the job's closure is dropped. Never just because its job ended or its request was answered. Past the bound, the reply is `busy`. If main stops reading, the writer stall ends the connection, and what is queued goes with it.
 - **A cancel or the deadline fences the job,** which then runs no SQL, and aborts it if it hasn't started. A job that starts past its deadline runs no SQL either, and its reply is `deadline`, whether or not its watcher has run. SQL already running finishes, and its reply is checked as above.
 
 The 5 s health check calls `ipfs.stats`. `checkHealth()` stays synchronous, because `ipfsBackend()` calls it at admission. It reads a snapshot that is true while all of these hold:
@@ -635,7 +635,8 @@ Upstream's constants are per instance, and some limit bookkeeping rather than wo
     - SQLite copies a block into its own pages, which the store's fixed reservation and page cap cover. The fetched buffer keeps its own dynamic reservation until its last owner drops it.
     - A write that meets the page cap fails with `SQLITE_FULL`, whether it is a block, a name or a provider record, and that entry isn't cached. A block is still served, from its transient buffer.
   - **Pending replies:** each head reserves what it holds, before it is encoded: its JSON, encoded in a buffer of exactly that size, and its frame header. The reservation lasts until the writer has written and flushed the head, or the reply that took its place, and freed its buffers. A head that doesn't fit the writer's 64 KiB buffer is written from its own buffer, never copied. If the writer fails, what is queued is freed first, every head's JSON with it, and the reservations only then; nothing more is queued.
-    - Stats replies aren't charged. At most 4 are outstanding, each within one frame (1 MiB), and the snapshot each copies is library memory, as the recorder's own is. Charging them would fail the health check under memory pressure, exactly when main most needs it.
+    - Stats replies aren't charged to the memory budget; they are bounded instead. At most 4 stats calls are outstanding, their replies counted until written ([Stats](#stats)), each encoded in a buffer of exactly its length, within one frame (1 MiB). Charging them would fail the health check under memory pressure, exactly when main most needs it.
+    - A reply's 1 MiB doesn't bound the memory its job works in. Its progress snapshot is a copy of the whole recorder, taken under the recorder's lock before it is fitted to the frame: library memory outside the budget, as the recorder itself is. What bounds it is what the recorder holds: its latest 512 events and its active targets, one per request in progress (at most the 512 admitted), each with its path.
   - **The writer's data queue:** 16 MiB, reserved at process start.
 - **When admitted work can't reserve:**
   - **before its head,** it waits up to its remaining `headers_ms`, then answers `busy` (503).
@@ -1356,7 +1357,7 @@ Every body already passes through main today, so the pipe adds one copy into the
 | memory budget | persistent 192 MiB; ephemeral 448 MiB, by reservation ([Budgets](#budgets)) | new work `busy`; admitted work waits as below; evict idle private instances |
 | a reservation for admitted work | before the head: the rest of `headers_ms`; after it: 10 s per block | `busy` (`deadline` if queued after `headers_ms`); a stream aborts with `busy` |
 | `ipfs.stats` | 5 s from when the reader handles it; main's watchdog at 20 s | `deadline`; on the watchdog, kill |
-| stats jobs, per process | 4 outstanding, each until its closure is dropped | `busy` |
+| stats calls, per process | 4 outstanding, each until its reply is written, or its job is dropped without one | `busy` |
 | abort JSON, after the stream ID | 1 KiB | protocol error |
 | persistent cache | 256 MiB of block data on disk (a target), 16 MiB hot | upstream's LRU eviction |
 | private instances | 8 per ephemeral process; a 36 MiB page cap (32 MiB block target) and 4 MiB hot each | a new partition evicts an unpinned instance, else 503 `busy`; existing partitions are unaffected |
