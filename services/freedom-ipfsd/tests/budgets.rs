@@ -312,7 +312,16 @@ fn stats_count_what_the_requests_did() {
             "total_gateway_busy_responses": 0, "bytes_read": 0, "max_active_handles": 0,
             "last_native_error_code": null, "last_native_error_message": null })
     );
-    assert_eq!(fresh["progress"], Value::Null);
+    // The persistent process's instance records progress: none yet.
+    assert_eq!(
+        (
+            &fresh["progress"]["active_count"],
+            &fresh["progress"]["event_count"]
+        ),
+        (&json!(0), &json!(0)),
+        "{}",
+        fresh["progress"]
+    );
     assert_eq!(
         fresh["store"],
         json!({ "block_count": 2, "total_bytes": one.len() + two.len() })
