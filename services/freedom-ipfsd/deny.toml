@@ -31,9 +31,9 @@ ignore = [
     # a semver shim whose only item is `pub use parent::TLS_SERVER_ROOTS`
     # from webpki-roots 1. Its roots are 1's, and 1 is at 1.0.10 here, which
     # removes the distrusted emSign root (RUSTSEC-2026-0381). An ignore is by
-    # advisory, not by version, so `[bans]` keeps webpki-roots 1 at 1.0.10
-    # or later.
-    { id = "RUSTSEC-2026-0381", reason = "only webpki-roots 0.26.11, a shim re-exporting 1's roots; 1 is held at >= 1.0.10 by [bans]" },
+    # advisory, not by version, so `[bans]` refuses every other version
+    # before 1.0.10.
+    { id = "RUSTSEC-2026-0381", reason = "only webpki-roots 0.26.11, a shim re-exporting 1's roots; [bans] refuses every other affected version" },
 ]
 
 [licenses]
@@ -65,10 +65,14 @@ ignore = true
 multiple-versions = "warn"
 wildcards = "deny"
 allow-wildcard-paths = true
-# webpki-roots 1 before 1.0.10 trusts the distrusted emSign root
-# (RUSTSEC-2026-0381). The advisory is ignored above for 0.26.11's sake, so
-# this ban is what keeps 1 patched.
-deny = [{ crate = "webpki-roots:>=1, <1.0.10", reason = "trusts the distrusted emSign root (RUSTSEC-2026-0381)" }]
+# webpki-roots before 1.0.10 trusts the distrusted emSign root
+# (RUSTSEC-2026-0381), except 0.26.11, the shim over 1's roots. The advisory
+# is ignored above for that shim's sake, so these bans are what keep every
+# other affected version out: 0.26.10 and older embed the root themselves.
+deny = [
+    { crate = "webpki-roots:<0.26.11", reason = "embeds the distrusted emSign root (RUSTSEC-2026-0381)" },
+    { crate = "webpki-roots:>0.26.11, <1.0.10", reason = "embeds the distrusted emSign root (RUSTSEC-2026-0381)" },
+]
 
 [sources]
 unknown-registry = "deny"
