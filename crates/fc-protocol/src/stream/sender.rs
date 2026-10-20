@@ -590,6 +590,19 @@ impl Sender {
     /// returns `None` when there is nothing to write. Control entries go
     /// first, then the open streams round-robin, one frame each.
     pub fn next_frame(&mut self, out: &mut Vec<u8>) -> Option<Written> {
+        let (written, json) = self.next_frame_owned(out)?;
+        if let Some(json) = json {
+            out.extend_from_slice(&json);
+        }
+        Some(written)
+    }
+
+    /// As [`Sender::next_frame`], except that a head's or a reply's JSON is
+    /// handed over rather than copied: `out` gets its frame header, and the
+    /// JSON, as it was queued, is returned to be written right after it. A
+    /// writer then holds no copy of a large message, and no buffer grown
+    /// for one.
+    pub fn next_frame_owned(&mut self, out: &mut Vec<u8>) -> Option<(Written, Option<Vec<u8>>)> {
         if self.failed.is_some() {
             return None;
         }
@@ -600,19 +613,25 @@ impl Sender {
         }
         while let Some(id) = self.rotation.pop_front() {
             if let Some(written) = self.write_stream(id, out) {
-                return Some(written);
+                return Some((written, None));
             }
         }
         None
     }
 
     /// Writes a control entry, unless a cancel has made it stale: a head
-    /// or abort dropped in favour of the `cancelled` reply.
-    fn write_control(&mut self, entry: Control, id: u64, out: &mut Vec<u8>) -> Option<Written> {
+    /// or abort dropped in favour of the `cancelled` reply. A head's or a
+    /// reply's JSON is returned after its header.
+    fn write_control(
+        &mut self,
+        entry: Control,
+        id: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<(Written, Option<Vec<u8>>)> {
         let state = self.requests.remove(&id)?;
         match (entry, state) {
             (Control::Head, State::Head { json, body }) => {
-                put_json(out, &json);
+                put_json_header(out, json.len());
                 if let Some(mut body) = body {
                     if body.writable() {
                         body.scheduled = true;
@@ -620,15 +639,16 @@ impl Sender {
                     }
                     self.requests.insert(id, State::Open(body));
                 }
-                Some(Written::Head { id })
+                Some((Written::Head { id }, Some(json)))
             }
             (Control::Reply, State::Reply { json, cancelled }) => {
-                put_json(out, &json);
-                Some(if cancelled {
+                put_json_header(out, json.len());
+                let written = if cancelled {
                     Written::Cancelled { id }
                 } else {
                     Written::Reply { id }
-                })
+                };
+                Some((written, Some(json)))
             }
             (
                 Control::Abort,
@@ -639,7 +659,7 @@ impl Sender {
             ) => {
                 put_header(out, KIND_ABORT, id, json.len());
                 out.extend_from_slice(&json);
-                Some(Written::Abort { id, code })
+                Some((Written::Abort { id, code }, None))
             }
             (_, state) => {
                 self.requests.insert(id, state);
@@ -836,12 +856,12 @@ fn cancelled_reply(id: u64) -> Vec<u8> {
     .into_bytes()
 }
 
-/// Appends a JSON frame; `json` is within one frame, as queueing checked.
-fn put_json(out: &mut Vec<u8>, json: &[u8]) {
-    let len = u32::try_from(json.len().min(MAX_PAYLOAD) + 1).unwrap_or(u32::MAX);
+/// Appends a JSON frame's header, for a payload of `len` bytes: within one
+/// frame, as queueing checked.
+fn put_json_header(out: &mut Vec<u8>, len: usize) {
+    let len = u32::try_from(len.min(MAX_PAYLOAD) + 1).unwrap_or(u32::MAX);
     out.extend_from_slice(&len.to_be_bytes());
     out.push(KIND_JSON);
-    out.extend_from_slice(json);
 }
 
 #[cfg(test)]
@@ -1148,5 +1168,51 @@ mod tests {
         s.head(1, b"{}".to_vec(), true).unwrap();
         let wordy = Abort::new(AbortCode::Internal, "x".repeat(2000));
         assert_eq!(s.abort(1, &wordy), Err(SendError::TooLarge));
+    }
+
+    /// The same frames as `next_frame`'s, byte for byte, with a head's and a
+    /// reply's JSON handed over as it was queued.
+    #[test]
+    fn owned_frames_are_next_frames_split() {
+        fn queue(s: &mut Sender) {
+            for id in 1..=4 {
+                s.request(id).unwrap();
+            }
+            s.head(1, br#"{"head":1}"#.to_vec(), true).unwrap();
+            assert_eq!(s.push(1, &[7; 100]).unwrap(), 100);
+            s.finish(1).unwrap();
+            s.reply(2, br#"{"reply":2}"#.to_vec()).unwrap();
+            s.head(3, br#"{"head":3}"#.to_vec(), true).unwrap();
+            s.abort(3, &Abort::new(AbortCode::Internal, "internal"))
+                .unwrap();
+            s.head(4, br#"{"head":4}"#.to_vec(), false).unwrap();
+            assert_eq!(s.cancel(4), Ok(Cancel::Cancelled));
+        }
+        let (mut copied, mut owned) = (Sender::new(), Sender::new());
+        queue(&mut copied);
+        queue(&mut owned);
+        let (mut expected, mut kinds) = (Vec::new(), Vec::new());
+        while let Some(written) = copied.next_frame(&mut expected) {
+            kinds.push(written);
+        }
+        let (mut frames, mut handed, mut owned_kinds) = (Vec::new(), Vec::new(), Vec::new());
+        while let Some((written, json)) = owned.next_frame_owned(&mut frames) {
+            owned_kinds.push(written);
+            if let Some(json) = json {
+                frames.extend_from_slice(&json);
+                handed.push(json);
+            }
+        }
+        assert_eq!(frames, expected);
+        assert_eq!(owned_kinds, kinds);
+        assert_eq!(
+            handed,
+            [
+                br#"{"head":1}"#.to_vec(),
+                br#"{"reply":2}"#.to_vec(),
+                br#"{"head":3}"#.to_vec(),
+                cancelled_reply(4)
+            ]
+        );
     }
 }
