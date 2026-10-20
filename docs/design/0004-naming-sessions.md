@@ -395,6 +395,11 @@ How a failed exchange is classified. The core's rules are ordered, and the first
         - While the prefixes aren't known, an IPv6 address outside 0007's fixed forms is refused. IPv4 addresses and the fixed forms are judged as always, so a dual-stack gateway is still reached over IPv4.
         - Main reads only the effective resolvers, not each interface's own. So a prefix that only an interface's resolver advertises, behind a manual setting, a VPN or a local resolver, is outside the check. 0007's [What the gate can't see](0007-ipfs-service.md#what-the-gate-cant-see) lists that limit with the others, which apply here too.
       - **At connect time:** the check runs in the connection's own resolution step, and the connection goes to an address that passed. Main dials a clearnet gateway with Node's `https` and a checking `lookup`. An answer with no passing address fails the gateway. A separate lookup before the fetch would leave DNS rebinding open.
+      - **TLS trust on that path:**
+        - The certificate is verified against the gateway's own host name (SNI and the certificate's name), with verification never relaxed.
+        - The roots are Node's bundled set plus the OS's trust store (`tls.getCACertificates('system')`), so a locally installed root, such as an enterprise's, is trusted as Chromium trusts it.
+        - What Chromium's verifier adds beyond that doesn't apply: its own root store and distrust decisions, Certificate Transparency, CRLSets. That is deviation `ccip-gateway-tls`.
+        - Main's tests check that the dial carries both root sets and the gateway's name, and that a gateway whose certificate chains to no trusted root is refused.
       - **Routes:**
         - A clearnet gateway goes `DIRECT`; the Tor PAC routes only `.onion`. A clearnet gateway that the session would send through a proxy is refused, because main can't check where the proxy connects.
         - An `.onion` gateway keeps its separately authorized route, through the PAC to Arti, and is never resolved locally. It is refused while that route isn't on the session, as today.
@@ -574,6 +579,7 @@ Each deviation gets a boundary vector in the implementation PR, generated from t
 | `decode-budget` | unbounded | 4 MiB of output per ABI decode with an array | malformed, per the decode's caller |
 | `cache-bytes` | 500 entries per cache | also 8 MiB per cache | eviction |
 | `ccip-urls` | every URL in the lookup | the first 32 | the rest aren't tried |
+| `ccip-gateway-tls` | a gateway's certificate is checked by Chromium's verifier, under the session's policy | a clearnet gateway's certificate is checked by Node's `https`, against Node's bundled roots and the OS's trust store, for the gateway's host name ([CCIP-Read](#ccip-read)) | a certificate that Chromium's own root store, Certificate Transparency or CRLSets would judge differently changes whether that gateway answers; a refusal moves on to the next gateway |
 | `monotonic-time` | TTLs, quarantine and deadlines on `Date.now()` | the monotonic clock; Tezos expiry still compares wall time | none unless the wall clock jumps |
 | `error-text` | ethers' full message, which embeds node text and request data | the class's short message, sanitized | same branches; [agreement](#errors-agreement-and-text) unchanged |
 | `classification` | rules 3, 6 and 9 of [Classification](#classification), and text matched in composed messages | the core's rules | a malformed answer quarantines; a revert never does |
