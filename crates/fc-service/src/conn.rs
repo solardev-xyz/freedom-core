@@ -57,7 +57,7 @@
 //! reader decodes `{ type, id, method, params }` and ignores a `context`.
 
 use std::borrow::Cow;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::io::{Read, Write};
 use std::pin::Pin;
@@ -304,6 +304,8 @@ struct State {
     /// stream's end or abort) that frame is: the request isn't settled
     /// until the write and its flush are done ([`Connection::settled`]).
     writing_terminal: Option<u64>,
+    /// What queued heads hold until the writer takes them, by request.
+    charges: HashMap<u64, Charge>,
     /// When the writer last claimed or finished a frame.
     progress: Instant,
     writer_done: bool,
@@ -330,6 +332,7 @@ impl Link {
                 waiters: Vec::new(),
                 writing: false,
                 writing_terminal: None,
+                charges: HashMap::new(),
                 progress: Instant::now(),
                 writer_done: false,
                 input: VecDeque::new(),
@@ -508,6 +511,11 @@ impl Connection {
     /// connection's lock, so however late its producer runs, a head is never
     /// queued after its deadline, and one queued in time stands (0007,
     /// "`headers_ms`").
+    ///
+    /// A queued head keeps `charge` until the writer takes it, or takes the
+    /// reply a cancel or a settle put in its place, or the connection is
+    /// done: such as the memory reservation of its encoded size (0007,
+    /// "Pending replies"). Otherwise `charge` is dropped at once.
     pub fn head_by<T: Serialize>(
         &self,
         id: u64,
@@ -515,18 +523,22 @@ impl Connection {
         body: bool,
         deadline: Instant,
         late: &ErrorBody,
+        charge: Option<Charge>,
     ) -> Result<Headed, SendError> {
         let mut json = Vec::new();
         write_result(&mut json, id, result).map_err(|_| SendError::TooLarge)?;
         let mut late_json = Vec::new();
         write_error(&mut late_json, id, late).map_err(|_| SendError::TooLarge)?;
         let need = if body { Need::Open } else { Need::Owed };
-        self.queue(need, |state| {
+        self.queue(need, move |state| {
             let queued = if Instant::now() < deadline {
                 state.sender.head(id, json, body).map(|()| Headed::Queued)
             } else {
                 state.sender.reply(id, late_json).map(|()| Headed::Late)
             };
+            if let (Ok(Headed::Queued), Some(charge)) = (queued, charge) {
+                state.charges.insert(id, charge);
+            }
             (queued, false)
         })
     }
@@ -632,6 +644,10 @@ impl Connection {
         }
     }
 }
+
+/// What a queued head holds until the writer takes it
+/// ([`Connection::head_by`]): dropped then.
+pub type Charge = Box<dyn Send>;
 
 /// What [`Connection::head_by`] queued.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1383,6 +1399,9 @@ struct Claimed {
     wakers: Vec<Waker>,
     /// It ended a request: the reader may admit a parked one.
     freed: bool,
+    /// What its head held, released now: the head, or what replaced it,
+    /// left the queue.
+    released: Option<Charge>,
 }
 
 /// The request a frame belongs to.
@@ -1404,6 +1423,7 @@ fn write_loop(link: &Link, mut output: impl Write) {
             link.reader.notify_one();
         }
         wake(claimed.wakers);
+        drop(claimed.released);
         // Outside the lock: a write may block for as long as main doesn't
         // read, and nothing else waits for it.
         if output
@@ -1445,6 +1465,7 @@ fn claim(link: &Link, frame: &mut Vec<u8>) -> Option<Claimed> {
                     return Some(Claimed {
                         wakers: Vec::new(),
                         freed: false,
+                        released: None,
                     });
                 }
                 frame.clear();
@@ -1462,14 +1483,27 @@ fn claim(link: &Link, frame: &mut Vec<u8>) -> Option<Claimed> {
                 } else {
                     Vec::new()
                 };
+                // A head, or the reply that took its place.
+                let released = match written {
+                    Written::Head { id } | Written::Reply { id } | Written::Cancelled { id } => {
+                        state.charges.remove(&id)
+                    }
+                    _ => None,
+                };
                 state.writing = true;
                 state.progress = Instant::now();
-                return Some(Claimed { wakers, freed });
+                return Some(Claimed {
+                    wakers,
+                    freed,
+                    released,
+                });
             }
         }
         if state.closed || failed {
             state.writer_done = true;
+            let charges = std::mem::take(&mut state.charges);
             drop(state);
+            drop(charges);
             link.ended.notify_all();
             return None;
         }
@@ -1484,7 +1518,10 @@ fn writer_failed(link: &Link) {
     let mut state = link.lock();
     state.writing = false;
     state.writer_done = true;
+    // Nothing more is written: what queued heads hold goes.
+    let charges = std::mem::take(&mut state.charges);
     drop(state);
+    drop(charges);
     link.ended.notify_all();
 }
 

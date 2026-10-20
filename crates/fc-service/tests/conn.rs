@@ -43,9 +43,20 @@ fn body(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i % 251) as u8).collect()
 }
 
+/// A head's charge: counts itself out when dropped.
+struct Charged(Arc<Mutex<usize>>);
+
+impl Drop for Charged {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap() -= 1;
+    }
+}
+
 #[derive(Default)]
 struct Toy {
     headed: Mutex<Vec<Headed>>,
+    /// Heads' charges not yet released.
+    charged: Arc<Mutex<usize>>,
     cancels: Mutex<Vec<u64>>,
     ends: Mutex<Vec<End>>,
     conn: Mutex<Option<Connection>>,
@@ -82,6 +93,8 @@ impl Service for Toy {
                 } else {
                     now - Duration::from_millis(in_ms.unsigned_abs())
                 };
+                let charge = Charged(self.charged.clone());
+                *self.charged.lock().unwrap() += 1;
                 let headed = conn
                     .head_by(
                         request.id,
@@ -89,6 +102,7 @@ impl Service for Toy {
                         false,
                         deadline,
                         &ErrorBody::new(ErrorCode::Deadline, "late"),
+                        Some(Box::new(charge)),
                     )
                     .unwrap();
                 self.headed.lock().unwrap().push(headed);
@@ -512,10 +526,44 @@ fn a_head_is_queued_only_before_its_deadline() {
         (&late["id"], &late["error"]["code"]),
         (&json!(3), &json!("deadline"))
     );
+    // The toy records what it queued after the call returns.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while main.toy.headed.lock().unwrap().len() < 2 {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
     assert_eq!(
         *main.toy.headed.lock().unwrap(),
         [Headed::Queued, Headed::Late]
     );
+    // Each head's charge went with it: the written head's, and the late
+    // one's at once.
+    assert_eq!(*main.toy.charged.lock().unwrap(), 0);
+    main.close();
+    assert_eq!(main.exit(), Exit::Ok);
+}
+
+#[test]
+fn a_queued_head_holds_its_charge_until_the_writer_takes_it() {
+    let gate = Gate::new(KIND_JSON);
+    let held = gate.clone();
+    let mut main = start_with(options(), move |pipe| Gated { pipe, gate: held });
+    main.hello();
+    // The writer is held inside request 2's reply, so request 3's head
+    // waits in the queue with its charge.
+    main.request(2, "t.echo", json!(2));
+    gate.held();
+    main.request(3, "t.head_by", json!({ "in_ms": 60_000 }));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while main.toy.headed.lock().unwrap().is_empty() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(*main.toy.charged.lock().unwrap(), 1, "held while queued");
+    gate.release();
+    assert_eq!(main.message()["id"], 2);
+    assert_eq!(main.message()["id"], 3);
+    assert_eq!(*main.toy.charged.lock().unwrap(), 0, "released once taken");
     main.close();
     assert_eq!(main.exit(), Exit::Ok);
 }
