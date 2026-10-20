@@ -591,7 +591,7 @@ fn memory_deadline(deadline: Instant) -> Instant {
 /// queued before `deadline`: as for a head, `deadline` from then on.
 fn busy(conn: &Connection, id: u64, deadline: Instant) -> Outcome {
     let busy = ErrorBody::new(ErrorCode::Busy, BUSY);
-    match conn.reply_error_by(id, &busy, deadline.into_std(), &late()) {
+    match conn.reply_error_by(id, &busy, deadline.into_std(), &late(), None) {
         Ok(Headed::Queued) => Outcome::Failed("busy", BUSY),
         Ok(Headed::Late) => Outcome::Failed("deadline", LATE),
         Err(_) => Outcome::Settled,
@@ -603,7 +603,7 @@ fn busy(conn: &Connection, id: u64, deadline: Instant) -> Outcome {
 fn too_large(conn: &Connection, id: u64, deadline: Instant) -> Outcome {
     let message = "the response's head is too large";
     let internal = ErrorBody::new(ErrorCode::Internal, message);
-    match conn.reply_error_by(id, &internal, deadline.into_std(), &late()) {
+    match conn.reply_error_by(id, &internal, deadline.into_std(), &late(), None) {
         Ok(Headed::Queued) => Outcome::Failed("internal", message),
         Ok(Headed::Late) => Outcome::Failed("deadline", LATE),
         Err(_) => Outcome::Settled,

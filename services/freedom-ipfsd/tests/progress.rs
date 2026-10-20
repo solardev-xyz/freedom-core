@@ -164,3 +164,47 @@ fn a_snapshot_past_a_frame_is_cut_to_fit() {
     assert_eq!(events.last().unwrap()["target_id"], last);
     shut_down(ipfsd);
 }
+
+/// Review of #143: with main not reading, at most 4 stats replies wait for
+/// the writer, each up to a frame: the rest are `busy`. The recorder is
+/// filled with 16 KiB paths first, so each reply is near a frame.
+#[test]
+fn a_main_that_stops_reading_holds_at_most_4_stats_replies() {
+    let dirs = Dirs::new();
+    let mut ipfsd = Ipfsd::persistent(&dirs, &[]);
+    ipfsd.hello();
+    assert_eq!(ipfsd.start(disk("p-1"))["result"]["instance"], "p-1");
+    let missing = freedom_ipfs_core::cid_from_data(0x55, b"missing");
+    let path = format!("/ipfs/{missing}/{}", "n".repeat(16 << 10));
+    for _ in 0..24 {
+        let id = ipfsd.request("ipfs.request", get("p-1", &path));
+        let head = ipfsd.reply(id);
+        if head["result"]["body"] == true {
+            ipfsd.body(id);
+        }
+    }
+    ipfsd.pause_reading();
+    let ids: Vec<u64> = (0..18)
+        .map(|_| {
+            let id = ipfsd.request("ipfs.stats", json!({ "instance": "p-1" }));
+            // Time for its job to run and queue its reply.
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            id
+        })
+        .collect();
+    ipfsd.resume_reading();
+    let (mut answered, mut busy) = (0, 0);
+    for id in ids {
+        let reply = ipfsd.reply(id);
+        if reply["result"].is_object() {
+            answered += 1;
+        } else {
+            assert_eq!(reply["error"]["code"], "busy", "{reply}");
+            busy += 1;
+        }
+    }
+    shut_down(ipfsd);
+    // One may have been read before main stopped reading.
+    assert!(answered <= 5, "{answered} answered, {busy} busy");
+    assert_eq!(answered + busy, 18);
+}

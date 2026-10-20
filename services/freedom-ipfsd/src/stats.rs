@@ -31,9 +31,12 @@
 //!   The job's reply is queued only before it ([`Connection::reply_by`]),
 //!   and a watcher answers `deadline` once it has passed, however late
 //!   either runs.
-//! - **at most [`MAX_STATS_JOBS`]** are outstanding in the process, counted
-//!   until the job's closure is dropped, whether it ran or not: never just
-//!   because its request was answered. Past them, `busy`.
+//! - **at most [`MAX_STATS_JOBS`] stats calls** are outstanding in the
+//!   process, each counted from its admission until its reply has been
+//!   written (its reply holds its place, as a charge), or until its job's
+//!   closure is dropped without a reply (aborted unrun, fenced, or answered
+//!   `deadline`): never just because its job ended or its request was
+//!   answered. Past them, `busy`.
 //! - **a cancel, or the deadline,** fences the job, which then runs no SQL,
 //!   and aborts it if it hasn't started. A job that starts past its
 //!   deadline runs no SQL either, whether or not the watcher has run.
@@ -45,7 +48,7 @@ use std::time::{Duration, Instant};
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::stream::{SendError, WRITER_DATA_CAP};
-use fc_service::conn::Connection;
+use fc_service::conn::{Charge, Connection};
 use fc_service::panic::{Labeled, TaskKind, with_kind};
 use serde_json::value::RawValue;
 use serde_json::{Value, json};
@@ -59,8 +62,9 @@ use crate::{params, progress, testhooks};
 
 /// `ipfs.stats`'s deadline (0007, "Methods").
 pub const STATS_DEADLINE: Duration = Duration::from_secs(5);
-/// The most stats jobs outstanding at once in the process (0007, "Stats"):
-/// main asks every 5 s and gives up at 20 s, so it has at most 4 asked.
+/// The most stats calls outstanding at once in the process, each from its
+/// admission until its reply is written (0007, "Stats"): main asks every
+/// 5 s and gives up at 20 s, so it has at most 4 asked.
 pub const MAX_STATS_JOBS: usize = 4;
 
 /// The stats' control job: the service's own work, so a panic exits 70.
@@ -171,6 +175,9 @@ pub struct Stats {
     /// to the store.
     started: AtomicU64,
     ran: AtomicU64,
+    /// Jobs that queued their reply and returned.
+    #[cfg(test)]
+    replied: AtomicU64,
     /// Runs in the next job, once started, before its fence is checked.
     #[cfg(test)]
     before_fence: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -185,8 +192,10 @@ struct Job {
     abort: Option<AbortHandle>,
 }
 
-/// A job's place in the bound: freed when the job's closure is dropped,
-/// after it ran, or unrun when it was aborted.
+/// A stats call's place in the bound, from its admission: freed once its
+/// reply has been written and flushed (the reply holds it, as a charge), or
+/// when its job's closure is dropped without one: aborted before it ran,
+/// fenced, or answered `deadline`.
 struct JobSlot {
     stats: Arc<Stats>,
     id: u64,
@@ -214,6 +223,8 @@ impl Stats {
             started: AtomicU64::new(0),
             ran: AtomicU64::new(0),
             #[cfg(test)]
+            replied: AtomicU64::new(0),
+            #[cfg(test)]
             before_fence: Mutex::new(None),
         })
     }
@@ -234,6 +245,12 @@ impl Stats {
     #[cfg(test)]
     pub fn before_fence(&self, hook: Box<dyn FnOnce() + Send>) {
         *self.before_fence.lock().unwrap_or_else(|p| p.into_inner()) = Some(hook);
+    }
+
+    /// The jobs that have queued their reply and returned.
+    #[cfg(test)]
+    pub fn replied(&self) -> u64 {
+        self.replied.load(Ordering::SeqCst)
     }
 
     /// The jobs that have started, and those that ran their SQL.
@@ -305,7 +322,7 @@ impl Stats {
                 drop(jobs);
                 let _ = conn.reply_error(
                     id,
-                    &ErrorBody::new(ErrorCode::Busy, "4 stats jobs are outstanding already"),
+                    &ErrorBody::new(ErrorCode::Busy, "4 stats calls are outstanding already"),
                 );
                 return;
             }
@@ -326,8 +343,8 @@ impl Stats {
         let (reply, timer) = (conn.clone(), conn.clone());
         let stats = self.clone();
         let job = self.runtime.spawn_blocking(move || {
-            // Its place in the bound goes with the closure, run or not.
-            let _slot = slot;
+            // The call's place in the bound (`slot`) goes with the closure,
+            // unless its reply takes it.
             stats.started.fetch_add(1, Ordering::SeqCst);
             #[cfg(test)]
             {
@@ -346,7 +363,7 @@ impl Stats {
             // Past its deadline, however late the watcher runs: no SQL, and
             // `deadline`, through the same check as a reply.
             if Instant::now() >= deadline {
-                let _ = reply.reply_error_by(id, &late(), deadline, &late());
+                let _ = reply.reply_error_by(id, &late(), deadline, &late(), None);
                 return;
             }
             stats.ran.fetch_add(1, Ordering::SeqCst);
@@ -372,10 +389,17 @@ impl Stats {
                 let result = progress::fit(id, result);
                 // Fitted, it is within a frame; were it not, it would still
                 // be answered.
-                if let Err(SendError::TooLarge) = reply.reply_by(id, &result, deadline, &late()) {
+                // The reply holds the call's place until it is written: the
+                // bound counts replies waiting for the writer too.
+                let charge: Charge = Box::new(slot);
+                if let Err(SendError::TooLarge) =
+                    reply.reply_by(id, &result, deadline, &late(), Some(charge))
+                {
                     let too_large = ErrorBody::new(ErrorCode::Internal, "the stats are too large");
-                    let _ = reply.reply_error_by(id, &too_large, deadline, &late());
+                    let _ = reply.reply_error_by(id, &too_large, deadline, &late(), None);
                 }
+                #[cfg(test)]
+                stats.replied.fetch_add(1, Ordering::SeqCst);
             });
         });
         // Its abort, recorded before anything can stop it: a cancel is

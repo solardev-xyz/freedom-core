@@ -1040,4 +1040,51 @@ mod tests {
         );
         assert_eq!(counted["last_native_error_code"], "deadline", "{counted}");
     }
+
+    /// Review of #143: the 4 stats calls are counted until their replies
+    /// are written, not until their jobs end: with the writer held, 4
+    /// replies wait, a 5th call is `busy`, and their places free once
+    /// they are written.
+    #[test]
+    fn stats_replies_waiting_for_the_writer_hold_their_places() {
+        let mut harness = Harness::new(0);
+        // The writer is held inside head 3.
+        harness.head(3, 30_000);
+        harness.pace.begun(3);
+        for id in 4..8 {
+            harness.stats(id);
+        }
+        // Every job has queued its reply and ended.
+        let deadline = Instant::now() + WAIT;
+        while harness.stats.replied() < 4 {
+            assert!(Instant::now() < deadline, "the jobs never replied");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(harness.stats.outstanding(), 4, "held by their replies");
+        harness.stats(8);
+        harness.barrier(9);
+        harness.pace.permit(usize::MAX / 2);
+        assert_eq!(harness.replies.recv_timeout(WAIT).unwrap()["id"], 3);
+        for id in 4..8 {
+            let reply = harness.replies.recv_timeout(WAIT).unwrap();
+            assert_eq!(reply["id"], id, "{reply}");
+            assert!(reply["result"]["gateway"].is_object(), "{reply}");
+        }
+        let refused = harness.replies.recv_timeout(WAIT).unwrap();
+        assert_eq!(
+            (&refused["id"], &refused["error"]["code"]),
+            (&json!(8), &json!("busy")),
+            "{refused}"
+        );
+        assert_eq!(harness.replies.recv_timeout(WAIT).unwrap()["id"], 9);
+        // Written: their places are free.
+        let deadline = Instant::now() + WAIT;
+        while harness.stats.outstanding() > 0 {
+            assert!(Instant::now() < deadline, "the places were never freed");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let ran = harness.stats.ran();
+        harness.shut_down();
+        assert_eq!(ran, (4, 4), "the 5th never started");
+    }
 }
