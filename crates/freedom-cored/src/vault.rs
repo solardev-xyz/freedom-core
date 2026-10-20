@@ -27,7 +27,10 @@
 //!   admitted before a lock acknowledgement runs after it. Unlock also
 //!   installs only with a ticket taken at its start.
 //! - **Deadlines** (30 s from admission) are enforced by the loop's wakeup,
-//!   for queued and running work alike, independently of the worker.
+//!   for queued and running work alike, independently of the worker. A job
+//!   may claim its commit point only in the first two thirds of its
+//!   deadline. A later claim stops it uncommitted, answered `deadline`, so
+//!   what follows a claim has at least 10 s plus main's 15 s margin (#127).
 //! - **The auto-lock counts sleep** ([`Clock`], #80): a vault left unlocked
 //!   locks on waking once its time has passed, however long the machine
 //!   slept. While unlocked, the loop wakes at least every
@@ -49,7 +52,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use fc_keys::freedom::{self, FreedomKeys};
 use fc_keys::{Mnemonic, WordCount, multiformats};
 use fc_protocol::error::{ErrorBody, ErrorCode};
-use fc_protocol::message::{self, CallerKind};
+use fc_protocol::message;
 use fc_protocol::secret::{SecretBytes, SecretResponse};
 use fc_vault::format::{self, SealParams};
 use fc_vault::state::{LockReason, Locked, Prepared, Ticket, VaultState};
@@ -386,33 +389,54 @@ struct Pending {
 }
 
 /// Shared by the loop and the worker for one job: who wins the race between
-/// abandoning it and committing it.
-pub struct JobControl(AtomicU8);
+/// abandoning it and committing it, and until when it may commit.
+pub struct JobControl {
+    state: AtomicU8,
+    /// The last moment the worker may claim the commit point: two thirds
+    /// into the job's deadline. What follows a claim (a rename and a
+    /// directory flush, or a node write's fsyncs) then has the last third
+    /// and main's watchdog margin, 25 s by default, however late it came
+    /// (#127).
+    claim_by: Instant,
+}
 
 const JOB_RUNNING: u8 = 0;
 const JOB_ABANDONED: u8 = 1;
 const JOB_COMMITTED: u8 = 2;
 
 impl JobControl {
-    fn new() -> Arc<Self> {
-        Arc::new(JobControl(AtomicU8::new(JOB_RUNNING)))
+    fn new(claim_by: Instant) -> Arc<Self> {
+        Arc::new(JobControl {
+            state: AtomicU8::new(JOB_RUNNING),
+            claim_by,
+        })
     }
 
-    /// Loop: stops the job unless it already committed. True if stopped.
+    /// Stops the job unless it already committed. True if it is stopped:
+    /// by this call, or already by the worker, past its claim time. So the
+    /// loop answers a job the worker stopped as it would one it stopped,
+    /// without waiting for the worker's cleanup to finish.
     fn abandon(&self) -> bool {
-        self.0
-            .compare_exchange(
-                JOB_RUNNING,
-                JOB_ABANDONED,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
+        match self.state.compare_exchange(
+            JOB_RUNNING,
+            JOB_ABANDONED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => true,
+            Err(state) => state == JOB_ABANDONED,
+        }
     }
 
-    /// Worker: claims the commit point. False if the job was abandoned.
+    /// Worker: claims the commit point. False if the job was abandoned, or
+    /// if it is past its claim time: it then stops as if abandoned, and the
+    /// loop answers `deadline`.
     fn commit(&self) -> bool {
-        self.0
+        if Instant::now() >= self.claim_by {
+            self.abandon();
+            return false;
+        }
+        self.state
             .compare_exchange(
                 JOB_RUNNING,
                 JOB_COMMITTED,
@@ -425,12 +449,12 @@ impl JobControl {
     /// Whether the worker claimed the commit point (deadlines and revocation
     /// no longer apply).
     fn committed(&self) -> bool {
-        self.0.load(Ordering::Acquire) == JOB_COMMITTED
+        self.state.load(Ordering::Acquire) == JOB_COMMITTED
     }
 
     /// Worker: whether to stop early (skip the KDF).
     fn abandoned(&self) -> bool {
-        self.0.load(Ordering::Acquire) == JOB_ABANDONED
+        self.state.load(Ordering::Acquire) == JOB_ABANDONED
     }
 }
 
@@ -705,27 +729,11 @@ impl Vault {
     }
 
     /// Handles a request. Inline methods reply at once; KDF methods are
-    /// queued and reply when their job finishes.
-    pub fn request(
-        &mut self,
-        id: u64,
-        method: &str,
-        raw: Option<&str>,
-        caller: CallerKind,
-    ) -> Vec<Out> {
+    /// queued and reply when their job finishes. The caller was checked
+    /// against fc-protocol's method table before this (#101): `compat.*`,
+    /// `vault.reconcile` and `nodes.op_status` are main's own.
+    pub fn request(&mut self, id: u64, method: &str, raw: Option<&str>) -> Vec<Out> {
         let mut out = Vec::new();
-        // compat.* and vault.reconcile are main-internal (design 0001).
-        let internal_only = method.starts_with("compat.")
-            || method == "vault.reconcile"
-            || method == "nodes.op_status";
-        if internal_only && caller != CallerKind::Shell {
-            self.reply_error(
-                &mut out,
-                id,
-                ErrorBody::new(ErrorCode::Forbidden, "main-internal only"),
-            );
-            return out;
-        }
         let result = match method {
             "vault.status" => self.status(id),
             "vault.lock" => {
@@ -1181,7 +1189,7 @@ impl Vault {
             };
             let job_id = self.next_job;
             self.next_job += 1;
-            let control = JobControl::new();
+            let control = JobControl::new(pending.deadline - self.kdf_deadline / 3);
             let (kind, job) = match precheck {
                 // The request's secrets are dropped (wiped) here, unused.
                 Some((kind, version)) => (kind, self.precheck_job(version, Arc::clone(&control))),
@@ -1318,6 +1326,12 @@ impl Vault {
         let request = running.request;
         // A result after the deadline is abandoned, unless it committed.
         if !running.answered && Instant::now() >= running.deadline && running.control.abandon() {
+            running.answered = true;
+            self.reply_error(&mut out, request, deadline_exceeded());
+        }
+        // The worker stopped itself, past its claim time: the deadline's
+        // answer, a little early. (The loop answers whenever it abandons.)
+        if !running.answered && running.control.abandoned() {
             running.answered = true;
             self.reply_error(&mut out, request, deadline_exceeded());
         }
@@ -1781,7 +1795,8 @@ fn hex(bytes: &[u8]) -> String {
 
 /// Startup work that touches storage, run off the event loop: adoption
 /// tightens an existing vault file to 0600 in place (metadata only; quick
-/// unlock's content fingerprint is unaffected), then the file is snapshot.
+/// unlock's content fingerprint is unaffected), temp files a killed write
+/// left are removed, then the file is snapshot.
 pub fn startup_snapshot(dir: &Path) -> (FileSnapshot, NodeRecovery) {
     // Finish an interrupted node identity write before anything else
     // (design 0001: before core.hello is answered and before any node write).
@@ -1794,7 +1809,38 @@ pub fn startup_snapshot(dir: &Path) -> (FileSnapshot, NodeRecovery) {
             serde_json::json!({ "error": e.kind().to_string() }),
         ),
     }
+    remove_leftover_temps(dir);
     (snapshot(dir), recovery)
+}
+
+/// The files the core replaces atomically in the identity directory, whose
+/// temp files a killed write can leave (#81). The vault's is an encrypted
+/// copy of the mnemonic; the journal's records hold no secret, but are
+/// litter all the same.
+const REPLACED: [&str; 5] = [
+    VAULT_FILE,
+    journal::JOURNAL,
+    journal::DONE,
+    journal::STAGING,
+    journal::UNRESOLVED,
+];
+
+/// Removes the temp files writes killed before their rename left (#81).
+/// Startup only: the gate is held and no job runs yet, so none is live.
+fn remove_leftover_temps(dir: &Path) {
+    for name in REPLACED {
+        match fsx::remove_temps(dir, name) {
+            Ok(0) => {}
+            Ok(count) => crate::log::info(
+                "removed temp files a killed write left",
+                serde_json::json!({ "count": count }),
+            ),
+            Err(e) => crate::log::warn(
+                "could not remove temp files a killed write left",
+                serde_json::json!({ "error": e.kind().to_string() }),
+            ),
+        }
+    }
 }
 
 /// What startup recovery leaves for main to act on, in `core.hello`'s
@@ -1868,24 +1914,31 @@ fn snapshot(dir: &Path) -> FileSnapshot {
     read_vault(dir).map(|contents| contents.map(|c| sha256_hex(c.as_bytes())))
 }
 
-/// Reads the vault file: `None` if missing. Only a regular file of bounded
-/// size is read, so a FIFO or a huge file can't stall anything.
+/// Reads the vault file: `None` if missing. It is opened once and judged on
+/// the open handle (#83): only a regular file is read, never through a
+/// symlink, and at most [`MAX_VAULT_BYTES`], so nothing swapped in between a
+/// check and the read (a FIFO, a symlink, a growing file) can stall the
+/// worker or be read whole.
 fn read_vault(dir: &Path) -> Result<Option<String>, OpError> {
-    let path = dir.join(VAULT_FILE);
-    let metadata = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+    read_bounded(&dir.join(VAULT_FILE))
+}
+
+/// [`read_vault`] for any path.
+fn read_bounded(path: &Path) -> Result<Option<String>, OpError> {
+    let file = match fsx::open_regular(path, false) {
+        Ok(fsx::Regular::Missing) => return Ok(None),
+        Ok(fsx::Regular::Other) => return Err(OpError::Storage("not_regular")),
+        Ok(fsx::Regular::File(file)) => file,
         Err(e) => return Err(storage(&e)),
     };
-    if !metadata.is_file() {
-        return Err(OpError::Storage("not_regular"));
-    }
-    if metadata.len() > MAX_VAULT_BYTES {
-        return Err(OpError::Storage("too_large"));
-    }
-    match std::fs::read_to_string(&path) {
-        Ok(contents) => Ok(Some(contents)),
-        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Err(OpError::Corrupt),
+    read_handle(&file).map(Some)
+}
+
+/// A vault file's text through an open handle, at most [`MAX_VAULT_BYTES`].
+fn read_handle(file: &std::fs::File) -> Result<String, OpError> {
+    match fsx::read_at_most(file, MAX_VAULT_BYTES) {
+        Ok(Some(bytes)) => String::from_utf8(bytes).map_err(|_| OpError::Corrupt),
+        Ok(None) => Err(OpError::Storage("too_large")),
         Err(e) => Err(storage(&e)),
     }
 }
@@ -1952,6 +2005,8 @@ fn claim(control: &JobControl) -> bool {
     let claimed = control.commit();
     if claimed {
         crate::testhooks::commit_delay();
+    } else {
+        crate::testhooks::refused_claim_hold();
     }
     claimed
 }
@@ -1968,10 +2023,21 @@ fn job_delete(dir: &Path, password: &SecretBytes, control: &JobControl) -> JobOu
         return not_committed(error);
     }
     match fsx::remove(&dir.join(VAULT_FILE), || claim(control)) {
-        Ok(Some(done)) => JobOutput::Checked {
-            result: Ok(()),
-            commit: Some(Commit { done, file: None }),
-        },
+        Ok(Some(done)) => {
+            // Copies a killed write left go with the vault (#81). No other
+            // job runs, so none of them is live. The delete has committed:
+            // a failure here is only logged.
+            if let Err(e) = fsx::remove_temps(dir, VAULT_FILE) {
+                crate::log::warn(
+                    "could not remove the vault's leftover temp files",
+                    serde_json::json!({ "error": e.kind().to_string() }),
+                );
+            }
+            JobOutput::Checked {
+                result: Ok(()),
+                commit: Some(Commit { done, file: None }),
+            }
+        }
         Ok(None) => not_committed(OpError::Abandoned),
         Err(e) => not_committed(storage(&e)),
     }
@@ -2000,7 +2066,9 @@ fn write_vault(
         &dir.join(VAULT_FILE),
         contents.as_bytes(),
         |staged| {
-            let staged = std::fs::read_to_string(staged).map_err(|e| e.kind().to_string())?;
+            // Read back through the handle that wrote it.
+            let staged = read_handle(staged)
+                .map_err(|e| format!("the staged vault can't be read: {e:?}"))?;
             let opened = format::open(&staged, password).map_err(|e| e.to_string())?;
             if opened.mnemonic.phrase() == expected.as_str() {
                 Ok(())

@@ -11,8 +11,16 @@
 //! - **One directory:** the core works only in the canonical identity
 //!   directory whose gate it holds. The path is resolved again after locking,
 //!   and a change (a retargeted symlink) is refused.
+//! - **Private (Unix, #84):** `flock` works on a read-only handle, so anyone
+//!   who can open the lock file can hold the gate and keep every core from
+//!   starting. The lock and identity directories are created `0700`, and
+//!   existing ones lose their group and other bits; the lock file is created
+//!   `0600` (never through a symlink), and an existing one is tightened to
+//!   it. A directory or lock file that isn't the user's own is refused
+//!   (exit 74). Windows: both inherit the per-user `%APPDATA%` ACL, as the
+//!   vault does.
 
-use std::fs::{File, OpenOptions, TryLockError};
+use std::fs::{File, TryLockError};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -35,6 +43,10 @@ pub enum GateError {
     LockInsideIdentity,
     /// The identity directory resolved differently after locking (exit 74).
     Moved,
+    /// The lock or identity directory, or the lock file, isn't the user's
+    /// own, or isn't what it should be (exit 74).
+    #[cfg_attr(not(unix), allow(dead_code))]
+    NotPrivate(&'static str),
     /// Any other storage failure (exit 74).
     Storage(std::io::Error),
 }
@@ -48,6 +60,7 @@ impl std::fmt::Display for GateError {
                 f.write_str("the lock directory must be outside the identity directory")
             }
             GateError::Moved => f.write_str("the identity directory changed while taking its lock"),
+            GateError::NotPrivate(what) => write!(f, "refusing {what}"),
             GateError::Storage(e) => write!(f, "storage error: {}", e.kind()),
         }
     }
@@ -65,8 +78,8 @@ pub struct Gate {
 /// Qualifies storage, then takes the gate for `identity_dir`, retrying on
 /// contention for up to 5 s.
 pub fn acquire(identity_dir: &Path, lock_dir: &Path) -> Result<Gate, GateError> {
-    std::fs::create_dir_all(identity_dir).map_err(GateError::Storage)?;
-    std::fs::create_dir_all(lock_dir).map_err(GateError::Storage)?;
+    create_private_dir(identity_dir).map_err(GateError::Storage)?;
+    create_private_dir(lock_dir).map_err(GateError::Storage)?;
     let canonical_identity = std::fs::canonicalize(identity_dir).map_err(GateError::Storage)?;
     let canonical_locks = std::fs::canonicalize(lock_dir).map_err(GateError::Storage)?;
     if canonical_locks.starts_with(&canonical_identity) {
@@ -81,15 +94,17 @@ pub fn acquire(identity_dir: &Path, lock_dir: &Path) -> Result<Gate, GateError> 
             Qualification::Unknown(reason) => return Err(GateError::Unqualified(reason)),
         }
     }
+    make_private(
+        &canonical_identity,
+        "an identity directory that isn't the user's own",
+    )?;
+    make_private(
+        &canonical_locks,
+        "a lock directory that isn't the user's own",
+    )?;
 
     let lock_path = canonical_locks.join(lock_file_name(&canonical_identity));
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(GateError::Storage)?;
+    let file = open_lock_file(&lock_path)?;
     let started = Instant::now();
     loop {
         match file.try_lock() {
@@ -111,6 +126,90 @@ pub fn acquire(identity_dir: &Path, lock_dir: &Path) -> Result<Gate, GateError> 
         lock_path,
         identity_dir: canonical_identity,
     })
+}
+
+/// Creates `dir` and its missing ancestors, private to the user on Unix
+/// (`0700`, less the umask).
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
+}
+
+/// Unix: `dir` (canonical) must be a directory the user owns; its group and
+/// other permission bits are removed (#84).
+#[cfg(unix)]
+fn make_private(dir: &Path, foreign: &'static str) -> Result<(), GateError> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    // Judged and changed through one handle, never by path twice.
+    let handle = File::open(dir).map_err(GateError::Storage)?;
+    let metadata = handle.metadata().map_err(GateError::Storage)?;
+    if !metadata.is_dir() {
+        return Err(GateError::NotPrivate(
+            "a lock or identity path that isn't a directory",
+        ));
+    }
+    if metadata.uid() != rustix::process::getuid().as_raw() {
+        return Err(GateError::NotPrivate(foreign));
+    }
+    let mode = metadata.mode() & 0o7777;
+    if mode & 0o077 != 0 {
+        handle
+            .set_permissions(std::fs::Permissions::from_mode(mode & 0o7700))
+            .map_err(GateError::Storage)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn make_private(_dir: &Path, _foreign: &'static str) -> Result<(), GateError> {
+    Ok(())
+}
+
+/// Opens (creating it if needed, never truncating it) the lock file. Unix:
+/// created `0600`, never through a symlink, and it must be a regular file the
+/// user owns, tightened to `0600` if it is wider (#84).
+#[cfg(unix)]
+fn open_lock_file(path: &Path) -> Result<File, GateError> {
+    use rustix::fs::{Mode, OFlags};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let flags =
+        OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let fd = rustix::fs::open(path, flags, Mode::RUSR | Mode::WUSR)
+        .map_err(|e| GateError::Storage(e.into()))?;
+    let file = File::from(fd);
+    let metadata = file.metadata().map_err(GateError::Storage)?;
+    if !metadata.is_file() {
+        return Err(GateError::NotPrivate(
+            "a lock file that isn't a regular file",
+        ));
+    }
+    if metadata.uid() != rustix::process::getuid().as_raw() {
+        return Err(GateError::NotPrivate(
+            "a lock file that isn't the user's own",
+        ));
+    }
+    if metadata.mode() & 0o777 != 0o600 {
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(GateError::Storage)?;
+    }
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn open_lock_file(path: &Path) -> Result<File, GateError> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(GateError::Storage)
 }
 
 /// The lock file's name: the SHA-256 of the canonical identity directory, so

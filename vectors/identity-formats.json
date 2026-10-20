@@ -144,5 +144,37 @@
       ],
       "didFromPublicKey": "did:key:z6MkpHvUmNrRummmZhCZMPLEsrrYfKfesiUMq5HsDuLZ8ALB"
     }
+  ],
+  "radiclePrivateFiles": [
+    {
+      "mnemonicId": "abandon-12",
+      "comment": "alic",
+      "checkIntegerHex": "0a0b0c0d",
+      "paddingHex": "01",
+      "privateKeyFile": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACAfvBnR44b5lpxeeSXXHOWzMrOZ7mMrF/R0OjJIgj4kiwAAAIgKCwwNCgsM\nDQAAAAtzc2gtZWQyNTUxOQAAACAfvBnR44b5lpxeeSXXHOWzMrOZ7mMrF/R0OjJIgj4kiw\nAAAECyYuYvxqVY/QRcpo3XAA4woTX2eLwIFpNeE+vmqX4UvR+8GdHjhvmWnF55Jdcc5bMy\ns5nuYysX9HQ6MkiCPiSLAAAABGFsaWMB\n-----END OPENSSH PRIVATE KEY-----\n"
+    },
+    {
+      "mnemonicId": "abandon-12",
+      "comment": "alice",
+      "checkIntegerHex": "0a0b0c0d",
+      "paddingHex": "0102030405060708",
+      "deviation": "openssh-padding",
+      "privateKeyFile": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACAfvBnR44b5lpxeeSXXHOWzMrOZ7mMrF/R0OjJIgj4kiwAAAJAKCwwNCgsM\nDQAAAAtzc2gtZWQyNTUxOQAAACAfvBnR44b5lpxeeSXXHOWzMrOZ7mMrF/R0OjJIgj4kiw\nAAAECyYuYvxqVY/QRcpo3XAA4woTX2eLwIFpNeE+vmqX4UvR+8GdHjhvmWnF55Jdcc5bMy\ns5nuYysX9HQ6MkiCPiSLAAAABWFsaWNlAQIDBAUGBwg=\n-----END OPENSSH PRIVATE KEY-----\n"
+    },
+    {
+      "mnemonicId": "abandon-12",
+      "comment": "alices",
+      "checkIntegerHex": "0a0b0c0d",
+      "paddingHex": "01020304050607",
+      "privateKeyFile": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACAfvBnR44b5lpxeeSXXHOWzMrOZ7mMrF/R0OjJIgj4kiwAAAJAKCwwNCgsM\nDQAAAAtzc2gtZWQyNTUxOQAAACAfvBnR44b5lpxeeSXXHOWzMrOZ7mMrF/R0OjJIgj4kiw\nAAAECyYuYvxqVY/QRcpo3XAA4woTX2eLwIFpNeE+vmqX4UvR+8GdHjhvmWnF55Jdcc5bMy\ns5nuYysX9HQ6MkiCPiSLAAAABmFsaWNlcwECAwQFBgc=\n-----END OPENSSH PRIVATE KEY-----\n"
+    },
+    {
+      "mnemonicId": "abandon-12",
+      "comment": "Freedom-Node1",
+      "checkIntegerHex": "0a0b0c0d",
+      "paddingHex": "0102030405060708",
+      "deviation": "openssh-padding",
+      "privateKeyFile": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACAfvBnR44b5lpxeeSXXHOWzMrOZ7mMrF/R0OjJIgj4kiwAAAJgKCwwNCgsM\nDQAAAAtzc2gtZWQyNTUxOQAAACAfvBnR44b5lpxeeSXXHOWzMrOZ7mMrF/R0OjJIgj4kiw\nAAAECyYuYvxqVY/QRcpo3XAA4woTX2eLwIFpNeE+vmqX4UvR+8GdHjhvmWnF55Jdcc5bMy\ns5nuYysX9HQ6MkiCPiSLAAAADUZyZWVkb20tTm9kZTEBAgMEBQYHCA==\n-----END OPENSSH PRIVATE KEY-----\n"
+    }
   ]
 }

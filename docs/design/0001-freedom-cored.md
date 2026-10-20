@@ -93,6 +93,12 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
 - **Taking the lock:**
   - The core opens the file for read and write, creating it if needed, never truncating it, and with close-on-exec, which is Rust's default.
   - It then takes `File::try_lock` (`flock` on Unix, `LockFileEx` on Windows).
+- **The gate is private to the user (Unix).** `flock` works on a read-only handle, so anyone who can open the lock file can hold the gate, and every core start would exit 75 (#84). So:
+  - the lock directory and the identity directory are created `0700`, and existing ones lose their group and other permission bits;
+  - the lock file is created `0600` and never opened through a symlink, and an existing one is tightened to `0600`;
+  - a lock or identity directory, or a lock file, that isn't the current user's own is refused with exit 74 (`storage`).
+
+  **Windows:** both inherit the per-user `%APPDATA%` ACL, as the vault does ([Threat model](#threat-model)). An open handle from before an upgrade isn't revoked: the file is never replaced, since replacing a lock file breaks exclusion.
 - **Outcomes:**
   - **Contention:** retry for 5 s (Windows can release a lock a little after process exit), then exit 75 (`lock_held`).
   - **Any other locking error:** exit 74 (`storage`). The core never runs without the lock.
@@ -116,7 +122,7 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   2. The core revokes the vault epoch (see [Concurrency](#concurrency-epochs-and-revocation)) and finishes or abandons in-flight work according to its commit state.
   3. It exits 0.
 
-  After 3 s, main kills the core. Killing is safe because every write follows [Writes and durability](#writes-and-durability).
+  After 3 s, main kills the core. Killing is safe because every write follows [Writes and durability](#writes-and-durability). The core's own exit fits inside that: work past its commit point gets 2 s to finish. The writer then gets up to 2 s more to flush, which only a main that isn't reading uses up.
 - **Parent death:**
   - The core's I/O task, which is independent of vault work, exits on stdin EOF. EOF in the middle of a frame counts as EOF.
   - **Unix backstop:** main passes its PID as `--parent-pid`. At start the core exits if `getppid()` differs, which means main has already died. On Linux it then sets `PR_SET_PDEATHSIG` and re-checks `getppid()` to close the race. After that it polls `getppid()` every 2 s.
@@ -150,7 +156,7 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   - **Requests that waited go one at a time** once there is room, each as if it had just arrived: after the loop's timers, and with whatever main sends meanwhile handled between them. An auto-lock that comes due while they drain therefore locks before the next one, and a `vault.touch` among them can't postpone a lock already due. A cancel or `core.shutdown` sent meanwhile is handled within one request's time, not behind the whole backlog.
   - **Memory stays bounded:** what waits is the frames the reader holds, and for each vault request admitted before the wait (one running, 32 queued) its reply and at most one event.
   - **The core exits only on a stall.** If its frames wait while the writer writes nothing for **30 s**, main has stopped reading: the core logs "main is not reading replies" and exits 76 (`protocol`). Writer progress is any frame written, whoever made it: the 30 s count from the later of the writer's last write and the moment the frames began to wait.
-    - **Why 30 s:** it is far above a healthy main's pauses, which last milliseconds to seconds, and waiting costs nothing meanwhile. It is also the longest deadline the core gives a request (the KDF methods'), which puts it between main's [hang watchdogs](#deadlines-cancellation-and-commit): 20 s for a 5 s method, 45 s for a KDF method. So the core never gives up on main sooner than main gives up on a short request, and a main that can no longer run its timers keeps it waiting no longer than main would wait for a KDF reply.
+    - **Why 30 s:** it is far above a healthy main's pauses, which last milliseconds to seconds, and waiting costs nothing meanwhile. It also sits between main's [hang watchdogs](#deadlines-cancellation-and-commit): 15 s for an immediate method, 45 s for a vault method. So the core never gives up on main sooner than main gives up on an immediate request, and a main that can no longer run its timers keeps it waiting no longer than main would wait for a vault reply. A session's longer deadline (120 s) bounds its work, not the writer, which the 30 s alone judge.
     - **Why not exit at once,** as the core first did: a burst of requests, then a fraction of a second without reading (about 256 small replies), killed the core and locked the vault.
   - **Main must keep reading** whatever the state of its own writes, as 0005 requires of both sides ("consumers never block on the writer"). Otherwise each side's writer could wait on the other.
 - **Protocol errors** are an unknown kind, an oversized frame, invalid JSON, a response that has both or neither of `result` and `error`, or an unsolicited or duplicate response. They mean a bug in main or the core: the receiver logs it and closes the connection.
@@ -174,7 +180,8 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   - Main binds its pending-request map, timers and event handlers to the child's generation, a counter local to main. A late callback from a retired child is ignored.
 - **Exactly one terminal response per request:** a result, or an error such as `cancelled` or `deadline`. The core owns deadlines (see below). Main keeps every pending entry, even after its own caller has gone away, until that terminal response arrives. So a slow reply is never a protocol error; only an unsolicited or a second response is.
 - **Handshake:**
-  - The first message must be main's `core.hello`: `{ protocol: 1, shell_version, auto_lock_ms }`. Main sends `auto_lock_ms = 900000` (15 minutes), as `vault.js` does today.
+  - The first message must be main's `core.hello`: `{ protocol: 1, shell_version, auto_lock_ms, node_roots? }`. Main sends `auto_lock_ms = 900000` (15 minutes), as `vault.js` does today.
+  - `node_roots: { bee?, radicle? }` gives each node's root as an absolute path: Bee's `data_dir`, Radicle's `home`. The core tightens the node identity files under those roots ([Existing files](#writes-and-durability)). A root that isn't absolute is ignored, and so is the whole field in an older core.
   - The core replies `{ protocol: 1, core_version, capabilities }`, or with `protocol_mismatch`.
   - Main and core ship pinned together, so a mismatch is a packaging bug, and main fails loudly.
 - **Caller context:** main fills it in and never takes it from the renderer. Kinds use shell-neutral names, so a Chromium browser process can fill them in later.
@@ -182,14 +189,17 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   - `"shell"`: main-internal work with no IPC event behind it, such as the x402 client and background jobs.
   - `{ "page": { origin, top_origin, frame, navigation } }`: web content. This is reserved for Phase 2, which also defines how a page's approval binds to a key and an operation.
 
-  Each method declares the caller kinds it accepts, and the core answers anything else with `forbidden`. All Phase 1 methods accept `chrome` and `shell`.
+  Each method declares the caller kinds it accepts, in `fc-protocol`'s method table, and the core checks every request against it once, before dispatching anything (#101). A method the table doesn't list is `unknown_method`; a caller it doesn't list for the method gets `forbidden`. Nothing is allowed by default.
+  - Most methods accept `chrome` and `shell`.
+  - Main's own methods accept only `shell`: `core.hello`, `core.shutdown`, `vault.reconcile`, `nodes.op_status`, `compat.*` and `dweb.open`. A main bug that forwarded a renderer's `core.shutdown` under `chrome` would otherwise wipe the vault and, through the restart, reset the in-memory throttle.
+  - No method accepts `page` yet (Phase 2).
 - **Error codes:**
   - **Request errors:** `vault_locked`, `incorrect_password`, `throttled` (with `data.retry_after_ms`), `no_vault`, `vault_exists`, `unsupported_vault_version`, `corrupt_vault`, `invalid_mnemonic`, `invalid_argument`, `weak_password`, `storage` (with `data.kind`).
   - **Protocol-level:** `forbidden`, `busy`, `cancelled`, `deadline`, `internal`.
   - Main maps each code to the exact JS string per method; see [Parity contract](#parity-contract).
 - **Schema:**
-  - `fc-protocol` defines params, results, errors and the method table (name, caller kinds, mutation or read-only, default deadline).
-  - CI regenerates `protocol/schema.json` and fails on any difference from the committed file.
+  - `fc-protocol` defines the method table (name, caller kinds, whether it writes identity data, default deadline), errors, and message types; params and results are typed where each method is handled.
+  - `protocol/schema.json` is rendered from the table and committed. A test fails on any difference, so CI catches a stale file.
   - freedom-browser's contract test checks its proxy table against that file.
 
 ### Concurrency, epochs and revocation
@@ -221,16 +231,20 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
 ### Deadlines, cancellation and commit
 
 - **Deadlines:**
-  - A deadline is a total budget on a monotonic clock, starting when the core admits the request (queue time included). Defaults: 30 s for KDF methods, 5 s for everything else.
-  - **The core enforces deadlines and always replies.** Main doesn't settle requests on its own timer. It runs only a hang watchdog: core deadline + 15 s. If the watchdog fires, main treats the core as hung, kills it, restarts it and [reconciles](#reconciliation).
+  - A deadline is a total budget on a monotonic clock, starting when the core admits the request (queue time included). Each method has one of three classes, in the method table (`fc_protocol::methods`, and `protocol/schema.json` generated from it):
+    - **immediate:** answered at once, on the loop or its thread, with no deadline;
+    - **vault:** 30 s, for every request on the vault queue, KDF methods included;
+    - **session:** 120 s, for naming, chain and `dweb.open` sessions, or the caller's shorter `deadline_ms` where the method takes one (0004, 0005).
+  - **The core enforces deadlines and always replies.** Main doesn't settle requests on its own timer. It runs only a hang watchdog on every request: core deadline + 15 s, or 15 s for an immediate method. If the watchdog fires, main treats the core as hung, kills it, restarts it and [reconciles](#reconciliation). The process's own lifecycle has its own bounds instead: main waits 10 s for `core.hello`'s reply, and gives `core.shutdown` 3 s before it kills the process.
 - **Before the commit point,** a deadline or `cancel` stops the operation and returns `deadline` or `cancelled`. Throttle attempts are reserved before a KDF starts, so concurrent guesses can't all slip past the check.
 - **The commit point** is the worker's atomic claim immediately before the vault rename or unlink, or before the journal write of a multi-file operation. The loop and the worker race on one atomic: either the loop abandons the job first (cancel, deadline or revocation), and the job writes nothing, or the worker claims the commit first, and from then on cancel, deadline and revocation no longer apply.
+  - **A claim comes in the first two thirds of the deadline,** 20 s of the vault class's 30 s. A later claim stops the job uncommitted, answered `deadline`. So what follows a claim has at least 10 s, plus the watchdog's 15 s, before main gives up on the core (#127). That work is a rename and a directory flush, or a node write's journal and its fsyncs.
 - **After the commit point,** the reply is the real outcome of the rename or unlink, even past the deadline:
   - **If it happened,** the reply is success. A later failure, such as a directory `fsync` error, doesn't turn into an error reply. It is reported as success with `durable: false`, and logged.
   - **If the rename or unlink itself failed,** nothing changed, and the reply is that error.
 
   So every error reply means "not committed", and only a missing reply needs reconciliation.
-- **Shutdown** revokes everything before its commit point. Work past its commit point finishes and sends its reply before the process exits, within a bounded wait. Main's hang watchdog and reconciliation cover anything slower.
+- **Shutdown** revokes everything before its commit point. Work past its commit point finishes and sends its reply before the process exits, within 2 s, inside main's 3 s grace. Work slower than that is cut off at exit, as a kill would cut it off; the next start's recovery and main's reconciliation cover it.
 - **Read-only operations** can be cancelled at any time.
 
 ### Reconciliation
@@ -267,15 +281,26 @@ A reply can still go missing (core crash, hang watchdog), so every mutation can 
 
 1. Create a temp file in the same directory with an exclusive create (`O_EXCL`). On Unix its mode is `0600` from creation.
 2. Write it, then `fsync` it. On Windows, `FlushFileBuffers`.
-3. **For the vault:** read the temp file back, decrypt it with the new password, and compare the mnemonic before going on. On any mismatch or error, delete the temp file and keep the old vault.
-4. Rename it over the target.
-5. On Unix, `fsync` the directory.
+3. **For the vault:** read the temp file back through the handle that wrote it, decrypt it with the new password, and compare the mnemonic before going on. On any mismatch or error, delete the temp file and keep the old vault.
+4. Rename it over the target, if the temp name still names the file written and checked (Unix: the same device and inode). If not, nothing changes, and the write fails before its commit.
+5. Make the rename durable. On Unix, `fsync` the directory. On Windows, flush the renamed file through a write handle (`FlushFileBuffers`).
 6. Return errors from any flush; never ignore them.
 
 - **Guarantee:** the vault survives a process crash on every OS, and power loss on local Unix filesystems.
-- **Windows:** `MoveFileExW` with `REPLACE_EXISTING | WRITE_THROUGH` is best-effort under power loss.
-- **Existing files:** at adoption (the first core start on a profile), the core tightens existing secret files to `0600` in place with `chmod`, which doesn't change the content. It first checks that each is a regular file, not a symlink, owned by the current user. This covers the vault, the Bee keystore and config, and the Radicle keys.
+- **Windows** (#85): durability under power loss is best effort.
+  - The rename is std's.
+  - The flush of the renamed file commits NTFS's journal through the rename, since NTFS journals a rename with the file's own metadata. std can't open a directory to flush it.
+  - The design first named `MoveFileExW` with `REPLACE_EXISTING | WRITE_THROUGH`. Its documented guarantee covers only moves done as a copy and a delete, and it would need FFI.
+  - A failed flush is reported like a failed directory flush: `durable: false` for a vault write; for node files, it is logged.
+  - The renamed file is opened again by name to be flushed, and std exposes no file identity there, so the identity checks below are Unix-only.
+- **Existing files:** at adoption, the core tightens existing secret files to `0600` in place with `fchmod`, which doesn't change the content. It first checks, on the open handle, that each is a regular file the current user owns; a symlink is never followed.
+  - **The vault** is tightened at every start, before the snapshot.
+  - **Node files** are the files of each node's journal layout (Bee's keystore and config, Radicle's keys and config). They are tightened under the roots main gives in `core.hello`'s `node_roots`, on a thread of their own, so slow storage can't hold up the handshake (#85).
+  - **Until main sends `node_roots`,** node files that JS wrote keep their mode until the next `nodes.write_identity`.
 - **Delete:** unlink, then `fsync` the directory before replying. A delete commits at the unlink.
+- **Leftover temp files** (#81). A process killed between steps 1 and 4 leaves its temp file behind, for the vault an encrypted copy of the mnemonic. The core removes the temp files of its own atomic writes in the identity directory (the vault and the node journal's records) at startup, under the gate, before any job runs. `vault.delete` also removes the vault's, once its unlink has committed.
+- **Reading** (#83). The vault, the journal's records and node files are opened once, and judged on the open handle: anything but a regular file (a directory, a FIFO, a socket, a device; a symlink, except for Radicle's config, which JS follows) is refused before a byte is read, and no more than the size bound is read. The open itself can't wait: it is non-blocking on Unix. On Windows a symlink's own reparse point is opened (`FILE_FLAG_OPEN_REPARSE_POINT`) and refused. A file swapped in between a check and the read can therefore neither block the worker nor be read whole. Recovery reads the journal through a read-write handle, and flushes that same handle: it never opens the journal again by name.
+- **What a same-user process can still do.** Between the identity check and `rename(2)` there are a few system calls, in which another process of the same user can still swap the file under the name. The vault and node directories are that user's own, so such a process can write the files directly anyway. What the core guarantees is what it reports: a node file is recorded as installed only if the target is the file checked, with its digest, after the rename; otherwise the target is removed and the node is corrupt.
 
 ### Multi-file writes
 
@@ -285,7 +310,8 @@ This covers node identities. **Bee:** `keys/swarm.key` plus `config.yaml`. **Rad
 2. **Commit.** Write `<identityDir>/node-identity-journal.json` atomically and durably. It holds `{ op_id, node, files: [{ target, staged, sha256 }] }`, with absolute paths.
 3. **Install.** For each file:
    - if the target already has the journaled SHA-256, it's done;
-   - otherwise rename the staged file over it.
+   - otherwise rename the staged file over it, if its name still names the file just hashed (Unix: the same device and inode); if not, nothing is renamed, the journal stays, and recovery judges it again;
+   - after the rename, the target must be the file hashed, with its digest (review of #114). If it isn't, it is removed, and the node is corrupt until a fresh write.
 
    Then `fsync` every affected directory.
 4. **Finish.** Add `op_id` to `<identityDir>/node-identity-done.json` (the last 32 operations, written atomically), then delete the journal and `fsync`.
@@ -448,7 +474,7 @@ The password crosses the pipe, which is no worse than today, where it is used in
 
 | Crate | Kind | Contents |
 |---|---|---|
-| `fc-keys` | logic | BIP-39 (`@scure/bip39` rules), BIP-32 on `k256` (every intermediate secret zeroized), SLIP-10 Ed25519, the path registry. Encoders: EIP-55, Web3 keystore v3 (scrypt; password NFKC, as ethers does), OpenSSH v1 with an injectable check integer, did:key. The IPFS encoder is kept for the vectors only. |
+| `fc-keys` | logic | BIP-39 (`@scure/bip39` rules), BIP-32 on `k256` (every intermediate secret zeroized), SLIP-10 Ed25519, the path registry. Encoders: EIP-55, Web3 keystore v3 (scrypt; password NFKC, as ethers does), OpenSSH v1 with an injectable check integer, did:key. One deviation (`openssh-padding`, #77): the reference pads an OpenSSH private section that is already aligned with a full 8 bytes. OpenSSH's reader accepts that, but ssh-key, which Radicle reads keys with, refuses it, so a Radicle alias whose length is 5 mod 8 gave a key radicle-node can't load. The core pads it with none, as OpenSSH's writer does. The IPFS encoder is kept for the vectors only. |
 | `fc-vault` | logic | The passworder v6 format (PBKDF2-SHA-256, iterations from `keyMetadata` or the legacy 10,000; AES-256-GCM, 16-byte IV, 32-byte salt), the vault envelope, the lock state machine with epochs, the throttle policy. Everything is a pure function of (state, event, now), returning the bytes to write. |
 | `fc-protocol` | logic | Message types, error codes, the method table, a sans-I/O frame codec, schema generation, base64/hex secret field types decoding into `Zeroizing`. |
 | `freedom-cored` | binary | Stdio transport and writer, control path, vault task, KDF pool, timers, durable writes, the node journal, the lifetime lock with storage qualification, logging, process hardening, and the `hold-lock` subcommand. |

@@ -29,6 +29,10 @@ const MNEMONICS = [
   { id: 'fresh-256', mnemonic: 'debate leisure left spoon alley double transfer segment region actual nest timber home garage easily tone thing bread anger boring belt trend eager vivid' },
 ];
 const COMMENTS = ['FreedomBrowser', 'vector-alias'];
+// Aliases whose private section is 4, 5 (aligned), 6 and 13 (aligned) bytes
+// past 131, for radiclePrivateFiles.
+const RADICLE_ALIGNMENT_ALIASES = ['alic', 'alice', 'alices', 'Freedom-Node1'];
+const RADICLE_FIXED_CHECK = '0a0b0c0d';
 const UNICODE_PASSWORD = 'Caf\u00e9-\ud83d\udd10-password';
 const VAULT_CASES = [
   { id: 'ascii-min-12', mnemonicId: 'abandon-12', password: 'testpass' },
@@ -192,6 +196,22 @@ function buildIdentities({ meta, derivation: d, formats: f }) {
           return { comment, did: result.did, nodeId: result.nodeId, publicKeyFile: result.publicKeyFile };
         }),
         didFromPublicKey: f.didFromPublicKey(radicleKey.publicKey),
+      };
+    }),
+    // Whole private key files with a fixed check integer, for aliases around
+    // an aligned private section (131 bytes plus the alias). The reference
+    // pads an aligned section with a full 8 bytes, which OpenSSH reads but
+    // ssh-key (Radicle's reader) refuses; the core pads it with none, as
+    // OpenSSH writes it (deviation openssh-padding, freedom-core #77).
+    radiclePrivateFiles: RADICLE_ALIGNMENT_ALIASES.map((comment) => {
+      const key = d.deriveAllKeys(mnemonicFor('abandon-12')).radicleKey;
+      const result = replayRadicle(f, key, comment, RADICLE_FIXED_CHECK);
+      const parsed = parseOpenSSH(result.privateKeyFile, key, comment);
+      const aligned = (131 + Buffer.byteLength(comment)) % 8 === 0;
+      return {
+        mnemonicId: 'abandon-12', comment, checkIntegerHex: RADICLE_FIXED_CHECK, paddingHex: parsed.paddingHex,
+        ...(aligned ? { deviation: 'openssh-padding' } : {}),
+        privateKeyFile: result.privateKeyFile,
       };
     }),
   };

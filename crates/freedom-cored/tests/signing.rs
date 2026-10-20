@@ -122,6 +122,45 @@ fn every_vector_case_over_the_wire() {
         }
     }
     assert!(checked > 150, "only {checked} cases");
+    // Typed data as JSON text, sent in the frame as written (#87): the core
+    // reads each number as JSON.parse does, whatever its spelling.
+    for case in vectors["typedDataText"].as_array().unwrap() {
+        let Some((_, key)) = keys.iter().find(|(k, _)| *k == case["keyId"]) else {
+            continue;
+        };
+        let label = case["id"].as_str().unwrap();
+        let text = case["typed_data_json"].as_str().unwrap();
+        let mut send = |method: &str, params: String| {
+            id += 1;
+            let frame = format!(
+                r#"{{"type":"request","id":{id},"method":"{method}","params":{params},"context":{{"caller":"chrome"}}}}"#
+            );
+            core.send_raw(&raw_frame(1, frame.as_bytes()));
+            core.response(id)
+        };
+        let signed = send(
+            "sign.typed_data",
+            format!(r#"{{"key":{key},"typed_data":{text}}}"#),
+        );
+        let hashed = send("typed_data.hash", format!(r#"{{"typed_data":{text}}}"#));
+        if case["result"]["status"] == "error" {
+            for reply in [&signed, &hashed] {
+                assert_eq!(
+                    reply["error"]["code"], "invalid_argument",
+                    "{label}: {reply}"
+                );
+            }
+            continue;
+        }
+        assert_eq!(
+            signed["result"]["signature"], case["result"]["signature"],
+            "{label}: {signed}"
+        );
+        assert_eq!(
+            hashed["result"]["hash"], case["result"]["hash"],
+            "{label}: {hashed}"
+        );
+    }
 }
 
 #[test]
@@ -278,4 +317,48 @@ fn errors_quoting_malformed_input_stay_small() {
     // Still running, and still answering.
     let status = core.call(20, "vault.status", json!({}));
     assert_eq!(status["result"]["unlocked"], false, "{status}");
+}
+
+/// A JSON number in the frame is read as `JSON.parse` reads it (#87):
+/// main sends `JSON.stringify` output, but a caller passing a dApp's own
+/// JSON text gets the integer ethers would sign, never an approximation.
+#[test]
+fn typed_data_numbers_are_read_as_json_parse_reads_them() {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    let mut hash = |id: u64, number: &str| {
+        let text = format!(
+            r#"{{"type":"request","id":{id},"method":"typed_data.hash","params":{{"typed_data":{{"domain":{{"name":"N"}},"types":{{"M":[{{"name":"v","type":"uint256"}}]}},"message":{{"v":{number}}}}}}},"context":{{"caller":"chrome"}}}}"#
+        );
+        core.send_raw(&raw_frame(1, text.as_bytes()));
+        core.response(id)
+    };
+    let tie = hash(2, "4503599627370496.5");
+    let even = hash(3, r#""4503599627370496""#);
+    assert!(tie["result"]["hash"].is_string(), "{tie}");
+    assert_eq!(tie["result"], even["result"]);
+    // (2^53 - 1) + 0.5 is 2^53: no safe integer.
+    let unsafe_tie = hash(4, "9007199254740991.5");
+    assert_eq!(
+        unsafe_tie["error"]["code"], "invalid_argument",
+        "{unsafe_tie}"
+    );
+    // The same tie with a padded integer significand, which serde_json's
+    // float_roundtrip reads as 2^52 + 1.
+    let padded = hash(5, &format!("45035996273704965{}e-753", "0".repeat(752)));
+    assert_eq!(padded["result"], even["result"], "{padded}");
+    // Exponents past std's 0x10000, compensated by the decimal point's
+    // position: exactly 1 both ways, and 2^53 + 1 (an unsafe 2^53).
+    let one = hash(6, r#""1""#);
+    let zeros = "0".repeat(655_359);
+    let fraction = hash(7, &format!("0.{zeros}1e+655360"));
+    assert_eq!(fraction["result"], one["result"], "{fraction}");
+    let integer = hash(8, &format!("1{}e-1048000", "0".repeat(1_048_000)));
+    assert_eq!(integer["result"], one["result"], "{integer}");
+    let unsafe_one = hash(9, &format!("0.{zeros}9007199254740993e+655375"));
+    assert_eq!(
+        unsafe_one["error"]["code"], "invalid_argument",
+        "{unsafe_one}"
+    );
 }

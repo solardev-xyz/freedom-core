@@ -840,6 +840,144 @@ mod tests {
         assert!(is_identifier(&"n".repeat(256)));
     }
 
+    /// The decimal digits of 5^n.
+    fn five_to(n: u32) -> String {
+        let mut digits = vec![1u8]; // little-endian
+        for _ in 0..n {
+            let mut carry = 0u8;
+            for digit in &mut digits {
+                let product = *digit * 5 + carry;
+                *digit = product % 10;
+                carry = product / 10;
+            }
+            if carry > 0 {
+                digits.push(carry);
+            }
+        }
+        digits.iter().rev().map(|d| char::from(b'0' + d)).collect()
+    }
+
+    /// A JSON number is read as `JSON.parse` reads it, correctly rounded to
+    /// the nearest double, ties to even, before the integer rules apply
+    /// (#87): `parse_json` rereads each double from its spelling. serde_json
+    /// rounds approximately, and its `float_roundtrip` parser still
+    /// misrounds padded spellings and halfway subnormals, so the core could
+    /// sign another integer than the one ethers signs and the approval UI
+    /// shows, or refuse one ethers accepts.
+    #[test]
+    fn numbers_are_read_as_json_parse_reads_them() {
+        let hash = |kind: &str, number: &str| {
+            let message = crate::parse_json(&format!(r#"{{"v":{number}}}"#)).unwrap();
+            let types = json!({ "M": [{ "name": "v", "type": kind }] });
+            typed_data_hash(&json!({ "name": "N" }), &types, &message)
+        };
+        let uint = |number: &str| hash("uint256", number);
+        let int = |number: &str| hash("int256", number);
+        // 2^52 + 0.5 is a tie between 2^52 and 2^52 + 1: JSON.parse gives
+        // 2^52, which ethers signs.
+        assert_eq!(
+            uint("4503599627370496.5").unwrap(),
+            uint("4503599627370496").unwrap()
+        );
+        assert_eq!(
+            uint("45035996273704965e-1").unwrap(),
+            uint("4503599627370496").unwrap()
+        );
+        // The same tie with its integer significand padded by 752 zeros and
+        // a compensating exponent, which float_roundtrip reads as 2^52 + 1;
+        // and just above the tie, which rounds up.
+        let zeros = "0".repeat(752);
+        let padded = format!("45035996273704965{zeros}e-753");
+        assert_eq!(uint(&padded).unwrap(), uint("4503599627370496").unwrap());
+        assert_eq!(
+            int(&format!("-{padded}")).unwrap(),
+            int("-4503599627370496").unwrap()
+        );
+        let above = format!("45035996273704965{}1e-754", "0".repeat(752));
+        assert_eq!(uint(&above).unwrap(), uint("4503599627370497").unwrap());
+        // 2^52 + 1.5 is a tie too, and rounds up to the even 2^52 + 2.
+        assert_eq!(
+            uint("4503599627370497.5").unwrap(),
+            uint("4503599627370498").unwrap()
+        );
+        // (2^53 - 1) + 0.5 rounds to 2^53, which is no safe integer: an
+        // error, as in ethers.
+        assert!(uint("9007199254740991.5").is_err());
+        assert!(uint("9007199254740991").is_ok());
+        // 2^-1075, halfway between 0 and the smallest subnormal, is 0 (ties
+        // to even), which ethers accepts; float_roundtrip reads the
+        // subnormal and refuses it. Just above halfway is the subnormal: no
+        // integer, refused by both.
+        let half = format!("{}{}e-1092", five_to(1075), "0".repeat(17));
+        assert_eq!(uint(&half).unwrap(), uint("0").unwrap());
+        assert_eq!(int(&format!("-{half}")).unwrap(), int("0").unwrap());
+        let over = format!("{}{}1e-1093", five_to(1075), "0".repeat(17));
+        assert!(uint(&over).is_err());
+        // Exponents std doesn't read whole (from 655,360 on, it stops at
+        // 0x10000) are compensated exactly: 1 is signed as 1, not 0 (a
+        // wrong signature) and not refused as infinite; 2^53 + 1 is the
+        // unsafe 2^53, refused, not 0.
+        let zeros = "0".repeat(655_359);
+        assert_eq!(
+            uint(&format!("0.{zeros}1e+655360")).unwrap(),
+            uint("1").unwrap()
+        );
+        assert_eq!(
+            int(&format!("-0.{zeros}5e+655360")).unwrap(),
+            int("-5").unwrap()
+        );
+        assert_eq!(
+            uint(&format!("1{}e-1048000", "0".repeat(1_048_000))).unwrap(),
+            uint("1").unwrap()
+        );
+        assert!(uint(&format!("0.{zeros}9007199254740993e+655375")).is_err());
+        // The hashes the pinned ethers gives these spellings (JSON.parse,
+        // then TypedDataEncoder.hash): 1, and the large padded tie (2^52)
+        // and just above it (2^52 + 1).
+        let hex = |hash: [u8; 32]| crate::to_hex(&hash);
+        assert_eq!(
+            hex(uint(&format!("0.{zeros}1e+655360")).unwrap()),
+            "0x0b4d71ebb529b3a73e4ed8c1f6d477af49f3deddab5e0fc048d609ddcffb9d2c"
+        );
+        let wide = "0".repeat(655_360);
+        assert_eq!(
+            hex(uint(&format!("45035996273704965{wide}e-655361")).unwrap()),
+            "0x95aff59408c2ac285ddb313edb76e664b1a64c10be8e5a8230982322e605ae0c"
+        );
+        assert_eq!(
+            hex(uint(&format!("45035996273704965{wide}1e-655362")).unwrap()),
+            "0x99f65ce034fa0d2a2920040427c93df7b4e14f81b0fd54cb95879c8c05de870d"
+        );
+        // Literals between 2^52 and 2^53, where a double holds only
+        // integers, padded or not: each reads as Rust's correctly rounded
+        // parser reads it.
+        let mut differ = Vec::new();
+        for i in 0..2048u64 {
+            let integer = (1u64 << 52) + i.wrapping_mul(1_099_511_627_791) % (1u64 << 52);
+            for fraction in ["5", "25", "75", "4999999999", "5000000001"] {
+                for literal in [
+                    format!("{integer}.{fraction}"),
+                    format!(
+                        "{integer}{fraction}{}e-{}",
+                        "0".repeat(40),
+                        fraction.len() + 40
+                    ),
+                ] {
+                    let parsed = crate::parse_json(&literal).unwrap();
+                    if parsed.as_f64() != literal.parse::<f64>().ok() {
+                        differ.push(literal);
+                    }
+                }
+            }
+        }
+        assert!(
+            differ.is_empty(),
+            "{} differ: {:?}",
+            differ.len(),
+            &differ[..differ.len().min(5)]
+        );
+    }
+
     #[test]
     fn int_bounds() {
         let ok = |v: Value| encode_base(&Base::Int(8), &v, &mut Budget::default()).is_ok();

@@ -50,8 +50,8 @@ pub use fc_dweb::Class as HtmlClass;
 pub use fc_naming::session::exec::{Effect, Fired};
 pub use html::HTML_TOO_LARGE_CODE;
 pub use io::{
-    Answer, ColibriClass, ColibriReply, Endpoint, Ms, MyotisClass, MyotisReply, Request, Transport,
-    VerifiedOp,
+    Answer, ColibriClass, ColibriReply, Endpoint, Ms, MyotisClass, MyotisRejection, MyotisReply,
+    Request, Transport, VerifiedOp,
 };
 pub use logs::{CapReader, RangeEntry, Ranker};
 pub use machine::{Call, Emitted, Machine, OverBudget, Reply, Reservation, StateTables, Success};

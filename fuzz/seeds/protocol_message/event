@@ -1,0 +1,1 @@
+{"type":"event","event":"vault.locked","data":{"reason":"auto","epoch":12}}
