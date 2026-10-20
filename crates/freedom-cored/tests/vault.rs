@@ -1297,7 +1297,6 @@ fn a_committed_job_past_its_deadline_does_not_spin_the_loop() {
     let (_root, data, locks) = dirs();
     let mut core = spawn_env("serve", &data, &locks, &[], &env_refs(&env));
     core.hello();
-    let sent = Instant::now();
     let create = request(
         2,
         "vault.create",
@@ -1305,9 +1304,10 @@ fn a_committed_job_past_its_deadline_does_not_spin_the_loop() {
     );
     core.send_raw(&frame(&create));
     wait_for_claim(&marker);
-    // Past the 6 s deadline (counted from before the send, so the core's
-    // own count is no further), with the rename still held: measure CPU.
-    std::thread::sleep(Duration::from_millis(7000).saturating_sub(sent.elapsed()));
+    // The claim follows admission, so 6 s after seeing it the 6 s deadline
+    // has passed, however late the test runs. The rename is still held:
+    // measure CPU.
+    std::thread::sleep(Duration::from_millis(6100));
     let before = core.cpu_ticks();
     std::thread::sleep(Duration::from_millis(500));
     let spent = core.cpu_ticks() - before;
