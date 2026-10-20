@@ -167,11 +167,18 @@ fn a_snapshot_past_a_frame_is_cut_to_fit() {
 
 /// Review of #143: with main not reading, at most 4 stats replies wait for
 /// the writer, each up to a frame: the rest are `busy`. The recorder is
-/// filled with 16 KiB paths first, so each reply is near a frame.
+/// filled with 16 KiB paths first, so each reply is near a frame. Main
+/// resumes reading only once the service acknowledges (a test hook, off
+/// stdout) that its reader has handled every call, so each was admitted or
+/// refused while main wasn't reading, however late the reader ran.
 #[test]
 fn a_main_that_stops_reading_holds_at_most_4_stats_replies() {
     let dirs = Dirs::new();
-    let mut ipfsd = Ipfsd::persistent(&dirs, &[]);
+    let handled = dirs.data.with_file_name("handled");
+    let mut ipfsd = Ipfsd::persistent(
+        &dirs,
+        &[("FREEDOM_IPFSD_TEST_HANDLED_FILE", handled.to_str().unwrap())],
+    );
     ipfsd.hello();
     assert_eq!(ipfsd.start(disk("p-1"))["result"]["instance"], "p-1");
     let missing = freedom_ipfs_core::cid_from_data(0x55, b"missing");
@@ -184,14 +191,29 @@ fn a_main_that_stops_reading_holds_at_most_4_stats_replies() {
         }
     }
     ipfsd.pause_reading();
+    // Each call given time for its job to run and queue its reply, so a
+    // place a job freed on ending, not on its reply's write, would admit
+    // the next; then main waits for the reader's acknowledgement.
     let ids: Vec<u64> = (0..18)
         .map(|_| {
             let id = ipfsd.request("ipfs.stats", json!({ "instance": "p-1" }));
-            // Time for its job to run and queue its reply.
             std::thread::sleep(std::time::Duration::from_millis(150));
             id
         })
         .collect();
+    let last = ids[ids.len() - 1].to_string();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !std::fs::read_to_string(&handled)
+        .unwrap_or_default()
+        .lines()
+        .any(|line| line == last)
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "call {last} never handled"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     ipfsd.resume_reading();
     let (mut answered, mut busy) = (0, 0);
     for id in ids {
@@ -205,6 +227,9 @@ fn a_main_that_stops_reading_holds_at_most_4_stats_replies() {
     }
     shut_down(ipfsd);
     // One may have been read before main stopped reading.
-    assert!(answered <= 5, "{answered} answered, {busy} busy");
+    assert!(
+        (4..=5).contains(&answered),
+        "{answered} answered, {busy} busy"
+    );
     assert_eq!(answered + busy, 18);
 }

@@ -26,6 +26,10 @@
 //!   `ipfs.stats` reply, in either process: how many targets and events the
 //!   instance's recorder and the process's default recorder hold, so a test
 //!   can tell what was recorded, and where, even where `progress` is null.
+//! - `FREEDOM_IPFSD_TEST_HANDLED_FILE=<path>` appends each request's ID to
+//!   the file once the service has handled it on the reader thread (its
+//!   reply queued, or its work started): a test can wait for the reader
+//!   without reading stdout.
 //! - `FREEDOM_IPFSD_TEST_REQUEST_HOOKS=1` lets an `ipfs.request`'s own
 //!   headers ask for a fault in its work, so one process can serve held,
 //!   panicking and ordinary requests side by side:
@@ -65,6 +69,23 @@ pub fn hold_teardown(instance: &Instance) {
 
 #[cfg(not(feature = "testhooks"))]
 pub fn hold_teardown(_instance: &Instance) {}
+
+/// Records that the service has handled request `id`, if a test asks
+/// (`FREEDOM_IPFSD_TEST_HANDLED_FILE`): one line per request.
+pub fn handled(id: u64) {
+    #[cfg(feature = "testhooks")]
+    if let Some(path) = std::env::var_os("FREEDOM_IPFSD_TEST_HANDLED_FILE") {
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(file, "{id}");
+        }
+    }
+    let _ = id;
+}
 
 /// What `instance`'s recorder and the process's default recorder hold, if
 /// a test asks (`FREEDOM_IPFSD_TEST_PROGRESS_COUNTS=1`).

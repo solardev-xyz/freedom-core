@@ -19,6 +19,7 @@ use crate::build_info;
 use crate::instances::Instances;
 use crate::requests::Requests;
 use crate::stats::Stats;
+use crate::testhooks;
 
 pub struct IpfsService {
     instances: Arc<Instances>,
@@ -77,6 +78,7 @@ impl Service for IpfsService {
                 );
             }
         }
+        testhooks::handled(request.id);
     }
 
     fn cancel(&self, conn: &Connection, id: u64) {
