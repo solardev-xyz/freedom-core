@@ -339,6 +339,7 @@ How a failed exchange is classified. The core's rules are ordered, and the first
 | # | Core rule | The reference |
 |---|---|---|
 | 1 | Transport `timeout`, `refused`, `too_large`: **yes** | yes (`TIMEOUT`, `SERVER_ERROR`) |
+| 1a | `unsent`, a request the core never sent (over the frame): the leg fails, but **the endpoint isn't marked** either way, since it never saw the request † | — (the reference sends any size) |
 | 2 | Transport `network`, any socket-level failure: **yes** † | yes when the socket error's message matches the text rule (`ECONNREFUSED`, `ENOTFOUND`, `ETIMEDOUT`); otherwise no. A reset (`ECONNRESET`, "socket hang up") is semantic |
 | 3 | HTTP non-2xx once ethers' `FetchRequest` is done: **yes** | yes (`SERVER_ERROR`) |
 | 4 | Body not UTF-8 or not JSON, no response for the request's id, or an `error` member that isn't an object: **yes** † | no (`UNSUPPORTED_OPERATION`, `BAD_DATA`), unless the composed message matches the text rule below |
@@ -482,7 +483,7 @@ Main's terminal reply for an I/O request is a result or one of these:
 - `cancelled`;
 - `stale_generation`.
 
-No error carries a URL or a server's text.
+No error carries a URL or a server's text. The core has one class of its own, `unsent`: a request it never sent because it was over 0001's frame. Main never reports it.
 
 ## Bounds
 
@@ -547,6 +548,8 @@ The 4 MiB decode budget caps aliasing: an `OffchainLookup` whose URL array repea
 ## Deviations
 
 Each deviation gets a boundary vector in the implementation PR, generated from the same harness with the reference patched in memory where the deviation has no natural trigger. Each patch is recorded in its vector. 0003's codec deviations (`name-length`, `json-depth`, and the core's JSON error text) still apply; its lone-surrogate deviations are gone, as strings now keep them (#95).
+
+`name-length` applies to sessions on both of `fastNormalize`'s paths: a name over 1,024 bytes, trimmed or normalized, is refused with `name exceeds 1024 bytes` before any I/O. The ASCII path, which skips ENSIP-15, used to skip the check too, and a long name's calls then outgrew the frame and quarantined every endpoint (#74; `deviation-name-length`).
 
 | ID | Today | The core | Failure and cache behavior |
 |---|---|---|---|

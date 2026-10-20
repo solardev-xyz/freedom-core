@@ -1,0 +1,68 @@
+# cargo-deny policy for freedom-ipfsd: the core's (../../deny.toml), with the
+# exceptions freedom-ipfs's graph needs, each explained. CI runs
+# `cargo deny check` here on every PR and daily, apart from the core's, so an
+# advisory in this graph never blocks a core change (design 0007, "Where the
+# code lives").
+
+[graph]
+all-features = true
+
+[advisories]
+# Vulnerabilities and unsound crates fail the check; nothing is ignored
+# without a comment explaining why.
+yanked = "deny"
+ignore = [
+    # hickory-proto 0.25.2, through libp2p-dns 0.44 (libp2p's `/dns`
+    # resolver). The NSEC3 loop is in DNSSEC validation, which needs the
+    # `dnssec-ring` or `dnssec-aws-lc-rs` feature: this graph builds
+    # hickory-proto without either. The fix is hickory 0.26, which needs a
+    # libp2p-dns release that takes it. Design 0007 turns this resolver off
+    # under a proxy (implementation step 8).
+    { id = "RUSTSEC-2026-0118", reason = "DNSSEC validation only; hickory-proto is built without its dnssec features" },
+    # Same crate and path. The quadratic name compression is in message
+    # encoding: a stub resolver encodes only its own one-question queries,
+    # and decodes the answers. The fix needs hickory 0.26, as above.
+    { id = "RUSTSEC-2026-0119", reason = "encoding only: the resolver encodes its own queries, never a received message" },
+    # paste 1.0.15, a proc macro through netlink-packet-core (if-watch, for
+    # libp2p-quic): unmaintained, with no safe upgrade. Its code runs at
+    # compile time only, and nothing of it ships.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained proc macro, compile time only; no upgrade exists" },
+]
+
+[licenses]
+confidence-threshold = 0.9
+unused-allowed-license = "allow"
+# webpki-roots (Mozilla's root certificates, through reqwest and
+# libp2p-websocket): data under the Community Data License Agreement,
+# permissive (0007, "Where the code lives"). Scoped to that crate, so another
+# CDLA dependency needs its own review.
+exceptions = [{ allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" }]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[licenses.private]
+# Workspace crates are unpublished and carry no license yet.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# freedom-ipfs, pinned to a commit until a release carries 0007's upstream
+# changes.
+allow-git = ["https://github.com/solardev-xyz/freedom-ipfs"]

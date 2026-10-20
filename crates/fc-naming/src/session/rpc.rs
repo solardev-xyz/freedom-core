@@ -89,6 +89,10 @@ pub enum Transport {
     TooLarge,
     Cancelled,
     StaleGeneration,
+    /// The core never sent the request: it was over 0001's frame. The
+    /// endpoint did nothing wrong, so its leg fails without counting
+    /// against it (#74).
+    Unsent,
 }
 
 /// A node's JSON-RPC `error` member, as ethers keeps it in `info.error`.

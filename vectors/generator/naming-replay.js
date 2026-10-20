@@ -224,6 +224,16 @@ const PARSE_RFC3339 = `function __parseRfc3339(text) {
 // `append` adds helpers at the module's end, where function declarations
 // still hoist); `harness` patches main's side, played by this harness.
 const PATCHES = {
+  'name-length': () => ({
+    text: 'An ENS, WNS or GNS name over 1,024 bytes (UTF-8), trimmed or normalized, is refused with "name exceeds 1024 bytes" before any I/O, on the ASCII path too.',
+    source: {
+      'ens-resolver.js': {
+        edits: [['function fastNormalize(trimmed) {\n  const lowered = trimmed.toLowerCase();\n  if (PURE_ASCII_HOST.test(lowered)) return lowered;\n  return ens_normalize(trimmed);\n}',
+          "function fastNormalize(trimmed) {\n  if (Buffer.byteLength(trimmed) > 1024) throw new Error('name exceeds 1024 bytes');\n  const lowered = trimmed.toLowerCase();\n  if (PURE_ASCII_HOST.test(lowered)) return lowered;\n  const normalized = ens_normalize(trimmed);\n  if (Buffer.byteLength(normalized) > 1024) throw new Error('name exceeds 1024 bytes');\n  return normalized;\n}"]],
+        append: [],
+      },
+    },
+  }),
   'ccip-urls': (b) => ({
     text: `A quorum leg's CCIP-Read round tries the first ${b.ccipUrls} gateway URLs.`,
     source: {
@@ -1487,7 +1497,16 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
     const head = UR.slice(2).toLowerCase().padStart(64, '0') + word(160) + word(at) + 'deadbeef'.padEnd(64, '0') + word(at + callData.length / 2);
     return revert('0x556f1830' + head + urls + callData + bytes('0x09'));
   };
+  // Sixteen labels of 63 bytes or less: 1,024 bytes with .eth, and one
+  // byte more.
+  const nameOf = (last) => [...Array(15).fill('a'.repeat(63)), 'a'.repeat(last)].join('.') + '.eth';
   return [
+    // An ASCII name one byte over 1,024 is refused before any I/O, like a
+    // non-ASCII one; a name of exactly 1,024 bytes resolves.
+    deviation('name-length', base({}), [
+      { call: content(nameOf(61)) },
+      { after: 1000, call: content(nameOf(60)) },
+    ]),
     // Three gateway URLs and a bound of two: the reference reaches the
     // working third gateway, the core gives up after two.
     deviation('ccip-urls', base({
