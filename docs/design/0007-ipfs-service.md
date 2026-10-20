@@ -555,9 +555,20 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
   - `last_native_error_code` and `last_native_error_message`.
 
   The service counts these itself. The event-queue fields go, with the queue: deviation `stats-fields`.
-- **`progress`:** upstream's progress snapshot. The persistent process only.
-- **`store`:** `block_count` and `total_bytes`.
-- **`budget`:** each [budget's](#budgets) use and limit.
+  - A request is started when admitted, and freed when its admission ends.
+  - It is completed when its work queues its `end`, or a head without a body.
+  - It has failed when the service gives it an error or an abort: `deadline`, `busy`, `internal` or `body_stream_error`. The last error is that failure's code and fixed message, or `gateway_busy` for such a head.
+  - It is cancelled on main's `cancel`.
+  - An outcome is counted as the work ends, a moment after its terminal is queued, and before its admission ends.
+- **`progress`:** upstream's progress snapshot. The persistent process only. Until upstream item 4 moves the recorder out of the FFI crate, it is `null` in both processes: deviation `stats-progress`.
+- **`store`:** `block_count` and `total_bytes`, or `null` if the store can't say.
+- **`budget`:** each [budget's](#budgets) use and limit:
+  - `memory` (`used`);
+  - `requests` (`admitted`) and `writer` (`queued`);
+  - `block_fetches`, `http_provider_requests` and `dht_queries` (`in_flight`), and `bitswap_connections` (`in_use`, `waiting` and `denied`);
+  - the instance's `background` queue (`outstanding` and `dropped`).
+
+  Each has its `limit`. All but `background` are the process's, as the budgets are.
 
 The 5 s health check calls `ipfs.stats`. `checkHealth()` stays synchronous, because `ipfsBackend()` calls it at admission. It reads a snapshot that is true while all of these hold:
 - the generation is live;
@@ -588,6 +599,9 @@ Upstream's constants are per instance, and some limit bookkeeping rather than wo
   - **its caches:** the hot cache, the gateway's small-body cache (2 MiB) and the UnixFS metadata cache (1 MiB), each built with a fixed capacity and reserved at it.
 
   An instance starts only if its fixed reservation fits.
+  - The service reserves it at admission, before the store opens, from the store's options and the gateway configuration.
+  - The caches' part is handed to upstream's builder, which reserves it again as it builds. If other work takes it in that moment, the start's job fails it with `busy`, and the ID is retired, as after any failed start.
+  - The page cap counts SQLite's default 4096-byte pages.
 - **In all:**
   - a private instance reserves 43 MiB (36 + 4 + 2 + 1), so eight reserve 344 MiB;
   - the persistent instance reserves 27 MiB (8 + 16 + 2 + 1);
@@ -611,8 +625,12 @@ Upstream's constants are per instance, and some limit bookkeeping rather than wo
   - **Pending replies:** each head reserves its encoded size until it is written.
   - **The writer's data queue:** 16 MiB, reserved at process start.
 - **When admitted work can't reserve:**
-  - **before its head,** it waits up to its remaining `headers_ms`, then answers `busy` (503);
-  - **after its head,** a stream's next block fetch waits up to 10 s, then the stream aborts with `busy`, a truncation;
+  - **before its head,** it waits up to its remaining `headers_ms`, then answers `busy` (503).
+    - The waits end 50 ms before `headers_ms` does (or half way, if less is left), so the reply is the work's `busy`, not the watcher's `deadline`. Upstream's 503 `memory_budget` is that refusal, and becomes `busy`.
+    - If upstream moves on to another source after a refusal, as delegated routing's Bitswap fallback does, its answer can come after `headers_ms`. The reply is then `deadline`.
+  - **after its head,** a stream's next block fetch waits up to 10 s, then the stream aborts with `busy`, a truncation.
+    - The 10 s start with each read of the body, and that read's fetches share them.
+    - Upstream gives a body no typed error, so the service tells a refusal by its text (`memory budget`).
   - **background work** is dropped at once.
 - **What it doesn't charge:** the disk store's file, which lives on disk, not in memory; and allocator and library overhead it can't see.
 - **What a store's `max_bytes` means:** a target for block data that drives LRU eviction.
@@ -1347,6 +1365,7 @@ Every body already passes through main today, so the pipe adds one copy into the
 | `read-ahead` | one 64 KiB read in main, plus a two-chunk channel | a 128 KiB window per stream | about the same buffering, now bounded by credit |
 | `exit-text` | `Native event dispatcher exited with code N`, `Native gateway stopped unexpectedly` | `freedom-ipfs service exited` | in 502 bodies and logs only |
 | `stats-fields` | the event-queue fields in the diagnostics | dropped, with the queue; budget use added | the panel shows the rest |
+| `stats-progress` | the progress snapshot in the diagnostics | `null` until upstream item 4 lands | the panel shows no progress until then |
 | `targets` | the add-on ships for darwin-arm64, linux-arm64, linux-x64 and win32-x64, and needs GLIBC ≥ 2.38 | the service builds for this repository's five targets, static on Linux | IPFS on darwin-x64 and older distributions (#350), if the musl build holds |
 
 ## Implementation steps
