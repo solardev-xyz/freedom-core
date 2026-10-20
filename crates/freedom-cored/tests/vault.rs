@@ -1372,13 +1372,14 @@ fn shutdown_waits_for_committed_work_and_sends_its_reply() {
 
 #[test]
 fn shutdown_stops_waiting_for_committed_work_after_two_seconds() {
-    // Past the 2 s the core waits on exit, it exits anyway, inside main's
-    // 3 s grace (#127). The stalled create never renames: the next start's
-    // recovery covers it, as it would a kill.
+    // A commit stalled 4.5 s: the 2 s the core waits on exit run out first,
+    // where the old 5 s waited it out. So the outcome tells them apart, not
+    // the test's own clock (#127). The stalled create never renames: the
+    // next start's recovery covers it, as it would a kill.
     let marker_dir = tempfile::tempdir().unwrap();
     let marker = marker_dir.path().join("claimed");
     let mut env = commit_hooks(&marker);
-    env[0].1 = "10000".into();
+    env[0].1 = "4500".into();
     let (_root, data, locks) = dirs();
     let mut core = spawn_env("serve", &data, &locks, &[], &env_refs(&env));
     core.hello();
@@ -1389,20 +1390,47 @@ fn shutdown_stops_waiting_for_committed_work_after_two_seconds() {
     );
     core.send_raw(&frame(&create));
     wait_for_claim(&marker);
-    let sent = Instant::now();
     core.send_raw(&frame(&shell_request(3, "core.shutdown", json!({}))));
     assert_eq!(core.response(3)["result"], json!({}));
-    assert_eq!(core.exit_code(Duration::from_secs(8)), 0);
-    let took = sent.elapsed();
-    assert!(took >= Duration::from_millis(1900), "{took:?}");
-    // Well under the old 5 s; 2 s and the exit itself.
-    assert!(took < Duration::from_secs(4), "{took:?}");
+    assert_eq!(core.exit_code(Duration::from_secs(15)), 0);
     assert!(!data.join(VAULT).exists());
     let stderr = core.stderr();
     assert!(
         stderr.contains("a committed vault job did not finish before exit"),
         "{stderr}"
     );
+}
+
+#[test]
+fn a_refused_claim_is_answered_by_its_deadline_whatever_its_cleanup_takes() {
+    // Claims end at 4 s of a 6 s deadline. The job reaches its commit point
+    // at about 4.2 s, is refused, then stalls 5 s before it cleans up. The
+    // loop still answers at the 6 s deadline, not when the worker is done.
+    let env = [
+        ("FREEDOM_CORED_TEST_KDF_DEADLINE_MS", "6000"),
+        ("FREEDOM_CORED_TEST_JOB_DELAY_MS", "4200"),
+        ("FREEDOM_CORED_TEST_REFUSED_CLAIM_DELAY_MS", "5000"),
+    ];
+    let (_root, data, locks) = dirs();
+    let mut core = spawn_env("serve", &data, &locks, &[], &env);
+    core.hello();
+    let sent = Instant::now();
+    let create = request(
+        2,
+        "vault.create",
+        json!({ "password_b64": b64("testpass1"), "words": 12 }),
+    );
+    core.send_raw(&frame(&create));
+    assert_eq!(core.response(2)["error"]["code"], "deadline");
+    // Answered by the deadline, before the worker's 9 s or more.
+    let took = sent.elapsed();
+    assert!(took < Duration::from_millis(8500), "{took:?}");
+    // Nothing more for 2 once the worker is done; the loop serves the next.
+    std::thread::sleep(Duration::from_millis(4000));
+    assert!(!data.join(VAULT).exists());
+    let status = core.call(3, "vault.status", json!({}));
+    assert_eq!(status["id"], 3);
+    assert_eq!(status["result"]["exists"], false);
 }
 
 /// The vault's temp files in `data`: what a write killed before its rename

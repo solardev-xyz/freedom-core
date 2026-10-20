@@ -376,16 +376,20 @@ impl JobControl {
         })
     }
 
-    /// Loop: stops the job unless it already committed. True if stopped.
+    /// Stops the job unless it already committed. True if it is stopped:
+    /// by this call, or already by the worker, past its claim time. So the
+    /// loop answers a job the worker stopped as it would one it stopped,
+    /// without waiting for the worker's cleanup to finish.
     fn abandon(&self) -> bool {
-        self.state
-            .compare_exchange(
-                JOB_RUNNING,
-                JOB_ABANDONED,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
+        match self.state.compare_exchange(
+            JOB_RUNNING,
+            JOB_ABANDONED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => true,
+            Err(state) => state == JOB_ABANDONED,
+        }
     }
 
     /// Worker: claims the commit point. False if the job was abandoned, or
@@ -1898,6 +1902,8 @@ fn claim(control: &JobControl) -> bool {
     let claimed = control.commit();
     if claimed {
         crate::testhooks::commit_delay();
+    } else {
+        crate::testhooks::refused_claim_delay();
     }
     claimed
 }

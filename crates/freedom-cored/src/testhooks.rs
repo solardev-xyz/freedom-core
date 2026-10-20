@@ -12,6 +12,8 @@
 //!   its commit point, before the rename or unlink.
 //! - `FREEDOM_CORED_TEST_COMMIT_MARKER` names a file created the moment a job
 //!   claims its commit point (before that stall), so tests can wait for it.
+//! - `FREEDOM_CORED_TEST_REFUSED_CLAIM_DELAY_MS` stalls a job whose claim
+//!   was refused, before it cleans up: a slow disk under that cleanup.
 //! - `FREEDOM_CORED_TEST_CHAIN_TOTAL_BYTES` replaces the chain total's
 //!   256 MiB (design 0005, Bounds), so a test can bring it near full.
 //! - `FREEDOM_CORED_TEST_NAMING_MARKER` names a file the naming thread
@@ -45,6 +47,13 @@ pub fn snapshot_delay() {
 #[cfg(debug_assertions)]
 pub fn job_delay() {
     if let Some(ms) = millis("FREEDOM_CORED_TEST_JOB_DELAY_MS") {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+}
+
+#[cfg(debug_assertions)]
+pub fn refused_claim_delay() {
+    if let Some(ms) = millis("FREEDOM_CORED_TEST_REFUSED_CLAIM_DELAY_MS") {
         std::thread::sleep(Duration::from_millis(ms));
     }
 }
@@ -125,6 +134,9 @@ pub fn job_delay() {}
 
 #[cfg(not(debug_assertions))]
 pub fn commit_delay() {}
+
+#[cfg(not(debug_assertions))]
+pub fn refused_claim_delay() {}
 
 #[cfg(not(debug_assertions))]
 pub fn kdf_deadline(default: Duration) -> Duration {
