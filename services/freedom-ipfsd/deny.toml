@@ -69,8 +69,11 @@ allow-wildcard-paths = true
 # (RUSTSEC-2026-0381), except 0.26.11, the shim over 1's roots. The advisory
 # is ignored above for that shim's sake, so these bans are what keep every
 # other affected version out: 0.26.10 and older embed the root themselves.
+# A range doesn't match prereleases, so the only ones published, 0.26.0's
+# three alphas (crates.io's index, 2026-10-20), are banned by their own.
 deny = [
     { crate = "webpki-roots:<0.26.11", reason = "embeds the distrusted emSign root (RUSTSEC-2026-0381)" },
+    { crate = "webpki-roots:>=0.26.0-alpha.0, <0.26.0", reason = "embeds the distrusted emSign root (RUSTSEC-2026-0381)" },
     { crate = "webpki-roots:>0.26.11, <1.0.10", reason = "embeds the distrusted emSign root (RUSTSEC-2026-0381)" },
 ]
 
