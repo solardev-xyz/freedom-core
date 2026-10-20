@@ -4,10 +4,11 @@
 //!   links, and which process this is. The connection checks the protocol
 //!   and frame kinds first, and adds `protocol`.
 //! - `ipfs.start` and `ipfs.stop`: [`Instances`].
+//! - `ipfs.request`: [`Requests`].
 //! - `ipfs.shutdown` ends the connection (fc-service); [`Service::end`]
 //!   then tears down every instance, and the process exits 0.
-//! - `ipfs.request` and `ipfs.stats` come next (PR 3). Until then, as any
-//!   other method, they are `unknown_method`.
+//! - `ipfs.stats` comes with the budgets (PR 3b). Until then, as any other
+//!   method, it is `unknown_method`.
 
 use std::sync::Arc;
 
@@ -17,14 +18,19 @@ use serde_json::{Map, Value, json};
 
 use crate::build_info;
 use crate::instances::Instances;
+use crate::requests::Requests;
 
 pub struct IpfsService {
     instances: Arc<Instances>,
+    requests: Arc<Requests>,
 }
 
 impl IpfsService {
-    pub fn new(instances: Arc<Instances>) -> IpfsService {
-        IpfsService { instances }
+    pub fn new(instances: Arc<Instances>, requests: Arc<Requests>) -> IpfsService {
+        IpfsService {
+            instances,
+            requests,
+        }
     }
 }
 
@@ -47,6 +53,10 @@ impl Service for IpfsService {
         match request.method {
             "ipfs.start" => self.instances.start(conn, request.id, request.params),
             "ipfs.stop" => self.instances.stop(conn, request.id, request.params),
+            "ipfs.request" => {
+                self.requests
+                    .request(&self.instances, conn, request.id, request.params);
+            }
             _ => {
                 let _ = conn.reply_error(
                     request.id,
@@ -57,6 +67,7 @@ impl Service for IpfsService {
     }
 
     fn cancel(&self, conn: &Connection, id: u64) {
+        self.requests.cancel(id);
         self.instances.cancel(conn, id);
     }
 
@@ -203,10 +214,11 @@ mod tests {
             .enable_time()
             .build()
             .unwrap();
-        let instances = Instances::new(Kind::Ephemeral, runtime.handle().clone());
+        let requests = Requests::new(runtime.handle().clone());
+        let instances = Instances::new(Kind::Ephemeral, runtime.handle().clone(), requests.clone());
         let (seen, events) = mpsc::channel();
         let service = Arc::new(Observed {
-            inner: IpfsService::new(instances.clone()),
+            inner: IpfsService::new(instances.clone(), requests),
             seen,
         });
         let (input, mut main_out) = std::io::pipe().unwrap();

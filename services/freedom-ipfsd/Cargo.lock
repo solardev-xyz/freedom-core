@@ -1063,8 +1063,10 @@ version = "0.1.0"
 dependencies = [
  "fc-protocol",
  "fc-service",
+ "freedom-ipfs-core",
  "freedom-ipfs-gateway",
  "freedom-ipfs-store",
+ "futures-core",
  "serde",
  "serde_json",
  "tempfile",

@@ -37,6 +37,9 @@ fc-service = { path = "../../crates/fc-service" }
 # (item 8: #35-#37) and v0.4.6. src/build_info.rs reports the same commit.
 freedom-ipfs-gateway = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "b5485ee8434a4389075e5d851bd6b87637b79afc" }
 freedom-ipfs-store = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "b5485ee8434a4389075e5d851bd6b87637b79afc" }
+# The `Stream` trait, to read a response's body as it comes; already in
+# freedom-ipfs's graph.
+futures-core = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The process runtime (0007, "Inside the process"). freedom-ipfs requires
@@ -44,6 +47,9 @@ serde_json = "1"
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time"] }
 
 [dev-dependencies]
+# The tests seed a store with blocks: CIDs from freedom-ipfs's own helper,
+# at the same commit (already in the graph).
+freedom-ipfs-core = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "b5485ee8434a4389075e5d851bd6b87637b79afc" }
 tempfile = "3"
 
 # The core's workspace lints, copied: workspace lints don't cross workspaces.

@@ -1,4 +1,5 @@
-//! `ipfs.start` and `ipfs.stop` parameters (design 0007, "Methods").
+//! `ipfs.start`, `ipfs.stop` and `ipfs.request` parameters (design 0007,
+//! "Methods").
 //!
 //! Every member is required and checked, and unknown members are refused:
 //! main sends today's values explicitly (0007: "the values above are
@@ -7,7 +8,7 @@
 
 use std::time::Duration;
 
-use freedom_ipfs_gateway::RoutingMode;
+use freedom_ipfs_gateway::{NativeRequestHeader, RoutingMode};
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -22,6 +23,9 @@ pub const MAX_MEMORY_STORE: u64 = 32 << 20;
 /// A disk store's most block data: a target for LRU eviction, not a hard
 /// bound (0007, "Budgets"); this only refuses nonsense.
 pub const MAX_DISK_STORE: u64 = 1 << 40;
+/// The longest `headers_ms`: the plan's head deadline is at most 30 s (0007,
+/// "Bounds").
+pub const MAX_HEADERS_MS: u64 = 30_000;
 /// The most delegated routers, and the longest one.
 pub const MAX_ROUTERS: usize = 8;
 pub const MAX_ROUTER_LEN: usize = 2048;
@@ -95,6 +99,33 @@ struct GatewayWire {
 #[serde(deny_unknown_fields)]
 struct StopWire {
     instance: String,
+}
+
+/// A checked `ipfs.request`: what upstream's native-request parser is
+/// given, and the head's deadline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Request {
+    pub instance: String,
+    /// Passed through to the parser, which takes `GET` or `HEAD`.
+    pub method: String,
+    /// The plan's path, passed through.
+    pub path: String,
+    /// The plan's headers, passed through.
+    pub headers: Vec<NativeRequestHeader>,
+    /// The head's deadline, from admission.
+    pub headers_ms: Duration,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestWire {
+    instance: String,
+    method: String,
+    path: String,
+    /// `[name, value]` pairs, as main sends them; upstream's header type
+    /// takes that form (and `{ name, value }`, as the add-on's JSON does).
+    headers: Vec<NativeRequestHeader>,
+    headers_ms: u64,
 }
 
 fn object<'a, T: Deserialize<'a>>(params: Option<&'a RawValue>) -> Result<T, &'static str> {
@@ -175,6 +206,23 @@ pub fn stop(params: Option<&RawValue>) -> Result<String, &'static str> {
     let wire: StopWire = object(params)?;
     check_instance(&wire.instance)?;
     Ok(wire.instance)
+}
+
+/// Parses and checks `ipfs.request`'s params. The method, path and headers
+/// are upstream's parser's to judge; here only their types.
+pub fn request(params: Option<&RawValue>) -> Result<Request, &'static str> {
+    let wire: RequestWire = object(params)?;
+    check_instance(&wire.instance)?;
+    if !(1..=MAX_HEADERS_MS).contains(&wire.headers_ms) {
+        return Err("headers_ms must be between 1 and 30000");
+    }
+    Ok(Request {
+        instance: wire.instance,
+        method: wire.method,
+        path: wire.path,
+        headers: wire.headers,
+        headers_ms: Duration::from_millis(wire.headers_ms),
+    })
 }
 
 /// Instance IDs are main's labels (`p-1`, `e-1`, …): short, and safe to log.
@@ -325,6 +373,56 @@ mod tests {
         assert!(start(None).is_err());
         let array = serde_json::value::to_raw_value(&json!([1])).unwrap();
         assert!(start(Some(&array)).is_err());
+    }
+
+    fn request_params() -> Value {
+        json!({ "instance": "p-1", "method": "GET", "path": "/ipfs/bafy/app.js",
+            "headers": [["range", "bytes=0-"]], "headers_ms": 30000 })
+    }
+
+    #[test]
+    fn a_request_takes_its_five_members() {
+        let raw = serde_json::value::to_raw_value(&request_params()).unwrap();
+        assert_eq!(
+            request(Some(&raw)),
+            Ok(Request {
+                instance: "p-1".into(),
+                method: "GET".into(),
+                path: "/ipfs/bafy/app.js".into(),
+                headers: vec![NativeRequestHeader {
+                    name: "range".into(),
+                    value: "bytes=0-".into()
+                }],
+                headers_ms: Duration::from_secs(30),
+            })
+        );
+        let cases: Vec<(&str, Value)> = vec![
+            ("instance", json!("p 1")),
+            ("instance", json!(1)),
+            ("method", json!(1)),
+            ("path", json!(null)),
+            ("headers", json!("range")),
+            ("headers", json!([["range"]])),
+            ("headers", json!([["range", 1]])),
+            ("headers_ms", json!(0)),
+            ("headers_ms", json!(30_001)),
+            ("headers_ms", json!(-1)),
+            ("headers_ms", json!(1.5)),
+            ("extra", json!(1)),
+        ];
+        for (member, value) in cases {
+            let mut params = request_params();
+            params[member] = value.clone();
+            let raw = serde_json::value::to_raw_value(&params).unwrap();
+            assert!(request(Some(&raw)).is_err(), "{member} = {value}");
+        }
+        for missing in ["instance", "method", "path", "headers", "headers_ms"] {
+            let mut params = request_params();
+            params.as_object_mut().unwrap().remove(missing);
+            let raw = serde_json::value::to_raw_value(&params).unwrap();
+            assert!(request(Some(&raw)).is_err(), "{missing}");
+        }
+        assert!(request(None).is_err());
     }
 
     #[test]

@@ -10,6 +10,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -49,12 +50,28 @@ pub struct Ipfsd {
     pending: VecDeque<Value>,
     stderr: Option<std::thread::JoinHandle<String>>,
     next_id: u64,
+    /// Whether stdout's reader is paused: main not reading.
+    paused: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl Drop for Ipfsd {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        self.resume_reading();
+    }
+}
+
+impl Ipfsd {
+    /// Main stops reading stdout: once the pipe's buffer is full, the
+    /// service's writer blocks inside the frame it is writing.
+    pub fn pause_reading(&self) {
+        *self.paused.0.lock().unwrap() = true;
+    }
+
+    pub fn resume_reading(&self) {
+        *self.paused.0.lock().unwrap() = false;
+        self.paused.1.notify_all();
     }
 }
 
@@ -91,8 +108,16 @@ impl Ipfsd {
         let mut stdout = child.stdout.take().unwrap();
         let mut stderr = child.stderr.take().unwrap();
         let (tx, frames) = mpsc::channel();
+        let paused = Arc::new((Mutex::new(false), Condvar::new()));
+        let reading = paused.clone();
         std::thread::spawn(move || {
             loop {
+                {
+                    let mut paused = reading.0.lock().unwrap();
+                    while *paused {
+                        paused = reading.1.wait(paused).unwrap();
+                    }
+                }
                 let mut header = [0u8; 5];
                 if stdout.read_exact(&mut header).is_err() {
                     return;
@@ -107,7 +132,7 @@ impl Ipfsd {
                         |_| json!({ "malformed": String::from_utf8_lossy(&payload) }),
                     )
                 } else {
-                    json!({ "unexpected_kind": header[4] })
+                    stream_frame(header[4], &payload)
                 };
                 if tx.send(message).is_err() {
                     return;
@@ -126,6 +151,7 @@ impl Ipfsd {
             pending: VecDeque::new(),
             stderr: Some(stderr),
             next_id: 1,
+            paused,
         }
     }
 
@@ -147,6 +173,88 @@ impl Ipfsd {
 
     pub fn cancel(&mut self, id: u64) {
         self.send(&json!({ "type": "cancel", "id": id }));
+    }
+
+    /// Returns `bytes` of stream `id`'s window.
+    pub fn credit(&mut self, id: u64, bytes: u32) {
+        let frame = fc_protocol::stream::credit_frame(id, bytes).unwrap();
+        let stdin = self.stdin.as_mut().expect("stdin is closed");
+        stdin.write_all(&frame).unwrap();
+        stdin.flush().unwrap();
+    }
+
+    /// The next stream frame of stream `id`; other messages wait for
+    /// [`Ipfsd::recv`].
+    pub fn stream(&mut self, id: u64) -> Value {
+        if let Some(at) = self.pending.iter().position(|m| m["stream_id"] == id) {
+            return self.pending.remove(at).unwrap();
+        }
+        loop {
+            let message = match self.frames.recv_timeout(READ_TIMEOUT) {
+                Ok(message) => message,
+                Err(e) => panic!("no frame of stream {id} from freedom-ipfsd: {e}"),
+            };
+            if message["stream_id"] == id {
+                return message;
+            }
+            self.pending.push_back(message);
+        }
+    }
+
+    /// Whether a frame of stream `id` arrives within `within`.
+    pub fn stream_frame_within(&mut self, id: u64, within: Duration) -> bool {
+        if self.pending.iter().any(|m| m["stream_id"] == id) {
+            return true;
+        }
+        let deadline = Instant::now() + within;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.frames.recv_timeout(left) {
+                Ok(message) => {
+                    let ours = message["stream_id"] == id;
+                    self.pending.push_back(message);
+                    if ours {
+                        return true;
+                    }
+                }
+                Err(_) => return false,
+            }
+        }
+    }
+
+    /// Stream `id`'s body to its terminal, returning each byte read as
+    /// credit as main's consumer would: the bytes, and the terminal frame.
+    pub fn body(&mut self, id: u64) -> (Vec<u8>, Value) {
+        let mut bytes = Vec::new();
+        loop {
+            let frame = self.stream(id);
+            match frame["stream"].as_str() {
+                Some("data") => {
+                    let chunk = unhex(frame["hex"].as_str().unwrap());
+                    self.credit(id, u32::try_from(chunk.len()).unwrap());
+                    bytes.extend_from_slice(&chunk);
+                }
+                _ => return (bytes, frame),
+            }
+        }
+    }
+
+    /// The next event named `name`; other messages wait for
+    /// [`Ipfsd::recv`].
+    pub fn event(&mut self, name: &str) -> Value {
+        if let Some(at) = self.pending.iter().position(|m| m["event"] == name) {
+            return self.pending.remove(at).unwrap();
+        }
+        loop {
+            let message = match self.frames.recv_timeout(READ_TIMEOUT) {
+                Ok(message) => message,
+                Err(e) => panic!("no {name} from freedom-ipfsd: {e}"),
+            };
+            if message["event"] == name {
+                return message;
+            }
+            self.pending.push_back(message);
+        }
     }
 
     /// The next message, in the order the service wrote them.
@@ -348,6 +456,58 @@ pub fn start_params(instance: &str, store: Value) -> Value {
         "gateway": { "max_concurrent_requests": 8, "request_queue_timeout_ms": 15000 },
         "network": { "mode": "direct" }
     })
+}
+
+/// A stream frame as a message: `{ stream, stream_id, … }`, with a data
+/// frame's bytes in hex and an abort's code and message.
+fn stream_frame(kind: u8, payload: &[u8]) -> Value {
+    use fc_protocol::stream::StreamFrame;
+    match StreamFrame::decode(kind, payload) {
+        Ok(StreamFrame::Data { id, bytes }) => {
+            json!({ "stream": "data", "stream_id": id, "hex": hex(bytes) })
+        }
+        Ok(StreamFrame::End { id }) => json!({ "stream": "end", "stream_id": id }),
+        Ok(StreamFrame::Abort { id, abort }) => json!({ "stream": "abort", "stream_id": id,
+            "code": abort.code.as_str(), "message": abort.message }),
+        Ok(other) => json!({ "unexpected_frame": format!("{other:?}") }),
+        Err(e) => json!({ "unexpected_kind": kind, "error": e.category() }),
+    }
+}
+
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+pub fn unhex(text: &str) -> Vec<u8> {
+    (0..text.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&text[at..at + 2], 16).unwrap())
+        .collect()
+}
+
+/// Puts `blocks` (raw blocks) into the persistent store of `dirs`, before
+/// the service opens it, and returns their CIDs.
+pub fn seed(dirs: &Dirs, blocks: &[Vec<u8>]) -> Vec<String> {
+    std::fs::create_dir_all(&dirs.data).unwrap();
+    let store =
+        freedom_ipfs_store::SqliteBlockStore::open(dirs.data.join("freedom-ipfs.sqlite3"), 1 << 30)
+            .unwrap();
+    let cids = blocks
+        .iter()
+        .map(|data| {
+            let cid = freedom_ipfs_core::cid_from_data(freedom_ipfs_core::CODEC_RAW, data);
+            store.put_block(&cid, data).unwrap();
+            cid.to_string()
+        })
+        .collect();
+    assert!(store.close(Duration::from_secs(2)));
+    cids
+}
+
+/// `ipfs.request`'s params for a `GET` of `path` on `instance`.
+pub fn get(instance: &str, path: &str) -> Value {
+    json!({ "instance": instance, "method": "GET", "path": path, "headers": [],
+        "headers_ms": 30000 })
 }
 
 /// A command run to its end with no stdin, and its exit code.
