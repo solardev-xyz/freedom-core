@@ -5,8 +5,8 @@
 //! - the 4-byte check integer appears twice, and is random in production;
 //! - padding bytes `01 02 …` up to the next multiple of 8, so 0–7 bytes,
 //!   as OpenSSH writes them. The reference pads an aligned section with a
-//!   full 8 bytes, which OpenSSH and ssh-key (Radicle's reader) refuse
-//!   (deviation `openssh-padding`, #77);
+//!   full 8 bytes; OpenSSH reads that, but ssh-key (Radicle's reader)
+//!   refuses it (deviation `openssh-padding`, #77);
 //! - standard base64 wrapped at 70 characters, a trailing newline after the
 //!   END line;
 //! - public line `ssh-ed25519 <base64> <comment>\n`.
@@ -51,7 +51,7 @@ pub fn private_key_file_with_check(
     put_string(&mut private_section, &public);
     put_string(&mut private_section, keypair.as_slice());
     put_string(&mut private_section, comment.as_bytes());
-    // None for an aligned section: a reader refuses a full block of it.
+    // None for an aligned section: ssh-key refuses a full block of it.
     let padding = (8 - private_section.len() % 8) % 8;
     for i in 1..=padding {
         // `padding` is 0..=7, so this never truncates.
@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn padding_never_fills_a_whole_block() {
         // #77: a section already aligned (131 bytes plus a 5-byte alias)
-        // gets no padding; readers refuse 8 bytes of it.
+        // gets no padding; ssh-key refuses 8 bytes of it.
         let seed = crate::Mnemonic::from_entropy(&[3u8; 16]).unwrap().to_seed();
         let key = crate::freedom::derive_all(&seed).unwrap().radicle;
         for len in 0..=24 {

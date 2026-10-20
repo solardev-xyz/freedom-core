@@ -200,9 +200,9 @@ function buildIdentities({ meta, derivation: d, formats: f }) {
     }),
     // Whole private key files with a fixed check integer, for aliases around
     // an aligned private section (131 bytes plus the alias). The reference
-    // pads an aligned section with a full 8 bytes, which OpenSSH and ssh-key
-    // (Radicle's reader) refuse; the core pads it with none (deviation
-    // openssh-padding, freedom-core #77).
+    // pads an aligned section with a full 8 bytes, which OpenSSH reads but
+    // ssh-key (Radicle's reader) refuses; the core pads it with none, as
+    // OpenSSH writes it (deviation openssh-padding, freedom-core #77).
     radiclePrivateFiles: RADICLE_ALIGNMENT_ALIASES.map((comment) => {
       const key = d.deriveAllKeys(mnemonicFor('abandon-12')).radicleKey;
       const result = replayRadicle(f, key, comment, RADICLE_FIXED_CHECK);
