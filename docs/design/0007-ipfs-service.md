@@ -266,7 +266,7 @@ Electron main (profile P)
   - **Every other task the service spawns itself** (the Bitswap swarm's task, background retrieval, the instance's own tasks, the reader and writer) belongs to an instance's task set or to the process ([Instances](#instances-and-their-teardown)). The service observes each of these tasks' end. A panic, or an unexpected end, of one exits the process with 70, so it is a crash and main restarts it.
   - **Tasks the libraries spawn on an instance's runtime** (hyper's and libp2p's connection tasks) have no join handle the service holds, so their ordinary completion isn't observed. Their lifetime ends with the instance's runtime, whose shutdown is proven ([teardown](#instances-and-their-teardown)). A panic in one is still caught by the hook, and the hook exits the process with 70: any panic outside a request task is fatal, whether or not its task is tracked.
   - **A panic on any non-runtime thread** exits with 70 from the hook.
-  - **One exit at a time.** The first exit to begin reports and ends the process: a hook's, a watchdog's, or `main` returning. Any later one waits for it, so it can't cut off the first's report or change its code.
+  - **One exit at a time.** The first exit to begin reports and ends the process: a hook's, a watchdog's, or `main` returning. Any later one waits for it, so it can't cut off the first's report or change its code. The owner coming back (a panic in its report, or in a thread-local destructor as it exits) never waits on itself. While its report's timer is armed, that timer ends the process with the first code. Once the owner is already exiting, it aborts.
   - **In all:**
 
     | Where the panic is | The request | Its instance | The process |
