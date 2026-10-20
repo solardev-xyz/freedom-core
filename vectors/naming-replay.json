@@ -38410,7 +38410,7 @@
       "patches": [
         {
           "id": "memory-budgets",
-          "text": "A session is charged for its name's copies (8 per byte of its in-flight key) as it starts, its requests (endpoint and body) as it makes them, and its answers as they arrive, at 32 per byte (their parsed JSON at worst); one an answer takes past 25000 bytes ends at once: its callers get \"budget\", the answer is dropped, its outstanding I/O is cancelled and it makes no more. The patch holds for one step with one content lookup on JSON-RPC alone, without redirects or 429s, ended by an answer crossing (enforced); the core's replies and aliasing decodes are its own tests.",
+          "text": "A session is charged for its name's copies (8 per byte of its in-flight key) as it starts, its requests (endpoint and body) as it makes them, and its answers as they arrive, at what their parsed JSON can hold: twice their bytes, 88 per JSON value or key and 80 per escaped surrogate. An anchor answer (eth_blockNumber, eth_getBlockByNumber) is charged only until it is read, which is at once. One an answer takes past 4000 bytes ends at once: its callers get \"budget\", the answer is dropped, its outstanding I/O is cancelled and it makes no more. The patch holds for one step with one content lookup on JSON-RPC alone, without redirects or 429s, ended by an answer crossing (enforced); the core's replies, aliasing decodes and its refusal of one answer over 1048576 bytes are its own tests.",
           "harness": [
             "memory-budgets"
           ]
@@ -38447,7 +38447,7 @@
           }
         },
         "bounds": {
-          "sessionBytes": 25000
+          "sessionBytes": 4000
         }
       },
       "steps": [
@@ -38570,10 +38570,10 @@
             false
           ],
           "end": 40,
-          "outcome": "answered",
-          "answer": {
-            "status": 200,
-            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          "outcome": "cancelled",
+          "rejected": {
+            "at": 300030,
+            "code": "TIMEOUT"
           }
         },
         {

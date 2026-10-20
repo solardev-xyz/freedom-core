@@ -96,6 +96,8 @@ struct Sent {
 struct World {
     machine: Machine,
     answers: BTreeMap<String, String>,
+    /// Answers for one endpoint and method, over `answers`.
+    answers_at: BTreeMap<(String, String), String>,
     pending: BTreeMap<u64, Pending>,
     next_token: u64,
     replies: Vec<Reply>,
@@ -131,6 +133,7 @@ impl World {
         Self {
             machine: Machine::new(0, config, random),
             answers: recorded(),
+            answers_at: BTreeMap::new(),
             pending: BTreeMap::new(),
             next_token: 1,
             replies: Vec::new(),
@@ -212,7 +215,12 @@ impl World {
                 } else {
                     Answer::Rpc {
                         status: 200,
-                        body: self.answers[method].clone().into_bytes(),
+                        body: self
+                            .answers_at
+                            .get(&(endpoint.clone(), method.to_owned()))
+                            .unwrap_or(&self.answers[method])
+                            .clone()
+                            .into_bytes(),
                     }
                 };
                 self.deliver(at + 10, Pending::Answer(id, answer));
@@ -867,6 +875,93 @@ fn answers_count_against_the_session() {
     assert_eq!(message(world.reply(a)), Some("budget"));
 }
 
+/// The recorded anchor block with `count` transaction hashes, as
+/// `eth_getBlockByNumber(n, false)` lists them.
+fn block_with(world: &World, count: usize) -> String {
+    let hashes: Vec<String> = (0..count).map(|i| format!(r#""0x{i:064x}""#)).collect();
+    world.answers["eth_getBlockByNumber"].replace(
+        r#""transactions":[]"#,
+        &format!(r#""transactions":[{}]"#, hashes.join(",")),
+    )
+}
+
+/// `n` endpoints, each its own host.
+fn endpoints(n: usize) -> Vec<String> {
+    (0..n)
+        .map(|i| format!("https://e{i}.rpc.example"))
+        .collect()
+}
+
+/// One endpoint answers its head with 600 KB of tiny JSON values: about
+/// 26 MB once parsed, over the session's 16 MiB. That answer fails its
+/// endpoint as too large, and the lookup goes on with the other three
+/// (#73: it used to end the whole lookup with `budget`, the endpoint never
+/// marked).
+#[test]
+fn one_huge_answer_fails_its_endpoint_not_the_lookup() {
+    let mut world = World::new(config());
+    let huge = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"result":"0x1312d00","pad":[{}]}}"#,
+        vec!["[]"; 200_000].join(",")
+    );
+    assert!(huge.len() > 590_000 && huge.len() < 720 * 1024);
+    world
+        .answers_at
+        .insert((ENDPOINTS[3].to_owned(), "eth_blockNumber".into()), huge);
+    let a = world.machine.resolve_content("vitalik.eth");
+    world.run(10_000);
+    assert!(
+        world.reply(a).outcome.is_ok(),
+        "{:?}",
+        world.reply(a).outcome
+    );
+    assert!(
+        world.peak < Bounds::default().session_bytes,
+        "{}",
+        world.peak
+    );
+    // The lying endpoint is quarantined: the next lookup doesn't ask it.
+    let before = world.sent.len();
+    let b = world.machine.resolve_content("alice.eth");
+    world.run(60_000);
+    assert!(world.reply(b).outcome.is_ok());
+    assert!(
+        world.sent[before..]
+            .iter()
+            .all(|s| s.endpoint.as_deref() != Some(ENDPOINTS[3]))
+    );
+}
+
+/// Honest anchor blocks, however many endpoints answer them: eight
+/// endpoints with blocks of 1,000 transactions (about 69 KB each, the
+/// issue's case), and the 64-endpoint worst case with blocks of 2,900
+/// (about 200 KB each, design 0004's worst at 60 M gas). Each block is
+/// charged at what it can hold once parsed, and only until it is read for
+/// its hash (#73: the flat 32 bytes per byte, kept to the session's end,
+/// ended both lookups with `budget`).
+#[test]
+fn honest_large_anchor_blocks_fit_the_budget() {
+    for (n, transactions) in [(8, 1_000), (64, 2_900)] {
+        let mut config = config();
+        config.rpc = endpoints(n);
+        let mut world = World::new(config);
+        let block = block_with(&world, transactions);
+        world.answers.insert("eth_getBlockByNumber".into(), block);
+        let a = world.machine.resolve_content("vitalik.eth");
+        world.run(10_000);
+        assert!(
+            world.reply(a).outcome.is_ok(),
+            "{n}: {:?}",
+            world.reply(a).outcome
+        );
+        assert!(
+            world.peak < Bounds::default().session_bytes / 2,
+            "{n}: {}",
+            world.peak
+        );
+    }
+}
+
 #[test]
 fn an_aliasing_decode_counts_against_the_session() {
     let mut bounded = config();
@@ -949,19 +1044,26 @@ fn spent_in_its_finishing_poll_a_session_caches_nothing() {
 
 #[test]
 fn answers_count_as_their_parsed_tree() {
-    // 2 KB more per answer: about 30 KB of bodies in all, which raw would
-    // fit 200,000 bytes, but parsed (32 per byte) can't.
-    let mut bounded = config();
-    bounded.bounds.session_bytes = 200_000;
-    let mut world = World::new(bounded);
-    let pad = format!(r#","pad":"{}"}}"#, "x".repeat(2_000));
-    for body in world.answers.values_mut() {
+    // Each leg's answer grows by 2 KB: as one string, it is charged about
+    // 2 KB more; as 1,000 zeros, 1,000 values more (#73: an answer is
+    // charged at what its parse can hold, not 32 per byte).
+    let peak = |pad: &str| {
+        let mut world = World::new(config());
+        let body = world.answers.get_mut("eth_call").unwrap();
         body.pop();
-        body.push_str(&pad);
-    }
-    let a = world.machine.resolve_content("vitalik.eth");
-    world.run(10_000);
-    assert_eq!(message(world.reply(a)), Some("budget"));
+        body.push_str(&format!(r#","pad":{pad}}}"#));
+        let a = world.machine.resolve_content("vitalik.eth");
+        world.run(10_000);
+        assert!(world.reply(a).outcome.is_ok());
+        world.peak
+    };
+    let plain = peak("0");
+    let string = peak(&format!(r#""{}""#, "x".repeat(2_000)));
+    let values = peak(&format!("[{}]", vec!["0"; 1_000].join(",")));
+    // Two legs answered before they agreed; the third was cancelled. Each
+    // string answer counts its body and its string, about 4 KB.
+    assert!(string - plain < 2 * 2 * 2_100, "{plain} {string}");
+    assert!(values - plain >= 2 * 1_000 * 88, "{plain} {values}");
 }
 
 #[test]
@@ -1413,6 +1515,9 @@ fn a_cached_discoverys_copy_counts_against_the_session_that_takes_it() {
     let run = |backlog: usize| {
         let mut config = config();
         config.tezos = vec!["t1".into()];
+        // The registry's answer is far over the per-answer allowance, which
+        // this test isn't about.
+        config.bounds.answer_charge_bytes = usize::MAX;
         let mut machine = Machine::new(0, config, Box::new(Mulberry32::new(7)));
         machine.resolve_tezos("alice.tez");
         let (primed, scripts, _) = drive_tezos(&mut machine, &answers);
