@@ -496,6 +496,19 @@ fn malformed_requests_are_invalid_argument() {
                 .contains("example.com")
         );
     }
+    // More distinct header names than a header map holds (24,576), in one
+    // frame: refused, not a panic in the parser (freedom-ipfs#39). Main
+    // refuses this first, by 0006's 64 KiB of headers.
+    let mut params = good.clone();
+    params["headers"] = (0..25_000)
+        .map(|i| json!([format!("x-h{i}"), ""]))
+        .collect();
+    let reply = ipfsd.call("ipfs.request", params);
+    assert_eq!(
+        reply["error"]["code"], "invalid_argument",
+        "{}",
+        reply["error"]
+    );
     // The good one still is.
     let id = ipfsd.request("ipfs.request", good);
     assert_eq!(ipfsd.reply(id)["result"]["status"], 200);

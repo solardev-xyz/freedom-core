@@ -488,6 +488,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
   - `body` is false for `HEAD` and for 204, 205 and 304, which is main's rule today. Any bytes the gateway produces then are dropped.
   - A request is one JSON frame, within 0006's bounds of 64 KiB for the URL and 64 KiB for the headers.
     - **Main checks those bounds, the service doesn't.** Main measures them in UTF-16 units and the service would see bytes, so a check here could refuse what main accepted. The 1 MiB frame bound still applies.
+    - **Within a frame, the parser refuses more distinct header names than a header map holds** (24,576 in http 1.x) as `invalid_argument`, rather than panicking (freedom-ipfs#39). Main's bound keeps a request well under that: 64 KiB of headers, at 5 or more units each, is at most 13,107.
   - **The parser decides the method,** in any case, as the add-on does: `get` is `GET`.
   - **`headers_ms`** is from 1 to 30,000, the [Bounds](#bounds) table's 30 s. Anything else is `invalid_argument`, as are unknown members. A refusal never quotes the input.
   - **Refusals, in order:** `invalid_argument` for the params, then `busy` at the admission bound, then `stopped` for an instance that isn't live.

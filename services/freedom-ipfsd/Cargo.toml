@@ -34,9 +34,10 @@ fc-service = { path = "../../crates/fc-service" }
 # carries the upstream changes 0007 lists (deny.toml allows solardev-xyz).
 # It holds the builder (#26), the native-request parser (#25), owned
 # instances (#28), shared limits, memory reservations and cache capacities
-# (item 8: #35-#37) and v0.4.6. src/build_info.rs reports the same commit.
-freedom-ipfs-gateway = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "b5485ee8434a4389075e5d851bd6b87637b79afc" }
-freedom-ipfs-store = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "b5485ee8434a4389075e5d851bd6b87637b79afc" }
+# (item 8: #35-#37), v0.4.6 and the parser's header-capacity refusal (#39).
+# src/build_info.rs reports the same commit.
+freedom-ipfs-gateway = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "dfa612b10a257316a369b85d1f07b1bf12c474c0" }
+freedom-ipfs-store = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "dfa612b10a257316a369b85d1f07b1bf12c474c0" }
 # The `Stream` trait, to read a response's body as it comes; already in
 # freedom-ipfs's graph.
 futures-core = "0.3"
@@ -49,7 +50,7 @@ tokio = { version = "1", default-features = false, features = ["rt-multi-thread"
 [dev-dependencies]
 # The tests seed a store with blocks: CIDs from freedom-ipfs's own helper,
 # at the same commit (already in the graph).
-freedom-ipfs-core = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "b5485ee8434a4389075e5d851bd6b87637b79afc" }
+freedom-ipfs-core = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "dfa612b10a257316a369b85d1f07b1bf12c474c0" }
 tempfile = "3"
 
 # The core's workspace lints, copied: workspace lints don't cross workspaces.
