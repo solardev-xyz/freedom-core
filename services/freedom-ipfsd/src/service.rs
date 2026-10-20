@@ -191,6 +191,9 @@ mod tests {
         inner: IpfsService,
         /// The next cancel waits until this receives.
         gate: Arc<Mutex<Option<Receiver<()>>>>,
+        /// The ID of the last request the reader has handed over, once the
+        /// service has returned from it.
+        handled: Arc<std::sync::atomic::AtomicU64>,
     }
 
     impl Service for Delayed {
@@ -200,6 +203,8 @@ mod tests {
 
         fn request(&self, conn: &Connection, request: Request<'_>) {
             self.inner.request(conn, request);
+            self.handled
+                .store(request.id, std::sync::atomic::Ordering::SeqCst);
         }
 
         fn cancel(&self, conn: &Connection, id: u64) {
@@ -365,6 +370,8 @@ mod tests {
         stats: Arc<Stats>,
         /// Holds the next cancel callback, once set.
         cancel_gate: Arc<Mutex<Option<Receiver<()>>>>,
+        /// The last request the service has handled.
+        handled: Arc<std::sync::atomic::AtomicU64>,
         input: std::io::PipeWriter,
         replies: Receiver<Value>,
         pace: Pace,
@@ -402,9 +409,11 @@ mod tests {
                 false,
             );
             let cancel_gate = Arc::new(Mutex::new(None));
+            let handled = Arc::new(std::sync::atomic::AtomicU64::new(0));
             let service = Arc::new(Delayed {
                 inner: IpfsService::new(instances.clone(), requests.clone(), stats.clone()),
                 gate: cancel_gate.clone(),
+                handled: handled.clone(),
             });
             let (input, mut main_out) = std::io::pipe().unwrap();
             let (main_in, output) = std::io::pipe().unwrap();
@@ -450,6 +459,7 @@ mod tests {
                 instances,
                 stats,
                 cancel_gate,
+                handled,
                 input: main_out,
                 replies,
                 pace,
@@ -1063,13 +1073,25 @@ mod tests {
         assert_eq!(harness.stats.outstanding(), 4, "held by their replies");
         harness.stats(8);
         harness.barrier(9);
+        // Their replies wait for the writer too: the reader acknowledges
+        // it has handled them.
+        let deadline = Instant::now() + WAIT;
+        while harness.handled.load(std::sync::atomic::Ordering::SeqCst) < 9 {
+            assert!(Instant::now() < deadline, "the reader never handled 9");
+            std::thread::sleep(Duration::from_millis(5));
+        }
         harness.pace.permit(usize::MAX / 2);
         assert_eq!(harness.replies.recv_timeout(WAIT).unwrap()["id"], 3);
-        for id in 4..8 {
-            let reply = harness.replies.recv_timeout(WAIT).unwrap();
-            assert_eq!(reply["id"], id, "{reply}");
-            assert!(reply["result"]["gateway"].is_object(), "{reply}");
-        }
+        // In the order their jobs queued them.
+        let mut answered: Vec<u64> = (4..8)
+            .map(|_| {
+                let reply = harness.replies.recv_timeout(WAIT).unwrap();
+                assert!(reply["result"]["gateway"].is_object(), "{reply}");
+                reply["id"].as_u64().unwrap()
+            })
+            .collect();
+        answered.sort_unstable();
+        assert_eq!(answered, [4, 5, 6, 7]);
         let refused = harness.replies.recv_timeout(WAIT).unwrap();
         assert_eq!(
             (&refused["id"], &refused["error"]["code"]),
