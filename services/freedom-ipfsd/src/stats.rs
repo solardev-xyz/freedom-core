@@ -34,7 +34,8 @@
 //!   until the job's closure is dropped, whether it ran or not: never just
 //!   because its request was answered. Past them, `busy`.
 //! - **a cancel, or the deadline,** fences the job, which then runs no SQL,
-//!   and aborts it if it hasn't started.
+//!   and aborts it if it hasn't started. A job that starts past its
+//!   deadline runs no SQL either, whether or not the watcher has run.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -328,6 +329,12 @@ impl Stats {
                 }
             }
             if fence.load(Ordering::SeqCst) {
+                return;
+            }
+            // Past its deadline, however late the watcher runs: no SQL, and
+            // `deadline`, through the same check as a reply.
+            if Instant::now() >= deadline {
+                let _ = reply.reply_error_by(id, &late(), deadline, &late());
                 return;
             }
             stats.ran.fetch_add(1, Ordering::SeqCst);

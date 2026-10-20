@@ -486,7 +486,7 @@ async fn serve(work: Work, request: GatewayCoreRequest) -> Outcome {
     // until the writer has written it (0007, "Pending replies").
     let size = match fc_service::conn::head_len(id, &head) {
         Ok(size) => size,
-        Err(_) => return too_large(&conn, id),
+        Err(_) => return too_large(&conn, id, deadline),
     };
     let Ok(charge) = budget.reserve_until(size, memory_deadline).await else {
         return busy(&conn, id, deadline);
@@ -505,7 +505,7 @@ async fn serve(work: Work, request: GatewayCoreRequest) -> Outcome {
         Ok(Headed::Queued) => {}
         // `deadline` is its reply: the work ends here.
         Ok(Headed::Late) => return Outcome::Failed("deadline", LATE),
-        Err(SendError::TooLarge) => return too_large(&conn, id),
+        Err(SendError::TooLarge) => return too_large(&conn, id, deadline),
         // Settled already (a cancel, the deadline), or closing.
         Err(_) => return Outcome::Settled,
     }
@@ -598,11 +598,14 @@ fn busy(conn: &Connection, id: u64, deadline: Instant) -> Outcome {
     }
 }
 
-/// Answers a head that can't be one frame.
-fn too_large(conn: &Connection, id: u64) -> Outcome {
+/// Answers a head that can't be one frame, if that is queued before
+/// `deadline`: as for a head, `deadline` from then on.
+fn too_large(conn: &Connection, id: u64, deadline: Instant) -> Outcome {
     let message = "the response's head is too large";
-    match conn.reply_error(id, &ErrorBody::new(ErrorCode::Internal, message)) {
-        Ok(()) => Outcome::Failed("internal", message),
+    let internal = ErrorBody::new(ErrorCode::Internal, message);
+    match conn.reply_error_by(id, &internal, deadline.into_std(), &late()) {
+        Ok(Headed::Queued) => Outcome::Failed("internal", message),
+        Ok(Headed::Late) => Outcome::Failed("deadline", LATE),
         Err(_) => Outcome::Settled,
     }
 }

@@ -750,7 +750,8 @@ mod tests {
             (&json!(3), &json!("deadline")),
             "{reply}"
         );
-        assert_eq!(ran, (1, 1));
+        // It started past its deadline, its watcher still held: no SQL.
+        assert_eq!(ran, (1, 0));
     }
 
     /// Review of #141, M2: a stats reply queued in time stands, however
@@ -962,8 +963,14 @@ mod tests {
         harness.stats(3);
         running.recv_timeout(WAIT).unwrap();
         send(&mut harness.input, json!({ "type": "cancel", "id": 3 }));
+        // `cancelled` is written before the service's cancel callback
+        // runs: a barrier the reader answers after it acknowledges the
+        // callback, and so the fence.
+        harness.barrier(4);
         let reply = harness.replies.recv_timeout(WAIT).unwrap();
         assert_eq!(reply["error"]["code"], "cancelled", "{reply}");
+        let barrier = harness.replies.recv_timeout(WAIT).unwrap();
+        assert_eq!(barrier["id"], 4, "{barrier}");
         release.send(()).unwrap();
         let deadline = Instant::now() + WAIT;
         while harness.stats.outstanding() > 0 {
@@ -973,5 +980,59 @@ mod tests {
         let ran = harness.stats.ran();
         harness.shut_down();
         assert_eq!(ran, (1, 0), "started, and stopped at its fence");
+    }
+
+    /// A `HEAD` for a directory entry whose 120,000-character name makes
+    /// its head larger than a frame.
+    fn oversized_head(harness: &mut Harness, id: u64, headers_ms: u64) {
+        let name = "\u{800}".repeat(120_000);
+        let (raw, _) = harness.put(0x55, b"small");
+        let (_, root) = harness.put(0x70, &directory(&name, &raw, 5));
+        request(
+            &mut harness.input,
+            id,
+            "ipfs.request",
+            json!({ "instance": "e-1", "method": "HEAD", "path": format!("/ipfs/{root}/{name}"),
+                "headers": [], "headers_ms": headers_ms }),
+        );
+    }
+
+    /// Review of #141, round 2: a head too large for a frame is `internal`
+    /// if that is queued in time, and `deadline` if its work runs late.
+    #[test]
+    fn an_oversized_head_is_internal_in_time_and_deadline_after() {
+        let mut harness = Harness::new(usize::MAX / 2);
+        oversized_head(&mut harness, 3, 30_000);
+        let in_time = harness.replies.recv_timeout(WAIT).unwrap();
+        let context = harness
+            .instances
+            .with_live("e-1", |running| running.instance.context().clone())
+            .unwrap();
+        let work = Workers::hold(context.handle());
+        let watchers = Workers::hold(harness.runtime.handle());
+        oversized_head(&mut harness, 4, 10);
+        let deadline = Instant::now() + WAIT;
+        while harness.requests.admitted() == 0 {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        // Past its deadline before its work can even run.
+        std::thread::sleep(Duration::from_millis(150));
+        work.release();
+        let late = harness.replies.recv_timeout(WAIT).unwrap();
+        watchers.release();
+        let counted = harness.counters_once_freed(2);
+        harness.shut_down();
+        assert_eq!(
+            (&in_time["id"], &in_time["error"]["code"]),
+            (&json!(3), &json!("internal")),
+            "{in_time}"
+        );
+        assert_eq!(
+            (&late["id"], &late["error"]["code"]),
+            (&json!(4), &json!("deadline")),
+            "{late}"
+        );
+        assert_eq!(counted["last_native_error_code"], "deadline", "{counted}");
     }
 }
