@@ -248,7 +248,9 @@ pub trait Service: Send + Sync + 'static {
     /// ([`Connection::reply`], [`Connection::reply_error`], a head without a
     /// body, [`Connection::finish`], [`Connection::abort`]) may still be
     /// queued, and the writer writes it for at most 1 s after this returns;
-    /// new streams, data and events are refused. A teardown that fails
+    /// new streams, data and events are refused. After a failed write to
+    /// stdout nothing more can be written, so nothing is queued at all:
+    /// every call is `Closed`. A teardown that fails
     /// calls [`Connection::fail`]: its exit becomes the process's result
     /// (70 for quiescence it can't prove).
     fn end(&self, conn: &Connection, end: End);
@@ -288,6 +290,9 @@ struct Link {
     /// [`Service::end`] has returned.
     torn_down: AtomicBool,
     max_requests: usize,
+    /// A failed writer has freed what was queued.
+    #[cfg(test)]
+    abandoned_freed: AtomicBool,
 }
 
 struct State {
@@ -355,6 +360,8 @@ impl Link {
             result: AtomicU8::new(Exit::Ok.code()),
             torn_down: AtomicBool::new(false),
             max_requests: options.max_requests.max(1),
+            #[cfg(test)]
+            abandoned_freed: AtomicBool::new(false),
         }
     }
 
@@ -474,7 +481,9 @@ impl Connection {
     ) -> Result<T, SendError> {
         let (result, wakers) = {
             let mut state = self.link.lock();
-            if state.closed || (state.end.is_some() && need == Need::Open) {
+            // Nothing more is written once the writer is done, so nothing
+            // more is queued.
+            if state.closed || state.writer_done || (state.end.is_some() && need == Need::Open) {
                 return Err(SendError::Closed);
             }
             let (result, room) = op(&mut state);
@@ -1678,14 +1687,26 @@ fn claim(link: &Link, frame: &mut Vec<u8>) -> Option<Claimed> {
 
 /// A failed write to stdout: main is gone (0007: the guaranteed path, as
 /// stdin EOF is).
+///
+/// Nothing more is written, so nothing more is queued ([`Connection`]'s
+/// calls are `Closed` once the writer is done), and what is queued goes:
+/// the stream state, with every queued head's and reply's JSON and every
+/// queued body byte, is taken out of the connection and freed, and only
+/// then what the heads held, so a reservation is never free while the
+/// buffer it pays for still is. Both outside the lock.
 fn writer_failed(link: &Link) {
     link.end(End::Eof);
     let mut state = link.lock();
     state.writing = false;
     state.writer_done = true;
-    // Nothing more is written: what queued heads hold goes.
+    let abandoned = std::mem::replace(&mut state.sender, Sender::with_data_cap(0));
+    let events = std::mem::take(&mut state.events);
     let charges = std::mem::take(&mut state.charges);
     drop(state);
+    drop(abandoned);
+    drop(events);
+    #[cfg(test)]
+    link.abandoned_freed.store(true, Ordering::SeqCst);
     drop(charges);
     link.ended.notify_all();
 }
@@ -1728,6 +1749,64 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    /// Review of #141, round 2: when the writer fails, every queued head's
+    /// JSON is freed before what its head held: a charge dropped while its
+    /// buffer still lived would let others spend those bytes again. A
+    /// small head, then a 100,046-byte one, and the first write fails.
+    #[test]
+    fn a_failed_writer_frees_queued_heads_before_their_charges() {
+        struct Broken;
+        impl Write for Broken {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        /// Records, as it is dropped, whether the queued buffers were freed.
+        struct Witness(Arc<Link>, Arc<Mutex<Vec<bool>>>);
+        impl Drop for Witness {
+            fn drop(&mut self) {
+                let freed = self.0.abandoned_freed.load(Ordering::SeqCst);
+                self.1.lock().unwrap().push(freed);
+            }
+        }
+        let mut options = Options::new("t", 1, Instant::now());
+        options.exit_watchdog = None;
+        let link = Arc::new(Link::new(&options));
+        let conn = Connection { link: link.clone() };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        for (id, pad) in [(1, "small".to_owned()), (2, "x".repeat(100_000))] {
+            link.lock().sender.request(id).unwrap();
+            let head = serde_json::json!({ "pad": pad });
+            let charge: Charge = Box::new(Witness(link.clone(), seen.clone()));
+            let late = ErrorBody::new(ErrorCode::Deadline, "late");
+            let deadline = Instant::now() + Duration::from_secs(60);
+            assert_eq!(
+                conn.head_by(id, &head, false, deadline, &late, Some(charge)),
+                Ok(Headed::Queued)
+            );
+        }
+        // Its JSON is 100,046 bytes, with its frame header 100,051.
+        assert_eq!(
+            head_len(2, &serde_json::json!({ "pad": "x".repeat(100_000) })),
+            Ok(100_051)
+        );
+        write_loop(&link, Broken);
+        // The first head's charge went with its own frame, once written
+        // (here: failed); the second's only after the queue was freed.
+        assert_eq!(*seen.lock().unwrap(), [false, true]);
+        let mut frame = Vec::new();
+        let state = link.lock();
+        assert_eq!((state.sender.live(), state.sender.held()), (0, 0));
+        drop(state);
+        assert!(link.lock().sender.next_frame_owned(&mut frame).is_none());
+        // And nothing more is queued.
+        assert_eq!(conn.reply(3, &()), Err(SendError::Closed));
+    }
 
     /// Review of #141: a head's buffer is exactly its length, which
     /// `head_len` counts with its frame header, however large it is.
