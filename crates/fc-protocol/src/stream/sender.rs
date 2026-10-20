@@ -113,6 +113,20 @@ pub enum Cancel {
     Late,
 }
 
+/// What [`Sender::settle`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settled {
+    /// The error is the request's one reply: nothing of it had been
+    /// written, and a queued head and body were dropped.
+    Replied,
+    /// Its stream was open: the abort purged it and is queued.
+    Aborted,
+    /// Its outcome was settled already (a reply queued or written, an abort
+    /// queued, its end written), or this side doesn't hold it: nothing
+    /// changes.
+    Already,
+}
+
 /// What a credit frame did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Credited {
@@ -511,6 +525,63 @@ impl Sender {
         body.abort = Some((abort.code, json));
         self.control.push_back((Control::Abort, id));
         Ok(())
+    }
+
+    /// Settles request `id` with an outcome the service owes it (design
+    /// 0007, "Panics": a panic on its task, or its instance's teardown),
+    /// unless its outcome is settled already, deciding as the request's
+    /// protocol state calls for:
+    /// - **no head queued yet:** `json`, an error response, is its one
+    ///   reply;
+    /// - **a head queued but not written:** the head and any body queued
+    ///   behind it are dropped, as for a cancel, and `json` is its only
+    ///   reply;
+    /// - **its stream open:** `abort` purges the stream's queued data, and
+    ///   its `end` if queued, and is queued with the control frames;
+    /// - **settled already** (a reply queued or written, an abort queued,
+    ///   its `end` written), or never held: nothing changes.
+    pub fn settle(&mut self, id: u64, json: Vec<u8>, abort: &Abort) -> Result<Settled, SendError> {
+        self.usable()?;
+        if json.len() > MAX_PAYLOAD {
+            return Err(SendError::TooLarge);
+        }
+        let abort_json = abort.to_json().map_err(|_| SendError::TooLarge)?;
+        let Some(state) = self.requests.get_mut(&id) else {
+            return match self.absent(id) {
+                SendError::Gone => Ok(Settled::Already),
+                other => Err(other),
+            };
+        };
+        match state {
+            // An abort queued behind an unwritten head settled it.
+            State::Head {
+                body: Some(body), ..
+            } if body.abort.is_some() => Ok(Settled::Already),
+            State::Working | State::Head { .. } => {
+                if let State::Head {
+                    body: Some(body), ..
+                } = state
+                {
+                    self.held -= body.purge();
+                }
+                // A queued head's control entry is skipped as stale when it
+                // comes up: the state is a reply now.
+                *state = State::Reply {
+                    json,
+                    cancelled: false,
+                };
+                self.control.push_back((Control::Reply, id));
+                Ok(Settled::Replied)
+            }
+            State::Open(body) if body.abort.is_none() => {
+                self.held -= body.purge();
+                unschedule(&mut self.rotation, body, id);
+                body.abort = Some((abort.code, abort_json));
+                self.control.push_back((Control::Abort, id));
+                Ok(Settled::Aborted)
+            }
+            State::Open(_) | State::Reply { .. } => Ok(Settled::Already),
+        }
     }
 
     // ---- the writer ------------------------------------------------------
@@ -948,6 +1019,122 @@ mod tests {
         s.request(1).unwrap();
         s.head(1, b"{}".to_vec(), true).unwrap();
         assert_eq!(s.push(1, &[0; 5000]).unwrap(), SMALL_FRAME);
+    }
+
+    /// The error a settle in these tests owes.
+    fn internal_reply(id: u64) -> Vec<u8> {
+        format!(r#"{{"type":"response","id":{id},"error":{{"code":"internal","message":"x"}}}}"#)
+            .into_bytes()
+    }
+
+    #[test]
+    fn a_settle_decides_by_what_is_written() {
+        let internal = Abort::new(AbortCode::Internal, "x");
+        let mut s = Sender::new();
+        let mut out = Vec::new();
+        // No head yet: the error is the one reply.
+        s.request(1).unwrap();
+        assert_eq!(
+            s.settle(1, internal_reply(1), &internal),
+            Ok(Settled::Replied)
+        );
+        assert_eq!(s.head(1, b"{}".to_vec(), true), Err(SendError::Answered));
+        assert_eq!(s.next_frame(&mut out), Some(Written::Reply { id: 1 }));
+        assert_eq!(out[5..], internal_reply(1));
+        assert!(!s.is_live(1));
+        assert_eq!(
+            s.settle(1, internal_reply(1), &internal),
+            Ok(Settled::Already)
+        );
+
+        // A head queued with its body behind it: both go, the error is the
+        // only reply, and the head's stale entry is skipped.
+        s.request(2).unwrap();
+        s.head(2, b"{}".to_vec(), true).unwrap();
+        assert_eq!(s.push(2, &[7; 5000]).unwrap(), 5000);
+        assert_eq!(
+            s.settle(2, internal_reply(2), &internal),
+            Ok(Settled::Replied)
+        );
+        assert_eq!((s.held(), s.held_capacity()), (0, 0));
+        assert_eq!(s.push(2, &[7]), Err(SendError::NotOpen));
+        assert_eq!(drain(&mut s), [Written::Reply { id: 2 }]);
+        assert!(!s.is_live(2));
+
+        // An open stream with data and its end queued: the abort purges both.
+        s.request(3).unwrap();
+        s.head(3, b"{}".to_vec(), true).unwrap();
+        out.clear();
+        assert_eq!(s.next_frame(&mut out), Some(Written::Head { id: 3 }));
+        assert_eq!(s.push(3, &[7; 5000]).unwrap(), 5000);
+        s.finish(3).unwrap();
+        assert_eq!(
+            s.settle(3, internal_reply(3), &internal),
+            Ok(Settled::Aborted)
+        );
+        assert_eq!(s.held(), 0);
+        assert_eq!(s.push(3, &[7]), Err(SendError::Gone));
+        assert_eq!(
+            drain(&mut s),
+            [Written::Abort {
+                id: 3,
+                code: AbortCode::Internal
+            }]
+        );
+        assert_eq!(
+            s.settle(3, internal_reply(3), &internal),
+            Ok(Settled::Already)
+        );
+
+        // Settled already: a reply queued, an abort queued, an end written,
+        // a cancel's reply. Nothing changes.
+        s.request(4).unwrap();
+        s.reply(4, b"{}".to_vec()).unwrap();
+        assert_eq!(
+            s.settle(4, internal_reply(4), &internal),
+            Ok(Settled::Already)
+        );
+        s.request(5).unwrap();
+        s.head(5, b"{}".to_vec(), true).unwrap();
+        s.abort(5, &Abort::new(AbortCode::BodyStreamError, "y"))
+            .unwrap();
+        assert_eq!(
+            s.settle(5, internal_reply(5), &internal),
+            Ok(Settled::Already)
+        );
+        s.request(6).unwrap();
+        assert_eq!(s.cancel(6), Ok(Cancel::Cancelled));
+        assert_eq!(
+            s.settle(6, internal_reply(6), &internal),
+            Ok(Settled::Already)
+        );
+        s.request(7).unwrap();
+        s.head(7, b"{}".to_vec(), true).unwrap();
+        s.finish(7).unwrap();
+        assert_eq!(
+            drain(&mut s),
+            [
+                Written::Reply { id: 4 },
+                Written::Head { id: 5 },
+                Written::Abort {
+                    id: 5,
+                    code: AbortCode::BodyStreamError
+                },
+                Written::Cancelled { id: 6 },
+                Written::Head { id: 7 },
+                Written::End { id: 7 },
+            ]
+        );
+        assert_eq!(
+            s.settle(7, internal_reply(7), &internal),
+            Ok(Settled::Already)
+        );
+        assert_eq!(
+            s.settle(8, internal_reply(8), &internal),
+            Err(SendError::Unknown)
+        );
+        assert_eq!(s.live(), 0);
+        assert!(s.control_entries() == 0 && s.rotation_entries() == 0);
     }
 
     #[test]

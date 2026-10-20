@@ -27,9 +27,10 @@
 //!      same moment.
 //!   2. **Revoke:** the network capability comes with the network policy
 //!      (upstream item 3, implementation step 8). Nothing to revoke yet.
-//!   3. **Cancel:** [`Instance::begin_shutdown`] cancels the root token, and
-//!      so every task. In-flight heads and open streams are answered
-//!      `stopped` here once requests exist (PR 3).
+//!   3. **Cancel:** the instance's requests are settled `stopped` (an error
+//!      for those whose head isn't written, an abort for open streams;
+//!      [`Requests::stop_instance`]), then [`Instance::begin_shutdown`]
+//!      cancels the root token, and so every task.
 //!   4. **Quiescence:** the teardown's own thread drains the task set and
 //!      blocking regions, drops and joins the instance's runtime, then
 //!      closes the store. Only `reached` proves it.
@@ -40,6 +41,12 @@
 //!   with 70, and the armed watchdog ends the process within the 5 s
 //!   whatever else happens (`teardown_unproven`). Once the connection has
 //!   ended, its exit watchdog is that bound.
+//! - **After a request panic** (0007, "Panics"), the request's watcher
+//!   fences the instance first ([`Instances::fence_after_panic`]: retired,
+//!   and its 5 s bound armed), queues the request's `internal`, then runs
+//!   the rest of the teardown ([`Instances::retire`]), and once quiescence
+//!   is proven sends `ipfs.instance_retired { instance, reason: "panic" }`.
+//!   An instance already stopping is left to that teardown.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -52,7 +59,9 @@ use fc_service::conn::Connection;
 use fc_service::log;
 use fc_service::panic::{Labeled, TaskKind, with_kind};
 use fc_service::watchdog::Watchdog;
-use freedom_ipfs_gateway::{GatewayConfig, Instance, InstanceConfig, OnlineNode, Quiescence};
+use freedom_ipfs_gateway::{
+    GatewayConfig, GatewayCore, Instance, InstanceConfig, OnlineNode, Quiescence,
+};
 use freedom_ipfs_store::{SqliteBlockStore, StoreError};
 use serde_json::json;
 use serde_json::value::RawValue;
@@ -60,6 +69,7 @@ use tokio::runtime::Handle;
 
 use crate::network::NetworkPolicy;
 use crate::params::{self, Start, Store};
+use crate::requests::Requests;
 use crate::testhooks;
 
 /// The teardown's bound (0007): past it, `teardown_unproven` and exit 70.
@@ -132,6 +142,8 @@ pub struct Instances {
     kind: Kind,
     /// The process runtime: control jobs and their timers.
     runtime: Handle,
+    /// The process's requests: a teardown settles its instance's.
+    requests: Arc<Requests>,
     table: Mutex<Table>,
     /// An instance left the table, or a teardown failed.
     changed: Condvar,
@@ -170,11 +182,27 @@ enum State {
         /// `ipfs.stop` requests to answer once its teardown is proven.
         stops: Vec<u64>,
     },
-    Live(Box<Instance>),
+    Live(Box<Running>),
     /// Retired: its teardown runs.
     Stopping {
         stops: Vec<u64>,
     },
+}
+
+/// A live instance, and the one gateway its requests share: the gateway's
+/// header permits and queue are the instance's (0007: today's 8 permits and
+/// 15 s queue).
+struct Running {
+    instance: Instance,
+    core: GatewayCore,
+}
+
+/// An instance fenced after a request panic, to tear down
+/// ([`Instances::retire`]).
+pub struct Retiring {
+    instance_id: String,
+    instance: Instance,
+    watchdog: Option<Watchdog>,
 }
 
 /// Why a starting instance was retired before its start answered.
@@ -206,17 +234,20 @@ impl Slot {
             return None;
         }
         match std::mem::replace(&mut self.state, State::Stopping { stops }) {
-            State::Live(instance) => Some(*instance),
+            // The shared gateway goes with the fence; requests still
+            // running hold their own clones until they end.
+            State::Live(running) => Some(running.instance),
             _ => None,
         }
     }
 }
 
 impl Instances {
-    pub fn new(kind: Kind, runtime: Handle) -> Arc<Instances> {
+    pub fn new(kind: Kind, runtime: Handle, requests: Arc<Requests>) -> Arc<Instances> {
         Arc::new(Instances {
             kind,
             runtime,
+            requests,
             table: Mutex::new(Table::default()),
             changed: Condvar::new(),
         })
@@ -242,6 +273,24 @@ impl Instances {
         self.table
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Runs `f` with instance `instance_id` and its gateway, if the instance
+    /// is live: built, its start answered, not retired. A request's work is
+    /// spawned here, under the table's lock, so a fence handled after it
+    /// finds the request.
+    pub fn with_live<R>(
+        &self,
+        instance_id: &str,
+        f: impl FnOnce(&Instance, &GatewayCore) -> R,
+    ) -> Option<R> {
+        match self.lock().active.get(instance_id) {
+            Some(Slot {
+                state: State::Live(running),
+                ..
+            }) => Some(f(&running.instance, &running.core)),
+            _ => None,
+        }
     }
 
     /// `ipfs.start`, on the reader thread: admitted or refused at once; the
@@ -384,14 +433,15 @@ impl Instances {
                 }
                 return;
             }
-            Ok(instance) => instance,
+            Ok(built) => built,
         };
+        let (instance, core) = instance;
         let Some(slot) = table.active.get_mut(&instance_id) else {
             return;
         };
         if fenced.is_none() {
             log::info("instance started", json!({ "instance": instance_id }));
-            slot.state = State::Live(Box::new(instance));
+            slot.state = State::Live(Box::new(Running { instance, core }));
             // Queued under the lock: a stop or a cancel handled after this
             // finds a live instance whose start is answered. A head without
             // a body, not a reply: a cancel that arrives before the writer
@@ -410,8 +460,9 @@ impl Instances {
         self.tear_down(conn, &instance_id, instance, bound);
     }
 
-    /// Opens the store and builds the instance on a runtime of its own.
-    fn open(&self, start: &Start, seq: u64) -> Result<Instance, ErrorBody> {
+    /// Opens the store and builds the instance on a runtime of its own, and
+    /// the one gateway its requests share.
+    fn open(&self, start: &Start, seq: u64) -> Result<(Instance, GatewayCore), ErrorBody> {
         let store = match (&self.kind, start.store) {
             (Kind::Persistent { store }, Store::Disk { max_bytes }) => {
                 SqliteBlockStore::open(store, max_bytes)
@@ -450,7 +501,8 @@ impl Instances {
         match built {
             Ok(instance) => {
                 testhooks::hold_teardown(&instance);
-                Ok(instance)
+                let core = instance.gateway_core();
+                Ok((instance, core))
             }
             Err(_) => {
                 let _ = store.close(STORE_CLOSE);
@@ -589,28 +641,74 @@ impl Instances {
         }));
     }
 
-    /// Cancels the instance and waits for its teardown's proof.
+    /// Cancels the instance (its requests settled `stopped` first) and
+    /// waits for its teardown's proof.
     fn tear_down(
         &self,
         conn: &Connection,
         instance_id: &str,
         instance: Instance,
         watchdog: Option<Watchdog>,
-    ) {
+    ) -> bool {
+        self.requests.stop_instance(conn, instance_id);
         let quiescence = instance.begin_shutdown(DRAIN).wait();
-        self.finish(conn, instance_id, quiescence, watchdog);
+        self.finish(conn, instance_id, quiescence, watchdog)
+    }
+
+    /// A request on `instance_id` panicked: steps 1 and 2 of its teardown,
+    /// at once (0007, "Panics"). The ID is retired, so later requests and
+    /// stops get `stopped`, and the 5 s bound is armed. Returns the instance
+    /// to tear down once the request's terminal is queued; `None` if it
+    /// isn't live (already stopping: that teardown goes on).
+    pub fn fence_after_panic(&self, instance_id: &str) -> Option<Retiring> {
+        let mut table = self.lock();
+        let ended = table.ended;
+        let instance = table.active.get_mut(instance_id)?.retire(Vec::new())?;
+        drop(table);
+        log::warn(
+            "a request panicked: its instance is retired",
+            json!({ "instance": instance_id }),
+        );
+        Some(Retiring {
+            instance_id: instance_id.to_owned(),
+            instance,
+            watchdog: arm(ended),
+        })
+    }
+
+    /// The rest of a panicked instance's teardown, from step 3, as a control
+    /// job; then, once quiescence is proven, `ipfs.instance_retired`.
+    pub fn retire(self: &Arc<Self>, conn: &Connection, retiring: Retiring) {
+        let Retiring {
+            instance_id,
+            instance,
+            watchdog,
+        } = retiring;
+        log::info("instance stopping", json!({ "instance": instance_id }));
+        let (instances, conn) = (self.clone(), conn.clone());
+        drop(self.runtime.spawn_blocking(move || {
+            with_kind(CONTROL, || {
+                if instances.tear_down(&conn, &instance_id, instance, watchdog) {
+                    let _ = conn.event(
+                        "ipfs.instance_retired",
+                        &json!({ "instance": instance_id, "reason": "panic" }),
+                    );
+                }
+            });
+        }));
     }
 
     /// Acknowledges a teardown once quiescence is proven: the watchdog is
     /// disarmed, the room released, the ID recorded as retired, and the
     /// stops answered, in that order. Unproven, nothing is released.
+    /// Returns whether quiescence was proven.
     fn finish(
         &self,
         conn: &Connection,
         instance_id: &str,
         quiescence: Quiescence,
         watchdog: Option<Watchdog>,
-    ) {
+    ) -> bool {
         if !quiescence.reached {
             // The watchdog stays armed: it ends the process within its
             // bound whatever the connection's end does.
@@ -626,7 +724,7 @@ impl Instances {
             conn.fail(Exit::Internal);
             self.lock().unproven = true;
             self.changed.notify_all();
-            return;
+            return false;
         }
         if let Some(watchdog) = watchdog {
             watchdog.disarm();
@@ -652,6 +750,7 @@ impl Instances {
         }
         drop(table);
         self.changed.notify_all();
+        true
     }
 
     /// The connection ended (`Service::end`): every instance is torn down,
@@ -679,6 +778,7 @@ impl Instances {
             .into_iter()
             .map(|(instance_id, instance)| {
                 log::info("instance stopping", json!({ "instance": instance_id }));
+                self.requests.stop_instance(conn, &instance_id);
                 (instance_id, instance.begin_shutdown(DRAIN))
             })
             .collect();
@@ -715,5 +815,6 @@ fn store_error_kind(error: &StoreError) -> &'static str {
         StoreError::Sqlite(_) => "sqlite",
         StoreError::Core(_) => "core",
         StoreError::Json(_) => "json",
+        StoreError::PageCap { .. } => "page_cap",
     }
 }

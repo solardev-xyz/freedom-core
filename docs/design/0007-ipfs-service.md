@@ -321,6 +321,8 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
      - the root token is cancelled and the task set aborted;
      - the swarms are dropped, which closes their connections;
      - in-flight heads are answered `stopped`, and open streams aborted with `stopped`.
+       - **"In flight" means not yet written.** A head that is queued but not written is in flight: it is dropped with its body, and `stopped` is the only reply, even for a complete bodiless response.
+       - **A stream is open until its `end` is written,** so a stream whose work ended and whose `end` is still queued is aborted too. Teardown doesn't wait on the writer for main to read.
   4. **Wait for quiescence:** the task set is empty and the blocking-region count is zero. Then:
      - **The instance's runtime is dropped and joined** on a dedicated teardown thread, never on the process runtime's workers. Dropping a tokio runtime waits for its workers and every blocking-pool thread to exit, including blocking jobs the libraries spawned that no counter sees. A timed shutdown (`shutdown_timeout`, `shutdown_background`) is not used, because it may return while that work is still running.
      - **The store is closed** after the join (`close`, waiting at most 2 s for a statement in progress, as upstream's `close_or_close_later` does).
@@ -485,6 +487,11 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
   - As main does today, it sets the request ID to the envelope ID and the top-level path to `path`.
   - `body` is false for `HEAD` and for 204, 205 and 304, which is main's rule today. Any bytes the gateway produces then are dropped.
   - A request is one JSON frame, within 0006's bounds of 64 KiB for the URL and 64 KiB for the headers.
+    - **Main checks those bounds, the service doesn't.** Main measures them in UTF-16 units and the service would see bytes, so a check here could refuse what main accepted. The 1 MiB frame bound still applies.
+    - **Within a frame, the parser refuses more distinct header names than a header map holds** (24,576 in http 1.x) as `invalid_argument`, rather than panicking (freedom-ipfs#39). Main's bound keeps a request well under that: 64 KiB of headers, at 5 or more units each, is at most 13,107.
+  - **The parser decides the method,** in any case, as the add-on does: `get` is `GET`.
+  - **`headers_ms`** is from 1 to 30,000, the [Bounds](#bounds) table's 30 s. Anything else is `invalid_argument`, as are unknown members. A refusal never quotes the input.
+  - **Refusals, in order:** `invalid_argument` for the params, then `busy` at the admission bound, then `stopped` for an instance that isn't live.
 - **No caller context.**
   - Every request is main's, for a request main has already admitted and fenced. The service has no per-caller policy.
 - **One event from the service:** `ipfs.instance_retired { instance, reason }`, where `reason` is `"panic"`. The service sends it after retiring an instance on its own ([Panics](#crashes-hangs-and-restarts)), once its teardown has proven quiescence. It is never sent for a stop that main asked for.
@@ -505,8 +512,10 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
   - The request's admission slot is released only when its work has ended, not when the reply is sent.
 - **`headers_ms`:**
   - It runs from admission, so queue time and routing count. On expiry the request's token is cancelled and the reply is `deadline`.
+  - A head that is queued, though not yet written, when `headers_ms` runs out is in time: the service's part is done.
   - After the head there is no deadline in the service. Main's 60 s body-idle timer (0006) cancels a stalled body.
 - **Admission:** at most 512 requests per process, counting heads, open streams, and work still ending after a cancel. Beyond that the reply is `busy`.
+  - **A slot is held until both its work has ended and its terminal is written:** the reply, the stream's `end`, or its abort. That covers "only when its work has ended" and "counting open streams" together.
   - Main sends at most 512 outstanding service requests, retiring ones included ([Frames](#frames)). So `busy` here signals a fault, and the reply is from the reader's bounded refusals.
 
 ### Errors

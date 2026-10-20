@@ -30,6 +30,7 @@ mod build_info;
 mod instances;
 mod network;
 mod params;
+mod requests;
 mod service;
 mod testhooks;
 
@@ -43,6 +44,7 @@ use serde_json::json;
 
 use crate::args::{Command, Mode};
 use crate::instances::{Instances, Kind, STORE_FILE};
+use crate::requests::Requests;
 use crate::service::IpfsService;
 
 /// The gate's namespace: `<lock-dir>/ipfs-<sha256(data dir)>.lock`.
@@ -130,10 +132,9 @@ fn serve(kind: Kind, parent_pid: Option<u32>, started: Instant) -> Exit {
         }
     };
     log::info("serving", json!({ "kind": kind.name() }));
-    let service = Arc::new(IpfsService::new(Instances::new(
-        kind,
-        runtime.handle().clone(),
-    )));
+    let requests = Requests::new(runtime.handle().clone());
+    let instances = Instances::new(kind, runtime.handle().clone(), requests.clone());
+    let service = Arc::new(IpfsService::new(instances, requests));
     let mut options = Options::new(SERVICE, PROTOCOL, started);
     options.parent_pid = parent_pid;
     let exit = conn::run(service, options, std::io::stdin(), std::io::stdout());

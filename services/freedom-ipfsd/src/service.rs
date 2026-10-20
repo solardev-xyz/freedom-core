@@ -4,10 +4,11 @@
 //!   links, and which process this is. The connection checks the protocol
 //!   and frame kinds first, and adds `protocol`.
 //! - `ipfs.start` and `ipfs.stop`: [`Instances`].
+//! - `ipfs.request`: [`Requests`].
 //! - `ipfs.shutdown` ends the connection (fc-service); [`Service::end`]
 //!   then tears down every instance, and the process exits 0.
-//! - `ipfs.request` and `ipfs.stats` come next (PR 3). Until then, as any
-//!   other method, they are `unknown_method`.
+//! - `ipfs.stats` comes with the budgets (PR 3b). Until then, as any other
+//!   method, it is `unknown_method`.
 
 use std::sync::Arc;
 
@@ -17,14 +18,19 @@ use serde_json::{Map, Value, json};
 
 use crate::build_info;
 use crate::instances::Instances;
+use crate::requests::Requests;
 
 pub struct IpfsService {
     instances: Arc<Instances>,
+    requests: Arc<Requests>,
 }
 
 impl IpfsService {
-    pub fn new(instances: Arc<Instances>) -> IpfsService {
-        IpfsService { instances }
+    pub fn new(instances: Arc<Instances>, requests: Arc<Requests>) -> IpfsService {
+        IpfsService {
+            instances,
+            requests,
+        }
     }
 }
 
@@ -47,6 +53,10 @@ impl Service for IpfsService {
         match request.method {
             "ipfs.start" => self.instances.start(conn, request.id, request.params),
             "ipfs.stop" => self.instances.stop(conn, request.id, request.params),
+            "ipfs.request" => {
+                self.requests
+                    .request(&self.instances, conn, request.id, request.params);
+            }
             _ => {
                 let _ = conn.reply_error(
                     request.id,
@@ -57,6 +67,7 @@ impl Service for IpfsService {
     }
 
     fn cancel(&self, conn: &Connection, id: u64) {
+        self.requests.cancel(id);
         self.instances.cancel(conn, id);
     }
 
@@ -203,10 +214,11 @@ mod tests {
             .enable_time()
             .build()
             .unwrap();
-        let instances = Instances::new(Kind::Ephemeral, runtime.handle().clone());
+        let requests = Requests::new(runtime.handle().clone());
+        let instances = Instances::new(Kind::Ephemeral, runtime.handle().clone(), requests.clone());
         let (seen, events) = mpsc::channel();
         let service = Arc::new(Observed {
-            inner: IpfsService::new(instances.clone()),
+            inner: IpfsService::new(instances.clone(), requests),
             seen,
         });
         let (input, mut main_out) = std::io::pipe().unwrap();
@@ -278,5 +290,208 @@ mod tests {
         drop(main_out);
         assert_eq!(run.join().unwrap(), fc_service::Exit::Ok);
         runtime.shutdown_background();
+    }
+
+    /// A connection over pipes to the service, with a paced writer, and an
+    /// ephemeral offline instance `e-1` started.
+    struct Harness {
+        runtime: tokio::runtime::Runtime,
+        requests: Arc<Requests>,
+        instances: Arc<Instances>,
+        input: std::io::PipeWriter,
+        replies: Receiver<Value>,
+        pace: Pace,
+        run: std::thread::JoinHandle<fc_service::Exit>,
+    }
+
+    impl Harness {
+        /// With `writes` writes permitted once `e-1` is up: more are
+        /// permitted with [`Pace::permit`].
+        fn new(writes: usize) -> Harness {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_time()
+                .build()
+                .unwrap();
+            let requests = Requests::new(runtime.handle().clone());
+            let instances =
+                Instances::new(Kind::Ephemeral, runtime.handle().clone(), requests.clone());
+            let service = Arc::new(IpfsService::new(instances.clone(), requests.clone()));
+            let (input, mut main_out) = std::io::pipe().unwrap();
+            let (main_in, output) = std::io::pipe().unwrap();
+            let replies = messages(main_in);
+            let pace = Pace::default();
+            // The handshake's reply and the start's.
+            pace.permit(2 + writes);
+            let mut options = Options::new("ipfs", 1, Instant::now());
+            options.exit_watchdog = None;
+            let paced = Paced {
+                pipe: output,
+                pace: pace.clone(),
+            };
+            let run = std::thread::spawn(move || conn::run(service, options, input, paced));
+            request(
+                &mut main_out,
+                1,
+                "ipfs.hello",
+                json!({ "protocol": 1, "shell_version": "test", "frames": ["stream"] }),
+            );
+            assert!(replies.recv_timeout(WAIT).unwrap()["result"].is_object());
+            request(
+                &mut main_out,
+                2,
+                "ipfs.start",
+                json!({
+                    "instance": "e-1",
+                    "store": { "kind": "memory", "max_bytes": 1048576 },
+                    "routing": { "mode": "offline", "delegated_routers": [],
+                        "dht_query_timeout_s": 3, "dht_max_providers": 32 },
+                    "gateway": { "max_concurrent_requests": 8, "request_queue_timeout_ms": 15000 },
+                    "network": { "mode": "direct" }
+                }),
+            );
+            assert_eq!(
+                replies.recv_timeout(WAIT).unwrap()["result"]["instance"],
+                "e-1"
+            );
+            Harness {
+                runtime,
+                requests,
+                instances,
+                input: main_out,
+                replies,
+                pace,
+                run,
+            }
+        }
+
+        /// A `HEAD` for content the instance doesn't have: an HTTP failure,
+        /// as a head without a body.
+        fn head(&mut self, id: u64, headers_ms: u64) {
+            request(
+                &mut self.input,
+                id,
+                "ipfs.request",
+                json!({ "instance": "e-1", "method": "HEAD",
+                    "path": "/ipfs/bafkreibqphrxowsfix3hzojgk7grevwfojnu52chl5g3sg4pfwphq7yepq",
+                    "headers": [], "headers_ms": headers_ms }),
+            );
+        }
+
+        fn shut_down(mut self) {
+            self.pace.permit(usize::MAX / 2);
+            request(&mut self.input, 1 << 20, "ipfs.shutdown", json!({}));
+            drop(self.input);
+            assert_eq!(self.run.join().unwrap(), fc_service::Exit::Ok);
+            self.runtime.shutdown_background();
+        }
+    }
+
+    /// Holds both workers of a runtime until released.
+    #[derive(Clone, Default)]
+    struct Workers(Arc<(Mutex<bool>, Condvar)>);
+
+    impl Workers {
+        fn hold(handle: &tokio::runtime::Handle) -> Workers {
+            let gate = Workers::default();
+            let (held, holding) = mpsc::channel();
+            for _ in 0..2 {
+                let (gate, held) = (gate.clone(), held.clone());
+                drop(handle.spawn(async move {
+                    held.send(()).unwrap();
+                    let mut released = gate.0.0.lock().unwrap();
+                    while !*released {
+                        released = gate.0.1.wait(released).unwrap();
+                    }
+                }));
+            }
+            holding.recv_timeout(WAIT).unwrap();
+            holding.recv_timeout(WAIT).unwrap();
+            gate
+        }
+
+        fn release(&self) {
+            *self.0.0.lock().unwrap() = true;
+            self.0.1.notify_all();
+        }
+    }
+
+    /// Review of #140: a request is admitted until its terminal is written,
+    /// not only claimed: here a head without a body, held in its write.
+    #[test]
+    fn admission_lasts_until_a_bodiless_head_is_written() {
+        let mut harness = Harness::new(0);
+        harness.head(3, 30_000);
+        // The writer is inside the head's write, and the work has ended:
+        // its watcher has had time to see it.
+        harness.pace.begun(3);
+        std::thread::sleep(Duration::from_millis(500));
+        let held = harness.requests.admitted();
+        harness.pace.permit(usize::MAX / 2);
+        assert_eq!(harness.replies.recv_timeout(WAIT).unwrap()["id"], 3);
+        let deadline = Instant::now() + WAIT;
+        while harness.requests.admitted() > 0 {
+            assert!(Instant::now() < deadline, "released once written");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        harness.shut_down();
+        assert_eq!(held, 1, "its terminal was still being written");
+    }
+
+    /// Review of #140: a head the work produces after `headers_ms` is never
+    /// sent, even with the deadline's watcher held up.
+    #[test]
+    fn a_late_head_never_beats_a_delayed_deadline_watcher() {
+        let mut harness = Harness::new(usize::MAX / 2);
+        let context = harness
+            .instances
+            .with_live("e-1", |instance, _| instance.context().clone())
+            .unwrap();
+        let work = Workers::hold(context.handle());
+        let watchers = Workers::hold(harness.runtime.handle());
+        harness.head(3, 10);
+        let deadline = Instant::now() + WAIT;
+        while harness.requests.admitted() == 0 {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        // Past its deadline before its work can even run.
+        std::thread::sleep(Duration::from_millis(150));
+        work.release();
+        let reply = harness.replies.recv_timeout(WAIT).unwrap();
+        watchers.release();
+        harness.shut_down();
+        assert_eq!(reply["error"]["code"], "deadline", "{reply}");
+    }
+
+    #[test]
+    fn a_deadline_watcher_answers_work_that_never_runs() {
+        let mut harness = Harness::new(usize::MAX / 2);
+        let context = harness
+            .instances
+            .with_live("e-1", |instance, _| instance.context().clone())
+            .unwrap();
+        let work = Workers::hold(context.handle());
+        harness.head(3, 10);
+        let reply = harness.replies.recv_timeout(WAIT).unwrap();
+        work.release();
+        harness.shut_down();
+        assert_eq!(reply["error"]["code"], "deadline", "{reply}");
+    }
+
+    #[test]
+    fn a_head_queued_in_time_survives_a_delayed_watcher() {
+        let mut harness = Harness::new(usize::MAX / 2);
+        let watchers = Workers::hold(harness.runtime.handle());
+        let sent = Instant::now();
+        harness.head(3, 1000);
+        let reply = harness.replies.recv_timeout(WAIT).unwrap();
+        let elapsed = sent.elapsed();
+        // The watcher runs only once its deadline has long passed.
+        std::thread::sleep(Duration::from_millis(1100));
+        watchers.release();
+        harness.shut_down();
+        assert!(elapsed < Duration::from_millis(1000), "{elapsed:?}");
+        assert_eq!(reply["result"]["body"], false, "{reply}");
     }
 }
