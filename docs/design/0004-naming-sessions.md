@@ -170,6 +170,7 @@ Literal labels such as Myotis' `myotis-p2p` are plain strings and never substitu
   - `policy` is `resolutionPolicy()` (including the legacy `primary` mapping);
   - `quorum` is the raw `network.quorum` values;
   - `tezos` is `getRpcEndpoints()` (with `TEZOS_RPC` prepended).
+- **Each endpoint once:** the core keeps an `rpc` or `tezos` reference listed again only in its first place. Main's lists are deduplicated already, so this never changes what main sends; it keeps one endpoint from counting twice in a quorum, as two legs or two anchor heads, if a list ever repeats one.
 - **The core applies today's clamps and defaults** where today's code applies them. `resolveViaQuorum` clamps K and M from 1, `getPinnedBlock` from 2, and then the anchor's effective M.
 - **References are derived:** a reference is a keyed hash of the URL, under a key main generates per core process. A re-added URL gets back its reference, so quarantine (keyed by reference) survives a list change, as today's URL-keyed map does. Main keeps the reverse mapping for the 1,024 most recent references, which is far more than a configuration ever holds.
 - **Reads happen where today's code reads:** a session reads the current snapshot at the same points today's code calls `registry.getNetwork` and `getEndpoints`.
@@ -295,6 +296,7 @@ These follow `doResolveEnsContent`, `doResolveEnsAddress` and `doResolveEnsRever
   - The zero address and empty bytes are `NO_ADDRESS` (`address-*`).
 - **Reverse:**
   - **ENS:** through the UR's `reverse`, as an `(outcome, detail)` agreement value. A `ReverseAddressMismatch` is `UNVERIFIED` with the claimed name (`reverse-*`).
+  - **Only a normalized ENS name is the address's name** (deviation `reverse-normalized`, #75). The forward check hashes the claimed name as written, so an owner of an unnormalized name such as `vitaIik.eth` (a capital I) passes it, and the name renders like `vitalik.eth`. The core shows a name only when it is its own ENSIP-15 normalization; any other is `UNVERIFIED` with the claimed name and `Reverse record for <address> claims a name that isn't normalized`, with the trust the answer had. This holds for the quorum, Colibri and Myotis paths alike (`deviation-reverse-normalized`, `-colibri`, `-myotis`). WNS and GNS claims are normalized before their forward check already. The reference has the same gap, so it should take the same rule.
   - **WNS, then GNS:** on chain 1, an ENS `NO_REVERSE` falls back to WNS, then GNS, through **the same method** that produced the ENS answer. A claim is checked by a forward `addr` through that method too. A failed forward check leaves the claim unverified, and the next system is tried (`reverse-ens-empty-then-wns`, `reverse-ens-and-wns-empty-then-gns`, `reverse-wns-claim-fails-forward-then-gns-empty`; through Myotis, [Verified methods](#verified-methods)).
   - **Provisional:** a result that is `unverified` or `UNVERIFIED`.
   - **Error outcomes** agree by their [agreement identity](#errors-agreement-and-text), not by display text.
@@ -338,6 +340,7 @@ How a failed exchange is classified. The core's rules are ordered, and the first
 | # | Core rule | The reference |
 |---|---|---|
 | 1 | Transport `timeout`, `refused`, `too_large`: **yes** | yes (`TIMEOUT`, `SERVER_ERROR`) |
+| 1a | `unsent`, a request the core never sent (over the frame): the leg fails, but **the endpoint isn't marked** either way, since it never saw the request † | — (the reference sends any size) |
 | 2 | Transport `network`, any socket-level failure: **yes** † | yes when the socket error's message matches the text rule (`ECONNREFUSED`, `ENOTFOUND`, `ETIMEDOUT`); otherwise no. A reset (`ECONNRESET`, "socket hang up") is semantic |
 | 3 | HTTP non-2xx once ethers' `FetchRequest` is done: **yes** | yes (`SERVER_ERROR`) |
 | 4 | Body not UTF-8 or not JSON, no response for the request's id, or an `error` member that isn't an object: **yes** † | no (`UNSUPPORTED_OPERATION`, `BAD_DATA`), unless the composed message matches the text rule below |
@@ -387,7 +390,26 @@ How a failed exchange is classified. The core's rules are ordered, and the first
 - **Pinned legs** (quorum, single source, direct):
   - **The loop:** at most 10 rounds. Each round needs an `OffchainLookup` revert whose sender is the Universal Resolver, else today's error. The callback goes to **the same endpoint at the same block hash** (`ccip-fast-gateway`).
   - **Gateways** are tried in list order, 15 s each, through `shell.gateway`:
-    - The [codec](0003-naming.md#codecs) decides a URL's eligibility (`https`, no credentials, not an IP, a dotted host, not `.localhost`/`.local`/`.internal`), the GET or POST shape, and the answer's validity. Main refuses the same URLs again, failing closed.
+    - The [codec](0003-naming.md#codecs) decides a URL's eligibility (`https`, no credentials, not an IP, a dotted host with no empty label, not `.localhost`/`.local`/`.internal`), the GET or POST shape, and the answer's validity. Main refuses the same URLs again, failing closed.
+    - **Resolved addresses (main, #76):** a host name says nothing of where it points. `127.0.0.1.nip.io` or a LAN resolver's `router.lan` reach the local network, and the request comes from main, where Chromium's Private Network Access doesn't apply. The core can't check this, because it resolves no names. So main checks every address a gateway connection would use:
+      - **The policy is [design 0007's](0007-ipfs-service.md#addresses),** the one policy for untrusted destinations. That covers its IPv4 and IPv6 tables, its rules for IPv6 forms that embed IPv4, and its [NAT64 prefix states](0007-ipfs-service.md#network-specific-nat64-prefixes). So `fec0::1` is refused, and `2002:a00:1::1` (6to4) and `2a00:1::5efe:a00:1` (ISATAP) are refused as the `10.0.0.1` they embed.
+      - **No gateway is a configured target.** A contract names them, so 0007's exemption for configured endpoints never applies, even to a host the user configured for something else.
+      - **NAT64 prefixes:** main learns them as 0007 describes, with the same states, by asking for `ipv4only.arpa` from the resolvers the OS gives Node (`dns.getServers()`).
+        - While the prefixes aren't known, an IPv6 address outside 0007's fixed forms is refused. IPv4 addresses and the fixed forms are judged as always, so a dual-stack gateway is still reached over IPv4.
+        - Main reads only the effective resolvers, not each interface's own. So a prefix that only an interface's resolver advertises, behind a manual setting, a VPN or a local resolver, is outside the check. 0007's [What the gate can't see](0007-ipfs-service.md#what-the-gate-cant-see) lists that limit with the others, which apply here too.
+      - **At connect time:** the check runs in the connection's own resolution step, and the connection goes to an address that passed. Main dials a clearnet gateway with Node's `https` and a checking `lookup`. An answer with no passing address fails the gateway. A separate lookup before the fetch would leave DNS rebinding open.
+      - **TLS trust on that path:**
+        - The certificate is verified against the gateway's own host name (SNI and the certificate's name), with verification never relaxed.
+        - The roots are Node's bundled set plus the roots Node's system API exposes (`tls.getCACertificates('system')`). So a locally installed root, such as an enterprise's, is trusted where the OS's store, as Node reads it, holds it. That is not always where Chromium finds it: on Linux, Node reads OpenSSL's certificate file and directory, while Chromium also reads its NSS database.
+        - What differs from Chromium's verifier is deviation `ccip-gateway-tls`: its own root store and distrust decisions, Certificate Transparency, CRLSets, and local trust sources that Node doesn't read.
+        - Main's tests check that the dial carries both root sets and the gateway's name, and that a gateway whose certificate chains to no trusted root is refused.
+      - **Routes:**
+        - A clearnet gateway goes `DIRECT`; the Tor PAC routes only `.onion`. A clearnet gateway that the session would send through a proxy is refused, because main can't check where the proxy connects.
+        - An `.onion` gateway keeps its separately authorized route, through the PAC to Arti, and is never resolved locally. It is refused while that route isn't on the session, as today.
+      - **Redirects stay refused** (`redirect: 'error'`), so no hop needs a check.
+      - **Every gateway fetch is covered.** The pinned legs' loop and the Myotis and Colibri adapters' automatic CCIP callbacks all use main's one gateway fetch (`ccip-fetch.js`), so the check covers the [verified paths](#verified-operations) too.
+      - **A refusal** is `refused`, so the next gateway is tried.
+      - **Tests:** main's tests use the cases generated from 0007's table. These include site-local, 6to4, ISATAP, both NAT64 forms and the IPv4-mapped spellings.
     - An HTTP error, a redirect or an invalid answer moves on to the next URL (`ccip-gateway-errors-fall-through`).
   - **Bounds:** at most 32 URLs are tried per round (deviation `ccip-urls`).
 - **Verified paths** run ethers' built-in loop inside main's adapters, unchanged ([Verified operations](#verified-operations)).
@@ -481,7 +503,7 @@ Main's terminal reply for an I/O request is a result or one of these:
 - `cancelled`;
 - `stale_generation`.
 
-No error carries a URL or a server's text.
+No error carries a URL or a server's text. The core has one class of its own, `unsent`: a request it never sent because it was over 0001's frame. Main never reports it.
 
 ## Bounds
 
@@ -550,6 +572,8 @@ The 4 MiB decode budget caps aliasing: an `OffchainLookup` whose URL array repea
 
 Each deviation gets a boundary vector in the implementation PR, generated from the same harness with the reference patched in memory where the deviation has no natural trigger. Each patch is recorded in its vector. 0003's codec deviations (`name-length`, `json-depth`, and the core's JSON error text) still apply; its lone-surrogate deviations are gone, as strings now keep them (#95).
 
+`name-length` applies to sessions on both of `fastNormalize`'s paths: a name over 1,024 bytes, trimmed or normalized, is refused with `name exceeds 1024 bytes` before any I/O. The ASCII path, which skips ENSIP-15, used to skip the check too, and a long name's calls then outgrew the frame and quarantined every endpoint (#74; `deviation-name-length`).
+
 | ID | Today | The core | Failure and cache behavior |
 |---|---|---|---|
 | `overall-deadline` | no overall bound; a stalled Colibri worker can take minutes (a 60 s liveness check, 60 s more before abandonment, then one retry) | 120 s per resolution method | `deadline`; nothing cached |
@@ -563,10 +587,12 @@ Each deviation gets a boundary vector in the implementation PR, generated from t
 | `decode-budget` | unbounded | 4 MiB of output per ABI decode with an array | malformed, per the decode's caller |
 | `cache-bytes` | 500 entries per cache | also 8 MiB per cache | eviction |
 | `ccip-urls` | every URL in the lookup | the first 32 | the rest aren't tried |
+| `ccip-gateway-tls` | a gateway's certificate is checked by Chromium's verifier, under the session's policy | a clearnet gateway's certificate is checked by Node's `https`, against Node's bundled roots and the roots its system API exposes, for the gateway's host name ([CCIP-Read](#ccip-read)) | a certificate that Chromium's own root store, Certificate Transparency or CRLSets would judge differently, or one that chains to a root only Chromium reads (on Linux, a root only in the NSS database), changes whether that gateway answers; a refusal moves on to the next gateway |
 | `monotonic-time` | TTLs, quarantine and deadlines on `Date.now()` | the monotonic clock; Tezos expiry still compares wall time | none unless the wall clock jumps |
 | `error-text` | ethers' full message, which embeds node text and request data | the class's short message, sanitized | same branches; [agreement](#errors-agreement-and-text) unchanged |
 | `classification` | rules 3, 6 and 9 of [Classification](#classification), and text matched in composed messages | the core's rules | a malformed answer quarantines; a revert never does |
 | `null-block-hash` | a block whose hash is `null` (ethers' formatter accepts one, for pending blocks) is a hash vote like any other; when the chosen anchor's hash is `null`, the legs call at `latest`, where CCIP-Read takes ethers' built-in path | the hash fetch fails, as for a missing block | that endpoint is out of the hash vote and quarantined; the single-source anchor fails, so `direct` is unavailable |
+| `reverse-normalized` | an ENS primary name is shown as the reverse record returns it, normalized or not | only a name that is its own ENSIP-15 normalization; any other is `UNVERIFIED` with its claim | a lookalike primary name is never shown as the address's name |
 | `node-failures` | node errors can agree into a verified not-found (`node-errors-agree`) | freedom-browser#656's rule | until the reference pin includes it |
 | `transport` | Node's HTTP stack | the session's network stack | `.onion` endpoints work under Tor, and a missing route fails closed (`refused`) |
 | `rpc-redirects` | hops followed without checks | each hop checked against the endpoint policy and the onion gate | a refused hop is a provider failure |

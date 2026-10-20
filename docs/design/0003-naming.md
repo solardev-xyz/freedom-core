@@ -62,9 +62,10 @@ All pass `cargo deny`.
 | Area | Today | In the core |
 |---|---|---|
 | ENS normalization | a name whose lowercase form matches `^[a-z0-9-.]+$` skips ENSIP-15 (`fastNormalize`), and ethers' `namehash` refuses it later | every name is validated up front. The same names resolve and fail. Only names ethers refuses later (`ab--cd.eth`, `xn--x.eth`, `foo..eth`, `.eth`, `eth.`) get the normalizer's message instead of ethers'. Every other refusal message is the JS's own |
-| Input size | none for ENS names | 1,024 bytes, before and after normalization |
+| Input size | none for ENS names | 1,024 bytes, before and after normalization, on every path: the resolver's ASCII fast path too |
 | Tezos metadata errors | `invalid Tezos Domains metadata: <V8's JSON.parse message>` | the same prefix and the same accept/refuse decision (`jsjson`); only the message after the prefix is the core's own. `Invalid Micheline bytes value` is unchanged |
 | JSON depth | V8's `JSON.parse` accepts any depth | refused past 512 levels (`TooDeep`): a gateway answer counts as failed and the next gateway is tried, and metadata is invalid. Parsing, lookups, `String()`, `JSON.stringify` and drop never recurse, so even the deepest accepted value fits a 64 KiB stack unoptimized, on every platform. The bound also keeps copies and comparisons, which only tests use, small. Real documents nest a few dozen levels at most. Vectors at 600 levels |
+| Gateway hosts (`ccip-hosts`, #76) | one trailing dot is stripped, then the suffix and dot checks run, so a second trailing dot passes them: `localhost..`, `node.internal..`, `gateway..` are fetched | a host with an empty label after that one dot is stripped is refused (`a..b.example`, `.gw.example` and the double dots). A single trailing dot, as in `gw.example.`, still passes. Vectors mark the cases |
 
 **Kept on purpose:** both `OffchainLookup` decoders exist today, and they differ in both directions.
 - The pinned RPC path uses the strict `AbiCoder`, which accepts nonzero padding after the callback selector.

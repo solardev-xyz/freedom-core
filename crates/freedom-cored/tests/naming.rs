@@ -251,17 +251,18 @@ fn a_burst_while_main_is_not_reading_backs_up_rather_than_exiting() {
 }
 
 #[test]
-fn an_error_that_echoes_a_huge_name_still_fits_a_frame() {
+fn an_answer_that_echoes_a_huge_address_still_fits_a_frame() {
     let (_root, data, locks) = dirs();
     let mut core = spawn("serve", &data, &locks, &[]);
     core.hello();
-    // Without a configuration the lookup fails at once, with a message
-    // that echoes the name: nearly a whole frame of it.
-    let name = format!("{}.eth", "a".repeat(1_040_000));
+    // An invalid address is answered at once, echoed twice: nearly a whole
+    // frame of it each time. (A name that long is refused before it is
+    // echoed: #74.)
+    let address = "x".repeat(1_040_000);
     core.send(&request(
         2,
-        "naming.resolve_content",
-        json!({ "name": name, "private": false }),
+        "naming.resolve_reverse",
+        json!({ "address": address, "private": false }),
     ));
     let reply = core.until_response(2);
     assert_eq!(reply["error"]["code"], "resolution_failed", "{reply}");
@@ -305,22 +306,21 @@ fn replies_waiting_for_the_writer_survive_shutdown() {
         &[("FREEDOM_CORED_TEST_NAMING_MARKER", &marker_path)],
     );
     core.hello();
-    // Main stalls while 16 lookups fail at once, each reply carrying a
-    // 600 KB name: more than naming's 8 MiB share, so some wait in the
-    // naming thread when shutdown comes.
+    // Main stalls while 16 reverse lookups are answered at once, each
+    // reply echoing a 300 KB invalid address twice: more than naming's
+    // 8 MiB share, so some wait in the naming thread when shutdown comes.
     core.pause_reading();
     for i in 0..16u64 {
-        let name = format!("{}{i}.eth", "a".repeat(600_000));
+        let address = format!("{}{i}", "x".repeat(300_000));
         core.send(&request(
             10 + i,
-            "naming.resolve_content",
-            json!({ "name": name, "private": false }),
+            "naming.resolve_reverse",
+            json!({ "address": address, "private": false }),
         ));
     }
-    // Long names take a while to normalize: seconds for the 16, in a debug
-    // build under load. Shutdown comes once the naming thread has made all
-    // 16 replies. (A lookup still running at shutdown may get no reply, as
-    // 0001's drain is bounded, which this test isn't about.)
+    // Shutdown comes once the naming thread has made all 16 replies. (A
+    // lookup still running at shutdown may get no reply, as 0001's drain is
+    // bounded, which this test isn't about.)
     wait_for_marks(&marker, "made 16 replies", |marks| {
         marks.iter().filter(|mark| *mark == "reply").count() >= 16
     });
@@ -353,8 +353,10 @@ fn replies_waiting_for_the_writer_survive_shutdown() {
     assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
 }
 
+/// The largest name main can send is refused before any request (#74);
+/// it used to reach a verified operation too large to send.
 #[test]
-fn a_verified_request_too_large_to_send_settles_in_the_core() {
+fn a_name_of_a_whole_frame_is_refused_in_the_core() {
     let (_root, data, locks) = dirs();
     let mut core = spawn("serve", &data, &locks, &[]);
     core.hello();
@@ -367,8 +369,7 @@ fn a_verified_request_too_large_to_send_settles_in_the_core() {
         "naming.availability",
         json!({ "ready": true, "enabled": true }),
     );
-    // The largest lookup main can send: its verified operation, in a
-    // longer envelope, can't fit a frame.
+    // The largest lookup main can send.
     let empty = request(
         4,
         "naming.resolve_content",
@@ -385,6 +386,10 @@ fn a_verified_request_too_large_to_send_settles_in_the_core() {
     core.send(&lookup);
     let reply = core.until_response(4);
     assert_eq!(reply["error"]["code"], "resolution_failed", "{reply}");
+    assert_eq!(
+        reply["error"]["data"]["message"], "name exceeds 1024 bytes",
+        "{reply}"
+    );
     assert!(core.call(5, "vault.status", json!({}))["result"].is_object());
 }
 
@@ -415,9 +420,10 @@ fn no_shell_request_follows_the_shutdown_reply() {
             seen += 1;
         }
     }
-    // In one write: a slow naming request, an answer that frees a slot,
-    // and shutdown. The freed slot must not admit a waiting probe after
-    // the shutdown reply.
+    // In one write: a naming request with a large frame (its name is
+    // refused at once: names over 1,024 bytes are, #74), an answer that
+    // frees a slot, and shutdown. The freed slot must not admit a waiting
+    // probe after the shutdown reply.
     let slow = format!("{}.eth", "a".repeat(600_000));
     let mut batch = common::frame(&request(
         500,

@@ -387,6 +387,7 @@ fn ready(sleep: &mut Sleep<Request, Answer>) -> bool {
 
 impl Machine {
     pub fn new(now: Ms, config: Config, random: Box<dyn Random>) -> Self {
+        let config = config.with_distinct_endpoints();
         let ctx = Rc::new(Ctx::new(now, config, random));
         // An anchor answer's charge goes as a future takes the answer: it
         // reads a number or a hash from it at once, and drops the rest.
@@ -1025,7 +1026,8 @@ impl Machine {
     /// `naming.configure`: the whole snapshot is replaced, and a part that
     /// changed advances its generation. `reset_providers` is today's
     /// `invalidateCachedProvider`. The machine's bounds stay.
-    pub fn configure(&mut self, mut config: Config, reset_providers: bool) -> Generations {
+    pub fn configure(&mut self, config: Config, reset_providers: bool) -> Generations {
+        let mut config = config.with_distinct_endpoints();
         let (ens_changed, tezos_changed) = {
             let mut state = self.ctx.state.borrow_mut();
             config.bounds = state.config.bounds;

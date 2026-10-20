@@ -106,6 +106,8 @@ struct World {
     /// Configurations to apply at these times.
     configures: Vec<(u64, Config)>,
     failing: Vec<String>,
+    /// Every `eth_call` fails with this transport class.
+    failing_calls: Option<Transport>,
     sent: Vec<Sent>,
     /// When the machine cancelled requests.
     cancelled: Vec<u64>,
@@ -138,6 +140,7 @@ impl World {
             changes: Vec::new(),
             configures: Vec::new(),
             failing: Vec::new(),
+            failing_calls: None,
             sent: Vec::new(),
             cancelled: Vec::new(),
             cancelled_ids: Vec::new(),
@@ -202,11 +205,14 @@ impl World {
                 let Request::Rpc { endpoint, body } = request else {
                     continue;
                 };
+                let sent = jsjson::parse(&body).unwrap();
+                let method = sent.get("method").and_then(JsValue::as_str).unwrap();
                 let answer = if self.failing.contains(&endpoint) {
                     Answer::Failed(Transport::Network)
+                } else if let Some(transport) = self.failing_calls.filter(|_| method == "eth_call")
+                {
+                    Answer::Failed(transport)
                 } else {
-                    let sent = jsjson::parse(&body).unwrap();
-                    let method = sent.get("method").and_then(JsValue::as_str).unwrap();
                     Answer::Rpc {
                         status: 200,
                         body: self
@@ -615,6 +621,33 @@ fn an_ended_session_draws_no_randomness() {
     assert_eq!(draws.get(), at_change);
 }
 
+/// A request the core never sent (over the frame) fails its leg, but says
+/// nothing of the endpoint: none is quarantined, and the next lookup's legs
+/// use as many endpoints as before (#74). An answer too large, the
+/// endpoint's doing, still quarantines it.
+#[test]
+fn unsent_requests_quarantine_no_endpoint() {
+    let legs = |transport: Transport| {
+        let mut world = World::new(config());
+        world.failing_calls = Some(transport);
+        let a = world.machine.resolve_content("vitalik.eth");
+        world.run(10_000);
+        assert!(world.reply(a).outcome.is_err());
+        world.failing_calls = None;
+        let before = world.sent.len();
+        let b = world.machine.resolve_content("alice.eth");
+        world.run(20_000);
+        let called: std::collections::BTreeSet<&str> = world.sent[before..]
+            .iter()
+            .filter_map(|s| s.endpoint.as_deref())
+            .collect();
+        (world.reply(b).outcome.is_ok(), called.len())
+    };
+    assert_eq!(legs(Transport::Unsent), (true, 3));
+    let (_, after_too_large) = legs(Transport::TooLarge);
+    assert!(after_too_large < 3, "{after_too_large}");
+}
+
 #[test]
 fn late_failures_leave_forgotten_endpoints_alone() {
     let mut config = config();
@@ -643,6 +676,26 @@ fn late_failures_leave_forgotten_endpoints_alone() {
         .filter_map(|s| s.endpoint.as_deref())
         .collect();
     assert_eq!(probed.len(), ENDPOINTS.len());
+}
+
+/// An endpoint listed twice is one endpoint: the machine runs exactly as
+/// for the list without the repeat, so it is never two anchor heads or
+/// two legs that agree with each other.
+#[test]
+fn a_repeated_endpoint_counts_once() {
+    let run = |rpc: &[&str]| {
+        let mut config = config();
+        config.rpc = rpc.iter().map(|e| (*e).to_owned()).collect();
+        let mut world = World::new(config);
+        let a = world.machine.resolve_content("vitalik.eth");
+        world.run(10_000);
+        let reply = format!("{:?}", world.reply(a).outcome);
+        let sent: Vec<Option<String>> = world.sent.iter().map(|s| s.endpoint.clone()).collect();
+        (reply, sent)
+    };
+    let [a, b, c, d] = ENDPOINTS;
+    assert_eq!(run(&[a, a, b, c, d]), run(&[a, b, c, d]));
+    assert_eq!(run(&[a, b, a, c, b, d]), run(&[a, b, c, d]));
 }
 
 #[test]
@@ -1018,7 +1071,8 @@ fn every_callers_error_counts_against_the_session() {
     // No method can resolve: each caller's error carries the name.
     let mut failing = config();
     failing.order = vec!["myotis".into()];
-    let name = format!("{}.eth", "a".repeat(2_000));
+    // The longest name a session takes (#74): 1,024 bytes.
+    let name = format!("{}.eth", "a".repeat(1_020));
     let mut alone = World::new(failing.clone());
     let a = alone.machine.resolve_content(&name);
     alone.run(10_000);
@@ -1067,7 +1121,8 @@ fn replies_hold_their_room_until_written() {
 
 #[test]
 fn a_configuration_changes_replies_count_against_the_session() {
-    let name = format!("{}.eth", "a".repeat(2_000));
+    // The longest name a session takes (#74): 1,024 bytes.
+    let name = format!("{}.eth", "a".repeat(1_020));
     let reply = reply_size(&JsValue::string(format!(
         "Name resolution configuration changed while resolving {name}"
     )));
@@ -1271,8 +1326,12 @@ fn each_callers_copy_of_a_result_counts_as_the_tree_it_is() {
 
 #[test]
 fn an_exhausted_callers_reply_is_sized_too() {
-    let name = format!("{}.eth", "a".repeat(990_000));
-    let mut world = World::new(config());
+    // A name is at most 1,024 bytes (#74), so the reply cap is lowered
+    // below the error that echoes it.
+    let name = format!("{}.eth", "a".repeat(1_020));
+    let mut bounded = config();
+    bounded.bounds.reply_bytes = 1_000;
+    let mut world = World::new(bounded);
     world.changes.push(5);
     let caller = world.machine.resolve_content_with(
         &name,

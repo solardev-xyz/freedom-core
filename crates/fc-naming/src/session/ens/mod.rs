@@ -125,6 +125,22 @@ pub struct Config {
     pub bounds: crate::session::bounds::Bounds,
 }
 
+impl Config {
+    /// The configuration with each RPC and Tezos endpoint reference once,
+    /// in its first place. The reference dedupes its URLs
+    /// (`getEffectiveRpcEndpoints`, the Tezos list) and main gives one
+    /// reference per URL, so a repeat never comes from main. Kept anyway, a
+    /// repeated endpoint would count twice in a quorum, as legs and anchor
+    /// heads, and could agree with itself (#90's rule, for naming).
+    pub(crate) fn with_distinct_endpoints(mut self) -> Self {
+        let mut seen = std::collections::HashSet::new();
+        self.rpc.retain(|endpoint| seen.insert(endpoint.clone()));
+        let mut seen = std::collections::HashSet::new();
+        self.tezos.retain(|endpoint| seen.insert(endpoint.clone()));
+        self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Direct {
     pub endpoint: Endpoint,
@@ -534,8 +550,15 @@ pub(crate) fn prefetch_uri(resolved: &[u8]) -> Option<String> {
 }
 
 /// `fastNormalize`: lowercase ASCII hosts pass; anything else goes
-/// through ENSIP-15.
+/// through ENSIP-15. Either way a name over [`crate::MAX_NAME_BYTES`] is
+/// refused before any I/O (design 0003, Input size; #74): the ASCII path
+/// skipped that check, and a long name's calls outgrew the frame.
 pub(crate) fn fast_normalize(trimmed: &str) -> Result<String, Thrown> {
+    if trimmed.len() > crate::MAX_NAME_BYTES {
+        return Err(Thrown::new(
+            crate::Error::NameTooLong(crate::MAX_NAME_BYTES).to_string(),
+        ));
+    }
     let lowered = trimmed.to_lowercase();
     if !lowered.is_empty()
         && lowered

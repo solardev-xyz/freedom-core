@@ -387,9 +387,24 @@ async function buildCcip(checkout) {
     'https://0300.0250.0.1/q', 'not a url', 'https://xn--nxasmq6b.example/{data}', 'https://bücher.example/{data}',
     // One trailing dot is stripped before the checks, not two.
     'https://node.local../q', 'https://node.internal../q', 'https://node.localhost../q',
+    // Empty labels: the core refuses them (deviation ccip-hosts, #76).
+    'https://localhost../q', 'https://gateway../q', 'https://metadata.google.internal../q', 'https://a..b.example/q',
+    'https://.gw.example/q', 'https://gw.example../{data}',
   ];
+  // An https host with an empty label once one trailing dot is stripped.
+  const emptyLabel = (template) => {
+    try {
+      const { protocol, hostname } = new URL(template);
+      return protocol === 'https:' && hostname !== '' && hostname.replace(/\.$/, '').split('.').some((label) => label === '');
+    } catch {
+      return false;
+    }
+  };
   const policy = [];
-  for (const template of templates) policy.push({ template, data: '0x0102', ...(await run([template], '0x0102', JSON.stringify({ data: '0x00' }))) });
+  for (const template of templates) {
+    const deviation = emptyLabel(template) ? { deviation: 'ccip-hosts' } : {};
+    policy.push({ template, data: '0x0102', ...deviation, ...(await run([template], '0x0102', JSON.stringify({ data: '0x00' }))) });
+  }
   const bodies = [
     '{"data":"0x00ff"}', '{"data":"0x"}', '{"data":"0x0"}', '{"data":"00ff"}', '{"data":"0X00"}', '{"data":"0xzz"}',
     '{"data":1}', '[1]', '\uFEFF{"data":"0x"}', 'nope', '{"data":"0x01","data":"0x02"}', '{"x":"\uFFFD","data":"0x01"}',
