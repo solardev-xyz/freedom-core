@@ -25,6 +25,10 @@ change that needs a newer core pins a freedom-core release (design 0001,
    `Cargo.toml`, **and** the lockfile, which records every workspace package's
    version: run `cargo check --workspace` and commit the updated `Cargo.lock`.
    The release builds with `--locked`, so a stale lockfile fails it.
+   The service workspaces (`services/*`) take `fc-protocol` and `fc-service`
+   by path, so their lockfiles record those versions too: in each, run
+   `cargo update -p fc-protocol -p fc-service --offline` and commit its
+   `Cargo.lock`, or the Services workflow's `--locked` builds fail.
    `core.hello` reports this version as `core_version`.
 2. **Tag the merged commit on `main`** once its CI is green:
    `git tag cored-vX.Y.Z <commit> && git push origin cored-vX.Y.Z`. Only a
