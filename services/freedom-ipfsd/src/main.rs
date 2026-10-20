@@ -64,6 +64,9 @@ fn main() -> ExitCode {
     log::init();
     fc_service::hardening::harden();
     let exit = run(started);
+    // The process's exit is this thread's from here, unless a hook's or a
+    // watchdog's has begun: that one ends the process first.
+    fc_service::exit::claim();
     log::finish(Duration::from_millis(500));
     ExitCode::from(exit.code())
 }
