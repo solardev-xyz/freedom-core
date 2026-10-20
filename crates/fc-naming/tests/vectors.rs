@@ -384,11 +384,19 @@ fn ccip_gateways() {
         .unwrap()
         .try_into()
         .unwrap();
+    let mut deviations = 0;
     for case in c["policy"].as_array().unwrap() {
         let template = case["template"].as_str().unwrap();
         let data = unhex(case["data"].as_str().unwrap()).unwrap();
         let ours = ccip::gateway_request(template, &sender, &data);
         let requests = case["requests"].as_array().unwrap();
+        if case["deviation"] == "ccip-hosts" {
+            // An empty label (#76): the JS fetched it; the core refuses.
+            assert!(ours.is_none(), "{template}");
+            assert_eq!(requests.len(), 1, "{template}");
+            deviations += 1;
+            continue;
+        }
         match (ours, requests.first()) {
             (None, None) => {}
             (Some(ours), Some(js)) => {
@@ -403,6 +411,7 @@ fn ccip_gateways() {
             (ours, js) => panic!("{template}: core {ours:?}, JS {js:?}"),
         }
     }
+    assert!(deviations >= 6, "the empty-label cases went missing");
     for case in c["answers"].as_array().unwrap() {
         // Status handling is main's (it sees the HTTP response); the core
         // parses 2xx bodies.
