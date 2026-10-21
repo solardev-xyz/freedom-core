@@ -846,7 +846,11 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   - **IP literal:** a URL host, or an `/ip4` or `/ip6` component;
   - **name:** everything else.
 - **A multiaddr that is dialed** is checked whole, against the shapes the transports support. It has exactly one host component, and it comes first:
-  - `/ip4`, `/ip6`, `/dns`, `/dns4` or `/dns6`, then `/tcp/<port>`, optionally followed by `/tls`, `/ws`, `/wss` or `/tls/ws`;
+  - `/ip4`, `/ip6`, `/dns`, `/dns4` or `/dns6`, then `/tcp/<port>`, optionally followed by one of:
+    - WebSocket: `/ws`, `/wss`, `/tls/ws` or `/tls/sni/<name>/ws`;
+    - an HTTP provider: `/http`, `/https`, `/tls/http` or `/tls/sni/<name>/http`;
+
+    `/sni` only names the TLS server. Nothing resolves or dials it: the connection goes to the host component;
   - `/ip4`, `/ip6`, `/dns`, `/dns4` or `/dns6`, then `/udp/<port>/quic-v1`;
   - `/dnsaddr/<name>`, which expansion replaces before any dial;
   - `/onion3/<address>:<port>` (or `/onion`);
