@@ -846,11 +846,8 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   - **IP literal:** a URL host, or an `/ip4` or `/ip6` component;
   - **name:** everything else.
 - **A multiaddr that is dialed** is checked whole, against the shapes the transports support. It has exactly one host component, and it comes first:
-  - `/ip4`, `/ip6`, `/dns`, `/dns4` or `/dns6`, then `/tcp/<port>`, optionally followed by one of:
-    - WebSocket: `/ws`, `/wss`, `/tls/ws` or `/tls/sni/<name>/ws`;
-    - an HTTP provider: `/http`, `/https`, `/tls/http` or `/tls/sni/<name>/http`;
-
-    `/sni` only names the TLS server. Nothing resolves or dials it: the connection goes to the host component;
+  - `/ip4`, `/ip6`, `/dns`, `/dns4` or `/dns6`, then `/tcp/<port>`, optionally followed by WebSocket: `/ws`, `/wss` or `/tls/ws`. `/ws` and `/wss` include their path-carrying forms, `/x-parity-ws/<path>` and `/x-parity-wss/<path>`: the path goes in the WebSocket request and doesn't change the destination;
+  - an HTTP provider: `/ip4`, `/ip6`, `/dns`, `/dns4` or `/dns6`, then an optional `/tcp/<port>`, then `/http`, `/https` or `/tls/http`. Without `/tcp`, the port is the scheme's default (80, or 443 for HTTPS), and the configured-target exemption compares that effective port;
   - `/ip4`, `/ip6`, `/dns`, `/dns4` or `/dns6`, then `/udp/<port>/quic-v1`;
   - `/dnsaddr/<name>`, which expansion replaces before any dial;
   - `/onion3/<address>:<port>` (or `/onion`);
@@ -860,7 +857,10 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   - **A second host component anywhere.** libp2p's TCP transport dials the *last* IP and port in a multiaddr, and its DNS layer resolves *every* DNS component. So `/ip4/8.8.8.8/ip4/127.0.0.1/tcp/8080` would be checked as `8.8.8.8` while it connects to loopback, and `/ip4/8.8.8.8/dns/x.onion/tcp/80` would hide an onion name. The checked target must be the one the transport dials.
   - **`/ip6zone`, anywhere:** it scopes an address to one local link.
   - **`/unix` and `/memory`, anywhere:** they aren't network targets.
-  - **`/ipcidr`, `/p2p-circuit`, and any component the shapes above don't name.**
+  - **`/ipcidr`, `/p2p-circuit`, and any component the shapes above don't name,** an extra trailing component, or a second `/p2p`.
+  - **`/sni`, for now.** Neither pinned implementation uses it to name the TLS server: libp2p-websocket recognizes TLS only when `/tls` immediately precedes `/ws`, and freedom-ipfs's HTTP conversion reads `/tls/sni/<name>/http` as plain HTTP. Accepting `/tls/sni/<name>/ws` (AutoTLS peers advertise it) or `/tls/sni/<name>/http` needs that transport and conversion work first, with tests that TLS is used and its server name is the `/sni` name.
+
+  **The same shapes apply after expansion:** every multiaddr a `/dnsaddr` answer yields is checked whole again ([check 2](#the-gate)).
 
 **The policy:**
 - **Configured targets** are the delegated routers and DoH endpoint in `ipfs.start`, and Arti's endpoint. They are exempt from the address policy, by exact host (and port), including when one is local.
@@ -1318,7 +1318,8 @@ As 0006's 4.7 did, before anything moves:
     - 6rd, 6over4 and 6a44 addresses with private embedded addresses (`2a00:1:c0a8:101::1`, `2a00:1::c0a8:101`) are judged as IPv6 alone, and pass;
     - a DNS64 answer `64:ff9b::7f00:1` for an ordinary name, locally and through `RESOLVE`: refused, and no connection is made;
     - `/ip6zone/eth0/ip6/fe80::1` and `/unix/…` multiaddrs are refused;
-    - **a second host component:** `/ip4/8.8.8.8/ip4/127.0.0.1/tcp/8080`, the same with `/ipcidr/32`, `/p2p-circuit` or `/ip6zone/eth0` before the private pair, and `/ip4/8.8.8.8/dns/x.onion/tcp/80`, are refused, and a loopback canary sees no connection.
+    - **a second host component:** `/ip4/8.8.8.8/ip4/127.0.0.1/tcp/8080`, the same with `/ipcidr/32`, `/p2p-circuit` or `/ip6zone/eth0` before the private pair, and `/ip4/8.8.8.8/dns/x.onion/tcp/80`, are refused, and a loopback canary sees no connection. For the hidden onion, no DNS or TXT query is made either;
+    - **the shapes, as a matrix:** each accepted shape with and without its `/p2p` suffix, HTTP providers with and without `/tcp` (default ports 80 and 443) and the path-carrying WebSocket forms, all accepted; an extra trailing component, a second `/p2p`, and `/tls/sni/<name>/ws` or `/http`, all refused; and a `/dnsaddr` answer that yields a refused shape, refused.
   - **Failures:** an unavailable proxy, a proxy that refuses `RESOLVE` (the attempt fails, and no name is sent in `CONNECT`), and an unsupported transport in `socks5` mode.
   - **A SOCKS fixture with `RESOLVE`:**
     - a name that looks acceptable but resolves to a loopback or private address is refused, and no `CONNECT` is sent;
