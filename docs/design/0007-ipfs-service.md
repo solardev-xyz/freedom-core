@@ -1431,6 +1431,10 @@ Every body already passes through main today, so the pipe adds one copy into the
 4. **Routing under a proxy:** delegated only (recommended), or the light DHT through SOCKS, which costs many Tor circuits per query? And how many IPFS peers accept connections from Tor exits on their ports? That is to be measured before the setting ships.
 5. **Local providers:** the address policy refuses untrusted local targets by default. Should a user setting allow providers on the local network?
 6. **The musl build:** do SQLite and `ring` build statically for both Linux targets in this repository's release workflow? If not, the Linux builds need a glibc floor of their own, chosen with #350 in mind.
+   - **Answered: yes,** with musl's C compiler wrapper (`musl-tools`, `CC_<target>=musl-gcc`), which `release-ipfsd.yml` installs.
+     - The dry run of #144 built both targets static: `x86_64-unknown-linux-musl` static-pie, and `aarch64-unknown-linux-musl` statically linked. Both exit 64 for usage.
+     - On x86_64, the service's whole test suite passed against the musl build, SQLite stores and served content included.
+     - So no glibc floor is needed.
 7. **Upstream timing:** will freedom-ipfs take items 1–8? Until a release carries them, does the service pin a commit on a branch?
 8. **Streams in the core:** should 4.5's protocol version 2 for `freedom-cored` adopt these four frames as they are, with an explicit global credit added?
 9. **An OS memory limit:** should each service run under `RLIMIT_AS`, or a Windows job memory limit, as a backstop for what its budget can't see?
