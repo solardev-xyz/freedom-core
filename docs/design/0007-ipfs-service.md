@@ -1034,7 +1034,7 @@ An IPv6-only network can translate through a network-specific prefix of its own 
 - **The fixed forms** are those whose prefix is fixed: IPv4-mapped, the well-known NAT64 prefix and 6to4. Any other global IPv6 address could sit under a network-specific prefix.
   - **A learned prefix still applies under a fixed form.** An address inside `2002::/16` or `64:ff9b::/96` that also sits under a learned prefix is judged by both readings, and each IPv4 address must pass. Only IPv4-mapped is judged as IPv4 alone, since it connects to that address directly.
 - **States:**
-  - **pending** until the first query settles. An IPv6 target outside the fixed forms waits for it, within its own deadline;
+  - **pending** until the first query settles. Every IPv6 target but an IPv4-mapped one waits for it, within its own deadline: the first answer may teach a prefix that sits under a fixed form;
   - **known,** once every resolver learned has answered: the union of their prefixes. NODATA or NXDOMAIN from all of them gives an empty set, which means none of them advertises a prefix (RFC 7050 §3), not that no network does. The same holds when the OS lists no resolver;
   - **unknown,** while any resolver learned has failed (a timeout, `SERVFAIL`, a malformed answer). Another's answer doesn't settle it;
   - **incomplete,** when an answer holds more than 16 distinct prefixes.
@@ -1048,6 +1048,7 @@ An IPv6-only network can translate through a network-specific prefix of its own 
 - **Refresh:**
   - when the last answer's TTL expires, and at least once a minute, so a network change leaves at most about a minute when a new network's prefix is unknown;
   - after a failure, with backoff from 5 s to 1 min. A failed refresh keeps every known prefix: it never turns a known one back into a native address.
+- **A target is judged by the state at its check.** A lookup's check, or a candidate choice's, reads the state once, when all of its answers or candidates are in hand (after any wait for discovery), and judges every one of them against it. So no check reads a state older than the last publication before that read. An attempt that passed may still connect after a later publication: a publication neither waits for the attempts in flight nor cancels them, as it doesn't close connections already open either. Those attempts reach nothing new. Each target passed under the earlier state, and so was reachable for as long as that state stood: normally about a minute after a network change (**Refresh**, above), and longer while failed refreshes keep the state **unknown**, whose fixed-form allowance is deliberate.
 
 ###### What the gate can't see
 
@@ -1056,7 +1057,7 @@ The promise is exact for addresses the service can read: an IPv4 address, or an 
 - **a prefix only an unread resolver advertises:** an interface's own resolver that the OS doesn't expose as above, hidden behind a manual setting, a VPN's resolver or a local recursive resolver that doesn't forward to the DNS64. On Linux that includes the servers systemd-resolved leaves out of its exported file (links that aren't a DNS default route, nonstandard ports) and those a network manager didn't publish;
 - **explicit address mappings** (SIIT-EAM, RFC 7757);
 - **DNS64 that maps different IPv4 ranges to different prefixes** (RFC 7050 §5.1), for example private A records under a prefix the `ipv4only.arpa` answer doesn't show. The heuristic can't find that prefix, and RFC 7050 says so;
-- **for up to a minute after a network change,** a new network's prefix;
+- **after a network change,** a new network's prefix, normally for up to a minute, and for longer while failed refreshes keep the state **unknown**;
 - **in `socks5` mode,** translation on the exit's network. Nothing is learned there: the exit makes every connection, so the local translator is never used, and the exit's is out of the service's sight. The well-known prefix rule still applies in both modes.
 
 An address under such a prefix is classified as the global unicast address it looks like. The deviation `address-policy` records this limit.
@@ -1316,7 +1317,8 @@ As 0006's 4.7 did, before anything moves:
     - **two interfaces:** one interface's resolver advertises a prefix and the other's answers NODATA, as with a VPN beside the physical link: the prefix is known, and an address under it with `169.254.169.254` embedded is refused;
     - **a manual DNS override:** the effective resolver answers NODATA while the interface-learned one (DHCP's on Windows, the service's state on macOS, a default-route link's in systemd-resolved's exported file) advertises a prefix: the prefix is known;
     - **one resolver failing** while another answers: the state stays unknown;
-    - **the startup race:** an IPv6 dial made while discovery is pending waits for it, and an address under the prefix that the first answer teaches is refused;
+    - **the startup race:** an IPv6 dial made while discovery is pending waits for it, and an address under the prefix that the first answer teaches is refused. That holds under a fixed form too: with `2002:808:808::/48` in the first answer, `2002:808:808:7f00:0:100::` (`8.8.8.8` as 6to4, loopback under the /48) waits, then is refused;
+    - **publication and checks:** a publication while a lookup is blocked: its answers are judged against the new state. A publication after a candidate choice has read its state: all of its candidates are judged against that one state. A lookup or choice begun after a publication: the new state. Each with a prefix added, and with a publication of incomplete;
     - **failure:** after a failed query, an IPv6 target outside the fixed forms is refused and an IPv4 one passes; after a failed refresh, every known prefix is still applied;
     - **the bound:** an answer with 17 distinct prefixes makes the state incomplete, and `2a00:1:11::a9fe:a9fe` under the 17th is refused, not passed as global unicast. With a /96 inside `2002::/16` as the 17th, `2002:808:808::7f00:1` is refused too, though its 6to4 reading is `8.8.8.8`; an IPv4-mapped address still passes or fails as its IPv4 address;
     - **a learned prefix over a fixed form:** with `2002:808:808::/48` learned, `2002:808:808:a9fe:a9:fe00::` (169.254.169.254 under the /48, `8.8.8.8` as 6to4) is refused;
