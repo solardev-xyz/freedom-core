@@ -1057,7 +1057,7 @@ The promise is exact for addresses the service can read: an IPv4 address, or an 
 - **a prefix only an unread resolver advertises:** an interface's own resolver that the OS doesn't expose as above, hidden behind a manual setting, a VPN's resolver or a local recursive resolver that doesn't forward to the DNS64. On Linux that includes the servers systemd-resolved leaves out of its exported file (links that aren't a DNS default route, nonstandard ports) and those a network manager didn't publish;
 - **explicit address mappings** (SIIT-EAM, RFC 7757);
 - **DNS64 that maps different IPv4 ranges to different prefixes** (RFC 7050 §5.1), for example private A records under a prefix the `ipv4only.arpa` answer doesn't show. The heuristic can't find that prefix, and RFC 7050 says so;
-- **for up to a minute after a network change,** a new network's prefix;
+- **after a network change,** a new network's prefix, normally for up to a minute, and for longer while failed refreshes keep the state **unknown**;
 - **in `socks5` mode,** translation on the exit's network. Nothing is learned there: the exit makes every connection, so the local translator is never used, and the exit's is out of the service's sight. The well-known prefix rule still applies in both modes.
 
 An address under such a prefix is classified as the global unicast address it looks like. The deviation `address-policy` records this limit.
