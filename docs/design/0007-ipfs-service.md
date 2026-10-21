@@ -1032,13 +1032,18 @@ An IPv6-only network can translate through a network-specific prefix of its own 
   - **Each answer** that embeds `192.0.0.170` or `192.0.0.171` at one of RFC 6052's positions gives a prefix and its length. An answer that embeds neither teaches nothing.
   - **The result belongs to the process,** not to an instance: it describes the network, and the query carries nothing of a partition's.
 - **The fixed forms** are those whose prefix is fixed: IPv4-mapped, the well-known NAT64 prefix and 6to4. Any other global IPv6 address could sit under a network-specific prefix.
+  - **A learned prefix still applies under a fixed form.** An address inside `2002::/16` or `64:ff9b::/96` that also sits under a learned prefix is judged by both readings, and each IPv4 address must pass. Only IPv4-mapped is judged as IPv4 alone, since it connects to that address directly.
 - **States:**
   - **pending** until the first query settles. An IPv6 target outside the fixed forms waits for it, within its own deadline;
   - **known,** once every resolver learned has answered: the union of their prefixes. NODATA or NXDOMAIN from all of them gives an empty set, which means none of them advertises a prefix (RFC 7050 §3), not that no network does. The same holds when the OS lists no resolver;
   - **unknown,** while any resolver learned has failed (a timeout, `SERVFAIL`, a malformed answer). Another's answer doesn't settle it;
   - **incomplete,** when an answer holds more than 16 distinct prefixes.
 
-  In **unknown** and **incomplete**, an IPv6 target outside the fixed forms is refused, and `ipfs.stats` says why. IPv4 targets, and IPv6 targets under the fixed forms, are judged as always. A dual-stack network keeps IPv4, and an IPv6-only network whose resolver fails couldn't reach much anyway.
+  In **unknown**, an IPv6 target outside the fixed forms is refused, and `ipfs.stats` says why. IPv4 targets, and IPv6 targets under the fixed forms, are judged as always, with every prefix already learned still applied.
+
+  In **incomplete**, the prefixes past the bound weren't kept, and one of them may cover a fixed form: a learned prefix inside `2002::/16` or over `64:ff9b::/96` reads a different IPv4 address out of the same bits. So every IPv6 target is refused except an IPv4-mapped one, which connects to its IPv4 address, and `ipfs.stats` says why. IPv4 targets are judged as always.
+
+  A dual-stack network keeps IPv4, and an IPv6-only network whose resolver fails couldn't reach much anyway.
 - **Learned prefixes are kept** for the process's life, so a refresh adds prefixes and never removes one. A prefix only adds refusals, so keeping an old one, or a false one from the network's resolver, errs on the safe side. The bound of 16 counts all of them; past it, the state is **incomplete** until the process restarts.
 - **Refresh:**
   - when the last answer's TTL expires, and at least once a minute, so a network change leaves at most about a minute when a new network's prefix is unknown;
@@ -1313,7 +1318,8 @@ As 0006's 4.7 did, before anything moves:
     - **one resolver failing** while another answers: the state stays unknown;
     - **the startup race:** an IPv6 dial made while discovery is pending waits for it, and an address under the prefix that the first answer teaches is refused;
     - **failure:** after a failed query, an IPv6 target outside the fixed forms is refused and an IPv4 one passes; after a failed refresh, every known prefix is still applied;
-    - **the bound:** an answer with 17 distinct prefixes makes the state incomplete, and `2a00:1:11::a9fe:a9fe` under the 17th is refused, not passed as global unicast;
+    - **the bound:** an answer with 17 distinct prefixes makes the state incomplete, and `2a00:1:11::a9fe:a9fe` under the 17th is refused, not passed as global unicast. With a /96 inside `2002::/16` as the 17th, `2002:808:808::7f00:1` is refused too, though its 6to4 reading is `8.8.8.8`; an IPv4-mapped address still passes or fails as its IPv4 address;
+    - **a learned prefix over a fixed form:** with `2002:808:808::/48` learned, `2002:808:808:a9fe:a9:fe00::` (169.254.169.254 under the /48, `8.8.8.8` as 6to4) is refused;
     - a refresh that drops a prefix doesn't forget it;
     - 6rd, 6over4 and 6a44 addresses with private embedded addresses (`2a00:1:c0a8:101::1`, `2a00:1::c0a8:101`) are judged as IPv6 alone, and pass;
     - a DNS64 answer `64:ff9b::7f00:1` for an ordinary name, locally and through `RESOLVE`: refused, and no connection is made;
@@ -1422,7 +1428,7 @@ Every body already passes through main today, so the pipe adds one copy into the
 | `env-proxy` | `reqwest` reads proxy variables from main's environment; libp2p ignores them | the environment is cleared, and the proxy is configuration | the HTTP half no longer follows `HTTPS_PROXY` and similar |
 | `proxy` | none | an optional SOCKS5 policy for all traffic, failing closed | new: Route IPFS through Tor |
 | `onion-targets` | no rule for them | refused before any socket in `direct`; through the proxy in `socks5` | a refusal proves nothing was sent |
-| `address-policy` | none | untrusted targets refused unless globally reachable unicast, with IPv6 forms that embed IPv4 judged by their IPv4 address; configured endpoints exempt; IPv6 outside the fixed forms refused while NAT64 discovery is unknown | providers on local networks are unreachable unless configured; translation the service can't read is [not covered](#what-the-gate-cant-see) |
+| `address-policy` | none | untrusted targets refused unless globally reachable unicast, with IPv6 forms that embed IPv4 judged by their IPv4 address; configured endpoints exempt; IPv6 outside the fixed forms refused while NAT64 discovery is unknown, and every IPv6 target but IPv4-mapped while it is incomplete | providers on local networks are unreachable unless configured; translation the service can't read is [not covered](#what-the-gate-cant-see) |
 | `redirect-gate` | redirects follow each client's policy | the same acceptance, with every hop through the gate | a redirect to a refused target fails the attempt |
 | `read-ahead` | one 64 KiB read in main, plus a two-chunk channel | a 128 KiB window per stream | about the same buffering, now bounded by credit |
 | `exit-text` | `Native event dispatcher exited with code N`, `Native gateway stopped unexpectedly` | `freedom-ipfs service exited` | in 502 bodies and logs only |
