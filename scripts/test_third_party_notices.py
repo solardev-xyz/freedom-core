@@ -175,8 +175,31 @@ class SourceOffers(unittest.TestCase):
             ("Apache-2.0 OR MIT", False),
             ("", False),
             (None, False),
+            # Review of #145: grouping and precedence, as SPDX defines them.
+            ("MPL-2.0 AND (MIT OR Apache-2.0)", True),
+            ("(MIT OR Apache-2.0) AND MPL-2.0", True),
+            ("MIT AND (MPL-2.0 OR Apache-2.0)", False),
+            ("(MPL-2.0 AND MIT) OR (MPL-2.0 AND Apache-2.0)", True),
+            ("MPL-2.0 AND (Apache-2.0 WITH LLVM-exception OR MIT)", True),
+            ("Apache-2.0 WITH LLVM-exception AND MPL-2.0", True),
+            ("Apache-2.0 WITH LLVM-exception OR MPL-2.0", False),
+            ("MIT OR MPL-2.0 AND Apache-2.0", False),
+            ("MPL-2.0 AND MIT OR MPL-2.0 AND Apache-2.0", True),
+            # Spellings: whitespace, case, "or later", Cargo's legacy `/`.
+            ("MPL-2.0\tOR\tMIT", False),
+            ("MPL-2.0+", True),
+            ("mpl-2.0", True),
+            ("MPL-2.0 and MIT", True),
+            ("MIT/MPL-2.0", False),
+            ("((MPL-2.0))", True),
         ]:
             self.assertEqual(notices.needs_source_offer(expression), needed, expression)
+
+    def test_an_expression_that_does_not_parse_fails(self):
+        for expression in ["MPL-2.0 AND", "(MPL-2.0", "MPL-2.0)", "AND MIT", "MPL-2.0 MIT",
+                           "MPL-2.0 WITH", "MPL-2.0 WITH (x)", "()"]:
+            with self.assertRaisesRegex(notices.NoticeError, "license expression"):
+                notices.needs_source_offer(expression)
 
     def test_a_registry_crate_points_at_its_crates_io_archive(self):
         package = {

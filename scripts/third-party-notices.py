@@ -97,15 +97,81 @@ NATIVE = [
 SOURCE_LICENSES = ("MPL-2.0",)
 
 
+def license_tokens(expression):
+    """An SPDX license expression's tokens: parentheses, the operators AND,
+    OR and WITH, and identifiers. Cargo's legacy `/` is OR."""
+    tokens = []
+    for word in expression.replace("(", " ( ").replace(")", " ) ").replace("/", " OR ").split():
+        tokens.append(word.upper() if word.upper() in ("AND", "OR", "WITH") else word)
+    return tokens
+
+
 def needs_source_offer(expression):
-    """Whether a crate's license expression leaves only alternatives that
-    require a source offer: every `OR` alternative names one of
-    SOURCE_LICENSES. `MIT OR MPL-2.0` doesn't (MIT is taken); `MPL-2.0` and
-    `MPL-2.0 AND MIT` do."""
+    """Whether a crate's license expression leaves no way around one of
+    SOURCE_LICENSES: parsed as SPDX (WITH binds tightest, then AND, then OR,
+    parentheses grouping), an identifier needs an offer if it is one of them
+    (case-insensitive, `+` meaning that version or later; a WITH exception
+    keeps its license's need), an AND needs one if either side does, and an
+    OR only if every alternative does. `MIT OR MPL-2.0` doesn't; `MPL-2.0`,
+    `MPL-2.0 AND (MIT OR Apache-2.0)` and `mpl-2.0+` do. An expression that
+    doesn't parse fails, rather than passing as needing none."""
     if not expression:
         return False
-    alternatives = expression.replace("(", " ").replace(")", " ").split(" OR ")
-    return all(any(name in alt.split() for name in SOURCE_LICENSES) for alt in alternatives)
+    tokens = license_tokens(expression)
+    position = 0
+
+    def fail(why):
+        raise NoticeError(f"license expression {expression!r}: {why}")
+
+    def peek():
+        return tokens[position] if position < len(tokens) else None
+
+    def take():
+        nonlocal position
+        position += 1
+        return tokens[position - 1]
+
+    def atom():
+        token = peek()
+        if token is None:
+            fail("ends early")
+        if token == "(":
+            take()
+            needs = either()
+            if peek() != ")":
+                fail("an unclosed parenthesis")
+            take()
+            return needs
+        if token in ("AND", "OR", "WITH", ")"):
+            fail(f"unexpected {token}")
+        take()
+        needs = token.upper().rstrip("+") in (name.upper() for name in SOURCE_LICENSES)
+        if peek() == "WITH":
+            take()
+            exception = peek()
+            if exception is None or exception in ("AND", "OR", "WITH", "(", ")"):
+                fail("WITH without an exception")
+            take()
+        return needs
+
+    def both():
+        needs = atom()
+        while peek() == "AND":
+            take()
+            needs = atom() or needs
+        return needs
+
+    def either():
+        needs = both()
+        while peek() == "OR":
+            take()
+            needs = both() and needs
+        return needs
+
+    needs = either()
+    if peek() is not None:
+        fail(f"unexpected {peek()}")
+    return needs
 
 
 def source_location(package):
