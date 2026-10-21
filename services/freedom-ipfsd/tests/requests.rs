@@ -64,23 +64,6 @@ fn admitted_eventually(ipfsd: &mut Ipfsd, params: &Value) -> Option<u64> {
     None
 }
 
-/// Sends `params` until a request is refused `busy`: the slot of a request
-/// that just ended is released a moment after main reads its end. Returns
-/// the refusal; panics if every request within 10 s was admitted.
-fn admitted_eventually_busy(ipfsd: &mut Ipfsd, params: &Value) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        let id = ipfsd.request("ipfs.request", params.clone());
-        let reply = ipfsd.reply(id);
-        if reply["error"]["code"] == "busy" {
-            return reply;
-        }
-        let _ = ipfsd.body(id);
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    panic!("never busy")
-}
-
 fn shut_down(mut ipfsd: Ipfsd) -> String {
     ipfsd.shutdown();
     assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
@@ -176,9 +159,12 @@ fn admission_is_bounded_at_512_and_a_cancel_before_the_head_frees_its_slot() {
     let (_, terminal) = ipfsd.body(admitted);
     assert_eq!(terminal["stream"], "end");
     // The other 511 are still held, and admitted: one more fills the
-    // bound again.
-    ipfsd.request("ipfs.request", held("p-1", &path, "head"));
-    let refused = admitted_eventually_busy(&mut ipfsd, &get("p-1", &path));
+    // bound again. It is held after its head, so its reply says it was
+    // admitted: the finished request's slot is released a moment after
+    // main reads its end, and one sent sooner is refused. (Held before its
+    // head, a refusal went unseen, and the bound never filled.)
+    admitted_eventually(&mut ipfsd, &held("p-1", &path, "body")).expect("the bound filled again");
+    let refused = ipfsd.call("ipfs.request", get("p-1", &path));
     assert_eq!(refused["error"]["code"], "busy", "{refused}");
     shut_down(ipfsd);
 }
