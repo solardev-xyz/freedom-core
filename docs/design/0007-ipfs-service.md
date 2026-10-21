@@ -808,7 +808,11 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
 ### Modes
 
 - **`direct`, the default:** today's transports, behind [the gate](#the-gate). The environment's proxy variables no longer apply (deviation `env-proxy`).
-  - **The gate comes to `direct` with NAT64 discovery.** Without it, every IPv6 target outside the fixed forms would be refused ([Network-specific NAT64 prefixes](#network-specific-nat64-prefixes)). So until the service learns them, `direct` keeps today's transports, ungated, and the deviations `address-policy` and `redirect-gate` apply to `socks5` only. `socks5` needs no discovery, and ships first ([Implementation steps](#implementation-steps), step 8).
+  - **The gate comes to `direct` in two parts.**
+    - **With `socks5`, the classification and the capability:** onion targets, and multiaddrs that aren't network targets, are refused before any socket exists; the service's own loop follows redirects (`http` and `https` only, no `Referer`); and revoking the capability stops every later socket, DNS query and hop.
+    - **With NAT64 discovery, the address table.** Without discovery, every IPv6 target outside the fixed forms would be refused ([Network-specific NAT64 prefixes](#network-specific-nat64-prefixes)). Until the service learns the prefixes, `direct` resolves and connects as today (the system's resolver for HTTP, libp2p's DNS layer for peers) and applies no address table, so the deviation `address-policy` applies to `socks5` only.
+
+    `socks5` needs no discovery, and ships first ([Implementation steps](#implementation-steps), step 8).
 - **`socks5 { ip, port }`:** all of the service's traffic goes through the proxy.
   - **The endpoint is an IP literal,** so reaching the proxy needs no DNS. The service never resolves the proxy's name.
   - **Ordinary names:**
@@ -878,7 +882,7 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
 
    A name whose answers change between checks can't move a connection, because the address that was checked is the address connected to. Each new connection resolves and checks again.
 
-   **The check wraps the transport,** not the service's dial sites, so it also covers the dials libp2p makes itself (Kademlia's and identify's). In `direct` mode it sits twice: outside libp2p's DNS layer, asking the capability and classifying the target before any query starts, and below it, checking each resolved address before `connect()`.
+   **The check wraps the transport,** not the service's dial sites, so it also covers the dials libp2p makes itself: Kademlia's own, and dials to addresses learned through identify, which runs on existing connections and dials nothing itself. In `direct` mode it sits twice: outside libp2p's DNS layer, asking the capability and classifying the target before any query starts, and below it, checking each resolved address before `connect()`.
 
    **Candidate choice knows the transports.** Where providers' addresses are ranked and cut to two per peer, addresses the policy can't dial (QUIC in `socks5` mode, refused targets) are dropped first, so a peer never keeps only addresses that can't be used. Provider URLs are built from a multiaddr's parsed components, never by joining its text.
 4. **On every HTTP redirect hop:**
@@ -1272,7 +1276,10 @@ As 0006's 4.7 did, before anything moves:
   - **The stall:** exit 76.
 - **Network policy tests:**
   - **A SOCKS5 test proxy** records every connection, and a canary TCP and UDP listener is advertised in provider records and is the target of a configured router's redirect. In `socks5` mode the canary must see nothing, and the proxy everything.
-  - **Expansion and redirects:** a `/dnsaddr` that expands to a loopback address, a name that resolves to a private address, and a configured router or provider that redirects to a private address, to an onion URL and to a scheme other than HTTP or HTTPS. Each is refused before a socket opens.
+  - **Expansion and redirects:**
+    - a `/dnsaddr` that expands to a loopback address, a name that resolves to a private address, and a configured router that redirects to a private address or to a scheme other than HTTP or HTTPS: each is refused before a socket opens;
+    - a configured router that redirects to an onion URL: refused before a socket opens in `direct` mode, and taken by [the onion route](#the-onion-route) in `socks5` mode;
+    - a provider that redirects anywhere: the redirect is returned, not followed, since the provider client's acceptance is none.
   - **Canonical forms:**
     - upper case, a trailing dot, numeric IPv4 URL hosts, and `/dns/<x>.onion`;
     - one address in every spelling: `[::ffff:a9fe:a9fe]`, `[::ffff:169.254.169.254]`, `[0:0:0:0:0:ffff:a9fe:a9fe]` and upper-case hex in a URL, and `/ip6/::ffff:169.254.169.254` in a multiaddr, all refused as `169.254.169.254`.
@@ -1441,8 +1448,8 @@ Every body already passes through main today, so the pipe adds one copy into the
    Then the default switches.
 7. **Private windows:** the ephemeral process, readiness per partition, the cold start in `request()`, leases, eviction and fences.
 8. **Network policy:** the setting, Arti's endpoint and its `RESOLVE` qualification, policy changes, and the gate, redirect, SOCKS and canary tests. This needs upstream item 3.
-   - `socks5` first: it needs no NAT64 discovery.
-   - Then NAT64 discovery in the service, which moves `direct` behind the gate ([Modes](#modes)).
+   - `socks5` first, with the classification and the capability in `direct` too: none of them needs NAT64 discovery.
+   - Then NAT64 discovery in the service, which brings the address table to `direct` ([Modes](#modes)).
 9. **Removal,** one stable release later: the add-on, the event worker and their scripts.
 
 ## Open questions
