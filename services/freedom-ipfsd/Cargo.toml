@@ -51,6 +51,17 @@ serde_json = "1"
 # tokio's multi-threaded runtime, and already brings it.
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time"] }
 
+# The static Linux builds' allocator (0007, open question 6). musl's own maps
+# and unmaps each large buffer, a 256 KiB block read among them, so the
+# service spent its time in page faults and `munmap`, and streamed a cached
+# file at about 75 % of the add-on's rate. mimalloc takes its place for the
+# C code too (`override`: SQLite reads each block into a buffer it
+# allocates), in its secure mode (`secure`), so the heap stays hardened as
+# musl's was: the process parses network data, with C code in it. The other
+# targets keep their system allocator.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1.52", features = ["override", "secure"] }
+
 [dev-dependencies]
 tempfile = "3"
 

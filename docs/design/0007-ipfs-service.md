@@ -1436,6 +1436,10 @@ Every body already passes through main today, so the pipe adds one copy into the
      - The dry run of #144 built both targets static: `x86_64-unknown-linux-musl` static-pie, and `aarch64-unknown-linux-musl` statically linked. Both exit 64 for usage.
      - On x86_64, the service's whole test suite passed against the musl build, SQLite stores and served content included.
      - So no glibc floor is needed.
+   - **Its allocator:** musl's own maps and unmaps each large buffer, so on x86_64 a cached file streamed at about 75 % of the add-on's rate, under [Cost](#cost)'s 80 %.
+     - The Linux builds link mimalloc instead, for C code too, since SQLite reads each block into a buffer of its own. A cached file then streams at about 127 % of the add-on's rate; a glibc build's is about 135 %.
+     - It runs in its secure mode, since the process parses network data with C code in it: guard pages around its metadata, randomized allocation, encoded free lists, and checks for overflows and double frees on free. That costs about 5 % of the throughput and 60 MiB of peak memory.
+     - `release-ipfsd.yml` checks that mimalloc's `malloc` is the one linked.
 7. **Upstream timing:** will freedom-ipfs take items 1–8? Until a release carries them, does the service pin a commit on a branch?
 8. **Streams in the core:** should 4.5's protocol version 2 for `freedom-cored` adopt these four frames as they are, with an explicit global credit added?
 9. **An OS memory limit:** should each service run under `RLIMIT_AS`, or a Windows job memory limit, as a backstop for what its budget can't see?

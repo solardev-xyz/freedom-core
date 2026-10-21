@@ -52,6 +52,12 @@
     ],
     "note": "Neither the crate nor its repository (at this commit or on its default branch) carries a license text; it declares MIT OR Apache-2.0, of which this notice takes MIT. SPDX's MIT text (license-list-data v3.29.0, 31ba1a50e5397e00a304dbadc76531740e89ee48) stands in."
   },
+  "libmimalloc-sys 0.1.49": {
+    "bundled": [
+      "c_src/mimalloc/v3/LICENSE"
+    ],
+    "note": "The crate's LICENSE.txt covers its Rust bindings. It also compiles mimalloc's C sources (c_src/mimalloc/v3, its default), whose own LICENSE names Microsoft's copyright: that file ships too."
+  },
   "libp2p 0.56.0": {
     "repository": "https://github.com/libp2p/rust-libp2p",
     "commit": "2ac0ca97a82e161a4bf56ecdfc3a46dd69af302c",

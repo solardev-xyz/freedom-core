@@ -37,6 +37,12 @@ mod service;
 mod stats;
 mod testhooks;
 
+/// The static Linux builds' allocator, in place of musl's, for Rust and C
+/// code alike (Cargo.toml says why).
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

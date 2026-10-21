@@ -130,6 +130,17 @@ jobs:
             echo "$bin is dynamically linked" >&2
             exit 1
           fi
+          # mimalloc is the allocator, for C code too: `malloc` is its, and
+          # musl's own (mallocng) isn't linked at all. With musl's, a cached
+          # file streams at about 75 % of the add-on's rate (0007, open
+          # question 6).
+          symbols="$(nm "$bin")"
+          if ! grep -q ' T mi_malloc$' <<<"$symbols" \
+            || [ "$(grep -E ' T (malloc|mi_malloc)$' <<<"$symbols" | cut -d' ' -f1 | sort -u | wc -l)" != 1 ] \
+            || grep -q ' __libc_malloc_impl$' <<<"$symbols"; then
+            echo "$bin doesn't use mimalloc as its malloc" >&2
+            exit 1
+          fi
       - name: Package
         run: |
           name="freedom-ipfsd-${VERSION}-${{ matrix.asset }}"
