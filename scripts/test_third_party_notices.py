@@ -161,3 +161,46 @@ class OutputBytes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SourceOffers(unittest.TestCase):
+    def test_only_mpl_without_a_permissive_alternative_needs_one(self):
+        for expression, needed in [
+            ("MPL-2.0", True),
+            ("MPL-2.0 AND MIT", True),
+            ("(MPL-2.0 AND MIT)", True),
+            ("MIT OR MPL-2.0", False),
+            ("MPL-2.0 OR Apache-2.0", False),
+            ("MIT", False),
+            ("Apache-2.0 OR MIT", False),
+            ("", False),
+            (None, False),
+        ]:
+            self.assertEqual(notices.needs_source_offer(expression), needed, expression)
+
+    def test_a_registry_crate_points_at_its_crates_io_archive(self):
+        package = {
+            "name": "attohttpc",
+            "version": "0.30.1",
+            "source": "registry+https://github.com/rust-lang/crates.io-index",
+            "repository": "https://github.com/sbstp/attohttpc",
+        }
+        self.assertEqual(
+            notices.source_location(package),
+            "https://static.crates.io/crates/attohttpc/attohttpc-0.30.1.crate"
+            " (repository: https://github.com/sbstp/attohttpc)",
+        )
+
+    def test_a_git_crate_points_at_its_commit(self):
+        package = {
+            "name": "x",
+            "version": "1.0.0",
+            "source": "git+https://github.com/o/x?rev=abc#abcdef0",
+        }
+        self.assertEqual(
+            notices.source_location(package), "https://github.com/o/x at commit abcdef0"
+        )
+
+    def test_an_unknown_source_fails(self):
+        with self.assertRaisesRegex(notices.NoticeError, "no known source location"):
+            notices.source_location({"name": "x", "version": "1", "source": "path+file:///x"})
