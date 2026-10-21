@@ -319,7 +319,10 @@ mod tests {
         let other = acquire(&data, &locks, "radicle", Duration::ZERO).unwrap();
         assert_ne!(other.lock_path, gate.lock_path);
         drop(gate);
-        assert!(acquire(&data, &locks, "ipfs", Duration::ZERO).is_ok());
+        // Other tests in this binary spawn children: one forked while the
+        // gate was held keeps a copy of its descriptor, and so the lock,
+        // until it execs. Released means acquirable within the retry.
+        assert!(acquire(&data, &locks, "ipfs", CONTENTION_RETRY).is_ok());
     }
 
     #[test]
