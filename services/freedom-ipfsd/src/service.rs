@@ -19,6 +19,7 @@ use crate::build_info;
 use crate::instances::Instances;
 use crate::requests::Requests;
 use crate::stats::Stats;
+use crate::testhooks;
 
 pub struct IpfsService {
     instances: Arc<Instances>,
@@ -77,6 +78,7 @@ impl Service for IpfsService {
                 );
             }
         }
+        testhooks::handled(request.id);
     }
 
     fn cancel(&self, conn: &Connection, id: u64) {
@@ -191,6 +193,9 @@ mod tests {
         inner: IpfsService,
         /// The next cancel waits until this receives.
         gate: Arc<Mutex<Option<Receiver<()>>>>,
+        /// The ID of the last request the reader has handed over, once the
+        /// service has returned from it.
+        handled: Arc<std::sync::atomic::AtomicU64>,
     }
 
     impl Service for Delayed {
@@ -200,6 +205,8 @@ mod tests {
 
         fn request(&self, conn: &Connection, request: Request<'_>) {
             self.inner.request(conn, request);
+            self.handled
+                .store(request.id, std::sync::atomic::Ordering::SeqCst);
         }
 
         fn cancel(&self, conn: &Connection, id: u64) {
@@ -280,7 +287,7 @@ mod tests {
             inner: IpfsService::new(
                 instances.clone(),
                 requests,
-                Stats::new(runtime.handle().clone(), budgets, STATS_DEADLINE),
+                Stats::new(runtime.handle().clone(), budgets, STATS_DEADLINE, false),
             ),
             seen,
         });
@@ -365,6 +372,8 @@ mod tests {
         stats: Arc<Stats>,
         /// Holds the next cancel callback, once set.
         cancel_gate: Arc<Mutex<Option<Receiver<()>>>>,
+        /// The last request the service has handled.
+        handled: Arc<std::sync::atomic::AtomicU64>,
         input: std::io::PipeWriter,
         replies: Receiver<Value>,
         pace: Pace,
@@ -395,11 +404,18 @@ mod tests {
                 requests.clone(),
                 budgets.clone(),
             );
-            let stats = Stats::new(runtime.handle().clone(), budgets.clone(), stats_deadline);
+            let stats = Stats::new(
+                runtime.handle().clone(),
+                budgets.clone(),
+                stats_deadline,
+                false,
+            );
             let cancel_gate = Arc::new(Mutex::new(None));
+            let handled = Arc::new(std::sync::atomic::AtomicU64::new(0));
             let service = Arc::new(Delayed {
                 inner: IpfsService::new(instances.clone(), requests.clone(), stats.clone()),
                 gate: cancel_gate.clone(),
+                handled: handled.clone(),
             });
             let (input, mut main_out) = std::io::pipe().unwrap();
             let (main_in, output) = std::io::pipe().unwrap();
@@ -445,6 +461,7 @@ mod tests {
                 instances,
                 stats,
                 cancel_gate,
+                handled,
                 input: main_out,
                 replies,
                 pace,
@@ -1034,5 +1051,64 @@ mod tests {
             "{late}"
         );
         assert_eq!(counted["last_native_error_code"], "deadline", "{counted}");
+    }
+
+    /// Review of #143: the 4 stats calls are counted until their replies
+    /// are written, not until their jobs end: with the writer held, 4
+    /// replies wait, a 5th call is `busy`, and their places free once
+    /// they are written.
+    #[test]
+    fn stats_replies_waiting_for_the_writer_hold_their_places() {
+        let mut harness = Harness::new(0);
+        // The writer is held inside head 3.
+        harness.head(3, 30_000);
+        harness.pace.begun(3);
+        for id in 4..8 {
+            harness.stats(id);
+        }
+        // Every job has queued its reply and ended.
+        let deadline = Instant::now() + WAIT;
+        while harness.stats.replied() < 4 {
+            assert!(Instant::now() < deadline, "the jobs never replied");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(harness.stats.outstanding(), 4, "held by their replies");
+        harness.stats(8);
+        harness.barrier(9);
+        // Their replies wait for the writer too: the reader acknowledges
+        // it has handled them.
+        let deadline = Instant::now() + WAIT;
+        while harness.handled.load(std::sync::atomic::Ordering::SeqCst) < 9 {
+            assert!(Instant::now() < deadline, "the reader never handled 9");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        harness.pace.permit(usize::MAX / 2);
+        assert_eq!(harness.replies.recv_timeout(WAIT).unwrap()["id"], 3);
+        // In the order their jobs queued them.
+        let mut answered: Vec<u64> = (4..8)
+            .map(|_| {
+                let reply = harness.replies.recv_timeout(WAIT).unwrap();
+                assert!(reply["result"]["gateway"].is_object(), "{reply}");
+                reply["id"].as_u64().unwrap()
+            })
+            .collect();
+        answered.sort_unstable();
+        assert_eq!(answered, [4, 5, 6, 7]);
+        let refused = harness.replies.recv_timeout(WAIT).unwrap();
+        assert_eq!(
+            (&refused["id"], &refused["error"]["code"]),
+            (&json!(8), &json!("busy")),
+            "{refused}"
+        );
+        assert_eq!(harness.replies.recv_timeout(WAIT).unwrap()["id"], 9);
+        // Written: their places are free.
+        let deadline = Instant::now() + WAIT;
+        while harness.stats.outstanding() > 0 {
+            assert!(Instant::now() < deadline, "the places were never freed");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let ran = harness.stats.ran();
+        harness.shut_down();
+        assert_eq!(ran, (4, 4), "the 5th never started");
     }
 }

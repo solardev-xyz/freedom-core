@@ -31,6 +31,7 @@ mod build_info;
 mod instances;
 mod network;
 mod params;
+mod progress;
 mod requests;
 mod service;
 mod stats;
@@ -136,6 +137,12 @@ fn serve(kind: Kind, parent_pid: Option<u32>, started: Instant) -> Exit {
         }
     };
     log::info("serving", json!({ "kind": kind.name() }));
+    // Before anything of freedom-ipfs runs: the persistent process records
+    // progress, the ephemeral one never does (0007, "Stats").
+    let records_progress = matches!(kind, Kind::Persistent { .. });
+    if records_progress {
+        progress::install();
+    }
     // The process's budgets, the writer's 16 MiB reserved first.
     let budgets = match Budgets::new(&kind) {
         Ok(budgets) => Arc::new(budgets),
@@ -151,7 +158,12 @@ fn serve(kind: Kind, parent_pid: Option<u32>, started: Instant) -> Exit {
         requests.clone(),
         budgets.clone(),
     );
-    let stats = Stats::new(runtime.handle().clone(), budgets, STATS_DEADLINE);
+    let stats = Stats::new(
+        runtime.handle().clone(),
+        budgets,
+        STATS_DEADLINE,
+        records_progress,
+    );
     let service = Arc::new(IpfsService::new(instances, requests, stats));
     let mut options = Options::new(SERVICE, PROTOCOL, started);
     options.parent_pid = parent_pid;

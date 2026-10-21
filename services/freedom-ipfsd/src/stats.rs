@@ -17,8 +17,9 @@
 //!     failure's code and its fixed message, or a `gateway_busy` head's.
 //!
 //!   The event-queue fields went with the queue (deviation `stats-fields`).
-//! - **`progress`:** `null` until upstream's progress recorder leaves the
-//!   FFI crate (upstream item 4; deviation `stats-progress`).
+//! - **`progress`:** in the persistent process, the instance's recorder's
+//!   snapshot, cut to fit the reply's frame ([`crate::progress`]); `null`
+//!   in the ephemeral process, which records none.
 //! - **`store`:** `block_count` and `total_bytes`.
 //! - **`budget`:** each budget's use and limit: the memory budget, the
 //!   retrieval admission's four limits, the request admission, the writer's
@@ -30,9 +31,12 @@
 //!   The job's reply is queued only before it ([`Connection::reply_by`]),
 //!   and a watcher answers `deadline` once it has passed, however late
 //!   either runs.
-//! - **at most [`MAX_STATS_JOBS`]** are outstanding in the process, counted
-//!   until the job's closure is dropped, whether it ran or not: never just
-//!   because its request was answered. Past them, `busy`.
+//! - **at most [`MAX_STATS_JOBS`] stats calls** are outstanding in the
+//!   process, each counted from its admission until its reply has been
+//!   written (its reply holds its place, as a charge), or until its job's
+//!   closure is dropped without a reply (aborted unrun, fenced, or answered
+//!   `deadline`): never just because its job ended or its request was
+//!   answered. Past them, `busy`.
 //! - **a cancel, or the deadline,** fences the job, which then runs no SQL,
 //!   and aborts it if it hasn't started. A job that starts past its
 //!   deadline runs no SQL either, whether or not the watcher has run.
@@ -43,8 +47,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
-use fc_protocol::stream::WRITER_DATA_CAP;
-use fc_service::conn::Connection;
+use fc_protocol::stream::{SendError, WRITER_DATA_CAP};
+use fc_service::conn::{Charge, Connection};
 use fc_service::panic::{Labeled, TaskKind, with_kind};
 use serde_json::value::RawValue;
 use serde_json::{Value, json};
@@ -53,13 +57,14 @@ use tokio::task::AbortHandle;
 
 use crate::budget::Budgets;
 use crate::instances::Instances;
-use crate::params;
 use crate::requests::{MAX_ADMITTED, Requests};
+use crate::{params, progress, testhooks};
 
 /// `ipfs.stats`'s deadline (0007, "Methods").
 pub const STATS_DEADLINE: Duration = Duration::from_secs(5);
-/// The most stats jobs outstanding at once in the process (0007, "Stats"):
-/// main asks every 5 s and gives up at 20 s, so it has at most 4 asked.
+/// The most stats calls outstanding at once in the process, each from its
+/// admission until its reply is written (0007, "Stats"): main asks every
+/// 5 s and gives up at 20 s, so it has at most 4 asked.
 pub const MAX_STATS_JOBS: usize = 4;
 
 /// The stats' control job: the service's own work, so a panic exits 70.
@@ -161,6 +166,8 @@ pub struct Stats {
     budgets: Arc<Budgets>,
     /// [`STATS_DEADLINE`], but in tests.
     deadline: Duration,
+    /// The process records progress: the persistent one.
+    progress: bool,
     /// The jobs outstanding, by request ID: each is removed when its
     /// closure is dropped.
     jobs: Mutex<HashMap<u64, Job>>,
@@ -168,6 +175,9 @@ pub struct Stats {
     /// to the store.
     started: AtomicU64,
     ran: AtomicU64,
+    /// Jobs that queued their reply and returned.
+    #[cfg(test)]
+    replied: AtomicU64,
     /// Runs in the next job, once started, before its fence is checked.
     #[cfg(test)]
     before_fence: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -182,8 +192,10 @@ struct Job {
     abort: Option<AbortHandle>,
 }
 
-/// A job's place in the bound: freed when the job's closure is dropped,
-/// after it ran, or unrun when it was aborted.
+/// A stats call's place in the bound, from its admission: freed once its
+/// reply has been written and flushed (the reply holds it, as a charge), or
+/// when its job's closure is dropped without one: aborted before it ran,
+/// fenced, or answered `deadline`.
 struct JobSlot {
     stats: Arc<Stats>,
     id: u64,
@@ -196,14 +208,22 @@ impl Drop for JobSlot {
 }
 
 impl Stats {
-    pub fn new(runtime: Handle, budgets: Arc<Budgets>, deadline: Duration) -> Arc<Stats> {
+    pub fn new(
+        runtime: Handle,
+        budgets: Arc<Budgets>,
+        deadline: Duration,
+        progress: bool,
+    ) -> Arc<Stats> {
         Arc::new(Stats {
             runtime,
             budgets,
             deadline,
+            progress,
             jobs: Mutex::new(HashMap::new()),
             started: AtomicU64::new(0),
             ran: AtomicU64::new(0),
+            #[cfg(test)]
+            replied: AtomicU64::new(0),
             #[cfg(test)]
             before_fence: Mutex::new(None),
         })
@@ -225,6 +245,12 @@ impl Stats {
     #[cfg(test)]
     pub fn before_fence(&self, hook: Box<dyn FnOnce() + Send>) {
         *self.before_fence.lock().unwrap_or_else(|p| p.into_inner()) = Some(hook);
+    }
+
+    /// The jobs that have queued their reply and returned.
+    #[cfg(test)]
+    pub fn replied(&self) -> u64 {
+        self.replied.load(Ordering::SeqCst)
     }
 
     /// The jobs that have started, and those that ran their SQL.
@@ -270,13 +296,16 @@ impl Stats {
                 return;
             }
         };
-        let Some((store, counters, background)) = instances.with_live(&instance_id, |running| {
-            (
-                running.instance.node().store().clone(),
-                running.counters.clone(),
-                running.instance.node().background_queue().clone(),
-            )
-        }) else {
+        let Some((store, counters, background, recorder)) =
+            instances.with_live(&instance_id, |running| {
+                (
+                    running.instance.node().store().clone(),
+                    running.counters.clone(),
+                    running.instance.node().background_queue().clone(),
+                    running.instance.progress().clone(),
+                )
+            })
+        else {
             let _ = conn.reply_error(
                 id,
                 &ErrorBody::new(
@@ -293,7 +322,7 @@ impl Stats {
                 drop(jobs);
                 let _ = conn.reply_error(
                     id,
-                    &ErrorBody::new(ErrorCode::Busy, "4 stats jobs are outstanding already"),
+                    &ErrorBody::new(ErrorCode::Busy, "4 stats calls are outstanding already"),
                 );
                 return;
             }
@@ -314,8 +343,8 @@ impl Stats {
         let (reply, timer) = (conn.clone(), conn.clone());
         let stats = self.clone();
         let job = self.runtime.spawn_blocking(move || {
-            // Its place in the bound goes with the closure, run or not.
-            let _slot = slot;
+            // The call's place in the bound (`slot`) goes with the closure,
+            // unless its reply takes it.
             stats.started.fetch_add(1, Ordering::SeqCst);
             #[cfg(test)]
             {
@@ -334,7 +363,7 @@ impl Stats {
             // Past its deadline, however late the watcher runs: no SQL, and
             // `deadline`, through the same check as a reply.
             if Instant::now() >= deadline {
-                let _ = reply.reply_error_by(id, &late(), deadline, &late());
+                let _ = reply.reply_error_by(id, &late(), deadline, &late(), None);
                 return;
             }
             stats.ran.fetch_add(1, Ordering::SeqCst);
@@ -345,13 +374,32 @@ impl Stats {
                     }
                     _ => Value::Null,
                 };
-                let _ = reply.reply_by(
-                    id,
-                    &json!({ "gateway": gateway, "progress": Value::Null, "store": store,
-                        "budget": budget }),
-                    deadline,
-                    &late(),
-                );
+                // Here, not on the reader thread: a snapshot copies what
+                // the recorder holds.
+                let progress = if stats.progress {
+                    serde_json::to_value(recorder.snapshot()).unwrap_or(Value::Null)
+                } else {
+                    Value::Null
+                };
+                let mut result = json!({ "gateway": gateway, "progress": progress,
+                    "store": store, "budget": budget });
+                if let Some(counts) = testhooks::progress_counts(&recorder) {
+                    result["test_progress"] = counts;
+                }
+                let result = progress::fit(id, result);
+                // Fitted, it is within a frame; were it not, it would still
+                // be answered.
+                // The reply holds the call's place until it is written: the
+                // bound counts replies waiting for the writer too.
+                let charge: Charge = Box::new(slot);
+                if let Err(SendError::TooLarge) =
+                    reply.reply_by(id, &result, deadline, &late(), Some(charge))
+                {
+                    let too_large = ErrorBody::new(ErrorCode::Internal, "the stats are too large");
+                    let _ = reply.reply_error_by(id, &too_large, deadline, &late(), None);
+                }
+                #[cfg(test)]
+                stats.replied.fetch_add(1, Ordering::SeqCst);
             });
         });
         // Its abort, recorded before anything can stop it: a cancel is

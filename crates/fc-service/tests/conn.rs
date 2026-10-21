@@ -78,6 +78,20 @@ struct Toy {
     conn: Mutex<Option<Connection>>,
 }
 
+impl Toy {
+    /// A charge that counts itself, or with `reenter`, one that calls back
+    /// into the connection.
+    fn charge(&self, conn: &Connection, params: &Value) -> conn::Charge {
+        if params["reenter"] == true {
+            let reentered = self.reentered.lock().unwrap().clone().unwrap();
+            Box::new(Reentrant(conn.clone(), reentered))
+        } else {
+            *self.charged.lock().unwrap() += 1;
+            Box::new(Charged(self.charged.clone()))
+        }
+    }
+}
+
 /// `now` moved by `in_ms` (negative: into the past).
 fn deadline_in(in_ms: i64) -> Instant {
     let now = Instant::now();
@@ -115,13 +129,7 @@ impl Service for Toy {
             // with `reenter`, one that calls back into the connection).
             "t.head_by" => {
                 let deadline = deadline_in(params["in_ms"].as_i64().unwrap());
-                let charge: conn::Charge = if params["reenter"] == true {
-                    let reentered = self.reentered.lock().unwrap().clone().unwrap();
-                    Box::new(Reentrant(conn.clone(), reentered))
-                } else {
-                    *self.charged.lock().unwrap() += 1;
-                    Box::new(Charged(self.charged.clone()))
-                };
+                let charge = self.charge(conn, &params);
                 let head = json!({ "body": false, "pad": params["pad"] });
                 let headed = conn.head_by(
                     params["id"].as_u64().unwrap_or(request.id),
@@ -139,17 +147,27 @@ impl Service for Toy {
             "t.reply_by" => {
                 let deadline = deadline_in(params["in_ms"].as_i64().unwrap());
                 let late = ErrorBody::new(ErrorCode::Deadline, "late");
+                let charge = Some(self.charge(conn, &params));
                 let replied = if params["error"] == true {
                     conn.reply_error_by(
                         request.id,
                         &ErrorBody::new(ErrorCode::Busy, "busy"),
                         deadline,
                         &late,
+                        charge,
                     )
                 } else {
-                    conn.reply_by(request.id, &json!({ "in_time": true }), deadline, &late)
+                    conn.reply_by(
+                        request.id,
+                        &json!({ "in_time": true }),
+                        deadline,
+                        &late,
+                        charge,
+                    )
                 };
-                self.headed.lock().unwrap().push(replied.unwrap());
+                if let Ok(replied) = replied {
+                    self.headed.lock().unwrap().push(replied);
+                }
             }
             // A body of `len` bytes in one send, reported once the send
             // ends: how much of it was queued.
@@ -732,11 +750,21 @@ fn head_len_is_what_a_head_holds_on_the_wire() {
 /// Review of #141: a charge is never dropped under the connection's lock,
 /// on any path: a head queued and written, a late head, a head for a
 /// request already answered, and a head still queued when the writer
-/// fails.
+/// fails; and a reply's (`reply_by`): written, late, still queued when the
+/// writer fails, or purged when the stream state fails.
 /// The child runs one case and exits; a deadlock is a child that hangs.
 #[test]
 fn a_charge_is_dropped_outside_the_connections_lock() {
-    for case in ["written", "late", "answered", "writer_failed"] {
+    for case in [
+        "written",
+        "late",
+        "answered",
+        "writer_failed",
+        "reply_written",
+        "reply_late",
+        "reply_writer_failed",
+        "reply_purged",
+    ] {
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "reentrant_charge_case", "--test-threads=1"])
             .env("FC_SERVICE_REENTRANT_CASE", case)
@@ -774,7 +802,7 @@ fn reentrant_charge_case() {
     // queued behind it.
     let gate = Gate::new(KIND_JSON);
     let held = gate.clone();
-    let failing = case == "writer_failed";
+    let failing = case.ends_with("writer_failed");
     let mut main = start_with(options(), move |pipe| Gated {
         pipe,
         gate: held,
@@ -800,14 +828,34 @@ fn reentrant_charge_case() {
             let params = json!({ "in_ms": 60_000, "reenter": true, "id": 2 });
             main.request(3, "t.head_by", params);
         }
+        "reply_written" => {
+            main.request(3, "t.reply_by", json!({ "in_ms": 60_000, "reenter": true }));
+            assert_eq!(main.message()["result"]["in_time"], true);
+        }
+        "reply_late" => {
+            main.request(3, "t.reply_by", json!({ "in_ms": -1, "reenter": true }));
+            assert_eq!(main.message()["error"]["code"], "deadline");
+        }
         _ => {
+            // Request 3's head or reply waits behind request 2's held write;
+            // then the writer fails, or the stream state does.
             main.request(2, "t.echo", json!(2));
             gate.held();
-            main.request(3, "t.head_by", json!({ "in_ms": 60_000, "reenter": true }));
+            let method = if case.starts_with("reply") {
+                "t.reply_by"
+            } else {
+                "t.head_by"
+            };
+            main.request(3, method, json!({ "in_ms": 60_000, "reenter": true }));
             let deadline = Instant::now() + Duration::from_secs(10);
             while main.toy.headed.lock().unwrap().is_empty() {
                 assert!(Instant::now() < deadline);
                 std::thread::sleep(Duration::from_millis(5));
+            }
+            if case == "reply_purged" {
+                // Credit for a request with no stream: the stream state
+                // fails, and drops what is queued.
+                main.send(&credit_frame(3, 1).unwrap());
             }
             gate.release();
         }
@@ -839,6 +887,43 @@ fn a_reply_by_is_queued_only_before_its_deadline() {
         *main.toy.headed.lock().unwrap(),
         [Headed::Queued, Headed::Late, Headed::Queued, Headed::Late]
     );
+    main.close();
+    assert_eq!(main.exit(), Exit::Ok);
+}
+
+/// Review of #143: a reply queued by `reply_by` keeps its charge while it
+/// waits behind another frame and while it is written, and releases it
+/// once written; a late one at once.
+#[test]
+fn a_reply_by_holds_its_charge_until_it_is_written() {
+    let gate = Gate::new(KIND_JSON);
+    let held = gate.clone();
+    let mut main = start_with(options(), move |pipe| Gated {
+        pipe,
+        gate: held,
+        fail: false,
+    });
+    main.hello();
+    // Request 2's own reply, held inside its write.
+    main.request(2, "t.reply_by", json!({ "in_ms": 60_000 }));
+    gate.held();
+    assert_eq!(*main.toy.charged.lock().unwrap(), 1, "held while written");
+    // Request 3's, queued behind it.
+    main.request(3, "t.reply_by", json!({ "in_ms": 60_000 }));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while main.toy.headed.lock().unwrap().len() < 2 {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(*main.toy.charged.lock().unwrap(), 2, "held while queued");
+    gate.release();
+    assert_eq!(main.message()["id"], 2);
+    assert_eq!(main.message()["id"], 3);
+    released(&main.toy.charged);
+    // Late: its charge goes at once.
+    main.request(4, "t.reply_by", json!({ "in_ms": -1 }));
+    assert_eq!(main.message()["error"]["code"], "deadline");
+    released(&main.toy.charged);
     main.close();
     assert_eq!(main.exit(), Exit::Ok);
 }

@@ -520,20 +520,26 @@ impl Connection {
     /// connection's lock, as for [`Connection::head_by`]: however late its
     /// producer runs, the reply is never queued after its deadline, and one
     /// queued in time stands.
+    ///
+    /// The reply is encoded in a buffer of exactly its length, and a reply
+    /// queued in time keeps `charge` as a head does ([`Connection::head_by`]):
+    /// until the writer has written and flushed it and freed its buffers, or
+    /// the connection is done; otherwise `charge` is dropped before this
+    /// returns. Never under the connection's lock.
     pub fn reply_by<T: Serialize>(
         &self,
         id: u64,
         result: &T,
         deadline: Instant,
         late: &ErrorBody,
+        charge: Option<Charge>,
     ) -> Result<Headed, SendError> {
-        let mut json = Vec::new();
-        write_result(&mut json, id, result).map_err(|_| SendError::TooLarge)?;
-        self.reply_json_by(id, json, deadline, late)
+        let json = encode_result(id, result)?;
+        self.reply_json_by(id, json, deadline, late, charge)
     }
 
     /// Answers request `id` with `error`, as [`Connection::reply_error`]
-    /// does, only if it is queued before `deadline`: as
+    /// does, only if it is queued before `deadline`, with `charge`: as
     /// [`Connection::reply_by`].
     pub fn reply_error_by(
         &self,
@@ -541,10 +547,11 @@ impl Connection {
         error: &ErrorBody,
         deadline: Instant,
         late: &ErrorBody,
+        charge: Option<Charge>,
     ) -> Result<Headed, SendError> {
         let mut json = Vec::new();
         write_error(&mut json, id, error).map_err(|_| SendError::TooLarge)?;
-        self.reply_json_by(id, json, deadline, late)
+        self.reply_json_by(id, json, deadline, late, charge)
     }
 
     fn reply_json_by(
@@ -553,17 +560,29 @@ impl Connection {
         json: Vec<u8>,
         deadline: Instant,
         late: &ErrorBody,
+        charge: Option<Charge>,
     ) -> Result<Headed, SendError> {
+        let mut charge = charge;
+        let mut displaced = None;
         let mut late_json = Vec::new();
         write_error(&mut late_json, id, late).map_err(|_| SendError::TooLarge)?;
-        self.queue(Need::Owed, move |state| {
+        let queued = self.queue(Need::Owed, |state| {
             let queued = if Instant::now() < deadline {
                 state.sender.reply(id, json).map(|()| Headed::Queued)
             } else {
                 state.sender.reply(id, late_json).map(|()| Headed::Late)
             };
+            if let Ok(Headed::Queued) = queued
+                && let Some(charge) = charge.take()
+            {
+                displaced = state.charges.insert(id, charge);
+            }
             (queued, false)
-        })
+        });
+        // Outside the lock, as for a head.
+        drop(displaced);
+        drop(charge);
+        queued
     }
 
     /// Answers request `id` with a head, `result`. With `body`, it opens a
@@ -728,8 +747,9 @@ impl Connection {
     }
 }
 
-/// What a queued head holds until the writer has written it
-/// ([`Connection::head_by`]): dropped then, outside the connection's lock.
+/// What a queued head or reply holds until the writer has written it
+/// ([`Connection::head_by`], [`Connection::reply_by`]): dropped then,
+/// outside the connection's lock.
 pub type Charge = Box<dyn Send>;
 
 /// A JSON frame's header: its length and kind.
