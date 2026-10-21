@@ -91,6 +91,104 @@ NATIVE = [
 ]
 
 
+# Licenses whose terms, for an executable, also require telling recipients
+# where the covered source is (MPL-2.0 section 3.2(a)): a crate under one of
+# them, with no permissive alternative in its expression, gets a source line.
+SOURCE_LICENSES = ("MPL-2.0",)
+
+
+def license_tokens(expression):
+    """An SPDX license expression's tokens: parentheses, the operators AND,
+    OR and WITH, and identifiers. Cargo's legacy `/` is OR."""
+    tokens = []
+    for word in expression.replace("(", " ( ").replace(")", " ) ").replace("/", " OR ").split():
+        tokens.append(word.upper() if word.upper() in ("AND", "OR", "WITH") else word)
+    return tokens
+
+
+def needs_source_offer(expression):
+    """Whether a crate's license expression leaves no way around one of
+    SOURCE_LICENSES: parsed as SPDX (WITH binds tightest, then AND, then OR,
+    parentheses grouping), an identifier needs an offer if it is one of them
+    (case-insensitive, `+` meaning that version or later; a WITH exception
+    keeps its license's need), an AND needs one if either side does, and an
+    OR only if every alternative does. `MIT OR MPL-2.0` doesn't; `MPL-2.0`,
+    `MPL-2.0 AND (MIT OR Apache-2.0)` and `mpl-2.0+` do. An expression that
+    doesn't parse fails, rather than passing as needing none."""
+    if not expression:
+        return False
+    tokens = license_tokens(expression)
+    position = 0
+
+    def fail(why):
+        raise NoticeError(f"license expression {expression!r}: {why}")
+
+    def peek():
+        return tokens[position] if position < len(tokens) else None
+
+    def take():
+        nonlocal position
+        position += 1
+        return tokens[position - 1]
+
+    def atom():
+        token = peek()
+        if token is None:
+            fail("ends early")
+        if token == "(":
+            take()
+            needs = either()
+            if peek() != ")":
+                fail("an unclosed parenthesis")
+            take()
+            return needs
+        if token in ("AND", "OR", "WITH", ")"):
+            fail(f"unexpected {token}")
+        take()
+        needs = token.upper().rstrip("+") in (name.upper() for name in SOURCE_LICENSES)
+        if peek() == "WITH":
+            take()
+            exception = peek()
+            if exception is None or exception in ("AND", "OR", "WITH", "(", ")"):
+                fail("WITH without an exception")
+            take()
+        return needs
+
+    def both():
+        needs = atom()
+        while peek() == "AND":
+            take()
+            needs = atom() or needs
+        return needs
+
+    def either():
+        needs = both()
+        while peek() == "OR":
+            take()
+            needs = both() and needs
+        return needs
+
+    needs = either()
+    if peek() is not None:
+        fail(f"unexpected {peek()}")
+    return needs
+
+
+def source_location(package):
+    """Where a shipped crate's exact source is: its crates.io archive, or its
+    git repository at the commit it was built from."""
+    name, version, source = package["name"], package["version"], package.get("source") or ""
+    if source.startswith("registry+https://github.com/rust-lang/crates.io-index"):
+        where = f"https://static.crates.io/crates/{name}/{name}-{version}.crate"
+    elif source.startswith("git+"):
+        url, _, commit = source[len("git+"):].partition("#")
+        where = f"{url.split('?')[0]} at commit {commit}"
+    else:
+        raise NoticeError(f"{name} {version}: no known source location for {source!r}")
+    repository = package.get("repository")
+    return f"{where} (repository: {repository})" if repository else where
+
+
 class NoticeError(Exception):
     pass
 
@@ -294,6 +392,18 @@ def generate(binary=BINARY):
             "notices/crates.json vendors texts for crates the binary doesn't ship: "
             + ", ".join(sorted(vendored))
         )
+    offered = [
+        crates[key] for key in sorted(crates) if needs_source_offer(crates[key].get("license"))
+    ]
+    if offered:
+        lines += [
+            "",
+            "Source code: these crates are in the binary unmodified, under the",
+            "Mozilla Public License 2.0, whose section 3.2(a) asks that recipients",
+            "of an executable be told where the source is. Each one's exact source:",
+        ]
+        for package in offered:
+            lines.append(f"- {package['name']} {package['version']}: {source_location(package)}")
     lines += ["", f"Rust {TOOLCHAIN} toolchain runtime:"]
     for (name, version, expression, directory, declared) in std_crates(sysroot, source):
         label = f"{name} {version}"

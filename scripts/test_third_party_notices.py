@@ -161,3 +161,69 @@ class OutputBytes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SourceOffers(unittest.TestCase):
+    def test_only_mpl_without_a_permissive_alternative_needs_one(self):
+        for expression, needed in [
+            ("MPL-2.0", True),
+            ("MPL-2.0 AND MIT", True),
+            ("(MPL-2.0 AND MIT)", True),
+            ("MIT OR MPL-2.0", False),
+            ("MPL-2.0 OR Apache-2.0", False),
+            ("MIT", False),
+            ("Apache-2.0 OR MIT", False),
+            ("", False),
+            (None, False),
+            # Review of #145: grouping and precedence, as SPDX defines them.
+            ("MPL-2.0 AND (MIT OR Apache-2.0)", True),
+            ("(MIT OR Apache-2.0) AND MPL-2.0", True),
+            ("MIT AND (MPL-2.0 OR Apache-2.0)", False),
+            ("(MPL-2.0 AND MIT) OR (MPL-2.0 AND Apache-2.0)", True),
+            ("MPL-2.0 AND (Apache-2.0 WITH LLVM-exception OR MIT)", True),
+            ("Apache-2.0 WITH LLVM-exception AND MPL-2.0", True),
+            ("Apache-2.0 WITH LLVM-exception OR MPL-2.0", False),
+            ("MIT OR MPL-2.0 AND Apache-2.0", False),
+            ("MPL-2.0 AND MIT OR MPL-2.0 AND Apache-2.0", True),
+            # Spellings: whitespace, case, "or later", Cargo's legacy `/`.
+            ("MPL-2.0\tOR\tMIT", False),
+            ("MPL-2.0+", True),
+            ("mpl-2.0", True),
+            ("MPL-2.0 and MIT", True),
+            ("MIT/MPL-2.0", False),
+            ("((MPL-2.0))", True),
+        ]:
+            self.assertEqual(notices.needs_source_offer(expression), needed, expression)
+
+    def test_an_expression_that_does_not_parse_fails(self):
+        for expression in ["MPL-2.0 AND", "(MPL-2.0", "MPL-2.0)", "AND MIT", "MPL-2.0 MIT",
+                           "MPL-2.0 WITH", "MPL-2.0 WITH (x)", "()"]:
+            with self.assertRaisesRegex(notices.NoticeError, "license expression"):
+                notices.needs_source_offer(expression)
+
+    def test_a_registry_crate_points_at_its_crates_io_archive(self):
+        package = {
+            "name": "attohttpc",
+            "version": "0.30.1",
+            "source": "registry+https://github.com/rust-lang/crates.io-index",
+            "repository": "https://github.com/sbstp/attohttpc",
+        }
+        self.assertEqual(
+            notices.source_location(package),
+            "https://static.crates.io/crates/attohttpc/attohttpc-0.30.1.crate"
+            " (repository: https://github.com/sbstp/attohttpc)",
+        )
+
+    def test_a_git_crate_points_at_its_commit(self):
+        package = {
+            "name": "x",
+            "version": "1.0.0",
+            "source": "git+https://github.com/o/x?rev=abc#abcdef0",
+        }
+        self.assertEqual(
+            notices.source_location(package), "https://github.com/o/x at commit abcdef0"
+        )
+
+    def test_an_unknown_source_fails(self):
+        with self.assertRaisesRegex(notices.NoticeError, "no known source location"):
+            notices.source_location({"name": "x", "version": "1", "source": "path+file:///x"})

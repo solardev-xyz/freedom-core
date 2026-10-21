@@ -357,6 +357,11 @@ Crates:
 - zerovec 0.11.6: Unicode-3.0
 - zmij 1.0.21: MIT
 
+Source code: these crates are in the binary unmodified, under the
+Mozilla Public License 2.0, whose section 3.2(a) asks that recipients
+of an executable be told where the source is. Each one's exact source:
+- attohttpc 0.30.1: https://static.crates.io/crates/attohttpc/attohttpc-0.30.1.crate (repository: https://github.com/sbstp/attohttpc)
+
 Rust 1.99 toolchain runtime:
 - addr2line 0.27.1 (Rust standard library): Apache-2.0 OR MIT
 - adler2 2.0.1 (Rust standard library): 0BSD OR MIT OR Apache-2.0
