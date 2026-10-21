@@ -1,9 +1,10 @@
 name: Release freedom-ipfsd
 
 # Builds freedom-ipfsd, the freedom-ipfs service (design 0007), for the same
-# five targets as freedom-cored and publishes the archives plus SHA256SUMS as
-# a GitHub release, with build provenance attested for each. freedom-browser
-# pins a release tag and the digest of its SHA256SUMS (see RELEASING.md).
+# five platforms as freedom-cored (on Linux against glibc 2.17, where the
+# core is static musl) and publishes the archives plus SHA256SUMS as a GitHub
+# release, with build provenance attested for each. freedom-browser pins a
+# release tag and the digest of its SHA256SUMS (see RELEASING.md).
 #
 # Only a tag push (ipfsd-vX.Y.Z, matching services/freedom-ipfsd's version)
 # publishes. A manual run (on any ref, tags included) or a PR that changes
@@ -73,12 +74,13 @@ jobs:
         include:
           - { runner: macos-latest, target: aarch64-apple-darwin, asset: darwin-arm64, native: true }
           - { runner: macos-latest, target: x86_64-apple-darwin, asset: darwin-amd64, native: false }
-          # Static musl binaries (crt-static is the musl default): no
-          # dependency on the distribution's glibc. SQLite and ring are C,
-          # so their build scripts need musl's C compiler wrapper (0007,
-          # open question 6: they build and pass the service's tests).
-          - { runner: ubuntu-latest, target: x86_64-unknown-linux-musl, asset: linux-amd64, native: true }
-          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, asset: linux-arm64, native: true }
+          # Linked dynamically against glibc 2.17, Rust's own floor for these
+          # targets, so they run wherever Electron does (it needs 2.25), with
+          # the OS's allocator: static musl's cost a quarter of the
+          # throughput (0007, open question 6). cargo-zigbuild links them,
+          # with Zig's copy of glibc 2.17's symbols and startup code.
+          - { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu, glibc: "2.17", asset: linux-amd64, native: true }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, glibc: "2.17", asset: linux-arm64, native: true }
           - { runner: windows-latest, target: x86_64-pc-windows-msvc, asset: windows-amd64, native: true }
     runs-on: ${{ matrix.runner }}
     defaults:
@@ -95,20 +97,55 @@ jobs:
         run: |
           rustup toolchain install
           rustup target add ${{ matrix.target }}
-      - name: musl's C compiler
-        if: contains(matrix.target, 'musl')
+      - name: Zig and cargo-zigbuild
+        if: matrix.glibc
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q musl-tools
-          # cc's per-target variable: CC_<target>, with `-` as `_`.
-          var="CC_$(echo "${{ matrix.target }}" | tr '-' '_')"
-          echo "$var=musl-gcc" >> "$GITHUB_ENV"
-          echo "$var=musl-gcc"
+          # Their PyPI wheels, for the runner's architecture, pinned by
+          # version and sha256. A wheel is a zip: the binaries need no pip.
+          case "$(uname -m)" in
+            x86_64)
+              zig_url=https://files.pythonhosted.org/packages/db/81/f9f5c7fd68d80b8edff2a641a1c95ac4125356387d298374227040b8e1e8/ziglang-0.15.2-py3-none-manylinux_2_12_x86_64.manylinux2010_x86_64.musllinux_1_1_x86_64.whl
+              zig_sha256=806316453d1ede7174ed3fefb8e5348154629089c3bb5fe812dfd0e172fac130
+              zigbuild_url=https://files.pythonhosted.org/packages/95/2b/3fbef7958e7902b1c0119e1a028528df6a5d28bae11282ee550689cb8b59/cargo_zigbuild-0.23.4-py3-none-manylinux_2_5_x86_64.manylinux1_x86_64.whl
+              zigbuild_sha256=0a149a2a07b9513d422efa9cc23e1add9741f08abe86845fa418eaeb4cca7931
+              ;;
+            aarch64)
+              zig_url=https://files.pythonhosted.org/packages/53/7d/8c277208250ffa72f12a10f52dfc1d45850f08244093065b40c5f4628260/ziglang-0.15.2-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.musllinux_1_1_aarch64.whl
+              zig_sha256=edc0aa60ec964a4cf462d40f68d7de242ddf37fd9a80f2afaee6397059463230
+              zigbuild_url=https://files.pythonhosted.org/packages/40/c8/ac728b3e0bfe97a1d9e94e61402c0e4524689e1d2d6665009f0682f32ca2/cargo_zigbuild-0.23.4-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+              zigbuild_sha256=9f848addf9ca16e8df52b4a86eb41f7555bb4205aea117ad521f501a307129f5
+              ;;
+            *)
+              echo "no pinned Zig for $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          tools="$RUNNER_TEMP/zigbuild"
+          mkdir -p "$tools"
+          cd "$tools"
+          curl -fsSL -o zig.whl "$zig_url"
+          curl -fsSL -o cargo-zigbuild.whl "$zigbuild_url"
+          printf '%s  zig.whl\n%s  cargo-zigbuild.whl\n' "$zig_sha256" "$zigbuild_sha256" | sha256sum --check
+          unzip -q zig.whl -d zig
+          unzip -q cargo-zigbuild.whl -d cargo-zigbuild
+          chmod +x zig/ziglang/zig cargo-zigbuild/cargo_zigbuild-0.23.4.data/scripts/cargo-zigbuild
+          echo "$tools/zig/ziglang" >> "$GITHUB_PATH"
+          echo "$tools/cargo-zigbuild/cargo_zigbuild-0.23.4.data/scripts" >> "$GITHUB_PATH"
+          "$tools/zig/ziglang/zig" version
+          "$tools/cargo-zigbuild/cargo_zigbuild-0.23.4.data/scripts/cargo-zigbuild" --version
       - name: Build
         env:
           # Windows: link the C runtime statically (no VC++ redistributable).
           RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static' || '' }}
-        run: cargo build --locked --release --target ${{ matrix.target }}
+          GLIBC: ${{ matrix.glibc }}
+        run: |
+          if [ -n "$GLIBC" ]; then
+            # The glibc version as a suffix of the target; the binary still
+            # lands in target/<target>/release.
+            cargo zigbuild --locked --release --target "${{ matrix.target }}.$GLIBC"
+          else
+            cargo build --locked --release --target ${{ matrix.target }}
+          fi
       - name: Smoke test (usage exits 64)
         if: matrix.native
         run: |
@@ -120,16 +157,34 @@ jobs:
           set -e
           echo "exit code $code"
           [ "$code" = 64 ]
-      - name: Static on Linux
-        if: contains(matrix.target, 'musl')
+      - name: glibc ${{ matrix.glibc }} on Linux
+        if: matrix.glibc
+        env:
+          GLIBC: ${{ matrix.glibc }}
         run: |
           bin=target/${{ matrix.target }}/release/freedom-ipfsd
           file "$bin"
-          # A static binary has no program interpreter.
-          if readelf -l "$bin" | grep -q INTERP; then
-            echo "$bin is dynamically linked" >&2
+          # The highest glibc symbol version it needs is at most $GLIBC.
+          highest="$(objdump -T "$bin" | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/^GLIBC_//' | sort -uV | tail -n 1 || true)"
+          echo "highest GLIBC_ symbol version: $highest"
+          if [ -z "$highest" ] || [ "$(printf '%s\n%s\n' "$highest" "$GLIBC" | sort -V | tail -n 1)" != "$GLIBC" ]; then
+            echo "$bin needs glibc ${highest:-(none found)}, not $GLIBC at most" >&2
             exit 1
           fi
+          # The libraries it needs are glibc's and libgcc_s, and nothing else.
+          needed="$(readelf -d "$bin" | sed -n 's/.*(NEEDED).*\[\(.*\)\]$/\1/p')"
+          echo "needed: $(echo $needed)"
+          echo "$needed" | grep -qx 'libc.so.6' || { echo "$bin doesn't need libc.so.6" >&2; exit 1; }
+          for lib in $needed; do
+            case "$lib" in
+              libc.so.6 | libm.so.6 | libpthread.so.0 | libdl.so.2 | librt.so.1 | libutil.so.1 \
+                | ld-linux-x86-64.so.2 | ld-linux-aarch64.so.1 | libgcc_s.so.1) ;;
+              *)
+                echo "$bin needs $lib, which is neither glibc's nor libgcc_s" >&2
+                exit 1
+                ;;
+            esac
+          done
       - name: Package
         run: |
           name="freedom-ipfsd-${VERSION}-${{ matrix.asset }}"

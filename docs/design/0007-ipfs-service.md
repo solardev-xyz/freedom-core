@@ -1125,7 +1125,7 @@ Four options. A new repository is the user's decision; this design recommends th
 1. **This repository, as `services/freedom-ipfsd`, a separate Cargo workspace** (recommended).
    - **For:**
      - `fc-protocol` by path, so one frame and stream codec;
-     - one release workflow, with static musl Linux builds, which would also close #350's GLIBC floor if the C dependencies build there ([Open questions](#open-questions));
+     - one release workflow, with Linux builds against glibc 2.17, which also closes #350's GLIBC floor ([Open questions](#open-questions));
      - `SHA256SUMS` and attestations;
      - freedom-browser's fetch-and-verify script pattern, extended to a second asset;
      - the same lints, copied into its manifest, since workspace lints don't cross workspaces.
@@ -1387,7 +1387,7 @@ Every body already passes through main today, so the pipe adds one copy into the
 | `read-ahead` | one 64 KiB read in main, plus a two-chunk channel | a 128 KiB window per stream | about the same buffering, now bounded by credit |
 | `exit-text` | `Native event dispatcher exited with code N`, `Native gateway stopped unexpectedly` | `freedom-ipfs service exited` | in 502 bodies and logs only |
 | `stats-fields` | the event-queue fields in the diagnostics | dropped, with the queue; budget use added | the panel shows the rest |
-| `targets` | the add-on ships for darwin-arm64, linux-arm64, linux-x64 and win32-x64, and needs GLIBC ≥ 2.38 | the service builds for this repository's five targets, static on Linux | IPFS on darwin-x64 and older distributions (#350), if the musl build holds |
+| `targets` | the add-on ships for darwin-arm64, linux-arm64, linux-x64 and win32-x64, and needs GLIBC ≥ 2.38 | the service builds for the core's five platforms; on Linux, linked dynamically against glibc 2.17, Rust's own floor for these targets, below Electron's 2.25 | IPFS on darwin-x64, and on Linux wherever the browser runs (#350) |
 
 ## Implementation steps
 
@@ -1437,10 +1437,17 @@ Every body already passes through main today, so the pipe adds one copy into the
 4. **Routing under a proxy:** delegated only (recommended), or the light DHT through SOCKS, which costs many Tor circuits per query? And how many IPFS peers accept connections from Tor exits on their ports? That is to be measured before the setting ships.
 5. **Local providers:** the address policy refuses untrusted local targets by default. Should a user setting allow providers on the local network?
 6. **The musl build:** do SQLite and `ring` build statically for both Linux targets in this repository's release workflow? If not, the Linux builds need a glibc floor of their own, chosen with #350 in mind.
-   - **Answered: yes,** with musl's C compiler wrapper (`musl-tools`, `CC_<target>=musl-gcc`), which `release-ipfsd.yml` installs.
-     - The dry run of #144 built both targets static: `x86_64-unknown-linux-musl` static-pie, and `aarch64-unknown-linux-musl` statically linked. Both exit 64 for usage.
-     - On x86_64, the service's whole test suite passed against the musl build, SQLite stores and served content included.
-     - So no glibc floor is needed.
+   - **They build, but the Linux builds link glibc 2.17 instead,** for [Cost](#cost).
+     - The dry run of #144 built both targets static, with musl's C compiler wrapper, and on x86_64 the service's whole test suite passed against the musl build.
+     - But musl's allocator (mallocng) maps and unmaps each large buffer: each 256 KiB block SQLite reads, and the gateway's copies of it. The service spent its time in page faults and `munmap`, and a cached file streamed at about 75 % of the add-on's rate locally and 54 % on the hosted linux-x64 runner, under the 80 % gate.
+     - Replacing the static binary's allocator, for C code too, was measured:
+       - mimalloc reached about 130 %, but the C source its crate bundles has secure mode fail on 64 KiB pages, and lacks two upstream hardening fixes (ca77e6d, ef3867f), so shipping it meant maintaining patched C;
+       - jemalloc reached about 127 %, but bakes the build machine's page size in.
+     - **Decision:** link glibc dynamically, no newer than 2.17, Rust's own floor for these targets (`cargo-zigbuild --target <triple>.2.17`, pinned in `release-ipfsd.yml`).
+       - A cached file streams at about 132 % of the add-on's rate locally, with a peak RSS near 84 MiB, against musl's 49 MiB.
+       - The allocator is the system's, hardened and patched with it.
+       - Electron's binary needs GLIBC 2.25 at most, so the service runs wherever the browser does; the add-on needed 2.38 (#350). Distributions on musl, which only a static build would reach, can't run Electron.
+     - `release-ipfsd.yml` checks each Linux binary: its highest `GLIBC_` symbol version, the libraries it needs (glibc's and `libgcc_s` only), and its usage exit. On x86_64, the service's whole test suite passed on CentOS 7's glibc 2.17.
 7. **Upstream timing:** will freedom-ipfs take items 1–8? Until a release carries them, does the service pin a commit on a branch?
 8. **Streams in the core:** should 4.5's protocol version 2 for `freedom-cored` adopt these four frames as they are, with an explicit global credit added?
 9. **An OS memory limit:** should each service run under `RLIMIT_AS`, or a Windows job memory limit, as a backstop for what its budget can't see?
