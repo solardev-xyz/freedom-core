@@ -103,6 +103,39 @@ jobs:
       # --all-features: the test hooks (`testhooks`) the binary's tests use.
       - run: cargo test --locked --workspace --all-features
 
+  ipfsd-musl:
+    # The static Linux release builds' own code: mimalloc, their allocator
+    # (0007, open question 6), is compiled for musl targets only, so the
+    # jobs above never build it. Clippy and the tests on the target
+    # release-ipfsd.yml builds for linux-amd64, its binary under test.
+    name: freedom-ipfsd clippy + test (x86_64-unknown-linux-musl)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: services/freedom-ipfsd
+    env:
+      # SQLite, ring and mimalloc are C: cc's per-target variable names
+      # musl's C compiler wrapper, as in release-ipfsd.yml.
+      CC_x86_64_unknown_linux_musl: musl-gcc
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: |
+          rustup toolchain install
+          rustup target add x86_64-unknown-linux-musl
+      - name: musl's C compiler
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q musl-tools
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: services/freedom-ipfsd -> target
+      - run: cargo clippy --locked --workspace --all-targets --all-features --target x86_64-unknown-linux-musl -- -D warnings
+      # --all-features: the test hooks (`testhooks`) the binary's tests use.
+      - run: cargo test --locked --workspace --all-features --target x86_64-unknown-linux-musl
+
   ipfsd-deny:
     name: freedom-ipfsd cargo-deny
     runs-on: ubuntu-latest
