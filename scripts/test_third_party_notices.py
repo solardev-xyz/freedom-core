@@ -110,6 +110,52 @@ class Vendored(unittest.TestCase):
             notices.vendored_notices("svc")
 
 
+class Bundled(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name)
+        (self.dir / "notices").mkdir()
+        self.saved = dict(notices.WORKSPACES)
+        notices.WORKSPACES["svc"] = self.dir
+
+    def tearDown(self):
+        notices.WORKSPACES.clear()
+        notices.WORKSPACES.update(self.saved)
+        self.tmp.cleanup()
+
+    def write(self, manifest):
+        (self.dir / "notices" / "crates.json").write_text(notices.json.dumps(manifest))
+
+    def test_entries_name_paths_in_the_crate_and_vendor_nothing(self):
+        self.write({"x 1.0": {"bundled": ["c/LICENSE"], "note": "C code"},
+                    "y 2.0": {"repository": "https://example/repo", "commit": "abc",
+                              "files": ["repo/LICENSE"]}})
+        (self.dir / "notices" / "repo").mkdir()
+        (self.dir / "notices" / "repo" / "LICENSE").write_text("MIT")
+        self.assertEqual(notices.bundled_notices("svc"), {"x 1.0": ["c/LICENSE"]})
+        self.assertEqual(list(notices.vendored_notices("svc")), ["y 2.0"])
+
+    def test_a_malformed_entry_fails(self):
+        self.write({"x 1.0": {"bundled": []}})
+        with self.assertRaisesRegex(notices.NoticeError, "needs bundled paths"):
+            notices.bundled_notices("svc")
+        self.write({"x 1.0": {"bundled": ["c/LICENSE"], "files": ["repo/LICENSE"]}})
+        with self.assertRaisesRegex(notices.NoticeError, "vendors nothing"):
+            notices.bundled_notices("svc")
+
+    def test_files_must_be_in_the_crates_source(self):
+        crate = self.dir / "crate"
+        (crate / "c").mkdir(parents=True)
+        (crate / "c" / "LICENSE").write_text("MIT")
+        self.assertEqual(notices.bundled_files("x 1.0", crate, ["c/LICENSE"]),
+                         [(crate / "c" / "LICENSE").resolve()])
+        with self.assertRaisesRegex(notices.NoticeError, "is missing"):
+            notices.bundled_files("x 1.0", crate, ["c/COPYING"])
+        (self.dir / "LICENSE").write_text("elsewhere")
+        with self.assertRaisesRegex(notices.NoticeError, "outside its source"):
+            notices.bundled_files("x 1.0", crate, ["../LICENSE"])
+
+
 class Arguments(unittest.TestCase):
     def test_the_core_by_default(self):
         self.assertEqual(notices.parse_args([]), ("freedom-cored", False))

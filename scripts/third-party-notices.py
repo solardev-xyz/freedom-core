@@ -12,7 +12,10 @@ Apache-2.0, BSD-3-Clause, ...) require their notices to ship with it:
    crate from a git repository that keeps its license files only at the
    repository's root (a workspace member) gets the root's. A crate that
    ships none at all gets the texts its repository carries, vendored in its
-   workspace's notices/crates.json with their source and commit.
+   workspace's notices/crates.json with their source and commit. A crate
+   that compiles bundled native code whose license sits deeper in its
+   source (mimalloc's C library) gets that file too, named there as
+   `bundled`.
 2. The Rust toolchain's runtime: the standard library's out-of-tree crates
    (from the toolchain's rust-src), compiler-builtins, and on Linux the
    statically linked musl libc and LLVM libunwind/crt objects (texts in
@@ -337,6 +340,8 @@ def vendored_notices(binary):
         return {}
     vendored = {}
     for key, entry in json.loads(manifest.read_text(encoding="utf-8")).items():
+        if "bundled" in entry:
+            continue
         if not entry.get("repository") or not entry.get("commit") or not entry.get("files"):
             raise NoticeError(f"notices/crates.json: {key} needs a repository, a commit and files")
         files = [directory / file for file in entry["files"]]
@@ -345,6 +350,44 @@ def vendored_notices(binary):
                 raise NoticeError(f"notices/crates.json: {key}: {file.name} is missing")
         vendored[key] = files
     return vendored
+
+
+def bundled_notices(binary):
+    """`notices/crates.json` entries for crates that ship their own license
+    files but also compile bundled native code under a license of its own,
+    deeper in their source: as `"<name> <version>"`, those files' paths
+    (`bundled`, relative to the crate's source). Such an entry names nothing
+    else to vendor."""
+    manifest = WORKSPACES[binary] / "notices" / "crates.json"
+    if not manifest.is_file():
+        return {}
+    bundled = {}
+    for key, entry in json.loads(manifest.read_text(encoding="utf-8")).items():
+        if "bundled" not in entry:
+            continue
+        paths = entry["bundled"]
+        if entry.get("repository") or entry.get("commit") or entry.get("files"):
+            raise NoticeError(f"notices/crates.json: {key} is bundled: it vendors nothing")
+        if not isinstance(paths, list) or not paths or not all(
+            isinstance(path, str) and path for path in paths
+        ):
+            raise NoticeError(f"notices/crates.json: {key} needs bundled paths")
+        bundled[key] = paths
+    return bundled
+
+
+def bundled_files(label, directory, paths):
+    """The files at `paths` in a crate's source `directory`, each of which
+    must be there, inside it."""
+    files = []
+    for path in paths:
+        file = (directory / path).resolve()
+        if not file.is_relative_to(directory.resolve()):
+            raise NoticeError(f"{label}: bundled {path} is outside its source")
+        if not file.is_file():
+            raise NoticeError(f"{label}: bundled {path} is missing")
+        files.append(file)
+    return files
 
 
 def header(binary):
@@ -369,6 +412,7 @@ def generate(binary=BINARY):
             crates[(package["name"], package["version"])] = package
     sysroot, source = toolchain_sources()
     vendored = vendored_notices(binary)
+    bundled = bundled_notices(binary)
     lines = [*header(binary), "", "Crates:"]
     texts = {}  # text -> [labels]
 
@@ -386,11 +430,17 @@ def generate(binary=BINARY):
             if (package.get("source") or "").startswith("git+") else None
         )
         add(label, license_files(label, directory, package.get("license_file"), checkout,
-                                 vendored.pop(label, None)))
+                                 vendored.pop(label, None))
+            + bundled_files(label, directory, bundled.pop(label, [])))
     if vendored:
         raise NoticeError(
             "notices/crates.json vendors texts for crates the binary doesn't ship: "
             + ", ".join(sorted(vendored))
+        )
+    if bundled:
+        raise NoticeError(
+            "notices/crates.json names bundled texts for crates the binary doesn't ship: "
+            + ", ".join(sorted(bundled))
         )
     offered = [
         crates[key] for key in sorted(crates) if needs_source_offer(crates[key].get("license"))
