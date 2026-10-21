@@ -110,6 +110,19 @@ class Vendored(unittest.TestCase):
             notices.vendored_notices("svc")
 
 
+class Binaries(unittest.TestCase):
+    def test_every_binary_names_its_targets_and_native_code(self):
+        self.assertEqual(set(notices.TARGETS), set(notices.WORKSPACES))
+        self.assertEqual(set(notices.NATIVE), set(notices.WORKSPACES))
+
+    def test_the_service_links_glibc_on_linux_and_the_core_musl(self):
+        linux = lambda binary: [t for t in notices.TARGETS[binary] if "linux" in t]
+        self.assertEqual(linux("freedom-ipfsd"),
+                         ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"])
+        self.assertEqual(linux(notices.BINARY),
+                         ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"])
+
+
 class Arguments(unittest.TestCase):
     def test_the_core_by_default(self):
         self.assertEqual(notices.parse_args([]), ("freedom-cored", False))

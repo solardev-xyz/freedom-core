@@ -21,6 +21,7 @@ Exceptions, also noted in `crates.json`:
 | `base256emoji` 1.0.2, `cid` 0.11.3, `futures-bounded` 0.2.4, `if-watch` 3.2.2 | Neither the crate nor its repository carries a license text, at the crate's commit or on its default branch. Each declares MIT (`if-watch`: MIT OR Apache-2.0), so SPDX's MIT text stands in: `spdx/MIT.txt`, from spdx/license-list-data v3.29.0 (`31ba1a50e5397e00a304dbadc76531740e89ee48`). |
 | `yamux` 0.13.10 | The commit the crate records isn't in its repository; the texts are the release tag `yamux-v0.13.10`'s. |
 
-The Rust toolchain's own runtime notices (musl, LLVM's libunwind and
-compiler-rt) come from the repository's top-level `notices/`, as for
-freedom-cored.
+The runtime notices of the Linux builds, which link glibc 2.17 dynamically
+through Zig (glibc's startup and `libc_nonshared` objects, and LLVM's
+libunwind), come from the repository's top-level `notices/`, as
+freedom-cored's do.

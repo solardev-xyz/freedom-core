@@ -1,0 +1,49 @@
+The GNU C Library's startup code and libc_nonshared objects, as Zig 0.15.2
+builds them from the glibc sources it bundles for a glibc 2.17 target, and
+links them statically into freedom-ipfsd's Linux binaries (x86_64 and
+aarch64):
+
+- Scrt1.o, from sysdeps/x86_64/start.S (Copyright (C) 2001-2025) and
+  sysdeps/aarch64/start.S (Copyright (C) 1995-2025);
+- __libc_csu_init and __libc_csu_fini, from csu/elf-init-2.33.c
+  (Copyright (C) 2002-2020);
+- stat64, fstat64 and lstat64, from io/stat64-2.32.c, io/fstat64-2.32.c and
+  io/lstat64-2.32.c (Copyright (C) 1996-2020);
+- __pthread_atfork (aarch64), from sysdeps/pthread/pthread_atfork.c
+  (Copyright (C) 2002-2021).
+
+Each copyright is held by the Free Software Foundation, Inc., and each file
+carries this notice:
+
+This file is part of the GNU C Library.
+
+The GNU C Library is free software; you can redistribute it and/or
+modify it under the terms of the GNU Lesser General Public
+License as published by the Free Software Foundation; either
+version 2.1 of the License, or (at your option) any later version.
+
+In addition to the permissions in the GNU Lesser General Public
+License, the Free Software Foundation gives you unlimited
+permission to link the compiled version of this file with other
+programs, and to distribute those programs without any restriction
+coming from the use of this file. (The GNU Lesser General Public
+License restrictions do apply in other respects; for example, they
+cover modification of the file, and distribution when not linked
+into another program.)
+
+Note that people who make modified versions of this file are not
+obligated to grant this special exception for their modified
+versions; it is their choice whether to do so. The GNU Lesser
+General Public License gives permission to release a modified
+version without this exception; this exception also makes it
+possible to release a modified version which carries forward this
+exception.
+
+The GNU C Library is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+Lesser General Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public
+License along with the GNU C Library; if not, see
+<https://www.gnu.org/licenses/>.

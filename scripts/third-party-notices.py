@@ -13,12 +13,15 @@ Apache-2.0, BSD-3-Clause, ...) require their notices to ship with it:
    repository's root (a workspace member) gets the root's. A crate that
    ships none at all gets the texts its repository carries, vendored in its
    workspace's notices/crates.json with their source and commit.
-2. The Rust toolchain's runtime: the standard library's out-of-tree crates
-   (from the toolchain's rust-src), compiler-builtins, and on Linux the
-   statically linked musl libc and LLVM libunwind/crt objects (texts in
-   notices/, reviewed for TOOLCHAIN). The Rust project's own notice file for
-   the standard library ships next to it, copied from the toolchain by the
-   release workflow as THIRD-PARTY-NOTICES-rust-std.html.
+2. The runtime: the standard library's out-of-tree crates (from the
+   toolchain's rust-src), compiler-builtins, and the native code linked
+   statically on Linux (texts in notices/, reviewed for TOOLCHAIN). For
+   freedom-cored, static musl: musl libc and LLVM's libunwind and crt
+   objects. For freedom-ipfsd, glibc 2.17 linked dynamically through Zig:
+   glibc's startup and libc_nonshared objects and LLVM's libunwind, which
+   Zig builds from the sources it bundles. The Rust project's own notice
+   file for the standard library ships next to it, copied from the
+   toolchain by the release workflow as THIRD-PARTY-NOTICES-rust-std.html.
 
 A new proc-macro or build script can still emit code into the binary; when
 one is added, check where its generated code comes from.
@@ -47,19 +50,31 @@ WORKSPACES = {
     BINARY: ROOT,
     "freedom-ipfsd": ROOT / "services" / "freedom-ipfsd",
 }
-# Every target the release workflow builds.
-TARGETS = [
-    "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
-    "x86_64-unknown-linux-musl",
-    "aarch64-unknown-linux-musl",
-    "x86_64-pc-windows-msvc",
-]
+# Every target each binary's release workflow builds: release.yml for the
+# core, release-ipfsd.yml for the service, whose Linux builds link glibc 2.17
+# dynamically (design 0007, open question 6).
+TARGETS = {
+    BINARY: [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl",
+        "x86_64-pc-windows-msvc",
+    ],
+    "freedom-ipfsd": [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+    ],
+}
 LICENSE_PREFIXES = ("license", "licence", "copying", "notice", "unlicense", "copyright")
 
 # The toolchain the runtime notices below were reviewed for. When
 # rust-toolchain.toml moves, re-check them: the musl version Rust bundles,
-# the LLVM commit, and the standard library's crates.
+# the LLVM commit, and the standard library's crates. When release-ipfsd.yml
+# moves to another Zig, re-check what it links (NATIVE's freedom-ipfsd entry).
 TOOLCHAIN = "1.99"
 # Out-of-tree crates the standard library links on the release targets
 # (rust-src library/vendor).
@@ -69,26 +84,48 @@ STD_CRATES = [
 ]
 # Vendored crates whose std libraries never end up in a binary.
 STD_NOT_LINKED = {"getopts", "rustc-literal-escaper"}
-# Native code statically linked on some targets: (label, license, text).
-# Windows links Microsoft's C runtime statically under Microsoft's
-# redistribution terms; macOS links its system libraries dynamically.
-NATIVE = [
-    (
-        "musl libc 1.2.5 (C library; Linux)",
-        "MIT",
-        "notices/musl-1.2.5-COPYRIGHT",
-    ),
-    (
-        "LLVM libunwind (unwinder; Linux)",
-        "Apache-2.0 WITH LLVM-exception",
-        "rust-src:src/llvm-project/libunwind/LICENSE.TXT",
-    ),
-    (
-        "LLVM compiler-rt crtbegin/crtend (startup objects; Linux)",
-        "Apache-2.0 WITH LLVM-exception",
-        "notices/llvm-compiler-rt-LICENSE.TXT",
-    ),
-]
+# Native code each binary statically links on some targets: (label,
+# license, text). Windows links Microsoft's C runtime statically under
+# Microsoft's redistribution terms; macOS links its system libraries
+# dynamically, as freedom-ipfsd's Linux builds link glibc's.
+NATIVE = {
+    BINARY: [
+        (
+            "musl libc 1.2.5 (C library; Linux)",
+            "MIT",
+            "notices/musl-1.2.5-COPYRIGHT",
+        ),
+        (
+            "LLVM libunwind (unwinder; Linux)",
+            "Apache-2.0 WITH LLVM-exception",
+            "rust-src:src/llvm-project/libunwind/LICENSE.TXT",
+        ),
+        (
+            "LLVM compiler-rt crtbegin/crtend (startup objects; Linux)",
+            "Apache-2.0 WITH LLVM-exception",
+            "notices/llvm-compiler-rt-LICENSE.TXT",
+        ),
+    ],
+    # What Zig 0.15.2 links statically into a glibc 2.17 build, found in the
+    # binaries' symbols: glibc's startup object and the libc_nonshared
+    # members the binary needs, and LLVM's libunwind in place of libgcc_s.
+    # Zig also passes its compiler_rt and UBSan runtime to the linker, but
+    # nothing of either is linked. Zig's libunwind license is LLVM's, the
+    # same text as rust-src's.
+    "freedom-ipfsd": [
+        (
+            "GNU C Library startup and libc_nonshared objects, built by Zig "
+            "0.15.2 for glibc 2.17 (Linux)",
+            "LGPL-2.1-or-later, with the GNU C Library's exception for linking",
+            "notices/glibc-2.17-startup-NOTICE",
+        ),
+        (
+            "LLVM libunwind, Zig 0.15.2's copy (unwinder; Linux)",
+            "Apache-2.0 WITH LLVM-exception",
+            "rust-src:src/llvm-project/libunwind/LICENSE.TXT",
+        ),
+    ],
+}
 
 
 # Licenses whose terms, for an executable, also require telling recipients
@@ -364,7 +401,7 @@ def header(binary):
 
 def generate(binary=BINARY):
     crates = {}
-    for target in TARGETS:
+    for target in TARGETS[binary]:
         for package in shipped_packages(target, binary):
             crates[(package["name"], package["version"])] = package
     sysroot, source = toolchain_sources()
@@ -409,7 +446,7 @@ def generate(binary=BINARY):
         label = f"{name} {version}"
         lines.append(f"- {label} (Rust standard library): {expression}")
         add(label, license_files(label, directory, declared))
-    for (label, expression, text) in NATIVE:
+    for (label, expression, text) in NATIVE[binary]:
         lines.append(f"- {label}: {expression}")
         path = source / text[len("rust-src:"):] if text.startswith("rust-src:") else ROOT / text
         if not path.is_file():

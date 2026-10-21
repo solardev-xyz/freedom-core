@@ -125,20 +125,25 @@ publish job that runs no repository code.
    `git tag ipfsd-vX.Y.Z <commit> && git push origin ipfsd-vX.Y.Z`. Only a
    tag equal to `ipfsd-v` + that version publishes.
 3. **The workflow** builds every target, smoke-tests the four native builds
-   (usage exits 64), and checks that the Linux binaries have no program
-   interpreter. Then the publish job assembles `SHA256SUMS`, attests every
-   archive and `SHA256SUMS`, and publishes.
-   - **Linux is static musl.** SQLite and `ring` are C, so the build jobs
-     install `musl-tools` and set `CC_<target>=musl-gcc`. The C code compiles
-     against the distribution's musl headers. rustc links the toolchain's
-     bundled musl, which is the version THIRD-PARTY-NOTICES lists.
+   (usage exits 64), and checks that each Linux binary needs glibc 2.17 at
+   most and no library but glibc's and `libgcc_s`. Then the publish job
+   assembles `SHA256SUMS`, attests every archive and `SHA256SUMS`, and
+   publishes.
+   - **Linux links glibc 2.17 dynamically** (design 0007, open question 6).
+     `cargo-zigbuild` builds with `--target <triple>.2.17`: Zig compiles the
+     C code (SQLite, `ring`, BLAKE3) and links against its copy of glibc
+     2.17's symbols, adding glibc's startup objects and LLVM's libunwind,
+     which THIRD-PARTY-NOTICES lists. The job installs Zig 0.15.2 and
+     cargo-zigbuild 0.23.4 from their PyPI wheels, pinned by sha256. When
+     the Zig pin moves, re-check what it links statically (`NATIVE` in
+     `scripts/third-party-notices.py`).
 
    | Asset | Target |
    |---|---|
    | `freedom-ipfsd-vX.Y.Z-darwin-arm64.tar.gz` | `aarch64-apple-darwin` |
    | `freedom-ipfsd-vX.Y.Z-darwin-amd64.tar.gz` | `x86_64-apple-darwin` |
-   | `freedom-ipfsd-vX.Y.Z-linux-amd64.tar.gz` | `x86_64-unknown-linux-musl` (static) |
-   | `freedom-ipfsd-vX.Y.Z-linux-arm64.tar.gz` | `aarch64-unknown-linux-musl` (static) |
+   | `freedom-ipfsd-vX.Y.Z-linux-amd64.tar.gz` | `x86_64-unknown-linux-gnu` (glibc ≥ 2.17) |
+   | `freedom-ipfsd-vX.Y.Z-linux-arm64.tar.gz` | `aarch64-unknown-linux-gnu` (glibc ≥ 2.17) |
    | `freedom-ipfsd-vX.Y.Z-windows-amd64.zip` | `x86_64-pc-windows-msvc` (static CRT) |
 
 4. **Pin it in freedom-browser**, as for the core: the tag, plus the SHA-256
