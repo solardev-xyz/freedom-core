@@ -171,6 +171,19 @@ jobs:
             echo "$bin needs glibc ${highest:-(none found)}, not $GLIBC at most" >&2
             exit 1
           fi
+          # Exactly one program interpreter: the architecture's standard
+          # glibc loader, where every distribution has it.
+          case "${{ matrix.target }}" in
+            x86_64-*) want=/lib64/ld-linux-x86-64.so.2 ;;
+            aarch64-*) want=/lib/ld-linux-aarch64.so.1 ;;
+            *) echo "no standard loader known for ${{ matrix.target }}" >&2; exit 1 ;;
+          esac
+          interp="$(readelf -l "$bin" | sed -n 's/.*\[Requesting program interpreter: \(.*\)\]$/\1/p')"
+          echo "interpreter: ${interp:-(none)}"
+          if [ "$(printf '%s' "$interp" | grep -c '')" != 1 ] || [ "$interp" != "$want" ]; then
+            echo "$bin's interpreter is ${interp:-(none)}, not $want" >&2
+            exit 1
+          fi
           # The libraries it needs are glibc's and libgcc_s, and nothing else.
           needed="$(readelf -d "$bin" | sed -n 's/.*(NEEDED).*\[\(.*\)\]$/\1/p')"
           echo "needed: $(echo $needed)"
