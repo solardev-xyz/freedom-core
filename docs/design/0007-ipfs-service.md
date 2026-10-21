@@ -845,9 +845,18 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   - **onion:** the last label is `onion`, whether in a URL host or in `/dns`, `/dns4`, `/dns6` or `/dnsaddr`; and every `/onion3` (or `/onion`) multiaddr;
   - **IP literal:** a URL host, or an `/ip4` or `/ip6` component;
   - **name:** everything else.
-- **A multiaddr that is dialed** starts with `/ip4`, `/ip6`, `/dns`, `/dns4`, `/dns6`, `/dnsaddr`, `/onion3` or `/onion`. Any other first component is refused:
-  - `/ip6zone` scopes an address to one local link;
-  - `/unix` and `/memory` aren't network targets.
+- **A multiaddr that is dialed** is checked whole, against the shapes the transports support. It has exactly one host component, and it comes first:
+  - `/ip4`, `/ip6`, `/dns`, `/dns4` or `/dns6`, then `/tcp/<port>`, optionally followed by `/tls`, `/ws`, `/wss` or `/tls/ws`;
+  - `/ip4`, `/ip6`, `/dns`, `/dns4` or `/dns6`, then `/udp/<port>/quic-v1`;
+  - `/dnsaddr/<name>`, which expansion replaces before any dial;
+  - `/onion3/<address>:<port>` (or `/onion`);
+  - each optionally ending in one `/p2p/<peer>`.
+
+  Every other sequence is refused, whatever its first component:
+  - **A second host component anywhere.** libp2p's TCP transport dials the *last* IP and port in a multiaddr, and its DNS layer resolves *every* DNS component. So `/ip4/8.8.8.8/ip4/127.0.0.1/tcp/8080` would be checked as `8.8.8.8` while it connects to loopback, and `/ip4/8.8.8.8/dns/x.onion/tcp/80` would hide an onion name. The checked target must be the one the transport dials.
+  - **`/ip6zone`, anywhere:** it scopes an address to one local link.
+  - **`/unix` and `/memory`, anywhere:** they aren't network targets.
+  - **`/ipcidr`, `/p2p-circuit`, and any component the shapes above don't name.**
 
 **The policy:**
 - **Configured targets** are the delegated routers and DoH endpoint in `ipfs.start`, and Arti's endpoint. They are exempt from the address policy, by exact host (and port), including when one is local.
@@ -1304,7 +1313,8 @@ As 0006's 4.7 did, before anything moves:
     - a refresh that drops a prefix doesn't forget it;
     - 6rd, 6over4 and 6a44 addresses with private embedded addresses (`2a00:1:c0a8:101::1`, `2a00:1::c0a8:101`) are judged as IPv6 alone, and pass;
     - a DNS64 answer `64:ff9b::7f00:1` for an ordinary name, locally and through `RESOLVE`: refused, and no connection is made;
-    - `/ip6zone/eth0/ip6/fe80::1` and `/unix/…` multiaddrs are refused.
+    - `/ip6zone/eth0/ip6/fe80::1` and `/unix/…` multiaddrs are refused;
+    - **a second host component:** `/ip4/8.8.8.8/ip4/127.0.0.1/tcp/8080`, the same with `/ipcidr/32`, `/p2p-circuit` or `/ip6zone/eth0` before the private pair, and `/ip4/8.8.8.8/dns/x.onion/tcp/80`, are refused, and a loopback canary sees no connection.
   - **Failures:** an unavailable proxy, a proxy that refuses `RESOLVE` (the attempt fails, and no name is sent in `CONNECT`), and an unsupported transport in `socks5` mode.
   - **A SOCKS fixture with `RESOLVE`:**
     - a name that looks acceptable but resolves to a loopback or private address is refused, and no `CONNECT` is sent;
