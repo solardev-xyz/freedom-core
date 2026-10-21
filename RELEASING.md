@@ -104,3 +104,54 @@ gh attestation verify freedom-cored-vX.Y.Z-linux-amd64.tar.gz \
   but says nothing about what built them.
 - **freedom-browser should verify the provenance** of what it fetches, as
   well as the pinned `SHA256SUMS` digest. That is a freedom-browser change.
+
+# Releasing freedom-ipfsd
+
+`services/freedom-ipfsd` (design 0007) is released on its own tags,
+`ipfsd-vX.Y.Z`, by `.github/workflows/release-ipfsd.yml`. That workflow has
+the same shape as freedom-cored's: build jobs with a read-only token, and one
+publish job that runs no repository code.
+
+0. **Notices.** `services/freedom-ipfsd/THIRD-PARTY-NOTICES` is generated and
+   committed:
+   `(cd services/freedom-ipfsd && cargo fetch --locked) && python3 scripts/third-party-notices.py --binary freedom-ipfsd`.
+   CI fails when it is stale. The archives also ship
+   `THIRD-PARTY-NOTICES-rust-std.html` from the toolchain that built them.
+1. **Bump the version** in a PR: `version` in
+   `services/freedom-ipfsd/Cargo.toml`, and its own `Cargo.lock`
+   (`cargo check` in `services/freedom-ipfsd`). `ipfs.hello` reports it as
+   `service_version`, and it is independent of the core's version.
+2. **Tag the merged commit on `main`** once its CI is green:
+   `git tag ipfsd-vX.Y.Z <commit> && git push origin ipfsd-vX.Y.Z`. Only a
+   tag equal to `ipfsd-v` + that version publishes.
+3. **The workflow** builds every target, smoke-tests the four native builds
+   (usage exits 64), and checks that the Linux binaries have no program
+   interpreter. Then the publish job assembles `SHA256SUMS`, attests every
+   archive and `SHA256SUMS`, and publishes.
+   - **Linux is static musl.** SQLite and `ring` are C, so the build jobs
+     install `musl-tools` and set `CC_<target>=musl-gcc`. The C code compiles
+     against the distribution's musl headers. rustc links the toolchain's
+     bundled musl, which is the version THIRD-PARTY-NOTICES lists.
+
+   | Asset | Target |
+   |---|---|
+   | `freedom-ipfsd-vX.Y.Z-darwin-arm64.tar.gz` | `aarch64-apple-darwin` |
+   | `freedom-ipfsd-vX.Y.Z-darwin-amd64.tar.gz` | `x86_64-apple-darwin` |
+   | `freedom-ipfsd-vX.Y.Z-linux-amd64.tar.gz` | `x86_64-unknown-linux-musl` (static) |
+   | `freedom-ipfsd-vX.Y.Z-linux-arm64.tar.gz` | `aarch64-unknown-linux-musl` (static) |
+   | `freedom-ipfsd-vX.Y.Z-windows-amd64.zip` | `x86_64-pc-windows-msvc` (static CRT) |
+
+4. **Pin it in freedom-browser**, as for the core: the tag, plus the SHA-256
+   of the release's `SHA256SUMS`. The fetch script for the second asset is
+   0007's step 6.
+
+Failed runs, immutable releases and the tag ruleset work as for the core
+(above). Verify a download's provenance with:
+
+```sh
+gh attestation verify freedom-ipfsd-vX.Y.Z-linux-amd64.tar.gz \
+  --repo solardev-xyz/freedom-core \
+  --signer-workflow solardev-xyz/freedom-core/.github/workflows/release-ipfsd.yml \
+  --source-ref refs/tags/ipfsd-vX.Y.Z \
+  --deny-self-hosted-runners
+```
