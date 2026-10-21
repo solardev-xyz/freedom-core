@@ -175,11 +175,12 @@ Electron main (profile P)
 - **Errors:**
   - any other locking error exits 74 (`storage`);
   - so does a data or lock directory on a network filesystem, under 0001's qualification rules. SQLite's WAL mode isn't safe there in any case.
-- **`hold-lock`:** `freedom-ipfsd hold-lock --data-dir … --lock-dir …` holds the gate until its stdin closes, as the core's does. Profile delete, profile reset and `ipfs:reset` hold it while they remove the directory.
+- **`hold-lock`:** `freedom-ipfsd hold-lock --data-dir … --lock-dir …` holds the gate until its stdin closes, as the core's does. Profile delete holds it while it removes the directory. freedom-browser has no profile reset and no IPFS reset; one added later holds it too.
 - **What the lock guarantees, and what it doesn't:**
   - **It excludes only writers that take it:** the service, `hold-lock`, and the dev add-on fallback, which holds `hold-lock` for its whole lifetime ([Rollback](#rollback)).
   - **An older build** runs the add-on with no gate. Old and new builds sharing one data directory, for example through `FREEDOM_IPFS_DATA` or two profiles pointed at one directory, are unsupported.
   - **The profile lock** only excludes two owners of the same profile, as today.
+  - **Until the default switches, only development builds take it.** Only they can run the service, so only there can two kinds of writer share a directory. A packaged build runs the add-on alone: there, a gate would exclude no writer, but would bring [`network-fs` and `data-dir-lock`](#deviations) to add-on users early. The switch makes the gate unconditional, for the service, profile delete and the add-on fallback alike.
 - **Why not Myotis's model** (a C supervisor, an owner record, an Electron-as-Node child):
   - Myotis needs a JavaScript host for its add-on, and its directory holds sync state whose interrupted generation must be preserved.
   - Here the binary is plain Rust. The data is a cache in SQLite's WAL mode, so a kill costs at most the last writes.
