@@ -648,9 +648,11 @@ Upstream's constants are per instance, and some limit bookkeeping rather than wo
     - The 10 s start with each read of the body, and that read's fetches share them.
     - Upstream gives a body no typed error, so the service tells a refusal by its text (`memory budget`).
   - **background work** is dropped at once.
-- **What it doesn't charge:** the disk store's file, which lives on disk, not in memory; a stream's chunk while it is sent; and allocator and library overhead it can't see.
-  - A body's chunk is a 64 KiB copy upstream makes of its block's bytes, not a view of the block, so it holds no reservation. A stream holds one while it is sent: 32 MiB at most across the 512 admitted requests.
-  - Upstream's fix is chunks that are zero-copy views of their block (`ChargedBytes`), which keep its reservation until the last of them is dropped.
+- **What it doesn't charge:** the disk store's file, which lives on disk, not in memory; a body's chunk while the service sends it; and allocator and library overhead it can't see.
+  - A body's chunks are copies upstream makes, not views of its blocks, so they hold no reservation. The service holds one per stream while it is sent.
+  - **A file's chunk** carries at most 64 KiB of payload, assembled from its blocks' bytes. Its buffer can be larger: it keeps the spare capacity the assembly grew into, about 96 KiB for a 64 KiB chunk built from two 48 KiB leaves. So the files' chunks come to at most 32 MiB of payload across the 512 admitted requests, and more in memory.
+  - **A directory listing** is rendered whole and sent as one chunk. Its size follows the directory's links, not the 64 KiB: a directory of 1,024 links with 100-byte names renders to about 320 KiB.
+  - Upstream's fix is chunks that are zero-copy views of their blocks (`ChargedBytes`), which keep their reservation until the last of them is dropped, and listings that are reserved as they are rendered.
 - **What a store's `max_bytes` means:** a target for block data that drives LRU eviction.
   - On disk it bounds nothing hard. Retained blocks and metadata can pass it, and the file's size follows it only loosely.
   - In memory, the hard bound is the page cap above, and `max_bytes` is the eviction target inside it. Blocks that are retained while being streamed can't be evicted, so when the cap is reached, new blocks go uncached rather than the store growing.
