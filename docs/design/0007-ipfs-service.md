@@ -785,7 +785,11 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   - SOCKS5, once its `socks` feature is on.
     - With `socks5://` rather than `socks5h://`, the client resolves the name with its own resolver, which can be replaced (`ClientBuilder::dns_resolver`), and hands the proxy an IP.
     - TLS SNI and `Host` still use the URL's name.
-    - **One trap:** in reqwest 0.12.28's SOCKS connector, a resolver that succeeds with no address makes the connector keep the original name and send it to the proxy unresolved (`connect.rs`, around lines 1750–1765). So an ordinary name must never resolve to an empty success ([The resolver contract](#the-resolver-contract)).
+    - **One trap:** in reqwest 0.12.28's SOCKS connector, a resolver that succeeds with no address makes the connector keep the original name and send it to the proxy unresolved (`connect.rs`, lines 1869–1885). So an ordinary name must never resolve to an empty success ([The resolver contract](#the-resolver-contract)).
+    - **A second trap:** with hyper-util 0.1.20 and older, a resolved IPv6 address reaches the proxy as a domain, `"[2001:db8::1]"`, because the bracketed host isn't parsed as an address. hyper-util 0.1.21 sends it as an IPv6 address. The network code requires hyper-util 0.1.21 or later.
+    - **IP-literal hosts:** under `socks5://` they reach the client's resolver, IPv6 bracketed. Without a proxy they never do: hyper-util's HTTP connector connects to a literal directly. So the gate checks a literal URL host itself, in the redirect loop ([hop check 4](#the-gate)), not only in the resolver.
+    - **The resolver sees a name, never its port.** An exemption by exact host and port can't be expressed there, so configured targets are reached through clients of their own ([The gate](#the-gate)).
+    - **The connector can't see the destination:** `ClientBuilder::connector_layer` receives it as an opaque type, and under `socks5h://` the resolver isn't called either. A check on an onion client's destination sits in its own send path ([The onion route](#the-onion-route)).
   - Every client must be built with an explicit proxy or with `no_proxy()`. Today none sets either (`ns:828`, `rt:1807`, `rv:11132`), so the environment decides.
   - Redirects can be left to the service: with `Policy::none()`, every 3xx comes back to the caller, which decides each hop itself.
 - **libp2p 0.56:**
@@ -804,6 +808,7 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
 ### Modes
 
 - **`direct`, the default:** today's transports, behind [the gate](#the-gate). The environment's proxy variables no longer apply (deviation `env-proxy`).
+  - **The gate comes to `direct` with NAT64 discovery.** Without it, every IPv6 target outside the fixed forms would be refused ([Network-specific NAT64 prefixes](#network-specific-nat64-prefixes)). So until the service learns them, `direct` keeps today's transports, ungated, and the deviations `address-policy` and `redirect-gate` apply to `socks5` only. `socks5` needs no discovery, and ships first ([Implementation steps](#implementation-steps), step 8).
 - **`socks5 { ip, port }`:** all of the service's traffic goes through the proxy.
   - **The endpoint is an IP literal,** so reaching the proxy needs no DNS. The service never resolves the proxy's name.
   - **Ordinary names:**
@@ -811,8 +816,10 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
     - Each answer passes [the gate](#the-gate), and the connection goes to a checked address, as an IP literal in SOCKS `CONNECT`.
     - TLS SNI and HTTP `Host` keep the name.
     - A failed lookup, an empty answer, or an answer whose every address is refused is an error ([The resolver contract](#the-resolver-contract)).
+    - `RESOLVE` answers one address and can't ask for a family, so `/dns4` and `/dns6` resolve as `/dns` does.
   - **Onion names** take a separate, explicitly authorized route, and are handed to the proxy as names ([The onion route](#the-onion-route)).
   - **HTTP:** delegated routing, DoH and HTTP providers, all through the proxy this way.
+  - **Configured endpoints too:** a router on the local machine or network is reached through the proxy, and fails there unless the proxy can reach it. Nothing is direct in this mode.
   - **Bitswap:** TCP and WebSocket through the SOCKS transport. QUIC and hickory are off.
   - **Routing:** `delegated` by default, since the light DHT dials dozens of peers per query, each through Tor.
   - **Fails closed:**
@@ -840,6 +847,7 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
 
 **The policy:**
 - **Configured targets** are the delegated routers and DoH endpoint in `ipfs.start`, and Arti's endpoint. They are exempt from the address policy, by exact host (and port), including when one is local.
+  - An HTTP client's resolver sees a name, never its port, so configured targets are reached through clients of their own, whose resolver doesn't filter but still never answers empty. The redirect loop picks the client for each hop from its scheme, host and port: a configured host on another port, reached by a redirect, is untrusted.
 - **Untrusted targets** are everything learned from the network:
   - provider records and their multiaddrs;
   - HTTP provider URLs built from them;
@@ -869,10 +877,16 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
    - the connection is pinned to one that passed: `connect()` in `direct` mode, a SOCKS `CONNECT` to that IP literal in `socks5` mode.
 
    A name whose answers change between checks can't move a connection, because the address that was checked is the address connected to. Each new connection resolves and checks again.
+
+   **The check wraps the transport,** not the service's dial sites, so it also covers the dials libp2p makes itself (Kademlia's and identify's). In `direct` mode it sits twice: outside libp2p's DNS layer, asking the capability and classifying the target before any query starts, and below it, checking each resolved address before `connect()`.
+
+   **Candidate choice knows the transports.** Where providers' addresses are ranked and cut to two per peer, addresses the policy can't dial (QUIC in `socks5` mode, refused targets) are dropped first, so a peer never keeps only addresses that can't be used. Provider URLs are built from a multiaddr's parsed components, never by joining its text.
 4. **On every HTTP redirect hop:**
    - The service follows redirects itself: every client is built with `Policy::none()`.
    - For each hop, its own loop classifies the `Location` target, runs the gate, picks the client again (the ordinary one, or in `socks5` mode the [onion route](#the-onion-route)), and counts the hop against that client's acceptance.
    - That covers delegated routing, DoH and providers. A refused hop fails the attempt.
+   - **Schemes:** a `Location` must be `http` or `https`; any other scheme is refused. HTTPS to HTTP is followed, as reqwest's default acceptance follows it today (parity), and like every hop it sends no `Referer`.
+   - **IP-literal hosts are checked by the loop itself:** without a proxy, a literal never reaches the client's resolver.
    - **Each hop is a fresh request,** built from the operation's own fixed headers, never by copying the previous hop's. Because the service follows redirects itself, it doesn't rely on reqwest's header stripping:
      - The service sends no credentials. A configured endpoint can't carry userinfo, `Authorization`, cookies or proxy credentials: a URL with userinfo is refused when the setting is read, and no client has a cookie store.
      - Even so, a hop that changes scheme, host or port drops every header scoped to an authority (`Authorization`, `Cookie`, `Proxy-Authorization`).
@@ -1027,18 +1041,19 @@ An address under such a prefix is classified as the global unicast address it lo
 
 #### The resolver contract
 
-- **The service's resolver** sits under every ordinary name, in both modes. That covers reqwest's `dns_resolver` and the SOCKS and TCP transports. It answers one of two things:
+- **The service's resolver** sits under every ordinary name, in both modes. That covers reqwest's `dns_resolver` and the SOCKS transport. In `direct` mode, libp2p resolves its own names with its DNS layer (hickory), and the transport check beneath it holds that layer to this contract: an answer is dialed only at an address that passed, and an empty or wholly refused answer fails the dial ([check 3](#the-gate)). It answers one of two things:
   - **one or more addresses,** every one of which passed the gate;
   - **an error.**
 - **It never answers an empty success.** A failed lookup, an empty answer, and an answer whose every address the policy refuses are all errors, and the connection attempt fails.
   - This matters because, in reqwest 0.12.28, an empty success makes the SOCKS connector send the original name to the proxy unresolved. That is the route reserved for onions.
+  - Under `socks5://` an IP-literal host reaches the resolver too, IPv6 in brackets. The resolver parses it and judges it as the literal it is, never as a name.
 - **Onion names never reach this resolver.** The gate routes them first ([below](#the-onion-route)), and the resolver answers an onion name with an error, in case one ever arrives.
 
 #### The onion route
 
 - **In `direct` mode** there is none: onions are refused before any socket exists.
 - **In `socks5` mode,** onion targets have their own explicitly authorized route, which no ordinary name can enter:
-  - **HTTP:** a second client, built with `socks5h://` to Arti's endpoint, so the proxy receives the name. It is used only for a URL whose host the gate classified as onion. Its connector checks that classification again before it sends, and refuses anything else.
+  - **HTTP:** a second client, built with `socks5h://` to Arti's endpoint, so the proxy receives the name. It is used only for a URL whose host the gate classified as onion: its send path takes that URL as a type only the classifier constructs, checks the classification again before it sends, and refuses anything else. reqwest's connector can't see the destination, so the check can't sit there.
   - **libp2p:** the SOCKS transport's onion path, taken only for `/onion3` and onion `/dns*` components.
 - **Redirects re-select the route:** the service's redirect loop picks the client per hop. An onion URL that redirects to a clearnet name moves to the ordinary client, with `RESOLVE` and the gate. A clearnet URL that redirects to an onion moves to the onion client, in `socks5` mode only.
 
@@ -1071,21 +1086,24 @@ Each is a pull request to freedom-ipfs, and none changes mobile's behavior by de
 2. **The native-request parser, public.**
    - The JSON-to-`GatewayCoreRequest` parsing (`mob:2635`–`2689`) moves to a library function, with the same accepted forms and results.
    - The service then treats each path exactly as the add-on does, with no copy to drift.
-3. **A network policy.** One `NetworkPolicy` value, threaded through the builder, that supplies:
+3. **A network policy.** One `NetworkPolicy` value, threaded through the builder, that supplies the parts below.
+   - **The builder's default is today's clients and transports** (legacy), so a host that sets no policy, as mobile and the add-on don't, keeps today's behavior, the system proxy included.
+   - **The code lives in a crate of its own,** which namesys, routing and retrieval depend on. Its SOCKS code sits behind a cargo feature, off by default, so mobile builds compile none of it.
    1. **HTTP clients:**
       - a single constructor taking `Option<reqwest::Proxy>` and each client's redirect acceptance (the hop count), built with `Policy::none()`, so the service's own loop follows redirects through the gate (hop check 4);
-      - it replaces the three `timeout_http_client` functions (`ns:828`, `rt:1807`, `rv:11132`) and calls `no_proxy()` when no proxy is given;
-      - it enables `reqwest`'s `socks` feature, and uses `socks5://` (never `socks5h://`) with the gate's resolver as the client's `dns_resolver`. That resolver resolves locally in `direct` mode and through `RESOLVE` in `socks5` mode, and follows [the resolver contract](#the-resolver-contract): addresses that pass, or an error, never an empty success;
+      - it replaces the three `timeout_http_client` functions (`ns:828`, `rt:1807`, `rv:11132`) and calls `no_proxy()` in `direct` mode;
+      - it enables `reqwest`'s `socks` feature, and uses `socks5://` (never `socks5h://`) with the gate's resolver as the client's `dns_resolver`, and requires hyper-util 0.1.21 or later ([What can be honored](#what-can-be-honored)). That resolver resolves locally in `direct` mode and through `RESOLVE` in `socks5` mode, and follows [the resolver contract](#the-resolver-contract): addresses that pass, or an error, never an empty success;
       - in `socks5` mode, a second, onion-only client for [the onion route](#the-onion-route).
-   2. **Errors instead of panics:** the three constructors `expect` today (`ns:833`, `rt:1812`, `rv:11138`). With a proxy their configuration can fail, so they must return an error.
+   2. **Errors instead of panics:** the three constructors `expect` today (`ns:833`, `rt:1812`, `rv:11138`). With a proxy their configuration can fail, so building a policy's clients returns an error. The legacy defaults keep their infallible constructors, since their configuration has no proxy.
    3. **DoH:** the endpoint and its client come from the policy, at `mob:2226` and `rv:9436`, `9484` and `9531`. DNSLink is already pluggable (`DnsTxtResolver`, `ns:53`); Bitswap's address expansion isn't. Expansion results pass through the gate (check 2).
    4. **Transports:**
       - `build_dht_swarm` (`rt:1588`), `build_bitswap_swarm` (`rv:8816`) and `cloudflare_websocket_transport` (`rv:8847`) take `quic: bool`, `dns: Hickory | None`, and `tcp: Direct | Socks5(addr)`;
       - add a SOCKS5 `Transport` over `tokio-socks` (MIT, with its `tor` feature) for `/ip4`, `/ip6`, `/dns*` and `/onion3` with `/tcp`, and for WebSocket on top of it;
       - it resolves `/dns*` names with `RESOLVE`, checks every answer, and `CONNECT`s to a checked IP literal. A failed, empty or wholly refused answer fails the dial. Only `/onion3` and onion names go to the proxy as names, on their own code path. The WebSocket layer above keeps the name for TLS;
-      - in `direct` mode, the TCP and WebSocket transports resolve names themselves and check each address before connecting (check 3).
+      - in `direct` mode, the TCP and WebSocket transports resolve names themselves and check each address before connecting (check 3);
+      - a stack composed by hand needs libp2p's TLS-or-noise selector, which libp2p doesn't export. A local copy, attributed, keeps today's `(tls, noise)` choice.
    5. **The gate:**
-      - the classification and the address policy as one function, applied where candidates are chosen (`rt:1491`–`1525`, `rt:1767`–`1805`), after expansion, and at the dial sites (`rv:7765`, `rv:7949`, `rt:1044`);
+      - the classification and the address policy as one function, applied where candidates are chosen (`rt:1491`–`1525`, `rt:1767`–`1805`), after expansion, and at the transport, which covers the dial sites (`rv:7765`, `rv:7949`, `rt:1044`) and the dials libp2p makes itself (check 3);
       - every check asks the instance's network capability, so revoking it refuses everything later.
 4. **Progress and stats outside the FFI crate.**
    - Move the progress recorder and `progress_layer` (`mob:552`–`1018`) to a library crate, with a recorder per node rather than the process-global `PROGRESS_RECORDER` (`mob:79`).
@@ -1253,8 +1271,8 @@ As 0006's 4.7 did, before anything moves:
   - **Parent death,** the 5 s exit watchdog, and parent death while the writer is backed up.
   - **The stall:** exit 76.
 - **Network policy tests:**
-  - **A SOCKS5 test proxy** records every connection, and a canary TCP and UDP listener is advertised as a provider and a router. In `socks5` mode the canary must see nothing, and the proxy everything.
-  - **Expansion and redirects:** a `/dnsaddr` that expands to a loopback address, a name that resolves to a private address, and a configured router or provider that redirects to a private address, to an onion URL and to a different scheme. Each is refused before a socket opens.
+  - **A SOCKS5 test proxy** records every connection, and a canary TCP and UDP listener is advertised in provider records and is the target of a configured router's redirect. In `socks5` mode the canary must see nothing, and the proxy everything.
+  - **Expansion and redirects:** a `/dnsaddr` that expands to a loopback address, a name that resolves to a private address, and a configured router or provider that redirects to a private address, to an onion URL and to a scheme other than HTTP or HTTPS. Each is refused before a socket opens.
   - **Canonical forms:**
     - upper case, a trailing dot, numeric IPv4 URL hosts, and `/dns/<x>.onion`;
     - one address in every spelling: `[::ffff:a9fe:a9fe]`, `[::ffff:169.254.169.254]`, `[0:0:0:0:0:ffff:a9fe:a9fe]` and upper-case hex in a URL, and `/ip6/::ffff:169.254.169.254` in a multiaddr, all refused as `169.254.169.254`.
@@ -1423,6 +1441,8 @@ Every body already passes through main today, so the pipe adds one copy into the
    Then the default switches.
 7. **Private windows:** the ephemeral process, readiness per partition, the cold start in `request()`, leases, eviction and fences.
 8. **Network policy:** the setting, Arti's endpoint and its `RESOLVE` qualification, policy changes, and the gate, redirect, SOCKS and canary tests. This needs upstream item 3.
+   - `socks5` first: it needs no NAT64 discovery.
+   - Then NAT64 discovery in the service, which moves `direct` behind the gate ([Modes](#modes)).
 9. **Removal,** one stable release later: the add-on, the event worker and their scripts.
 
 ## Open questions
@@ -1452,3 +1472,4 @@ Every body already passes through main today, so the pipe adds one copy into the
 8. **Streams in the core:** should 4.5's protocol version 2 for `freedom-cored` adopt these four frames as they are, with an explicit global credit added?
 9. **An OS memory limit:** should each service run under `RLIMIT_AS`, or a Windows job memory limit, as a backstop for what its budget can't see?
 10. **If Arti can't `RESOLVE`:** should the Tor setting wait until it can, or ship with the proxy's own policy (option (b)) as an explicit deviation? This design waits (the user's decision).
+11. **Stream isolation under Tor:** should each instance (the profile's, and each private window's) send SOCKS credentials of its own, so Arti keeps their streams on separate circuits? This design is silent on it so far. Isolation needs `RESOLVE` with authentication, which tokio-socks doesn't offer, so it means a small SOCKS5 client of the service's own (the user's decision).
