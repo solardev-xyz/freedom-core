@@ -690,9 +690,9 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   - `release()` is idempotent, and `closeDwebSession(partition)` releases every lease the partition still holds, as a backstop.
 - **Capacity:**
   - When a private partition needs a new instance and none can be reserved, `ipfsBackend()` throws `BackendBusy`.
-  - The handler answers it before planning, as it answers `AdmissionFull`: 503 `{ code: "busy", message: "Too many private windows are loading IPFS content" }`.
+  - The handler answers it before planning, as it answers `AdmissionFull`: 503 `{ code: 503, message: "Too many private windows are loading IPFS content" }`, the shape of every error body the handler writes.
   - Node readiness stays `ref.up`.
-- **The executor:** one change. A `BackendBusy` rejection from `request()` (the service's `busy`) becomes 503 `{ code: "busy" }`, as `AdmissionFull` does. Every other rejection is the 502 it is today.
+- **The executor:** one change. A `BackendBusy` rejection from `request()` (the service's `busy`) becomes 503 `{ code: 503, message: "freedom-ipfs native node is busy" }`, as `AdmissionFull` does. Every other rejection is the 502 it is today.
 - **`request()`:**
   - **An already aborted signal** rejects at once. Nothing is sent, as today. So does a captured pair that has been retired.
   - **Otherwise** it sends `ipfs.request` with `headers_ms: headersTimeoutMs`, and registers one abort listener that sends `cancel`.
