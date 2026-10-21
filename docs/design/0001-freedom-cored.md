@@ -109,7 +109,7 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
 
   A known network type means exit 74 with `storage { kind: "network_filesystem" }`. The guarantee is exclusion between cores on local storage.
 - **One gate for every core-format writer.** The same `freedom-cored` binary provides two more subcommands, both of which take the gate under the same rules:
-  - **`hold-lock --data-dir … --lock-dir …`** prints `locked`, then holds the gate until its stdin closes. Profile delete and reset (`profile-catalog.js`) and data migrations hold it for the whole destructive operation. The gate lives outside the directory being removed, so no core can start until the operation releases it.
+  - **`hold-lock --data-dir … --lock-dir …`** prints `locked`, then holds the gate until its stdin closes. Profile delete (`profile-catalog.js`) and data migrations hold it for the whole destructive operation. freedom-browser has no profile reset; one added later holds it too. The gate lives outside the directory being removed, so no core can start until the operation releases it.
   - **`recover --data-dir … --lock-dir …`** takes the gate, rolls forward any node-identity journal (see [Multi-file writes](#multi-file-writes)), prints `recovered` (or `corrupt` with details), then exits.
 - **The JS vault writer** (a step-1 dev build without the `FREEDOM_CORE=1` opt-in, or a hotfix that reverts to the JS vault) can't hold an OS lock itself, because Node has no `flock`. So:
   - **It runs `recover` at startup,** before it starts any node or writes any identity file. A journal that a core left behind is therefore always completed first. Such builds keep shipping the binary for this purpose.
