@@ -130,6 +130,22 @@ impl Canary {
     }
 }
 
+/// A loopback TCP listener and a UDP socket on the same port. A port the
+/// OS picked for TCP can be refused for UDP: Windows excludes port ranges
+/// per protocol (`WSAEACCES`), and another process may hold it. So a few
+/// ports are tried before giving up.
+fn tcp_and_udp_on_one_port() -> (TcpListener, UdpSocket) {
+    let mut last = None;
+    for _ in 0..32 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        match UdpSocket::bind(listener.local_addr().unwrap()) {
+            Ok(udp) => return (listener, udp),
+            Err(error) => last = Some(error),
+        }
+    }
+    panic!("no loopback port was free over both TCP and UDP: {last:?}");
+}
+
 fn count_datagrams(socket: UdpSocket, count: &Arc<AtomicUsize>) -> SocketAddr {
     let addr = socket.local_addr().unwrap();
     let counted = count.clone();
@@ -162,13 +178,10 @@ impl Router {
             .map(|(peer, addrs)| json!({ "Schema": "peer", "ID": peer, "Addrs": addrs }))
             .collect();
         let body = json!({ "Providers": records }).to_string();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let (listener, udp) = tcp_and_udp_on_one_port();
         let addr = listener.local_addr().unwrap();
         let datagrams = Arc::new(AtomicUsize::new(0));
-        count_datagrams(
-            UdpSocket::bind(addr).expect("the router's port is free over UDP"),
-            &datagrams,
-        );
+        count_datagrams(udp, &datagrams);
         let accepted = Arc::new(AtomicUsize::new(0));
         let paths = Arc::new(Mutex::new(Vec::new()));
         let (counted, recorded) = (accepted.clone(), paths.clone());
