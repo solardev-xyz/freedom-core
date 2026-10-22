@@ -866,8 +866,9 @@ mod tests {
 
     #[test]
     fn the_refresh_counts_from_the_rounds_start() {
-        // A full round, one resolver answering 120 ms late; every answer's
-        // TTL is past the 200 ms ceiling.
+        // A full round, one resolver answering 400 ms late; every answer's
+        // TTL is past the 500 ms ceiling. Counted from the round's start,
+        // rounds start about 500 ms apart; from its end, about 900 ms.
         let answer = |query: &[u8]| {
             vec![reply_to(
                 query,
@@ -888,13 +889,20 @@ mod tests {
             learned.push(ask(resolver(answer).0));
         }
         learned.push(ask(resolver(move |query| {
-            std::thread::sleep(Duration::from_millis(120));
+            std::thread::sleep(Duration::from_millis(400));
             answer(query)
         })
         .0));
-        let discovery = Discovery::new(Arc::new(move || learned.clone()), FAST);
+        let timing = Timing {
+            attempt: Duration::from_secs(3),
+            attempts: 1,
+            floor: Duration::from_millis(50),
+            ceiling: Duration::from_millis(500),
+            backoff: Duration::from_millis(50),
+        };
+        let discovery = Discovery::new(Arc::new(move || learned.clone()), timing);
         let _lease = discovery.lease();
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(10);
         while starts.lock().unwrap().len() < 4 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -904,11 +912,9 @@ mod tests {
             discovery.state(),
             Nat64State::Known(vec![prefix("2001:db8:64::", 96)])
         );
-        // Start to start, about the ceiling: not the ceiling after the
-        // round's 120 ms.
         for pair in starts.windows(2) {
             let interval = pair[1] - pair[0];
-            assert!(interval < Duration::from_millis(280), "{interval:?}");
+            assert!(interval < Duration::from_millis(750), "{interval:?}");
         }
     }
 

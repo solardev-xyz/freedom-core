@@ -135,11 +135,24 @@ pub fn ask(
                     break;
                 }
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                // Windows reports a datagram larger than the buffer as an
+                // error, with the buffer filled; elsewhere it is cut short.
+                Err(e) if oversize(&e) => {
+                    if buffer.get(..2).is_some_and(|head| head == id.to_be_bytes()) {
+                        return Err(Failure::Truncated);
+                    }
+                }
                 Err(_) => return Err(Failure::Socket),
             }
         }
     }
     Err(Failure::Timeout)
+}
+
+/// Whether a receive failed because the datagram was larger than the
+/// buffer: Windows' `WSAEMSGSIZE`.
+fn oversize(error: &std::io::Error) -> bool {
+    cfg!(windows) && error.raw_os_error() == Some(10040)
 }
 
 /// The query: ID `id`, recursion desired, one question (`ipv4only.arpa`,
