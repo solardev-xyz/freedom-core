@@ -581,6 +581,10 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
   - **The reply fits one frame.** A snapshot's events are bounded by count, but neither they nor its active targets are bounded by bytes. If the reply would pass 1 MiB, it keeps as many active targets as fit, in order, then as many of the newest events as fit. `active_count` and `event_count` stay the recorder's, so a reader can tell what was cut.
   - Main has no `clearProgress`, and neither does the service: a target closes when its request ends or its span closes.
 - **`store`:** `block_count` and `total_bytes`, or `null` if the store can't say.
+- **`network`:** the instance's mode, and, under `direct`, what [NAT64 discovery](#network-specific-nat64-prefixes) knows. It is `{ mode: "direct", nat64: { state, prefixes, failures } }` or `{ mode: "socks5", nat64: null }`.
+  - `state` is `pending`, `known`, `unknown` or `incomplete`. In `unknown` and `incomplete`, it is why IPv6 targets are refused; in `pending`, why they wait. Pending with failures is a round that has failed and hasn't ended.
+  - `prefixes` are the prefixes learned, as `address/length`.
+  - `failures` give why the last round's resolvers failed, each a fixed name: `timeout`, `rcode`, `truncated`, `malformed`, `socket`, `unaskable` or `over_limit`. They never include an address.
 - **`budget`:** each [budget's](#budgets) use and limit:
   - `memory` (`used`);
   - `requests` (`admitted`) and `writer` (`queued`);
@@ -822,9 +826,9 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
 - **`direct`, the default:** today's transports, behind [the gate](#the-gate). The environment's proxy variables no longer apply (deviation `env-proxy`).
   - **The gate comes to `direct` in two parts.**
     - **With `socks5`, the classification and the capability:** onion targets, and multiaddrs that aren't network targets, are refused before any socket exists; the service's own loop follows redirects (`http` and `https` only, no `Referer`); and revoking the capability stops every later socket, DNS query and hop.
-    - **With NAT64 discovery, the address table.** Without discovery, every IPv6 target outside the fixed forms would be refused ([Network-specific NAT64 prefixes](#network-specific-nat64-prefixes)). Until the service learns the prefixes, `direct` resolves and connects as today (the system's resolver for HTTP, libp2p's DNS layer for peers) and applies no address table, so the deviation `address-policy` applies to `socks5` only.
+    - **With NAT64 discovery, the address table.** Without discovery, every IPv6 target outside the fixed forms would be refused ([Network-specific NAT64 prefixes](#network-specific-nat64-prefixes)). So the table came to `direct` with discovery. Every untrusted address is checked against it, an IPv6 one with what discovery knows, and the deviation `address-policy` applies to both modes. Configured targets stay exempt, loopback included.
 
-    `socks5` needs no discovery, and ships first ([Implementation steps](#implementation-steps), step 8).
+    `socks5` needs no discovery, and shipped first ([Implementation steps](#implementation-steps), step 8). A `direct` instance holds discovery running while it lives: the process's state, which every `direct` instance's table reads. A process with no `direct` instance sends no discovery query.
 - **`socks5 { ip, port }`:** all of the service's traffic goes through the proxy.
   - **The endpoint is an IP literal,** so reaching the proxy needs no DNS. The service never resolves the proxy's name.
   - **Ordinary names:**
@@ -1045,6 +1049,9 @@ Their embedded IPv4 address is a tunnel endpoint inside a provider's or site's n
 An IPv6-only network can translate through a network-specific prefix of its own (RFC 6052). Addresses under it look like ordinary global unicast, and, unlike the well-known prefix, it may translate to private IPv4 addresses. So in `direct` mode the service learns these prefixes as RFC 7050 describes, and fails closed for IPv6 while it doesn't know them.
 
 - **Discovery asks the access networks.** It sends one query, AAAA for `ipv4only.arpa`, to each resolver it can learn for each interface that is up, and takes the union of the answers, because only an access network's own DNS64 synthesizes for it (RFC 8880 §7.1). The service's other resolvers (hickory's, and the configured DoH endpoint) needn't see that DNS64.
+  - **At most 8 resolvers a round,** the first the OS lists, all asked at once, so a round lasts one query's sends at most.
+    - A resolver listed past the eighth isn't asked. It counts as a failure (`over_limit`), so the state is **unknown**, never **known** without it, since a prefix only it advertises would go unlearned.
+    - Hosts rarely list more.
   - **Which resolvers,** per OS. A manual DNS setting, a VPN's resolver or a local recursive resolver can stand in front of an interface's own, so the service reads the interface-learned servers where the OS keeps them, not only the effective list:
     - **Windows:** each adapter's DNS servers (`GetAdaptersAddresses`), and, where a manual setting overrides DHCP, the servers DHCP gave the interface (`DhcpNameServer` under the interface's `Tcpip` parameters);
     - **macOS:** each network service's DNS state in the SystemConfiguration dynamic store (`State:/Network/Service/<id>/DNS`), which holds what the service learned, not only `/etc/resolv.conf`'s primary resolver;
@@ -1052,12 +1059,18 @@ An IPv6-only network can translate through a network-specific prefix of its own 
   - **It is a discovery-only path:** that one name and type, over plain DNS. Each of these resolvers is a configured target for that query alone, as the DoH endpoint is for DoH. Its answers are parsed, never dialed, and the path resolves nothing else.
   - **Each answer** that embeds `192.0.0.170` or `192.0.0.171` at one of RFC 6052's positions gives a prefix and its length. An answer that embeds neither teaches nothing.
   - **The result belongs to the process,** not to an instance: it describes the network, and the query carries nothing of a partition's.
+  - **It runs while a `direct` instance lives.** A `socks5` instance learns nothing, and a process with no `direct` instance sends no query.
+    - **Paused** when the last `direct` instance goes, it sends nothing, not even a refresh. Every send, a resend included, checks that a `direct` instance still holds it, so a round under way sends nothing more, and isn't published. The check and the send are one step, under the lock a lease's release takes, and the send doesn't block: once the last release has returned, no send it didn't cover can follow. The prefixes it learned are kept.
+    - **Resumed** by the next one, it is **pending** again until a round settles, since the network may have changed meanwhile.
+  - **A direct instance holds it from its admission to its fence:** a fenced instance connects to nothing, so its teardown doesn't keep discovery querying.
 - **The fixed forms** are those whose prefix is fixed: IPv4-mapped, the well-known NAT64 prefix and 6to4. Any other global IPv6 address could sit under a network-specific prefix.
   - **A learned prefix still applies under a fixed form.** An address inside `2002::/16` or `64:ff9b::/96` that also sits under a learned prefix is judged by both readings, and each IPv4 address must pass. Only IPv4-mapped is judged as IPv4 alone, since it connects to that address directly.
 - **States:**
   - **pending** until the first query settles. Every IPv6 target but an IPv4-mapped one waits for it, within its own deadline: the first answer may teach a prefix that sits under a fixed form;
-  - **known,** once every resolver learned has answered: the union of their prefixes. NODATA or NXDOMAIN from all of them gives an empty set, which means none of them advertises a prefix (RFC 7050 §3), not that no network does. The same holds when the OS lists no resolver;
-  - **unknown,** while any resolver learned has failed (a timeout, `SERVFAIL`, a malformed answer). Another's answer doesn't settle it;
+  - **known,** once every resolver learned has answered: the union of their prefixes. NODATA or NXDOMAIN from all of them gives an empty set, which means none of them advertises a prefix (RFC 7050 §3), not that no network does. An NXDOMAIN's answer records teach nothing. The same holds when the OS lists no resolver;
+  - **unknown,** while any resolver learned has failed (a timeout, `SERVFAIL`, a malformed or oversized answer), can't be asked, or wasn't asked (past the bound). Another's answer doesn't settle it.
+    - **A round's first failure ends a known state at once:** it publishes **pending**, before the other resolvers answer, and the round's end publishes **unknown**, with every prefix the round learned.
+    - Pending, not unknown, because unknown admits the fixed forms judged by the prefixes it holds, and an answer still out could teach one that covers a fixed form (a /96 inside `2002::/16`).
   - **incomplete,** when an answer holds more than 16 distinct prefixes.
 
   In **unknown**, an IPv6 target outside the fixed forms is refused, and `ipfs.stats` says why. IPv4 targets, and IPv6 targets under the fixed forms, are judged as always, with every prefix already learned still applied.
@@ -1067,7 +1080,7 @@ An IPv6-only network can translate through a network-specific prefix of its own 
   A dual-stack network keeps IPv4, and an IPv6-only network whose resolver fails couldn't reach much anyway.
 - **Learned prefixes are kept** for the process's life, so a refresh adds prefixes and never removes one. A prefix only adds refusals, so keeping an old one, or a false one from the network's resolver, errs on the safe side. The bound of 16 counts all of them; past it, the state is **incomplete** until the process restarts.
 - **Refresh:**
-  - when the last answer's TTL expires, and at least once a minute, so a network change leaves at most about a minute when a new network's prefix is unknown;
+  - when the last answer's TTL expires, and at least once a minute, both counted from the round's start, so a network change leaves at most about a minute when a new network's prefix is unknown, and no answer is kept past its TTL. A TTL under 5 s waits 5 s, so a resolver can't set discovery querying in a loop;
   - after a failure, with backoff from 5 s to 1 min. A failed refresh keeps every known prefix: it never turns a known one back into a native address.
 - **A target is judged by the state at its check.** A lookup's check, or a candidate choice's, reads the state once, when all of its answers or candidates are in hand (after any wait for discovery), and judges every one of them against it. So no check reads a state older than the last publication before that read. An attempt that passed may still connect after a later publication: a publication neither waits for the attempts in flight nor cancels them, as it doesn't close connections already open either. Those attempts reach nothing new. Each target passed under the earlier state, and so was reachable for as long as that state stood: normally about a minute after a network change (**Refresh**, above), and longer while failed refreshes keep the state **unknown**, whose fixed-form allowance is deliberate.
 

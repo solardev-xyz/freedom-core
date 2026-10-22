@@ -21,6 +21,9 @@
 //! Everything stays on loopback.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+// The canary test needs the testhooks (its control runs `direct` without
+// the address table); without them, its helpers go unused.
+#![cfg_attr(not(feature = "testhooks"), allow(dead_code))]
 
 mod common;
 
@@ -333,6 +336,7 @@ fn proc_net_address(text: &str) -> Option<SocketAddr> {
 /// reached it, and the proxy was asked for nothing else. The control,
 /// `direct` over the same topology in the same process, reaches both
 /// canaries and never the proxy.
+#[cfg(feature = "testhooks")]
 #[test]
 fn under_socks5_the_canary_sees_nothing_and_the_proxy_everything() {
     let canary = Canary::start();
@@ -357,7 +361,10 @@ fn under_socks5_the_canary_sees_nothing_and_the_proxy_everything() {
     proxy
         .fixture
         .forward(Destination::Ip(router.addr), router.addr);
-    let mut ipfsd = Ipfsd::ephemeral(&[]);
+    // The control reaches canaries on loopback, which `direct`'s address
+    // table refuses: it runs without the table (the testhook leaves
+    // `socks5` as it is).
+    let mut ipfsd = Ipfsd::ephemeral(&[LOOPBACK_PROVIDERS]);
     ipfsd.hello();
 
     let started = ipfsd.start(instance("e-1", &router, proxy.network()));

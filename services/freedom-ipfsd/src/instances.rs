@@ -73,6 +73,7 @@ use serde_json::value::RawValue;
 use tokio::runtime::Handle;
 
 use crate::budget::{Budgets, Fixed};
+use crate::nat64::{Discovery, Lease};
 use crate::network;
 use crate::params::{self, Start, Store};
 use crate::requests::Requests;
@@ -153,6 +154,9 @@ pub struct Instances {
     requests: Arc<Requests>,
     /// The process's budgets: every instance's builder gets them.
     budgets: Arc<Budgets>,
+    /// The process's NAT64 discovery: every `direct` instance's address
+    /// table reads it, and holds it running while it lives.
+    discovery: Discovery,
     table: Mutex<Table>,
     /// An instance left the table, or a teardown failed.
     changed: Condvar,
@@ -180,6 +184,11 @@ struct Slot {
     /// slot, once its teardown is proven or nothing was built. Its caches'
     /// is upstream's instance's, which keeps it as long.
     _store: Reservation,
+    /// A `direct` instance's hold on NAT64 discovery: discovery runs while
+    /// one is held. Released at the instance's first fence, whatever its
+    /// state, not with the slot: a fenced instance connects to nothing, so
+    /// its teardown doesn't keep discovery querying.
+    nat64: Option<Lease>,
 }
 
 enum State {
@@ -210,6 +219,8 @@ pub struct Running {
     pub core: GatewayCore,
     /// Its `ipfs.stats` gateway counters.
     pub counters: Arc<GatewayCounters>,
+    /// The network policy it started under.
+    pub policy: network::NetworkPolicy,
 }
 
 /// An instance fenced after a request panic, to tear down
@@ -248,6 +259,7 @@ impl Slot {
         if !matches!(self.state, State::Live(_)) {
             return None;
         }
+        self.nat64 = None;
         match std::mem::replace(&mut self.state, State::Stopping { stops }) {
             // The shared gateway goes with the fence; requests still
             // running hold their own clones until they end. Step 2, with
@@ -267,12 +279,14 @@ impl Instances {
         runtime: Handle,
         requests: Arc<Requests>,
         budgets: Arc<Budgets>,
+        discovery: Discovery,
     ) -> Arc<Instances> {
         Arc::new(Instances {
             kind,
             runtime,
             requests,
             budgets,
+            discovery,
             table: Mutex::new(Table::default()),
             changed: Condvar::new(),
         })
@@ -304,6 +318,11 @@ impl Instances {
     /// is live: built, its start answered, not retired. A request's work is
     /// spawned here, under the table's lock, so a fence handled after it
     /// finds the request.
+    /// What the process's NAT64 discovery knows, for `ipfs.stats`.
+    pub fn nat64(&self) -> serde_json::Value {
+        self.discovery.stats()
+    }
+
     pub fn with_live<R>(&self, instance_id: &str, f: impl FnOnce(&Running) -> R) -> Option<R> {
         match self.lock().active.get(instance_id) {
             Some(Slot {
@@ -342,6 +361,11 @@ impl Instances {
             };
             let caches = store.split(fixed.caches);
             table.admitted += 1;
+            // A `direct` instance's address table needs NAT64 discovery
+            // running before it dials (0007, "Network-specific NAT64
+            // prefixes"); a `socks5` one learns nothing.
+            let nat64 = matches!(start.network, network::NetworkPolicy::Direct)
+                .then(|| self.discovery.lease());
             table.active.insert(
                 start.instance.clone(),
                 Slot {
@@ -352,6 +376,7 @@ impl Instances {
                         stops: Vec::new(),
                     },
                     _store: store,
+                    nat64,
                 },
             );
             (table.admitted, caches)
@@ -491,6 +516,7 @@ impl Instances {
                 instance,
                 core,
                 counters: Arc::default(),
+                policy: start.network,
             }));
             // Queued under the lock: a stop or a cancel handled after this
             // finds a live instance whose start is answered. A head without
@@ -548,6 +574,7 @@ impl Instances {
             start.network,
             &start.routing.delegated_routers,
             &start.routing.doh_endpoint,
+            self.discovery.handle(),
         ) {
             Ok(network) => network,
             Err(message) => {
@@ -625,12 +652,14 @@ impl Instances {
         if let Some(Slot {
             start,
             state: State::Starting { fenced, bound, .. },
+            nat64,
             ..
         }) = table.active.get_mut(instance_id)
             && *start == id
             && fenced.is_none()
         {
             *fenced = Some(Fence::Deadline);
+            *nat64 = None;
             *bound = arm(ended);
             let _ = conn.reply_error(
                 id,
@@ -668,6 +697,7 @@ impl Instances {
                 *fenced = Some(Fence::Stopped);
                 *bound = arm(false);
                 stops.push(id);
+                slot.nat64 = None;
             }
             State::Live(_) => {
                 let instance = slot.retire(vec![id]);
@@ -697,6 +727,7 @@ impl Instances {
                 if fenced.is_none() {
                     *fenced = Some(Fence::Cancelled);
                     *bound = arm(false);
+                    slot.nat64 = None;
                 }
             }
             State::Live(_) => {
@@ -868,6 +899,7 @@ impl Instances {
                     // earlier keeps its bound; one fenced now is bounded by
                     // the connection's exit watchdog.
                     fenced.get_or_insert(Fence::Stopped);
+                    slot.nat64 = None;
                 } else if let Some(instance) = slot.retire(Vec::new()) {
                     live.push((instance_id.clone(), instance));
                 }

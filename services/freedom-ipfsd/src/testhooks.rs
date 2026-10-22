@@ -1,6 +1,7 @@
 //! Fault injection for the integration tests (design 0007, Testing: "test
-//! hooks behind a cargo feature"). **Only with the `testhooks` feature:**
-//! without it every hook is a no-op and no variable is read.
+//! hooks behind a cargo feature"). **Only with the `testhooks` feature, in a
+//! debug or test build:** without it every hook is a no-op and no variable
+//! is read, and a release build with it doesn't compile.
 //!
 //! - `FREEDOM_IPFSD_TEST_HOLD_TEARDOWN_MS` holds each instance's teardown:
 //!   the instance runs an untracked job on its runtime's blocking pool, as
@@ -40,6 +41,14 @@
 //!     the gateway, and `body` once its head is queued, with a payload that
 //!     names a path: as a fault inside freedom-ipfs on a request's task
 //!     would.
+
+// The hooks are for debug and test builds only: some take a `direct`
+// instance's address table away (FREEDOM_IPFSD_TEST_DIRECT_UNCHECKED), or
+// choose who discovery asks (FREEDOM_IPFSD_TEST_NAT64_RESOLVERS), and others
+// let a request's own headers hold or panic its work. A release build with
+// the feature doesn't compile (CI checks it doesn't).
+#[cfg(all(feature = "testhooks", not(debug_assertions)))]
+compile_error!("the `testhooks` feature is for debug and test builds only, never a release build");
 
 use std::time::Duration;
 
@@ -106,6 +115,40 @@ pub fn progress_counts(
     }
     let _ = instance;
     None
+}
+
+/// NAT64 discovery's resolvers: the OS's (`None`), unless a test names its
+/// own in `FREEDOM_IPFSD_TEST_NAT64_RESOLVERS`, comma-separated: each a
+/// socket address to ask, or anything else, which is a resolver that can't
+/// be asked. Empty is none, so discovery knows no prefix at once.
+pub fn nat64_source() -> Option<crate::nat64::Source> {
+    #[cfg(feature = "testhooks")]
+    if let Ok(list) = std::env::var("FREEDOM_IPFSD_TEST_NAT64_RESOLVERS") {
+        use crate::nat64::resolvers::Learned;
+        let learned: Vec<Learned> = list
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(|item| match item.parse() {
+                Ok(addr) => Learned::Ask(addr),
+                Err(_) => Learned::Unaskable(item.to_string()),
+            })
+            .collect();
+        return Some(std::sync::Arc::new(move || learned.clone()));
+    }
+    None
+}
+
+/// A `direct` instance's address table: `checked`, unless a test turns it
+/// off (`FREEDOM_IPFSD_TEST_DIRECT_UNCHECKED`), for providers on loopback.
+pub fn direct_addresses(
+    checked: freedom_ipfs_gateway::net::Addresses,
+) -> freedom_ipfs_gateway::net::Addresses {
+    #[cfg(feature = "testhooks")]
+    if std::env::var_os("FREEDOM_IPFSD_TEST_DIRECT_UNCHECKED").is_some() {
+        return freedom_ipfs_gateway::net::Addresses::Unchecked;
+    }
+    checked
 }
 
 /// The process's memory budget: `default`, unless a test replaces it.

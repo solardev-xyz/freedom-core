@@ -281,6 +281,7 @@ mod tests {
             runtime.handle().clone(),
             requests.clone(),
             budgets.clone(),
+            crate::nat64::Discovery::none(),
         );
         let (seen, events) = mpsc::channel();
         let service = Arc::new(Observed {
@@ -404,6 +405,7 @@ mod tests {
                 runtime.handle().clone(),
                 requests.clone(),
                 budgets.clone(),
+                crate::nat64::Discovery::none(),
             );
             let stats = Stats::new(
                 runtime.handle().clone(),

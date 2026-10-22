@@ -103,6 +103,7 @@ fn is_link_local(ip: Ipv6Addr) -> bool {
 
 /// The servers a Windows `DhcpNameServer` value lists, separated by spaces
 /// or commas.
+#[cfg(any(windows, test))]
 pub fn dhcp_name_servers(value: &str) -> Vec<(IpAddr, Option<String>)> {
     value
         .split([' ', ','])
@@ -113,6 +114,7 @@ pub fn dhcp_name_servers(value: &str) -> Vec<(IpAddr, Option<String>)> {
 
 /// The `ServerAddresses` a macOS DNS state lists, from its XML property
 /// list: the strings of the array after that key.
+#[cfg(any(target_os = "macos", test))]
 pub fn server_addresses(plist: &str) -> Vec<(IpAddr, Option<String>)> {
     let Some((_, after)) = plist.split_once("<key>ServerAddresses</key>") else {
         return Vec::new();

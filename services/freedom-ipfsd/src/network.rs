@@ -34,8 +34,10 @@
 use std::net::{IpAddr, SocketAddr};
 
 use freedom_ipfs_gateway::net::gate::{ConfiguredTargets, Target, parse_url};
-use freedom_ipfs_gateway::net::{Addresses, Network};
+use freedom_ipfs_gateway::net::{Addresses, Nat64Handle, Network};
 use serde_json::Value;
+
+use crate::testhooks;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkPolicy {
@@ -119,12 +121,20 @@ pub fn is_onion(endpoint: &str) -> bool {
 
 /// The instance's network: upstream's policy for `policy`, with the
 /// delegated routers and the DoH endpoint as its configured targets, and a
-/// capability of its own. The endpoints are ones `ipfs.start`'s checks
-/// accepted; anything upstream still refuses is a fixed message.
+/// capability of its own. Under `direct`, untrusted addresses are checked
+/// against the address table, with what the process's NAT64 discovery
+/// knows (`nat64`); configured targets stay exempt. The endpoints are ones
+/// `ipfs.start`'s checks accepted; anything upstream still refuses is a
+/// fixed message.
+///
+/// No address is exempt for being on a local network: providers there are
+/// refused unless configured (design 0007's open question 5). An opt-in
+/// would be one more `Addresses` choice here.
 pub fn network(
     policy: NetworkPolicy,
     routers: &[String],
     doh_endpoint: &str,
+    nat64: Nat64Handle,
 ) -> Result<Network, &'static str> {
     let mut configured = ConfiguredTargets::new();
     for router in routers {
@@ -135,9 +145,11 @@ pub fn network(
     }
     let doh = parse_url(doh_endpoint).map_err(|_| "the DoH endpoint can't be configured")?;
     let upstream = match policy {
-        NetworkPolicy::Direct => {
-            freedom_ipfs_gateway::NetworkPolicy::direct(configured, doh, Addresses::Unchecked)
-        }
+        NetworkPolicy::Direct => freedom_ipfs_gateway::NetworkPolicy::direct(
+            configured,
+            doh,
+            testhooks::direct_addresses(Addresses::Checked(nat64)),
+        ),
         NetworkPolicy::Socks5 { proxy } => {
             freedom_ipfs_gateway::NetworkPolicy::socks5(proxy, configured, doh)
         }
@@ -285,10 +297,14 @@ mod tests {
     fn the_network_is_built_for_the_policy() {
         let routers = ["https://delegated-ipfs.dev/routing/v1".to_string()];
         let doh = "https://cloudflare-dns.com/dns-query";
-        let direct = network(NetworkPolicy::Direct, &routers, doh).unwrap();
+        let nat64 = || Nat64Handle::fixed(freedom_ipfs_gateway::net::gate::Nat64State::NONE);
+        let direct = network(NetworkPolicy::Direct, &routers, doh, nat64()).unwrap();
+        // Untrusted addresses are checked against the address table, with
+        // what NAT64 discovery knows.
         assert!(matches!(
             direct.policy().mode(),
-            freedom_ipfs_gateway::net::Mode::Direct(_)
+            freedom_ipfs_gateway::net::Mode::Direct(direct)
+                if matches!(direct.addresses, Addresses::Checked(_))
         ));
         assert_eq!(direct.policy().doh(), Some(doh));
         let configured = direct.policy().configured().unwrap();
@@ -296,7 +312,7 @@ mod tests {
         assert!(configured.contains(&Target::Name("cloudflare-dns.com".into()), 443));
 
         let proxy: SocketAddr = "127.0.0.1:9150".parse().unwrap();
-        let socks5 = network(NetworkPolicy::Socks5 { proxy }, &routers, doh).unwrap();
+        let socks5 = network(NetworkPolicy::Socks5 { proxy }, &routers, doh, nat64()).unwrap();
         assert!(matches!(
             socks5.policy().mode(),
             freedom_ipfs_gateway::net::Mode::Socks5(_)
