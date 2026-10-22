@@ -501,7 +501,7 @@ impl Core {
 
     /// The handshake, offering fragments (design 0005, Frames).
     pub fn hello_fragments(&mut self) -> Value {
-        self.call(
+        self.call_shell(
             1,
             "core.hello",
             json!({ "protocol": 1, "shell_version": "test", "auto_lock_ms": 900_000, "frames": ["fragment"] }),
@@ -509,7 +509,7 @@ impl Core {
     }
 
     pub fn hello_with(&mut self, auto_lock_ms: u64) -> Value {
-        self.call(
+        self.call_shell(
             1,
             "core.hello",
             json!({ "protocol": 1, "shell_version": "test", "auto_lock_ms": auto_lock_ms }),

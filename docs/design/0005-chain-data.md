@@ -34,7 +34,7 @@ Unlike naming, chain data passes **node errors** through to dApps, and its answe
 - **No double payments from the wallet's own sends:** the wallet never signs one intent at two nonces, so no broadcast reply, receipt or provider can make it pay twice ([Retrying an intent](#retrying-an-intent) sets the scope).
 
 **Non-goals**
-- **Pinning chain reads to a block**, and new trust semantics. Today's router reads at the caller's tag and calls m equal answers `verified`. Changing either is roadmap 3.1's decision, not this design's.
+- **Pinning chain reads to a block**, and new trust semantics. Today's router reads at the caller's tag and calls m equal answers `verified`; the core keeps that for m of at least 2, and m distinct endpoints (deviations `singleton-quorum` and `endpoint-dedup`). Changing either further is roadmap 3.1's decision, not this design's.
 - **Nonce management** stays in main. Main's wallet gains durable intent records and one rule: an intent keeps its nonce for good ([Retrying an intent](#retrying-an-intent)). The core keeps no nonce state.
 - **Paths that bypass the router today:** provider-manager's Safe reads and `wallet:test-provider`. Absorbing them is a follow-up; `wallet:proxy-rpc` has no callers and should be deleted.
 - **The verifiers' own networking** (roadmap 3.3), as in 0004.
@@ -139,7 +139,7 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
 | `{ myotis: "call_tx", chain_id, tx }` | `ethCallTx` at `latest` | likewise |
 | `{ myotis: "estimate_tx", chain_id, tx }` | `estimateGas` at `latest` | likewise |
 | `{ myotis: "fee", chain_id }` | `feeEstimate` | likewise |
-| `{ myotis: "broadcast", chain_id, raw }` | `sendRawTransaction` | `{ hash }`, `{ rejected: { reason } }`, `{ uncertain }`, `{ not_sent }` or `{ failure: class }` |
+| `{ myotis: "broadcast", chain_id, raw }` | `sendRawTransaction` | `{ hash }`, `{ rejected: { reason } }`, `{ rejected: { reason, code: -32602 } }`, `{ uncertain }`, `{ not_sent }` or `{ failure: class }` |
 | `{ colibri: "request", chain_id, method, params, deadline_ms }` | `requestViaColibri` | `{ result }`, `{ undefined_keys: ["result"] }`, `{ revert: { data } }`, `{ revert: { data }, capacity: true }` or `{ failure: class }` |
 
 #### Myotis read outcomes
@@ -165,6 +165,11 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
 - **A broadcast's `{ failure: class }`:** main may also answer a broadcast with a class of the chain set, so that a failure that sent nothing keeps today's text:
   - `not_running`, `not_ready`, `queue_full` and `queue_deadline` count as **not sent**, and the core rebuilds their texts and codes as for a read, so the last error is today's (`boundary-broadcast-myotis-not-running-last-error`: `Gnosis Myotis client is not running`; `boundary-broadcast-myotis-not-sent-then-direct` falls to Direct);
   - every other class is **ambiguous**: the client may have dispatched the transaction.
+- **A broadcast's `{ rejected }`** is one of the adapter's two definite refusals. Neither sent anything, and either ends the attempt loop, as the router's `myotisRefusal` check does. The core rebuilds the adapter's error: the reason, then its code and marker.
+  - **`{ rejected: { reason } }`:** the client judged the transaction unpayable or its nonce used, on verified state (Myotis ABI 36). Code `-32000`, `myotisRefusal: "rejected"`.
+  - **`{ rejected: { reason, code: -32602 } }`:** bytes that are no transaction Myotis relays (ABI 44), never gossiped. Code `-32602`, `myotisRefusal: "invalid-params"` (`boundary-broadcast-myotis-invalid-params`).
+  - **Typed and bounded:** `code` is present only when it is `-32602`; any other value, `-32000` included, is a malformed reply. Nothing else of the adapter's error crosses. The reason is the adapter's own bounded text (`boundedReason`: trimmed, whitespace runs collapsed, at most 300 UTF-16 units).
+  - **Negotiated:** `core.hello`'s capabilities gain `myotis_refusal_codes`, and main sends `code` only to a core that offers it. To an older core it sends `{ rejected: { reason } }` for both refusals: the broadcast still ends `rejected` with nothing else asked, but with code `-32000` and `myotisRefusal: "rejected"`.
 - **Colibri's outcomes:**
   - **`{ result }`:** the verified result, as JSON.
   - **`{ undefined_keys: ["result"] }`:** the adapter resolved `undefined`, which JSON can't carry, so main sends this instead of a result. It has exactly that one member, and the array is exactly `["result"]`. The read succeeds with an own `result` of `undefined`, `source: "colibri"` and `verified: true`, as the router returns it today. Its reply omits `result` and lists it in `undefined_keys` ([Replies](#replies); `boundary-colibri-undefined-result`).
@@ -273,6 +278,9 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
 
   It also adds bounds (deviation `quorum-clamps`): `k ≤ 9`, `timeout ≤ 60 s`, and at most 64 endpoints, as 0004.
 - **Orders are cleaned at configuration** (deviation `order-validation`): duplicates are dropped and unknown sources removed. Today a duplicate runs twice and an unknown name fails at run time.
+- **Endpoints are distinct** (deviation `endpoint-dedup`): an endpoint reference listed again is the same endpoint. It keeps its first place, and is user-configured if any of its entries is. The bound of 64 is on the entries main sends for a chain, checked at `chain.configure` before repeats are merged (a 65th entry is `invalid_argument`, even when it repeats an earlier one); so a chain has at most 64 distinct endpoints.
+  - **Today** each entry is a quorum member of its own. One endpoint listed twice agrees with itself and reaches m = 2 alone, and its answer is labelled `verified` (`boundary-quorum-duplicate-endpoint`: endpoints a, a, b). Under [Evidence for labels](#evidence-for-labels), such an answer could settle an intent on one node's word.
+  - **Main gives one reference per (chain, URL)**, so the core merges exact repeats. It can't see that two URLs reach one node: `https://x.example` and `https://x.example/`, or two API keys at one provider. Main therefore lists each host at most once in a chain's `rpc`, keeping the first in registry order, before it assigns references. A user source that repeats a builtin's URL, which `getEndpoints` keeps today, then adds nothing.
 - **When main sends it:** at startup and from `network-ipc`'s `refreshDownstream`, where today only ENS and provider-manager caches are cleared. Controls queue ahead of later requests, as naming's do.
 
 ## The router machine
@@ -410,7 +418,8 @@ The origin is browsing data: it stays in core memory, is never logged and dies w
 
 ### Results and trust
 
-- **Results:** `{ result, source, verified, trust? }`, where `verified` is true for myotis, colibri, quorum and blockscout. `trust` comes only on request.
+- **Results:** `{ result, source, verified, trust? }`, where `verified` is true for myotis, colibri and blockscout, and for a quorum whose m is more than 1. `trust` comes only on request.
+- **A quorum with m = 1** (deviation `singleton-quorum`) is one endpoint's answer, whatever the configuration says. Its reply is not `verified`, and its trust's `level` is Direct's for the endpoint that answered: `user-configured` or `unverified`. Its `method` stays `quorum`, and its `quorum` member still reads `{ k, m: 1, achieved: true }`. A fee quote from such a quorum is not `verified` either. Today all of them are labelled `verified` (`boundary-quorum-singleton-not-verified`), and `onchain-app-protocol.js` and the `web3:` gate read that flag alone.
 - **Final failure**, in today's order:
   - a truncation, at once ([Logs](#logs));
   - the Ant profile's best-ranked error;
@@ -466,7 +475,7 @@ A node's error proves only that *these* bytes weren't admitted by *that* node *n
   - **Matching:** case-sensitive, on `String(error.message)`.
 
   `already known` is never a refusal, in any client's wording, because it says the bytes exist. Anything unmatched is ambiguous, geth's minimum-tip refusal (`transaction gas price below minimum`) among them. Under the wallet's rule a classification decides only what is shown ([Retrying an intent](#retrying-an-intent)).
-- **Myotis `rejected`** counts as a refusal; its reasons include a used nonce.
+- **Myotis `rejected`** counts as a refusal; its reasons include a used nonce, and bytes Myotis doesn't relay ([The rest](#the-rest)).
 - **Order doesn't matter.** A refusal after an attempt that may have been sent (an ambiguous one) stops the attempt loop, as Myotis's final verdict does today, but it can't erase that attempt: the outcome table looks at every attempt (`boundary-broadcast-refusal-after-ambiguous`).
 - **A refusal with nothing possibly sent** doesn't stop the loop: re-sending continues as today, since another node may admit the bytes (`boundary-broadcast-resends-until-accepted`: `nonce too low` from a, `insufficient funds` from b, accepted by c).
 
@@ -504,6 +513,7 @@ Main's wallet chooses nonces for the sends it controls (0002). The guarantee cov
   - **Held:** anything else. A chain without a finalized block keeps its intents held, as does evidence deeper than the bound in rule 2.
 - **Failed and taken go back to the user.** The wallet explains what it knows and offers no retry. A new payment is the user's own act from the send screen: a new intent, with its own nonce and its own confirmation.
 - <a id="evidence-for-labels"></a>**Evidence for labels.** Every read comes from a verified source: Myotis, Colibri, or a quorum of at least two agreeing endpoints. A quorum with m = 1 counts as Direct. Without such a source, an intent stays held.
+  - **The core's labels carry this rule** (deviations `singleton-quorum` and `endpoint-dedup`): a quorum's reply is `verified`, with trust `level: "verified"`, only when m > 1, and its agreeing members are distinct endpoint references. A wallet that checks `level`, `achieved` and `m ≥ 2` therefore never counts one node's answer twice, nor a singleton quorum. Two references can still be one node behind two URLs; main's [configuration](#configuration) lists each host once for that reason.
   - **One finalized view.** Each read is agreed on its own, so two reads can be agreed by different endpoints, each with an honest node's own view: one lagging, one following an unfinalized fork. Mixing them can settle an intent on a fork's receipt (paid while the finalized nonce shows N unused), or read a lagging node's missing receipt as taken. A label therefore rests only on answers that don't depend on a node's view, tied to one finalized block F by its hash. Agreed by any pair that includes one honest node, such an answer is correct. These five rules are the contract:
     1. **The nonce at F.** Read the sender's nonce as `eth_getTransactionCount(sender, { blockHash: F.hash })` (EIP-1898). Every terminal label needs it past N. A node or chain that refuses the block-hash parameter leaves the intent held.
     2. **Inclusion on the finalized chain.** A receipt counts only if its block hash lies on the finalized chain. A walk of headers from F's hash along `parentHash`, down to the receipt's height, establishes that.
@@ -557,7 +567,7 @@ The core can die mid-broadcast: an exit, the watchdog, a protocol error. Main th
   - legacy when there's no priority fee, or when it is negative or above the gas price;
   - a priority fee `BigInt` can't parse (such as `-0x1`) doesn't downgrade: it fails that source's quote, and Direct moves on to its next endpoint (`boundary-fee-direct-priority-unparseable`);
   - otherwise EIP-1559, with `baseFee = gasPrice − priority` and `maxFee = 2·baseFee + priority`;
-  - decimal strings, `verified` for myotis, colibri and quorum.
+  - decimal strings, `verified` for myotis, colibri and quorum; a quorum's only when its m is more than 1 (deviation `singleton-quorum`).
 
 Vectors pin the downgrade boundaries. Whether a derived base fee and a "verified" Myotis fee are right is a product question, not a parity one.
 
@@ -635,6 +645,8 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 | `admission` | unbounded | 64 running, 256 waiting | `busy` |
 | `quorum-clamps` | `k ≥ 1`, `timeout ≥ 500`, unbounded above | also `k ≤ 9`, `timeout ≤ 60 s`, ≤ 64 endpoints | clamped |
 | `order-validation` | duplicates run twice; unknown names fail late | dropped at configuration | |
+| `endpoint-dedup` | an endpoint listed twice is two quorum members, so it can agree with itself | each endpoint reference once, in its first place; user-configured if any entry is | one endpoint never reaches a quorum alone |
+| `singleton-quorum` | a quorum with m = 1 is labelled `verified`, reads and fee quotes alike | `verified: false`, and the trust level Direct gives that endpoint | one endpoint's answer is never verified evidence |
 | `config-change` | the registry re-read mid-request; a change applies piecemeal | a change ends the chain's requests; main sends reads and fee quotes again once | callers see the new configuration whole |
 | `abandoned-exchanges` | the caller's signal doesn't reach the quorum | a cancel cancels members | |
 | `cancel-promptly` | the `AbortError` is thrown at the router's next check, so a read waiting on a verifier settles when that operation does | `cancelled` at once; the verifier's slot is held until main's reply | `cancel-read-no-fallthrough` replies at 10 ms, not 20 |
@@ -678,16 +690,16 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
   - nesting at 512 and 513 levels (`boundary-json-depth-512`, and `boundary-json-depth-513` for deviation `json-depth`);
   - canonical-equivalence pairs through the quorum: duplicate keys, number spellings, `__proto__`, lone surrogates (`boundary-agreement-*`);
   - `isCapacityFailure` on Colibri's errors: collapsed whitespace, a phrase past 500 units, elided hex and an error's own `failureKind` (`boundary-adaptive-capacity-*`).
-- **The harness** (`vectors/generator/chain-replay.js`) has 303 scenarios, each with a stable ID and a `from` field citing its source test or this document.
+- **The harness** (`vectors/generator/chain-replay.js`) has 306 scenarios, each with a stable ID and a `from` field citing its source test or this document.
   - **Values as text:** every value the reference produced or was given is recorded as JSON text, and `undefined` as a field of its own. No value can pass for an encoding, and every value `JSON.parse` makes survives: lone surrogates, any depth, `-0` and infinities.
   - **Large texts:** a text over 64 KiB is stored in its field's repeat form, a repeat unit plus a SHA-256, which keeps the 8 MiB `html()` answers small.
   - **Settle times:** ported scenarios carry the settle times their tests assert, and generation fails if a fixture drifts from them.
-- **The machine replays all 303** (`crates/fc-chain/tests/replay.rs`). A driver plays main from the records: it starts each call when the reference did, and answers each request with the answer its record got, at the time it got it, delivering answers due in one tick in the reference's microtask order (a failed fetch or a non-2xx status settles before a body is read; equal delays settle in registration order). It compares exactly:
+- **The machine replays all 306** (`crates/fc-chain/tests/replay.rs`). A driver plays main from the records: it starts each call when the reference did, and answers each request with the answer its record got, at the time it got it, delivering answers due in one tick in the reference's microtask order (a failed fetch or a non-2xx status settles before a body is read; equal delays settle in registration order). It compares exactly:
   - **every request the core owns** (`shell.rpc`'s endpoint and body with its `id` normalized, a verifier operation and its params, a Blockscout page) with its start, matched to a record of the same call, and **in the reference's order**: no request answers a ledger entry earlier than one already matched. No allowance for unordered concurrency is needed; the order holds across every call of every step. Main's own I/O (Blockscout's hops and DNS lookups, Myotis status samples) feeds the replies main sends instead;
   - **every cancel:** an exchange the reference aborted at T is cancelled at T, and no other is cancelled, except in two permitted races, each counted: a quorum member cancelled when a sibling launched in the same tick answered the same call in the tick both settled (127; the reference's abort came after the member's answer), and a Blockscout page cancelled by the scan's deadline in the tick its own fetch failed with `no answer within` (4). Main never delivers an answer to an exchange the machine cancelled first: it aborted it;
   - **every result and error,** with its settle time: key order, constructor, `name`, message, own properties, `-0` and UTF-16 strings;
   - **the state tables** after each step. Route keys whose target lists several addresses are compared with that list digested ([Adaptive bypass](#adaptive-bypass)).
-  - **18 scenarios show a deviation's difference,** each listed in the test with the whole reply, the requests and the state it must show instead, and every field the deviation doesn't change still compared: `broadcast-outcome` (13: today's error, or a success with another hash, becomes `uncertain`, reporting keccak256 of the raw bytes, with each reconciliation lookup made listed with its endpoint and its whole body or params, the hash included), `config-change` (`boundary-registry-change-mid-request`: the three members asked again at 1,000 listed whole, and the one exchange the change moves, Direct's, given its new start), `order-validation` (`boundary-order-duplicates-and-unknown`), `json-depth` (`boundary-json-depth-513`), `cancel-promptly` (`cancel-read-no-fallthrough`) and `adapter-error-text` (`boundary-colibri-revert-capacity`: the revert reads `execution reverted`, its route blocked as today).
+  - **20 scenarios show a deviation's difference,** each listed in the test with the whole reply, the requests and the state it must show instead, and every field the deviation doesn't change still compared: `broadcast-outcome` (13: today's error, or a success with another hash, becomes `uncertain`, reporting keccak256 of the raw bytes, with each reconciliation lookup made listed with its endpoint and its whole body or params, the hash included), `config-change` (`boundary-registry-change-mid-request`: the three members asked again at 1,000 listed whole, and the one exchange the change moves, Direct's, given its new start), `order-validation` (`boundary-order-duplicates-and-unknown`), `endpoint-dedup` (`boundary-quorum-duplicate-endpoint`: a asked once, its second exchange never made, and the quorum's miss handed to Direct), `singleton-quorum` (`boundary-quorum-singleton-not-verified`: the same requests, two reads and a fee quote labelled as Direct would), `json-depth` (`boundary-json-depth-513`), `cancel-promptly` (`cancel-read-no-fallthrough`) and `adapter-error-text` (`boundary-colibri-revert-capacity`: the revert reads `execution reverted`, its route blocked as today).
   - **None is skipped.**
 - **Not replayed:** the machine's own tests cover the second and third (`crates/fc-chain/tests/machine.rs` and its unit tests); the first and fourth are main's (step 5):
   - a read's reply overtaken by a configuration change after it was made: that is main's reply fencing ([Generations](#generations)), and the reference has no seam for it;

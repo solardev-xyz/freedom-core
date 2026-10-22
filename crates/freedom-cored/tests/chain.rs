@@ -445,6 +445,78 @@ fn a_broadcast_is_sent_or_rejected() {
 }
 
 #[test]
+fn a_myotis_refusal_keeps_its_code() {
+    // The core offers the form with a code; main sends it to no other core.
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    let hello = core.hello_fragments();
+    assert!(
+        hello["result"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("myotis_refusal_codes")),
+        "{hello}"
+    );
+    let mut chain = snapshot(&["direct"], &["a"], 5000);
+    chain["myotis"] = json!(true);
+    chain["broadcast_order"] = json!(["myotis", "direct"]);
+    configure(&mut core, 2, &[chain]);
+    call(
+        &mut core,
+        3,
+        "chain.availability",
+        json!({ "chain_id": 1, "ready": true }),
+    );
+    // Either refusal ends the broadcast `rejected`, Direct never asked,
+    // with the adapter's error: its message, code and marker.
+    for (id, rejected, code, marker) in [
+        (
+            4,
+            json!({ "reason": "nonce too low: next nonce 5, tx nonce 4" }),
+            -32000,
+            "rejected",
+        ),
+        (
+            5,
+            json!({
+                "reason": "invalid raw transaction: malformed type 0x2 transaction",
+                "code": -32602,
+            }),
+            -32602,
+            "invalid-params",
+        ),
+    ] {
+        core.send(&broadcast(id));
+        let (reply, seen) = serve(&mut core, id, |request| {
+            assert_eq!(request["method"], "shell.verified", "{request}");
+            Some(json!({ "result": { "rejected": rejected.clone() } }))
+        });
+        assert_eq!(seen.requests.len(), 1);
+        assert_eq!(reply["error"]["code"], "chain_error", "{reply}");
+        assert_eq!(
+            reply["error"]["data"],
+            json!({
+                "kind": "core",
+                "constructor": "Error",
+                "message": rejected["reason"],
+                "props": { "code": code, "myotisRefusal": marker },
+                "undefined_keys": [],
+                "outcome": "rejected",
+                "generation": 1,
+            })
+        );
+    }
+    // A code the closed set doesn't have is a malformed reply.
+    core.send(&broadcast(6));
+    malformed(
+        &mut core,
+        6,
+        json!({ "result": { "rejected": { "reason": "x", "code": -32000 } } }),
+        "malformed_shell_reply",
+    );
+}
+
+#[test]
 fn an_ambiguous_broadcast_is_reconciled() {
     let (_root, mut core) = core();
     configure(&mut core, 2, &[snapshot(&["direct"], &["a"], 5000)]);
@@ -1948,4 +2020,27 @@ fn a_page_is_checked_without_unescaping_anything_first() {
         escaped <= plain + 4,
         "the escaped header cost {escaped} MiB, the plain one {plain} MiB"
     );
+}
+
+#[test]
+fn the_endpoint_bound_counts_entries_before_repeats_merge() {
+    let (_root, mut core) = core();
+    let repeated = |n: usize| {
+        let mut chain = snapshot(&["quorum"], &[], 5_000);
+        chain["rpc"] = json!(vec![
+            json!({ "endpoint": "a", "user_configured": false });
+            n
+        ]);
+        chain
+    };
+    // 64 entries, all one endpoint: admitted, and merged to one.
+    configure(&mut core, 2, &[repeated(64)]);
+    // A 65th entry is refused at the wire bound, though it repeats an earlier one.
+    let reply = call(
+        &mut core,
+        3,
+        "chain.configure",
+        json!({ "chains": [repeated(65)] }),
+    );
+    assert_eq!(reply["error"]["code"], "invalid_argument", "{reply}");
 }

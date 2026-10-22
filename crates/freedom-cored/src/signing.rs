@@ -61,7 +61,10 @@ fn object<'a>(
         .keys()
         .find(|key| !required.contains(&key.as_str()) && !optional.contains(&key.as_str()))
     {
-        return Err(invalid(format!("unknown field {unknown}")));
+        return Err(invalid(format!(
+            "unknown field {}",
+            fc_evm::shortened(unknown)
+        )));
     }
     if let Some(missing) = required.iter().find(|key| !object.contains_key(**key)) {
         return Err(invalid(format!("missing field {missing}")));
@@ -135,8 +138,10 @@ fn string<'a>(object: &'a Map<String, Value>, field: &str) -> Result<&'a str, Er
 
 /// Handles one of [`METHODS`]; returns the JSON result.
 pub fn handle(state: &VaultState, method: &str, raw: Option<&str>) -> Result<Value, ErrorBody> {
+    // Numbers as JSON.parse reads them: typed data must hash the integer
+    // ethers signs and the approval UI shows (#87).
     let params: Value =
-        serde_json::from_str(raw.unwrap_or("{}")).map_err(|_| invalid("Invalid parameters"))?;
+        fc_evm::parse_json(raw.unwrap_or("{}")).map_err(|_| invalid("Invalid parameters"))?;
     match method {
         "sign.transaction" => {
             let fields = object(&params, &["key", "tx"], &[])?;

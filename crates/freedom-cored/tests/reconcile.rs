@@ -180,7 +180,7 @@ fn change_password_and_delete() {
 }
 
 #[test]
-fn main_internal_unthrottled_and_validated() {
+fn main_internal_throttled_and_validated() {
     let (_root, data, locks) = dirs();
     let mut core = spawn("serve", &data, &locks, &[]);
     core.hello();
@@ -194,7 +194,8 @@ fn main_internal_unthrottled_and_validated() {
     let forbidden = core.call(3, "vault.reconcile", params.clone());
     assert_eq!(forbidden["error"]["code"], "forbidden");
 
-    // Five failures make unlock throttled; reconcile still answers.
+    // Five failures make unlock throttled, and reconcile too (#78): a vault
+    // exists that didn't "before" (null), so it would have to decrypt.
     for id in 4..9 {
         let wrong = core.call(
             id,
@@ -211,14 +212,20 @@ fn main_internal_unthrottled_and_validated() {
         )["error"]["code"],
         "throttled"
     );
-    // A vault exists that didn't "before" (null), and testpass1 opens it.
-    assert_eq!(reconcile(&mut core, 10, params)["status"], "committed");
+    let throttled = core.call_shell(10, "vault.reconcile", params);
+    assert_eq!(throttled["error"]["code"], "throttled", "{throttled}");
+    assert!(throttled["error"]["data"]["retry_after_ms"].as_u64() > Some(0));
+    assert!(throttled.get("result").is_none());
+    // A delete's reconcile decrypts nothing, so it still answers.
+    let before = fingerprint(&mut core, 11);
+    let delete = json!({ "op": "delete", "fingerprint_before": before, "password_b64": b64("x") });
+    assert_eq!(reconcile(&mut core, 12, delete)["status"], "not_committed");
 
     // Fingerprints are 64 lowercase hex digits.
     for (id, bad) in [
-        (11, "ABC".to_owned()),
-        (12, "g".repeat(64)),
-        (13, "A".repeat(64)),
+        (13, "ABC".to_owned()),
+        (14, "g".repeat(64)),
+        (15, "A".repeat(64)),
     ] {
         let reply = core.call_shell(
             id,
@@ -231,15 +238,15 @@ fn main_internal_unthrottled_and_validated() {
     // and a password change needs a vault before it.
     for (id, params) in [
         (
-            14,
+            16,
             json!({ "op": "create", "password_b64": b64("testpass1") }),
         ),
         (
-            15,
+            17,
             json!({ "op": "delete", "password_b64": b64("testpass1") }),
         ),
         (
-            16,
+            18,
             json!({ "op": "change_password", "fingerprint_before": null, "password_b64": b64("testpass1") }),
         ),
     ] {
@@ -248,13 +255,99 @@ fn main_internal_unthrottled_and_validated() {
         assert!(reply.get("result").is_none());
     }
     assert_eq!(
-        core.call(17, "vault.status", json!({}))["result"]["unlocked"],
+        core.call(19, "vault.status", json!({}))["result"]["unlocked"],
         true
     );
     let unknown = core.call_shell(
-        18,
+        20,
         "vault.reconcile",
         json!({ "op": "rename", "fingerprint_before": null, "password_b64": b64("x") }),
     );
     assert_eq!(unknown["error"]["code"], "invalid_argument");
+}
+
+/// #78: reconcile with made-up pre-state against a vault that has long
+/// existed. Each wrong password counts toward the unlock throttle, whichever
+/// op asks; once it applies, the right password gets `throttled` from
+/// reconcile and unlock alike, so reconcile is no unthrottled password
+/// oracle, and no way around K-4 to the phrase or an unlock.
+#[test]
+fn wrong_passwords_through_reconcile_count_toward_the_throttle() {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    core.call(
+        2,
+        "vault.import",
+        json!({ "password_b64": b64("testpass1"), "mnemonic_b64": b64(ABANDON) }),
+    );
+    core.call(3, "vault.lock", json!({}));
+    // The import's unlock and the lock.
+    assert_eq!(core.events().len(), 2);
+    let made_up = "0".repeat(64);
+    let guesses = [
+        json!({ "op": "create", "fingerprint_before": null, "password_b64": b64("guess-1x"), "install": true }),
+        json!({ "op": "change_password", "fingerprint_before": made_up, "password_b64": b64("guess-2x") }),
+        json!({ "op": "import", "fingerprint_before": made_up, "password_b64": b64("guess-3x"), "mnemonic_b64": b64(ABANDON), "install": true }),
+        json!({ "op": "create", "fingerprint_before": null, "password_b64": b64("guess-4x") }),
+        json!({ "op": "change_password", "fingerprint_before": made_up, "password_b64": b64("guess-5x") }),
+    ];
+    for (id, guess) in (4..).zip(guesses) {
+        assert_eq!(reconcile(&mut core, id, guess)["status"], "not_committed");
+    }
+    // The sixth guess, even the right password, waits.
+    let right = json!({ "op": "create", "fingerprint_before": null, "password_b64": b64("testpass1"), "install": true });
+    let throttled = core.call_shell(9, "vault.reconcile", right);
+    assert_eq!(throttled["error"]["code"], "throttled", "{throttled}");
+    assert!(throttled.get("result").is_none(), "no phrase");
+    let unlock = core.call(
+        10,
+        "vault.unlock",
+        json!({ "password_b64": b64("testpass1") }),
+    );
+    assert_eq!(unlock["error"]["code"], "throttled", "{unlock}");
+    assert_eq!(
+        core.call(11, "vault.status", json!({}))["result"]["unlocked"],
+        false
+    );
+    assert!(
+        core.events().iter().all(|e| e["event"] != "vault.unlocked"),
+        "nothing unlocked"
+    );
+}
+
+/// An honest reconcile's decrypt succeeds, which resets the counter as any
+/// successful password check does: four earlier failures don't leave the
+/// user one guess from the throttle.
+#[test]
+fn a_committed_reconcile_resets_the_throttle() {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    let before = fingerprint(&mut core, 2);
+    assert_eq!(before, Value::Null);
+    core.call(
+        3,
+        "vault.import",
+        json!({ "password_b64": b64("testpass1"), "mnemonic_b64": b64(ABANDON) }),
+    );
+    for id in 4..8 {
+        let wrong = core.call(
+            id,
+            "vault.verify_password",
+            json!({ "password_b64": b64("wrong-password") }),
+        );
+        assert_eq!(wrong["error"]["code"], "incorrect_password");
+    }
+    let honest = json!({ "op": "import", "fingerprint_before": before, "password_b64": b64("testpass1"), "mnemonic_b64": b64(ABANDON) });
+    assert_eq!(reconcile(&mut core, 8, honest)["status"], "committed");
+    // Five more failures are free again.
+    for id in 9..14 {
+        let wrong = core.call(
+            id,
+            "vault.verify_password",
+            json!({ "password_b64": b64("wrong-password") }),
+        );
+        assert_eq!(wrong["error"]["code"], "incorrect_password", "{wrong}");
+    }
 }

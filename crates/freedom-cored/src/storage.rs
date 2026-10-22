@@ -226,12 +226,9 @@ mod imp {
     use std::os::windows::ffi::OsStrExt;
     use std::path::{Component, Path, Prefix};
 
-    use super::Qualification;
+    use fc_sys::windows::{DRIVE_NO_ROOT_DIR, DRIVE_REMOTE, DRIVE_UNKNOWN, drive_type};
 
-    // GetDriveTypeW results.
-    const DRIVE_UNKNOWN: u32 = 0;
-    const DRIVE_NO_ROOT_DIR: u32 = 1;
-    const DRIVE_REMOTE: u32 = 4;
+    use super::Qualification;
 
     /// UNC paths are network shares. Drive letters and volume paths are
     /// asked about with `GetDriveTypeW`: `DRIVE_REMOTE` (a mapped network
@@ -260,18 +257,6 @@ mod imp {
             }
             _ => Qualification::Local,
         }
-    }
-
-    /// `GetDriveTypeW` on a NUL-terminated root path.
-    #[allow(unsafe_code)]
-    fn drive_type(root: &[u16]) -> u32 {
-        if root.last() != Some(&0) {
-            return DRIVE_UNKNOWN;
-        }
-        // SAFETY: `root` is a valid, NUL-terminated UTF-16 string that lives
-        // for the whole call; GetDriveTypeW only reads it and keeps no
-        // reference.
-        unsafe { windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(root.as_ptr()) }
     }
 }
 

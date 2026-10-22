@@ -31,7 +31,7 @@ fn hello_status_shutdown() {
         json!({ "exists": false, "unlocked": false, "epoch": null, "fingerprint": null })
     );
     assert_eq!(
-        core.call(3, "core.shutdown", json!({}))["result"],
+        core.call_shell(3, "core.shutdown", json!({}))["result"],
         json!({})
     );
     assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
@@ -66,7 +66,7 @@ fn errors_are_typed() {
     core.send(&json!({ "type": "request", "id": 3, "method": "vault.status", "params": {},
         "context": { "caller": "page", "page": { "origin": "https://a", "top_origin": "https://a", "frame": 1, "navigation": 1 } } }));
     assert_eq!(core.recv()["error"]["code"], "forbidden");
-    let again = core.call(
+    let again = core.call_shell(
         4,
         "core.hello",
         json!({ "protocol": 1, "shell_version": "t", "auto_lock_ms": 0 }),
@@ -87,7 +87,7 @@ fn status_refuses_non_regular_vault_files_without_blocking() {
     assert_eq!(status["error"]["data"]["kind"], "not_regular");
     // The loop is still responsive.
     assert_eq!(
-        core.call(3, "core.shutdown", json!({}))["result"],
+        core.call_shell(3, "core.shutdown", json!({}))["result"],
         json!({})
     );
     assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
@@ -132,7 +132,7 @@ fn handshake_rules() {
     // A protocol mismatch is answered, then the core exits.
     let (_root, data, locks) = dirs();
     let mut core = spawn("serve", &data, &locks, &[]);
-    let reply = core.call(
+    let reply = core.call_shell(
         1,
         "core.hello",
         json!({ "protocol": 2, "shell_version": "t", "auto_lock_ms": 0 }),
@@ -144,6 +144,53 @@ fn handshake_rules() {
     let (_root, data, locks) = dirs();
     let mut core = spawn("serve", &data, &locks, &["--hello-timeout-ms", "300"]);
     assert_eq!(core.exit_code(Duration::from_secs(5)), 76);
+}
+
+/// #101: fc-protocol's method table decides who may call what, once for
+/// every request. `core.hello` and `core.shutdown` are main's own (`shell`):
+/// a `chrome` caller, which a main bug could forward from a renderer, is
+/// refused, and the core neither handshakes nor shuts down for it.
+#[test]
+fn the_method_table_decides_who_may_call() {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    let hello = json!({ "protocol": 1, "shell_version": "t", "auto_lock_ms": 900_000 });
+    let refused = core.call(1, "core.hello", hello.clone());
+    assert_eq!(refused["error"]["code"], "forbidden", "{refused}");
+    assert_eq!(
+        core.call_shell(2, "core.hello", hello)["result"]["protocol"],
+        1
+    );
+
+    let shutdown = core.call(3, "core.shutdown", json!({}));
+    assert_eq!(shutdown["error"]["code"], "forbidden", "{shutdown}");
+    // Still running.
+    assert!(core.call(4, "vault.status", json!({}))["result"].is_object());
+    // Main's own methods, from the browser UI.
+    for (id, method) in [
+        (5, "vault.reconcile"),
+        (6, "nodes.op_status"),
+        (7, "compat.private_key"),
+        (8, "compat.bee_wallet_key"),
+        (9, "compat.publisher_key"),
+        (10, "dweb.open"),
+    ] {
+        let reply = core.call(id, method, json!({}));
+        assert_eq!(reply["error"]["code"], "forbidden", "{method}: {reply}");
+    }
+    // A name the table doesn't list is unknown, whoever asks.
+    for (id, method) in [(11, "compat.root_key"), (12, "core.restart")] {
+        let reply = core.call_shell(id, method, json!({}));
+        assert_eq!(
+            reply["error"]["code"], "unknown_method",
+            "{method}: {reply}"
+        );
+    }
+    assert_eq!(
+        core.call_shell(13, "core.shutdown", json!({}))["result"],
+        json!({})
+    );
+    assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
 }
 
 #[test]
@@ -292,6 +339,104 @@ fn the_core_keeps_using_the_directory_it_locked() {
     );
 }
 
+/// #84: `flock` works on a read-only handle, so another local user who can
+/// open the lock file can hold the gate and keep the core from starting.
+/// The lock and identity directories are private (`0700`), the lock file
+/// `0600`; what an earlier build or the umask left wider is tightened.
+#[cfg(unix)]
+#[test]
+fn the_gate_is_private_to_the_user() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode =
+        |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+    let set = |path: &std::path::Path, mode: u32| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    let lock_file = |locks: &std::path::Path| {
+        let entries: Vec<_> = std::fs::read_dir(locks)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        entries[0].clone()
+    };
+
+    let (_root, data, locks) = dirs();
+    let mut holder = spawn("hold-lock", &data, &locks, &[]);
+    assert_eq!(holder.line(), "locked");
+    assert_eq!(mode(&data), 0o700);
+    assert_eq!(mode(&locks), 0o700);
+    assert_eq!(mode(&lock_file(&locks)), 0o600);
+    holder.close_stdin();
+    assert_eq!(holder.exit_code(Duration::from_secs(5)), 0);
+
+    // As an earlier build and the default umask left them.
+    set(&data, 0o755);
+    set(&locks, 0o755);
+    set(&lock_file(&locks), 0o644);
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    assert_eq!(mode(&data), 0o700);
+    assert_eq!(mode(&locks), 0o700);
+    assert_eq!(mode(&lock_file(&locks)), 0o600);
+}
+
+/// A symlink in the lock file's place is never followed: the core refuses
+/// to start (74), and the file it points to is untouched.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_lock_file_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let (root, data, locks) = dirs();
+    let mut holder = spawn("hold-lock", &data, &locks, &[]);
+    assert_eq!(holder.line(), "locked");
+    holder.close_stdin();
+    assert_eq!(holder.exit_code(Duration::from_secs(5)), 0);
+    let lock = std::fs::read_dir(&locks)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::remove_file(&lock).unwrap();
+    let elsewhere = root.path().join("elsewhere");
+    std::fs::write(&elsewhere, b"").unwrap();
+    std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &lock).unwrap();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    assert_eq!(core.exit_code(Duration::from_secs(10)), 74);
+    assert_eq!(
+        std::fs::metadata(&elsewhere).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+}
+
+/// Someone else's lock directory is refused (74). Only root can make one,
+/// so elsewhere this checks nothing.
+#[cfg(unix)]
+#[test]
+fn a_lock_dir_of_another_user_is_refused() {
+    if !running_as_root() {
+        return;
+    }
+    let (_root, data, locks) = dirs();
+    std::fs::create_dir_all(&locks).unwrap();
+    // Some sandboxes map no UID 65534 (EINVAL): nothing to check there.
+    if std::os::unix::fs::chown(&locks, Some(65534), None).is_err() {
+        return;
+    }
+    let mut core = spawn("serve", &data, &locks, &[]);
+    assert_eq!(core.exit_code(Duration::from_secs(10)), 74);
+}
+
+#[cfg(unix)]
+fn running_as_root() -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // The test's own files are owned by whoever runs it.
+    let probe = tempfile::tempdir().unwrap();
+    std::fs::metadata(probe.path()).unwrap().uid() == 0
+}
+
 #[test]
 fn the_lock_dir_must_be_outside_the_identity_dir() {
     let (_root, data, _locks) = dirs();
@@ -379,7 +524,7 @@ fn slow_storage_at_startup_is_bounded_by_the_hello_deadline() {
         &["--hello-timeout-ms", "1000"],
         &[SLOW_SNAPSHOT],
     );
-    core.send(&request(
+    core.send(&shell_request(
         1,
         "core.hello",
         json!({ "protocol": 1, "shell_version": "test", "auto_lock_ms": 900000 }),

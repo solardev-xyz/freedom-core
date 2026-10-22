@@ -1,0 +1,75 @@
+# cargo-fuzz targets for the parsers that take untrusted bytes (design 0001,
+# Testing): the frame codec, fragment reassembly and stream frames, the
+# message decoder and secret fields, fc-json, and the vault file.
+#
+# Run one locally (nightly; CI pins the same toolchain in ci.yml):
+#
+#   mkdir -p fuzz/corpus/json_parse
+#   cargo +nightly-2026-10-01 fuzz run json_parse fuzz/corpus/json_parse fuzz/seeds/json_parse
+#
+# The first directory collects new inputs, and must exist;
+# `fuzz/seeds/<target>` holds the committed starting inputs, which
+# `fuzz/seeds/generate.py` writes. A crash lands in
+# `fuzz/artifacts/<target>/`; replay it with
+# `cargo +nightly-2026-10-01 fuzz run <target> <file>`.
+#
+# Its own workspace, so libFuzzer and nightly-only build flags stay out of
+# the core's lockfile, `cargo deny` and stable builds.
+
+[package]
+name = "freedom-core-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+# The vault target seals its own inputs with the vault's cipher and KDF.
+aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc"] }
+base64 = "0.22.1"
+fc-json = { path = "../crates/fc-json" }
+fc-keys = { path = "../crates/fc-keys" }
+fc-protocol = { path = "../crates/fc-protocol" }
+fc-vault = { path = "../crates/fc-vault" }
+libfuzzer-sys = "0.4.13"
+serde_json = { version = "1", features = ["raw_value"] }
+sha2 = { version = "0.11", default-features = false }
+
+[workspace]
+members = ["."]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "json_parse"
+path = "fuzz_targets/json_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "protocol_frames"
+path = "fuzz_targets/protocol_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "protocol_message"
+path = "fuzz_targets/protocol_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vault_open"
+path = "fuzz_targets/vault_open.rs"
+test = false
+doc = false
+bench = false

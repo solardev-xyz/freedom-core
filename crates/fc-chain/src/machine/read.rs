@@ -296,7 +296,13 @@ pub(crate) async fn read(
                 return Ok(ReadAnswer {
                     result: answer.result,
                     source,
-                    verified: matches!(source, "myotis" | "colibri" | "quorum" | "blockscout"),
+                    verified: match source {
+                        "myotis" | "colibri" | "blockscout" => true,
+                        // m = 1 is one endpoint's answer (deviation
+                        // `singleton-quorum`).
+                        "quorum" => req.chain.quorum_verifies(),
+                        _ => false,
+                    },
                     trust: if options.include_trust {
                         answer.trust
                     } else {

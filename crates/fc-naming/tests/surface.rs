@@ -96,6 +96,8 @@ struct Sent {
 struct World {
     machine: Machine,
     answers: BTreeMap<String, String>,
+    /// Answers for one endpoint and method, over `answers`.
+    answers_at: BTreeMap<(String, String), String>,
     pending: BTreeMap<u64, Pending>,
     next_token: u64,
     replies: Vec<Reply>,
@@ -104,6 +106,8 @@ struct World {
     /// Configurations to apply at these times.
     configures: Vec<(u64, Config)>,
     failing: Vec<String>,
+    /// Every `eth_call` fails with this transport class.
+    failing_calls: Option<Transport>,
     sent: Vec<Sent>,
     /// When the machine cancelled requests.
     cancelled: Vec<u64>,
@@ -129,12 +133,14 @@ impl World {
         Self {
             machine: Machine::new(0, config, random),
             answers: recorded(),
+            answers_at: BTreeMap::new(),
             pending: BTreeMap::new(),
             next_token: 1,
             replies: Vec::new(),
             changes: Vec::new(),
             configures: Vec::new(),
             failing: Vec::new(),
+            failing_calls: None,
             sent: Vec::new(),
             cancelled: Vec::new(),
             cancelled_ids: Vec::new(),
@@ -199,14 +205,22 @@ impl World {
                 let Request::Rpc { endpoint, body } = request else {
                     continue;
                 };
+                let sent = jsjson::parse(&body).unwrap();
+                let method = sent.get("method").and_then(JsValue::as_str).unwrap();
                 let answer = if self.failing.contains(&endpoint) {
                     Answer::Failed(Transport::Network)
+                } else if let Some(transport) = self.failing_calls.filter(|_| method == "eth_call")
+                {
+                    Answer::Failed(transport)
                 } else {
-                    let sent = jsjson::parse(&body).unwrap();
-                    let method = sent.get("method").and_then(JsValue::as_str).unwrap();
                     Answer::Rpc {
                         status: 200,
-                        body: self.answers[method].clone().into_bytes(),
+                        body: self
+                            .answers_at
+                            .get(&(endpoint.clone(), method.to_owned()))
+                            .unwrap_or(&self.answers[method])
+                            .clone()
+                            .into_bytes(),
                     }
                 };
                 self.deliver(at + 10, Pending::Answer(id, answer));
@@ -607,6 +621,33 @@ fn an_ended_session_draws_no_randomness() {
     assert_eq!(draws.get(), at_change);
 }
 
+/// A request the core never sent (over the frame) fails its leg, but says
+/// nothing of the endpoint: none is quarantined, and the next lookup's legs
+/// use as many endpoints as before (#74). An answer too large, the
+/// endpoint's doing, still quarantines it.
+#[test]
+fn unsent_requests_quarantine_no_endpoint() {
+    let legs = |transport: Transport| {
+        let mut world = World::new(config());
+        world.failing_calls = Some(transport);
+        let a = world.machine.resolve_content("vitalik.eth");
+        world.run(10_000);
+        assert!(world.reply(a).outcome.is_err());
+        world.failing_calls = None;
+        let before = world.sent.len();
+        let b = world.machine.resolve_content("alice.eth");
+        world.run(20_000);
+        let called: std::collections::BTreeSet<&str> = world.sent[before..]
+            .iter()
+            .filter_map(|s| s.endpoint.as_deref())
+            .collect();
+        (world.reply(b).outcome.is_ok(), called.len())
+    };
+    assert_eq!(legs(Transport::Unsent), (true, 3));
+    let (_, after_too_large) = legs(Transport::TooLarge);
+    assert!(after_too_large < 3, "{after_too_large}");
+}
+
 #[test]
 fn late_failures_leave_forgotten_endpoints_alone() {
     let mut config = config();
@@ -635,6 +676,26 @@ fn late_failures_leave_forgotten_endpoints_alone() {
         .filter_map(|s| s.endpoint.as_deref())
         .collect();
     assert_eq!(probed.len(), ENDPOINTS.len());
+}
+
+/// An endpoint listed twice is one endpoint: the machine runs exactly as
+/// for the list without the repeat, so it is never two anchor heads or
+/// two legs that agree with each other.
+#[test]
+fn a_repeated_endpoint_counts_once() {
+    let run = |rpc: &[&str]| {
+        let mut config = config();
+        config.rpc = rpc.iter().map(|e| (*e).to_owned()).collect();
+        let mut world = World::new(config);
+        let a = world.machine.resolve_content("vitalik.eth");
+        world.run(10_000);
+        let reply = format!("{:?}", world.reply(a).outcome);
+        let sent: Vec<Option<String>> = world.sent.iter().map(|s| s.endpoint.clone()).collect();
+        (reply, sent)
+    };
+    let [a, b, c, d] = ENDPOINTS;
+    assert_eq!(run(&[a, a, b, c, d]), run(&[a, b, c, d]));
+    assert_eq!(run(&[a, b, a, c, b, d]), run(&[a, b, c, d]));
 }
 
 #[test]
@@ -814,6 +875,93 @@ fn answers_count_against_the_session() {
     assert_eq!(message(world.reply(a)), Some("budget"));
 }
 
+/// The recorded anchor block with `count` transaction hashes, as
+/// `eth_getBlockByNumber(n, false)` lists them.
+fn block_with(world: &World, count: usize) -> String {
+    let hashes: Vec<String> = (0..count).map(|i| format!(r#""0x{i:064x}""#)).collect();
+    world.answers["eth_getBlockByNumber"].replace(
+        r#""transactions":[]"#,
+        &format!(r#""transactions":[{}]"#, hashes.join(",")),
+    )
+}
+
+/// `n` endpoints, each its own host.
+fn endpoints(n: usize) -> Vec<String> {
+    (0..n)
+        .map(|i| format!("https://e{i}.rpc.example"))
+        .collect()
+}
+
+/// One endpoint answers its head with 600 KB of tiny JSON values: about
+/// 26 MB once parsed, over the session's 16 MiB. That answer fails its
+/// endpoint as too large, and the lookup goes on with the other three
+/// (#73: it used to end the whole lookup with `budget`, the endpoint never
+/// marked).
+#[test]
+fn one_huge_answer_fails_its_endpoint_not_the_lookup() {
+    let mut world = World::new(config());
+    let huge = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"result":"0x1312d00","pad":[{}]}}"#,
+        vec!["[]"; 200_000].join(",")
+    );
+    assert!(huge.len() > 590_000 && huge.len() < 720 * 1024);
+    world
+        .answers_at
+        .insert((ENDPOINTS[3].to_owned(), "eth_blockNumber".into()), huge);
+    let a = world.machine.resolve_content("vitalik.eth");
+    world.run(10_000);
+    assert!(
+        world.reply(a).outcome.is_ok(),
+        "{:?}",
+        world.reply(a).outcome
+    );
+    assert!(
+        world.peak < Bounds::default().session_bytes,
+        "{}",
+        world.peak
+    );
+    // The lying endpoint is quarantined: the next lookup doesn't ask it.
+    let before = world.sent.len();
+    let b = world.machine.resolve_content("alice.eth");
+    world.run(60_000);
+    assert!(world.reply(b).outcome.is_ok());
+    assert!(
+        world.sent[before..]
+            .iter()
+            .all(|s| s.endpoint.as_deref() != Some(ENDPOINTS[3]))
+    );
+}
+
+/// Honest anchor blocks, however many endpoints answer them: eight
+/// endpoints with blocks of 1,000 transactions (about 69 KB each, the
+/// issue's case), and the 64-endpoint worst case with blocks of 2,900
+/// (about 200 KB each, design 0004's worst at 60 M gas). Each block is
+/// charged at what it can hold once parsed, and only until it is read for
+/// its hash (#73: the flat 32 bytes per byte, kept to the session's end,
+/// ended both lookups with `budget`).
+#[test]
+fn honest_large_anchor_blocks_fit_the_budget() {
+    for (n, transactions) in [(8, 1_000), (64, 2_900)] {
+        let mut config = config();
+        config.rpc = endpoints(n);
+        let mut world = World::new(config);
+        let block = block_with(&world, transactions);
+        world.answers.insert("eth_getBlockByNumber".into(), block);
+        let a = world.machine.resolve_content("vitalik.eth");
+        world.run(10_000);
+        assert!(
+            world.reply(a).outcome.is_ok(),
+            "{n}: {:?}",
+            world.reply(a).outcome
+        );
+        assert!(
+            world.peak < Bounds::default().session_bytes / 2,
+            "{n}: {}",
+            world.peak
+        );
+    }
+}
+
 #[test]
 fn an_aliasing_decode_counts_against_the_session() {
     let mut bounded = config();
@@ -896,19 +1044,26 @@ fn spent_in_its_finishing_poll_a_session_caches_nothing() {
 
 #[test]
 fn answers_count_as_their_parsed_tree() {
-    // 2 KB more per answer: about 30 KB of bodies in all, which raw would
-    // fit 200,000 bytes, but parsed (32 per byte) can't.
-    let mut bounded = config();
-    bounded.bounds.session_bytes = 200_000;
-    let mut world = World::new(bounded);
-    let pad = format!(r#","pad":"{}"}}"#, "x".repeat(2_000));
-    for body in world.answers.values_mut() {
+    // Each leg's answer grows by 2 KB: as one string, it is charged about
+    // 2 KB more; as 1,000 zeros, 1,000 values more (#73: an answer is
+    // charged at what its parse can hold, not 32 per byte).
+    let peak = |pad: &str| {
+        let mut world = World::new(config());
+        let body = world.answers.get_mut("eth_call").unwrap();
         body.pop();
-        body.push_str(&pad);
-    }
-    let a = world.machine.resolve_content("vitalik.eth");
-    world.run(10_000);
-    assert_eq!(message(world.reply(a)), Some("budget"));
+        body.push_str(&format!(r#","pad":{pad}}}"#));
+        let a = world.machine.resolve_content("vitalik.eth");
+        world.run(10_000);
+        assert!(world.reply(a).outcome.is_ok());
+        world.peak
+    };
+    let plain = peak("0");
+    let string = peak(&format!(r#""{}""#, "x".repeat(2_000)));
+    let values = peak(&format!("[{}]", vec!["0"; 1_000].join(",")));
+    // Two legs answered before they agreed; the third was cancelled. Each
+    // string answer counts its body and its string, about 4 KB.
+    assert!(string - plain < 2 * 2 * 2_100, "{plain} {string}");
+    assert!(values - plain >= 2 * 1_000 * 88, "{plain} {values}");
 }
 
 #[test]
@@ -916,14 +1071,15 @@ fn every_callers_error_counts_against_the_session() {
     // No method can resolve: each caller's error carries the name.
     let mut failing = config();
     failing.order = vec!["myotis".into()];
-    let name = format!("{}.eth", "a".repeat(2_000));
+    // The longest name a session takes (#74): 1,024 bytes.
+    let name = format!("{}.eth", "a".repeat(1_020));
     let mut alone = World::new(failing.clone());
     let a = alone.machine.resolve_content(&name);
     alone.run(10_000);
     let error = message(alone.reply(a)).unwrap().to_owned();
     assert!(error.contains(&name));
     // As it is sent: a JSON string.
-    let reply = reply_size(&JsValue::String(error.clone()));
+    let reply = reply_size(&JsValue::string(error.clone()));
     let peak = alone.peak.max(8 * format!("content:{name}").len());
     for (room, outcome) in [(3 * reply, error.as_str()), (3 * reply - 1, "budget")] {
         let mut bounded = failing.clone();
@@ -965,8 +1121,9 @@ fn replies_hold_their_room_until_written() {
 
 #[test]
 fn a_configuration_changes_replies_count_against_the_session() {
-    let name = format!("{}.eth", "a".repeat(2_000));
-    let reply = reply_size(&JsValue::String(format!(
+    // The longest name a session takes (#74): 1,024 bytes.
+    let name = format!("{}.eth", "a".repeat(1_020));
+    let reply = reply_size(&JsValue::string(format!(
         "Name resolution configuration changed while resolving {name}"
     )));
     let callers = |world: &mut World| -> Vec<u64> {
@@ -1025,7 +1182,7 @@ fn an_exhausted_callers_reply_counts_against_the_session() {
     let text = "Myotis availability changed repeatedly while resolving vitalik.eth";
     let (probe, exhausted) = start(None);
     let held = probe.held_before_reply[&exhausted];
-    let size = reply_size(&JsValue::String(text.to_owned()));
+    let size = reply_size(&JsValue::string(text.to_owned()));
     for (room, expected) in [(size, text), (size - 1, "budget")] {
         let (world, exhausted) = start(Some(held + room));
         assert_eq!(message(world.reply(exhausted)), Some(expected));
@@ -1169,8 +1326,12 @@ fn each_callers_copy_of_a_result_counts_as_the_tree_it_is() {
 
 #[test]
 fn an_exhausted_callers_reply_is_sized_too() {
-    let name = format!("{}.eth", "a".repeat(990_000));
-    let mut world = World::new(config());
+    // A name is at most 1,024 bytes (#74), so the reply cap is lowered
+    // below the error that echoes it.
+    let name = format!("{}.eth", "a".repeat(1_020));
+    let mut bounded = config();
+    bounded.bounds.reply_bytes = 1_000;
+    let mut world = World::new(bounded);
     world.changes.push(5);
     let caller = world.machine.resolve_content_with(
         &name,
@@ -1354,6 +1515,9 @@ fn a_cached_discoverys_copy_counts_against_the_session_that_takes_it() {
     let run = |backlog: usize| {
         let mut config = config();
         config.tezos = vec!["t1".into()];
+        // The registry's answer is far over the per-answer allowance, which
+        // this test isn't about.
+        config.bounds.answer_charge_bytes = usize::MAX;
         let mut machine = Machine::new(0, config, Box::new(Mulberry32::new(7)));
         machine.resolve_tezos("alice.tez");
         let (primed, scripts, _) = drive_tezos(&mut machine, &answers);
