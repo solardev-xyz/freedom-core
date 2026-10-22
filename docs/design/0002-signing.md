@@ -1,6 +1,6 @@
 # 0002: Signing in the core (Phase 2)
 
-**Status:** proposed. Builds on [0001](0001-freedom-cored.md). After this phase, no raw private key leaves the core except through the permanent, user-requested backup exports.
+**Status:** proposed. Builds on [0001](0001-freedom-cored.md). After this phase, no raw signing key leaves the core except through the permanent, user-requested backup exports. The node identities are separate exceptions: Bee's keystore file, and the sealed release of the Radicle node key to its service ([0001](0001-freedom-cored.md), *Deliberate exceptions*).
 
 ## Summary
 
@@ -27,7 +27,7 @@ Each returns exactly the bytes ethers or bee-js return today, and each signing m
 ## Goals and non-goals
 
 **Goals**
-- **No raw key outside the core.** After the browser migrates, `compat.*` is removed. Main never holds a private key again, and neither does the Swarm path, which today keeps one alive for seconds while it uploads.
+- **No raw signing key outside the core.** After the browser migrates, `compat.*` is removed. Main never holds a vault signing key again, and neither does the Swarm path, which today keeps one alive for seconds while it uploads. The node identities stay outside this goal: Bee's key is written to its node's keystore file, and the Radicle node key goes to its service sealed, so main relays it without reading it ([0001](0001-freedom-cored.md), *Deliberate exceptions*; [0008](0008-radicle-service.md), *Keys*). Main loads the Radicle key itself only while the add-on runs there.
 - **Byte-exact parity.**
   - The same key and input give the same raw transaction, signature or SOC as today. ethers and k256 both sign with RFC 6979 deterministic nonces and low-s, so the signatures are identical, not just valid.
   - Golden vectors from the pinned JS check this (see [Parity](#parity-contract-and-vectors)).

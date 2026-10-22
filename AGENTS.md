@@ -11,17 +11,21 @@ The code holds users' keys and money. Every rule below exists for that reason.
 3. **No raw private key or seed leaves the core.**
    - **Exceptions:**
      - user-requested backup exports (`vault.export_*`) and the onboarding display of the mnemonic, which are permanent;
-     - the temporary `compat.*` exports listed in `docs/design/0001-freedom-cored.md`, which Phase 2 deletes.
+     - the temporary `compat.*` exports listed in `docs/design/0001-freedom-cored.md`, which Phase 2 deletes;
+     - Bee's node keystore, which `nodes.write_identity` writes for the Bee node main runs (0001, "Multi-file writes"), until Phase 5. It is in the format the JS reference writes, mode `0600` on Unix (on Windows it inherits its containing directory's ACL; 0001 describes the default profile's guarantee and the limit for alternate roots). Its password is in the node's `config.yaml` until Phase 5 moves it (0001, K-3);
+     - the sealed release of the Radicle node key to the Radicle service, through `nodes.seal_radicle_key`: sealed (HPKE) to a key the service makes at each start, and only while the vault is unlocked (design 0008, "Keys"). Main relays only ciphertext.
+
+       No other node key may be released.
      Any new exception needs a design change.
    - Signing APIs take a key reference, never key bytes.
    - Secret types zeroize on drop.
    - Secret types implement no `Debug`/`Display` that prints the bytes, and no `Serialize`.
    - Secret types implement `Clone` only when it's unavoidable.
 4. **Key storage:**
-   - One lock state: every cache of derived keys hangs off it, and any lock (auto or manual) wipes all of them.
+   - One lock state: every cache of derived keys hangs off it, and any lock (auto or manual) wipes all of them. A node identity isn't such a cache: once released to its node, it stays there across a lock, for the rest of a start and while the node runs (design 0008, "Keys").
    - Secret files are written atomically (temp file, fsync, rename) with mode `0600`.
    - A password change keeps the old vault until the new one decrypts.
-   - Never store a secret next to the thing it protects.
+   - Never store a secret next to the thing it protects. The one known exception is Bee's keystore password in `config.yaml`, beside `keys/swarm.key`, as the JS reference writes it, until Phase 5 (0001, K-3). No new code may add another.
    - Unlock attempts are throttled.
    These rules come from weaknesses found in the desktop JS code.
 5. **The desktop JS implementation is the reference.** Anything that reads or writes user data must reproduce `vectors/` exactly. Never edit a vector to make a test pass. If a vector looks wrong, stop and raise it.
