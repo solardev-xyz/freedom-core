@@ -708,11 +708,16 @@ A runs in main, at the confirmation before every transaction signature: a send t
   - **Failures:** a part that fails is null. The request fails only as a fee quote can (`deadline`, `cancelled`, `busy`, `budget`, or `reconfigured` after main's one resend), and main then has no reference.
 - **The reference R,** per gas, computed by main from the reply:
   1. **Verified:** the header has a base fee B and is fresh, its `timestamp` within 60 s of main's clock either way. R = 2·B + `lowest_priority`, or 2·B when that is null (all of B's quotes legacy on an EIP-1559 chain, or none answered).
-  2. **Combined quote:** otherwise, the combined-quote fallback, when B's combined quote arrived at most 60 s ago. R is its `maxFeePerGas`, or its `gasPrice` if legacy. It applies with no prover, Colibri out of the read order or failing, a malformed or stale header, or a chain without EIP-1559.
+  2. **Combined quote:** otherwise, the combined-quote fallback, when B's combined quote is at most 60 s old. R is its `maxFeePerGas`, or its `gasPrice` if legacy. It applies with no prover, Colibri out of the read order or failing, a malformed or stale header, or a chain without EIP-1559.
+     - **The quote's age** counts from the moment main sent the `chain.fee_reference` that returned it, not from the reply's arrival. The quote was made after that moment, so its true age is never more.
+     - **Everything after counts:** the time the request spent waiting for its header, the transport, and any time main holds the reply.
+     - **A slow header part** can therefore deliver a quote that is already too old. If B finishes at 0.1 s and the header fails at 60 s, the quote is past 60 s by the time the reply is used, and this branch doesn't apply.
   3. **None:** otherwise, or when R is 0.
   - **No reference:** the confirmation shows the most the transaction can cost, says it couldn't be compared, and the send isn't auto-approved.
   - **One endpoint's reference:** when R is a combined quote with `answered: 1`, it is that endpoint's word, and a Direct quote from it has a ratio of 1 against it. The confirmation still compares and shows the ratio, and a send above the threshold is still asked again. But no send judged against it is auto-approved: A can't judge it reliably. On a chain with one RPC endpoint and no verified header, no send is auto-approved.
-  - **A spike before signing:** the check uses evidence at most 60 s old at the moment of approval, by the user or automatically. Older evidence is gathered again before the signature, and the user is asked again if the new R puts the send above the threshold.
+  - **A spike before signing:** the check uses evidence at most 60 s old at the moment of approval, by the user or automatically. A header's age comes from its `timestamp`, a quote's from its request's start. Older evidence is gathered again before the signature, and the user is asked again if the new R puts the send above the threshold.
+    - **Reused evidence**, for a later approval or for another transaction's confirmation, keeps those ages.
+    - **Evidence gathered again** has a new request start.
     - **A rising base fee** raises R with it.
     - **During a spike** 2·B is headroom, not a forecast. A transaction quoted after the evidence was gathered can be asked about though it would pay little. The multiple and the 60 s are tuned together.
   - **A wrong clock** makes every header stale; R then falls back to the combined quote.
@@ -741,6 +746,9 @@ A runs in main, at the confirmation before every transaction signature: a send t
     - no reference: the most shown, "couldn't compare", never auto-approved; R of 0 likewise;
     - one endpoint's reference (`answered: 1`): the ratio shown, a send above the threshold asked again, and a send below it still not auto-approved;
     - a base-fee spike before signing: evidence 61 s old gathered again, and the user asked again only when the send is newly above;
+    - the quote's age from its request's start:
+      - fast quotes with a header that fails, or comes back stale, at 60 s, and an approval 61 s after the request started: no combined-quote reference, though the reply is 1 s old;
+      - the same with evidence reused for a later approval and for another transaction;
     - the mixed-type boundary case without a verified header, shown not flagged.
 
 ## Errors and text
@@ -873,9 +881,19 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
   - **every result and error,** with its settle time: key order, constructor, `name`, message, own properties, `-0` and UTF-16 strings;
   - **the state tables** after each step. Route keys whose target lists several addresses are compared with that list digested ([Adaptive bypass](#adaptive-bypass)).
   - **20 scenarios show a deviation's difference,** each listed in the test with the whole reply, the requests and the state it must show instead, and every field the deviation doesn't change still compared: `broadcast-outcome` (13: today's error, or a success with another hash, becomes `uncertain`, reporting keccak256 of the raw bytes, with each reconciliation lookup made listed with its endpoint and its whole body or params, the hash included), `config-change` (`boundary-registry-change-mid-request`: the three members asked again at 1,000 listed whole, and the one exchange the change moves, Direct's, given its new start), `order-validation` (`boundary-order-duplicates-and-unknown`), `endpoint-dedup` (`boundary-quorum-duplicate-endpoint`: a asked once, its second exchange never made, and the quorum's miss handed to Direct), `singleton-quorum` (`boundary-quorum-singleton-not-verified`: the same requests, two reads and a fee quote labelled as Direct would), `json-depth` (`boundary-json-depth-513`), `cancel-promptly` (`cancel-read-no-fallthrough`) and `adapter-error-text` (`boundary-colibri-revert-capacity`: the revert reads `execution reverted`, its route blocked as today).
-  - **`fee-combination`** ([B](#b-combining-directs-quotes)) changes three more when it is implemented. Each must list its whole requests, with their starts and cancels, and its whole reply:
-    - `router-fee-quote-direct-same-endpoint`: both endpoints asked at 0, the same values, `answered: 2`;
-    - `boundary-fee-direct-priority-unparseable` and `boundary-fee-direct-gas-price-fails-first`: b asked at once with a, not after it, and `answered: 1`.
+  - **`fee-combination`** ([B](#b-combining-directs-quotes)) changes three more when it is implemented.
+    - **What each lists:** its whole requests, with their starts and cancels, and its whole reply.
+    - **What is compared:** each reply's values and key order, `answered` last.
+    - **The inputs stay:** the endpoints' scripted answers are unchanged.
+
+    The three:
+    - **`router-fee-quote-direct-same-endpoint`:**
+      - both endpoints asked at 0;
+      - the inputs: primary answers G = 3773, P = 1 (M = 7545), and secondary answers `0x1` to both (G = 1, P = 1, M = 1);
+      - B's reply: `{"type":"eip1559","baseFee":"0","maxPriorityFeePerGas":"1","maxFeePerGas":"1","effectiveGasPrice":"1","source":"direct","verified":false,"answered":2}`;
+      - today's is primary's alone: `baseFee` 3772, `maxFeePerGas` 7545, `effectiveGasPrice` 3773.
+    - **`boundary-fee-direct-priority-unparseable`:** b asked at once with a, not after it. a fails, and b's legacy quote stands: `{"type":"legacy","gasPrice":"16","effectiveGasPrice":"16","source":"direct","verified":false,"answered":1}`.
+    - **`boundary-fee-direct-gas-price-fails-first`:** b asked at once with a. a fails, and b's legacy quote stands: `{"type":"legacy","gasPrice":"1000000000","effectiveGasPrice":"1000000000","source":"direct","verified":false,"answered":1}`.
 
     The other fee-quote scenarios don't reach Direct with more than one endpoint, and stay as they are. None of the three has `colibri` in its read order, so B's header read adds nothing to them.
   - **None is skipped.**
