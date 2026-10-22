@@ -1,0 +1,271 @@
+{
+  "base256emoji 1.0.2": {
+    "repository": "https://github.com/Jorropo/base256emoji",
+    "commit": "f7cf4ae2c15123376d6634ca7aed005034b396ec",
+    "files": [
+      "spdx/MIT.txt"
+    ],
+    "note": "Neither the crate nor its repository (at this commit or on its default branch) carries a license text; it declares MIT. SPDX's MIT text (license-list-data v3.29.0, 31ba1a50e5397e00a304dbadc76531740e89ee48) stands in."
+  },
+  "blake2b_simd 1.0.4": {
+    "repository": "https://github.com/oconnor663/blake2_simd",
+    "commit": "6a94ae2e18985c7c35bada8a4d438bfe9ab0d0c0",
+    "files": [
+      "oconnor663-blake2_simd/LICENSE"
+    ]
+  },
+  "blake2s_simd 1.0.4": {
+    "repository": "https://github.com/oconnor663/blake2_simd",
+    "commit": "6a94ae2e18985c7c35bada8a4d438bfe9ab0d0c0",
+    "files": [
+      "oconnor663-blake2_simd/LICENSE"
+    ]
+  },
+  "cid 0.11.3": {
+    "repository": "https://github.com/multiformats/rust-cid",
+    "commit": "8acbed8dab033eaa5006046995732277bae696cb",
+    "files": [
+      "spdx/MIT.txt"
+    ],
+    "note": "Neither the crate nor its repository (at this commit or on its default branch) carries a license text; it declares MIT. SPDX's MIT text (license-list-data v3.29.0, 31ba1a50e5397e00a304dbadc76531740e89ee48) stands in."
+  },
+  "const-str 0.4.3": {
+    "repository": "https://github.com/Nugine/const-str",
+    "commit": "a549b512ced97f5ec6569823dbce08916cd611f3",
+    "files": [
+      "Nugine-const-str/LICENSE"
+    ]
+  },
+  "futures-bounded 0.2.4": {
+    "repository": "https://github.com/thomaseizinger/rust-futures-bounded",
+    "commit": "7a9b5a96663835c1234df5251fe88df75d26fb86",
+    "files": [
+      "spdx/MIT.txt"
+    ],
+    "note": "Neither the crate nor its repository (at this commit or on its default branch) carries a license text; it declares MIT. SPDX's MIT text (license-list-data v3.29.0, 31ba1a50e5397e00a304dbadc76531740e89ee48) stands in."
+  },
+  "if-watch 3.2.2": {
+    "repository": "https://github.com/libp2p/if-watch",
+    "commit": "f6271229b3505bb1e245aad3d078bf571bb4e20e",
+    "files": [
+      "spdx/MIT.txt"
+    ],
+    "note": "Neither the crate nor its repository (at this commit or on its default branch) carries a license text; it declares MIT OR Apache-2.0, of which this notice takes MIT. SPDX's MIT text (license-list-data v3.29.0, 31ba1a50e5397e00a304dbadc76531740e89ee48) stands in."
+  },
+  "libp2p 0.56.0": {
+    "repository": "https://github.com/libp2p/rust-libp2p",
+    "commit": "2ac0ca97a82e161a4bf56ecdfc3a46dd69af302c",
+    "files": [
+      "libp2p-rust-libp2p/LICENSE"
+    ]
+  },
+  "libp2p-allow-block-list 0.6.0": {
+    "repository": "https://github.com/libp2p/rust-libp2p",
+    "commit": "7b9a558e3188eaf20a14bd8388d5e9b6e2aa9a23",
+    "files": [
+      "libp2p-rust-libp2p/LICENSE"
+    ]
+  },
+  "libp2p-connection-limits 0.6.0": {
+    "repository": "https://github.com/libp2p/rust-libp2p",
+    "commit": "7b9a558e3188eaf20a14bd8388d5e9b6e2aa9a23",
+    "files": [
+      "libp2p-rust-libp2p/LICENSE"
+    ]
+  },
+  "libp2p-core 0.43.2": {
+    "repository": "https://github.com/libp2p/rust-libp2p",
+    "commit": "e10ce4c1704a529161f62e8538e55a106e4ec2d6",
+    "files": [
+      "libp2p-rust-libp2p/LICENSE"
+    ]
+  },
+  "libp2p-dns 0.44.0": {
+    "repository": "https://github.com/libp2p/rust-libp2p",
+    "commit": "d92dabcbb87c4796d46e3d312b7fa042af10279a",
+    "files": [
+      "libp2p-rust-libp2p/LICENSE"
+    ]
+  },
+  "libp2p-identify 0.47.0": {
+    "repository": "https://github.com/libp2p/rust-libp2p",
+    "commit": "c9bd92ba2d4727d79b0c2623c20c998a4e60995a",
+    "files": [
+      "libp2p-rust-libp2p/LICENSE"
+    ]
+  },
+  "libp2p-identity 0.2.13": {
+    "repository": "https://github.com/libp2p/rust-libp2p",
+    "commit": "2a7e1fee31ca378d6cf48a10a8ddc4bbbbd1c1f6",
+    "files": [
+      "libp2p-rust-libp2p/LICENSE"
+    ]
+  },
+  "libp2p-kad 0.48.0": {
+    "repository": "https://github.com/libp2p/rust-libp2p",
+    "commit": "7b9a558e3188eaf20a14bd8388d5e9b6e2aa9a23",
+    "files": [
+      "libp2p-rust-libp2p/LICENSE"
+    ]
+  },
+  "libp2p-mdns 0.48.0": {
+    "repository": "https://github.com/libp2p/rust-libp2p",
+    "commit": "c9bd92ba2d4727d79b0c2623c20c998a4e60995a",
+    "files": [
+      "libp2p-rust-libp2p/LICENSE"
+    ]
+  },
+  "libp2p-metrics 0.17.0": {
+    "repository": "https://github.com/libp2p/rust-libp2p",
+    "commit": "7b9a558e3188eaf20a14bd8388d5e9b6e2aa9a23",
+    "files": [
+      "libp2p-rust-libp2p/LICENSE"
+    ]
+  },
+  "libp2p-noise 0.46.1": {
+    "repository": "https://github.com/libp2p/rust-libp2p",
+    "commit": "d92dabcbb87c4796d46e3d312b7fa042af10279a",
+    "files": [
+      "libp2p-rust-libp2p/LICENSE"
+    ]
+  },
+  "libp2p-ping 0.47.0": {
+    "repository": "https://github.com/libp2p/rust-libp2p",
+    "commit": "7b9a558e3188eaf20a14bd8388d5e9b6e2aa9a23",
+    "files": [
+      "libp2p-rust-libp2p/LICENSE"
+    ]
+  },
+  "libp2p-quic 0.13.0": {
+    "repository": "https://github.com/libp2p/rust-libp2p",
+    "commit": "c9bd92ba2d4727d79b0c2623c20c998a4e60995a",
+    "files": [
+      "libp2p-rust-libp2p/LICENSE"
+    ]
+  },
+  "libp2p-stream 0.4.0-alpha": {
+    "repository": "https://github.com/libp2p/rust-libp2p",
+    "commit": "7b9a558e3188eaf20a14bd8388d5e9b6e2aa9a23",
+    "files": [
+      "libp2p-rust-libp2p/LICENSE"
+    ]
+  },
+  "libp2p-swarm 0.47.1": {
+    "repository": "https://github.com/libp2p/rust-libp2p",
+    "commit": "4682e735cbdfd8f2b59f5478591a4e8ae552fa68",
+    "files": [
+      "libp2p-rust-libp2p/LICENSE"
+    ]
+  },
+  "libp2p-tcp 0.44.1": {
+    "repository": "https://github.com/libp2p/rust-libp2p",
+    "commit": "4682e735cbdfd8f2b59f5478591a4e8ae552fa68",
+    "files": [
+      "libp2p-rust-libp2p/LICENSE"
+    ]
+  },
+  "libp2p-tls 0.6.2": {
+    "repository": "https://github.com/libp2p/rust-libp2p",
+    "commit": "c9bd92ba2d4727d79b0c2623c20c998a4e60995a",
+    "files": [
+      "libp2p-rust-libp2p/LICENSE"
+    ]
+  },
+  "libp2p-upnp 0.5.0": {
+    "repository": "https://github.com/libp2p/rust-libp2p",
+    "commit": "7b9a558e3188eaf20a14bd8388d5e9b6e2aa9a23",
+    "files": [
+      "libp2p-rust-libp2p/LICENSE"
+    ]
+  },
+  "libp2p-websocket 0.45.1": {
+    "repository": "https://github.com/libp2p/rust-libp2p",
+    "commit": "c9bd92ba2d4727d79b0c2623c20c998a4e60995a",
+    "files": [
+      "libp2p-rust-libp2p/LICENSE"
+    ]
+  },
+  "libp2p-yamux 0.47.0": {
+    "repository": "https://github.com/libp2p/rust-libp2p",
+    "commit": "9736aacf814eb7b9df0372c5f9adcffba8a4b212",
+    "files": [
+      "libp2p-rust-libp2p/LICENSE"
+    ]
+  },
+  "multihash-codetable 0.2.2": {
+    "repository": "https://github.com/multiformats/rust-multihash",
+    "commit": "3e1cf2935384dc43daa522ddbe47b5d014dcd216",
+    "files": [
+      "multiformats-rust-multihash/LICENSE"
+    ]
+  },
+  "multihash-derive 0.9.3": {
+    "repository": "https://github.com/multiformats/rust-multihash",
+    "commit": "de25c19d0293ef8564d3d3f893d25d3b14bc2ddb",
+    "files": [
+      "multiformats-rust-multihash/LICENSE"
+    ]
+  },
+  "multistream-select 0.13.0": {
+    "repository": "https://github.com/libp2p/rust-libp2p",
+    "commit": "42566869b2ab3d1903d164c84da3308e7e890b8b",
+    "files": [
+      "libp2p-rust-libp2p/LICENSE"
+    ]
+  },
+  "quick-protobuf 0.8.1": {
+    "repository": "https://github.com/tafia/quick-protobuf",
+    "commit": "3db41b4b6b42e69cb20ee0857f6898f053ed8ee7",
+    "files": [
+      "tafia-quick-protobuf/LICENSE-MIT.md"
+    ]
+  },
+  "quick-protobuf-codec 0.3.1": {
+    "repository": "https://github.com/libp2p/rust-libp2p",
+    "commit": "ce24938048cdb9c29f0b8218364557783cecd44a",
+    "files": [
+      "libp2p-rust-libp2p/LICENSE"
+    ]
+  },
+  "rw-stream-sink 0.4.0": {
+    "repository": "https://github.com/libp2p/rust-libp2p",
+    "commit": "42566869b2ab3d1903d164c84da3308e7e890b8b",
+    "files": [
+      "libp2p-rust-libp2p/LICENSE"
+    ]
+  },
+  "uint 0.10.0": {
+    "repository": "https://github.com/paritytech/parity-common",
+    "commit": "63c5afbf8e0e903439d3c127c59b0e4a7991000b",
+    "files": [
+      "paritytech-parity-common/LICENSE-APACHE2",
+      "paritytech-parity-common/LICENSE-MIT",
+      "paritytech-parity-common/license-header"
+    ]
+  },
+  "yamux 0.12.1": {
+    "repository": "https://github.com/paritytech/yamux",
+    "commit": "b2528d836fdcd16d40452caee651bf05e1f62a0d",
+    "files": [
+      "paritytech-yamux/LICENSE-APACHE",
+      "paritytech-yamux/LICENSE-MIT"
+    ]
+  },
+  "yamux 0.13.10": {
+    "repository": "https://github.com/paritytech/yamux",
+    "commit": "70db05dc63e8368bd0559a5ec0dba6e5fc2bdd41",
+    "files": [
+      "paritytech-yamux/LICENSE-APACHE",
+      "paritytech-yamux/LICENSE-MIT"
+    ],
+    "note": "The commit the crate records (38e9944f8fbb723a3a4df575cfb15109efcb2d24) isn't in the repository; these are the release tag yamux-v0.13.10's."
+  },
+  "yasna 0.5.2": {
+    "repository": "https://github.com/qnighy/yasna.rs",
+    "commit": "b7e65f9a4c317494cce2d18ea02b3d6eaaea7985",
+    "files": [
+      "qnighy-yasna.rs/LICENSE-APACHE",
+      "qnighy-yasna.rs/LICENSE-MIT"
+    ]
+  }
+}

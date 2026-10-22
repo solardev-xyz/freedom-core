@@ -1055,9 +1055,24 @@ fn mains_answers_take_one_closed_shape() {
     assert_eq!(
         broadcast(r#"{"rejected":{"reason":"nonce too low \ud800"}}"#),
         Some(Answer::Myotis(MyotisReply::Rejected {
-            reason: "nonce too low \u{fffd}".into()
+            reason: "nonce too low \u{fffd}".into(),
+            kind: MyotisRejection::Rejected,
         }))
     );
+    // The adapter's -32602 refusal names its code, in either order.
+    for text in [
+        r#"{"rejected":{"reason":"invalid raw transaction","code":-32602}}"#,
+        r#"{"rejected":{"code":-32602,"reason":"invalid raw transaction"}}"#,
+    ] {
+        assert_eq!(
+            broadcast(text),
+            Some(Answer::Myotis(MyotisReply::Rejected {
+                reason: "invalid raw transaction".into(),
+                kind: MyotisRejection::InvalidParams,
+            })),
+            "{text}"
+        );
+    }
     assert_eq!(
         broadcast(r#"{"uncertain":true}"#),
         Some(Answer::Myotis(MyotisReply::Uncertain))
@@ -1109,6 +1124,49 @@ fn mains_answers_take_one_closed_shape() {
         (Kind::MyotisBroadcast, r#"{"uncertain":false}"#),
         (Kind::MyotisBroadcast, r#"{"hash":"0x1","uncertain":true}"#),
         (Kind::MyotisBroadcast, r#"{"rejected":{"reason":7}}"#),
+        // A refusal's code is -32602, as JSON.stringify writes it, or
+        // absent: any other code, spelling or member is malformed.
+        (
+            Kind::MyotisBroadcast,
+            r#"{"rejected":{"reason":"x","code":-32000}}"#,
+        ),
+        (
+            Kind::MyotisBroadcast,
+            r#"{"rejected":{"reason":"x","code":-32601}}"#,
+        ),
+        (
+            Kind::MyotisBroadcast,
+            r#"{"rejected":{"reason":"x","code":"-32602"}}"#,
+        ),
+        (
+            Kind::MyotisBroadcast,
+            r#"{"rejected":{"reason":"x","code":-32602.0}}"#,
+        ),
+        (
+            Kind::MyotisBroadcast,
+            r#"{"rejected":{"reason":"x","code":-3.2602e4}}"#,
+        ),
+        (
+            Kind::MyotisBroadcast,
+            r#"{"rejected":{"reason":"x","code":null}}"#,
+        ),
+        (Kind::MyotisBroadcast, r#"{"rejected":{"code":-32602}}"#),
+        (
+            Kind::MyotisBroadcast,
+            r#"{"rejected":{"reason":"x","kind":"invalid-params"}}"#,
+        ),
+        (
+            Kind::MyotisBroadcast,
+            r#"{"rejected":{"reason":"x","code":-32602,"data":"0x"}}"#,
+        ),
+        (
+            Kind::MyotisBroadcast,
+            r#"{"rejected":{"reason":"x","code":-32602,"code":-32602}}"#,
+        ),
+        (
+            Kind::MyotisBroadcast,
+            r#"{"rejected":{"reason":"x"},"code":-32602}"#,
+        ),
         (Kind::MyotisBroadcast, r#"{"payload":{}}"#),
         (Kind::Colibri, r#"{"revert":{"data":3}}"#),
         (Kind::Colibri, r#"{"result":1,"revert":{"data":"0x"}}"#),

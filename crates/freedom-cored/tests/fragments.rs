@@ -172,7 +172,7 @@ fn a_response_waits_for_credit_while_whole_messages_go() {
     core.send(&request(8, "test.large", json!({ "bytes": 2 * MIB })));
     let started = Instant::now();
     assert_eq!(
-        core.call(9, "core.shutdown", json!({}))["result"],
+        core.call_shell(9, "core.shutdown", json!({}))["result"],
         json!({})
     );
     assert_eq!(core.rest(), Vec::<Value>::new());

@@ -6,7 +6,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use fc_evm::{
-    Transaction, keccak256, parse_bytes, sign_message, sign_typed_data, to_hex, typed_data_hash,
+    Transaction, keccak256, parse_bytes, parse_json, sign_message, sign_typed_data, to_hex,
+    typed_data_hash,
 };
 use fc_keys::{Mnemonic, Secp256k1Key, freedom};
 use serde_json::Value;
@@ -154,4 +155,45 @@ fn typed_data() {
         );
     }
     assert!(deviations >= 10, "the deviation cases went missing");
+}
+
+/// Typed data given as JSON text (#87): `parse_json` reads every number as
+/// JSON.parse does, so the core signs what ethers signs, padded ties and
+/// halfway subnormals included.
+#[test]
+fn typed_data_text() {
+    let keys = keys();
+    let cases = load("signing.json")["typedDataText"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let mut tested = 0;
+    for case in &cases {
+        let id = case["id"].as_str().unwrap();
+        let key = keys[case["keyId"].as_str().unwrap()].signing_key();
+        let data = parse_json(case["typed_data_json"].as_str().unwrap()).unwrap();
+        let (domain, types, message) = (&data["domain"], &data["types"], &data["message"]);
+        let signed = sign_typed_data(key, domain, types, message);
+        tested += 1;
+        if expects_error(case) {
+            assert!(
+                signed.is_err(),
+                "{id}: expected a rejection, the core signed it"
+            );
+            continue;
+        }
+        let signature = signed.unwrap_or_else(|e| panic!("{id}: {e}"));
+        assert_eq!(
+            to_hex(&signature),
+            case["result"]["signature"].as_str().unwrap(),
+            "{id}"
+        );
+        let hash = typed_data_hash(domain, types, message).unwrap();
+        assert_eq!(
+            to_hex(&hash),
+            case["result"]["hash"].as_str().unwrap(),
+            "{id}"
+        );
+    }
+    assert!(tested >= 30, "the text cases went missing");
 }

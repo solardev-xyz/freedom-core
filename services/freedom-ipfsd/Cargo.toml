@@ -1,0 +1,88 @@
+# freedom-ipfsd: the freedom-ipfs service process (design 0007).
+#
+# Its own Cargo workspace, excluded from the core's: its own lockfile,
+# `cargo deny` policy and THIRD-PARTY-NOTICES, so freedom-ipfs's dependency
+# graph (libp2p, QUIC, SQLite, ring) never enters the core's, and a libp2p
+# advisory can't block a vault fix (0007, "Where the code lives"). It shares
+# `fc-protocol` and `fc-service` with the core, by path.
+
+[package]
+name = "freedom-ipfsd"
+description = "The freedom-ipfs service process: IPFS nodes as owned instances, over stdin and stdout frames (design 0007)"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+repository = "https://github.com/solardev-xyz/freedom-core"
+
+[workspace]
+resolver = "3"
+
+[features]
+# Fault injection for the integration tests (design 0007, Testing), read from
+# FREEDOM_IPFSD_TEST_* variables: see src/testhooks.rs. Without the feature
+# every hook is a no-op and no variable is read. Release builds leave it off.
+testhooks = []
+
+[dependencies]
+# The frame codec and error codes, shared with the core.
+fc-protocol = { path = "../../crates/fc-protocol" }
+# The service skeleton: the gate, hardening, the panic hook, watchdogs and the
+# connection to main.
+fc-service = { path = "../../crates/fc-service" }
+# freedom-ipfs, pinned to a commit on `integration/rust-core` until a release
+# carries the upstream changes 0007 lists (deny.toml allows solardev-xyz).
+# It holds the builder (#26), the native-request parser (#25), owned
+# instances (#28), shared limits, memory reservations and cache capacities
+# (item 8: #35-#37), v0.4.6, the parser's header-capacity refusal (#39), the
+# store's hot-cache fixed capacity (#40), the progress recorder per node
+# (#43), the network policy (0007 upstream item 3, #44-#50: the gate,
+# `NetworkPolicy` through the builder, a revocable capability, `direct`'s
+# HTTP clients and transports, and `socks5` behind the gateway's `socks`
+# feature, which `network: { mode: socks5 }` needs), its end-to-end tests
+# (#51), and stream isolation (#54: each `socks5` network's SOCKS5
+# credentials of its own). src/build_info.rs reports the same commit.
+# freedom-ipfs-core: the memory budget's `Reservation`, which the gateway
+# crate doesn't re-export.
+freedom-ipfs-core = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "0f8ebc38df196b277851271290089892e4d20d45" }
+freedom-ipfs-gateway = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "0f8ebc38df196b277851271290089892e4d20d45", features = ["socks"] }
+freedom-ipfs-store = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "0f8ebc38df196b277851271290089892e4d20d45" }
+# The `Stream` trait, to read a response's body as it comes; already in
+# freedom-ipfs's graph.
+futures-core = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The process runtime (0007, "Inside the process"). freedom-ipfs requires
+# tokio's multi-threaded runtime, and already brings it.
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time"] }
+
+[dev-dependencies]
+# Upstream's SOCKS5 test proxy and test servers (its `test-util` feature),
+# for the `socks5` tests through the binary; the same pin as the gateway's.
+freedom-ipfs-net = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "0f8ebc38df196b277851271290089892e4d20d45", features = ["test-util"] }
+tempfile = "3"
+
+# The core's workspace lints, copied: workspace lints don't cross workspaces.
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+
+# Dependencies carry no debug info in dev and test builds: freedom-ipfs's
+# graph is large, and its debug info is most of a target directory.
+[profile.dev.package."*"]
+debug = false
+
+# Request panics unwind to their join handles (0007, "Panics"): never
+# `panic = "abort"`.
+[profile.release]
+panic = "unwind"

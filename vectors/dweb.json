@@ -41013,7 +41013,7 @@
       "id": "path-bzz-ok",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -41098,7 +41098,7 @@
       "id": "path-bzz-ok-root",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -41183,7 +41183,7 @@
       "id": "path-bzz-ok-query-only",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -41268,7 +41268,7 @@
       "id": "path-bzz-ok-uppercase",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -41353,7 +41353,7 @@
       "id": "path-bzz-ok-encrypted",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -41438,7 +41438,7 @@
       "id": "path-bzz-short-ref",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -41523,7 +41523,7 @@
       "id": "path-bzz-long-ref",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -41608,7 +41608,7 @@
       "id": "path-bzz-ref-not-hex",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -41693,7 +41693,7 @@
       "id": "path-bzz-other-namespace",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -41778,7 +41778,7 @@
       "id": "path-bzz-root",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -41863,7 +41863,7 @@
       "id": "path-bzz-empty",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -41948,7 +41948,7 @@
       "id": "path-bzz-no-slash",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -42033,7 +42033,7 @@
       "id": "path-bzz-dot-dot",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -42118,7 +42118,7 @@
       "id": "path-bzz-encoded-dot-dot",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -42203,7 +42203,7 @@
       "id": "path-bzz-backslash",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -42288,7 +42288,7 @@
       "id": "path-bzz-encoded-slash",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -42373,7 +42373,7 @@
       "id": "path-bzz-encoded-backslash",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -42458,7 +42458,7 @@
       "id": "path-bzz-scheme",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -42543,7 +42543,7 @@
       "id": "path-bzz-authority",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -42628,7 +42628,7 @@
       "id": "path-bzz-fragment",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -42713,7 +42713,7 @@
       "id": "path-bzz-unencoded-space",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -42798,7 +42798,7 @@
       "id": "path-bzz-unencoded-caret",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -42883,7 +42883,7 @@
       "id": "path-bzz-unencoded-unicode",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -42968,7 +42968,7 @@
       "id": "path-bzz-not-string",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -43053,7 +43053,7 @@
       "id": "path-bzz-encoded-climb",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -43138,7 +43138,7 @@
       "id": "path-bzz-encoded-climb-upper",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -43223,7 +43223,7 @@
       "id": "path-bzz-encoded-backslash-climb",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -43308,7 +43308,7 @@
       "id": "path-bzz-encoded-dots-in-name",
       "source": "design",
       "request": {
-        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "url": "bzz://site.eth/a/b?q=1",
         "method": "GET",
         "headers": [
           [
@@ -43393,12 +43393,16 @@
       "id": "path-ipfs-ok",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://site.eth/a?b",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -43413,7 +43417,11 @@
           "headers": [
             [
               "accept",
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
             ]
           ],
           "retry": {
@@ -43428,8 +43436,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -43443,12 +43450,16 @@
       "id": "path-ipns-for-ipfs",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://site.eth/a?b",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -43463,7 +43474,11 @@
           "headers": [
             [
               "accept",
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
             ]
           ],
           "retry": {
@@ -43478,8 +43493,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -43493,12 +43507,16 @@
       "id": "path-ipfs-root",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://site.eth/a?b",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -43513,7 +43531,11 @@
           "headers": [
             [
               "accept",
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
             ]
           ],
           "retry": {
@@ -43528,8 +43550,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -43543,12 +43564,16 @@
       "id": "path-ipfs-no-ref",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://site.eth/a?b",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -43563,7 +43588,11 @@
           "headers": [
             [
               "accept",
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
             ]
           ],
           "retry": {
@@ -43578,8 +43607,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -43593,12 +43621,16 @@
       "id": "path-ipfs-no-ref-slash",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://site.eth/a?b",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -43613,7 +43645,11 @@
           "headers": [
             [
               "accept",
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
             ]
           ],
           "retry": {
@@ -43628,8 +43664,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -43643,12 +43678,16 @@
       "id": "path-ipfs-bad-ref",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://site.eth/a?b",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -43663,7 +43702,11 @@
           "headers": [
             [
               "accept",
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
             ]
           ],
           "retry": {
@@ -43678,8 +43721,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -43693,12 +43735,16 @@
       "id": "path-ipfs-other-namespace",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://site.eth/a?b",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -43713,7 +43759,11 @@
           "headers": [
             [
               "accept",
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
             ]
           ],
           "retry": {
@@ -43728,8 +43778,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -43743,12 +43792,16 @@
       "id": "path-ipfs-dot-dot",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://site.eth/a?b",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -43763,7 +43816,11 @@
           "headers": [
             [
               "accept",
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
             ]
           ],
           "retry": {
@@ -43778,8 +43835,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -43793,12 +43849,16 @@
       "id": "path-ipfs-escape-to-ipns",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://site.eth/a?b",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -43813,7 +43873,11 @@
           "headers": [
             [
               "accept",
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
             ]
           ],
           "retry": {
@@ -43828,8 +43892,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -43843,12 +43906,16 @@
       "id": "path-ipfs-backslash",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://site.eth/a?b",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -43863,7 +43930,11 @@
           "headers": [
             [
               "accept",
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
             ]
           ],
           "retry": {
@@ -43878,8 +43949,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -43893,12 +43963,16 @@
       "id": "path-ipfs-ref-dot-dot",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://site.eth/a?b",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -43913,7 +43987,11 @@
           "headers": [
             [
               "accept",
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
             ]
           ],
           "retry": {
@@ -43928,8 +44006,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -43943,12 +44020,16 @@
       "id": "path-ipfs-uppercase-namespace",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://site.eth/a?b",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -43963,7 +44044,11 @@
           "headers": [
             [
               "accept",
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
             ]
           ],
           "retry": {
@@ -43978,8 +44063,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -43993,12 +44077,16 @@
       "id": "path-ipfs-encoded-climb",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://site.eth/a?b",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -44013,7 +44101,11 @@
           "headers": [
             [
               "accept",
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
             ]
           ],
           "retry": {
@@ -44028,8 +44120,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -44043,12 +44134,16 @@
       "id": "path-ipfs-encoded-climb-upper",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://site.eth/a?b",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -44063,7 +44158,11 @@
           "headers": [
             [
               "accept",
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
             ]
           ],
           "retry": {
@@ -44078,8 +44177,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -44093,12 +44191,16 @@
       "id": "path-ipfs-encoded-dots-climb",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://site.eth/a?b",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -44113,7 +44215,11 @@
           "headers": [
             [
               "accept",
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
             ]
           ],
           "retry": {
@@ -44128,8 +44234,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -44143,12 +44248,16 @@
       "id": "path-ipfs-encoded-backslash-climb",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://site.eth/a?b",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -44163,7 +44272,11 @@
           "headers": [
             [
               "accept",
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
             ]
           ],
           "retry": {
@@ -44178,8 +44291,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -44193,12 +44305,16 @@
       "id": "path-ipfs-encoded-backslash-climb-lower",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://site.eth/a?b",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -44213,7 +44329,11 @@
           "headers": [
             [
               "accept",
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
             ]
           ],
           "retry": {
@@ -44228,8 +44348,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -44243,12 +44362,16 @@
       "id": "path-ipfs-encoded-climb-inside",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://site.eth/a?b",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -44263,7 +44386,11 @@
           "headers": [
             [
               "accept",
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
             ]
           ],
           "retry": {
@@ -44278,8 +44405,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -44293,12 +44419,16 @@
       "id": "path-ipfs-encoded-dot",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://site.eth/a?b",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -44313,7 +44443,11 @@
           "headers": [
             [
               "accept",
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
             ]
           ],
           "retry": {
@@ -44328,8 +44462,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -44343,12 +44476,16 @@
       "id": "path-ipfs-encoded-dot-dot-last",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://site.eth/a?b",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -44363,7 +44500,11 @@
           "headers": [
             [
               "accept",
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
             ]
           ],
           "retry": {
@@ -44378,8 +44519,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -44393,12 +44533,16 @@
       "id": "path-ipfs-encoded-ref-dot-dot",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://site.eth/a?b",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -44413,6 +44557,769 @@
           "headers": [
             [
               "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "path-ipfs-encoded-separator",
+      "source": "design",
+      "request": {
+        "url": "ipfs://site.eth/a?b",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/a%2Fb/c%5Cd.txt",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "valid"
+    },
+    {
+      "id": "path-ipfs-encoded-dots-in-name",
+      "source": "design",
+      "request": {
+        "url": "ipfs://site.eth/a?b",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/..%2e/x%2E%2E/...%2F",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "valid"
+    },
+    {
+      "id": "path-ipfs-double-encoded",
+      "source": "design",
+      "request": {
+        "url": "ipfs://site.eth/a?b",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/%252e%252e%252fapi/v0/id",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "valid"
+    },
+    {
+      "id": "path-ipfs-encoded-climb-in-query",
+      "source": "design",
+      "request": {
+        "url": "ipfs://site.eth/a?b",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/x?..%2F..%2Fapi",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "valid"
+    },
+    {
+      "id": "path-ipfs-lone-percent",
+      "source": "design",
+      "request": {
+        "url": "ipfs://site.eth/a?b",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/a%2/%",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "valid"
+    },
+    {
+      "id": "path-tie-bzz-own",
+      "source": "design",
+      "request": {
+        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "valid"
+    },
+    {
+      "id": "path-tie-bzz-other-reference",
+      "source": "design",
+      "request": {
+        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/a/b.html?x=1&y=%2F",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "path-tie-bzz-uppercase-reference",
+      "source": "design",
+      "request": {
+        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/C0FFEEC0FFEEC0FFEEC0FFEEC0FFEEC0FFEEC0FFEEC0FFEEC0FFEEC0FFEEBEEF/a/b.html?x=1&y=%2F",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "path-tie-bzz-other-file",
+      "source": "design",
+      "request": {
+        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/other",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "path-tie-bzz-query-dropped",
+      "source": "design",
+      "request": {
+        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "path-tie-ipfs-other-cid",
+      "source": "design",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafkreidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+          "headers": [
+            [
+              "accept",
               "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
             ]
           ],
@@ -44440,15 +45347,19 @@
       "expect": "path"
     },
     {
-      "id": "path-ipfs-encoded-separator",
+      "id": "path-tie-ipfs-uncanonical-cid",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://QmVmkadKS2uvxyD6YJJzd3Umem6SWV7QxYnL7kbpdWAsPS/index.html",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -44459,7 +45370,121 @@
       "plan": {
         "fetch": {
           "node": "ipfs",
-          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/a%2Fb/c%5Cd.txt",
+          "path": "/ipfs/QmVmkadKS2uvxyD6YJJzd3Umem6SWV7QxYnL7kbpdWAsPS/index.html",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "path-tie-ipns-other-key",
+      "source": "design",
+      "request": {
+        "url": "ipns://k51qzi5uqu5dlvj2baxnqndepeb86cbk3ng7n3i46uzyxzyqj2xjonzllnv0v8/x?y",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipns/k51qzi5uqu5dlvj2baxnqndepeb86cbk3ng7n3i46uzyxzyqj2xjonzllnv0va/x?y",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "path-tie-fetch-for-gateway-form",
+      "source": "design",
+      "request": {
+        "url": "ipfs://localhost/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/a/b?q=1#f",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
           "headers": [
             [
               "accept",
@@ -44480,6 +45505,176 @@
           "response": [
             "strip_page_state",
             "small_text"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "path-tie-fetch-for-invalid-host",
+      "source": "design",
+      "request": {
+        "url": "bzz://not-a-reference/x",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "path-tie-name-host-any-reference",
+      "source": "design",
+      "request": {
+        "url": "bzz://site.eth/a/b?q=1",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/a/b?q=1",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -44490,15 +45685,19 @@
       "expect": "valid"
     },
     {
-      "id": "path-ipfs-encoded-dots-in-name",
+      "id": "path-tie-dnslink-own",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipns://docs.ipfs.tech/install/",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -44509,11 +45708,15 @@
       "plan": {
         "fetch": {
           "node": "ipfs",
-          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/..%2e/x%2E%2E/...%2F",
+          "path": "/ipns/docs.ipfs.tech/install/",
           "headers": [
             [
               "accept",
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
             ]
           ],
           "retry": {
@@ -44528,8 +45731,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -44540,15 +45742,19 @@
       "expect": "valid"
     },
     {
-      "id": "path-ipfs-double-encoded",
+      "id": "path-tie-dnslink-other-name",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipns://docs.ipfs.tech/install/",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -44559,11 +45765,15 @@
       "plan": {
         "fetch": {
           "node": "ipfs",
-          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/%252e%252e%252fapi/v0/id",
+          "path": "/ipns/evil.example/install/",
           "headers": [
             [
               "accept",
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
             ]
           ],
           "retry": {
@@ -44578,8 +45788,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -44587,113 +45796,13 @@
           }
         }
       },
-      "expect": "valid"
-    },
-    {
-      "id": "path-ipfs-encoded-climb-in-query",
-      "source": "design",
-      "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
-        "method": "GET",
-        "headers": [
-          [
-            "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-          ]
-        ],
-        "backend": {
-          "ipfs": "native",
-          "up": true
-        }
-      },
-      "plan": {
-        "fetch": {
-          "node": "ipfs",
-          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/x?..%2F..%2Fapi",
-          "headers": [
-            [
-              "accept",
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-            ]
-          ],
-          "retry": {
-            "statuses": [],
-            "on_error": false,
-            "attempts": 1,
-            "delays_ms": []
-          },
-          "timers": {
-            "queue_ms": 15000,
-            "headers_ms": 30000,
-            "body_idle_ms": 60000
-          },
-          "response": [
-            "strip_page_state",
-            "small_text"
-          ],
-          "trust": {
-            "name": null,
-            "content": "node_asserted"
-          }
-        }
-      },
-      "expect": "valid"
-    },
-    {
-      "id": "path-ipfs-lone-percent",
-      "source": "design",
-      "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
-        "method": "GET",
-        "headers": [
-          [
-            "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-          ]
-        ],
-        "backend": {
-          "ipfs": "native",
-          "up": true
-        }
-      },
-      "plan": {
-        "fetch": {
-          "node": "ipfs",
-          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/a%2/%",
-          "headers": [
-            [
-              "accept",
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-            ]
-          ],
-          "retry": {
-            "statuses": [],
-            "on_error": false,
-            "attempts": 1,
-            "delays_ms": []
-          },
-          "timers": {
-            "queue_ms": 15000,
-            "headers_ms": 30000,
-            "body_idle_ms": 60000
-          },
-          "response": [
-            "strip_page_state",
-            "small_text"
-          ],
-          "trust": {
-            "name": null,
-            "content": "node_asserted"
-          }
-        }
-      },
-      "expect": "valid"
+      "expect": "path"
     },
     {
       "id": "path-ipns-ok",
       "source": "design",
       "request": {
-        "url": "ipns://docs.ipfs.tech/install/",
+        "url": "ipns://site.eth/x",
         "method": "GET",
         "headers": [
           [
@@ -44750,7 +45859,7 @@
       "id": "path-ipns-key",
       "source": "design",
       "request": {
-        "url": "ipns://docs.ipfs.tech/install/",
+        "url": "ipns://site.eth/x",
         "method": "GET",
         "headers": [
           [
@@ -44807,7 +45916,7 @@
       "id": "path-ipfs-for-ipns",
       "source": "design",
       "request": {
-        "url": "ipns://docs.ipfs.tech/install/",
+        "url": "ipns://site.eth/x",
         "method": "GET",
         "headers": [
           [
@@ -44864,7 +45973,7 @@
       "id": "path-ipns-encoded-climb",
       "source": "design",
       "request": {
-        "url": "ipns://docs.ipfs.tech/install/",
+        "url": "ipns://site.eth/x",
         "method": "GET",
         "headers": [
           [
@@ -44921,7 +46030,7 @@
       "id": "path-ipns-encoded-dots-climb",
       "source": "design",
       "request": {
-        "url": "ipns://docs.ipfs.tech/install/",
+        "url": "ipns://site.eth/x",
         "method": "GET",
         "headers": [
           [
@@ -44978,7 +46087,7 @@
       "id": "path-ipns-encoded-backslash-climb",
       "source": "design",
       "request": {
-        "url": "ipns://docs.ipfs.tech/install/",
+        "url": "ipns://site.eth/x",
         "method": "GET",
         "headers": [
           [
@@ -45035,7 +46144,7 @@
       "id": "path-ipns-encoded-separator",
       "source": "design",
       "request": {
-        "url": "ipns://docs.ipfs.tech/install/",
+        "url": "ipns://site.eth/x",
         "method": "GET",
         "headers": [
           [
@@ -50720,6 +51829,91 @@
       "id": "trust-name-string",
       "source": "design",
       "request": {
+        "url": "bzz://site.eth/a/b?q=1",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "bundled",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b?q=1",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": "verified",
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "valid"
+    },
+    {
+      "id": "trust-name-string-hash-host",
+      "source": "design",
+      "request": {
         "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
         "method": "GET",
         "headers": [
@@ -50799,7 +51993,57 @@
           }
         }
       },
-      "expect": "valid"
+      "expect": "trust"
+    },
+    {
+      "id": "trust-name-string-cid-host",
+      "source": "design",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          ]
+        ],
+        "backend": {
+          "ipfs": "native",
+          "up": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+          "headers": [
+            [
+              "accept",
+              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": 15000,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state",
+            "small_text"
+          ],
+          "trust": {
+            "name": "verified",
+            "content": "node_asserted"
+          }
+        }
+      },
+      "expect": "trust"
     },
     {
       "id": "redirect-302",

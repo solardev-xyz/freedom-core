@@ -90,6 +90,38 @@ pub enum MyotisClass {
     Error,
 }
 
+/// Which of the Myotis adapter's definite refusals a broadcast's
+/// `rejected` is (design 0005, The rest): a closed set, each with the
+/// code and `myotisRefusal` marker the adapter throws it with. Neither
+/// sent anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MyotisRejection {
+    /// The client judged the transaction unpayable or its nonce used, on
+    /// verified state (ABI 36): geth's `-32000`, `rejected`.
+    Rejected,
+    /// Bytes that are no transaction Myotis relays (ABI 44): the
+    /// permanent `-32602`, `invalid-params`.
+    InvalidParams,
+}
+
+impl MyotisRejection {
+    /// The error's `code`.
+    pub fn code(self) -> i32 {
+        match self {
+            Self::Rejected => -32000,
+            Self::InvalidParams => -32602,
+        }
+    }
+
+    /// The error's `myotisRefusal`.
+    pub fn marker(self) -> &'static str {
+        match self {
+            Self::Rejected => "rejected",
+            Self::InvalidParams => "invalid-params",
+        }
+    }
+}
+
 /// A Myotis operation's outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MyotisReply {
@@ -105,10 +137,11 @@ pub enum MyotisReply {
     Sent {
         hash: String,
     },
-    /// The client judged the transaction unpayable or its nonce used, and
-    /// sent nothing (its reason).
+    /// One of the adapter's definite refusals, which sent nothing: its
+    /// reason, and which refusal it was.
     Rejected {
         reason: String,
+        kind: MyotisRejection,
     },
     /// Dispatched, then a deadline, an exit or a stop; or an answer
     /// without a hash.
@@ -201,7 +234,7 @@ impl Answer {
                         + block_after.as_ref().map_or(0, String::len)
                 }
                 MyotisReply::Sent { hash } => hash.len(),
-                MyotisReply::Rejected { reason } => reason.len(),
+                MyotisReply::Rejected { reason, .. } => reason.len(),
                 _ => 0,
             },
             Self::Colibri(reply) => match reply {

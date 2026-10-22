@@ -155,6 +155,17 @@ impl<'t> Index<'t> {
             .saturating_add(grown_capacity(count.max_depth).saturating_mul(4)))
     }
 
+    /// How many values and keys `text` has, found by [`Index::new`]'s first
+    /// pass alone, which allocates nothing. The errors are its.
+    pub fn values_in(text: &str) -> Result<usize, IndexError> {
+        if text.len() > MAX_TEXT {
+            return Err(IndexError::TooLong(text.len()));
+        }
+        let mut count = Count::default();
+        scan(text, &mut count)?;
+        Ok(count.nodes)
+    }
+
     /// The indexed text.
     pub fn text(&self) -> &'t str {
         self.text

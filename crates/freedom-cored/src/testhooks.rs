@@ -12,17 +12,50 @@
 //!   its commit point, before the rename or unlink.
 //! - `FREEDOM_CORED_TEST_COMMIT_MARKER` names a file created the moment a job
 //!   claims its commit point (before that stall), so tests can wait for it.
+//! - `FREEDOM_CORED_TEST_COMMIT_HOLD` names a file: after that stall, a job
+//!   waits until the file exists or the core begins to exit (at most 120 s).
+//!   So a test holds a committed job as long as it needs, or until the
+//!   exit drain, without racing the core's clock.
+//! - `FREEDOM_CORED_TEST_REFUSED_CLAIM_HOLD` names a file: a job whose claim
+//!   was refused waits, before it cleans up, until that file exists (at
+//!   most 120 s). It stands for a slow disk under that cleanup, held for as
+//!   long as the test needs.
 //! - `FREEDOM_CORED_TEST_CHAIN_TOTAL_BYTES` replaces the chain total's
 //!   256 MiB (design 0005, Bounds), so a test can bring it near full.
 //! - `FREEDOM_CORED_TEST_NAMING_MARKER` names a file the naming thread
 //!   appends a line to for each reply it makes (`reply`), and at its end
 //!   for the waiting frames it hands to the writer (`drain <count>`), so
 //!   tests can wait for both while main isn't reading.
+//! - `FREEDOM_CORED_TEST_SWAP` (`<stage>=<path>`) renames the file at
+//!   `<path>` over the file the core is about to use at `<stage>`, once (the
+//!   rename consumes it): `journal` right after recovery read the journal,
+//!   `checked` right after a staged or temp file was checked and before its
+//!   identity is compared, `renaming` right before a staged node file is
+//!   renamed. It stands for a same-user process winning a race.
 //! - `FREEDOM_CORED_TEST_METHODS` enables the `test.*` methods
 //!   (`testmethods`), which make responses of any size. Release builds
 //!   don't compile them, nor this hook.
 
 use std::time::Duration;
+
+/// Set as the core begins to exit; it releases a held commit.
+#[cfg(debug_assertions)]
+static EXITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The core is about to wait for committed work and exit.
+#[cfg(debug_assertions)]
+pub fn exiting() {
+    EXITING.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Waits until `release` exists, `also` holds, or 120 s pass.
+#[cfg(debug_assertions)]
+fn hold(release: &std::ffi::OsStr, also: impl Fn() -> bool) {
+    let until = std::time::Instant::now() + Duration::from_secs(120);
+    while !std::path::Path::new(release).exists() && !also() && std::time::Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
 
 #[cfg(debug_assertions)]
 fn millis(name: &str) -> Option<u64> {
@@ -44,12 +77,24 @@ pub fn job_delay() {
 }
 
 #[cfg(debug_assertions)]
+pub fn refused_claim_hold() {
+    if let Some(release) = std::env::var_os("FREEDOM_CORED_TEST_REFUSED_CLAIM_HOLD") {
+        hold(&release, || false);
+    }
+}
+
+#[cfg(debug_assertions)]
 pub fn commit_delay() {
     if let Ok(marker) = std::env::var("FREEDOM_CORED_TEST_COMMIT_MARKER") {
         let _ = std::fs::write(marker, b"claimed");
     }
     if let Some(ms) = millis("FREEDOM_CORED_TEST_COMMIT_DELAY_MS") {
         std::thread::sleep(Duration::from_millis(ms));
+    }
+    if let Some(release) = std::env::var_os("FREEDOM_CORED_TEST_COMMIT_HOLD") {
+        hold(&release, || {
+            EXITING.load(std::sync::atomic::Ordering::SeqCst)
+        });
     }
 }
 
@@ -95,6 +140,18 @@ pub fn naming_drain(frames: usize) {
 }
 
 #[cfg(debug_assertions)]
+pub fn swap(stage: &str, path: &std::path::Path) {
+    let Ok(spec) = std::env::var("FREEDOM_CORED_TEST_SWAP") else {
+        return;
+    };
+    if let Some((wanted, replacement)) = spec.split_once('=')
+        && wanted == stage
+    {
+        let _ = std::fs::rename(replacement, path);
+    }
+}
+
+#[cfg(debug_assertions)]
 pub fn test_methods() -> bool {
     std::env::var_os("FREEDOM_CORED_TEST_METHODS").is_some()
 }
@@ -109,6 +166,12 @@ pub fn job_delay() {}
 pub fn commit_delay() {}
 
 #[cfg(not(debug_assertions))]
+pub fn refused_claim_hold() {}
+
+#[cfg(not(debug_assertions))]
+pub fn exiting() {}
+
+#[cfg(not(debug_assertions))]
 pub fn kdf_deadline(default: Duration) -> Duration {
     default
 }
@@ -117,6 +180,9 @@ pub fn kdf_deadline(default: Duration) -> Duration {
 pub fn stall(default: Duration) -> Duration {
     default
 }
+
+#[cfg(not(debug_assertions))]
+pub fn swap(_stage: &str, _path: &std::path::Path) {}
 
 #[cfg(not(debug_assertions))]
 pub fn naming_reply() {}

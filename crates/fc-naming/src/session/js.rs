@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn numbers_coerce_as_javascript() {
-        let s = |text: &str| to_number(Some(&JsValue::String(text.into())));
+        let s = |text: &str| to_number(Some(&JsValue::string(text)));
         assert_eq!(s(" 3 "), 3.0);
         assert_eq!(s(""), 0.0);
         assert_eq!(s("0x10"), 16.0);

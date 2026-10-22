@@ -7,8 +7,8 @@
 
 use fc_chain::machine::{
     Answer, Bounds, BroadcastOutcome, Call, ChainConfig, ChainError, ColibriReply, Effect, Emitted,
-    Machine, MyotisClass, MyotisReply, Protocol, Prover, QuorumConfig, ReadOptions, Reply, Request,
-    RpcEndpoint, Success, Transport, VerifiedOp,
+    Machine, MyotisClass, MyotisRejection, MyotisReply, Prop, Protocol, Prover, QuorumConfig,
+    ReadOptions, Reply, Request, RpcEndpoint, Success, Transport, VerifiedOp,
 };
 
 /// A test world: the machine and everything it emitted.
@@ -1074,26 +1074,56 @@ fn nothing_sent_is_not_sent_with_todays_text() {
 
 #[test]
 fn myotis_verdicts_end_the_loop() {
-    let mut world = World::new(
-        Bounds::default(),
-        &[broadcaster(&["myotis", "direct"], &["a"])],
-    );
-    world.machine.availability(1, true);
-    let id = world.submit(send(), None);
-    world.answer(
-        world.requests[0].0,
-        Answer::Myotis(MyotisReply::Rejected {
-            reason: "nonce too low: next nonce 5, tx nonce 4".into(),
-        }),
-    );
-    assert_eq!(outcome(world.reply(id)), (BroadcastOutcome::Rejected, None));
-    assert!(world.rpcs().is_empty());
-    match &world.reply(id).result {
-        Err(ChainError::Thrown(thrown)) => {
-            assert_eq!(thrown.code(), Some("-32000"));
-            assert!(thrown.prop("myotisRefusal").is_some());
+    // Either definite refusal ends the broadcast `rejected`, Direct never
+    // asked, with the adapter's error as it threw it: its message, its
+    // code, then its marker.
+    for (kind, reason, code, marker) in [
+        (
+            MyotisRejection::Rejected,
+            "nonce too low: next nonce 5, tx nonce 4",
+            "-32000",
+            r#""rejected""#,
+        ),
+        (
+            MyotisRejection::InvalidParams,
+            "invalid raw transaction: malformed type 0x2 transaction",
+            "-32602",
+            r#""invalid-params""#,
+        ),
+    ] {
+        let mut world = World::new(
+            Bounds::default(),
+            &[broadcaster(&["myotis", "direct"], &["a"])],
+        );
+        world.machine.availability(1, true);
+        let id = world.submit(send(), None);
+        world.answer(
+            world.requests[0].0,
+            Answer::Myotis(MyotisReply::Rejected {
+                reason: reason.into(),
+                kind,
+            }),
+        );
+        assert_eq!(outcome(world.reply(id)), (BroadcastOutcome::Rejected, None));
+        assert!(world.rpcs().is_empty());
+        match &world.reply(id).result {
+            Err(ChainError::Thrown(thrown)) => {
+                assert_eq!(thrown.message.to_string_lossy(), reason);
+                let props: Vec<_> = thrown
+                    .props
+                    .iter()
+                    .map(|(key, value)| (*key, value.clone()))
+                    .collect();
+                assert_eq!(
+                    props,
+                    [
+                        ("code", Prop::Json(code.into())),
+                        ("myotisRefusal", Prop::Json(marker.into())),
+                    ]
+                );
+            }
+            other => panic!("{other:?}"),
         }
-        other => panic!("{other:?}"),
     }
 }
 

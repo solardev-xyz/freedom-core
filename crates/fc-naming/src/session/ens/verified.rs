@@ -327,13 +327,7 @@ pub(crate) async fn colibri_reverse(
             .and_then(JsValue::as_str)
             .filter(|n| !n.is_empty())
         {
-            Some(name) => Ok(obj(vec![
-                ("success", JsValue::Bool(true)),
-                ("address", s(address)),
-                ("name", s(name)),
-                ("system", s("ens")),
-                ("trust", trust),
-            ])),
+            Some(name) => Ok(ens_primary_name(address, name, trust)),
             None => Ok(no_reverse(address, Some(trust))),
         },
         Verified::Revert(data)
@@ -431,13 +425,7 @@ pub(crate) async fn read_myotis_reverse(
             .and_then(JsValue::as_str)
             .filter(|n| !n.is_empty()),
     ) {
-        return Ok(obj(vec![
-            ("success", JsValue::Bool(true)),
-            ("address", s(address)),
-            ("name", s(name)),
-            ("system", s("ens")),
-            ("trust", ens_trust),
-        ]));
+        return Ok(ens_primary_name(address, name, ens_trust));
     }
     if status != Some("noRecord") {
         return Err(Thrown::new("unexpected reverse record shape"));

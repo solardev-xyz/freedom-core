@@ -100,6 +100,56 @@ fn radicle_openssh_files_are_byte_identical() {
     }
 }
 
+/// Whole private key files around an aligned private section (#77). Where
+/// the reference pads an aligned section with a full 8 bytes (deviation
+/// `openssh-padding`), the core writes the same file without them, which
+/// OpenSSH and ssh-key read.
+#[test]
+fn radicle_private_files_never_pad_a_whole_block() {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+    let seeds = seeds();
+    let file = load("identity-formats.json");
+    let cases = file["radiclePrivateFiles"].as_array().unwrap();
+    assert_eq!(cases.len(), 4);
+    let mut deviations = 0;
+    for case in cases {
+        let keys = freedom::derive_all(&seeds[s(&case["mnemonicId"])]).unwrap();
+        let check = u32::from_be_bytes(bytes::<4>(s(&case["checkIntegerHex"])));
+        let comment = s(&case["comment"]);
+        let ours = openssh::private_key_file_with_check(&keys.radicle, comment, check);
+        let reference = s(&case["privateKeyFile"]);
+        if case.get("deviation").is_none() {
+            assert_eq!(*ours, reference, "{comment}");
+            continue;
+        }
+        deviations += 1;
+        assert_eq!(s(&case["paddingHex"]), "0102030405060708", "{comment}");
+        // The reference's blob without its last 8 bytes, the private
+        // section's length (the 4 bytes before the section) less 8.
+        let body: String = reference
+            .lines()
+            .filter(|l| !l.starts_with("-----"))
+            .collect();
+        let mut blob = STANDARD.decode(body).unwrap();
+        blob.truncate(blob.len() - 8);
+        let section = 131 + comment.len();
+        let at = blob.len() - section - 4;
+        let len = u32::from_be_bytes(blob[at..at + 4].try_into().unwrap());
+        assert_eq!(len as usize, section + 8, "{comment}");
+        blob[at..at + 4].copy_from_slice(&(section as u32).to_be_bytes());
+        let encoded = STANDARD.encode(&blob);
+        let mut expected = String::from("-----BEGIN OPENSSH PRIVATE KEY-----\n");
+        for line in encoded.as_bytes().chunks(70) {
+            expected.push_str(std::str::from_utf8(line).unwrap());
+            expected.push('\n');
+        }
+        expected.push_str("-----END OPENSSH PRIVATE KEY-----\n");
+        assert_eq!(*ours, expected, "{comment}");
+    }
+    assert_eq!(deviations, 2);
+}
+
 #[test]
 fn bee_keystores() {
     let seeds = seeds();

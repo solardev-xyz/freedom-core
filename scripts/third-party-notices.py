@@ -1,24 +1,34 @@
 #!/usr/bin/env python3
-"""Generates THIRD-PARTY-NOTICES for the freedom-cored binary.
+"""Generates THIRD-PARTY-NOTICES for a binary this repository releases:
+freedom-cored (the default), or a service process in its own workspace
+under services/ (design 0007), next to its own Cargo.lock.
 
 The binary statically links third-party code whose licenses (MIT,
 Apache-2.0, BSD-3-Clause, ...) require their notices to ship with it:
 
-1. Every crate that ends up in freedom-cored on any release target (normal
+1. Every crate that ends up in the binary on any release target (normal
    dependencies only: build scripts and proc-macros don't ship), with its
-   license expression and the license/notice files from its own source.
-2. The Rust toolchain's runtime: the standard library's out-of-tree crates
-   (from the toolchain's rust-src), compiler-builtins, and on Linux the
-   statically linked musl libc and LLVM libunwind/crt objects (texts in
-   notices/, reviewed for TOOLCHAIN). The Rust project's own notice file for
-   the standard library ships next to it, copied from the toolchain by the
-   release workflow as THIRD-PARTY-NOTICES-rust-std.html.
+   license expression and the license/notice files from its own source. A
+   crate from a git repository that keeps its license files only at the
+   repository's root (a workspace member) gets the root's. A crate that
+   ships none at all gets the texts its repository carries, vendored in its
+   workspace's notices/crates.json with their source and commit.
+2. The runtime: the standard library's out-of-tree crates (from the
+   toolchain's rust-src), compiler-builtins, and the native code linked
+   statically on Linux (texts in notices/, reviewed for TOOLCHAIN). For
+   freedom-cored, static musl: musl libc and LLVM's libunwind and crt
+   objects. For freedom-ipfsd, glibc 2.17 linked dynamically through Zig:
+   glibc's startup and libc_nonshared objects and LLVM's libunwind, which
+   Zig builds from the sources it bundles. The Rust project's own notice
+   file for the standard library ships next to it, copied from the
+   toolchain by the release workflow as THIRD-PARTY-NOTICES-rust-std.html.
 
 A new proc-macro or build script can still emit code into the binary; when
 one is added, check where its generated code comes from.
 
     python3 scripts/third-party-notices.py          # rewrite the file
     python3 scripts/third-party-notices.py --check  # CI: fail if stale
+    python3 scripts/third-party-notices.py --binary freedom-ipfsd [--check]
 
 Needs the crates' sources (`cargo fetch --locked`) and the toolchain's
 rust-src component (rust-toolchain.toml installs it).
@@ -34,19 +44,37 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 OUTPUT = ROOT / "THIRD-PARTY-NOTICES"
 NOTICES = ROOT / "notices"
 BINARY = "freedom-cored"
-# Every target the release workflow builds.
-TARGETS = [
-    "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
-    "x86_64-unknown-linux-musl",
-    "aarch64-unknown-linux-musl",
-    "x86_64-pc-windows-msvc",
-]
+# Every binary with notices, and the workspace that builds it. Each
+# workspace's THIRD-PARTY-NOTICES sits at its root, next to its Cargo.lock.
+WORKSPACES = {
+    BINARY: ROOT,
+    "freedom-ipfsd": ROOT / "services" / "freedom-ipfsd",
+}
+# Every target each binary's release workflow builds: release.yml for the
+# core, release-ipfsd.yml for the service, whose Linux builds link glibc 2.17
+# dynamically (design 0007, open question 6).
+TARGETS = {
+    BINARY: [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl",
+        "x86_64-pc-windows-msvc",
+    ],
+    "freedom-ipfsd": [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+    ],
+}
 LICENSE_PREFIXES = ("license", "licence", "copying", "notice", "unlicense", "copyright")
 
 # The toolchain the runtime notices below were reviewed for. When
 # rust-toolchain.toml moves, re-check them: the musl version Rust bundles,
-# the LLVM commit, and the standard library's crates.
+# the LLVM commit, and the standard library's crates. When release-ipfsd.yml
+# moves to another Zig, re-check what it links (NATIVE's freedom-ipfsd entry).
 TOOLCHAIN = "1.99"
 # Out-of-tree crates the standard library links on the release targets
 # (rust-src library/vendor).
@@ -56,45 +84,169 @@ STD_CRATES = [
 ]
 # Vendored crates whose std libraries never end up in a binary.
 STD_NOT_LINKED = {"getopts", "rustc-literal-escaper"}
-# Native code statically linked on some targets: (label, license, text).
-# Windows links Microsoft's C runtime statically under Microsoft's
-# redistribution terms; macOS links its system libraries dynamically.
-NATIVE = [
-    (
-        "musl libc 1.2.5 (C library; Linux)",
-        "MIT",
-        "notices/musl-1.2.5-COPYRIGHT",
-    ),
-    (
-        "LLVM libunwind (unwinder; Linux)",
-        "Apache-2.0 WITH LLVM-exception",
-        "rust-src:src/llvm-project/libunwind/LICENSE.TXT",
-    ),
-    (
-        "LLVM compiler-rt crtbegin/crtend (startup objects; Linux)",
-        "Apache-2.0 WITH LLVM-exception",
-        "notices/llvm-compiler-rt-LICENSE.TXT",
-    ),
-]
+# Native code each binary statically links on some targets: (label,
+# license, text). Windows links Microsoft's C runtime statically under
+# Microsoft's redistribution terms; macOS links its system libraries
+# dynamically, as freedom-ipfsd's Linux builds link glibc's.
+NATIVE = {
+    BINARY: [
+        (
+            "musl libc 1.2.5 (C library; Linux)",
+            "MIT",
+            "notices/musl-1.2.5-COPYRIGHT",
+        ),
+        (
+            "LLVM libunwind (unwinder; Linux)",
+            "Apache-2.0 WITH LLVM-exception",
+            "rust-src:src/llvm-project/libunwind/LICENSE.TXT",
+        ),
+        (
+            "LLVM compiler-rt crtbegin/crtend (startup objects; Linux)",
+            "Apache-2.0 WITH LLVM-exception",
+            "notices/llvm-compiler-rt-LICENSE.TXT",
+        ),
+    ],
+    # What Zig 0.15.2 links statically into a glibc 2.17 build, found in the
+    # binaries' symbols: glibc's startup object and the libc_nonshared
+    # members the binary needs, and LLVM's libunwind in place of libgcc_s.
+    # Zig also passes its compiler_rt and UBSan runtime to the linker, but
+    # nothing of either is linked. Zig's libunwind license is LLVM's, the
+    # same text as rust-src's.
+    "freedom-ipfsd": [
+        (
+            "GNU C Library startup and libc_nonshared objects, built by Zig "
+            "0.15.2 for glibc 2.17 (Linux)",
+            "LGPL-2.1-or-later, with the GNU C Library's exception for linking",
+            "notices/glibc-2.17-startup-NOTICE",
+        ),
+        (
+            "LLVM libunwind, Zig 0.15.2's copy (unwinder; Linux)",
+            "Apache-2.0 WITH LLVM-exception",
+            "rust-src:src/llvm-project/libunwind/LICENSE.TXT",
+        ),
+    ],
+}
+
+
+# Licenses whose terms, for an executable, also require telling recipients
+# where the covered source is (MPL-2.0 section 3.2(a)): a crate under one of
+# them, with no permissive alternative in its expression, gets a source line.
+SOURCE_LICENSES = ("MPL-2.0",)
+
+
+def license_tokens(expression):
+    """An SPDX license expression's tokens: parentheses, the operators AND,
+    OR and WITH, and identifiers. Cargo's legacy `/` is OR."""
+    tokens = []
+    for word in expression.replace("(", " ( ").replace(")", " ) ").replace("/", " OR ").split():
+        tokens.append(word.upper() if word.upper() in ("AND", "OR", "WITH") else word)
+    return tokens
+
+
+def needs_source_offer(expression):
+    """Whether a crate's license expression leaves no way around one of
+    SOURCE_LICENSES: parsed as SPDX (WITH binds tightest, then AND, then OR,
+    parentheses grouping), an identifier needs an offer if it is one of them
+    (case-insensitive, `+` meaning that version or later; a WITH exception
+    keeps its license's need), an AND needs one if either side does, and an
+    OR only if every alternative does. `MIT OR MPL-2.0` doesn't; `MPL-2.0`,
+    `MPL-2.0 AND (MIT OR Apache-2.0)` and `mpl-2.0+` do. An expression that
+    doesn't parse fails, rather than passing as needing none."""
+    if not expression:
+        return False
+    tokens = license_tokens(expression)
+    position = 0
+
+    def fail(why):
+        raise NoticeError(f"license expression {expression!r}: {why}")
+
+    def peek():
+        return tokens[position] if position < len(tokens) else None
+
+    def take():
+        nonlocal position
+        position += 1
+        return tokens[position - 1]
+
+    def atom():
+        token = peek()
+        if token is None:
+            fail("ends early")
+        if token == "(":
+            take()
+            needs = either()
+            if peek() != ")":
+                fail("an unclosed parenthesis")
+            take()
+            return needs
+        if token in ("AND", "OR", "WITH", ")"):
+            fail(f"unexpected {token}")
+        take()
+        needs = token.upper().rstrip("+") in (name.upper() for name in SOURCE_LICENSES)
+        if peek() == "WITH":
+            take()
+            exception = peek()
+            if exception is None or exception in ("AND", "OR", "WITH", "(", ")"):
+                fail("WITH without an exception")
+            take()
+        return needs
+
+    def both():
+        needs = atom()
+        while peek() == "AND":
+            take()
+            needs = atom() or needs
+        return needs
+
+    def either():
+        needs = both()
+        while peek() == "OR":
+            take()
+            needs = both() and needs
+        return needs
+
+    needs = either()
+    if peek() is not None:
+        fail(f"unexpected {peek()}")
+    return needs
+
+
+def source_location(package):
+    """Where a shipped crate's exact source is: its crates.io archive, or its
+    git repository at the commit it was built from."""
+    name, version, source = package["name"], package["version"], package.get("source") or ""
+    if source.startswith("registry+https://github.com/rust-lang/crates.io-index"):
+        where = f"https://static.crates.io/crates/{name}/{name}-{version}.crate"
+    elif source.startswith("git+"):
+        url, _, commit = source[len("git+"):].partition("#")
+        where = f"{url.split('?')[0]} at commit {commit}"
+    else:
+        raise NoticeError(f"{name} {version}: no known source location for {source!r}")
+    repository = package.get("repository")
+    return f"{where} (repository: {repository})" if repository else where
 
 
 class NoticeError(Exception):
     pass
 
 
-def shipped_packages(target):
+def output_for(binary):
+    return OUTPUT if binary == BINARY else WORKSPACES[binary] / "THIRD-PARTY-NOTICES"
+
+
+def shipped_packages(target, binary=BINARY):
     meta = json.loads(
         subprocess.check_output(
             [
                 "cargo", "metadata", "--locked", "--offline",
                 "--format-version", "1", "--filter-platform", target,
             ],
-            cwd=ROOT,
+            cwd=WORKSPACES[binary],
         )
     )
     packages = {p["id"]: p for p in meta["packages"]}
     nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
-    root = next(p["id"] for p in meta["packages"] if p["name"] == BINARY)
+    root = next(p["id"] for p in meta["packages"] if p["name"] == binary)
     seen, stack = set(), [root]
     while stack:
         current = stack.pop()
@@ -114,13 +266,32 @@ def shipped_packages(target):
     return [packages[i] for i in seen if packages[i]["source"] is not None]
 
 
-def license_files(label, directory, declared):
+def git_checkout_root(directory):
+    """The root of the cargo git checkout holding `directory`: the nearest
+    ancestor (or itself) that cargo marked with `.cargo-ok`."""
+    for candidate in [directory, *directory.parents]:
+        if (candidate / ".cargo-ok").is_file():
+            return candidate
+    return None
+
+
+def license_files(label, directory, declared, checkout=None, vendored=None):
     """Every license/notice file at the root of a source, plus the declared
-    one. Missing material is an error, never silently skipped."""
-    files = sorted(
-        f for f in directory.iterdir()
-        if f.is_file() and f.name.lower().startswith(LICENSE_PREFIXES)
-    )
+    one; for a crate of a git checkout with none of its own, the checkout
+    root's; for a crate with none at all, its vendored texts. Missing
+    material is an error, never silently skipped."""
+    def found(where):
+        return sorted(
+            f for f in where.iterdir()
+            if f.is_file() and f.name.lower().startswith(LICENSE_PREFIXES)
+        )
+    files = found(directory)
+    if not files and not declared and checkout is not None and checkout != directory:
+        files = found(checkout)
+    if vendored is not None:
+        if files or declared:
+            raise NoticeError(f"{label} ships its own license files: drop its vendored texts")
+        return vendored
     if declared:
         named = directory / declared
         if not named.is_file():
@@ -192,25 +363,50 @@ def std_crates(sysroot, source):
     return crates
 
 
-def generate():
-    crates = {}
-    for target in TARGETS:
-        for package in shipped_packages(target):
-            crates[(package["name"], package["version"])] = package
-    sysroot, source = toolchain_sources()
-    lines = [
-        "THIRD-PARTY NOTICES for freedom-cored",
+def vendored_notices(binary):
+    """`notices/crates.json` in the binary's workspace, if it has one:
+    for each crate that ships no license file, as `"<name> <version>"`, its
+    vendored texts (`files`, relative to that notices directory), with the
+    repository and commit they come from."""
+    directory = WORKSPACES[binary] / "notices"
+    manifest = directory / "crates.json"
+    if not manifest.is_file():
+        return {}
+    vendored = {}
+    for key, entry in json.loads(manifest.read_text(encoding="utf-8")).items():
+        if not entry.get("repository") or not entry.get("commit") or not entry.get("files"):
+            raise NoticeError(f"notices/crates.json: {key} needs a repository, a commit and files")
+        files = [directory / file for file in entry["files"]]
+        for file in files:
+            if not file.is_file():
+                raise NoticeError(f"notices/crates.json: {key}: {file.name} is missing")
+        vendored[key] = files
+    return vendored
+
+
+def header(binary):
+    """The file's opening: the core's text, naming `binary`."""
+    return [
+        f"THIRD-PARTY NOTICES for {binary}",
         "",
-        "freedom-cored statically links the third-party code listed below: the",
+        f"{binary} statically links the third-party code listed below: the",
         "crates it depends on, and the runtime of the Rust toolchain it is built",
         "with. Each is listed with its license expression, followed by the",
         "license and notice texts its source distributes. The Rust standard",
         "library's own notices are in THIRD-PARTY-NOTICES-rust-std.html, which",
         "ships next to this file. Generated by scripts/third-party-notices.py;",
         "do not edit.",
-        "",
-        "Crates:",
     ]
+
+
+def generate(binary=BINARY):
+    crates = {}
+    for target in TARGETS[binary]:
+        for package in shipped_packages(target, binary):
+            crates[(package["name"], package["version"])] = package
+    sysroot, source = toolchain_sources()
+    vendored = vendored_notices(binary)
+    lines = [*header(binary), "", "Crates:"]
     texts = {}  # text -> [labels]
 
     def add(label, files):
@@ -222,13 +418,35 @@ def generate():
         label = f"{name} {version}"
         lines.append(f"- {label}: {package.get('license') or 'see the license files below'}")
         directory = pathlib.Path(package["manifest_path"]).parent
-        add(label, license_files(label, directory, package.get("license_file")))
+        checkout = (
+            git_checkout_root(directory)
+            if (package.get("source") or "").startswith("git+") else None
+        )
+        add(label, license_files(label, directory, package.get("license_file"), checkout,
+                                 vendored.pop(label, None)))
+    if vendored:
+        raise NoticeError(
+            "notices/crates.json vendors texts for crates the binary doesn't ship: "
+            + ", ".join(sorted(vendored))
+        )
+    offered = [
+        crates[key] for key in sorted(crates) if needs_source_offer(crates[key].get("license"))
+    ]
+    if offered:
+        lines += [
+            "",
+            "Source code: these crates are in the binary unmodified, under the",
+            "Mozilla Public License 2.0, whose section 3.2(a) asks that recipients",
+            "of an executable be told where the source is. Each one's exact source:",
+        ]
+        for package in offered:
+            lines.append(f"- {package['name']} {package['version']}: {source_location(package)}")
     lines += ["", f"Rust {TOOLCHAIN} toolchain runtime:"]
     for (name, version, expression, directory, declared) in std_crates(sysroot, source):
         label = f"{name} {version}"
         lines.append(f"- {label} (Rust standard library): {expression}")
         add(label, license_files(label, directory, declared))
-    for (label, expression, text) in NATIVE:
+    for (label, expression, text) in NATIVE[binary]:
         lines.append(f"- {label}: {expression}")
         path = source / text[len("rust-src:"):] if text.startswith("rust-src:") else ROOT / text
         if not path.is_file():
@@ -244,20 +462,40 @@ def generate():
     return ("\n".join(lines).rstrip() + "\n").encode("utf-8")
 
 
+def parse_args(argv):
+    """`[--binary <name>] [--check]`: which binary, and whether to check."""
+    binary, check, rest = BINARY, False, list(argv)
+    while rest:
+        arg = rest.pop(0)
+        if arg == "--check":
+            check = True
+        elif arg == "--binary" and rest:
+            binary = rest.pop(0)
+        else:
+            raise NoticeError(f"unknown argument {arg}")
+    if binary not in WORKSPACES:
+        raise NoticeError(f"no notices for {binary}: one of {', '.join(WORKSPACES)}")
+    return binary, check
+
+
 def main():
     try:
-        content = generate()
+        binary, check = parse_args(sys.argv[1:])
+        content = generate(binary)
     except NoticeError as e:
         print(f"third-party-notices: {e}", file=sys.stderr)
         return 1
-    if "--check" in sys.argv[1:]:
+    output = output_for(binary)
+    if check:
         # Byte for byte: LF line endings on every platform.
-        if not OUTPUT.exists() or OUTPUT.read_bytes() != content:
-            print("THIRD-PARTY-NOTICES is stale: run python3 scripts/third-party-notices.py",
+        if not output.exists() or output.read_bytes() != content:
+            rerun = "" if binary == BINARY else f" --binary {binary}"
+            print(f"{output.relative_to(ROOT) if output.is_relative_to(ROOT) else output} "
+                  f"is stale: run python3 scripts/third-party-notices.py{rerun}",
                   file=sys.stderr)
             return 1
         return 0
-    OUTPUT.write_bytes(content)
+    output.write_bytes(content)
     return 0
 
 
