@@ -38,10 +38,9 @@ This design moves it into **its own supervised process, `freedom-radicled`**. It
   - The import that spawns `git push` today becomes an in-process libgit2 fetch. So when the process has exited, every writer it had is gone, and a restart is always a new generation.
 - **The state isn't a cache.** The Radicle home holds:
   - the user's signed issues and comments;
-  - the seeding policies;
-  - the node's key.
+  - the seeding policies.
 
-  So the service reconciles interrupted writes under the lock before it reports `RUNNING`, and a write that has started is either proven, or reported as **outcome unknown**.
+  It no longer holds the node's key ([Keys](#keys)). So the service reconciles interrupted writes under the lock before it reports `RUNNING`, and a write that has started is either proven, or reported as **outcome unknown**.
 - **The blob API (0006's requirement):** `rad.blob` returns a blob's **raw bytes**, **chunked** over 0007's stream frames, with an optional **byte range**.
   - The existing JSON endpoint stays byte-identical.
   - A new `rad:` endpoint, `/raw/<rev>/<path>`, serves the bytes themselves, with Range, under conservative headers.
@@ -50,17 +49,18 @@ This design moves it into **its own supervised process, `freedom-radicled`**. It
   - Reads run on a bounded pool, with no process-wide mutex.
   - JSON results are reserved as they are built and stopped at a cap.
   - Main **streams** them to handlers. Only small results are collected, under their own budget.
-- **Keys:**
+- **Keys** (the user's decision, 2026-10-22, [Keys](#keys)):
   - The service holds one secret: the user's Radicle node key, which heartwood needs for every connection and signature. It is a separate identity, not a wallet key, and not a cache that a vault lock wipes.
-  - It keeps today's source: the key file the core writes. The service reads it, so main no longer holds the key, and the service never generates one.
-  - The custody mode, and reconciling it with AGENTS.md, is the user's decision ([Keys](#keys)).
+  - **No file holds it.** On a profile with a vault, the core releases the derived key at each start, sealed (HPKE) to a key the service makes for that start. Main relays only ciphertext.
+  - So a start needs the vault unlocked until the core releases the key, every restart included. After that release, a lock stops neither the start nor the node.
+  - A profile without a vault runs its node with a throwaway key, made in memory at each start and never written. It reads and browses, with no lasting identity.
 - **Network policy:**
   - heartwood's SOCKS5 proxy and onion settings are set in memory, `direct` or `socks5` through Arti, with every other routing field overridden.
   - Names are resolved, checked and pinned, as in 0007's SOCKS contract.
   - An address policy covers addresses learned from peers.
   - The node listens on nothing: no inbound port, and, after an upstream change, no control socket.
 - **Private windows** read the profile's node, as today. A private read sends nothing, signs nothing, writes nothing and records nothing. Private partitions can't seed, sync or write.
-- **The code goes beside 0007's,** as `services/freedom-radicled` in its own Cargo workspace. A new repository remains the user's call.
+- **The code goes beside 0007's,** as `services/freedom-radicled` in its own Cargo workspace (the user's decision, 2026-10-22). Moving it to a new repository later would be a new decision.
 - **Tests come first:**
   - a contract suite over the add-on's 30 exports;
   - golden JSON recorded from v0.8.0 on a fixture repository, which the service must reproduce byte for byte.
@@ -70,7 +70,7 @@ This design moves it into **its own supervised process, `freedom-radicled`**. It
 **Goals**
 - **Crash isolation:** no Radicle fault can end main. A crashed service restarts with back-off.
 - **Parity:**
-  - the same `Embedded` calls, the same Radicle home and the same key file;
+  - the same `Embedded` calls, with `start_with_key` in place of `start`, the same Radicle home, and the same identity on a profile with a vault;
   - the same JSON bytes for every read main passes through;
   - the [deviations](#deviations) are listed.
 - **The blob API:** raw, chunked and ranged bytes, with bounded memory.
@@ -82,7 +82,7 @@ This design moves it into **its own supervised process, `freedom-radicled`**. It
 - **One owner per Radicle home,** enforced by the OS before anything touches it, for every Freedom writer.
 - **Writes with an honest outcome,** and a home that is reconciled after any interruption.
 - **A network policy the node honors,** failing closed: under a proxy, no direct peer socket.
-- **Honest key custody:** the key's holders and sources are stated, and anything new is left to the user.
+- **Honest key custody:** no key at rest. The key's holders, sources and route are stated, with what sealing protects and what it doesn't.
 
 **Non-goals**
 - **Planning `rad:` in the core** (0006's model for `bzz:` and `ipfs:`). `serveRepoApi` stays in main. Moving it into `fc-dweb` is a later step, once the service exists.
@@ -159,14 +159,14 @@ Electron main (profile P) ──spawn──▶ freedom-radicled serve --home <ra
   - everything else main has.
 
   `HOME` points at an empty directory the service owns. With libgit2's configuration search paths emptied ([upstream](#upstream-changes)), no global or system git configuration applies.
-- **Handshake:** `rad.hello` within 10 s, as 0001.
+- **Handshake:** `rad.hello` within 10 s, as 0001. Its reply carries the X25519 public key the service made for this start ([The sealed release](#the-sealed-release)).
 - **The lock:** `<lock-dir>/radicle-<sha256(canonical home)>.lock`, under 0001's rules, which also cover the canonical path, the stable lock directory, network filesystems and bind mounts.
   - Contention retries for 5 s, then exits 75. Other errors and network filesystems exit 74.
   - **It is taken before anything opens the home.** heartwood's own exclusion is the control-socket bind, which comes after its threads have started (`hw/radicle-node/src/runtime.rs:202`–`249`).
 - **Every Freedom writer of Radicle files takes this gate:**
   - the service;
   - `hold-lock`;
-  - the core, in every path of 0001's node identity protocol that touches Radicle files: `nodes.write_identity`, its startup recovery before `core.hello`, the `recover` subcommand, and the retries after `pending_recovery` ([Identity changes](#identity-changes)).
+  - the core, in every path of 0001's node identity protocol that touches Radicle files: `nodes.write_identity` (the [switch](#the-switch) included), its startup recovery before `core.hello`, the `recover` subcommand, and the retries after `pending_recovery` ([Identity changes](#identity-changes)).
 
   The `rad` CLI pointed at Freedom's home doesn't take it, and is unsupported, as is any older build sharing the home.
 - **`freedom-radicled hold-lock --home … --lock-dir …`** holds the gate until stdin closes, as 0001's does. It is used by:
@@ -182,15 +182,16 @@ Electron main (profile P) ──spawn──▶ freedom-radicled serve --home <ra
 - **Start:**
   1. spawn;
   2. `rad.hello`;
-  3. **`rad.reconcile`,** a phase of its own, with its own deadline ([Reconciliation](#reconciliation)). Its reply is the boundary main can see: the home is consistent;
-  4. `rad.start`, which runs `Embedded::start` with today's options, the [network policy](#network-policy) and no key generation, and returns `{ did, nid, alias }`;
-  5. `RUNNING`;
-  6. main runs today's background `rad.connect_seeds` and default-repository `rad.clone`.
+  3. **`rad.identity`:** the node key arrives, sealed by the core, or, on a profile without a vault, the service makes a throwaway key ([Keys](#keys)). On a profile with a vault, a start while the vault is locked waits in main, before the spawn ([When the node can start](#when-the-node-can-start));
+  4. **`rad.reconcile`,** a phase of its own, with its own deadline ([Reconciliation](#reconciliation)). Its reply is the boundary main can see: the home is consistent;
+  5. `rad.start`, which runs `Embedded::start_with_key` with today's options, the [network policy](#network-policy) and the key from `rad.identity`, and returns `{ did, nid, alias }`;
+  6. `RUNNING`;
+  7. main runs today's background `rad.connect_seeds` and default-repository `rad.clone`.
 
   Until `RUNNING`, every other request gets `stopped`.
 - **A failed start ends the process.**
   - libradicle can fail after heartwood's threads have started (`lr:777`). Those threads hold each other alive.
-  - So the service answers with the error and then exits: `recovery_failed` or `deadline` from `rad.reconcile`, or `start_failed` or `no_identity` from `rad.start`. Main shows the error and doesn't restart, as a failed start is handled today.
+  - So the service answers with the error and then exits: `key_file_present`, `bad_sealed_key` or `no_identity` from `rad.identity`; `recovery_failed` or `deadline` from `rad.reconcile`; `start_failed` or `key_file_present` from `rad.start`. Main shows the error and doesn't restart, as a failed start is handled today. The one exception is `key_file_present`: main runs the [switch](#the-switch), then starts once more.
   - The menu's start spawns a fresh process.
 - **Stop is the process's end:**
   1. main sends `rad.shutdown` and closes stdin;
@@ -213,6 +214,10 @@ Each ref is renamed into place atomically, but the steps together aren't. So bef
 
 **The dirty marker** (`node/dirty`) records that the home may hold a partial mutation:
 - **It is set before any mutation can run.** `rad.reconcile` writes it durably (the file, then its directory, flushed) before it changes anything. It stays present for the whole run, and every mutation of the home happens while it is present: COB writes, `unseed`, the import, clones, and heartwood's own fetches.
+- **It names the writers.** It holds the node IDs (public keys, so public data) of every identity that may have left a partial mutation:
+  - `rad.reconcile` adds the running identity's before it changes anything;
+  - an earlier identity stays named until its namespace has been checked, whatever key later processes run with. Its vault may have been deleted or replaced since. The [switch](#the-switch) names the identity whose key file it removes in the same way;
+  - once every earlier identity's namespace is checked or its repository quarantined, `rad.reconcile` rewrites the marker durably to name only the running identity, before it replies.
 - **It is kept after anything that may be partial:** a write that ends `outcome_unknown`, or a clone or fetch that is cancelled or cut off.
 - **It is cleared only after a proven clean stop.** At `rad.shutdown`, it is removed (durably) only when all of these hold:
   - the write queue is empty, and the executing writer, if any, has returned;
@@ -220,7 +225,7 @@ Each ref is renamed into place atomically, but the steps together aren't. So bef
   - `Embedded::shutdown` has returned, so heartwood's workers have finished their fetches.
 
   A shutdown with a timed-out writer still running, or one that reaches the 5 s exit, leaves the marker.
-- **What it selects:** with the marker present at start, the own-namespace check and the cache rebuild run. Temporary clones and ref lock files are handled on every start.
+- **What it selects:** with the marker present at start, the checks of the namespaces it names and the cache rebuild run. Temporary clones and ref lock files are handled on every start.
 
 - **Temporary clones:**
   - **What is recognized:** directories directly under `storage/` named `<RID>.tmp`, which is heartwood's `TempRepository` format (`hw/radicle/src/storage/git/temp.rs`: `<rid>.<random>` with its extension replaced by `tmp`), and the legacy `<RID>.lock`, where `<RID>` parses as a repository ID.
@@ -229,10 +234,10 @@ Each ref is renamed into place atomically, but the steps together aren't. So bef
 - **Ref lock files:**
   - **What is recognized:** regular files named `*.lock` under a repository's `refs/`, plus `packed-refs.lock`, `HEAD.lock` and `config.lock` at its root.
   - A lock file is an update that never committed, so its ref keeps its old value. It is removed, with no symlinks followed.
-- **The node's own namespace,** in every repository, when the marker was present:
-  - its refs are checked against its `rad/sigrefs`;
-  - if refs advanced without a matching signature (a kill between the ref and the signing), the namespace is re-signed over its current refs, with the node's key. The refs were written by this node.
-  - The repository is queued for a refs announcement once the node runs.
+- **The namespaces the marker names,** in every repository, when the marker was present. Each one's refs are checked against its `rad/sigrefs`:
+  - **The running identity's own:** if refs advanced without a matching signature (a kill between the ref and the signing), the namespace is re-signed over its current refs, with the node's key, which `rad.identity` has delivered by then. The refs were written by this node. The repository is queued for a refs announcement once the node runs.
+  - **An earlier identity's,** whose key this process doesn't hold: checked the same way, and never signed. Refs that don't match its `rad/sigrefs` quarantine the repository as `namespace`, with every byte kept ([the escape](#the-escape)). Nothing recovers that key or writes a key file, and nothing signs that namespace with the running key.
+  - A throwaway key owns no namespace, since it never writes ([Profiles without a vault](#profiles-without-a-vault)), so its own check finds nothing.
 - **The COB cache,** when the marker was present: rebuilt from storage for every repository, in bounded, resumable batches ([Work units](#work-units)). `cobs/cache.db` is derived data.
 - **Failure:**
   - Anything the procedure doesn't recognize, or can't repair, is left exactly as it is. An example is an owned ref that points at a missing object.
@@ -248,8 +253,8 @@ Every potentially long step is a **unit**. Each unit has a work limit and a time
 | Unit | Work limit | Time limit |
 |---|---|---|
 | removing one temporary clone, or one repository's ref lock files | one directory | 30 s |
-| checking the node's namespace against its `rad/sigrefs` | 1,024 refs; a larger namespace takes several units, each with a checkpoint | 30 s |
-| re-signing the namespace | one ref update, flushed, with libgit2's fsync option on | 30 s |
+| checking one named namespace against its `rad/sigrefs` | 1,024 refs; a larger namespace takes several units, each with a checkpoint | 30 s |
+| re-signing the running identity's namespace | one ref update, flushed, with libgit2's fsync option on | 30 s |
 | materializing one COB into staging | one COB | 30 s |
 | committing a batch | one transaction: at most 64 staged COBs and the checkpoint | 30 s |
 | publication | one transaction | 30 s |
@@ -262,6 +267,10 @@ Every potentially long step is a **unit**. Each unit has a work limit and a time
   - An entry is written in the same transaction as the work it records. For a re-sign, it is written after the ref update has been flushed.
   - So the state never claims work that isn't durable.
   - **It is bound to its input:** each repository's checkpoints carry the repository's input version, a hash over its refs taken when its repair began. A resumed repair whose input version differs discards that repository's staging and starts it over.
+  - **And to the signing authority:** each namespace check's checkpoint names the namespace it checks (its node ID), that namespace's input version (a hash over its refs), and the signing authority that applies: the namespace's own identity when the running key is that identity, and otherwise none.
+    - A resumed check keeps its checkpoint while all three are unchanged, whatever the running key. So successive throwaway keys, none of which can sign A's namespace, each continue A's read-only check where the last one stopped.
+    - It starts that namespace over only when its input version or the authority changes: A's key arrives, or A's key goes. A retry alone never changes either.
+    - A namespace is never signed with any key but its own.
   - **Online,** a repository's progress rows are deleted in its publication transaction. So a completed repair can't be reused once later mutations begin.
 - **Before `RUNNING`:** once every repository is done or quarantined, the progress state is cleared in one durable transaction, before `rad.reconcile` replies. No completion record survives into a run whose new mutations could make it wrong.
 
@@ -276,7 +285,7 @@ Every potentially long step is a **unit**. Each unit has a work limit and a time
   - keeps the marker and the progress state;
   - answers `deadline`.
 - **A cutoff is not an overrun.** `deadline` is a normal reply, and Retry continues. A unit that exceeds its own 30 s is a [unit overrun](#the-unit-watchdog): the process ends with 70, and the next attempt treats that unit as interrupted.
-- Main shows "Radicle is still repairing its data" with **Retry**. A retry spawns a new process, which continues from the checkpoints. There is no automatic restart loop.
+- Main shows "Radicle is still repairing its data" with **Retry**. A retry spawns a new process, which continues from the checkpoints, with a new throwaway key too ([the progress state](#work-units)). There is no automatic restart loop.
 - **Shutdown and kill:** `rad.shutdown` stops after the current unit. A kill is safe at any point, since every unit is idempotent and is recorded only once it is durable.
 
 #### The unit watchdog
@@ -301,7 +310,7 @@ A unit that can't finish is not retried forever.
 - **So every retry makes progress or reaches a diagnosis:** it advances a checkpoint, or it quarantines a repository.
 - **Two kinds of quarantine:**
   - **`cache`:** a COB or the cache can't be rebuilt. The repository's git data and the node's namespace are intact.
-  - **`namespace`:** the node's own namespace doesn't verify and can't be re-signed, for example an owned ref that points at a missing object.
+  - **`namespace`:** a namespace the marker names doesn't verify and can't be re-signed: for example an owned ref that points at a missing object, or an earlier identity's refs that its `rad/sigrefs` doesn't sign.
 - **The record:** a quarantine is recorded durably, in a `quarantine` table that outlives the run, before anything else resumes:
   - at a start, before `rad.reconcile` replies;
   - online, before the writer takes its next task.
@@ -371,7 +380,7 @@ heartwood fetches, updates the COB cache, announces and serves on its own. So re
 
   So no panic payload, which can contain a path or a RID, reaches a log.
 - **A restart is a new generation.**
-  - The node, its policy and its key are re-read from the home, after reconciliation.
+  - The node and its policy are re-read from the home, after reconciliation. Its key arrives again through `rad.identity`: sealed anew, so on a profile with a vault a restart waits for an unlock ([When the node can start](#when-the-node-can-start)), or a new throwaway key.
   - Requests captured by main before the restart fail with the old generation, as 0007's do.
   - There is no in-process restart, so instance epochs aren't needed.
   - There are no partition instances either, so 0007's lease and per-partition readiness don't apply: readiness is the node's ([Main's side](#mains-side)).
@@ -406,11 +415,12 @@ The rules this design relies on, as 0007 specifies them:
 
 | Method | Params | Result | Pool and deadline |
 |---|---|---|---|
-| `rad.hello` | `protocol`, `shell_version`, `frames` | `protocol`, `service_version`, `libradicle` build info | 10 s after spawn |
+| `rad.hello` | `protocol`, `shell_version`, `frames` | `protocol`, `service_version`, `libradicle` build info, `recipient` (the service's X25519 public key for this start, base64) | 10 s after spawn |
+| `rad.identity` | `sealed: { enc, ciphertext }` from the core's `nodes.seal_radicle_key`, or `ephemeral: true` on a profile without a vault | `{ did, nid, ephemeral }` | inline; within 30 s of `rad.hello`'s reply; once per process; on failure, the process exits ([Keys](#the-sealed-release)) |
 | `rad.reconcile` | none | `{ was_dirty, repaired, quarantined: { count, first } }`: counts per step, and up to 16 quarantine entries | 300 s ([the bound](#reconciliation)); on failure or deadline, the process exits |
 | `rad.quarantine_list` | `page` | `{ entries, next_page }`: up to 64 entries `{ rid, qid, kind, step, unit, since }` per page | read pool; 60 s |
 | `rad.remove_repo` | `rid`, `qid` | `{ removed }`, or `not_quarantined` when no record with that `qid` exists ([the escape](#the-escape)) | write queue; 60 s |
-| `rad.start` | `alias`, `network` | `did`, `nid`, `alias` | 30 s; on failure, the process exits |
+| `rad.start` | `alias`, `network` | `did`, `nid`, `alias`; the node runs as the key from `rad.identity` | 30 s; on failure, the process exits |
 | `rad.stats` | none | `connected_peers`, `node_alive`, the repair unit in progress and its elapsed time, `quarantined_count`, pool and budget use | inline; 5 s |
 | `rad.shutdown` | none | none: the process exits | main kills after 10 s |
 | `rad.read` | `op`, `args` | head `{ content_type: "application/json", bytes }`, then the JSON as a body stream | read pool; 60 s to the head |
@@ -474,7 +484,11 @@ The rules this design relies on, as 0007 specifies them:
 | `quarantined` | on a quarantined repository: COB ops; for `namespace`, every read; a write, seed, clone or sync; `data.kind`, `data.step` | 503 with `{"error": message}`; the provider's existing errors for writes |
 | `internal` | a panic on a read's thread | 500 |
 | `recovery_failed`; `deadline` | `rad.reconcile`: a failure outside any one repository, or the deadline; `message` names the step | the manager's error state; for `deadline`, "Radicle is still repairing its data" with Retry |
-| `start_failed`, `no_identity` | `rad.start`; `message` is libradicle's | the manager's error state, with that message |
+| `key_file_present` | `rad.identity` or `rad.start`: something exists at `keys/radicle` ([The switch](#the-switch)) | main runs the switch and starts again, once; then the manager's error state |
+| `bad_sealed_key` | `rad.identity`: the ciphertext doesn't open with this process's key, or doesn't hold 32 bytes | the manager's error state |
+| `no_identity` | `rad.reconcile` or `rad.start` before `rad.identity` succeeded | the manager's error state |
+| `start_failed` | `rad.start`; `message` is libradicle's | the manager's error state, with that message |
+| `needs_vault` | a COB write or `rad.import_repo` on a node with a throwaway key ([Profiles without a vault](#profiles-without-a-vault)) | refused in main before anything is sent; the provider's existing errors |
 
 Exit codes:
 - 0001's: 64, 74, 75 and 76;
@@ -563,7 +577,7 @@ All bounds are process-wide. The service hosts one node.
   - The executing write keeps the writer slot until its libradicle call has actually returned, even after its reply.
 - **The mutation-start boundary:** a write *starts* when the writer thread calls into libradicle's mutation.
   - **Before it, failure is definitive:**
-    - validation errors (`invalid_argument`) and a full queue (`busy`);
+    - validation errors (`invalid_argument`), a full queue (`busy`), and a write on a node with a throwaway key (`needs_vault`);
     - a queued write that is cancelled, passes its deadline, or meets a shutdown. It is removed from the queue before it can run, and answered `cancelled`, `deadline` or `stopped`.
 
     None of them ran.
@@ -650,51 +664,141 @@ All bounds are process-wide. The service hosts one node.
 
 ## Keys
 
+**Decided (the user, 2026-10-22): a host key with no file at rest, and a vault for a lasting identity** ([Open questions](#open-questions), 2–4). The options the user weighed are kept at the end of this section, as the reasons for that choice.
+
 **What the service holds:**
 - **One secret: the user's Radicle node key,** an Ed25519 key.
 - heartwood holds it in memory for the node's lifetime, in several clones that each zeroize on drop. It needs it continuously:
   - as the Noise XK static key of every peer connection (the node ID is its public key);
   - to sign node, inventory and refs announcements, `rad/sigrefs`, COB changes, and identity documents on import.
 - **It survives a vault lock.**
-  - The node keeps running, and signing, while the vault is locked, as it does today.
+  - Once the core has released the key, a lock stops neither the rest of the start nor the node, which keeps running, and signing, as it does today. Only the next start needs the vault again ([When the node can start](#when-the-node-can-start)).
   - The key isn't a derived-key cache of the kind AGENTS.md rule 4 has wiped by every lock. It is a node identity with its own lifetime, like Bee's.
+- **Until the key arrives,** the service also holds an X25519 key pair of its own, made for that one start ([The sealed release](#the-sealed-release)).
 - The service holds no wallet key, no recovery phrase and no vault data, and has no connection to the core.
 
-**Where the key comes from** (unchanged for profiles with a vault):
-- `<home>/keys/radicle`, an unencrypted OpenSSH file with mode `0600`, which `Embedded::start` loads (`lr:723`).
-- **On a profile with a vault,** the core's `nodes.write_identity` writes it (0001, *Multi-file writes*), derived from the vault seed at `m/44'/73404'/0'/0'/0'` (SLIP-0010).
-  - Ed25519 derivation is hardened at every level, and the file holds no chain code, so the key leads to neither the seed nor any other derived key.
+**Where the key comes from:**
+- **No file holds it.** The service starts the node only with `Embedded::start_with_key` (`lr:744`), which keeps the key in memory and writes nothing secret: the profile gets the public key, in memory, and `keys/` isn't touched (`lr:615`). The service never calls `Embedded::start`, which loads `keys/radicle` or generates it (`lr:698`–`726`).
+- **On a profile with a vault:** the key derived from the vault seed at `m/44'/73404'/0'/0'/0'` (SLIP-0010), which the core releases sealed, at each start ([The sealed release](#the-sealed-release)).
+  - Ed25519 derivation is hardened at every level, and the release carries no chain code, so the key leads to neither the seed nor any other derived key.
   - It does let anyone holding it act as the user's Radicle identity, which is derived from the wallet and can't be rotated without a new derivation path.
-- **On a profile without one,** the core writes a random device key, through the same journaled, atomic `0600` write under the home gate. Today libradicle generates it at first start.
-  - The service never generates a key. `rad.start` with no key file answers `no_identity` ([upstream](#upstream-changes)).
-  - Main asks the core for the device key, then starts again.
+- **On a profile without one:** a throwaway key, which the service makes in memory at each start ([Profiles without a vault](#profiles-without-a-vault)).
+- **The core writes no Radicle key:** no derived key file, and no random device key. `nodes.write_identity`'s Radicle form writes no key file at all ([Identity changes](#identity-changes)).
+
+### The sealed release
+
+**`nodes.seal_radicle_key`,** a new core method:
+
+| | |
+|---|---|
+| Params | `{ recipient }`: the service's X25519 public key for this start (32 bytes, base64), as `rad.hello` returned it |
+| Result | `{ enc, ciphertext }`, base64: HPKE's encapsulated key (32 bytes), and the sealed key with its tag (48 bytes) |
+| Plaintext | the 32-byte Ed25519 secret seed (RFC 8032) at `m/44'/73404'/0'/0'/0'`: the bytes libradicle's `HostKey` takes (`lr:654`). Never a chain code, the seed, or any other key |
+| Sealing | HPKE (RFC 9180), base mode, single-shot: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256 and AES-256-GCM (IDs `0x0020`, `0x0001`, `0x0002`). `info` is `freedom-radicle-node-key/1`; `aad` is empty |
+| Callers | `shell` only, like 0001's other main-only methods. No renderer channel reaches it |
+| Errors | `no_vault`; `vault_locked`; `invalid_argument` for a recipient that isn't 32 bytes, or that gives HPKE's all-zero shared secret; 0001's protocol errors |
+
+- **It requires an unlocked vault, and refuses otherwise:**
+  - **no vault:** `no_vault`. That is the only answer that leads main to a throwaway key;
+  - **locked:** `vault_locked`;
+  - **a lock while it runs:** it is admitted against the current epoch, as 0001's derivations are, so a result from a revoked epoch is wiped and answers `vault_locked`. The epoch is checked when the reply is handed to the core's writer. A reply handed over isn't recalled (0001), and that handoff is the start's boundary ([When the node can start](#when-the-node-can-start)).
+- **One key only:** no parameter selects another path or another node's key.
+- The core derives the key into a zeroizing buffer, seals it, and wipes it. It logs the method, never the recipient or the ciphertext.
+
+**The service's side:**
+- At spawn, after the lock, the service makes an X25519 key pair from the OS's randomness. The private half lives in zeroizing memory. `rad.hello`'s reply carries the public half as `recipient`.
+- **`rad.identity { sealed: { enc, ciphertext } }`:**
+  1. It checks `keys/radicle` first ([The switch](#the-switch)).
+  2. It opens the ciphertext with its private half. The plaintext must be 32 bytes, and goes straight into a `HostKey`, which zeroes its input (`lr:659`).
+  3. It wipes the private half after this one attempt, whether the ciphertext opened or not. So a ciphertext opens in one process, once, and one captured from an earlier start opens nowhere.
+  4. It replies `{ did, nid, ephemeral: false }`.
+- **Failures end the process:**
+  - a ciphertext that doesn't open, or doesn't hold 32 bytes: `bad_sealed_key`;
+  - a second `rad.identity`: `invalid_argument`;
+  - `rad.reconcile` or `rad.start` before `rad.identity` has succeeded: `no_identity`;
+  - no `rad.identity` within 30 s of `rad.hello`'s reply: the service exits.
+- **The key in the service:** reconciliation signs with it ([Reconciliation](#reconciliation)). Then `rad.start` hands it to `start_with_key`, and the service keeps no copy of its own.
+
+**A start, end to end:**
+1. Main spawns the service, and `rad.hello` returns `recipient`.
+2. Main asks the core for `nodes.seal_radicle_key { recipient }`, and passes the reply on in `rad.identity`.
+3. `rad.reconcile`, then `rad.start` ([Start](#start-stop-and-reconciliation)).
+
+Main sees the recipient, `enc` and the ciphertext, and never the key.
+
+### The switch
+
+- **The core deletes any plaintext `keys/radicle`** under the home gate, as a journaled step of `nodes.write_identity`'s Radicle form ([Identity changes](#identity-changes)). It removes `keys/radicle.pub` with it, which names an identity the node may no longer run as, and which nothing reads now ([Main's side](#mains-side)). The step writes no key, so it needs no vault.
+- **Why:** `start_with_key` leaves an old key file in place (`lr:744` documents that), and a later `start` would bring that identity back. Every home from before this design has one: the derived key the core wrote, or the random key libradicle generated.
+- **When:** main runs it when the service refuses with `key_file_present`, then starts again, once.
+- **The old identity stays checked.** The add-on leaves no dirty marker, so nothing records whether it stopped in the middle of a write. The switch therefore adds the old identity's node ID to `node/dirty` ([the dirty marker](#reconciliation)):
+  - It reads the node ID from the key file's public part (an OpenSSH private key file carries its public key in the clear), or from `keys/radicle.pub`. It never needs the secret part.
+  - So the first start after the switch runs the full reconciliation once, and checks that identity's namespace in every repository, whatever key the start runs with. The core's derived key is the same identity, and re-signs. Any other key quarantines a namespace that doesn't verify ([Reconciliation](#reconciliation)).
+  - If neither file yields a public key, the switch answers `node_identity_corrupt` and touches nothing. Only an identity change with `wipe`, which leaves nothing to check, removes such a file.
+- **The journal:** the marker and the removals are recorded before anything is removed, and the marker is installed first. Recovery repeats each step, and a file that's already gone counts as done. So a crash at any point leaves either the key file, which the next start refuses, or no key file and a marker that names the old identity.
+- **What it ends:** on a home whose key libradicle generated, the switch ends that identity. What it published stays, signed, but no Freedom node can act as it again. A key the core derived stays the profile's identity for as long as the profile keeps that vault, since the sealed key is the same key.
+- **No fallback:**
+  - The service starts the node only with `start_with_key`.
+  - It refuses to start while anything exists at `keys/radicle`, as `lstat` sees it (a file, or a symlink, even a dangling one). `rad.identity` checks before it opens anything, and `rad.start` checks again just before `start_with_key`. Either answers `key_file_present`, and the process exits.
+  - It never falls back to a file or a generated key. It makes a throwaway key only when main asks for one on a profile without a vault ([below](#profiles-without-a-vault)), never because a sealed key is missing, locked, or doesn't open.
+
+### When the node can start
+
+- **On a profile with a vault, every start needs it unlocked until the key is released:** the start at launch, a restart after a crash, and the restart that a policy change causes, such as Route Radicle through Tor.
+- **The boundary is the key's release.** A start owns its identity from the moment the core hands its seal reply to its writer, after the epoch check ([The sealed release](#the-sealed-release)).
+  - **Before it,** a lock ends the start. The core answers `vault_locked` and returns nothing, main shuts the process down, and the start waits as below.
+  - **From then on,** a lock stops nothing: not the reply on its way to main, nor `rad.identity`, `rad.reconcile` (up to its 300 s), `rad.start`, or the run. Main completes the start whatever the vault does, and the node keeps the key as a running node does.
+- **A start while the vault is locked waits, in main.**
+  - Main doesn't spawn the service. Radicle's status says it is waiting for the unlock, and main starts it on the core's `vault.unlocked` event.
+  - A crash restart that comes due while the vault is locked waits too. The wait doesn't count as a crash.
+- **The service never waits for a key.** Without one, it exits. So a waiting start holds no gate on the home, and profile removal, `radicle:reset` and identity changes stay possible.
+- **Once running, the node keeps running** across every lock, manual or automatic, until it stops, crashes, or its policy changes.
+- **The cost, which the user accepted:** after a launch, Radicle is down until the first unlock. A crash or a policy change while the vault is locked takes it down until the next one.
+
+### Profiles without a vault
+
+- **Radicle needs a vault for a lasting identity.** A profile without one gets no stored key.
+- **Its node runs with a throwaway Ed25519 key:**
+  - on `rad.identity { ephemeral: true }`, the service checks `keys/radicle` first, then fills a `HostKey` with 32 bytes from the OS's randomness, and replies `{ did, nid, ephemeral: true }`. `rad.start` runs `start_with_key` with it, as with a sealed key;
+  - the key is made in memory at each start and never written to a file. Nothing secret is stored;
+  - so each start is a new node ID to peers. A new throwaway key resets no repair checkpoint, since none can sign an earlier identity's namespace ([Work units](#work-units)).
+- **Main asks for it only on the core's `no_vault`,** never while the vault is locked, and never after another error. The service can't tell a profile without a vault from a main that asks for a throwaway key anyway: under 0001's threat model, main is trusted to choose.
+- **Reading and browsing, with no identity of its own:**
+  - reads, clones, seeding and syncing work as on any profile;
+  - **a generation with a throwaway key can't publish under an identity of its own.** COB writes and the import answer `needs_vault`. Main refuses them before anything is sent, by the running generation's identity ([Main's side](#mains-side)), and the service refuses them again. A throwaway identity's writes couldn't be edited after the next start, and reconciliation, which signs only with the running key, couldn't repair them.
+- **The vault changes the identity only at a start.**
+  - **Creating a vault** gives the profile its derived identity at the next start. Until then, the running throwaway generation keeps its identity, and writes stay refused.
+  - **Deleting the vault** leaves a node that runs as the derived identity as it is, writes included: it keeps its key, as across a lock, until it stops. Its next start uses a throwaway key.
+
+### What sealing protects
+
+- **Only the relay through main,** meaning main's heap and logs.
+- The core and the service still hold the key in plaintext, so their swap and memory dumps are covered only by 0001's hardening.
+- A compromised main can still ask for the key sealed to a key of its own.
+
+**What having no file adds:** the key isn't on disk, so a copy of the home, a backup of it, or a program reading it carries no Radicle key. Swap, above, is the exception.
 
 **What changes:**
-- The add-on loads the key into main's process today. After this design only the service does, under 0001's process hardening. Main never holds it.
+- The add-on loads the key into main's process today, from a file. After this design only the service holds it, under 0001's process hardening, and no file holds it at rest. Main never holds it.
 
-**How this fits AGENTS.md:**
+### How this fits AGENTS.md
+
 - **Rule 3** ("No raw private key or seed leaves the core"):
-  - The Radicle key leaves the core today, as a file, through 0001's `nodes.write_identity`. AGENTS.md's list of exceptions doesn't name node identity writes.
-  - This design adds no new release of key material. It moves the file's reader from main to the service, and the random device key's writer from libradicle to the core.
+  - `nodes.seal_radicle_key` releases a node key, sealed. That is a new exception, and this design is the design change it needs. AGENTS.md rule 3 is amended to match (#120): it names this release, and no other node key may be released.
+  - The core no longer writes the Radicle key to a file, so rule 3 has no Radicle file exception.
 - **Rule 4:**
-  - Secret files are atomic and `0600`: this now holds for both kinds of key, since the core writes both.
-  - The lock-wipes-caches rule doesn't cover a node identity that outlives a lock, as above.
-- **A prerequisite:** reconciling rules 3 and 4 with node identities (listing them, and their lifetime across locks) comes before any custody mode is chosen. It is the user's decision ([Open questions](#open-questions)).
+  - Secret files are atomic and `0600`: the Radicle key has no file now.
+  - The lock-wipes-caches rule doesn't cover a node identity that outlives a lock, as above. AGENTS.md says so (#120).
 
-**Options for the user:**
-1. **The key file (this design's default, today's behavior):** no change to the core's key release, and the node starts at launch without the vault being unlocked.
-2. **A host key with no file at rest:**
-   - libradicle v0.8.0 has `Embedded::start_with_key` (`lr:744`): it writes nothing secret and keeps the key in memory. UniFFI exposes it; the add-on doesn't.
-   - **How the key would arrive:** from the core, sealed (HPKE, RFC 9180) to an X25519 key the service generates at each start. Main relays only ciphertext.
-   - **The switch:** the core deletes any plaintext `keys/radicle` under the home gate, as a journaled step. `start_with_key` would otherwise leave an old file in place (`lr:744` documents that), and a later `start` would bring that identity back.
-   - **No fallback:** in this mode the service calls only `start_with_key`. It refuses to start while a `keys/radicle` file exists, and never falls back to a file or a generated key, including while the vault is locked.
-   - **Costs:**
-     - a new core method that releases a node key, sealed. That is a new exception to rule 3, which needs a design change;
-     - the node can start only while the vault is unlocked, including every restart after a crash.
-   - **What sealing protects:** only the relay through main, meaning main's heap and logs. The core and the service still hold the key in plaintext, so their swap and memory dumps are covered only by 0001's hardening. A compromised main can still ask for the key sealed to a key of its own.
+### The options the user weighed
+
+1. **The key file (today's behavior):** not chosen. It needed no new release from the core, and the node started at launch without an unlock, but an unencrypted key stayed at rest.
+2. **A host key with no file at rest:** chosen, as above. libradicle v0.8.0 already has `Embedded::start_with_key`, which UniFFI exposes and the add-on doesn't.
 3. **Signing in the core:** rejected.
    - The Noise handshake needs the secret for every connection, and heartwood copies it into its reactor and sessions.
    - The core would have to serve network handshakes on demand.
+
+**For profiles without a vault,** the core writing a random device key was not chosen either: a lasting identity needs a vault.
 
 ## Main's side
 
@@ -727,6 +831,17 @@ All bounds are process-wide. The service hosts one node.
 - **Private partitions are read-only:**
   - main refuses `seed`, `sync`, COB writes and `importRepo` for a private partition before anything is sent;
   - reads go to the profile's node as today.
+- **The start brings the key** ([Keys](#keys)):
+  - after `rad.hello`, main asks the core for `nodes.seal_radicle_key` and passes the reply on in `rad.identity`. On the core's `no_vault` it sends `{ ephemeral: true }` instead;
+  - on a profile with a vault, main spawns the service only while the vault is unlocked, and otherwise starts it on `vault.unlocked` ([When the node can start](#when-the-node-can-start));
+  - a `vault_locked` answer ends the start. Once the seal reply has arrived, main completes the start whatever the vault does;
+  - on `key_file_present`, main runs the [switch](#the-switch), then starts again, once.
+- **The active identity belongs to the generation:**
+  - `rad.identity`'s reply, `{ did, nid, ephemeral }`, is the running node's identity. Main keeps it with the generation, and drops it with the generation.
+  - It alone gives the DID main shows for the node, and it alone decides write admission. While the generation is `ephemeral`, main refuses COB writes and `importRepo` before anything is sent (`needs_vault`); otherwise it admits them. Whether the profile has a vault now doesn't enter into it. Reads, seeding, cloning and syncing work in either mode.
+  - **Creating, locking, unlocking or deleting the vault** changes neither while the generation runs ([Profiles without a vault](#profiles-without-a-vault)).
+- **The next start's identity is a separate value:** the derived DID from `keys.addresses` while the vault is unlocked, or none. Main may show it as the identity Radicle will use at its next start, never as the running node's. With no generation running, there is no active identity.
+- **Main no longer reads `keys/`:** `isRadicleIdentityInjected` (whether `keys/radicle` exists) and `readRadicleDid` (which reads `keys/radicle.pub`) go. The file never exists now, so nothing may read its absence as an identity never written.
 
 ### Identity changes
 
@@ -734,11 +849,14 @@ One owner holds the home gate at each step, and no step waits on a gate that its
 
 1. **Main stops the service.** The process exits, and its gate is free, since it starts no child.
 2. **The core takes the gate for the whole identity change.**
-   - `nodes.write_identity { node: "radicle", home, alias, wipe: true }`. It extends 0001's journaled multi-file write.
-   - It stages the key files, then commits the journal, which records the wipe. It then wipes `node/`, `cobs/` and `storage/`, installs the files, and finishes.
-   - Recovery of such a journal repeats the wipe, which is idempotent, and then the install. All of this is under the same gate.
+   - `nodes.write_identity { node: "radicle", home, alias, wipe: true }`. It extends 0001's journaled multi-file write, and writes no key file: the Radicle key is never written ([Keys](#keys)). It needs no vault.
+   - It stages the config, then commits the journal, which records the wipe and the removal of `keys/radicle` and `keys/radicle.pub`. It then wipes `node/`, `cobs/` and `storage/`, removes the key files, installs the config, and finishes.
+   - Recovery of such a journal repeats the wipe and the removals, which are idempotent, and then the install. All of this is under the same gate.
    - The wipe moves from main into the core, so main never holds `hold-lock` while the core needs the gate.
-3. **Main starts the service** only on `installed` (0001: "Main starts a node only on `installed`"). The service's own start then reconciles under the gate before `RUNNING`.
+   - **The [switch](#the-switch)** is the same call without `wipe`. It also stages `node/dirty` with the old identity's node ID. With `wipe`, nothing is left to check, and no marker is written.
+3. **Main starts the service** only on `installed` (0001: "Main starts a node only on `installed`"). The new process gets its key through `rad.identity`, then reconciles under the gate before `RUNNING`.
+
+- **When:** an identity change is one that main starts on purpose, as onboarding's forced re-injection does today when a profile's nodes already had identities. The derived identity itself needs no write, since it arrives sealed at each start. So creating a vault on a profile whose node ran with throwaway keys needs no identity change: that node owned nothing ([Profiles without a vault](#profiles-without-a-vault)).
 
 - **Contention:** if the gate is held, for example by a running service that main didn't stop, `nodes.write_identity` retries for 5 s, then answers `lock_held` and touches nothing.
 - **The core's own recovery:** startup recovery before `core.hello`, and `recover`, take the gate per Radicle journal in the same way. If the gate is held, the journal is left in place, and the core reports `pending_recovery` for Radicle without blocking `core.hello`. Main keeps the service stopped and retries, as 0001 already requires.
@@ -747,7 +865,9 @@ One owner holds the home gate at each step, and no step waits on a gate that its
 
 ## Private windows
 
-- **No ephemeral node.** `rad:` reads touch only local storage, and a read never starts a network fetch.
+- **No node of their own.** `rad:` reads touch only local storage, and a read never starts a network fetch.
+- **Whatever key the node runs with:** private windows read the profile's node, whether it runs with the vault's key or, on a profile without a vault, with a throwaway key ([Keys](#profiles-without-a-vault)). A read signs nothing, so the key plays no part in it.
+- **Only while the node runs:** on a profile with a vault, the node starts only after an unlock ([When the node can start](#when-the-node-can-start)). Until then, private reads answer `stopped` (503), as other windows' do.
 - **The boundary:** a read from a private window causes:
   - no explicit fetch;
   - no signed announcement;
@@ -805,8 +925,8 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
   - **only onion names** are handed to the proxy as names, through a separate, explicit route;
   - nothing falls back to a direct socket;
   - if the pinned Arti can't `RESOLVE`, the setting waits, as 0007 decides.
-- **The setting:** a per-profile **Route Radicle through Tor**, off by default, using `tor-manager`'s endpoint. Whether it and 0007's IPFS setting become one switch is an [open question](#open-questions).
-- **Changing the policy restarts the process.** Nothing of the old policy survives its process, since there is no child.
+- **The setting:** a per-profile **Route Radicle through Tor**, off by default, using `tor-manager`'s endpoint. It is a switch of its own, apart from 0007's IPFS setting; a future "everything through Tor" mode would turn both on ([Open questions](#open-questions), 9).
+- **Changing the policy restarts the process.** Nothing of the old policy survives its process, since there is no child. On a profile with a vault, the new process starts only while the vault is unlocked ([When the node can start](#when-the-node-can-start)).
 
 ### The address policy
 
@@ -841,13 +961,13 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
 
 **libradicle** (v0.8.0):
 1. **Policy in `Options`** (`lr:41`):
-   - add `proxy: Option<SocketAddr>`, `onion: AddressConfig`, `control_socket: bool`, `generate_key: bool`, a resolver hook and an address policy;
+   - add `proxy: Option<SocketAddr>`, `onion: AddressConfig`, `control_socket: bool`, a resolver hook and an address policy;
    - `run` (`lr:757`–`793`) applies them to `profile.config.node` before `Runtime::init`, overriding every routing field and `externalAddresses`;
    - nothing is written to `config.json`.
 2. **Node health:** `Embedded::node_alive()`, from the node thread's `JoinHandle::is_finished` (`lr:684`, `lr:781`).
-3. **No key generation, and errors rather than panics, at start:**
-   - with `generate_key: false`, `start` fails with `NoIdentity` instead of generating a key (`lr:700`–`720`);
-   - the key-generation `expect` becomes an error (`lr:706`).
+3. **No key generation at start: no change needed** since the custody decision ([Keys](#keys)).
+   - The service calls only `start_with_key` (`lr:744`), which generates no key and writes nothing secret.
+   - So it never reaches `start`'s key generation (`lr:700`–`720`) or its `expect` (`lr:706`).
 4. **The JSON serializers move out of the add-on:**
    - Today they are written inline in each export (`napi:34`–`216` and every export's `json!`, for example `blob_at` at `napi:742`–`765`).
    - Move them to a library module that writes into any `io::Write`, so the add-on, UniFFI and the service emit the same bytes, and the service can bound the writer.
@@ -883,9 +1003,9 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
     A failure there should stop the node with an error the host can see.
 13. **`Storage::reconcile`,** the procedure in [Reconciliation](#reconciliation):
     - typed recognition of temporary clones (`<RID>.tmp`, legacy `<RID>.lock`) and ref lock files, with no symlinks followed;
-    - validation and re-signing of the node's own namespace;
+    - validation of every namespace the marker names, and re-signing of the running identity's, with a signer the host passes in (the key from `rad.identity`), since the node isn't running yet. A namespace whose node ID isn't the signer's is never signed;
     - a COB cache rebuild in batches into a staging table, with durable checkpoints and atomic publication;
-    - progress state written in the same transactions as the work, bound to each repository's input version, with an in-progress record for every unit;
+    - progress state written in the same transactions as the work, bound to each repository's input version and to each namespace check's signing authority, with an in-progress record for every unit;
     - namespace checks in units of 1,024 refs, with checkpoints;
     - a cancel token and a deadline checked between units;
     - a `quarantine` table with its two kinds, and `remove_repo`;
@@ -900,9 +1020,9 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
 
 ## Where the code lives
 
-0007's options and recommendation apply.
+**Decided (the user, 2026-10-22): the first option,** as for 0007. The others are kept as the reasons for that choice.
 
-1. **This repository, `services/freedom-radicled`, its own Cargo workspace** (recommended):
+1. **This repository, `services/freedom-radicled`, its own Cargo workspace** (chosen):
    - it shares `fc-protocol` and 0007's service skeleton;
    - it has its own lockfile and `deny.toml`. libradicle's lockfile, which also covers its add-on and UniFFI bindings, has 453 packages, including vendored libgit2 (C; GPL-2.0 with a linking exception, which the notices must carry) and bundled SQLite;
    - heartwood comes from `solardev-xyz/heartwood`, which `deny.toml`'s organization allowlist covers.
@@ -910,7 +1030,7 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
 3. **Upstream libradicle,** as a binary beside `napi/` and `uniffi/`.
    - **For:** the closest home.
    - **Against:** the frame protocol, lock and supervision contract are Freedom's, and this repository's lack of a license blocks depending on `fc-protocol`.
-4. **A new repository:** the user's decision.
+4. **A new repository:** not chosen. Moving later would be a new decision.
 
 **Scope of the separation:**
 - A separate workspace separates dependency resolution and advisory gates. It is not supply-chain isolation: build scripts and proc macros still run with the build host's authority.
@@ -1013,10 +1133,30 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
   - an owned ref pointing at a missing object: the repository is quarantined (`namespace`) persistently, with nothing deleted. Its reads answer `quarantined`, it isn't served or announced, and other repositories work;
   - an unreadable cache database (home-level): `recovery_failed`, with nothing deleted.
 - **Identity changes:**
-  - stop → wipe and key write by the core → restart, including a failed write;
+  - stop → wipe and key-file removal by the core → restart, including a failed write; no key file is written;
   - with an independently running service holding the gate: `lock_held`, and no file touched;
-  - core recovery while the gate is held: `pending_recovery`, then completion once the service stops;
-  - a profile without a key: `no_identity`, the core's device key, then a start.
+  - core recovery while the gate is held: `pending_recovery`, then completion once the service stops.
+- **Keys:**
+  - **a lock while the node runs,** manual and automatic: the node stays `RUNNING` and connected, and a COB write after the lock still signs;
+  - **a start while the vault is locked,** at launch, as a crash restart and after a policy change: main spawns nothing until `vault.unlocked`, then the node starts. Nothing on a profile with a vault ever leads to a throwaway key;
+  - **the lock boundary:**
+    - a lock between `rad.hello` and the seal, and one during the derivation, before the reply is handed to the core's writer: `vault_locked`, nothing returned, the process is shut down, and the start waits;
+    - a lock just after the core hands the reply to its writer, before main reads it (a test hook), and one after main reads it, before `rad.identity`: the start completes;
+    - a lock during `rad.reconcile`, through a repair that runs for minutes, and one during `rad.start`: the start completes, and the node runs. A running node's behavior is unchanged;
+  - **a key file present:** a file, a symlink and a dangling symlink at `keys/radicle`. `rad.identity` answers `key_file_present` before it opens the ciphertext, and the process exits. One placed between `rad.identity` and `rad.start`, through a test hook: `rad.start` refuses;
+  - **ciphertext only through main:** with a test vault whose derived key is known, a recorder on both pipes and on main's log finds the key's bytes nowhere, raw, in base64 or in hex. Main sees the recipient, `enc` and the ciphertext;
+  - **the seal:** RFC 9180's test vectors for the suite. A ciphertext sealed to another process's recipient, a tampered one, and one from an earlier start: `bad_sealed_key`, then the exit. A second `rad.identity`: `invalid_argument`. `nodes.seal_radicle_key` from `chrome`: `forbidden`; with no vault: `no_vault`; locked: `vault_locked`; a lock during the call: `vault_locked`, with nothing returned; a low-order recipient: `invalid_argument`;
+  - **the throwaway key is never written:** on a profile without a vault, after a start, reads, a clone and a stop, no file under the home or the service's `HOME` holds the key's bytes, and `keys/` holds no key. Each start has a new node ID. COB writes and the import answer `needs_vault`, in main and in the service;
+  - **vault changes without a restart:** a vault created, locked and unlocked, and deleted, each while a node runs. The DID main shows and its write admission stay the generation's: a throwaway node keeps refusing writes after a vault is created, and a derived node keeps admitting them after a lock and after a delete. The derived DID is shown only as the next start's. Then a restart: the derived identity after a create, a throwaway one after a delete;
+  - **the switch:** a home with the core's derived key file, and one with libradicle's random key. `key_file_present`, the switch, then a start: with the derived key, the DID is the file's. A crash before the journal commit, after it, after the marker's install, and after each removal: recovery finishes the switch, and the next start succeeds. No start ever runs with the file present. A key file whose public key can't be read: `node_identity_corrupt`, and nothing is touched;
+  - **a dirty home across an identity's loss:** identity A commits a COB ref and is killed before `rad/sigrefs`. Then:
+    - A's vault is deleted, and the next start uses a throwaway key;
+    - or the vault is replaced by another, without a wipe, and the next start uses its derived key;
+    - or, the first switch from a generated identity: the add-on, running as libradicle's key, is killed in the same place, then the switch runs, and the next start uses the sealed key or a throwaway one.
+
+    Each time, the reconciliation checks A's namespace, quarantines the repository as `namespace` with every byte kept, writes no key file, and signs nothing with the new key. The marker then names only the running identity, and a clean stop clears it. With A's vault kept or restored instead, or with the core's derived key file before the switch, the start runs as A and re-signs;
+  - **a resumed check across a key change:** a check of A's namespace cut off by the deadline while A runs, then a start under another key. The check starts over, and doesn't sign;
+  - **successive throwaway keys:** A's vault deleted, A's refs unchanged, and a namespace check of A that needs several reconciliation deadlines. Each Retry runs a fresh throwaway key, and each continues from the last checkpoint. The check completes, or quarantines the repository as `namespace`, within a bounded number of retries, and A's key is never recovered or used;
 - **Progress:** more than 16 failed candidates with a paused writer, then a cancel: the summary counts every failure, the terminal `cancelled` arrives, and memory stays bounded. Also an oversized `reason`, and a summary whose reasons are NULs and backslashes: the encoded event stays within 4 KiB, cut at character boundaries.
 - **Rust tests through the binary,** with test hooks behind a feature:
   - the lock and `hold-lock`;
@@ -1043,8 +1183,8 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
 
 | Item | Today | The service |
 |---|---|---|
-| start | `Embedded::start({ home, alias: 'FreedomBrowser', listen: [] })` in main | the same call, in the service, after reconciliation |
-| key | `keys/radicle`, loaded in main | the same file, loaded in the service |
+| start | `Embedded::start({ home, alias: 'FreedomBrowser', listen: [] })` in main | `Embedded::start_with_key` with the same options and the key from `rad.identity`, in the service, after reconciliation |
+| key | `keys/radicle`, loaded in main | no file: the derived key, sealed by the core to the service at each start; a throwaway key on a profile without a vault ([Keys](#keys)) |
 | read results | the add-on's JSON text | the same bytes, from the shared serializers |
 | README | composed in main from `tree_at` and `blob_at` | composed in the service; the same bytes |
 | errors | `{"error": message}`; 404 by message test, else 500 | the same bodies and statuses; a code alongside |
@@ -1064,14 +1204,20 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 
 - The add-on path stays selectable in dev builds (`FREEDOM_RADICLE_BACKEND=addon`) until the service ships in one stable release.
 - While selected, the add-on runs under `hold-lock`. A build that doesn't take the lock is unsupported on the same home.
+- **It runs only on a home that still has `keys/radicle`.** On a home without one, its `start` would generate a key file of its own (`lr:700`–`720`), so main refuses it there. The service's first start switches a home ([The switch](#the-switch)), so after that the add-on is refused on it.
 - Then the add-on, its fetch script and its `check-binaries.js` rule go.
-- The home's format doesn't change, so rollback needs no migration.
+- **The switch is one-way.** The home's other files keep their format, but a build from before this design finds no `keys/radicle`:
+  - its add-on generates a random key file at start (`lr:700`–`720`), so the node runs as a new identity, with a key at rest again;
+  - getting the derived identity back there takes a re-injection, which wipes `node/`, `cobs/` and `storage/` first, as `injectRadicleIdentityNow` in `identity-manager.js` does.
+
+  So no release rolls back past the switch to the add-on. Once the service has shipped, fixes go forward.
 
 ## Bounds
 
 | Budget | Bound | Exhausted |
 |---|---|---|
-| handshake; `rad.reconcile`; `rad.start` | 10 s; 300 s, checked between COBs; 30 s | kill; error, and the process exits (Retry continues from the checkpoints) |
+| handshake; `rad.identity`; `rad.reconcile`; `rad.start` | 10 s; 30 s after the handshake; 300 s, checked between COBs; 30 s | kill; the process exits; error, and the process exits (Retry continues from the checkpoints) |
+| a start on a profile with a vault, while it is locked | no process, so nothing to bound: main waits for `vault.unlocked` | — |
 | every repair unit | its work limit, and 30 s by an independent watchdog, at startup and online | exit 70 with the record kept; a unit in progress when two processes ended quarantines its repository |
 | the writer during an online repair | one unit at a time, at most 30 s | other repositories' writes run between units |
 | quarantine diagnostics | 16 entries in `rad.reconcile`'s reply; 64 per page of `rad.quarantine_list` | the next page |
@@ -1111,7 +1257,10 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 | `read-concurrency` | reads serialized by one mutex | 4 concurrent | reads don't queue behind each other |
 | `outcome-unknown` | a write that failed after starting reports its error | any started write that isn't proven is `outcome_unknown`, never retried | pages check before writing again |
 | `progress-summary` | every progress event is delivered | failures beyond 8 fold into a summary; the terminal is reserved | the same outcome, fewer events in a burst |
-| `device-key` | libradicle generates a random key on a profile without a vault | the core writes it, atomically and `0600`, under the gate | the service never generates a key |
+| `key-custody` | `keys/radicle`, an unencrypted file, loaded in main | no key file: the core releases the derived key at each start, sealed to the service, and main relays only ciphertext; the switch removes the old file | no Radicle key at rest |
+| `locked-start` | the node starts at launch whatever the vault's state | on a profile with a vault, every start needs an unlock until the core releases the key, restarts included; after that, the rest of the start and the running node outlive a lock | Radicle is down from launch until the first unlock, and after a crash or a policy change while locked |
+| `device-key` | libradicle generates a random key on a profile without a vault, and keeps it in `keys/radicle` | a throwaway key, made in memory at each start and never written; COB writes and the import are refused (`needs_vault`) | such a profile reads and browses with no lasting identity; the switch ends an identity libradicle generated, though what it published stays |
+| `locked-did` | the DID shows while the vault is locked, read from `keys/radicle.pub` | the running generation's, from `rad.identity`; with no node running, only the next start's, from `keys.addresses` while unlocked | while the vault is locked and no node runs, no Radicle DID shows |
 | `stop-budget` | no Radicle budget | 10 s, then kill | quit can't wait on Radicle |
 | `env` | the add-on inherits main's environment | cleared; `HOME` an empty directory; no git configuration | `RAD_*`, `SSH_AUTH_SOCK` and git configuration no longer apply |
 | `proxy` | none | an optional SOCKS5 policy, names resolved through the proxy and checked, failing closed | new: Route Radicle through Tor |
@@ -1123,30 +1272,34 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 
 1. **Tests first,** in freedom-browser: the contract suite, the fixture repository and golden vectors from the v0.8.0 add-on.
 2. **Upstream:**
-   - libradicle items 1–9;
+   - libradicle items 1, 2 and 4–9 (item 3 needs nothing now);
    - heartwood items 10–14, on the `freedom/embed` fork.
 
-   The service can start on items 1–4, 9, 10 and 13.
+   The service can start on items 1, 2, 4, 9, 10 and 13.
 3. **The shared service skeleton,** from 0007: the lock, `hold-lock`, the handshake, parent death, the panic hook, hardening and the frame I/O.
 4. **`services/freedom-radicled`:**
-   - the dirty marker, `rad.reconcile` with its bound, the repair units and their watchdog, the online repair, the repository gate, quarantine and `rad.remove_repo`;
+   - the dirty marker and the identities it names, `rad.reconcile` with its bound, the repair units and their watchdog, the online repair, the repository gate, quarantine and `rad.remove_repo`;
    - the pools, the output budget and bounded JSON construction;
    - `rad.read` and `rad.blob`, with ranges;
    - network operations with bounded progress and cancel;
    - the write queue with the mutation-start boundary, and the in-process import;
    - `rad.stats`;
+   - the X25519 recipient, `rad.identity` with HPKE, the key-file check and the throwaway key, and `needs_vault` for writes under a throwaway key;
    - the test hooks and the Rust tests.
 5. **Release:** five targets, `SHA256SUMS`, attestations and notices (libgit2's included), on `radicled-v*` tags, in separate build jobs.
 6. **freedom-core:**
-   - `nodes.write_identity` for Radicle takes the home gate and gains `wipe`;
+   - `nodes.write_identity` for Radicle takes the home gate and gains `wipe`. It writes no key file, removes `keys/radicle` and `keys/radicle.pub` (the switch) after naming the old identity in `node/dirty`, and needs no vault;
    - the core's recovery paths take the gate;
-   - a random device key for profiles without a vault.
+   - `nodes.seal_radicle_key`, with HPKE.
 7. **freedom-browser:**
    - `radicle-embedded.js` on the service, behind `FREEDOM_RADICLE_BACKEND` in dev, with `callStream` and `callScoped`;
    - admission and cancel for `rad:` and `radapi:`;
    - the limits for other callers;
    - private partitions read-only;
+   - the start with the sealed key, the wait for an unlock, the throwaway key on `no_vault`, and the switch on `key_file_present`;
+   - the active identity bound to the generation, writes refused while it is a throwaway one, and no more reads of `keys/`;
    - the identity change through the core, and `hold-lock` for the alias and profile removal;
+   - the add-on refused on a home without `keys/radicle`;
    - the contract suite against the binary, the gates;
    - then the default switches.
 8. **The raw endpoint** and the viewer's images and downloads.
@@ -1156,13 +1309,18 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 ## Open questions
 
 1. **Where the code lives:** a separate workspace here (recommended), upstream libradicle, or a new repository (the user's decision).
-2. **Key custody:** keep the key file (this design), or move to a sealed host key with no file at rest? The latter needs a new exception to rule 3, and an unlocked vault for every start (the user's decision).
+   - **Decided (the user, 2026-10-22): a separate workspace here,** following 0007's `services/freedom-ipfsd`.
+2. **Key custody:** keep the key file (the draft's default), or move to a sealed host key with no file at rest? The latter needs a new exception to rule 3, and an unlocked vault for every start (the user's decision).
+   - **Decided (the user, 2026-10-22): the sealed host key, with no file at rest.** The node starts only while the vault is unlocked, every restart included, and a later lock doesn't stop a running node. [Keys](#keys) is now that design. Its boundary is the key's release: a start that already has its key completes whatever the vault does ([When the node can start](#when-the-node-can-start)).
 3. **AGENTS.md, a prerequisite to the custody choice:** should rules 3 and 4 name node identities: 0001's node identity writes (Bee and Radicle), and keys that outlive a vault lock? (The user's decision.)
-4. **The device key:** this design has the core write the random key on profiles without a vault. Is a device identity that isn't derived from the wallet still wanted there, or should Radicle require a vault?
+   - **Decided (the user, 2026-10-22):** rule 3 names the sealed release of the Radicle node key to this service, and no other node key may be released. Bee's keystore file stays a temporary exception until Phase 5, and rule 4 says that a node keeps its key across a lock once it has been released to it. AGENTS.md is amended to match (#120).
+4. **The device key:** the draft had the core write a random key on profiles without a vault. Is a device identity that isn't derived from the wallet still wanted there, or should Radicle require a vault?
+   - **Decided (the user, 2026-10-22): Radicle needs a vault for a lasting identity.** A profile without one runs its node with a throwaway key, made in memory at each start and never written. It reads and browses, and can't publish under an identity of its own. Creating a vault gives it the derived identity at the next start ([Profiles without a vault](#profiles-without-a-vault)).
 5. **The control socket:** is it acceptable that the `rad` CLI can no longer attach to Freedom's node, or should a developer setting keep it?
 6. **The raw endpoint for pages:** is the inert-type allowlist right? Should pages get `/raw/` at all, or only the viewer?
 7. **Caps:** are 64 MiB per blob, 32 MiB per JSON result and 64 MiB of built data per read right?
 8. **The address policy:** are these the right ranges, and is the exact-address exemption for configured seeds enough for LAN setups?
 9. **One Tor switch:** should Route Radicle through Tor and 0007's Route IPFS through Tor be one setting?
+   - **Decided (the user, 2026-10-22): separate switches now, and a future "everything through Tor" mode turns both on.** The two protocols pay different costs under Tor, so a user can take one without the other.
 10. **heartwood's memory:** should the service run under an OS-level limit (`RLIMIT_AS`, or a Windows job memory limit), given that heartwood's own buffers aren't bounded by the service?
 11. **Private windows:** is read-only the right rule for private partitions, or should an explicit, user-initiated seed be allowed there?

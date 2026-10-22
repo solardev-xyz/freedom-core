@@ -1613,3 +1613,134 @@ fn a_temp_vault_swapped_after_its_check_is_never_committed() {
     );
     assert!(unlocked["result"].is_object(), "{unlocked}");
 }
+
+/// #82: design 0001's parity table orders `no_vault`, then
+/// `unsupported_vault_version`, before `throttled` (verify and the exports:
+/// `no_vault`, then `throttled`). The attempt used to be reserved before
+/// the file was read, so a throttled core said `throttled` for a vault that
+/// was gone or unsupported.
+#[test]
+fn file_errors_come_before_throttled() {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    core.call(
+        2,
+        "vault.import",
+        json!({ "password_b64": b64("testpass1"), "mnemonic_b64": b64(ABANDON) }),
+    );
+    // Seven failures (waiting out the delays after the fifth and sixth):
+    // the next attempt then waits 4 s, ample for what follows.
+    let mut id = 2;
+    for _ in 0..7 {
+        loop {
+            id += 1;
+            let wrong = core.call(
+                id,
+                "vault.unlock",
+                json!({ "password_b64": b64("wrong-password") }),
+            );
+            match wrong["error"]["code"].as_str() {
+                Some("incorrect_password") => break,
+                Some("throttled") => std::thread::sleep(Duration::from_millis(
+                    wrong["error"]["data"]["retry_after_ms"].as_u64().unwrap(),
+                )),
+                _ => panic!("{wrong}"),
+            }
+        }
+    }
+    let vault = data.join(VAULT);
+    let good = std::fs::read_to_string(&vault).unwrap();
+    let password = json!({ "password_b64": b64("testpass1") });
+    let change = json!({ "password_b64": b64("testpass1"), "new_password_b64": b64("testpass2") });
+    let export_key = json!({ "password_b64": b64("testpass1"), "account": 0 });
+    let mut call = |core: &mut Core, method: &str, params: &Value| {
+        id += 1;
+        core.call(id, method, params.clone())["error"].clone()
+    };
+
+    // The file is fine: the attempt waits.
+    for method in ["vault.unlock", "vault.verify_password"] {
+        assert_eq!(call(&mut core, method, &password)["code"], "throttled");
+    }
+
+    // Gone (outside the core, as by hand).
+    std::fs::remove_file(&vault).unwrap();
+    for (method, params, message) in [
+        (
+            "vault.unlock",
+            &password,
+            "No vault found. Create one first.",
+        ),
+        (
+            "vault.change_password",
+            &change,
+            "No vault found. Create one first.",
+        ),
+        (
+            "vault.delete",
+            &password,
+            "No vault found. Create one first.",
+        ),
+        ("vault.verify_password", &password, "No vault found"),
+        ("vault.export_mnemonic", &password, "No vault found"),
+        ("vault.export_private_key", &export_key, "No vault found"),
+    ] {
+        let error = call(&mut core, method, params);
+        assert_eq!(error["code"], "no_vault", "{method}: {error}");
+        assert_eq!(error["message"], message, "{method}");
+    }
+
+    // An unsupported version: unlock, change_password and delete say so;
+    // verify and the exports check no version, as JS verifyPassword.
+    std::fs::write(&vault, good.replacen("\"version\": 1", "\"version\": 2", 1)).unwrap();
+    for method in ["vault.unlock", "vault.change_password", "vault.delete"] {
+        let params = if method == "vault.change_password" {
+            &change
+        } else {
+            &password
+        };
+        let error = call(&mut core, method, params);
+        assert_eq!(
+            error["code"], "unsupported_vault_version",
+            "{method}: {error}"
+        );
+        assert_eq!(error["message"], "Unsupported vault version: 2");
+    }
+    assert_eq!(
+        call(&mut core, "vault.verify_password", &password)["code"],
+        "throttled"
+    );
+    // The version comes first, whatever `encrypted` holds, as in JS (a later
+    // format may change it).
+    std::fs::write(&vault, r#"{"version":2,"encrypted":7}"#).unwrap();
+    for method in ["vault.unlock", "vault.change_password", "vault.delete"] {
+        let params = if method == "vault.change_password" {
+            &change
+        } else {
+            &password
+        };
+        let error = call(&mut core, method, params);
+        assert_eq!(
+            error["code"], "unsupported_vault_version",
+            "{method}: {error}"
+        );
+        assert_eq!(error["message"], "Unsupported vault version: 2");
+    }
+
+    // Not a vault at all: corrupt, whatever the password.
+    std::fs::write(&vault, "not json").unwrap();
+    for method in ["vault.unlock", "vault.verify_password"] {
+        assert_eq!(
+            call(&mut core, method, &password)["code"],
+            "corrupt_vault",
+            "{method}"
+        );
+    }
+
+    // Back: the attempt waits again, and nothing above counted against it.
+    std::fs::write(&vault, &good).unwrap();
+    let throttled = call(&mut core, "vault.unlock", &password);
+    assert_eq!(throttled["code"], "throttled", "{throttled}");
+    assert!(throttled["data"]["retry_after_ms"].as_u64().unwrap() > 0);
+}

@@ -10,7 +10,10 @@
 //! - **Throttle:** an attempt is reserved when its job starts and settled
 //!   with the real outcome when the KDF actually ends, even if the request
 //!   was already answered. Every job that checks a password reserves one,
-//!   `vault.reconcile` included unless it reconciles a delete (#78).
+//!   `vault.reconcile` included unless it reconciles a delete (#78). While
+//!   the throttle refuses, the job still checks the file, with no password:
+//!   a missing, unsupported or corrupt vault is reported before `throttled`,
+//!   as design 0001's parity table orders them (#82).
 //! - **Commit point:** each job shares a [`JobControl`] with the loop. The
 //!   commit point is the worker's atomic claim immediately before the rename
 //!   or unlink. Until then the loop can abandon the job and answer at once
@@ -56,7 +59,7 @@ use fc_vault::state::{LockReason, Locked, Prepared, Ticket, VaultState};
 use fc_vault::throttle::{Attempt, Outcome, Throttle};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::clock::Clock;
 use crate::fsx::{self, Done};
@@ -229,6 +232,9 @@ pub enum JobOutput {
     NodeWritten(Result<(journal::Outcome, serde_json::Map<String, serde_json::Value>), OpError>),
     /// nodes.op_status.
     OpStatus(Result<journal::OpStatus, OpError>),
+    /// A password check the throttle refused: what the file says, before
+    /// `throttled` (#82).
+    Prechecked(Result<(), OpError>),
 }
 
 /// What `vault.reconcile` found for a committed create or import.
@@ -263,7 +269,8 @@ impl JobOutput {
             JobOutput::Unlocked(_)
             | JobOutput::Reconciled { .. }
             | JobOutput::NodeWritten(_)
-            | JobOutput::OpStatus(_) => None,
+            | JobOutput::OpStatus(_)
+            | JobOutput::Prechecked(_) => None,
         }
     }
 }
@@ -320,6 +327,35 @@ enum Kind {
 }
 
 impl Kind {
+    /// What a password check the throttle refuses still checks, without the
+    /// password, before it answers `throttled` (design 0001's parity table,
+    /// #82): `Some(true)` for the file's existence, structure and version
+    /// (unlock, change_password, delete), `Some(false)` for existence and
+    /// structure (verify and the exports, which check no version, as JS
+    /// `verifyPassword`). `None`: `throttled` at once (reconcile among
+    /// them: an honest one never meets the throttle, #78).
+    fn precheck(&self) -> Option<bool> {
+        match self {
+            Kind::Unlock { .. } | Kind::ChangePassword { .. } | Kind::Delete { .. } => Some(true),
+            Kind::Verify { .. } | Kind::ExportMnemonic { .. } | Kind::ExportPrivateKey { .. } => {
+                Some(false)
+            }
+            Kind::Create { .. }
+            | Kind::Import { .. }
+            | Kind::Reconcile { .. }
+            | Kind::NodeWrite { .. }
+            | Kind::OpStatus { .. } => None,
+        }
+    }
+
+    /// verify and the exports say "No vault found".
+    fn short_no_vault(&self) -> bool {
+        matches!(
+            self,
+            Kind::Verify { .. } | Kind::ExportMnemonic { .. } | Kind::ExportPrivateKey { .. }
+        )
+    }
+
     /// Whether the job checks a password, and so reserves a throttle attempt
     /// first.
     ///
@@ -432,9 +468,17 @@ enum RunningKind {
     ExportPrivateKey(u32),
     Create,
     Import,
-    Reconcile { install: bool },
+    Reconcile {
+        install: bool,
+    },
     NodeWrite,
     OpStatus,
+    /// A password check the throttle refused, checking the file first.
+    /// `ready_at`: when the throttle allows the next attempt (clock ms).
+    Precheck {
+        short: bool,
+        ready_at: u64,
+    },
 }
 
 struct Running {
@@ -1112,24 +1156,33 @@ impl Vault {
                     }
                 }
             }
+            let now = self.now_ms();
+            let mut precheck = None;
             let attempt = if pending.kind.throttled() {
-                match self.throttle.reserve(self.now_ms()) {
+                match self.throttle.reserve(now) {
                     Ok(attempt) => Some(attempt),
-                    Err(throttled) => {
-                        let seconds = throttled.retry_after_ms.div_ceil(1000);
-                        self.reply_error(
-                            out,
-                            pending.id,
-                            ErrorBody::new(
-                                ErrorCode::Throttled,
-                                format!("Too many attempts. Try again in {seconds} seconds."),
-                            )
-                            .with_data(
-                                serde_json::json!({ "retry_after_ms": throttled.retry_after_ms }),
-                            ),
-                        );
-                        continue;
-                    }
+                    Err(throttled) => match pending.kind.precheck() {
+                        // The file first, with no password (design 0001's
+                        // parity table): its errors come before `throttled`.
+                        Some(version) => {
+                            precheck = Some((
+                                RunningKind::Precheck {
+                                    short: pending.kind.short_no_vault(),
+                                    ready_at: now.saturating_add(throttled.retry_after_ms),
+                                },
+                                version,
+                            ));
+                            None
+                        }
+                        None => {
+                            self.reply_error(
+                                out,
+                                pending.id,
+                                throttled_error(throttled.retry_after_ms),
+                            );
+                            continue;
+                        }
+                    },
                 }
             } else {
                 None
@@ -1137,7 +1190,11 @@ impl Vault {
             let job_id = self.next_job;
             self.next_job += 1;
             let control = JobControl::new(pending.deadline - self.kdf_deadline / 3);
-            let (kind, job) = self.job_for(pending.kind, Arc::clone(&control));
+            let (kind, job) = match precheck {
+                // The request's secrets are dropped (wiped) here, unused.
+                Some((kind, version)) => (kind, self.precheck_job(version, Arc::clone(&control))),
+                None => self.job_for(pending.kind, Arc::clone(&control)),
+            };
             self.running = Some(Running {
                 job: job_id,
                 request: pending.id,
@@ -1150,6 +1207,13 @@ impl Vault {
             });
             out.push(Out::Job(job_id, job));
         }
+    }
+
+    /// The job of a password check the throttle refused: it reads the file,
+    /// and holds no password.
+    fn precheck_job(&self, version: bool, control: Arc<JobControl>) -> Job {
+        let dir = self.dir.clone();
+        Box::new(move || Finished(JobOutput::Prechecked(job_precheck(&dir, version, &control))))
     }
 
     fn job_for(&self, kind: Kind, control: Arc<JobControl>) -> (RunningKind, Job) {
@@ -1400,6 +1464,14 @@ impl Vault {
                     .map_err(|e| e.body(false));
                 (Outcome::NotTried, reply)
             }
+            (RunningKind::Precheck { short, ready_at }, JobOutput::Prechecked(result)) => {
+                let reply = match result {
+                    Err(error) => Err(error.body(*short)),
+                    // The file is fine: the attempt itself has to wait.
+                    Ok(()) => Err(throttled_error(ready_at.saturating_sub(now).max(1))),
+                };
+                (Outcome::NotTried, reply)
+            }
             (RunningKind::Reconcile { install }, JobOutput::Reconciled { result, tried }) => {
                 let reply = match result {
                     Err(error) => Err(error.body(false)),
@@ -1561,9 +1633,10 @@ fn throttle_outcome(output: &JobOutput) -> Outcome {
             result.as_ref().map(|_| ())
         }
         JobOutput::Reconciled { tried, .. } => return *tried,
-        JobOutput::Written { .. } | JobOutput::NodeWritten(_) | JobOutput::OpStatus(_) => {
-            return Outcome::NotTried;
-        }
+        JobOutput::Written { .. }
+        | JobOutput::NodeWritten(_)
+        | JobOutput::OpStatus(_)
+        | JobOutput::Prechecked(_) => return Outcome::NotTried,
     };
     match result {
         Ok(_) => Outcome::Success,
@@ -1571,6 +1644,16 @@ fn throttle_outcome(output: &JobOutput) -> Outcome {
         Err(OpError::Weak) => Outcome::Success,
         Err(error) => error.throttle_outcome(),
     }
+}
+
+/// `throttled`, with the wait (design 0001, Throttling).
+fn throttled_error(retry_after_ms: u64) -> ErrorBody {
+    let seconds = retry_after_ms.div_ceil(1000);
+    ErrorBody::new(
+        ErrorCode::Throttled,
+        format!("Too many attempts. Try again in {seconds} seconds."),
+    )
+    .with_data(serde_json::json!({ "retry_after_ms": retry_after_ms }))
 }
 
 fn cancelled() -> ErrorBody {
@@ -1664,9 +1747,17 @@ fn private_key_result(id: u64, key: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>,
         .map_err(|_| internal())
 }
 
+/// An error reply. One that wouldn't fit a frame, say a message quoting
+/// input past fc-evm's bounds, would end the core when framed (#86): its code
+/// stays, its message becomes a fixed one, and its data goes.
 fn error_payload(id: u64, error: &ErrorBody) -> Zeroizing<Vec<u8>> {
     let mut payload = Zeroizing::new(Vec::with_capacity(256));
-    let _ = message::write_error(&mut *payload, id, error);
+    let written = message::write_error(&mut *payload, id, error);
+    if written.is_err() || payload.len() > fc_protocol::frame::MAX_PAYLOAD {
+        payload.zeroize();
+        let fixed = ErrorBody::new(error.code, "Error too large to report");
+        let _ = message::write_error(&mut *payload, id, &fixed);
+    }
     payload
 }
 
@@ -1894,6 +1985,18 @@ fn job_verify(dir: &Path, password: &SecretBytes, control: &JobControl) -> Resul
     }
     let contents = read_vault(dir)?.ok_or(OpError::NoVault)?;
     format::verify_password(&contents, password.as_bytes()).map_err(OpError::from_vault)
+}
+
+/// A password check the throttle refused (#82): what the file says without
+/// the password, in design 0001's order (`no_vault`, then
+/// `unsupported_vault_version` if `version`, or a corrupt file). `Ok`: the
+/// answer is `throttled`.
+fn job_precheck(dir: &Path, version: bool, control: &JobControl) -> Result<(), OpError> {
+    if control.abandoned() {
+        return Err(OpError::Abandoned);
+    }
+    let contents = read_vault(dir)?.ok_or(OpError::NoVault)?;
+    format::check_structure(&contents, version).map_err(OpError::from_vault)
 }
 
 /// The worker's commit claim, right before the rename or unlink. After it,
@@ -2221,6 +2324,31 @@ fn written(result: Result<(NewVault, Commit), OpError>) -> JobOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #86: an error reply too large for a frame ended the core (exit 70)
+    /// once framed. It is replaced by its code with a fixed message.
+    #[test]
+    fn an_error_too_large_for_a_frame_still_frames() {
+        let huge = ErrorBody::new(
+            ErrorCode::InvalidArgument,
+            "\"".repeat(fc_protocol::frame::MAX_PAYLOAD),
+        )
+        .with_data(serde_json::json!({ "kind": "x" }));
+        let payload = error_payload(7, &huge);
+        assert!(crate::transport::frame(&payload).is_some());
+        let reply: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(
+            reply,
+            serde_json::json!({
+                "type": "response", "id": 7,
+                "error": { "code": "invalid_argument", "message": "Error too large to report" },
+            })
+        );
+        // Others are unchanged.
+        let small = ErrorBody::new(ErrorCode::InvalidArgument, "Invalid parameters");
+        let reply: serde_json::Value = serde_json::from_slice(&error_payload(8, &small)).unwrap();
+        assert_eq!(reply["error"]["message"], "Invalid parameters");
+    }
 
     const ABANDON: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
