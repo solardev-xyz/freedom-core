@@ -582,7 +582,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
   - Main has no `clearProgress`, and neither does the service: a target closes when its request ends or its span closes.
 - **`store`:** `block_count` and `total_bytes`, or `null` if the store can't say.
 - **`network`:** the instance's mode, and, under `direct`, what [NAT64 discovery](#network-specific-nat64-prefixes) knows. It is `{ mode: "direct", nat64: { state, prefixes, failures } }` or `{ mode: "socks5", nat64: null }`.
-  - `state` is `pending`, `known`, `unknown` or `incomplete`. In `unknown` and `incomplete`, it is why IPv6 targets are refused.
+  - `state` is `pending`, `known`, `unknown` or `incomplete`. In `unknown` and `incomplete`, it is why IPv6 targets are refused; in `pending`, why they wait. Pending with failures is a round that has failed and hasn't ended.
   - `prefixes` are the prefixes learned, as `address/length`.
   - `failures` give why the last round's resolvers failed, each a fixed name: `timeout`, `rcode`, `truncated`, `malformed`, `socket`, `unaskable` or `over_limit`. They never include an address.
 - **`budget`:** each [budget's](#budgets) use and limit:
@@ -1060,14 +1060,17 @@ An IPv6-only network can translate through a network-specific prefix of its own 
   - **Each answer** that embeds `192.0.0.170` or `192.0.0.171` at one of RFC 6052's positions gives a prefix and its length. An answer that embeds neither teaches nothing.
   - **The result belongs to the process,** not to an instance: it describes the network, and the query carries nothing of a partition's.
   - **It runs while a `direct` instance lives.** A `socks5` instance learns nothing, and a process with no `direct` instance sends no query.
-    - **Paused** when the last `direct` instance goes, it sends nothing, not even a refresh. Every send, a resend included, checks that a `direct` instance still holds it, so a round under way sends nothing more, and isn't published. The prefixes it learned are kept.
+    - **Paused** when the last `direct` instance goes, it sends nothing, not even a refresh. Every send, a resend included, checks that a `direct` instance still holds it, so a round under way sends nothing more, and isn't published. The check and the send are one step, under the lock a lease's release takes, and the send doesn't block: once the last release has returned, no send it didn't cover can follow. The prefixes it learned are kept.
     - **Resumed** by the next one, it is **pending** again until a round settles, since the network may have changed meanwhile.
+  - **A direct instance holds it from its admission to its fence:** a fenced instance connects to nothing, so its teardown doesn't keep discovery querying.
 - **The fixed forms** are those whose prefix is fixed: IPv4-mapped, the well-known NAT64 prefix and 6to4. Any other global IPv6 address could sit under a network-specific prefix.
   - **A learned prefix still applies under a fixed form.** An address inside `2002::/16` or `64:ff9b::/96` that also sits under a learned prefix is judged by both readings, and each IPv4 address must pass. Only IPv4-mapped is judged as IPv4 alone, since it connects to that address directly.
 - **States:**
   - **pending** until the first query settles. Every IPv6 target but an IPv4-mapped one waits for it, within its own deadline: the first answer may teach a prefix that sits under a fixed form;
   - **known,** once every resolver learned has answered: the union of their prefixes. NODATA or NXDOMAIN from all of them gives an empty set, which means none of them advertises a prefix (RFC 7050 §3), not that no network does. An NXDOMAIN's answer records teach nothing. The same holds when the OS lists no resolver;
-  - **unknown,** while any resolver learned has failed (a timeout, `SERVFAIL`, a malformed or oversized answer), can't be asked, or wasn't asked (past the bound). Another's answer doesn't settle it. **A round's first failure publishes unknown at once,** before the other resolvers answer, so a known state never outlasts an established failure;
+  - **unknown,** while any resolver learned has failed (a timeout, `SERVFAIL`, a malformed or oversized answer), can't be asked, or wasn't asked (past the bound). Another's answer doesn't settle it.
+    - **A round's first failure ends a known state at once:** it publishes **pending**, before the other resolvers answer, and the round's end publishes **unknown**, with every prefix the round learned.
+    - Pending, not unknown, because unknown admits the fixed forms judged by the prefixes it holds, and an answer still out could teach one that covers a fixed form (a /96 inside `2002::/16`).
   - **incomplete,** when an answer holds more than 16 distinct prefixes.
 
   In **unknown**, an IPv6 target outside the fixed forms is refused, and `ipfs.stats` says why. IPv4 targets, and IPv6 targets under the fixed forms, are judged as always, with every prefix already learned still applied.
