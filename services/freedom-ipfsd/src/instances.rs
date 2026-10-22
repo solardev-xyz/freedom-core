@@ -578,6 +578,20 @@ impl Instances {
                     "the instance's runtime didn't start",
                 ))
             }
+            // One of its HTTP clients couldn't be built for its network
+            // (reqwest refused the configuration). Until the `network` field
+            // is wired (`network.rs`), its network is upstream's legacy one.
+            Err(InstanceStartError::Network(_)) => {
+                let _ = store.close(STORE_CLOSE);
+                log::error(
+                    "an instance's network didn't build",
+                    json!({ "instance": start.instance }),
+                );
+                Err(ErrorBody::new(
+                    ErrorCode::Internal,
+                    "the instance's network didn't build",
+                ))
+            }
         }
     }
 

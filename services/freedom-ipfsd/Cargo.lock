@@ -928,7 +928,7 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-core"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=0bb3e995a9f3da7d2df30939115cfee9b21bd212#0bb3e995a9f3da7d2df30939115cfee9b21bd212"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=c88b711c5d9070eedd92cf92fa33f16f6e385606#c88b711c5d9070eedd92cf92fa33f16f6e385606"
 dependencies = [
  "bytes",
  "cid",
@@ -942,7 +942,7 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-gateway"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=0bb3e995a9f3da7d2df30939115cfee9b21bd212#0bb3e995a9f3da7d2df30939115cfee9b21bd212"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=c88b711c5d9070eedd92cf92fa33f16f6e385606#c88b711c5d9070eedd92cf92fa33f16f6e385606"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -952,6 +952,7 @@ dependencies = [
  "clap",
  "freedom-ipfs-core",
  "freedom-ipfs-namesys",
+ "freedom-ipfs-net",
  "freedom-ipfs-retrieval",
  "freedom-ipfs-routing",
  "freedom-ipfs-store",
@@ -969,10 +970,11 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-namesys"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=0bb3e995a9f3da7d2df30939115cfee9b21bd212#0bb3e995a9f3da7d2df30939115cfee9b21bd212"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=c88b711c5d9070eedd92cf92fa33f16f6e385606#c88b711c5d9070eedd92cf92fa33f16f6e385606"
 dependencies = [
  "async-trait",
  "cid",
+ "freedom-ipfs-net",
  "futures",
  "ipld-core",
  "libp2p-identity",
@@ -987,14 +989,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "freedom-ipfs-net"
+version = "0.4.6"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=c88b711c5d9070eedd92cf92fa33f16f6e385606#c88b711c5d9070eedd92cf92fa33f16f6e385606"
+dependencies = [
+ "data-encoding",
+ "either",
+ "futures",
+ "hickory-resolver",
+ "http",
+ "libp2p",
+ "multiaddr",
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower-layer",
+ "tower-service",
+ "url",
+]
+
+[[package]]
 name = "freedom-ipfs-retrieval"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=0bb3e995a9f3da7d2df30939115cfee9b21bd212#0bb3e995a9f3da7d2df30939115cfee9b21bd212"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=c88b711c5d9070eedd92cf92fa33f16f6e385606#c88b711c5d9070eedd92cf92fa33f16f6e385606"
 dependencies = [
  "bytes",
  "cid",
  "freedom-ipfs-core",
  "freedom-ipfs-namesys",
+ "freedom-ipfs-net",
  "freedom-ipfs-routing",
  "freedom-ipfs-store",
  "futures",
@@ -1015,11 +1040,12 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-routing"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=0bb3e995a9f3da7d2df30939115cfee9b21bd212#0bb3e995a9f3da7d2df30939115cfee9b21bd212"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=c88b711c5d9070eedd92cf92fa33f16f6e385606#c88b711c5d9070eedd92cf92fa33f16f6e385606"
 dependencies = [
  "async-trait",
  "cid",
  "freedom-ipfs-namesys",
+ "freedom-ipfs-net",
  "futures",
  "libp2p",
  "reqwest",
@@ -1034,7 +1060,7 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-store"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=0bb3e995a9f3da7d2df30939115cfee9b21bd212#0bb3e995a9f3da7d2df30939115cfee9b21bd212"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=c88b711c5d9070eedd92cf92fa33f16f6e385606#c88b711c5d9070eedd92cf92fa33f16f6e385606"
 dependencies = [
  "cid",
  "freedom-ipfs-core",
@@ -1048,7 +1074,7 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-unixfs"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=0bb3e995a9f3da7d2df30939115cfee9b21bd212#0bb3e995a9f3da7d2df30939115cfee9b21bd212"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=c88b711c5d9070eedd92cf92fa33f16f6e385606#c88b711c5d9070eedd92cf92fa33f16f6e385606"
 dependencies = [
  "cid",
  "freedom-ipfs-core",
