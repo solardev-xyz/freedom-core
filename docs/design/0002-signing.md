@@ -238,6 +238,8 @@ Rust tests replay every case, in the crates (#18) and over the wire through the 
 
 **Status:** decided by the user on 2026-10-22. The core's view of exactly what is signed is built now, not with the policy phase: `typed_data.hash` and `sign.typed_data` return it, the approval UI moves onto it, and `sign.typed_data` refuses any hash other than the one the user confirmed. A view too big for one 1 MiB reply is refused (deviation `view-size`). A `primaryType` that isn't the inferred root is warned about and signed as ethers signs it: the user overrode the proposal to refuse it. A domain `chainId` that is mismatched or absent is warned about, and signed. [Options weighed (#88)](#options-weighed-88) keeps the alternatives, as the decision's rationale.
 
+**Tightened in #112's review** (2026-10-22), consistent with [#89](#amendment-accounts-as-feed-owners-89): a typed-data request with a warning always shows its prompt, even when the site has signing auto-approve.
+
 ### Today
 
 The core hashes and signs `{ domain, types, message }`. The approval UI builds its own view from the dApp's JSON (`formatTypedDataForDisplay` in `dapp-sign.js`). The two can differ:
@@ -254,6 +256,8 @@ The core hashes and signs `{ domain, types, message }`. The approval UI builds i
 3. **A `primaryType` that isn't the inferred root is warned about, and signed as ethers signs it.** The core signs the inferred root, the view reports the mismatch, and the approval screen warns that the site named a different primary type, and that other wallets could sign something different. The proposal was to refuse it; the user overrode that, so it isn't a deviation.
 4. **A domain `chainId` that differs from the dApp's chain, or is absent, is warned about, and signed.**
 5. **`personal_sign`** is shown from the bytes main sends, as part of the UI's move.
+
+**Tightened in #112's review,** consistent with #89's 32-byte rule: a request with a warning (a `primaryType` mismatch, or a `chainId` that is mismatched or absent) always shows the approval prompt, even when the site has signing auto-approve. A warning that auto-approve can skip protects nothing.
 
 ### What the core does (#88)
 
@@ -295,7 +299,7 @@ The core hashes and signs `{ domain, types, message }`. The approval UI builds i
   - Approving signs in each case. `unknown` is never shown as a match.
 - **A refusal for size** fails the dApp's request before the prompt, mapped like any `invalid_argument`. Nothing is shown or signed.
 - **`personal_sign`:** main shows the bytes it sends to `sign.message`, decoded from the same strictly validated hex.
-- **Auto-approve:** whether a warned request still skips the prompt when the site has signing auto-approve is open ([Open questions](#open-questions) 6).
+- **Auto-approve doesn't apply to a warned request** (tightened in #112's review, consistent with #89). With `named_type: mismatch`, `chain: mismatch` or `chain: absent`, the prompt always appears with its warning, even when the site has signing auto-approve, and nothing is signed until the user approves. A request with no warning is auto-approved as before.
 
 ### What the binding doesn't cover
 
@@ -319,6 +323,8 @@ The core hashes and signs `{ domain, types, message }`. The approval UI builds i
 5. **The `primaryType` warning** is shown on a mismatch, a non-string `primaryType` included, and not on a match or without one. Approving returns ethers' signature over the inferred root.
 6. **The `chainId` warning** is shown on a mismatch, naming both chains, and on an absent `chainId`, and not on a match. Approving signs, and `unknown` is never shown as a match.
 7. **`personal_sign`** is shown from the bytes it signs.
+8. **A warned request prompts under auto-approve:** with signing auto-approve on, a `primaryType` mismatch, a mismatched `chainId` and an absent one each show the prompt with the warning, and nothing is signed until the user approves.
+9. **An unwarned request still auto-signs:** with signing auto-approve on, a request whose view reports `named_type` `match` or `unknown`, and `chain` `match` or `unknown`, is signed with no prompt, as before.
 
 ### Options weighed (#88)
 
@@ -392,7 +398,7 @@ One PR per step, each after the freedom-core release that provides it.
   - The prompt always appears, even when the site has signing auto-approve: auto-approve doesn't apply at exactly 32 bytes. A warning that auto-approve could skip would protect nothing.
   - It appears whatever the account: a Ledger or phone account can own a feed made elsewhere too.
   - Approving signs exactly as before.
-- **Nothing else changes.** Other message lengths, typed data, transactions, Safe and x402 behave as they do today, and signing auto-approve still applies to everything but a 32-byte `personal_sign`.
+- **Nothing else changes.** Other message lengths, typed data, transactions, Safe and x402 behave as they do today, and signing auto-approve still applies to everything but a 32-byte `personal_sign`. (Since [#88](#amendment-what-the-user-is-shown-88), a typed-data request with a warning is excepted too.)
 
 ### What the core does
 
@@ -452,5 +458,4 @@ The write-up set these out before the decision. They stay as its rationale.
 2. **SOC payloads larger than one chunk.** `writeFeedPayload` uploads big payloads through `/bytes` first, and the core then signs the root chunk. A later phase could chunk and hash the whole payload in the core. That isn't needed for parity.
 3. **Error strings.** dApps see main's error mapping, not ethers' exact messages. Do any callers match on ethers' message text? Check during the browser migration.
 4. **Wallet-owned feeds** (#89): removed for now. Bringing them back needs a new design that avoids the signature collision ([the amendment](#amendment-accounts-as-feed-owners-89), *Decision*).
-5. **What the user is shown** (#88): **decided** (the user, 2026-10-22): the core's view now, with the UI moved onto it and `sign.typed_data` bound to the confirmed hash; a view over one frame refused (`view-size`); a `primaryType` mismatch and a mismatched or absent `chainId` warned about, and signed. See [the amendment](#amendment-what-the-user-is-shown-88).
-6. **Warnings and auto-approve** (#88). Does a typed-data request with a warning (a `primaryType` mismatch, a `chainId` mismatched or absent) always show its prompt, even when the site has signing auto-approve, as a 32-byte `personal_sign` does ([#89](#amendment-accounts-as-feed-owners-89))? Proposed: yes, since a warning that auto-approve skips protects nothing. Needs the user's decision.
+5. **What the user is shown** (#88): **decided** (the user, 2026-10-22): the core's view now, with the UI moved onto it and `sign.typed_data` bound to the confirmed hash; a view over one frame refused (`view-size`); a `primaryType` mismatch and a mismatched or absent `chainId` warned about, and signed. Tightened in #112's review, consistent with #89: a warned request always shows its prompt, even under signing auto-approve. See [the amendment](#amendment-what-the-user-is-shown-88).
