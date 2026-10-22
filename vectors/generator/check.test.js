@@ -19,17 +19,23 @@ FILES.push('streams.json', 'generator/streams.js');
 
 function corruptedCheck(filename, corrupt) {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
-  for (const file of FILES) {
-    const destination = path.join(copy, file);
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.copyFileSync(path.join(SOURCE, file), destination);
+  let result;
+  // Everything after the directory exists, setup included, is undone.
+  try {
+    for (const file of FILES) {
+      const destination = path.join(copy, file);
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      fs.copyFileSync(path.join(SOURCE, file), destination);
+    }
+    const destination = path.join(copy, filename);
+    const contents = JSON.parse(fs.readFileSync(destination, 'utf8'));
+    corrupt(contents);
+    fs.writeFileSync(destination, JSON.stringify(contents, null, 2) + '\n');
+    result = spawnSync(process.execPath, [path.join(copy, 'generator/generate.js'),
+      'check', '--freedom-browser', REFERENCE], { encoding: 'utf8', timeout: 60000 });
+  } finally {
+    fs.rmSync(copy, { recursive: true, force: true });
   }
-  const destination = path.join(copy, filename);
-  const contents = JSON.parse(fs.readFileSync(destination, 'utf8'));
-  corrupt(contents);
-  fs.writeFileSync(destination, JSON.stringify(contents, null, 2) + '\n');
-  const result = spawnSync(process.execPath, [path.join(copy, 'generator/generate.js'),
-    'check', '--freedom-browser', REFERENCE], { encoding: 'utf8', timeout: 60000 });
   assert.equal(result.error, undefined, result.error?.message);
   assert.equal(result.status, 1, result.stdout + result.stderr);
   return result.stderr;
@@ -349,11 +355,13 @@ test('replay\'s memory-budgets patch refuses what it can\'t model', async () => 
   empty.steps[0].call = { fn: 'resolveEnsContent', args: [''] };
   await assert.rejects(replay.runScenario(REFERENCE, ethers, FakeTimers, empty), /ended otherwise/);
   // A name is charged as the core keys it, normalized: a decomposed name
-  // and its composed form record the same trace.
+  // and its composed form record the same trace. At 3,000 bytes the first
+  // block answer crosses; charged as written, the decomposed name's 800
+  // bytes more would cross at the head answers instead.
   const named = (name) => {
     const scenario = structuredClone(definition(ethers, 'deviation-memory-budgets'));
     scenario.steps[0].call = { fn: 'resolveEnsContent', args: [name] };
-    scenario.world.bounds = { sessionBytes: 22_000 };
+    scenario.world.bounds = { sessionBytes: 3_000 };
     return replay.runScenario(REFERENCE, ethers, FakeTimers, scenario);
   };
   const decomposed = `${('e' + String.fromCharCode(0x301)).repeat(100)}.eth`;

@@ -15,7 +15,8 @@
 //! The machine reproduces the reference's requests, timings and results
 //! (`vectors/chain-replay.json`), with design 0005's deviations:
 //! `overall-deadline`, `admission`, `abandoned-exchanges`,
-//! `order-validation`, `quorum-clamps`, `config-change`, `memory-budgets`,
+//! `order-validation`, `endpoint-dedup`, `singleton-quorum`,
+//! `quorum-clamps`, `config-change`, `memory-budgets`,
 //! `monotonic-time`, `state-retention`, `rpc-id`, `adapter-error-text`,
 //! `cancel-promptly`, `paired-endpoint-text` and `broadcast-outcome`. It
 //! keeps no wall clock: every instant is the executor's monotonic
@@ -49,8 +50,8 @@ pub use fc_dweb::Class as HtmlClass;
 pub use fc_naming::session::exec::{Effect, Fired};
 pub use html::HTML_TOO_LARGE_CODE;
 pub use io::{
-    Answer, ColibriClass, ColibriReply, Endpoint, Ms, MyotisClass, MyotisReply, Request, Transport,
-    VerifiedOp,
+    Answer, ColibriClass, ColibriReply, Endpoint, Ms, MyotisClass, MyotisRejection, MyotisReply,
+    Request, Transport, VerifiedOp,
 };
 pub use logs::{CapReader, RangeEntry, Ranker};
 pub use machine::{Call, Emitted, Machine, OverBudget, Reply, Reservation, StateTables, Success};

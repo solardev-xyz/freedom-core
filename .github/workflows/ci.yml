@@ -98,6 +98,60 @@ jobs:
           node vectors/generator/generate.js check --freedom-browser "$FREEDOM_BROWSER_CHECKOUT"
           node --test vectors/generator/check.test.js
 
+  fuzz:
+    # cargo-fuzz targets for the parsers that take untrusted bytes (design
+    # 0001, Testing): fc-json, fc-protocol's frames, fragments, stream
+    # frames, messages and secret fields, and the vault file. Each target
+    # runs for a fixed time: a minute on pushes and PRs, five on the daily
+    # run. A crash fails the job and uploads the input that caused it.
+    name: fuzz (nightly, time-boxed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # cargo-fuzz needs nightly (sanitizers, coverage instrumentation).
+      # Pinned, so a nightly regression can't fail unrelated PRs.
+      RUSTUP_TOOLCHAIN: nightly-2026-10-01
+      CARGO_FUZZ_VERSION: "0.13.2"
+      FUZZ_SECONDS: ${{ github.event_name == 'schedule' && '300' || '60' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: fuzz -> target
+      - name: Install cargo-fuzz
+        run: cargo install --locked cargo-fuzz --version "$CARGO_FUZZ_VERSION"
+      - name: Lockfile, format and lints
+        working-directory: fuzz
+        run: |
+          cargo fetch --locked
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+      - name: Build every target
+        # Debug assertions on: an arithmetic overflow is a finding too.
+        run: cargo fuzz build --debug-assertions
+      - name: Fuzz each target
+        run: |
+          for target in $(cargo fuzz list); do
+            echo "::group::$target ($FUZZ_SECONDS s)"
+            # New inputs go to the first directory, which libFuzzer
+            # requires to exist; the committed seeds are only read.
+            mkdir -p "fuzz/corpus/$target"
+            cargo fuzz run --debug-assertions "$target" "fuzz/corpus/$target" "fuzz/seeds/$target" -- \
+              -max_total_time="$FUZZ_SECONDS" -timeout=10 -rss_limit_mb=2048
+            echo "::endgroup::"
+          done
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+          retention-days: 14
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest

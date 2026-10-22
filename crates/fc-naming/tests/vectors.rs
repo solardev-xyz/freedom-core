@@ -384,11 +384,19 @@ fn ccip_gateways() {
         .unwrap()
         .try_into()
         .unwrap();
+    let mut deviations = 0;
     for case in c["policy"].as_array().unwrap() {
         let template = case["template"].as_str().unwrap();
         let data = unhex(case["data"].as_str().unwrap()).unwrap();
         let ours = ccip::gateway_request(template, &sender, &data);
         let requests = case["requests"].as_array().unwrap();
+        if case["deviation"] == "ccip-hosts" {
+            // An empty label (#76): the JS fetched it; the core refuses.
+            assert!(ours.is_none(), "{template}");
+            assert_eq!(requests.len(), 1, "{template}");
+            deviations += 1;
+            continue;
+        }
         match (ours, requests.first()) {
             (None, None) => {}
             (Some(ours), Some(js)) => {
@@ -403,6 +411,7 @@ fn ccip_gateways() {
             (ours, js) => panic!("{template}: core {ours:?}, JS {js:?}"),
         }
     }
+    assert!(deviations >= 6, "the empty-label cases went missing");
     for case in c["answers"].as_array().unwrap() {
         // Status handling is main's (it sees the HTTP response); the core
         // parses 2xx bodies.
@@ -486,31 +495,16 @@ fn tezos_codecs() {
                 let bytes: Value = b.map_or(Value::Null, |b| {
                     serde_json::from_str(&b.stringify()).unwrap()
                 });
-                json!([k, bytes])
+                json!([k.as_str(), bytes])
             })
             .collect();
         assert_eq!(Value::Array(ours), case["js"], "{}", case["value"]);
     }
     for case in t["metadata"].as_array().unwrap() {
-        let hex = case["hex"].as_str().map(|h| JsValue::String(h.to_owned()));
+        let hex = case["hex"].as_str().map(JsValue::string);
         let ours = tezos::decode_json_bytes(hex.as_ref());
         if case["deviation"] == "json-depth" {
             assert!(ours.is_err(), "{}: deeper than MAX_DEPTH", case["hex"]);
-            continue;
-        }
-        if case["deviation"] == "lone-surrogate-keys" {
-            // Keys that differ only in lone surrogates become one key.
-            assert!(ours.is_ok(), "{}", case["hex"]);
-            continue;
-        }
-        if case["deviation"] == "lone-surrogate" {
-            // JavaScript keeps the lone surrogate; the core holds U+FFFD.
-            assert_eq!(
-                ours.unwrap(),
-                JsValue::String("\u{FFFD}".into()),
-                "{}",
-                case["hex"]
-            );
             continue;
         }
         match case["js"].get("stringified") {

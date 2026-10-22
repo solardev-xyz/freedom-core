@@ -173,7 +173,7 @@ All of this is today's behavior, ported with vectors:
   - `hash = keccak256(utf8(html))`.
 
   This replaces the worker thread and its ethers decode.
-- **The answer's `result`** is the string `JSON.parse` would make: anything but a string is malformed, and its escapes are decoded. A lone surrogate becomes U+FFFD, which no check tells apart from it: one unit to the size check, and no hex digit.
+- **The answer's `result`** is the string `JSON.parse` would make: anything but a string is malformed, and its escapes are decoded. A lone surrogate is kept, and read as text it is U+FFFD: one unit to the size check, and no hex digit.
 - **Memory:** what the answer sizes is charged to the request before it is allocated (0005, Bounds): the unescaped string, when it has escapes; the decode's one buffer, the ABI data's bytes, which the document is then cut from in place; and the trust's index. The document stays charged until its reply is made, and counts as output after that. An 8 MiB document so costs 8 MiB beside its answer, and a request without room for it ends with `budget` before the buffer is made.
 - **`html_base64`** carries the document's UTF-8 bytes. Base64 keeps the reply within 0005's message cap at 10.7 MiB, where a JSON string of control characters could grow six-fold.
 - **`hash`** is `0x` and 64 lowercase hex digits, as ethers writes it.
@@ -223,7 +223,8 @@ The plan is checked as the JSON main receives, against the request main admitted
       - no segment may then be `.` or `..`, so the decoded path stays beneath `/<namespace>/<ref>`.
 
       A normalized path has no literal dot segments, so any found here come from escapes. An encoded separator that doesn't climb, such as `a%2Fb` in a file name, still passes to the IPFS node as today. The query isn't judged;
-    - a base path that changes which IPFS reference is asked can't be told from the path; the namespace can.
+    - a base path that changes which IPFS reference is asked can't be told from the path; the namespace can;
+    - **a hash host's target is the request's own** (#97). For a host the core needs no lookup for (a Swarm reference, a CID, an IPNS key, or a DNSLink name, which the node resolves itself), the validator rebuilds the target as `dweb.open` plans it: `/<namespace>/<canonical host><pathname><search>`, with the canonical CID or key. The plan's `path` must equal it. A request that no fetch answers (a gateway-form URL, an invalid host) refuses any fetch plan, with `path`. Only a name host's target comes from a lookup, and only its namespace and shape can be checked.
   - **`header`:**
     - names are lowercase tokens;
     - values are RFC 9110 field values (section 5.5): visible ASCII, spaces, tabs and `obs-text` (0x80 to 0xFF). No other control character is allowed (C0, including NUL, CR and LF, or DEL), and no space or tab at either end;
@@ -241,7 +242,7 @@ The plan is checked as the JSON main receives, against the request main admitted
     - Ant: `canonicalize_redirect` and `strip_page_state`;
     - the native node: `strip_page_state` and `small_text`;
     - the external gateway: all four.
-  - **`trust`:** `name` is a string or null, and `content` is the backend's label.
+  - **`trust`:** `content` is the backend's label. `name` is null, or a string for a name host only: a hash host had no lookup, so no name label can stand behind it (#97).
 - **`redirect`:** only for `ipfs:` and `ipns:`:
   - the status is 307;
   - the `Location` is exactly the canonical form today's `gatewayFormRedirect` gives the request's URL;
@@ -412,7 +413,7 @@ freedom-ipfs and libradicle run inside Electron main today. Any Rust panic in ei
   - the proxy and onion configuration, as a new capability for both;
   - an ephemeral node, or a cache partition, for private windows, which today share the persistent IPFS cache;
   - for libradicle, a new blob API returning raw, chunked or ranged bytes, since today's binaries are dropped and text is decoded lossily.
-- **Each gets its own design,** written against the pinned upstream source: freedom-ipfs v0.4.5 and libradicle v0.8.0. The research read older sources.
+- **Each gets its own design,** written against the pinned upstream source: freedom-ipfs v0.4.6 and libradicle v0.8.0. The research read older sources.
 
 ## Tests first (4.7)
 

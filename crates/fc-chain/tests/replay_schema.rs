@@ -283,6 +283,7 @@ const SCENARIO_IDS: &[&str] = &[
     "boundary-broadcast-myotis-odd-payload",
     "boundary-broadcast-myotis-not-sent-then-direct",
     "boundary-broadcast-myotis-not-running-last-error",
+    "boundary-broadcast-myotis-invalid-params",
     "boundary-broadcast-unknown-broadcaster",
     "boundary-adaptive-quorum-deadline-not-a-timeout",
     "boundary-adaptive-capacity-survives-success",
@@ -308,6 +309,8 @@ const SCENARIO_IDS: &[&str] = &[
     "boundary-registry-change-mid-request",
     "boundary-order-duplicates-and-unknown",
     "boundary-quorum-clamps",
+    "boundary-quorum-duplicate-endpoint",
+    "boundary-quorum-singleton-not-verified",
     "boundary-direct-user-configured-trust",
     "boundary-unparseable-endpoint-host",
     "boundary-colibri-trust",
@@ -335,7 +338,7 @@ const KINDS: &[&str] = &[
     "event",
 ];
 const OUTCOMES: &[&str] = &["answered", "failed", "aborted", "refused", "open", "fired"];
-const DEVIATIONS: &[&str] = &["json-depth"];
+const DEVIATIONS: &[&str] = &["json-depth", "endpoint-dedup", "singleton-quorum"];
 
 fn vectors() -> Json {
     let path = concat!(

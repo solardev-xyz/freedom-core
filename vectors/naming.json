@@ -1120,6 +1120,7 @@
       {
         "template": "https://node.local../q",
         "data": "0x0102",
+        "deviation": "ccip-hosts",
         "requests": [
           {
             "url": "https://node.local../q",
@@ -1132,6 +1133,7 @@
       {
         "template": "https://node.internal../q",
         "data": "0x0102",
+        "deviation": "ccip-hosts",
         "requests": [
           {
             "url": "https://node.internal../q",
@@ -1144,11 +1146,90 @@
       {
         "template": "https://node.localhost../q",
         "data": "0x0102",
+        "deviation": "ccip-hosts",
         "requests": [
           {
             "url": "https://node.localhost../q",
             "method": "POST",
             "body": "{\"sender\":\"0xeeeeeeee14d718c2b47d9923deab1335e144eeee\",\"data\":\"0x0102\"}"
+          }
+        ],
+        "result": "0x00"
+      },
+      {
+        "template": "https://localhost../q",
+        "data": "0x0102",
+        "deviation": "ccip-hosts",
+        "requests": [
+          {
+            "url": "https://localhost../q",
+            "method": "POST",
+            "body": "{\"sender\":\"0xeeeeeeee14d718c2b47d9923deab1335e144eeee\",\"data\":\"0x0102\"}"
+          }
+        ],
+        "result": "0x00"
+      },
+      {
+        "template": "https://gateway../q",
+        "data": "0x0102",
+        "deviation": "ccip-hosts",
+        "requests": [
+          {
+            "url": "https://gateway../q",
+            "method": "POST",
+            "body": "{\"sender\":\"0xeeeeeeee14d718c2b47d9923deab1335e144eeee\",\"data\":\"0x0102\"}"
+          }
+        ],
+        "result": "0x00"
+      },
+      {
+        "template": "https://metadata.google.internal../q",
+        "data": "0x0102",
+        "deviation": "ccip-hosts",
+        "requests": [
+          {
+            "url": "https://metadata.google.internal../q",
+            "method": "POST",
+            "body": "{\"sender\":\"0xeeeeeeee14d718c2b47d9923deab1335e144eeee\",\"data\":\"0x0102\"}"
+          }
+        ],
+        "result": "0x00"
+      },
+      {
+        "template": "https://a..b.example/q",
+        "data": "0x0102",
+        "deviation": "ccip-hosts",
+        "requests": [
+          {
+            "url": "https://a..b.example/q",
+            "method": "POST",
+            "body": "{\"sender\":\"0xeeeeeeee14d718c2b47d9923deab1335e144eeee\",\"data\":\"0x0102\"}"
+          }
+        ],
+        "result": "0x00"
+      },
+      {
+        "template": "https://.gw.example/q",
+        "data": "0x0102",
+        "deviation": "ccip-hosts",
+        "requests": [
+          {
+            "url": "https://.gw.example/q",
+            "method": "POST",
+            "body": "{\"sender\":\"0xeeeeeeee14d718c2b47d9923deab1335e144eeee\",\"data\":\"0x0102\"}"
+          }
+        ],
+        "result": "0x00"
+      },
+      {
+        "template": "https://gw.example../{data}",
+        "data": "0x0102",
+        "deviation": "ccip-hosts",
+        "requests": [
+          {
+            "url": "https://gw.example../0x0102",
+            "method": "GET",
+            "body": null
           }
         ],
         "result": "0x00"
@@ -14073,7 +14154,6 @@
       },
       {
         "hex": "225c756438303022",
-        "deviation": "lone-surrogate",
         "js": {
           "stringified": "\"\\ud800\""
         }
@@ -14123,7 +14203,6 @@
       },
       {
         "hex": "7b225c7564383030223a312c225c7564383031223a322c225c7566666664223a337d",
-        "deviation": "lone-surrogate-keys",
         "js": {
           "stringified": "{\"\\ud800\":1,\"\\ud801\":2,\"�\":3}"
         }
