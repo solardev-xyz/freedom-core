@@ -918,7 +918,8 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
    - **Schemes:** a `Location` must be `http` or `https`; any other scheme is refused. HTTPS to HTTP is followed, as reqwest's default acceptance follows it today (parity), and like every hop it sends no `Referer`.
    - **IP-literal hosts are checked by the loop itself:** without a proxy, a literal never reaches the client's resolver.
    - **Each hop is a fresh request,** built from the operation's own fixed headers, never by copying the previous hop's. Because the service follows redirects itself, it doesn't rely on reqwest's header stripping:
-     - The service sends no credentials. A configured endpoint can't carry userinfo, `Authorization`, cookies or proxy credentials: a URL with userinfo is refused when the setting is read, and no client has a cookie store.
+     - The service sends no request credentials. A configured endpoint can't carry userinfo, `Authorization`, cookies or proxy credentials: a URL with userinfo is refused when the setting is read, and no client has a cookie store.
+       - Under `socks5` the instance's SOCKS credentials are a different thing: they go only to the proxy, in its handshake, never in a request header. Every hop carries them, the configured and onion clients' included ([The SOCKS contract](#the-gate), *Stream isolation*).
      - Even so, a hop that changes scheme, host or port drops every header scoped to an authority (`Authorization`, `Cookie`, `Proxy-Authorization`).
      - No hop sends `Referer`.
      - Methods follow reqwest's rules: 303, and 301 or 302 after a `POST`, become a `GET` without a body; 307 and 308 keep the method and body.
@@ -935,7 +936,9 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
 - **If the pinned Arti can't `RESOLVE`,** the setting doesn't ship until it can, unless the user accepts (b) as an explicit deviation ([Open questions](#open-questions)).
 - **Stream isolation** (the user's decision, [Open questions](#open-questions), 11): each instance sends SOCKS5 credentials of its own, so Arti keeps its streams on circuits of their own.
   - **Who is kept apart:** the profile's instance and each private window's, from one another, and from other users of the same Arti that send no credentials.
-  - **The credentials** (RFC 1929) are made when the instance's network is built: a fixed username, and a password of 128 random bits from the operating system. They are never stored or logged, and never leave the process except to the proxy.
+  - **The credentials** (RFC 1929) are made when the instance's network is built: a fixed username, and a password of 128 random bits from the operating system.
+    - They live in memory for the network's lifetime, and are never persisted or logged. Their `Debug` form is redacted, and no error carries them. They leave the process only to the proxy.
+    - **If the operating system can't supply the randomness,** `ipfs.start` fails with `internal` and a fixed message. No instance is built, and nothing falls back to a fixed password or to no authentication.
   - **Every stream carries them:** `RESOLVE`, the libp2p transport's `CONNECT`, and the HTTP clients', the onion client's included.
   - **No fallback:** each client offers only username/password authentication, so a proxy that won't take it fails closed rather than sharing circuits silently.
 
@@ -1364,7 +1367,12 @@ As 0006's 4.7 did, before anything moves:
     - a chain that moves between the ordinary and onion clients is counted against one hop budget, and fails at the limit;
     - an endpoint URL with userinfo is refused when the setting is read.
   - **Arti qualification:** the pinned Arti answers `RESOLVE`, with username/password credentials as well as without, run in the release pipeline before the setting ships.
-  - **Stream isolation:** two instances send different credentials, every stream of one instance (`RESOLVE`, libp2p and HTTP `CONNECT`, onion) sends the same ones, and a proxy that offers only no authentication fails the dial.
+  - **Stream isolation:**
+    - two instances send different credentials;
+    - every stream of one instance (`RESOLVE`, libp2p and HTTP `CONNECT`, onion, every redirect hop) sends the same ones;
+    - a proxy that selects only no authentication fails the dial;
+    - neither the username nor the password appears in any `Debug` output or error;
+    - an injected randomness failure refuses the start, with no instance built.
   - **Onion:** `.onion` and `/onion3` targets in `direct` mode open no socket.
 - **Live:** `ipfs:native:smoke` re-pointed at the service, with `/ipns/ipfs.tech/` and #102's fan-out of 48 concurrent requests and no `gateway_busy`.
 
