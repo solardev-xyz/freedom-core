@@ -204,8 +204,12 @@ fn stats_report_what_discovery_knows_under_direct_and_nothing_under_socks5() {
     let mut ipfsd = Ipfsd::ephemeral(&[("FREEDOM_IPFSD_TEST_NAT64_RESOLVERS", &resolvers)]);
     ipfsd.hello();
     assert_eq!(ipfsd.start(memory("e-1"))["result"]["instance"], "e-1");
+    // Unknown as soon as the round begins (the unaskable one), then with
+    // both reasons once the failing one has answered.
     let network = network_stats_until(&mut ipfsd, "e-1", |network| {
-        network["nat64"]["state"] == "unknown"
+        network["nat64"]["failures"]
+            .as_array()
+            .is_some_and(|failures| failures.len() == 2)
     });
     assert_eq!(
         network,

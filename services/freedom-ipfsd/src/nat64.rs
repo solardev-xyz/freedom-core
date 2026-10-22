@@ -26,14 +26,23 @@
 //!   Learned prefixes are kept for the process's life: a refresh adds
 //!   prefixes and never removes one, and a failed refresh keeps them all.
 //! - **Refresh:** when the answers' TTL expires, and at least once a minute
-//!   ([`Timing::ceiling`]), so a network change leaves about a minute when
-//!   a new network's prefix is unknown; each round reads the resolvers
-//!   again. After a failure, with backoff from 5 s to a minute.
+//!   ([`Timing::ceiling`]), both counted from the round's start, so a
+//!   network change leaves about a minute when a new network's prefix is
+//!   unknown, and no answer is kept past its TTL; each round reads the
+//!   resolvers again. After a failure, with backoff from 5 s to a minute.
+//! - **At most [`MAX_RESOLVERS`] resolvers a round, the first the OS lists,**
+//!   asked at once, so a round ends within one query's sends (two of 2 s):
+//!   one listed past them isn't asked, and counts as a failure
+//!   (`over_limit`), so the state can't be known.
+//! - **A failure ends a known state at once:** the first one a round
+//!   establishes publishes unknown, before the others' answers.
 //! - **The result belongs to the process,** not to an instance. It runs
 //!   only while a `direct` instance holds a [`Lease`]: a `socks5` instance
 //!   learns nothing (the exit makes every connection), and a process with
-//!   none sends no query. Resumed after a pause, the state is pending
-//!   again, since the network may have changed meanwhile.
+//!   none sends no query: a round under way when the last lease goes sends
+//!   nothing more, not even a resend, and isn't published. Resumed after a
+//!   pause, the state is pending again, since the network may have changed
+//!   meanwhile.
 
 pub mod query;
 pub mod resolvers;
@@ -48,7 +57,7 @@ use freedom_ipfs_gateway::net::Nat64Publisher;
 use freedom_ipfs_gateway::net::gate::{Nat64Prefix, Nat64State};
 use serde_json::json;
 
-use self::query::{Answer, Failure};
+use self::query::Failure;
 use self::resolvers::Learned;
 
 /// Where the resolvers come from: the OS ([`resolvers::learned`]), or a
@@ -83,8 +92,9 @@ impl Timing {
     };
 }
 
-/// The most resolvers asked at once, each from a thread of its own.
-const CONCURRENT: usize = 8;
+/// The most resolvers asked in a round, all at once, each from a thread of
+/// its own: a round lasts one query's sends, at most.
+pub const MAX_RESOLVERS: usize = 8;
 
 /// The process's discovery: the state every `direct` instance's gate reads.
 #[derive(Clone)]
@@ -219,12 +229,15 @@ impl Drop for Lease {
     }
 }
 
+/// A resolver that failed, as logs name it, and why: a fixed name.
+pub type Failed = (String, &'static str);
+
 /// What a round learned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Round {
     pub state: Nat64State,
     /// The resolvers that failed, or couldn't be asked, and why.
-    pub failures: Vec<(String, &'static str)>,
+    pub failures: Vec<Failed>,
     /// The smallest TTL the answers gave.
     pub ttl: Option<Duration>,
 }
@@ -237,7 +250,7 @@ impl Shared {
     }
 
     /// Publishes `state` and its round's failures, and logs a change.
-    fn publish(&self, state: Nat64State, failures: &[(String, &'static str)]) {
+    fn publish(&self, state: Nat64State, failures: &[Failed]) {
         *self
             .failures
             .lock()
@@ -276,13 +289,33 @@ impl Shared {
                 }
                 control.generation
             };
-            let round = round(&(self.source)(), &mut kept, &self.timing);
+            // A round sends while its lease holds: once the last one goes,
+            // or a resume begins another generation, it sends nothing more.
+            let proceed = || {
+                let control = self.lock();
+                control.leases > 0 && control.generation == generation
+            };
+            // The first failure ends a known state at once.
+            let failed = |state: Nat64State, failures: &[Failed]| {
+                let control = self.lock();
+                if control.leases > 0 && control.generation == generation {
+                    self.publish(state, failures);
+                }
+            };
+            let started = Instant::now();
+            let round = round(&(self.source)(), &mut kept, &self.timing, &proceed, &failed);
             let mut control = self.lock();
-            if control.leases > 0 && control.generation == generation {
-                self.publish(round.state.clone(), &round.failures);
+            if control.leases == 0 || control.generation != generation {
+                // Abandoned: paused, or resumed meanwhile. Nothing is
+                // published, the backoff stays as it was, and the loop
+                // waits for a lease, or starts the resumed round at once.
+                continue;
             }
+            self.publish(round.state.clone(), &round.failures);
+            // From the round's start: the answers' TTLs began then, at the
+            // latest, and the ceiling bounds start to start.
             let delay = next_delay(&round, &mut backoff, &self.timing);
-            let deadline = Instant::now() + delay;
+            let deadline = started + delay;
             // Until the refresh, or a resume after a pause, which starts a
             // round at once. Paused, the next round waits for a lease above.
             loop {
@@ -303,39 +336,59 @@ impl Shared {
     }
 }
 
-/// One round: every resolver `learned` lists, asked at once (a few at a
-/// time), its answers added to `kept`, the prefixes learned so far.
-pub fn round(learned: &[Learned], kept: &mut Vec<Nat64Prefix>, timing: &Timing) -> Round {
-    let mut failures = Vec::new();
+/// One round: the first [`MAX_RESOLVERS`] resolvers `learned` lists, asked
+/// at once, each from a thread of its own, their answers added to `kept`,
+/// the prefixes learned so far. A resolver listed past them isn't asked, and
+/// counts as a failure (`over_limit`), as one that can't be asked does.
+///
+/// - **Each send asks `proceed` first:** once it says no, the round sends
+///   nothing more, and its caller doesn't publish it.
+/// - **The first failure is reported at once** (`failed`, with the state
+///   unknown and the failures so far), not when the round ends, so a known
+///   state never outlasts an established failure.
+pub fn round(
+    learned: &[Learned],
+    kept: &mut Vec<Nat64Prefix>,
+    timing: &Timing,
+    proceed: &(dyn Fn() -> bool + Sync),
+    failed: &dyn Fn(Nat64State, &[Failed]),
+) -> Round {
+    let mut failures: Vec<Failed> = Vec::new();
     let mut asked: Vec<SocketAddr> = Vec::new();
-    for resolver in learned {
+    for (index, resolver) in learned.iter().enumerate() {
         match resolver {
+            _ if index >= MAX_RESOLVERS => failures.push((describe(resolver), "over_limit")),
             Learned::Ask(addr) => asked.push(*addr),
             Learned::Unaskable(text) => failures.push((text.clone(), "unaskable")),
         }
     }
+    let mut reported = false;
+    let mut report = |failures: &[Failed], kept: &[Nat64Prefix]| {
+        if !reported && !failures.is_empty() {
+            reported = true;
+            failed(Nat64State::unknown(kept.iter().copied()), failures);
+        }
+    };
+    report(&failures, kept);
     let mut ttl: Option<Duration> = None;
-    for chunk in asked.chunks(CONCURRENT) {
-        let answers: Vec<(SocketAddr, Result<Answer, Failure>)> = std::thread::scope(|scope| {
-            let asking: Vec<_> = chunk
-                .iter()
-                .map(|addr| {
-                    let addr = *addr;
-                    scope.spawn(move || {
-                        (
-                            addr,
-                            query::ask(addr, query_id(), timing.attempt, timing.attempts),
-                        )
-                    })
+    std::thread::scope(|scope| {
+        let (sent, answers) = std::sync::mpsc::channel();
+        let asking: Vec<_> = asked
+            .iter()
+            .map(|addr| {
+                let (addr, sent) = (*addr, sent.clone());
+                scope.spawn(move || {
+                    let answer =
+                        query::ask(addr, query_id(), timing.attempt, timing.attempts, proceed);
+                    let _ = sent.send((addr, answer));
                 })
-                .collect();
-            asking
-                .into_iter()
-                .zip(chunk)
-                .map(|(asking, addr)| asking.join().unwrap_or((*addr, Err(Failure::Socket))))
-                .collect()
-        });
+            })
+            .collect();
+        drop(sent);
+        // As each answers: until every thread has ended.
+        let mut heard = 0;
         for (addr, answer) in answers {
+            heard += 1;
             match answer {
                 Ok(answer) => {
                     for prefix in answer.prefixes {
@@ -349,10 +402,21 @@ pub fn round(learned: &[Learned], kept: &mut Vec<Nat64Prefix>, timing: &Timing) 
                         ttl = Some(ttl.map_or(answer_ttl, |ttl| ttl.min(answer_ttl)));
                     }
                 }
-                Err(failure) => failures.push((addr.to_string(), failure.as_str())),
+                Err(failure) => {
+                    failures.push((addr.to_string(), failure.as_str()));
+                    report(&failures, kept);
+                }
             }
         }
-    }
+        // A thread that ended without an answer failed: it can only have
+        // panicked, which its join contains.
+        for asking in asking {
+            let _ = asking.join();
+        }
+        if heard < asked.len() {
+            failures.push(("a resolver's query".to_string(), Failure::Socket.as_str()));
+        }
+    });
     let state = if failures.is_empty() {
         Nat64State::known(kept.iter().copied())
     } else {
@@ -362,6 +426,14 @@ pub fn round(learned: &[Learned], kept: &mut Vec<Nat64Prefix>, timing: &Timing) 
         state,
         failures,
         ttl,
+    }
+}
+
+/// A resolver as logs name it.
+fn describe(resolver: &Learned) -> String {
+    match resolver {
+        Learned::Ask(addr) => addr.to_string(),
+        Learned::Unaskable(text) => text.clone(),
     }
 }
 
@@ -469,7 +541,13 @@ mod tests {
         let (one, _) = dns64(Arc::new(Mutex::new(Some(vec!["2a00:1:2:3::"]))));
         let (other, _) = dns64(Arc::new(Mutex::new(Some(vec![]))));
         let mut kept = Vec::new();
-        let union = round(&[ask(one), ask(other)], &mut kept, &FAST);
+        let union = round(
+            &[ask(one), ask(other)],
+            &mut kept,
+            &FAST,
+            &|| true,
+            &|_, _| {},
+        );
         assert_eq!(
             union.state,
             Nat64State::Known(vec![prefix("2a00:1:2:3::", 96)])
@@ -494,7 +572,13 @@ mod tests {
         let (long, _) = resolver(records(300));
         let (short, _) = resolver(records(40));
         let mut kept = Vec::new();
-        let both = round(&[ask(long), ask(short)], &mut kept, &FAST);
+        let both = round(
+            &[ask(long), ask(short)],
+            &mut kept,
+            &FAST,
+            &|| true,
+            &|_, _| {},
+        );
         assert_eq!(both.ttl, Some(Duration::from_secs(40)));
     }
 
@@ -503,7 +587,13 @@ mod tests {
         let (answers, _) = dns64(Arc::new(Mutex::new(Some(vec!["2a00:1:2:3::"]))));
         let (failing, _) = dns64(Arc::new(Mutex::new(None)));
         let mut kept = Vec::new();
-        let failed = round(&[ask(answers), ask(failing)], &mut kept, &FAST);
+        let failed = round(
+            &[ask(answers), ask(failing)],
+            &mut kept,
+            &FAST,
+            &|| true,
+            &|_, _| {},
+        );
         assert_eq!(
             failed.state,
             Nat64State::Unknown(vec![prefix("2a00:1:2:3::", 96)])
@@ -515,6 +605,8 @@ mod tests {
             &[ask(answers), Learned::Unaskable("fe80::1%wlan9".into())],
             &mut kept,
             &FAST,
+            &|| true,
+            &|_, _| {},
         );
         assert_eq!(
             unaskable.state,
@@ -529,7 +621,7 @@ mod tests {
     #[test]
     fn no_resolver_listed_is_known_and_empty() {
         let mut kept = Vec::new();
-        let none = round(&[], &mut kept, &FAST);
+        let none = round(&[], &mut kept, &FAST, &|| true, &|_, _| {});
         assert_eq!(none.state, Nat64State::NONE);
         assert_eq!(none.ttl, None);
     }
@@ -539,17 +631,17 @@ mod tests {
         let answers = Arc::new(Mutex::new(Some(vec!["2a00:1:2:3::"])));
         let (addr, _) = dns64(answers.clone());
         let mut kept = Vec::new();
-        round(&[ask(addr)], &mut kept, &FAST);
+        round(&[ask(addr)], &mut kept, &FAST, &|| true, &|_, _| {});
         // A refresh that drops the prefix doesn't forget it.
         *answers.lock().unwrap() = Some(vec![]);
         assert_eq!(
-            round(&[ask(addr)], &mut kept, &FAST).state,
+            round(&[ask(addr)], &mut kept, &FAST, &|| true, &|_, _| {}).state,
             Nat64State::Known(vec![prefix("2a00:1:2:3::", 96)])
         );
         // A failed refresh keeps it too.
         *answers.lock().unwrap() = None;
         assert_eq!(
-            round(&[ask(addr)], &mut kept, &FAST).state,
+            round(&[ask(addr)], &mut kept, &FAST, &|| true, &|_, _| {}).state,
             Nat64State::Unknown(vec![prefix("2a00:1:2:3::", 96)])
         );
         // Seventeen distinct prefixes: incomplete, for good.
@@ -573,14 +665,14 @@ mod tests {
             "2a00:1:11::",
         ];
         *answers.lock().unwrap() = Some(seventeen);
-        let state = round(&[ask(addr)], &mut kept, &FAST).state;
+        let state = round(&[ask(addr)], &mut kept, &FAST, &|| true, &|_, _| {}).state;
         assert!(
             matches!(state, Nat64State::Incomplete(ref kept) if kept.len() == 16),
             "{state:?}"
         );
         *answers.lock().unwrap() = Some(vec![]);
         assert!(matches!(
-            round(&[ask(addr)], &mut kept, &FAST).state,
+            round(&[ask(addr)], &mut kept, &FAST, &|| true, &|_, _| {}).state,
             Nat64State::Incomplete(_)
         ));
         assert_eq!(kept.len(), Nat64State::MAX_PREFIXES + 1);
@@ -629,7 +721,16 @@ mod tests {
     }
 
     fn wait_for(discovery: &Discovery, wanted: impl Fn(&Nat64State) -> bool) -> Nat64State {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        wait_within(discovery, Duration::from_secs(5), wanted)
+    }
+
+    /// The state once `wanted` holds, or as it is after `within`.
+    fn wait_within(
+        discovery: &Discovery,
+        within: Duration,
+        wanted: impl Fn(&Nat64State) -> bool,
+    ) -> Nat64State {
+        let deadline = Instant::now() + within;
         loop {
             let state = discovery.state();
             if wanted(&state) || Instant::now() > deadline {
@@ -680,12 +781,14 @@ mod tests {
             Nat64State::Known(vec![prefix("2a00:1:2:3::", 96), prefix("2a00:5::", 96)])
         );
 
-        // Paused: no lease, no query.
+        // Paused: no lease, no query, and no round: the list isn't read.
         drop(lease);
         std::thread::sleep(Duration::from_millis(300));
         while queries.try_recv().is_ok() {}
+        let read = asked.load(Ordering::SeqCst);
         std::thread::sleep(Duration::from_millis(500));
         assert!(queries.try_recv().is_err(), "a query while paused");
+        assert_eq!(asked.load(Ordering::SeqCst), read, "a round while paused");
 
         // Resumed: pending at once. Its first round asks a resolver that
         // never answers, so it is still pending when read; then known again.
@@ -754,7 +857,13 @@ mod tests {
         let (one, one_queries) = dns64(Arc::new(Mutex::new(Some(vec![]))));
         let (two, two_queries) = dns64(Arc::new(Mutex::new(Some(vec![]))));
         let mut kept = Vec::new();
-        round(&[ask(one), ask(two), ask(one)], &mut kept, &FAST);
+        round(
+            &[ask(one), ask(two), ask(one)],
+            &mut kept,
+            &FAST,
+            &|| true,
+            &|_, _| {},
+        );
         for queries in [one_queries, two_queries] {
             let sent: Vec<Vec<u8>> = queries.try_iter().collect();
             assert!(!sent.is_empty());
@@ -768,6 +877,220 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A resolver that takes queries and never answers: each one it gets
+    /// is reported.
+    fn silent() -> (SocketAddr, Receiver<Vec<u8>>) {
+        resolver(|_| vec![])
+    }
+
+    /// A one-round timing: a refresh only after `ceiling`.
+    fn slow(attempt: Duration, attempts: u32) -> Timing {
+        Timing {
+            attempt,
+            attempts,
+            ceiling: Duration::from_secs(30),
+            floor: Duration::from_secs(30),
+            ..FAST
+        }
+    }
+
+    #[test]
+    fn a_pause_stops_the_round_under_way_and_it_is_not_published() {
+        // A full round of resolvers that never answer, each sent to twice.
+        let silent: Vec<(SocketAddr, Receiver<Vec<u8>>)> =
+            (0..MAX_RESOLVERS).map(|_| silent()).collect();
+        let learned: Vec<Learned> = silent.iter().map(|(addr, _)| ask(*addr)).collect();
+        let discovery = Discovery::new(
+            Arc::new(move || learned.clone()),
+            slow(Duration::from_millis(300), 2),
+        );
+        let lease = discovery.lease();
+        for (_, queries) in &silent {
+            queries.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        drop(lease);
+        // Past both sends: no resend, and nothing published.
+        std::thread::sleep(Duration::from_millis(900));
+        for (_, queries) in &silent {
+            assert!(queries.try_recv().is_err(), "a resend after the pause");
+        }
+        assert_eq!(discovery.state(), Nat64State::Pending);
+        assert_eq!(discovery.stats()["failures"], json!([]));
+    }
+
+    #[test]
+    fn a_pause_stops_resolvers_not_yet_asked() {
+        // The adversarial review's probe: a ninth resolver, past the first
+        // round's resolvers, is never asked after a pause (nor before it:
+        // it is past the bound).
+        let first: Vec<(SocketAddr, Receiver<Vec<u8>>)> =
+            (0..MAX_RESOLVERS).map(|_| silent()).collect();
+        let (ninth, ninth_queries) = silent();
+        let mut learned: Vec<Learned> = first.iter().map(|(addr, _)| ask(*addr)).collect();
+        learned.push(ask(ninth));
+        let discovery = Discovery::new(
+            Arc::new(move || learned.clone()),
+            slow(Duration::from_millis(150), 1),
+        );
+        let lease = discovery.lease();
+        for (_, queries) in &first {
+            queries.recv_timeout(Duration::from_secs(1)).unwrap();
+        }
+        drop(lease);
+        assert!(
+            ninth_queries
+                .recv_timeout(Duration::from_millis(400))
+                .is_err(),
+            "the paused discovery sent to a resolver it hadn't asked"
+        );
+    }
+
+    #[test]
+    fn the_refresh_counts_from_the_rounds_start() {
+        // A full round, one resolver answering 120 ms late; every answer's
+        // TTL is past the 200 ms ceiling.
+        let answer = |query: &[u8]| {
+            vec![reply_to(
+                query,
+                ResponseCode::NoError,
+                &[(under("2001:db8:64::"), 300)],
+                None,
+                |_| {},
+            )]
+        };
+        let starts = Arc::new(Mutex::new(Vec::<Instant>::new()));
+        let seen = starts.clone();
+        let (first, _) = resolver(move |query| {
+            seen.lock().unwrap().push(Instant::now());
+            answer(query)
+        });
+        let mut learned = vec![ask(first)];
+        for _ in 2..MAX_RESOLVERS {
+            learned.push(ask(resolver(answer).0));
+        }
+        learned.push(ask(resolver(move |query| {
+            std::thread::sleep(Duration::from_millis(120));
+            answer(query)
+        })
+        .0));
+        let discovery = Discovery::new(Arc::new(move || learned.clone()), FAST);
+        let _lease = discovery.lease();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while starts.lock().unwrap().len() < 4 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let starts = starts.lock().unwrap().clone();
+        assert!(starts.len() >= 4, "{}", starts.len());
+        assert_eq!(
+            discovery.state(),
+            Nat64State::Known(vec![prefix("2001:db8:64::", 96)])
+        );
+        // Start to start, about the ceiling: not the ceiling after the
+        // round's 120 ms.
+        for pair in starts.windows(2) {
+            let interval = pair[1] - pair[0];
+            assert!(interval < Duration::from_millis(280), "{interval:?}");
+        }
+    }
+
+    #[test]
+    fn past_eight_resolvers_the_rest_are_not_asked_and_the_state_is_unknown() {
+        // The bound decided for a round: the first eight the OS lists.
+        assert_eq!(MAX_RESOLVERS, 8);
+        let answering = Arc::new(Mutex::new(Some(vec!["2001:db8:64::"])));
+        let resolvers: Vec<(SocketAddr, Receiver<Vec<u8>>)> = (0..=MAX_RESOLVERS)
+            .map(|_| dns64(answering.clone()))
+            .collect();
+        let learned: Vec<Learned> = resolvers.iter().map(|(addr, _)| ask(*addr)).collect();
+        let mut kept = Vec::new();
+        let round = round(&learned, &mut kept, &FAST, &|| true, &|_, _| {});
+        assert_eq!(
+            round.state,
+            Nat64State::Unknown(vec![prefix("2001:db8:64::", 96)])
+        );
+        assert_eq!(
+            round.failures,
+            vec![(resolvers[MAX_RESOLVERS].0.to_string(), "over_limit")]
+        );
+        for (_, queries) in &resolvers[..MAX_RESOLVERS] {
+            assert!(queries.try_recv().is_ok());
+        }
+        assert!(
+            resolvers[MAX_RESOLVERS].1.try_recv().is_err(),
+            "the ninth was asked"
+        );
+    }
+
+    /// Discovery that knows no prefix from one answering resolver, then
+    /// refreshes against `then`, every 30 ms.
+    fn known_then(then: Vec<Learned>, attempt: Duration) -> Discovery {
+        let (good, _) = dns64(Arc::new(Mutex::new(Some(vec![]))));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        Discovery::new(
+            Arc::new(move || {
+                if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                    vec![Learned::Ask(good)]
+                } else {
+                    then.clone()
+                }
+            }),
+            Timing {
+                attempt,
+                attempts: 1,
+                floor: Duration::from_millis(30),
+                ceiling: Duration::from_millis(30),
+                backoff: Duration::from_millis(30),
+            },
+        )
+    }
+
+    #[test]
+    fn a_known_state_ends_at_the_first_failure_not_the_rounds_end() {
+        // The adversarial review's probe, in one round: a resolver that
+        // fails at once, beside one that never answers within its 2 s.
+        let (failing, _) = dns64(Arc::new(Mutex::new(None)));
+        let (quiet, quiet_queries) = silent();
+        let discovery = known_then(vec![ask(failing), ask(quiet)], Duration::from_secs(2));
+        let _lease = discovery.lease();
+        assert_eq!(
+            wait_for(&discovery, |state| *state != Nat64State::Pending),
+            Nat64State::NONE
+        );
+        // The refresh is under way: the quiet one has its query, and won't
+        // time out for 2 s. The failure is established already.
+        quiet_queries.recv_timeout(Duration::from_secs(2)).unwrap();
+        // Well before the quiet one's 2 s are up.
+        let state = wait_within(&discovery, Duration::from_millis(800), |state| {
+            matches!(state, Nat64State::Unknown(_))
+        });
+        assert!(matches!(state, Nat64State::Unknown(_)), "{state:?}");
+        let target: std::net::IpAddr = "2a00:1:2:3::7f00:1".parse().unwrap();
+        assert!(freedom_ipfs_gateway::net::gate::check_address(target, &state).is_err());
+        assert_eq!(discovery.stats()["failures"], json!(["rcode"]));
+    }
+
+    #[test]
+    fn a_resolver_past_the_bound_ends_a_known_state_when_the_round_begins() {
+        let first: Vec<(SocketAddr, Receiver<Vec<u8>>)> =
+            (0..MAX_RESOLVERS).map(|_| silent()).collect();
+        let mut then: Vec<Learned> = first.iter().map(|(addr, _)| ask(*addr)).collect();
+        then.push(ask(silent().0));
+        let discovery = known_then(then, Duration::from_secs(2));
+        let _lease = discovery.lease();
+        assert_eq!(
+            wait_for(&discovery, |state| *state != Nat64State::Pending),
+            Nat64State::NONE
+        );
+        first[0].1.recv_timeout(Duration::from_secs(2)).unwrap();
+        // Well before any of the round's 2 s timeouts.
+        let state = wait_within(&discovery, Duration::from_millis(800), |state| {
+            matches!(state, Nat64State::Unknown(_))
+        });
+        assert!(matches!(state, Nat64State::Unknown(_)), "{state:?}");
+        assert_eq!(discovery.stats()["failures"], json!(["over_limit"]));
     }
 
     #[test]

@@ -10,8 +10,10 @@
 //! teaches nothing.
 //!
 //! - **An answer:** `NOERROR` with or without AAAA records, or `NXDOMAIN`
-//!   (RFC 7050 §3: no prefix is advertised). Its TTL is the smallest of its
-//!   AAAA records', or, without one, the negative TTL its SOA gives.
+//!   (RFC 7050 §3: no prefix is advertised). A `NOERROR`'s TTL is the
+//!   smallest of its AAAA records', or, without one, the negative TTL its
+//!   SOA gives. An `NXDOMAIN` teaches nothing, whatever its answer section
+//!   holds, and its TTL is its SOA's.
 //! - **A failure:** no reply within the attempts, any other response code,
 //!   a truncated reply, a reply outside the protocol (not a response to
 //!   this query: another opcode or question), or a socket error, such as
@@ -34,8 +36,10 @@ pub const NAME: &str = "ipv4only.arpa.";
 /// [`Nat64State::MAX_PREFIXES`]: freedom_ipfs_gateway::net::gate::Nat64State::MAX_PREFIXES
 const PAYLOAD: u16 = 1232;
 
-/// The largest reply read.
-const MAX_REPLY: usize = 4096;
+/// The largest reply read. One that doesn't fit is refused, not read cut
+/// short: the receive buffer is a byte longer, so a datagram that fills it
+/// was larger.
+pub const MAX_REPLY: usize = 4096;
 
 /// What one resolver answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,12 +59,15 @@ pub enum Failure {
     Socket,
     /// No reply within the attempts.
     Timeout,
-    /// The reply was truncated.
+    /// The reply was truncated, by the resolver (the TC bit), or by the
+    /// receive because it was larger than [`MAX_REPLY`].
     Truncated,
     /// A response code other than `NOERROR` and `NXDOMAIN`, as a number.
     Rcode(u16),
     /// A reply that isn't a well-formed response to this query.
     Malformed,
+    /// Its round was abandoned before it could send (discovery paused).
+    Abandoned,
 }
 
 impl Failure {
@@ -72,19 +79,21 @@ impl Failure {
             Self::Truncated => "truncated",
             Self::Rcode(_) => "rcode",
             Self::Malformed => "malformed",
+            Self::Abandoned => "abandoned",
         }
     }
 }
 
 /// Asks `resolver` for `ipv4only.arpa`'s AAAA records, with query ID `id`:
 /// up to `attempts` sends of the same query, each waiting `attempt` for
-/// its reply. A reply with another ID is skipped, as a late one to another
-/// query would be.
+/// its reply, while `proceed` says it may still send. A reply with another
+/// ID is skipped, as a late one to another query would be.
 pub fn ask(
     resolver: SocketAddr,
     id: u16,
     attempt: Duration,
     attempts: u32,
+    proceed: &(dyn Fn() -> bool + Sync),
 ) -> Result<Answer, Failure> {
     let query = encode(id)?;
     let local: SocketAddr = if resolver.is_ipv4() {
@@ -94,8 +103,11 @@ pub fn ask(
     };
     let socket = UdpSocket::bind(local).map_err(|_| Failure::Socket)?;
     socket.connect(resolver).map_err(|_| Failure::Socket)?;
-    let mut buffer = vec![0u8; MAX_REPLY];
+    let mut buffer = vec![0u8; MAX_REPLY + 1];
     for _ in 0..attempts.max(1) {
+        if !proceed() {
+            return Err(Failure::Abandoned);
+        }
         socket.send(&query).map_err(|_| Failure::Socket)?;
         let deadline = Instant::now() + attempt;
         loop {
@@ -107,6 +119,13 @@ pub fn ask(
                 .set_read_timeout(Some(left))
                 .map_err(|_| Failure::Socket)?;
             match socket.recv(&mut buffer) {
+                // Too large: the kernel cut it short. Ours is refused as
+                // truncated; another's is skipped, as any other is.
+                Ok(read) if read > MAX_REPLY => {
+                    if buffer.get(..2).is_some_and(|head| head == id.to_be_bytes()) {
+                        return Err(Failure::Truncated);
+                    }
+                }
                 Ok(read) => {
                     if let Some(reply) = buffer.get(..read).and_then(|reply| answer(reply, id)) {
                         return reply;
@@ -170,13 +189,17 @@ fn read(message: &Message) -> Result<Answer, Failure> {
     if message.truncated() {
         return Err(Failure::Truncated);
     }
-    match message.response_code() {
-        ResponseCode::NoError | ResponseCode::NXDomain => {}
+    let nxdomain = match message.response_code() {
+        ResponseCode::NoError => false,
+        ResponseCode::NXDomain => true,
         other => return Err(Failure::Rcode(u16::from(other))),
-    }
+    };
     let mut prefixes = Vec::new();
     let mut ttl: Option<u32> = None;
-    for record in message.answers() {
+    // NXDOMAIN: the name doesn't exist, so no prefix is advertised (RFC 7050
+    // §3), whatever its answer section holds.
+    let answers = if nxdomain { &[][..] } else { message.answers() };
+    for record in answers {
         if let RData::AAAA(aaaa) = record.data() {
             prefixes.extend(Nat64Prefix::in_ipv4only_answer(aaaa.0));
             ttl = Some(ttl.map_or(record.ttl(), |ttl| ttl.min(record.ttl())));
@@ -257,8 +280,8 @@ pub mod tests {
 
     /// A resolver on loopback that answers each query it gets with what
     /// `respond` returns for its bytes (a list of datagrams, possibly
-    /// empty), and reports each query it got. It keeps answering when
-    /// nobody reads the reports.
+    /// empty), and reports each query it got, before answering it. It keeps
+    /// answering when nobody reads the reports.
     pub fn resolver(
         respond: impl Fn(&[u8]) -> Vec<Vec<u8>> + Send + 'static,
     ) -> (SocketAddr, mpsc::Receiver<Vec<u8>>) {
@@ -269,10 +292,12 @@ pub mod tests {
             let mut buffer = [0u8; 2048];
             while let Ok((read, from)) = socket.recv_from(&mut buffer) {
                 let query = buffer[..read].to_vec();
+                // Reported before it is answered: once its answer is read,
+                // the query is in the report.
+                let _ = sent.send(query.clone());
                 for datagram in respond(&query) {
                     let _ = socket.send_to(&datagram, from);
                 }
-                let _ = sent.send(query);
             }
         });
         (addr, got)
@@ -321,7 +346,7 @@ pub mod tests {
                 |_| {},
             )]
         });
-        let answer = ask(addr, 7, ATTEMPT, 1).unwrap();
+        let answer = ask(addr, 7, ATTEMPT, 1, &|| true).unwrap();
         assert_eq!(
             answer.prefixes,
             vec![prefix("64:ff9b::", 96), prefix("2a00:1:2:3::", 64)]
@@ -340,7 +365,7 @@ pub mod tests {
             let (addr, _) =
                 resolver(move |query| vec![reply_to(query, rcode, &[], Some((900, 60)), |_| {})]);
             assert_eq!(
-                ask(addr, 9, ATTEMPT, 1),
+                ask(addr, 9, ATTEMPT, 1, &|| true),
                 Ok(Answer {
                     prefixes: vec![],
                     ttl: Some(Duration::from_secs(60)),
@@ -349,7 +374,7 @@ pub mod tests {
             );
             let (addr, _) = resolver(move |query| vec![reply_to(query, rcode, &[], None, |_| {})]);
             assert_eq!(
-                ask(addr, 9, ATTEMPT, 1),
+                ask(addr, 9, ATTEMPT, 1, &|| true),
                 Ok(Answer {
                     prefixes: vec![],
                     ttl: None,
@@ -357,6 +382,77 @@ pub mod tests {
                 "{rcode:?}"
             );
         }
+    }
+
+    #[test]
+    fn nxdomain_teaches_nothing_even_with_answers() {
+        for soa in [Some((900, 60)), None] {
+            let (addr, _) = resolver(move |query| {
+                vec![reply_to(
+                    query,
+                    ResponseCode::NXDomain,
+                    &[(v6("64:ff9b::c000:aa"), 30)],
+                    soa,
+                    |_| {},
+                )]
+            });
+            assert_eq!(
+                ask(addr, 9, ATTEMPT, 1, &|| true),
+                Ok(Answer {
+                    prefixes: vec![],
+                    ttl: soa.map(|_| Duration::from_secs(60)),
+                }),
+                "{soa:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reply_larger_than_the_buffer_is_refused_not_read_cut_short() {
+        // The adversarial review's probe: past MAX_REPLY, the kernel cuts
+        // the datagram short, and what is left would parse.
+        let (addr, _) = resolver(|query| {
+            let mut reply = reply_to(
+                query,
+                ResponseCode::NoError,
+                &[(v6("64:ff9b::c000:aa"), 60)],
+                None,
+                |_| {},
+            );
+            reply.resize(MAX_REPLY + 100, 0);
+            vec![reply]
+        });
+        assert_eq!(
+            ask(addr, 0x4242, ATTEMPT, 1, &|| true),
+            Err(Failure::Truncated)
+        );
+        // One that fills the buffer exactly is read.
+        let (addr, _) = resolver(|query| {
+            let mut reply = reply_to(
+                query,
+                ResponseCode::NoError,
+                &[(v6("64:ff9b::c000:aa"), 60)],
+                None,
+                |_| {},
+            );
+            reply.resize(MAX_REPLY, 0);
+            vec![reply]
+        });
+        assert!(ask(addr, 0x4242, ATTEMPT, 1, &|| true).is_ok());
+    }
+
+    #[test]
+    fn an_abandoned_query_sends_nothing_more() {
+        let (addr, got) = resolver(|_| vec![]);
+        let sends = std::sync::atomic::AtomicUsize::new(0);
+        // Proceeds for the first send only.
+        let proceed = || sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+        assert_eq!(
+            ask(addr, 1, Duration::from_millis(100), 3, &proceed),
+            Err(Failure::Abandoned)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(got.try_iter().count(), 1);
     }
 
     #[test]
@@ -376,7 +472,10 @@ pub mod tests {
                     |_| {},
                 )]
             });
-            assert_eq!(ask(addr, 1, ATTEMPT, 1), Err(Failure::Rcode(number)));
+            assert_eq!(
+                ask(addr, 1, ATTEMPT, 1, &|| true),
+                Err(Failure::Rcode(number))
+            );
         }
     }
 
@@ -393,7 +492,7 @@ pub mod tests {
                 },
             )]
         });
-        assert_eq!(ask(addr, 1, ATTEMPT, 1), Err(Failure::Truncated));
+        assert_eq!(ask(addr, 1, ATTEMPT, 1, &|| true), Err(Failure::Truncated));
     }
 
     #[test]
@@ -431,11 +530,11 @@ pub mod tests {
                     edit,
                 )]
             });
-            assert_eq!(ask(addr, 1, ATTEMPT, 1), Err(Failure::Malformed));
+            assert_eq!(ask(addr, 1, ATTEMPT, 1, &|| true), Err(Failure::Malformed));
         }
         // Bytes that don't parse, under our ID.
         let (addr, _) = resolver(|query| vec![[&query[..2], &[0xff; 5][..]].concat()]);
-        assert_eq!(ask(addr, 1, ATTEMPT, 1), Err(Failure::Malformed));
+        assert_eq!(ask(addr, 1, ATTEMPT, 1, &|| true), Err(Failure::Malformed));
     }
 
     #[test]
@@ -454,7 +553,7 @@ pub mod tests {
             // Garbage under another ID, then a reply under another ID, then ours.
             vec![vec![0x00, 0x01, 0xff], stray, ours]
         });
-        let answer = ask(addr, 0x0203, ATTEMPT, 1).unwrap();
+        let answer = ask(addr, 0x0203, ATTEMPT, 1, &|| true).unwrap();
         assert_eq!(answer.prefixes, vec![prefix("64:ff9b::", 96)]);
     }
 
@@ -482,7 +581,7 @@ pub mod tests {
             socket.send_to(&genuine, from).unwrap();
         });
         assert_eq!(
-            ask(addr, 0x4242, ATTEMPT, 1),
+            ask(addr, 0x4242, ATTEMPT, 1, &|| true),
             Ok(Answer {
                 prefixes: vec![],
                 ttl: None,
@@ -495,7 +594,7 @@ pub mod tests {
         let (addr, got) = resolver(|_| vec![]);
         let started = Instant::now();
         assert_eq!(
-            ask(addr, 1, Duration::from_millis(100), 3),
+            ask(addr, 1, Duration::from_millis(100), 3, &|| true),
             Err(Failure::Timeout)
         );
         assert!(started.elapsed() >= Duration::from_millis(300));
@@ -515,7 +614,7 @@ pub mod tests {
                 vec![reply_to(query, ResponseCode::NoError, &[], None, |_| {})]
             }
         });
-        assert!(ask(addr, 1, Duration::from_millis(150), 2).is_ok());
+        assert!(ask(addr, 1, Duration::from_millis(150), 2, &|| true).is_ok());
     }
 
     #[test]
@@ -525,7 +624,7 @@ pub mod tests {
         let closed = UdpSocket::bind("127.0.0.1:0").unwrap();
         let addr = closed.local_addr().unwrap();
         drop(closed);
-        let result = ask(addr, 1, Duration::from_millis(200), 2);
+        let result = ask(addr, 1, Duration::from_millis(200), 2, &|| true);
         assert!(
             matches!(result, Err(Failure::Socket | Failure::Timeout)),
             "{result:?}"
