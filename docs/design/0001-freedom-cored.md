@@ -191,7 +191,7 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
 
   Each method declares the caller kinds it accepts, in `fc-protocol`'s method table, and the core checks every request against it once, before dispatching anything (#101). A method the table doesn't list is `unknown_method`; a caller it doesn't list for the method gets `forbidden`. Nothing is allowed by default.
   - Most methods accept `chrome` and `shell`.
-  - Main's own methods accept only `shell`: `core.hello`, `core.shutdown`, `vault.reconcile`, `nodes.op_status`, `compat.*` and `dweb.open`. A main bug that forwarded a renderer's `core.shutdown` under `chrome` would otherwise wipe the vault and, through the restart, reset the in-memory throttle.
+  - Main's own methods accept only `shell`: `core.hello`, `core.shutdown`, `vault.reconcile`, `nodes.op_status`, `compat.*`, `dweb.open` and `nodes.seal_radicle_key` ([0008](0008-radicle-service.md#the-sealed-release)). A main bug that forwarded a renderer's `core.shutdown` under `chrome` would otherwise wipe the vault and, through the restart, reset the in-memory throttle.
   - No method accepts `page` yet (Phase 2).
 - **Error codes:**
   - **Request errors:** `vault_locked`, `incorrect_password`, `throttled` (with `data.retry_after_ms`), `no_vault`, `vault_exists`, `unsupported_vault_version`, `corrupt_vault`, `invalid_mnemonic`, `invalid_argument`, `weak_password`, `storage` (with `data.kind`).
@@ -295,7 +295,7 @@ A reply can still go missing (core crash, hang watchdog), so every mutation can 
   - The renamed file is opened again by name to be flushed, and std exposes no file identity there, so the identity checks below are Unix-only.
 - **Existing files:** at adoption, the core tightens existing secret files to `0600` in place with `fchmod`, which doesn't change the content. It first checks, on the open handle, that each is a regular file the current user owns; a symlink is never followed.
   - **The vault** is tightened at every start, before the snapshot.
-  - **Node files** are the files of each node's journal layout (Bee's keystore and config, Radicle's keys and config). They are tightened under the roots main gives in `core.hello`'s `node_roots`, on a thread of their own, so slow storage can't hold up the handshake (#85).
+  - **Node files** are the files of each node's journal layout (Bee's keystore and config; Radicle's config, and its key files until 0008's [switch](0008-radicle-service.md#the-switch) removes them). They are tightened under the roots main gives in `core.hello`'s `node_roots`, on a thread of their own, so slow storage can't hold up the handshake (#85).
   - **Until main sends `node_roots`,** node files that JS wrote keep their mode until the next `nodes.write_identity`.
 - **Delete:** unlink, then `fsync` the directory before replying. A delete commits at the unlink.
 - **Leftover temp files** (#81). A process killed between steps 1 and 4 leaves its temp file behind, for the vault an encrypted copy of the mnemonic. The core removes the temp files of its own atomic writes in the identity directory (the vault and the node journal's records) at startup, under the gate, before any job runs. `vault.delete` also removes the vault's, once its unlink has committed.
@@ -304,7 +304,7 @@ A reply can still go missing (core crash, hang watchdog), so every mutation can 
 
 ### Multi-file writes
 
-This covers node identities. **Bee:** `keys/swarm.key` plus `config.yaml`. **Radicle:** private key, public key and config. Node directories can be outside the profile, so the journal lives in the identity directory, where startup recovery always finds it.
+This covers node identities. **Bee:** `keys/swarm.key` plus `config.yaml`. **Radicle:** private key, public key and config, until design 0008 (below). Node directories can be outside the profile, so the journal lives in the identity directory, where startup recovery always finds it.
 
 1. **Stage.** For each target, write `<target>.freedom-new` (exclusive create, `0600`, fsync) and compute its SHA-256.
 2. **Commit.** Write `<identityDir>/node-identity-journal.json` atomically and durably. It holds `{ op_id, node, files: [{ target, staged, sha256 }] }`, with absolute paths.
@@ -326,6 +326,7 @@ This covers node identities. **Bee:** `keys/swarm.key` plus `config.yaml`. **Rad
 - **Reconciliation:** `nodes.op_status { op_id }` returns `installed`, `pending_recovery`, `not_committed` or `corrupt` from the done list and the journal. A consistent node directory alone doesn't count, because it could still hold the old identity. Main starts a node only on `installed`.
 - **Ordering with the shell:** main stops the node before calling `nodes.write_identity` and starts it only after an `installed` result or reconciliation, as it does today. Ant's own config rewrite at start (`ant-manager.js:815`) therefore always happens after the write.
 - **Bee's keystore password** still goes into `config.yaml` (K-3, Phase 5). The journal guarantees that the keystore and the password always match.
+- **Radicle, after design 0008:** the Radicle key is never written ([0008, *Keys*](0008-radicle-service.md#keys)). The Radicle form writes only the config, plus, for 0008's switch, the dirty marker that names the old identity. It removes `keys/radicle` and `keys/radicle.pub` instead: a journal entry can name a target to remove rather than a staged file. Install unlinks it, following no symlink, and flushes its directory. Recovery repeats that, and a target already gone is done. 0008's *Identity changes* adds the wipe of an identity change.
 
 ## Parity contract
 
@@ -381,7 +382,7 @@ Main's proxy has to reproduce each JS handler: argument checks and defaults, the
 | `vault.export_mnemonic`, `vault.export_private_key` | see parity table | permanent, user-requested backup exports |
 | `keys.addresses` | `{ accounts?: [u32], publishers?: [u32] }` → `{ user_wallets, bee_wallet, publishers, radicle: { public_key, did, node_id } }` | public data only; needs an unlocked vault |
 | `keys.radicle_did` | `{ public_key }` → `{ did }` | public conversion; works while locked (`readRadicleDid`, `identity-manager.js:381`) |
-| `nodes.write_identity` | `{ op_id, node: "bee", data_dir, api_port, p2p_port }` or `{ op_id, node: "radicle", home, alias }` → `{ address }` or `{ did, node_id }` | [multi-file protocol](#multi-file-writes). Bee generates a fresh keystore password and writes `config.yaml` exactly as `createBeeConfig` does, with main's per-profile ports |
+| `nodes.write_identity` | `{ op_id, node: "bee", data_dir, api_port, p2p_port }` or `{ op_id, node: "radicle", home, alias }` → `{ address }` or `{ did, node_id }` | [multi-file protocol](#multi-file-writes). Bee generates a fresh keystore password and writes `config.yaml` exactly as `createBeeConfig` does, with main's per-profile ports. [0008](0008-radicle-service.md#identity-changes) replaces the Radicle form: `{ op_id, node: "radicle", home, alias, wipe? }` writes no key file, removes any, needs no vault, and returns no DID |
 | `nodes.op_status` | `{ op_id }` → `{ status: "installed" \| "pending_recovery" \| "not_committed" \| "corrupt" }` | reconciliation after a lost reply |
 | `vault.reconcile` | see [Reconciliation](#reconciliation) | after a lost mutation reply |
 | `compat.private_key` | `{ account }` → `{ private_key }` | temporary; see Migration |
