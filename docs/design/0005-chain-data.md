@@ -283,9 +283,14 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
   - **Main gives one reference per (chain, URL)**, so the core merges exact repeats. It can't see that two URLs reach one node: `https://x.example` and `https://x.example/`, or two API keys at one provider. Main therefore lists each host at most once in a chain's `rpc`, keeping the first in registry order, before it assigns references. A user source that repeats a builtin's URL, which `getEndpoints` keeps today, then adds nothing.
 - **When main sends it:** at startup and from `network-ipc`'s `refreshDownstream`, where today only ENS and provider-manager caches are cleared. Controls queue ahead of later requests, as naming's do.
 
-### Endpoints serve their chain (proposed, #93)
+### Endpoints serve their chain (decided, #93)
 
-**Status:** proposed; **needs the user's decision** on where the check runs, since either place changes the protocol or the browser.
+**Status:** decided (the user, 2026-10-22):
+- the check runs in main, before the snapshot;
+- main re-checks every endpoint hourly;
+- main refuses to save a user source whose endpoint answers another chain.
+
+The options weighed are kept below.
 
 - **Today** nothing asks an endpoint which chain it serves. A user-added RPC that serves another chain answers balances, nonces and receipts for that chain:
   - Direct returns them, labelled `unverified` or `user-configured`;
@@ -303,9 +308,15 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
 | Parity and tests | None of the machine changes; the replay is untouched. | Every replay scenario's first exchanges change: the driver must answer the checks itself, and memory, cancel and broadcast rules need a case for the check (a broadcast attempt whose check failed was never sent). |
 | Trust | Main is trusted for configuration already (it names the endpoints). | The core decides, as it decides the rest. |
 
-- **Recommendation:** main, before the snapshot. The check guards against a misconfigured endpoint, not a malicious one: a lying endpoint answers `eth_chainId` correctly and lies about the rest, which only the quorum and the verifiers bound. A configuration-time check covers the misconfiguration, keeps the machine and its replayed scenarios as they are, and tells the user at the moment they can fix the source.
-  - **Not covered:** a URL that starts serving another chain later in the process's life, such as a load balancer that is repointed. A periodic re-check (hourly, say) narrows that window at the cost of the coalesced reconfigurations above.
-- **Decision needed:** the place (main or the core); whether main re-checks periodically; and whether main refuses to save a user source whose endpoint answers another chain, or saves it and leaves it out.
+- **The decision: main, before the snapshot.** The check guards against a misconfigured endpoint, not a malicious one: a lying endpoint answers `eth_chainId` correctly and lies about the rest, which only the quorum and the verifiers bound. A configuration-time check covers the misconfiguration, keeps the machine and its replayed scenarios as they are, and tells the user at the moment they can fix the source.
+- **An hourly re-check:** main asks every (chain, URL) again once an hour.
+  - A result that hasn't changed does nothing.
+  - A changed one joins the coalesced reconfiguration above, at most one `chain.configure` a minute.
+  - This narrows the window in which a URL repointed later in the process's life (such as a load balancer) goes unnoticed to about an hour.
+- **A user source that answers another chain isn't saved.**
+  - When the user adds or edits a source, main checks it before saving. A mismatch refuses the save, with a message that the endpoint serves another chain.
+  - A check that merely fails (the endpoint is down, or times out) doesn't refuse it: the source is saved, and stays out until a retry succeeds.
+  - A builtin endpoint that answers another chain is left out, as any endpoint is.
 
 ## The router machine
 
@@ -595,9 +606,13 @@ The core can die mid-broadcast: an exit, the watchdog, a protocol error. Main th
 
 Vectors pin the downgrade boundaries. Whether a derived base fee and a "verified" Myotis fee are right is a product question, not a parity one.
 
-### Plausibility (proposed, #92)
+### Plausibility (decided, #92)
 
-**Status:** proposed; **needs the user's decision**: a cap is policy, and a cross-check is a deviation.
+**Status:** decided (the user, 2026-10-22):
+- **A,** the cap at confirmation, with a threshold relative to the current network fee, not a fixed amount or the value sent;
+- **B,** widened from two endpoints to several, keeping the tightest constraints.
+
+C isn't adopted as a cap on quotes, and D isn't adopted. The options weighed are kept below.
 
 - **Today** the only checks are a gas price above 0, a priority fee at most the gas price, and the 4096-bit width. Nodes rarely agree exactly on `eth_gasPrice`, so the quorum usually misses and Direct quotes, from one endpoint (`router-fee-quote-direct-same-endpoint`).
 - **What one endpoint can do:** answer both values with 1e18 wei. The quote becomes EIP-1559 with base fee 0 and a priority fee of 1e18 wei per gas, about 21,000 ETH for a plain transfer, all of it a tip. A node refuses a transaction the sender can't cover, so the real risk is a smaller inflation: ten or fifty times the going rate, which the user pays in full and may not notice.
@@ -619,8 +634,20 @@ Vectors pin the downgrade boundaries. Whether a derived base fee and a "verified
   - **Mixed** (one endpoint gave no priority hint): legacy at the lower gas price. The bound then holds against each quote's gas price, not against an honest EIP-1559 transaction, which pays less when the base fee falls.
   - **The second request fails, or there is no second endpoint:** the first quote alone, marked single-source, with no bound; A decides.
 - **C's reference.** It bounds a quote only if it is verified and independent of the quote: read from Myotis, from Colibri where it proves those reads, or from a quorum of at least two distinct endpoints, and never from Direct, which may be the quoting endpoint itself. Quorums on `latest` often miss, and a chain without EIP-1559 has no base fee: then C either fails the quote or leaves it to A. Read from the quoting endpoint, C is only a consistency check, which catches a broken node, not a dishonest one.
-- **Recommendation:** A as the owner of the problem: it is the last step before a signature, and covers every transaction, not just quotes. B is the core's hardening if a parity deviation is acceptable here.
-- **Decision needed:** whether A's threshold is absolute per chain or relative to the value; whether the core takes B, and B's policy for mixed types and a failed second request; and whether C is wanted at all, given its reference's availability.
+- **The decision: A owns the problem, and B hardens the core's quotes.** A is the last step before a signature, and covers every transaction, not just quotes.
+- **B, with several endpoints.**
+  - Direct asks up to two more endpoints where they exist, three quotes in all, concurrently and within the quote's budget.
+  - It combines every quote that answers, by the rules above: the lowest M and the lowest P; legacy at the lowest gas price; mixed types legacy at the lowest gas price.
+  - An inflated quote then needs every answering endpoint to inflate it.
+  - A dishonest or broken endpoint can only underquote. That delays the payment, which can be replaced at the same nonce.
+  - If only one quote answers, it is marked single-source, and A decides.
+- **A's threshold is relative to the current network fee.** A fixed amount per chain can't follow congestion pricing, and a ratio to the value sent means nothing for the many transactions that send no native value.
+  - **The reference R,** per gas:
+    - where Myotis or Colibri verifies the latest block's base fee B: 2·B plus the lowest priority fee B's quotes gave;
+    - otherwise: B's combined max fee.
+  - **The check:** the confirmation asks again when the transaction's max fee per gas (its gas price, if legacy) is above about 3·R. It names the ratio ("20× today's network fee"), and such a send is never auto-approved. The multiple is tuned against measured fee spikes before release.
+  - **No reference:** when none is available (every quote failed), the confirmation shows the most the transaction can cost, says it couldn't be compared, and the send isn't auto-approved.
+  - **Whatever set the fee:** A judges every transaction this way, whether its fees came from a quote, from a dApp, or from a replacement.
 
 ## Errors and text
 
@@ -792,5 +819,5 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
 5. **The wallet's texts and UI** (step 5): how to show "sent, unconfirmed", unresolved and "taken" intents, and how to offer the same bytes again or a replacement at the same nonce.
 6. **HTTP statuses on broadcast.** A 401, 403 or 429 is ambiguous here, although a gateway usually answers it before forwarding. Is a misconfigured key showing `uncertain` acceptable, or should these be refusals?
 7. **Pinning and trust** (roadmap 3.1): whether a quorum of unpinned `latest` reads may be called `verified`.
-8. **Endpoints' chain** (#93): where `eth_chainId` is checked; see [Endpoints serve their chain](#endpoints-serve-their-chain-proposed-93).
-9. **Fee plausibility** (#92): who bounds a quote, and how; see [Plausibility](#plausibility-proposed-92).
+8. **Endpoints' chain** (#93): **decided** (the user, 2026-10-22): in main, re-checked hourly, and a mismatched user source isn't saved. See [Endpoints serve their chain](#endpoints-serve-their-chain-decided-93).
+9. **Fee plausibility** (#92): **decided** (the user, 2026-10-22): A, with a threshold relative to the current network fee, and B across several endpoints. See [Plausibility](#plausibility-decided-92).
