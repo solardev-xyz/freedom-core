@@ -843,7 +843,7 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
     - nothing falls back to a direct socket;
     - a transport the proxy can't carry (QUIC, or any other non-TCP transport) is refused before any socket exists.
 - **Where the proxy comes from:**
-  - A new per-profile setting, **Route IPFS through Tor**, off by default, sends Arti's SOCKS endpoint from `tor-manager`, as an IP and port.
+  - A new per-profile setting, **Route IPFS through Tor**, off by default, sends Arti's SOCKS endpoint from `tor-manager`, as an IP and port. It is a switch of its own, apart from 0008's Route Radicle through Tor; a future "everything through Tor" mode would turn both on ([Open questions](#open-questions), 3).
   - Today Tor in Freedom means onion access. Clearnet and the dweb protocols stay direct (`docs/features.md`), and this design keeps that default.
 
 ### The gate
@@ -1511,7 +1511,9 @@ Every body already passes through main today, so the pipe adds one copy into the
    - are 8 instances under a 448 MiB budget the right bound?
 3. **The proxy's scope:**
    - SOCKS5 to Arti only (this design), or also a user's HTTP proxy for the HTTP half? libp2p would need another custom transport for that.
+     - **Decided (the user, 2026-10-22): SOCKS5 to Arti only.** One proxy path to build and test. A user's HTTP proxy can be added later as a decision of its own.
    - Should Route IPFS through Tor follow a future "everything through Tor" mode, and be one switch with 0008's Radicle setting?
+     - **Decided (the user, 2026-10-22): separate switches now, and a future "everything through Tor" mode turns both on.** IPFS gives up more under Tor than Radicle does (no QUIC, delegated routing only), so a user can take one without the other. An all-Tor mode, if one is added, sets both.
 4. **Routing under a proxy:** delegated only (recommended), or the light DHT through SOCKS, which costs many Tor circuits per query? And how many IPFS peers accept connections from Tor exits on their ports? That is to be measured before the setting ships.
 5. **Local providers:** the address policy refuses untrusted local targets by default. Should a user setting allow providers on the local network?
    - **Decided (the user, 2026-10-22): no setting.** The address policy ships as designed. A local node the user sets up deliberately is reached as a configured endpoint, which is exempt. A setting can be added later as a decision of its own, if users need one.
