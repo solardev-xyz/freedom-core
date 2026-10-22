@@ -60,7 +60,7 @@ This design moves it into **its own supervised process, `freedom-radicled`**. It
   - An address policy covers addresses learned from peers.
   - The node listens on nothing: no inbound port, and, after an upstream change, no control socket.
 - **Private windows** read the profile's node, as today. A private read sends nothing, signs nothing, writes nothing and records nothing. Private partitions can't seed, sync or write.
-- **The code goes beside 0007's,** as `services/freedom-radicled` in its own Cargo workspace. A new repository remains the user's call.
+- **The code goes beside 0007's,** as `services/freedom-radicled` in its own Cargo workspace (the user's decision, 2026-10-22). Moving it to a new repository later would be a new decision.
 - **Tests come first:**
   - a contract suite over the add-on's 30 exports;
   - golden JSON recorded from v0.8.0 on a fixture repository, which the service must reproduce byte for byte.
@@ -900,9 +900,9 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
 
 ## Where the code lives
 
-0007's options and recommendation apply.
+**Decided (the user, 2026-10-22): the first option,** as for 0007. The others are kept as the reasons for that choice.
 
-1. **This repository, `services/freedom-radicled`, its own Cargo workspace** (recommended):
+1. **This repository, `services/freedom-radicled`, its own Cargo workspace** (chosen):
    - it shares `fc-protocol` and 0007's service skeleton;
    - it has its own lockfile and `deny.toml`. libradicle's lockfile, which also covers its add-on and UniFFI bindings, has 453 packages, including vendored libgit2 (C; GPL-2.0 with a linking exception, which the notices must carry) and bundled SQLite;
    - heartwood comes from `solardev-xyz/heartwood`, which `deny.toml`'s organization allowlist covers.
@@ -910,7 +910,7 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
 3. **Upstream libradicle,** as a binary beside `napi/` and `uniffi/`.
    - **For:** the closest home.
    - **Against:** the frame protocol, lock and supervision contract are Freedom's, and this repository's lack of a license blocks depending on `fc-protocol`.
-4. **A new repository:** the user's decision.
+4. **A new repository:** not chosen. Moving later would be a new decision.
 
 **Scope of the separation:**
 - A separate workspace separates dependency resolution and advisory gates. It is not supply-chain isolation: build scripts and proc macros still run with the build host's authority.
@@ -1156,6 +1156,7 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 ## Open questions
 
 1. **Where the code lives:** a separate workspace here (recommended), upstream libradicle, or a new repository (the user's decision).
+   - **Decided (the user, 2026-10-22): a separate workspace here,** following 0007's `services/freedom-ipfsd`.
 2. **Key custody:** keep the key file (this design), or move to a sealed host key with no file at rest? The latter needs a new exception to rule 3, and an unlocked vault for every start (the user's decision).
 3. **AGENTS.md, a prerequisite to the custody choice:** should rules 3 and 4 name node identities: 0001's node identity writes (Bee and Radicle), and keys that outlive a vault lock? (The user's decision.)
 4. **The device key:** this design has the core write the random key on profiles without a vault. Is a device identity that isn't derived from the wallet still wanted there, or should Radicle require a vault?

@@ -69,7 +69,7 @@ This design moves it into **its own supervised process, `freedom-ipfsd`**:
   - freedom-ipfs has no hook for any of this today, so it needs upstream changes, [listed](#upstream-changes-in-freedom-ipfs) by file and line.
 - **The code lives in this repository, in its own Cargo workspace** (`services/freedom-ipfsd`).
   - It shares `fc-protocol` and the release workflow, but not the core's lockfile, build jobs or credentials.
-  - A new repository remains the user's call ([Where the code lives](#where-the-code-lives)).
+  - The user decided this on 2026-10-22. Moving it to a new repository later would be a new decision ([Where the code lives](#where-the-code-lives)).
 - **Tests come first.** #704's native-backend cases become one contract suite, run against the add-on before anything moves, and then against the service.
 
 ## Goals and non-goals
@@ -1182,9 +1182,9 @@ Each is a pull request to freedom-ipfs, and none changes mobile's behavior by de
 
 ## Where the code lives
 
-Four options. A new repository is the user's decision; this design recommends the first.
+**Decided (the user, 2026-10-22): the first option.** The other three are kept as the reasons for that choice. Moving the service later would be a new decision.
 
-1. **This repository, as `services/freedom-ipfsd`, a separate Cargo workspace** (recommended).
+1. **This repository, as `services/freedom-ipfsd`, a separate Cargo workspace** (chosen).
    - **For:**
      - `fc-protocol` by path, so one frame and stream codec;
      - one release workflow, with Linux builds against glibc 2.17, which also closes #350's GLIBC floor ([Open questions](#open-questions));
@@ -1505,6 +1505,7 @@ Every body already passes through main today, so the pipe adds one copy into the
 ## Open questions
 
 1. **Where the code lives:** a separate workspace in this repository (recommended), a member of the core's workspace, upstream, or a new repository (the user's decision).
+   - **Decided (the user, 2026-10-22): a separate workspace in this repository, `services/freedom-ipfsd`, as built.** It keeps IPFS's dependencies out of the key-holding core's lockfile and checks, while sharing `fc-protocol` and the release pipeline. Being self-contained, it can still move later.
 2. **Private windows:**
    - an in-memory instance per private partition in one process (recommended), one instance shared by all private windows, or a process per window, which would also separate address spaces?
    - are 8 instances under a 448 MiB budget the right bound?
@@ -1513,6 +1514,7 @@ Every body already passes through main today, so the pipe adds one copy into the
    - Should Route IPFS through Tor follow a future "everything through Tor" mode, and be one switch with 0008's Radicle setting?
 4. **Routing under a proxy:** delegated only (recommended), or the light DHT through SOCKS, which costs many Tor circuits per query? And how many IPFS peers accept connections from Tor exits on their ports? That is to be measured before the setting ships.
 5. **Local providers:** the address policy refuses untrusted local targets by default. Should a user setting allow providers on the local network?
+   - **Decided (the user, 2026-10-22): no setting.** The address policy ships as designed. A local node the user sets up deliberately is reached as a configured endpoint, which is exempt. A setting can be added later as a decision of its own, if users need one.
 6. **The musl build:** do SQLite and `ring` build statically for both Linux targets in this repository's release workflow? If not, the Linux builds need a glibc floor of their own, chosen with #350 in mind.
    - **They build, but the Linux builds link glibc 2.17 instead,** for [Cost](#cost).
      - The dry run of #144 built both targets static, with musl's C compiler wrapper, and on x86_64 the service's whole test suite passed against the musl build.
