@@ -1,4 +1,5 @@
-//! `ipfs.start` and `ipfs.stop` parameters (design 0007, "Methods").
+//! `ipfs.start`, `ipfs.stop` and `ipfs.request` parameters (design 0007,
+//! "Methods").
 //!
 //! Every member is required and checked, and unknown members are refused:
 //! main sends today's values explicitly (0007: "the values above are
@@ -7,7 +8,7 @@
 
 use std::time::Duration;
 
-use freedom_ipfs_gateway::RoutingMode;
+use freedom_ipfs_gateway::{NativeRequestHeader, RoutingMode};
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -22,9 +23,11 @@ pub const MAX_MEMORY_STORE: u64 = 32 << 20;
 /// A disk store's most block data: a target for LRU eviction, not a hard
 /// bound (0007, "Budgets"); this only refuses nonsense.
 pub const MAX_DISK_STORE: u64 = 1 << 40;
-/// The most delegated routers, and the longest one.
+/// The longest `headers_ms`: the plan's head deadline is at most 30 s (0007,
+/// "Bounds").
+pub const MAX_HEADERS_MS: u64 = 30_000;
+/// The most delegated routers.
 pub const MAX_ROUTERS: usize = 8;
-pub const MAX_ROUTER_LEN: usize = 2048;
 
 /// A checked `ipfs.start`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +51,9 @@ pub enum Store {
 pub struct Routing {
     pub mode: RoutingMode,
     pub delegated_routers: Vec<String>,
+    /// The DoH endpoint DNSLink and `/dnsaddr` expansion ask (0007, "The
+    /// gate": a configured target, as the routers are).
+    pub doh_endpoint: String,
     pub dht_query_timeout: Duration,
     pub dht_max_providers: usize,
 }
@@ -80,6 +86,7 @@ struct StoreWire {
 struct RoutingWire {
     mode: String,
     delegated_routers: Vec<String>,
+    doh_endpoint: String,
     dht_query_timeout_s: u64,
     dht_max_providers: u64,
 }
@@ -95,6 +102,33 @@ struct GatewayWire {
 #[serde(deny_unknown_fields)]
 struct StopWire {
     instance: String,
+}
+
+/// A checked `ipfs.request`: what upstream's native-request parser is
+/// given, and the head's deadline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Request {
+    pub instance: String,
+    /// Passed through to the parser, which takes `GET` or `HEAD`.
+    pub method: String,
+    /// The plan's path, passed through.
+    pub path: String,
+    /// The plan's headers, passed through.
+    pub headers: Vec<NativeRequestHeader>,
+    /// The head's deadline, from admission.
+    pub headers_ms: Duration,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestWire {
+    instance: String,
+    method: String,
+    path: String,
+    /// `[name, value]` pairs, as main sends them; upstream's header type
+    /// takes that form (and `{ name, value }`, as the add-on's JSON does).
+    headers: Vec<NativeRequestHeader>,
+    headers_ms: u64,
 }
 
 fn object<'a, T: Deserialize<'a>>(params: Option<&'a RawValue>) -> Result<T, &'static str> {
@@ -135,9 +169,16 @@ pub fn start(params: Option<&RawValue>) -> Result<Start, &'static str> {
         .routing
         .delegated_routers
         .iter()
-        .all(|router| router_ok(router))
+        .all(|router| network::endpoint_ok(router))
     {
-        return Err("routing.delegated_routers must be http or https URLs");
+        return Err(
+            "routing.delegated_routers must be http or https URLs, without userinfo or a fragment",
+        );
+    }
+    if !network::endpoint_ok(&wire.routing.doh_endpoint) {
+        return Err(
+            "routing.doh_endpoint must be an http or https URL, without userinfo or a fragment",
+        );
     }
     if !(1..=60).contains(&wire.routing.dht_query_timeout_s) {
         return Err("routing.dht_query_timeout_s must be between 1 and 60");
@@ -153,12 +194,36 @@ pub fn start(params: Option<&RawValue>) -> Result<Start, &'static str> {
     if !(1..=60_000).contains(&wire.gateway.request_queue_timeout_ms) {
         return Err("gateway.request_queue_timeout_ms must be between 1 and 60000");
     }
+    let network = network::parse(&wire.network)?;
+    match network {
+        // `direct` has no route to an onion (0007, "The onion route").
+        NetworkPolicy::Direct
+            if wire
+                .routing
+                .delegated_routers
+                .iter()
+                .chain([&wire.routing.doh_endpoint])
+                .any(|endpoint| network::is_onion(endpoint)) =>
+        {
+            return Err("an onion router or DoH endpoint needs network mode socks5");
+        }
+        // The light DHT dials dozens of peers per query, each through the
+        // proxy, and can't bootstrap without a local lookup (0007, "Modes":
+        // routing is delegated under a proxy; decision D6).
+        NetworkPolicy::Socks5 { .. }
+            if !matches!(mode, RoutingMode::Delegated | RoutingMode::Offline) =>
+        {
+            return Err("network mode socks5 takes routing mode delegated or offline");
+        }
+        NetworkPolicy::Direct | NetworkPolicy::Socks5 { .. } => {}
+    }
     Ok(Start {
         instance: wire.instance,
         store,
         routing: Routing {
             mode,
             delegated_routers: wire.routing.delegated_routers,
+            doh_endpoint: wire.routing.doh_endpoint,
             dht_query_timeout: Duration::from_secs(wire.routing.dht_query_timeout_s),
             dht_max_providers,
         },
@@ -166,7 +231,7 @@ pub fn start(params: Option<&RawValue>) -> Result<Start, &'static str> {
             max_concurrent_requests,
             request_queue_timeout: Duration::from_millis(wire.gateway.request_queue_timeout_ms),
         },
-        network: network::parse(&wire.network)?,
+        network,
     })
 }
 
@@ -175,6 +240,23 @@ pub fn stop(params: Option<&RawValue>) -> Result<String, &'static str> {
     let wire: StopWire = object(params)?;
     check_instance(&wire.instance)?;
     Ok(wire.instance)
+}
+
+/// Parses and checks `ipfs.request`'s params. The method, path and headers
+/// are upstream's parser's to judge; here only their types.
+pub fn request(params: Option<&RawValue>) -> Result<Request, &'static str> {
+    let wire: RequestWire = object(params)?;
+    check_instance(&wire.instance)?;
+    if !(1..=MAX_HEADERS_MS).contains(&wire.headers_ms) {
+        return Err("headers_ms must be between 1 and 30000");
+    }
+    Ok(Request {
+        instance: wire.instance,
+        method: wire.method,
+        path: wire.path,
+        headers: wire.headers,
+        headers_ms: Duration::from_millis(wire.headers_ms),
+    })
 }
 
 /// Instance IDs are main's labels (`p-1`, `e-1`, …): short, and safe to log.
@@ -190,18 +272,6 @@ fn check_instance(instance: &str) -> Result<(), &'static str> {
     }
 }
 
-/// A delegated router is configuration main sends, not page input: this
-/// only refuses what can't be one. Userinfo, the gate and every later check
-/// on configured endpoints come with the network policy (0007, step 8).
-fn router_ok(router: &str) -> bool {
-    let rest = router
-        .strip_prefix("https://")
-        .or_else(|| router.strip_prefix("http://"));
-    router.len() <= MAX_ROUTER_LEN
-        && rest.is_some_and(|rest| !rest.is_empty())
-        && router.bytes().all(|b| b.is_ascii_graphic())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +284,7 @@ mod tests {
             "store": { "kind": "disk", "max_bytes": 268435456 },
             "routing": { "mode": "auto",
                 "delegated_routers": ["https://delegated-ipfs.dev/routing/v1", "https://cid.contact/routing/v1"],
+                "doh_endpoint": "https://cloudflare-dns.com/dns-query",
                 "dht_query_timeout_s": 3, "dht_max_providers": 32 },
             "gateway": { "max_concurrent_requests": 8, "request_queue_timeout_ms": 15000 },
             "network": { "mode": "direct" }
@@ -241,6 +312,7 @@ mod tests {
                         "https://delegated-ipfs.dev/routing/v1".into(),
                         "https://cid.contact/routing/v1".into()
                     ],
+                    doh_endpoint: "https://cloudflare-dns.com/dns-query".into(),
                     dht_query_timeout: Duration::from_secs(3),
                     dht_max_providers: 32,
                 },
@@ -287,6 +359,35 @@ mod tests {
             ("/routing/delegated_routers", json!(["https://"])),
             ("/routing/delegated_routers", json!(["https://a b"])),
             ("/routing/delegated_routers", json!(vec!["https://a"; 9])),
+            (
+                "/routing/delegated_routers",
+                json!(["https://u:p@delegated-ipfs.dev/"]),
+            ),
+            (
+                "/routing/delegated_routers",
+                json!(["https://delegated-ipfs.dev/#f"]),
+            ),
+            ("/routing/delegated_routers", json!(["https://.example/"])),
+            ("/routing/doh_endpoint", json!("ftp://cloudflare-dns.com/")),
+            (
+                "/routing/doh_endpoint",
+                json!("https://u@cloudflare-dns.com/"),
+            ),
+            (
+                "/routing/doh_endpoint",
+                json!("https://cloudflare-dns.com/#f"),
+            ),
+            ("/routing/doh_endpoint", json!("")),
+            ("/routing/doh_endpoint", json!(1)),
+            // `direct` reaches no onion.
+            (
+                "/routing/delegated_routers",
+                json!(["https://router.onion/routing/v1"]),
+            ),
+            (
+                "/routing/doh_endpoint",
+                json!("https://dns.onion/dns-query"),
+            ),
             ("/routing/dht_query_timeout_s", json!(0)),
             ("/routing/dht_query_timeout_s", json!(61)),
             ("/routing/dht_max_providers", json!(0)),
@@ -295,11 +396,13 @@ mod tests {
             ("/gateway/max_concurrent_requests", json!(65)),
             ("/gateway/request_queue_timeout_ms", json!(0)),
             ("/gateway/request_queue_timeout_ms", json!(60_001)),
+            // `socks5` takes delegated or offline routing; `todays()` is auto.
             (
                 "/network",
                 json!({ "mode": "socks5", "ip": "127.0.0.1", "port": 9150 }),
             ),
             ("/network/mode", json!("tor")),
+            ("/network/port", json!(0)),
             ("/extra", json!(1)),
             ("/routing/extra", json!(1)),
         ];
@@ -322,9 +425,99 @@ mod tests {
             params.as_object_mut().unwrap().remove(missing);
             assert!(parse(&params).is_err(), "{missing}");
         }
+        let mut no_doh = todays();
+        no_doh["routing"]
+            .as_object_mut()
+            .unwrap()
+            .remove("doh_endpoint");
+        assert!(parse(&no_doh).is_err());
         assert!(start(None).is_err());
         let array = serde_json::value::to_raw_value(&json!([1])).unwrap();
         assert!(start(Some(&array)).is_err());
+    }
+
+    /// `socks5` with delegated or offline routing: an onion router or DoH
+    /// endpoint is accepted there, where `direct` refuses it; every other
+    /// routing mode is refused (decision D6).
+    #[test]
+    fn socks5_takes_delegated_or_offline_routing_and_reaches_onions() {
+        let socks5 = |mode: &str| {
+            let mut params = todays();
+            params["routing"]["mode"] = mode.into();
+            params["routing"]["delegated_routers"] = json!(["https://router.onion/routing/v1"]);
+            params["routing"]["doh_endpoint"] = json!("https://dns.onion/dns-query");
+            params["network"] = json!({ "mode": "socks5", "ip": "127.0.0.1", "port": 9150 });
+            parse(&params)
+        };
+        for (mode, expected) in [
+            ("delegated", RoutingMode::Delegated),
+            ("offline", RoutingMode::Offline),
+        ] {
+            let start = socks5(mode).unwrap();
+            assert_eq!(start.routing.mode, expected);
+            assert_eq!(
+                start.network,
+                NetworkPolicy::Socks5 {
+                    proxy: "127.0.0.1:9150".parse().unwrap()
+                }
+            );
+        }
+        for mode in ["auto", "light_dht"] {
+            assert_eq!(
+                socks5(mode),
+                Err("network mode socks5 takes routing mode delegated or offline")
+            );
+        }
+    }
+
+    fn request_params() -> Value {
+        json!({ "instance": "p-1", "method": "GET", "path": "/ipfs/bafy/app.js",
+            "headers": [["range", "bytes=0-"]], "headers_ms": 30000 })
+    }
+
+    #[test]
+    fn a_request_takes_its_five_members() {
+        let raw = serde_json::value::to_raw_value(&request_params()).unwrap();
+        assert_eq!(
+            request(Some(&raw)),
+            Ok(Request {
+                instance: "p-1".into(),
+                method: "GET".into(),
+                path: "/ipfs/bafy/app.js".into(),
+                headers: vec![NativeRequestHeader {
+                    name: "range".into(),
+                    value: "bytes=0-".into()
+                }],
+                headers_ms: Duration::from_secs(30),
+            })
+        );
+        let cases: Vec<(&str, Value)> = vec![
+            ("instance", json!("p 1")),
+            ("instance", json!(1)),
+            ("method", json!(1)),
+            ("path", json!(null)),
+            ("headers", json!("range")),
+            ("headers", json!([["range"]])),
+            ("headers", json!([["range", 1]])),
+            ("headers_ms", json!(0)),
+            ("headers_ms", json!(30_001)),
+            ("headers_ms", json!(-1)),
+            ("headers_ms", json!(1.5)),
+            ("extra", json!(1)),
+        ];
+        for (member, value) in cases {
+            let mut params = request_params();
+            params[member] = value.clone();
+            let raw = serde_json::value::to_raw_value(&params).unwrap();
+            assert!(request(Some(&raw)).is_err(), "{member} = {value}");
+        }
+        for missing in ["instance", "method", "path", "headers", "headers_ms"] {
+            let mut params = request_params();
+            params.as_object_mut().unwrap().remove(missing);
+            let raw = serde_json::value::to_raw_value(&params).unwrap();
+            assert!(request(Some(&raw)).is_err(), "{missing}");
+        }
+        assert!(request(None).is_err());
     }
 
     #[test]

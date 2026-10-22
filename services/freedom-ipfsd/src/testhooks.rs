@@ -15,10 +15,35 @@
 //! - `FREEDOM_IPFSD_TEST_PANIC=start` panics in each `ipfs.start`'s job,
 //!   with a payload that names a path, as a fault in the service's own work
 //!   would.
+//! - `FREEDOM_IPFSD_TEST_MEMORY_BUDGET` replaces the process's memory budget
+//!   (bytes), so a test can fill it.
+//! - `FREEDOM_IPFSD_TEST_STREAM_MEMORY_WAIT_MS` replaces the 10 s a
+//!   stream's next fetch waits for memory.
+//! - `FREEDOM_IPFSD_TEST_HTML_PREFETCH_ASSETS` turns upstream's HTML
+//!   prefetch on (off by default, as 0007 keeps it), for that many assets,
+//!   one at a time: background work, to fill an instance's background queue.
+//! - `FREEDOM_IPFSD_TEST_PROGRESS_COUNTS=1` adds `test_progress` to each
+//!   `ipfs.stats` reply, in either process: how many targets and events the
+//!   instance's recorder and the process's default recorder hold, so a test
+//!   can tell what was recorded, and where, even where `progress` is null.
+//! - `FREEDOM_IPFSD_TEST_HANDLED_FILE=<path>` appends each request's ID to
+//!   the file once the service has handled it on the reader thread (its
+//!   reply queued, or its work started): a test can wait for the reader
+//!   without reading stdout.
+//! - `FREEDOM_IPFSD_TEST_REQUEST_HOOKS=1` lets an `ipfs.request`'s own
+//!   headers ask for a fault in its work, so one process can serve held,
+//!   panicking and ordinary requests side by side:
+//!   - `x-freedom-test-hold: head` holds the work before it asks the
+//!     gateway, and `body` once its head is queued, before its body, until
+//!     the work is cancelled (as any await in it is);
+//!   - `x-freedom-test-panic: request` panics in the work before it asks
+//!     the gateway, and `body` once its head is queued, with a payload that
+//!     names a path: as a fault inside freedom-ipfs on a request's task
+//!     would.
 
 use std::time::Duration;
 
-use freedom_ipfs_gateway::Instance;
+use freedom_ipfs_gateway::{GatewayCoreRequest, Instance};
 
 #[cfg(feature = "testhooks")]
 fn millis(name: &str) -> Option<u64> {
@@ -45,6 +70,80 @@ pub fn hold_teardown(instance: &Instance) {
 #[cfg(not(feature = "testhooks"))]
 pub fn hold_teardown(_instance: &Instance) {}
 
+/// Records that the service has handled request `id`, if a test asks
+/// (`FREEDOM_IPFSD_TEST_HANDLED_FILE`): one line per request.
+pub fn handled(id: u64) {
+    #[cfg(feature = "testhooks")]
+    if let Some(path) = std::env::var_os("FREEDOM_IPFSD_TEST_HANDLED_FILE") {
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(file, "{id}");
+        }
+    }
+    let _ = id;
+}
+
+/// What `instance`'s recorder and the process's default recorder hold, if
+/// a test asks (`FREEDOM_IPFSD_TEST_PROGRESS_COUNTS=1`).
+pub fn progress_counts(
+    instance: &freedom_ipfs_gateway::progress::ProgressRecorder,
+) -> Option<serde_json::Value> {
+    #[cfg(feature = "testhooks")]
+    if std::env::var_os("FREEDOM_IPFSD_TEST_PROGRESS_COUNTS").is_some() {
+        let counts = |recorder: &freedom_ipfs_gateway::progress::ProgressRecorder| {
+            let snapshot = serde_json::to_value(recorder.snapshot()).unwrap_or_default();
+            serde_json::json!({ "active_count": snapshot["active_count"],
+                "event_count": snapshot["event_count"] })
+        };
+        let default = freedom_ipfs_gateway::progress::default_recorder();
+        return Some(
+            serde_json::json!({ "instance": counts(instance), "default": counts(&default) }),
+        );
+    }
+    let _ = instance;
+    None
+}
+
+/// The process's memory budget: `default`, unless a test replaces it.
+pub fn memory_budget(default: usize) -> usize {
+    #[cfg(feature = "testhooks")]
+    if let Some(bytes) = millis("FREEDOM_IPFSD_TEST_MEMORY_BUDGET") {
+        return usize::try_from(bytes).unwrap_or(default);
+    }
+    default
+}
+
+/// How long a stream's next fetch waits for memory: `default`, unless a
+/// test replaces it.
+pub fn stream_memory_wait(default: Duration) -> Duration {
+    #[cfg(feature = "testhooks")]
+    if let Some(ms) = millis("FREEDOM_IPFSD_TEST_STREAM_MEMORY_WAIT_MS") {
+        return Duration::from_millis(ms);
+    }
+    default
+}
+
+/// The instance's gateway configuration, with HTML prefetch on if a test
+/// asks for it.
+pub fn gateway_config(
+    config: freedom_ipfs_gateway::GatewayConfig,
+) -> freedom_ipfs_gateway::GatewayConfig {
+    #[cfg(feature = "testhooks")]
+    if let Some(assets) = millis("FREEDOM_IPFSD_TEST_HTML_PREFETCH_ASSETS") {
+        let assets = usize::try_from(assets).unwrap_or(0);
+        return config.with_html_prefetch(freedom_ipfs_gateway::GatewayHtmlPrefetchConfig::new(
+            assets,
+            64 << 10,
+            1,
+        ));
+    }
+    config
+}
+
 /// Stalls an `ipfs.start`, as `FREEDOM_IPFSD_TEST_START_DELAY_MS` says.
 pub fn start_delay() {
     #[cfg(feature = "testhooks")]
@@ -60,6 +159,60 @@ pub fn start_deadline(default: Duration) -> Duration {
         return Duration::from_millis(ms);
     }
     default
+}
+
+/// Where in a request's work a hook acts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// Before it asks the gateway.
+    Request,
+    /// Once its head is queued, before its body.
+    Body,
+}
+
+/// What a request's test headers ask of its work: nothing, without the
+/// feature or `FREEDOM_IPFSD_TEST_REQUEST_HOOKS`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RequestHooks {
+    hold: Option<Phase>,
+    panic: Option<Phase>,
+}
+
+impl RequestHooks {
+    /// Read from `request`'s headers, once, before its work starts.
+    pub fn of(request: &GatewayCoreRequest) -> RequestHooks {
+        #[cfg(feature = "testhooks")]
+        if std::env::var("FREEDOM_IPFSD_TEST_REQUEST_HOOKS").is_ok_and(|on| on == "1") {
+            let phase = |name: &str| match request
+                .headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+            {
+                Some("head" | "request") => Some(Phase::Request),
+                Some("body") => Some(Phase::Body),
+                _ => None,
+            };
+            return RequestHooks {
+                hold: phase("x-freedom-test-hold"),
+                panic: phase("x-freedom-test-panic"),
+            };
+        }
+        let _ = request;
+        RequestHooks::default()
+    }
+
+    /// Acts at `phase`: holds the work until it is cancelled, or panics.
+    pub async fn at(&self, phase: Phase) {
+        if self.panic == Some(phase) {
+            #[allow(clippy::panic)]
+            {
+                panic!("test panic in a request: SECRET /ipfs/bafy/home/user/.config/Freedom");
+            }
+        }
+        if self.hold == Some(phase) {
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 /// Panics at `point` if `FREEDOM_IPFSD_TEST_PANIC` names it.

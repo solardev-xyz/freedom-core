@@ -300,8 +300,17 @@ async function buildLegacyVaults(reference, existing, mode, directory) {
 }
 
 async function buildVaults(reference, existing, mode) {
-  const { meta, vault, passworder } = reference;
+  // Each run writes its vaults to a fresh directory, removed after.
   const directory = scratchDirectory();
+  try {
+    return await buildVaultsIn(directory, reference, existing, mode);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+async function buildVaultsIn(directory, reference, existing, mode) {
+  const { meta, vault, passworder } = reference;
   const fixtures = [];
   for (const [index, config] of VAULT_CASES.entries()) {
     const mnemonic = mnemonicFor(config.mnemonicId);

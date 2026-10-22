@@ -319,7 +319,11 @@ mod tests {
         let other = acquire(&data, &locks, "radicle", Duration::ZERO).unwrap();
         assert_ne!(other.lock_path, gate.lock_path);
         drop(gate);
-        assert!(acquire(&data, &locks, "ipfs", Duration::ZERO).is_ok());
+        // Other tests in this binary spawn children: one spawned while the
+        // gate was held keeps a copy of its descriptor, and so the lock,
+        // until it execs. Released means acquirable within the retry, here
+        // and in every other test that reacquires after a release.
+        assert!(acquire(&data, &locks, "ipfs", CONTENTION_RETRY).is_ok());
     }
 
     #[test]
@@ -375,7 +379,8 @@ mod tests {
         set(&data, 0o755);
         set(&locks, 0o777);
         set(&lock_path, 0o644);
-        let gate = acquire(&data, &locks, "ipfs", Duration::ZERO).unwrap();
+        // A reacquire after a release retries (see the release test).
+        let gate = acquire(&data, &locks, "ipfs", CONTENTION_RETRY).unwrap();
         assert_eq!(mode(&data), 0o700);
         assert_eq!(mode(&locks), 0o700);
         assert_eq!(mode(&gate.lock_path), 0o600);
@@ -431,7 +436,7 @@ mod tests {
         let (exit, out) = holder.join().unwrap();
         said.extend(out);
         assert_eq!((exit, said.as_slice()), (Exit::Ok, &b"locked\n"[..]));
-        assert!(acquire(&data, &locks, "ipfs", Duration::ZERO).is_ok());
+        assert!(acquire(&data, &locks, "ipfs", CONTENTION_RETRY).is_ok());
     }
 
     /// A stdin that fails its first read with `kind`, then reads `inner`.
@@ -493,7 +498,7 @@ mod tests {
         };
         let exit = hold_lock(&data, &locks, "ipfs", input, Vec::new());
         assert_eq!(exit, Exit::Internal);
-        assert!(acquire(&data, &locks, "ipfs", Duration::ZERO).is_ok());
+        assert!(acquire(&data, &locks, "ipfs", CONTENTION_RETRY).is_ok());
     }
 
     #[test]

@@ -49,11 +49,8 @@ fn a_persistent_instance_starts_and_stops() {
         ipfsd.start(disk("p-2"))["result"],
         json!({ "instance": "p-2" })
     );
-    // Requests and stats come with the next step.
-    for method in ["ipfs.request", "ipfs.stats"] {
-        let reply = ipfsd.call(method, json!({ "instance": "p-2" }));
-        assert_eq!(reply["error"]["code"], "unknown_method", "{reply}");
-    }
+    let reply = ipfsd.call("ipfs.stats", json!({ "instance": "p-2" }));
+    assert!(reply["result"]["gateway"].is_object(), "{reply}");
     ipfsd.shutdown();
     assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
     let stderr = ipfsd.stderr();
@@ -110,9 +107,10 @@ fn ephemeral_instances() {
 fn start_params_are_checked() {
     let mut ipfsd = Ipfsd::ephemeral(&[]);
     ipfsd.hello();
-    // The network policy is step 8's: only direct, for now.
+    // `socks5` takes delegated or offline routing only (decision D6).
     let mut socks = memory("e-1");
     socks["network"] = json!({ "mode": "socks5", "ip": "127.0.0.1", "port": 9150 });
+    socks["routing"]["mode"] = json!("auto");
     let reply = ipfsd.start(socks);
     assert_eq!(reply["error"]["code"], "invalid_argument");
     assert!(
@@ -124,6 +122,23 @@ fn start_params_are_checked() {
     );
     for (pointer, value) in [
         ("/network/mode", json!("tor")),
+        (
+            "/network",
+            json!({ "mode": "socks5", "ip": "localhost", "port": 9150 }),
+        ),
+        (
+            "/network",
+            json!({ "mode": "socks5", "ip": "0.0.0.0", "port": 9150 }),
+        ),
+        (
+            "/routing/doh_endpoint",
+            json!("https://u@cloudflare-dns.com/"),
+        ),
+        // `direct` reaches no onion.
+        (
+            "/routing/delegated_routers",
+            json!(["https://router.onion/routing/v1"]),
+        ),
         ("/routing/mode", json!("everything")),
         ("/routing/dht_query_timeout_s", json!(0)),
         ("/gateway/max_concurrent_requests", json!(0)),
@@ -148,6 +163,11 @@ fn start_params_are_checked() {
     );
     // None of them took e-1.
     assert_eq!(ipfsd.start(memory("e-1"))["result"]["instance"], "e-1");
+    // `socks5` with offline routing starts: nothing is sent at start, so
+    // the proxy needn't be up.
+    let mut socks = memory("e-2");
+    socks["network"] = json!({ "mode": "socks5", "ip": "127.0.0.1", "port": 9 });
+    assert_eq!(ipfsd.start(socks)["result"]["instance"], "e-2");
     ipfsd.close_stdin();
     assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
 }
@@ -269,6 +289,36 @@ fn a_stop_while_starting_answers_both() {
         2,
         "{stderr}"
     );
+    // Revoked first: p-1 as soon as it existed, fenced while it built; p-2
+    // at the connection's end.
+    assert_eq!(
+        stopping(&stderr),
+        [("p-1".to_string(), true), ("p-2".to_string(), true)],
+        "{stderr}"
+    );
+}
+
+/// Every fence revokes the instance's network first (0007, teardown step
+/// 2): a stop's, and the connection's end.
+#[test]
+fn every_fence_revokes_the_network_first() {
+    let mut ipfsd = Ipfsd::ephemeral(&[]);
+    ipfsd.hello();
+    for instance in ["e-1", "e-2"] {
+        assert_eq!(
+            ipfsd.start(memory(instance))["result"]["instance"],
+            instance
+        );
+    }
+    assert_eq!(ipfsd.stop("e-1")["result"], json!({ "instance": "e-1" }));
+    ipfsd.close_stdin();
+    assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
+    let stderr = ipfsd.stderr();
+    assert_eq!(
+        stopping(&stderr),
+        [("e-1".to_string(), true), ("e-2".to_string(), true)],
+        "{stderr}"
+    );
 }
 
 #[cfg(feature = "testhooks")]
@@ -294,6 +344,9 @@ fn a_cancelled_start_is_torn_down() {
     assert_eq!(ipfsd.stop("p-1")["error"]["code"], "stopped");
     ipfsd.shutdown();
     assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
+    // The cancelled start's instance was revoked as soon as it existed.
+    let stderr = ipfsd.stderr();
+    assert_eq!(stopping(&stderr)[0], ("p-1".to_string(), true), "{stderr}");
 }
 
 #[cfg(feature = "testhooks")]
