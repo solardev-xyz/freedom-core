@@ -263,3 +263,95 @@ fn discovery_queries_only_while_a_direct_instance_lives() {
     ipfsd.close_stdin();
     assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
 }
+
+/// 169-M1: a fenced instance's discovery lease goes at its fence, not when
+/// its teardown is proven. A live instance's stop, its teardown held 2 s
+/// across the 5 s refresh: no query until the stop's acknowledgement.
+#[test]
+fn a_stopped_instance_holds_discovery_no_longer_than_its_fence() {
+    let dns64 = Dns64::start(&["2001:db8:64::"], false);
+    let resolvers = dns64.addr.to_string();
+    let mut ipfsd = Ipfsd::ephemeral(&[
+        ("FREEDOM_IPFSD_TEST_NAT64_RESOLVERS", &resolvers),
+        ("FREEDOM_IPFSD_TEST_HOLD_TEARDOWN_MS", "2000"),
+    ]);
+    ipfsd.hello();
+    assert_eq!(ipfsd.start(memory("e-1"))["result"]["instance"], "e-1");
+    let network = network_stats_until(&mut ipfsd, "e-1", |network| {
+        network["nat64"]["state"] == "known"
+    });
+    assert_eq!(network["nat64"]["state"], "known", "{network}");
+    // Past 4 s of the 5 s TTL, the stop; its teardown is held past the
+    // refresh's time.
+    std::thread::sleep(Duration::from_millis(4000));
+    let before = dns64.queries();
+    let stopped = Instant::now();
+    assert_eq!(ipfsd.stop("e-1")["result"], json!({ "instance": "e-1" }));
+    assert!(stopped.elapsed() >= Duration::from_millis(1500));
+    assert_eq!(
+        dns64.queries(),
+        before,
+        "a query during the fenced teardown"
+    );
+    ipfsd.close_stdin();
+    assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
+}
+
+/// The same for a start fenced while it builds, by each of a start's
+/// fences: a stop, a cancel, its deadline, the connection's end. Fenced 1 s
+/// after its admission's query, its build held 5.5 s: past the 5 s
+/// refresh, and within the 5 s bound its fence armed. No query meanwhile.
+#[test]
+fn a_start_fenced_while_building_holds_discovery_no_longer() {
+    for fence in ["stop", "cancel", "deadline", "end"] {
+        let dns64 = Dns64::start(&["2001:db8:64::"], false);
+        let resolvers = dns64.addr.to_string();
+        let mut env = vec![
+            ("FREEDOM_IPFSD_TEST_NAT64_RESOLVERS", resolvers.as_str()),
+            ("FREEDOM_IPFSD_TEST_START_DELAY_MS", "5500"),
+        ];
+        if fence == "deadline" {
+            env.push(("FREEDOM_IPFSD_TEST_START_DEADLINE_MS", "1000"));
+        }
+        let mut ipfsd = Ipfsd::ephemeral(&env);
+        ipfsd.hello();
+        let start = ipfsd.request("ipfs.start", memory("e-1"));
+        // Its admission took the lease: discovery has asked.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while dns64.queries() == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(dns64.queries() > 0, "{fence}: no query at admission");
+        std::thread::sleep(Duration::from_millis(1000));
+        let before = dns64.queries();
+        match fence {
+            "stop" => {
+                let stop = ipfsd.request("ipfs.stop", json!({ "instance": "e-1" }));
+                assert_eq!(ipfsd.recv()["id"], start);
+                assert_eq!(ipfsd.recv()["id"], stop);
+            }
+            "cancel" => {
+                ipfsd.cancel(start);
+                // The instance is gone once built and torn down.
+                std::thread::sleep(Duration::from_millis(5500));
+            }
+            "deadline" => {
+                assert_eq!(ipfsd.recv()["error"]["code"], "deadline");
+                std::thread::sleep(Duration::from_millis(5500));
+            }
+            _ => {
+                ipfsd.close_stdin();
+                assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0), "{fence}");
+            }
+        }
+        assert_eq!(
+            dns64.queries(),
+            before,
+            "{fence}: a query while the fenced start built"
+        );
+        if fence != "end" {
+            ipfsd.close_stdin();
+            assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0), "{fence}");
+        }
+    }
+}

@@ -1,6 +1,7 @@
 //! Fault injection for the integration tests (design 0007, Testing: "test
-//! hooks behind a cargo feature"). **Only with the `testhooks` feature:**
-//! without it every hook is a no-op and no variable is read.
+//! hooks behind a cargo feature"). **Only with the `testhooks` feature, in a
+//! debug or test build:** without it every hook is a no-op and no variable
+//! is read, and a release build with it doesn't compile.
 //!
 //! - `FREEDOM_IPFSD_TEST_HOLD_TEARDOWN_MS` holds each instance's teardown:
 //!   the instance runs an untracked job on its runtime's blocking pool, as
@@ -40,6 +41,14 @@
 //!     the gateway, and `body` once its head is queued, with a payload that
 //!     names a path: as a fault inside freedom-ipfs on a request's task
 //!     would.
+
+// The hooks are for debug and test builds only: some take a `direct`
+// instance's address table away (FREEDOM_IPFSD_TEST_DIRECT_UNCHECKED), or
+// choose who discovery asks (FREEDOM_IPFSD_TEST_NAT64_RESOLVERS), and others
+// let a request's own headers hold or panic its work. A release build with
+// the feature doesn't compile (CI checks it doesn't).
+#[cfg(all(feature = "testhooks", not(debug_assertions)))]
+compile_error!("the `testhooks` feature is for debug and test builds only, never a release build");
 
 use std::time::Duration;
 

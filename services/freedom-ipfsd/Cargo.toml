@@ -21,7 +21,8 @@ resolver = "3"
 [features]
 # Fault injection for the integration tests (design 0007, Testing), read from
 # FREEDOM_IPFSD_TEST_* variables: see src/testhooks.rs. Without the feature
-# every hook is a no-op and no variable is read. Release builds leave it off.
+# every hook is a no-op and no variable is read. A release build with it
+# doesn't compile (src/testhooks.rs), and CI checks that it doesn't.
 testhooks = []
 
 [dependencies]

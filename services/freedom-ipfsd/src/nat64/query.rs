@@ -92,9 +92,11 @@ pub trait Gate: Sync {
     fn run(&self, send: &dyn Fn() -> std::io::Result<usize>) -> Option<std::io::Result<usize>>;
 }
 
-/// Sends always allowed.
+/// Sends always allowed: tests.
+#[cfg(test)]
 pub struct Open;
 
+#[cfg(test)]
 impl Gate for Open {
     fn run(&self, send: &dyn Fn() -> std::io::Result<usize>) -> Option<std::io::Result<usize>> {
         Some(send())

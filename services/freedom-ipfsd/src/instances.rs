@@ -184,9 +184,11 @@ struct Slot {
     /// slot, once its teardown is proven or nothing was built. Its caches'
     /// is upstream's instance's, which keeps it as long.
     _store: Reservation,
-    /// A `direct` instance's hold on NAT64 discovery, as long as the slot:
-    /// discovery runs while one is held.
-    _nat64: Option<Lease>,
+    /// A `direct` instance's hold on NAT64 discovery: discovery runs while
+    /// one is held. Released at the instance's first fence, whatever its
+    /// state, not with the slot: a fenced instance connects to nothing, so
+    /// its teardown doesn't keep discovery querying.
+    nat64: Option<Lease>,
 }
 
 enum State {
@@ -257,6 +259,7 @@ impl Slot {
         if !matches!(self.state, State::Live(_)) {
             return None;
         }
+        self.nat64 = None;
         match std::mem::replace(&mut self.state, State::Stopping { stops }) {
             // The shared gateway goes with the fence; requests still
             // running hold their own clones until they end. Step 2, with
@@ -373,7 +376,7 @@ impl Instances {
                         stops: Vec::new(),
                     },
                     _store: store,
-                    _nat64: nat64,
+                    nat64,
                 },
             );
             (table.admitted, caches)
@@ -649,12 +652,14 @@ impl Instances {
         if let Some(Slot {
             start,
             state: State::Starting { fenced, bound, .. },
+            nat64,
             ..
         }) = table.active.get_mut(instance_id)
             && *start == id
             && fenced.is_none()
         {
             *fenced = Some(Fence::Deadline);
+            *nat64 = None;
             *bound = arm(ended);
             let _ = conn.reply_error(
                 id,
@@ -692,6 +697,7 @@ impl Instances {
                 *fenced = Some(Fence::Stopped);
                 *bound = arm(false);
                 stops.push(id);
+                slot.nat64 = None;
             }
             State::Live(_) => {
                 let instance = slot.retire(vec![id]);
@@ -721,6 +727,7 @@ impl Instances {
                 if fenced.is_none() {
                     *fenced = Some(Fence::Cancelled);
                     *bound = arm(false);
+                    slot.nat64 = None;
                 }
             }
             State::Live(_) => {
@@ -892,6 +899,7 @@ impl Instances {
                     // earlier keeps its bound; one fenced now is bounded by
                     // the connection's exit watchdog.
                     fenced.get_or_insert(Fence::Stopped);
+                    slot.nat64 = None;
                 } else if let Some(instance) = slot.retire(Vec::new()) {
                     live.push((instance_id.clone(), instance));
                 }
