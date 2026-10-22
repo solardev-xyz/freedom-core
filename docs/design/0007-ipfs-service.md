@@ -489,7 +489,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
   - **`network`** is one of two forms:
     - `{ "mode": "direct" }`;
     - `{ "mode": "socks5", "ip", "port" }`.
-      - `ip` is an IPv4 or IPv6 address written plainly: no brackets, no zone, no shorthand, no hex or octal. It may not be unspecified, multicast or broadcast. Loopback and private addresses are allowed, since an external Tor may sit on the LAN.
+      - `ip` is an IPv4 or IPv6 address written plainly: no brackets, no zone, no shorthand, no hex or octal. An IPv4-mapped IPv6 address is read as the IPv4 address it maps. It may not be unspecified, multicast or broadcast. Loopback and private addresses are allowed, since an external Tor may sit on the LAN.
       - `port` is from 1 to 65535.
       - No credentials are taken ([Open questions](#open-questions), 11).
       - `socks5` takes `routing.mode` `delegated` or `offline` only ([Open questions](#open-questions), 4).
