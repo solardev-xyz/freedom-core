@@ -863,8 +863,9 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   **The same shapes apply after expansion:** every multiaddr a `/dnsaddr` answer yields is checked whole again ([check 2](#the-gate)).
 
 **The policy:**
-- **Configured targets** are the delegated routers and DoH endpoint in `ipfs.start`, and Arti's endpoint. They are exempt from the address policy, by exact host (and port), including when one is local.
+- **Configured targets** are the delegated routers and DoH endpoint in `ipfs.start`. They are exempt from the address policy, by exact host (and port), including when one is local.
   - An HTTP client's resolver sees a name, never its port, so configured targets are reached through clients of their own, whose resolver doesn't filter but still never answers empty. The redirect loop picks the client for each hop from its scheme, host and port: a configured host on another port, reached by a redirect, is untrusted.
+  - **Arti's endpoint is not a target.** In `socks5` mode it is the transport that every connection goes through, so the service connects to it without asking the gate. A target at its address, as a literal or as a name's answer, is untrusted like any other, so the network can't point the service at the proxy's port.
 - **Untrusted targets** are everything learned from the network:
   - provider records and their multiaddrs;
   - HTTP provider URLs built from them;
