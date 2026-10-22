@@ -1,0 +1,37 @@
+[package]
+name = "fc-sys"
+description = "The few OS calls the standard library lacks, behind safe functions: the workspace's only unsafe code"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+# The workspace lints, except `unsafe_code`: this crate holds the
+# workspace's unsafe code, so that every other crate keeps `forbid`, which
+# nothing can lift. Here it is `deny`, so each FFI call still carries its own
+# reviewed `#[allow(unsafe_code)]`, and every unsafe block needs a `SAFETY`
+# comment and may hold only one unsafe operation.
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_ErrorReporting",
+] }

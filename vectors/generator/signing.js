@@ -171,6 +171,29 @@ const TYPED_DATA = [
   { id: 'error-quantity-exponent', typed_data: { domain: { name: 'E' }, types: ONE('uint256'), message: { v: '1e3' } } },
 ];
 
+// Typed data given as JSON text, which the core must read as JSON.parse
+// reads it (#87): each number correctly rounded to the nearest double, ties
+// to even, however it is spelled. ethers signs JSON.parse's value.
+const PADDING = '0'.repeat(752);
+const FIVE_TO_1075 = (5n ** 1075n).toString();
+const textOf = (type, number) => `{"domain":{"name":"N"},"types":{"M":[{"name":"v","type":"${type}"}]},"message":{"v":${number}}}`;
+const TYPED_DATA_TEXT = [
+  { id: 'tie-plain', typed_data_json: textOf('uint256', '4503599627370496.5') },
+  { id: 'tie-exponent', typed_data_json: textOf('uint256', '45035996273704965e-1') },
+  { id: 'tie-up-to-even', typed_data_json: textOf('uint256', '4503599627370497.5') },
+  // 2^52 + 1/2 with its integer significand padded by 752 zeros.
+  { id: 'tie-padded', typed_data_json: textOf('uint256', `45035996273704965${PADDING}e-753`) },
+  { id: 'tie-padded-negative', typed_data_json: textOf('int256', `-45035996273704965${PADDING}e-753`) },
+  { id: 'above-tie-padded', typed_data_json: textOf('uint256', `45035996273704965${PADDING}1e-754`) },
+  // 2^-1075, halfway between 0 and the smallest subnormal: 0. Just above
+  // halfway it is the subnormal, which no integer type takes.
+  { id: 'subnormal-half', typed_data_json: textOf('uint256', `${FIVE_TO_1075}${'0'.repeat(17)}e-1092`) },
+  { id: 'subnormal-half-negative', typed_data_json: textOf('int256', `-${FIVE_TO_1075}${'0'.repeat(17)}e-1092`) },
+  { id: 'error-subnormal-above-half', typed_data_json: textOf('uint256', `${FIVE_TO_1075}${'0'.repeat(17)}1e-1093`) },
+  { id: 'error-unsafe-tie', typed_data_json: textOf('uint256', '9007199254740991.5') },
+  { id: 'error-not-integral', typed_data_json: textOf('uint256', '4503599627370495.5') },
+];
+
 const SOCS = [
   { id: 'one-byte', identifier: '00'.repeat(32), payload: '01' },
   { id: 'thirty-two', identifier: '11'.repeat(32), payload: 'ab'.repeat(32) },
@@ -262,6 +285,22 @@ async function buildSigning(reference, mnemonicFor, meta) {
     }
   }
 
+  const typedDataText = [];
+  for (const { id, typed_data_json: text } of TYPED_DATA_TEXT) {
+    for (const signer of accounts) {
+      typedDataText.push({
+        id: `${id}/${signer.id}`, keyId: signer.id, typed_data_json: text,
+        result: await settle(async () => {
+          const data = JSON.parse(text);
+          return {
+            signature: await signer.wallet.signTypedData(data.domain, data.types, data.message),
+            hash: ethers.TypedDataEncoder.hash(data.domain, data.types, data.message),
+          };
+        }),
+      });
+    }
+  }
+
   const bee = new beeJs.Bee('http://127.0.0.1:1633');
   const socs = [];
   for (const { id, identifier, payload, span } of SOCS) {
@@ -296,9 +335,10 @@ async function buildSigning(reference, mnemonicFor, meta) {
       bytes: '0x-prefixed lowercase hex',
       signature: '65 bytes r || s || v with v in {27, 28}, 0x hex',
       deviation: 'ethers signs these; the core must reject them (design 0002)',
+      typed_data_json: 'typed data as JSON text, which ethers signs as JSON.parse reads it; the core must read the text the same way',
     },
     keys: keys.map(({ id, mnemonicId, key, address }) => ({ id, mnemonicId, key, address })),
-    transactions, messages, typedData, socs,
+    transactions, messages, typedData, typedDataText, socs,
   };
 }
 

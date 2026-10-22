@@ -208,13 +208,21 @@ fn request_bytes(request: &Request) -> usize {
     }
 }
 
-/// What an answer can come to hold: its body parsed as JSON (its worst-case
-/// tree, `PARSED_FACTOR` per byte), or the verifier's outcome.
+/// What an answer can come to hold: its body parsed as JSON (a bound from
+/// counting its values, with the body's own bytes and any replacement of
+/// invalid UTF-8), or the verifier's outcome.
 fn answer_bytes(answer: &Answer) -> usize {
     use super::budget::PARSED_FACTOR;
     match answer {
         Answer::Rpc { body, .. } | Answer::Gateway { body, .. } | Answer::Tezos { body, .. } => {
-            body.len().saturating_mul(PARSED_FACTOR)
+            let text = String::from_utf8_lossy(body);
+            let decoded = match &text {
+                std::borrow::Cow::Owned(owned) => owned.len(),
+                std::borrow::Cow::Borrowed(_) => 0,
+            };
+            body.len()
+                .saturating_add(decoded)
+                .saturating_add(super::budget::parsed_bound(&text))
         }
         Answer::Verified(super::ens::Verified::Result(value)) => {
             value.stringify().len().saturating_mul(PARSED_FACTOR)
@@ -223,6 +231,13 @@ fn answer_bytes(answer: &Answer) -> usize {
         Answer::Verified(super::ens::Verified::Failure(class)) => class.len(),
         Answer::Failed(_) | Answer::Done => 0,
     }
+}
+
+/// Whether a JSON-RPC body the core wrote asks for a head or a block, which
+/// only the anchor does.
+fn is_anchor_body(body: &str) -> bool {
+    body.contains(r#""method":"eth_blockNumber""#)
+        || body.contains(r#""method":"eth_getBlockByNumber""#)
 }
 
 /// One caller's terminal reply.
@@ -245,7 +260,7 @@ fn reply_bytes(outcome: &Outcome) -> usize {
     let (tree, wire) = match outcome {
         Ok(value) => (value.held(), value.stringify().len()),
         Err(thrown) => {
-            let message = JsValue::String(thrown.message.clone());
+            let message = JsValue::string(thrown.message.clone());
             (message.held(), message.stringify().len())
         }
     };
@@ -303,7 +318,16 @@ pub struct Machine {
     /// owner.
     origins: std::collections::BTreeMap<u64, (Generations, Ms, u64)>,
     next_owner: u64,
+    /// The anchor's head and block requests (`eth_blockNumber`,
+    /// `eth_getBlockByNumber`): their answers are read for a number or a
+    /// hash at once, so their charge is taken back as they are read (#73).
+    anchor_requests: RefCell<std::collections::BTreeSet<u64>>,
+    /// Those answers' charges, until read or cancelled: by request id, the
+    /// session and the bytes.
+    anchor_charges: AnchorCharges,
 }
+
+type AnchorCharges = Rc<RefCell<std::collections::BTreeMap<u64, (u64, usize)>>>;
 
 /// Deviation `endpoint-retention`: endpoints that left the configuration
 /// join `retired` (most recent last), re-added ones leave it, and past
@@ -340,7 +364,7 @@ fn sized(outcome: Outcome, bounds: &super::bounds::Bounds) -> Outcome {
     match outcome {
         Ok(value) if !bounds.reply_fits(value.stringify().len()) => Err(Thrown::too_large()),
         Err(thrown)
-            if !bounds.reply_fits(JsValue::String(thrown.message.clone()).stringify().len()) =>
+            if !bounds.reply_fits(JsValue::string(thrown.message.clone()).stringify().len()) =>
         {
             Err(Thrown::too_large())
         }
@@ -363,7 +387,21 @@ fn ready(sleep: &mut Sleep<Request, Answer>) -> bool {
 
 impl Machine {
     pub fn new(now: Ms, config: Config, random: Box<dyn Random>) -> Self {
+        let config = config.with_distinct_endpoints();
         let ctx = Rc::new(Ctx::new(now, config, random));
+        // An anchor answer's charge goes as a future takes the answer: it
+        // reads a number or a hash from it at once, and drops the rest.
+        let anchor_charges = AnchorCharges::default();
+        {
+            let weak = Rc::downgrade(&ctx);
+            let charges = Rc::clone(&anchor_charges);
+            ctx.rt.set_consumed(move |id| {
+                let released = charges.borrow_mut().remove(&id);
+                if let (Some(ctx), Some((session, bytes))) = (weak.upgrade(), released) {
+                    ctx.budget.borrow_mut().uncharge(session, bytes);
+                }
+            });
+        }
         // A request counts against the session making it as it is made: one
         // that crosses the budget is never emitted (`memory-budgets`).
         let weak = Rc::downgrade(&ctx);
@@ -391,6 +429,8 @@ impl Machine {
             retired_tezos: std::collections::VecDeque::new(),
             origins: std::collections::BTreeMap::new(),
             next_owner: 1,
+            anchor_requests: RefCell::new(std::collections::BTreeSet::new()),
+            anchor_charges,
         }
     }
 
@@ -753,11 +793,11 @@ impl Machine {
         if !valid {
             let result = JsValue::Object(vec![
                 ("success".into(), JsValue::Bool(false)),
-                ("address".into(), JsValue::String(address.into())),
-                ("reason".into(), JsValue::String("INVALID_ADDRESS".into())),
+                ("address".into(), JsValue::string(address)),
+                ("reason".into(), JsValue::string("INVALID_ADDRESS")),
                 (
                     "error".into(),
-                    JsValue::String(format!("Invalid address: {address}")),
+                    JsValue::string(format!("Invalid address: {address}")),
                 ),
             ]);
             return self.reply(Ok(result), options.attempts_used);
@@ -986,7 +1026,8 @@ impl Machine {
     /// `naming.configure`: the whole snapshot is replaced, and a part that
     /// changed advances its generation. `reset_providers` is today's
     /// `invalidateCachedProvider`. The machine's bounds stay.
-    pub fn configure(&mut self, mut config: Config, reset_providers: bool) -> Generations {
+    pub fn configure(&mut self, config: Config, reset_providers: bool) -> Generations {
+        let mut config = config.with_distinct_endpoints();
         let (ens_changed, tezos_changed) = {
             let mut state = self.ctx.state.borrow_mut();
             config.bounds = state.config.bounds;
@@ -1109,6 +1150,25 @@ impl Machine {
             .take_effects()
             .into_iter()
             .map(|effect| {
+                match &effect {
+                    Effect::Request {
+                        id,
+                        request: Request::Rpc { body, .. },
+                        ..
+                    } if is_anchor_body(body) => {
+                        self.anchor_requests.borrow_mut().insert(*id);
+                    }
+                    Effect::Cancel { id, .. } => {
+                        self.anchor_requests.borrow_mut().remove(id);
+                        // An anchor answer delivered but never read: its
+                        // future was dropped, so its charge goes now.
+                        let released = self.anchor_charges.borrow_mut().remove(id);
+                        if let Some((session, bytes)) = released {
+                            self.ctx.budget.borrow_mut().uncharge(session, bytes);
+                        }
+                    }
+                    _ => {}
+                }
                 let (generations, deadline, _) = match &effect {
                     Effect::Request { owner, .. } => {
                         self.origins.get(owner).copied().unwrap_or(current)
@@ -1129,27 +1189,58 @@ impl Machine {
     }
 
     /// Answers request `id`. The answer counts against its session's
-    /// budget (`memory-budgets`); one that crosses it is dropped, and the
-    /// session ends at the next poll.
+    /// budget (`memory-budgets`), at what its parse can hold.
+    /// - **An answer charged over `answer_charge_bytes`** is refused: its
+    ///   request fails as `too_large`, the endpoint's doing (a provider
+    ///   failure), and the session goes on with its other requests. One
+    ///   endpoint's answer so can't spend a lookup's budget (#73).
+    /// - **One that crosses the session's budget or the total** is dropped,
+    ///   and the session ends at the next poll.
+    /// - **The anchor's answers** are charged until the poll that reads
+    ///   them, which keeps only a number or a hash.
     pub fn complete(&self, id: u64, answer: Answer) -> bool {
+        // An anchor request leaves the set on every path; only an answer
+        // charged and taken moves on to `anchor_charges`.
+        let anchor = self.anchor_requests.borrow_mut().remove(&id);
         let session = self
             .ctx
             .rt
             .owner_of(id)
             .and_then(|owner| self.origins.get(&owner))
             .map_or(0, |origin| origin.2);
-        if session != 0 {
-            let bounds = self.ctx.bounds();
-            if !self
-                .ctx
-                .budget
-                .borrow_mut()
-                .charge(session, answer_bytes(&answer), &bounds)
-            {
-                return false;
-            }
+        if session == 0 {
+            return self.ctx.rt.complete(id, answer);
         }
-        self.ctx.rt.complete(id, answer)
+        // A second answer to a request is refused before it is charged: the
+        // executor wouldn't take it, and a charge that crossed a budget
+        // would still end the session.
+        if !self.ctx.rt.awaits(id) {
+            return false;
+        }
+        let bounds = self.ctx.bounds();
+        let bytes = answer_bytes(&answer);
+        let refused = matches!(
+            answer,
+            Answer::Rpc { .. } | Answer::Gateway { .. } | Answer::Tezos { .. }
+        ) && bytes > bounds.answer_charge_bytes;
+        if refused {
+            return self
+                .ctx
+                .rt
+                .complete(id, Answer::Failed(super::rpc::Transport::TooLarge));
+        }
+        if !self.ctx.budget.borrow_mut().charge(session, bytes, &bounds) {
+            return false;
+        }
+        if !self.ctx.rt.complete(id, answer) {
+            return false;
+        }
+        if anchor {
+            self.anchor_charges
+                .borrow_mut()
+                .insert(id, (session, bytes));
+        }
+        true
     }
 
     pub fn schedule(&self, at: Ms, token: u64) {
@@ -1337,5 +1428,163 @@ mod tests {
         retire(&mut retired, &list(&["b", "c"]), &list(&["c", "d"]), 2);
         retire(&mut retired, &list(&["c", "d"]), &list(&["d"]), 2);
         assert_eq!(retired, list(&["b", "c"]));
+    }
+
+    fn four_endpoints() -> Config {
+        Config {
+            rpc: (0..4).map(|i| format!("https://e{i}.example")).collect(),
+            direct: None,
+            order: vec!["quorum".into()],
+            prefer_verified: false,
+            quorum: crate::jsjson::parse(r#"{"k":3,"m":2,"anchor":"latest"}"#).unwrap(),
+            myotis_enabled: false,
+            prover: None,
+            tezos: Vec::new(),
+            bounds: Default::default(),
+        }
+    }
+
+    fn machine(config: Config) -> Machine {
+        Machine::new(
+            0,
+            config,
+            Box::new(super::super::random::Mulberry32::new(7)),
+        )
+    }
+
+    /// An anchor answer refused as too large is never charged, and its
+    /// request id is forgotten with it (#132 review).
+    #[test]
+    fn a_refused_anchor_answer_leaves_no_bookkeeping() {
+        let mut machine = machine(four_endpoints());
+        let pad = vec!["[]"; 20_000].join(",");
+        let huge = format!(r#"{{"jsonrpc":"2.0","id":1,"result":"0x1312d00","pad":[{pad}]}}"#);
+        for round in 0..3 {
+            machine.resolve_content(&format!("leak{round}.eth"));
+            let mut turns = 0;
+            while turns == 0 || machine.running() > 0 {
+                machine.poll();
+                for emitted in machine.take_effects() {
+                    if let Effect::Request {
+                        id,
+                        request: Request::Rpc { body, .. },
+                        ..
+                    } = emitted.effect
+                    {
+                        assert!(is_anchor_body(&body));
+                        let answer = Answer::Rpc {
+                            status: 200,
+                            body: huge.as_bytes().to_vec(),
+                        };
+                        assert!(machine.complete(id, answer));
+                    }
+                }
+                machine.take_replies();
+                turns += 1;
+                assert!(turns < 10);
+            }
+            assert_eq!(machine.held(), 0);
+            assert!(machine.anchor_requests.borrow().is_empty());
+            assert!(machine.anchor_charges.borrow().is_empty());
+            // Past the endpoints' quarantine.
+            machine.fire_next((round + 1) * 60_001);
+        }
+    }
+
+    /// An anchor answer delivered but never read (its lookup ended first)
+    /// is uncharged as its request is cancelled (#132 review).
+    #[test]
+    fn an_anchor_answer_never_read_goes_with_its_cancel() {
+        let mut config = four_endpoints();
+        let mut machine = machine(config.clone());
+        machine.resolve_content("vitalik.eth");
+        machine.poll();
+        let mut delivered = 0;
+        for emitted in machine.take_effects() {
+            if let Effect::Request { id, .. } = emitted.effect {
+                let answer = Answer::Rpc {
+                    status: 200,
+                    body: br#"{"jsonrpc":"2.0","id":1,"result":"0x1312d00"}"#.to_vec(),
+                };
+                assert!(machine.complete(id, answer));
+                delivered += 1;
+            }
+        }
+        assert_eq!(delivered, 4);
+        assert_eq!(machine.anchor_charges.borrow().len(), 4);
+        assert!(machine.held() > 0);
+        // A real configuration change ends the lookup before it reads them.
+        config.prefer_verified = true;
+        machine.configure(config, false);
+        let cancelled = machine
+            .take_effects()
+            .into_iter()
+            .filter(|emitted| matches!(emitted.effect, Effect::Cancel { .. }))
+            .count();
+        assert_eq!(cancelled, 4);
+        machine.take_replies();
+        assert_eq!(machine.running(), 0);
+        assert_eq!(machine.held(), 0);
+        assert!(machine.anchor_requests.borrow().is_empty());
+        assert!(machine.anchor_charges.borrow().is_empty());
+    }
+
+    fn head(pad: usize) -> Answer {
+        let pad = "x".repeat(pad);
+        Answer::Rpc {
+            status: 200,
+            body: format!(r#"{{"jsonrpc":"2.0","id":1,"result":"0x1312d00","pad":"{pad}"}}"#)
+                .into_bytes(),
+        }
+    }
+
+    /// A lookup's first anchor request, with what the machine holds.
+    fn first_request(machine: &mut Machine) -> (u64, usize) {
+        machine.resolve_content("vitalik.eth");
+        machine.poll();
+        let id = machine
+            .take_effects()
+            .into_iter()
+            .find_map(|emitted| match emitted.effect {
+                Effect::Request { id, .. } => Some(id),
+                Effect::Cancel { .. } => None,
+            })
+            .unwrap();
+        (id, machine.held())
+    }
+
+    /// A second answer to one request isn't taken and holds nothing, even
+    /// one whose charge would cross the session's budget or the total
+    /// (#132 review).
+    #[test]
+    fn a_second_answer_is_refused_before_it_is_charged() {
+        let tight = |session: bool| {
+            let mut config = four_endpoints();
+            if session {
+                config.bounds.session_bytes = 4096;
+            } else {
+                config.bounds.total_bytes = 4096;
+                config.bounds.resume_bytes = 3000;
+            }
+            config
+        };
+        for config in [four_endpoints(), tight(true), tight(false)] {
+            let mut machine = machine(config);
+            let (id, _) = first_request(&mut machine);
+            assert!(machine.complete(id, head(0)));
+            let held = machine.held();
+            // Under the answer allowance, and under 4,096 alone.
+            assert!(answer_bytes(&head(1200)) < 4096);
+            for pad in [0, 1200] {
+                assert!(!machine.complete(id, head(pad)));
+                assert_eq!(machine.held(), held);
+                assert_eq!(machine.anchor_charges.borrow().len(), 1);
+            }
+            // The first answer is read, and the lookup goes on.
+            machine.poll();
+            assert!(machine.anchor_charges.borrow().is_empty());
+            assert_eq!(machine.running(), 1);
+            assert!(machine.take_replies().is_empty());
+        }
     }
 }

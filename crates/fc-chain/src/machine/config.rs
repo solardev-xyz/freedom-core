@@ -44,7 +44,9 @@ pub struct ChainConfig {
     /// `access.broadcastOrder`, or main's default.
     pub broadcast_order: Vec<String>,
     pub quorum: QuorumConfig,
-    /// `getEndpoints(chainId, 'rpc')`, in registry order.
+    /// `getEndpoints(chainId, 'rpc')`, in registry order. A reference
+    /// listed again is the same endpoint: the machine keeps its first
+    /// place (deviation `endpoint-dedup`).
     pub rpc: Vec<RpcEndpoint>,
     /// The first prover.
     pub prover: Option<Prover>,
@@ -72,6 +74,7 @@ pub(crate) struct Chain {
     /// `max(500, Number(timeoutMs) || 5000)`, at most the core's bound: the
     /// configured timeout every source budget starts from.
     pub timeout: f64,
+    /// Each endpoint once, in registry order (deviation `endpoint-dedup`).
     pub rpc: Vec<RpcEndpoint>,
     pub prover: Option<Prover>,
     pub myotis: bool,
@@ -106,6 +109,24 @@ fn or(number: f64, fallback: f64) -> f64 {
     } else {
         number
     }
+}
+
+/// The endpoints, each once (deviation `endpoint-dedup`): a reference
+/// listed again keeps its first place, and is user-configured if any of
+/// its entries is. At most `limit` of them.
+///
+/// The router counts every entry as a quorum member of its own, so one
+/// endpoint listed twice agreed with itself and reached m = 2 alone (#90).
+fn distinct(rpc: &[RpcEndpoint], limit: usize) -> Vec<RpcEndpoint> {
+    let mut out: Vec<RpcEndpoint> = Vec::new();
+    for entry in rpc {
+        if let Some(seen) = out.iter_mut().find(|e| e.endpoint == entry.endpoint) {
+            seen.user_configured |= entry.user_configured;
+        } else if out.len() < limit {
+            out.push(entry.clone());
+        }
+    }
+    out
 }
 
 /// An order with duplicates and unknown sources dropped.
@@ -147,7 +168,7 @@ impl Chain {
             k,
             m,
             timeout,
-            rpc: config.rpc.iter().take(bounds.endpoints).cloned().collect(),
+            rpc: distinct(&config.rpc, bounds.endpoints),
             prover: config.prover.clone(),
             myotis: config.myotis,
             blockscout: config.blockscout.clone(),
@@ -159,9 +180,18 @@ impl Chain {
         self.rpc.iter().map(|e| e.endpoint.clone()).collect()
     }
 
-    /// `endpoints.slice(0, k)`.
+    /// `endpoints.slice(0, k)`: distinct endpoints, so each agreeing
+    /// member is another endpoint.
     pub(crate) fn members(&self) -> Vec<Endpoint> {
         self.urls().into_iter().take(slice_end(self.k)).collect()
+    }
+
+    /// Whether this chain's quorum is verified evidence: only when it
+    /// needs at least two agreeing endpoints (design 0005, Evidence for
+    /// labels). A quorum with m = 1 is one endpoint's answer and counts as
+    /// Direct (deviation `singleton-quorum`).
+    pub(crate) fn quorum_verifies(&self) -> bool {
+        self.m > 1.0
     }
 
     pub(crate) fn user_configured(&self, endpoint: &str) -> bool {
@@ -268,6 +298,73 @@ mod tests {
         let c = Chain::new(&endpoints, &Bounds::default());
         assert_eq!(c.rpc.len(), 64);
         assert_eq!(c.rpc[63].endpoint, "e63");
+    }
+
+    #[test]
+    fn endpoints_are_distinct() {
+        // Deviation `endpoint-dedup`: a reference listed again keeps its
+        // first place, user-configured if any of its entries is, and the
+        // core's bound counts distinct endpoints.
+        let entry = |endpoint: &str, user_configured: bool| RpcEndpoint {
+            endpoint: endpoint.into(),
+            user_configured,
+        };
+        let config = ChainConfig {
+            chain_id: 1,
+            display_name: String::new(),
+            read_order: Vec::new(),
+            broadcast_order: Vec::new(),
+            quorum: QuorumConfig::default(),
+            rpc: vec![
+                entry("a", false),
+                entry("a", false),
+                entry("b", false),
+                entry("a", true),
+                entry("c", false),
+                entry("b", false),
+            ],
+            prover: None,
+            myotis: false,
+            blockscout: None,
+        };
+        let c = Chain::new(&config, &Bounds::default());
+        assert_eq!(c.urls(), ["a", "b", "c"]);
+        assert_eq!(c.members(), ["a", "b", "c"]);
+        assert!(c.user_configured("a"));
+        assert!(!c.user_configured("b"));
+        let bounded = Chain::new(
+            &config,
+            &Bounds {
+                endpoints: 2,
+                ..Bounds::default()
+            },
+        );
+        assert_eq!(bounded.urls(), ["a", "b"]);
+        assert!(bounded.user_configured("a"));
+    }
+
+    #[test]
+    fn a_singleton_quorum_does_not_verify() {
+        // Deviation `singleton-quorum`: m = 1, however it comes about, is
+        // one endpoint's answer.
+        for (k, m) in [
+            (None, Some("1")),
+            (Some("1"), None),
+            (Some("true"), Some("1")),
+            (Some("3"), Some("0.5")),
+        ] {
+            let c = chain(k, m, None, &[]);
+            assert_eq!(c.m, 1.0, "{k:?} {m:?}");
+            assert!(!c.quorum_verifies(), "{k:?} {m:?}");
+        }
+        // m = 1.5 needs two agreeing answers.
+        for (k, m) in [
+            (None, None),
+            (Some("3"), Some("1.5")),
+            (Some("2"), Some("5")),
+        ] {
+            assert!(chain(k, m, None, &[]).quorum_verifies(), "{k:?} {m:?}");
+        }
     }
 
     #[test]

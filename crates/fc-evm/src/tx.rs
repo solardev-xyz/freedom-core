@@ -5,7 +5,7 @@ use k256::ecdsa::SigningKey;
 use serde_json::{Map, Value};
 
 use crate::signature::sign_digest;
-use crate::{Error, U256, keccak256, parse_address, parse_bytes, parse_unsigned, rlp};
+use crate::{Error, U256, keccak256, parse_address, parse_bytes, parse_unsigned, rlp, shortened};
 
 /// ethers keeps the nonce in a JS number: at most 2^53 - 1.
 const MAX_NONCE: u64 = (1 << 53) - 1;
@@ -84,7 +84,7 @@ impl Transaction {
             _ => return Err(err("type: only 0 (legacy) and 2 (EIP-1559)")),
         };
         if let Some(unknown) = fields.keys().find(|key| !allowed.contains(&key.as_str())) {
-            return Err(err(format!("{unknown}: unknown field")));
+            return Err(err(format!("{}: unknown field", shortened(unknown))));
         }
         let chain_id = quantity(fields, "chain_id")?;
         if chain_id.is_zero() {

@@ -7,6 +7,7 @@
 //! ```
 
 mod chain;
+mod clock;
 mod exit;
 mod fsx;
 mod gate;

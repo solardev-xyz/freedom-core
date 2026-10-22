@@ -71,11 +71,16 @@ struct Inner<Q, A> {
 /// emitted, and its future never resolves.
 type Admit<Q> = Rc<dyn Fn(&Q) -> bool>;
 
+/// Told, as a future takes an answer, the id of the request it answers.
+type Consumed = Rc<dyn Fn(u64)>;
+
 /// The executor's shared state: the clock, timers and outstanding I/O.
 /// Clones share it.
 pub struct Rt<Q, A> {
     inner: Rc<RefCell<Inner<Q, A>>>,
     admit: Rc<RefCell<Option<Admit<Q>>>>,
+    /// Told each request id whose answer a future has just taken.
+    consumed: Rc<RefCell<Option<Consumed>>>,
 }
 
 impl<Q, A> Clone for Rt<Q, A> {
@@ -83,6 +88,7 @@ impl<Q, A> Clone for Rt<Q, A> {
         Self {
             inner: Rc::clone(&self.inner),
             admit: Rc::clone(&self.admit),
+            consumed: Rc::clone(&self.consumed),
         }
     }
 }
@@ -100,7 +106,14 @@ impl<Q, A> Rt<Q, A> {
                 owner: 0,
             })),
             admit: Rc::new(RefCell::new(None)),
+            consumed: Rc::new(RefCell::new(None)),
         }
+    }
+
+    /// Sets the hook told each request id whose answer a future takes, as
+    /// it takes it.
+    pub fn set_consumed(&self, consumed: impl Fn(u64) + 'static) {
+        *self.consumed.borrow_mut() = Some(Rc::new(consumed));
     }
 
     /// Sets the check every request passes as it is made.
@@ -155,6 +168,11 @@ impl<Q, A> Rt<Q, A> {
             }
             _ => false,
         }
+    }
+
+    /// Whether outstanding request `id` still waits for its answer.
+    pub fn awaits(&self, id: u64) -> bool {
+        matches!(self.inner.borrow().io.get(&id), Some((_, None)))
     }
 
     /// The owner of outstanding request `id`.
@@ -297,14 +315,19 @@ impl<Q: Unpin, A> Future for Io<Q, A> {
                 this.id = Some(id);
                 Poll::Pending
             }
-            Some(id) => match inner.io.get_mut(&id).and_then(|(_, slot)| slot.take()) {
-                Some(answer) => {
-                    inner.io.remove(&id);
-                    this.done = true;
-                    Poll::Ready(answer)
+            Some(id) => {
+                let Some(answer) = inner.io.get_mut(&id).and_then(|(_, slot)| slot.take()) else {
+                    return Poll::Pending;
+                };
+                inner.io.remove(&id);
+                this.done = true;
+                drop(inner);
+                let consumed = this.rt.consumed.borrow().clone();
+                if let Some(consumed) = consumed {
+                    consumed(id);
                 }
-                None => Poll::Pending,
-            },
+                Poll::Ready(answer)
+            }
         }
     }
 }

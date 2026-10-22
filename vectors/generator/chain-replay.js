@@ -259,7 +259,10 @@ function loadReference(checkout, stubs, dns) {
 
 // The Myotis manager's and child process's own errors, by class, with
 // their texts (myotis-manager.js runningInstance, verifiedRequest,
-// broadcastRejected and sendRawTransaction; myotis-process.js unavailable).
+// broadcastRejected and sendRawTransaction; myotis-process.js unavailable;
+// broadcastRefused, which freedom-browser's main added after the pinned
+// commit, in a1dff495: the manager is stubbed, and the pinned router
+// already ends a broadcast on any error that carries `myotisRefusal`).
 // The classes are design 0005's ("Myotis read outcomes"), and the
 // broadcast's; a scenario names one with `throws`, and the record keeps it.
 const MYOTIS_ERRORS = {
@@ -270,6 +273,9 @@ const MYOTIS_ERRORS = {
   queue_deadline: { make: () => Object.assign(new Error('Myotis queue deadline exceeded'), { code: 'MYOTIS_UNAVAILABLE' }) },
   caller_deadline: { make: () => Object.assign(new Error('Myotis caller deadline exceeded'), { code: 'MYOTIS_UNAVAILABLE' }) },
   rejected: { make: (_chain, outcome) => Object.assign(new Error(outcome.reason), { code: -32000, myotisRefusal: 'rejected' }) },
+  // Bytes that are no transaction Myotis relays (ABI 44): the permanent
+  // -32602, never gossiped (broadcastRefused).
+  invalid_params: { make: (_chain, outcome) => Object.assign(new Error(outcome.reason), { code: -32602, myotisRefusal: 'invalid-params' }) },
   // In band: the client answered without a hash (sendRawTransaction).
   uncertain: { make: () => Object.assign(new Error('Myotis broadcast outcome uncertain; reconcile the original signed transaction'), { code: 'MYOTIS_BROADCAST_UNCERTAIN' }) },
   // Dispatched, then a deadline, an exit or a stop (myotis-process.js).
@@ -1979,6 +1985,12 @@ function boundaryScenarios(ethers, tx) {
       ...w(100, net(['myotis', 'direct']), []),
       myotis: myotisOn(100, { broadcast: { throws: 'not_running' } }),
     }, send(100, tx.gnosis.raw)),
+    // The adapter's second definite refusal, -32602 (Myotis ABI 44): final
+    // as `rejected` is, the error as thrown; Direct is never asked.
+    scenario('boundary-broadcast-myotis-invalid-params', `${D_}: Broadcast classes`, {
+      ...w(100, net(['myotis', 'direct']), [A]),
+      myotis: myotisOn(100, { broadcast: { throws: 'invalid_params', reason: 'invalid raw transaction: malformed type 0x2 transaction' } }),
+    }, send(100, tx.gnosis.raw)),
     scenario('boundary-broadcast-unknown-broadcaster', `${D_}: Broadcast`, {
       chains: { 1: chainEntry({ access: { broadcastOrder: ['quorum', 'colibri'] } }, [A]) },
     }, send(1, tx.mainnet.raw)),
@@ -2093,6 +2105,47 @@ function boundaryScenarios(ethers, tx) {
         { world: { chains: { 1: chainEntry(net(['quorum'], { k: 0, m: 5, timeoutMs: 100 }), ABC, [PROVER]) }, rpc: Object.fromEntries(ABC.map((u) => [u, ok('0x1', 600)])) }, calls: [req(1, 'eth_call', [{ to: '0xabc' }, 'latest'])] },
         { world: { chains: { 1: chainEntry(net(['quorum'], { k: '2', m: 'x', timeoutMs: 'abc' }), ABC, [PROVER]) }, rpc: Object.fromEntries(ABC.map((u) => [u, ok('0x1', 4000)])) }, calls: [req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], { include_trust: true })] },
       ],
+    },
+    // An endpoint listed twice (#90): the reference counts each entry as a
+    // member, so a's answer agrees with itself and reaches m = 2 alone,
+    // verified. The core keeps each endpoint once (deviation
+    // endpoint-dedup): a and b disagree, and Direct reuses a's answer,
+    // unverified.
+    {
+      ...scenario('boundary-quorum-duplicate-endpoint', `${D_}: Configuration; deviation endpoint-dedup`, {
+        ...w(1, net(['quorum', 'direct']), [A, A, B]),
+        rpc: { [A]: ok('0xdead', 100), [B]: ok('0xbeef', 50) },
+      }, req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], { include_trust: true })),
+      deviation: 'endpoint-dedup',
+    },
+    // A quorum with m = 1 (#91): one endpoint's answer, which the reference
+    // labels verified, a read's and a fee quote's alike. The core labels it
+    // as Direct would (deviation singleton-quorum): unverified, or
+    // user-configured for an endpoint a source the user added covers.
+    {
+      ...scenario('boundary-quorum-singleton-not-verified', `${D_}: Evidence for labels; deviation singleton-quorum`, {
+        ...w(1, net(['quorum'], { k: 3, m: 1, timeoutMs: 5000 }), ABC),
+        sourceList: [{ id: 'mine', builtin: false }],
+        rpc: { [A]: ok('0x1', 100), [B]: ok('0x2', 200), [C]: { hang: true } },
+      }),
+      steps: [
+        { calls: [req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], { include_trust: true })] },
+        {
+          world: { chains: { 1: chainEntry(net(['quorum'], { k: 3, m: 1, timeoutMs: 5000 }), ABC, [PROVER], { sources: [{ id: 'mine', coverage: { 1: A } }] }) } },
+          calls: [req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], { include_trust: true })],
+        },
+        {
+          world: {
+            rpc: {
+              [A]: { rules: [{ when: { method: 'eth_gasPrice' }, then: ok('0x10', 100) }], else: ok('0x1', 100) },
+              [B]: { rules: [{ when: { method: 'eth_gasPrice' }, then: ok('0x20', 200) }], else: ok('0x2', 200) },
+              [C]: { hang: true },
+            },
+          },
+          calls: [fee(1)],
+        },
+      ],
+      deviation: 'singleton-quorum',
     },
     // Trust labels: a user's own endpoint, a keyed one, and an endpoint URL
     // that doesn't parse (its host '' is left out of every list).

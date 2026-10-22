@@ -41,6 +41,12 @@ pub struct Bounds {
     /// ends: its requests, its answers, its aliasing decodes' output and
     /// its replies. Everything it retains derives from those.
     pub session_bytes: usize,
+    /// The most one answer may be charged (`memory-budgets`, #73): an
+    /// answer whose parse could hold more is refused as `too_large`, its
+    /// endpoint's failure, whatever its session holds, so one endpoint's
+    /// answer can't spend a lookup's budget. Valid answers sit far below
+    /// it: a 200 KB anchor block is charged about 660 KB.
+    pub answer_charge_bytes: usize,
     /// What all sessions may hold: a session whose charge crosses it fails,
     /// and new sessions are busy until the total is under `resume_bytes`.
     pub total_bytes: usize,
@@ -64,6 +70,7 @@ impl Default for Bounds {
             decode_bytes: crate::abi::MAX_DECODE_BYTES,
             retired_endpoints: 64,
             session_bytes: 16 * 1024 * 1024,
+            answer_charge_bytes: 1024 * 1024,
             total_bytes: 64 * 1024 * 1024,
             resume_bytes: 48 * 1024 * 1024,
         }
@@ -93,7 +100,7 @@ impl Bounds {
         let size: usize = payloads
             .iter()
             .map(|p| {
-                crate::jsjson::JsValue::String((*p).to_owned())
+                crate::jsjson::JsValue::string((*p).to_owned())
                     .stringify()
                     .len()
             })

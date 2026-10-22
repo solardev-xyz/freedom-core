@@ -1,0 +1,1 @@
+{"type":"request","id":7,"method":"vault.unlock","params":{"password_b64":"Y29ycmVjdCBob3JzZSBiYXR0ZXJ5IHN0YXBsZQ=="},"context":{"caller":"chrome"}}

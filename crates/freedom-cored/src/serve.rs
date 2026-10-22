@@ -55,6 +55,7 @@ use std::time::{Duration, Instant};
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::frame::{Frame, KIND_JSON};
 use fc_protocol::message::{self, CallerKind, Context, Message, MessageError};
+use fc_protocol::methods::{self, Admission};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use zeroize::Zeroizing;
@@ -71,9 +72,11 @@ use crate::{testhooks, testmethods};
 /// How long the writer may take to flush on exit.
 const EXIT_DRAIN: Duration = Duration::from_secs(2);
 /// How long exiting waits for a vault job past its commit point to finish
-/// and reply. A commit is a rename or unlink plus a directory flush; main's
-/// hang watchdog and reconciliation cover anything slower.
-const COMMIT_DRAIN: Duration = Duration::from_secs(5);
+/// and reply: inside main's 3 s shutdown grace, so the core exits on its
+/// own (#127). A commit is a rename or unlink plus a directory flush, or a
+/// node write's few fsyncs; the next start's recovery covers anything
+/// slower, as it would a kill.
+const COMMIT_DRAIN: Duration = Duration::from_secs(2);
 /// How long the loop's frames may wait with the writer writing nothing
 /// before the core decides main has stopped reading, and exits (design
 /// 0001, Transport and framing):
@@ -129,9 +132,11 @@ pub enum Event {
 
 /// The methods `core.hello`'s capabilities name: every method this build
 /// implements but the `chain.*` methods (design 0006's `chain.html`
-/// included), which design 0005 doesn't add to them (it adds `fragments`
-/// only). Only these names, the chain methods, and in debug builds the test
-/// methods', are ever logged; anything else is logged as `<unknown>`.
+/// included), which design 0005 doesn't add to them (it adds features
+/// only). Every method, these and the chain methods, is a row of
+/// fc-protocol's method table, which says who may call it (#101); a test
+/// keeps the two in step. Only the table's names, and in debug builds the
+/// test methods', are ever logged; anything else is logged as `<unknown>`.
 const CAPABILITIES: &[&str] = &[
     "core.hello",
     "core.shutdown",
@@ -172,11 +177,15 @@ const CAPABILITIES: &[&str] = &[
     "dweb.open",
 ];
 
-/// The transport features in `core.hello`'s capabilities, after the
-/// methods: `fragments`, fragmented responses with bulk credit (design
-/// 0005, Frames). The core always offers them; it sends them only to a main
-/// whose hello offered `frames: ["fragment"]`.
-const FEATURES: &[&str] = &["fragments"];
+/// The features in `core.hello`'s capabilities, after the methods (design
+/// 0005):
+/// - `fragments`: fragmented responses with bulk credit (Frames). The core
+///   always offers them; it sends them only to a main whose hello offered
+///   `frames: ["fragment"]`.
+/// - `myotis_refusal_codes`: the core reads a Myotis broadcast's `{
+///   rejected: { reason, code: -32602 } }` (The rest). Main sends that form
+///   only to a core that offers it.
+const FEATURES: &[&str] = &["fragments", "myotis_refusal_codes"];
 
 pub fn run(options: &Options) -> Exit {
     hardening::harden();
@@ -428,15 +437,13 @@ pub fn run(options: &Options) -> Exit {
     // what's queued, but never wait on a peer that stopped reading: exiting
     // releases the gate. Requests still waiting their turn are dropped with
     // the loop: none of them ran.
+    crate::testhooks::exiting();
     let outs = core.vault.shutdown();
     let _ = core.dispatch(outs);
-    let until = Instant::now() + COMMIT_DRAIN;
+    let draining = Instant::now();
+    let until = draining + COMMIT_DRAIN;
     while core.vault.committing() {
         let Some(left) = until.checked_duration_since(Instant::now()) else {
-            log::error(
-                "a committed vault job did not finish before exit",
-                serde_json::json!({}),
-            );
             break;
         };
         match events.recv_timeout(left) {
@@ -447,6 +454,13 @@ pub fn run(options: &Options) -> Exit {
             Ok(_) => {}
             Err(_) => break,
         }
+    }
+    // However the wait ended: past the drain, or the wait itself timing out.
+    if core.vault.committing() {
+        log::error(
+            "a committed vault job did not finish before exit",
+            serde_json::json!({ "waited_ms": draining.elapsed().as_millis() }),
+        );
     }
     // What waits for room goes past the allowance: the drain below bounds it
     // by time instead.
@@ -536,6 +550,71 @@ struct HelloParams {
     /// names are ignored.
     #[serde(default)]
     frames: Vec<String>,
+    /// Where main keeps each node's identity (`data_dir` for Bee, `home` for
+    /// Radicle), as absolute paths: their files, which JS wrote under the
+    /// umask, are tightened to 0600 (design 0001, "Writes and durability";
+    /// #85). Optional.
+    #[serde(default)]
+    node_roots: Option<NodeRoots>,
+}
+
+#[derive(Deserialize)]
+struct NodeRoots {
+    #[serde(default)]
+    bee: Option<String>,
+    #[serde(default)]
+    radicle: Option<String>,
+}
+
+impl NodeRoots {
+    /// The roots given, as absolute, normalized paths. Others are logged
+    /// and skipped: tightening is hardening, not worth failing a handshake.
+    fn valid(self) -> Vec<(&'static str, PathBuf)> {
+        [("bee", self.bee), ("radicle", self.radicle)]
+            .into_iter()
+            .filter_map(|(node, root)| {
+                let root = PathBuf::from(root?);
+                if crate::journal::normalized_absolute(&root) {
+                    Some((node, root))
+                } else {
+                    log::warn(
+                        "ignoring a node root that isn't an absolute path",
+                        serde_json::json!({ "node": node }),
+                    );
+                    None
+                }
+            })
+            .collect()
+    }
+}
+
+/// Tightens existing node identity files on their own thread, so slow
+/// storage can't hold up the handshake or the loop. Main starts nodes only
+/// after the handshake, and a node reading its files meanwhile is
+/// unaffected by a mode change.
+fn spawn_adoption(roots: Vec<(&'static str, PathBuf)>) {
+    if roots.is_empty() {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("adopt".into())
+        .spawn(move || {
+            for (node, root) in roots {
+                let changed = crate::nodes::tighten_existing(node, &root);
+                if changed > 0 {
+                    log::info(
+                        "tightened node identity files to 0600",
+                        serde_json::json!({ "node": node, "count": changed }),
+                    );
+                }
+            }
+        });
+    if spawned.is_err() {
+        log::warn(
+            "cannot start the thread that tightens node identity files",
+            serde_json::json!({}),
+        );
+    }
 }
 
 #[derive(Serialize)]
@@ -558,14 +637,37 @@ fn span(payload: &[u8], text: &RawValue) -> Range<usize> {
 
 /// A method name that is safe to log: known names only.
 fn loggable(method: &str) -> &'static str {
+    if let Some(row) = methods::method(method) {
+        return row.name;
+    }
     #[cfg(debug_assertions)]
-    let known = CAPABILITIES
-        .iter()
-        .chain(chain::METHODS)
-        .chain(testmethods::METHODS);
-    #[cfg(not(debug_assertions))]
-    let known = CAPABILITIES.iter().chain(chain::METHODS);
-    known.copied().find(|m| *m == method).unwrap_or("<unknown>")
+    if let Some(name) = testmethods::METHODS.iter().find(|m| **m == method) {
+        return name;
+    }
+    "<unknown>"
+}
+
+/// Whether `caller` may call `method` (#101): fc-protocol's method table,
+/// checked once for every request before anything is dispatched, and in
+/// debug builds the test methods, when their hook enables them. `Err` is
+/// the refusal: a method the table doesn't list is unknown; one it lists,
+/// but not for this caller, is forbidden.
+fn admitted(method: &str, caller: CallerKind, test_methods: bool) -> Result<(), ErrorBody> {
+    match methods::admit(method, caller) {
+        Admission::Allowed(_) => Ok(()),
+        Admission::Forbidden => Err(ErrorBody::new(
+            ErrorCode::Forbidden,
+            "not callable by this caller",
+        )),
+        Admission::Unknown => {
+            #[cfg(debug_assertions)]
+            if test_methods && testmethods::handles(method) && caller != CallerKind::Page {
+                return Ok(());
+            }
+            let _ = test_methods;
+            Err(ErrorBody::new(ErrorCode::UnknownMethod, "Unknown method"))
+        }
+    }
 }
 
 /// A fixed category for a malformed message; the parser's own text can quote
@@ -616,7 +718,19 @@ impl Ahead {
         }
         match Message::decode(&frame.payload) {
             // Refused in its turn: web content can't lock or shut down.
-            Ok(Message::Request { id, context, .. }) if context.caller == CallerKind::Page => {
+            // Refused in its turn: a caller the method table doesn't allow
+            // for it (web content, or the browser UI for `core.shutdown`)
+            // can't shut down or lock ahead of the requests that wait.
+            Ok(Message::Request {
+                id,
+                method,
+                context,
+                ..
+            }) if !matches!(
+                methods::admit(&method, context.caller),
+                Admission::Allowed(_)
+            ) =>
+            {
                 Ahead::Request(id)
             }
             Ok(Message::Request { id, method, .. }) => match &*method {
@@ -925,11 +1039,12 @@ impl Core {
         context: &Context,
     ) -> Flow {
         let started = Instant::now();
-        if context.caller == CallerKind::Page {
-            return self.error(
-                id,
-                ErrorBody::new(ErrorCode::Forbidden, "not callable from web content"),
-            );
+        #[cfg(debug_assertions)]
+        let test_methods = self.test.is_some();
+        #[cfg(not(debug_assertions))]
+        let test_methods = false;
+        if let Err(refusal) = admitted(method, context.caller, test_methods) {
+            return self.error(id, refusal);
         }
         let flow = match method {
             "core.hello" => self.hello(id, params),
@@ -942,13 +1057,8 @@ impl Core {
                 }
             }
             method if Vault::handles(method) => {
-                let outs = self.vault.request(id, method, params, context.caller);
+                let outs = self.vault.request(id, method, params);
                 self.dispatch(outs)
-            }
-            // `dweb.open` is main's own (design 0006).
-            method if naming::shell_only(method) && context.caller != CallerKind::Shell => {
-                let forbidden = ErrorBody::new(ErrorCode::Forbidden, "main-internal only");
-                self.error(id, forbidden)
             }
             method if naming::handles(method) => {
                 let params = match params.map(|p| RawValue::from_string(p.to_owned())) {
@@ -1040,6 +1150,7 @@ impl Core {
             );
         }
         self.vault.set_auto_lock_ms(params.auto_lock_ms);
+        spawn_adoption(params.node_roots.map(NodeRoots::valid).unwrap_or_default());
         // Granted with the handshake: main holds the core's credit from now
         // on, and the core main's if main takes fragments.
         if params.frames.iter().any(|kind| kind == "fragment") {
@@ -1350,6 +1461,26 @@ mod tests {
         assert_eq!(ids, [1, 2, 3]);
     }
 
+    /// #101: every method served is a row of fc-protocol's method table,
+    /// and every row is served: the capabilities, then the chain methods.
+    #[test]
+    fn every_method_has_a_row_and_every_row_a_handler() {
+        let rows: Vec<&str> = methods::METHODS.iter().map(|m| m.name).collect();
+        let served: Vec<&str> = CAPABILITIES.iter().chain(chain::METHODS).copied().collect();
+        assert_eq!(rows, served);
+        for name in rows {
+            assert!(
+                matches!(name, "core.hello" | "core.shutdown")
+                    || Vault::handles(name)
+                    || naming::handles(name)
+                    || chain::handles(name),
+                "{name}"
+            );
+            assert_eq!(loggable(name), name);
+        }
+        assert_eq!(loggable("compat.root_key"), "<unknown>");
+    }
+
     #[test]
     fn only_requests_wait_and_shutdown_and_lock_are_seen_ahead() {
         let ahead = |message: serde_json::Value| {
@@ -1366,6 +1497,11 @@ mod tests {
         assert!(matches!(
             ahead(request(7, "core.shutdown", "shell")),
             Ahead::Shutdown
+        ));
+        // #101: main's own; from the browser UI it waits, to be refused.
+        assert!(matches!(
+            ahead(request(7, "core.shutdown", "chrome")),
+            Ahead::Request(7)
         ));
         assert!(matches!(
             ahead(request(7, "vault.lock", "chrome")),

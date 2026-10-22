@@ -22310,6 +22310,432 @@
       ]
     },
     {
+      "id": "deviation-name-length",
+      "system": "ens",
+      "seed": 7,
+      "deviation": "name-length",
+      "patches": [
+        {
+          "id": "name-length",
+          "text": "An ENS, WNS or GNS name over 1,024 bytes (UTF-8), trimmed or normalized, is refused with \"name exceeds 1024 bytes\" before any I/O, on the ASCII path too.",
+          "source": {
+            "ens-resolver.js": {
+              "edits": [
+                [
+                  "function fastNormalize(trimmed) {\n  const lowered = trimmed.toLowerCase();\n  if (PURE_ASCII_HOST.test(lowered)) return lowered;\n  return ens_normalize(trimmed);\n}",
+                  "function fastNormalize(trimmed) {\n  if (Buffer.byteLength(trimmed) > 1024) throw new Error('name exceeds 1024 bytes');\n  const lowered = trimmed.toLowerCase();\n  if (PURE_ASCII_HOST.test(lowered)) return lowered;\n  const normalized = ens_normalize(trimmed);\n  if (Buffer.byteLength(normalized) > 1024) throw new Error('name exceeds 1024 bytes');\n  return normalized;\n}"
+                ]
+              ],
+              "append": []
+            }
+          }
+        }
+      ],
+      "world": {
+        "endpoints": [
+          "https://a.rpc.example",
+          "https://b.rpc.example",
+          "https://c.rpc.example",
+          "https://d.rpc.example"
+        ],
+        "network": {
+          "verification": {
+            "order": [
+              "quorum"
+            ],
+            "preferVerified": false
+          },
+          "quorum": {
+            "k": 3,
+            "m": 2,
+            "timeoutMs": 5000,
+            "anchor": "latest",
+            "anchorTtlMs": 30000
+          }
+        },
+        "calls": {
+          "resolve": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000"
+          },
+          "callback": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000"
+          }
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "call": {
+            "fn": "resolveEnsContent",
+            "args": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.eth"
+            ]
+          },
+          "results": [
+            {
+              "thrown": "name exceeds 1024 bytes",
+              "settled": 0
+            }
+          ]
+        },
+        {
+          "at": 1000,
+          "after": 1000,
+          "call": {
+            "fn": "resolveEnsContent",
+            "args": [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.eth"
+            ]
+          },
+          "results": [
+            {
+              "value": {
+                "type": "ok",
+                "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.eth",
+                "system": "ens",
+                "codec": "ipfs-ns",
+                "protocol": "ipfs",
+                "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+                "decoded": "QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+                "trust": {
+                  "level": "verified",
+                  "system": "ens",
+                  "block": {
+                    "number": 19999992,
+                    "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+                  },
+                  "agreed": [
+                    "c.rpc.example",
+                    "b.rpc.example"
+                  ],
+                  "dissented": [],
+                  "queried": [
+                    "c.rpc.example",
+                    "b.rpc.example",
+                    "d.rpc.example"
+                  ],
+                  "quorum": {
+                    "k": 3,
+                    "m": 2,
+                    "achieved": true
+                  }
+                }
+              },
+              "settled": 1060
+            }
+          ]
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 1,
+          "t": 1010,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 1,
+          "chain": 1,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 1020,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 1,
+          "step": 1,
+          "t": 1010,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 2,
+          "chain": 2,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 1020,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 2,
+          "step": 1,
+          "t": 1010,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 3,
+          "chain": 3,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 1020,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 3,
+          "step": 1,
+          "t": 1010,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 4,
+          "chain": 4,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 1020,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 4,
+          "step": 1,
+          "t": 1030,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 5,
+          "chain": 5,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 1040,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 5,
+          "step": 1,
+          "t": 1030,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 6,
+          "chain": 6,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 1040,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 6,
+          "step": 1,
+          "t": 1030,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 7,
+          "chain": 7,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 1040,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 7,
+          "step": 1,
+          "t": 1030,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 8,
+          "chain": 8,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 1040,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 8,
+          "step": 1,
+          "t": 1050,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 9,
+          "chain": 9,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b9230000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000048000000000000000000000000000000000000000000000000000000000000004023f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613c61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616103657468000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d15957f06549dbfe89f9bd74ff76b101b1118536b8a4671769042c76fecc232b8a00000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 1060,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000\"}"
+          }
+        },
+        {
+          "id": 9,
+          "step": 1,
+          "t": 1050,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 10,
+          "chain": 10,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b9230000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000048000000000000000000000000000000000000000000000000000000000000004023f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613c61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616103657468000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d15957f06549dbfe89f9bd74ff76b101b1118536b8a4671769042c76fecc232b8a00000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 1060,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000\"}"
+          }
+        },
+        {
+          "id": 10,
+          "step": 1,
+          "t": 1050,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 11,
+          "chain": 11,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x9061b9230000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000048000000000000000000000000000000000000000000000000000000000000004023f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613c61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616103657468000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d15957f06549dbfe89f9bd74ff76b101b1118536b8a4671769042c76fecc232b8a00000000000000000000000000000000000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "resolve:contenthash",
+          "end": 1060,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000\"}"
+          }
+        },
+        {
+          "id": 11,
+          "step": 1,
+          "t": 1060,
+          "kind": "prefetch",
+          "host": null,
+          "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+          "end": null,
+          "outcome": "open"
+        }
+      ],
+      "unpatched": [
+        [
+          {
+            "value": {
+              "type": "ok",
+              "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.eth",
+              "system": "ens",
+              "codec": "ipfs-ns",
+              "protocol": "ipfs",
+              "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+              "decoded": "QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+              "trust": {
+                "level": "verified",
+                "system": "ens",
+                "block": {
+                  "number": 19999992,
+                  "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+                },
+                "agreed": [
+                  "c.rpc.example",
+                  "b.rpc.example"
+                ],
+                "dissented": [],
+                "queried": [
+                  "c.rpc.example",
+                  "b.rpc.example",
+                  "d.rpc.example"
+                ],
+                "quorum": {
+                  "k": 3,
+                  "m": 2,
+                  "achieved": true
+                }
+              }
+            },
+            "settled": 60
+          }
+        ],
+        [
+          {
+            "value": {
+              "type": "ok",
+              "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.eth",
+              "system": "ens",
+              "codec": "ipfs-ns",
+              "protocol": "ipfs",
+              "uri": "ipfs://QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+              "decoded": "QmW81r84Aihiqqi2Jw6nM1LnpeMfRCenRxtjwHNkXVkZYa",
+              "trust": {
+                "level": "verified",
+                "system": "ens",
+                "block": {
+                  "number": 19999992,
+                  "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+                },
+                "agreed": [
+                  "c.rpc.example",
+                  "b.rpc.example"
+                ],
+                "dissented": [],
+                "queried": [
+                  "c.rpc.example",
+                  "b.rpc.example",
+                  "d.rpc.example"
+                ],
+                "quorum": {
+                  "k": 3,
+                  "m": 2,
+                  "achieved": true
+                }
+              }
+            },
+            "settled": 1080
+          }
+        ]
+      ]
+    },
+    {
       "id": "deviation-ccip-urls",
       "system": "ens",
       "seed": 7,
@@ -37984,7 +38410,7 @@
       "patches": [
         {
           "id": "memory-budgets",
-          "text": "A session is charged for its name's copies (8 per byte of its in-flight key) as it starts, its requests (endpoint and body) as it makes them, and its answers as they arrive, at 32 per byte (their parsed JSON at worst); one an answer takes past 25000 bytes ends at once: its callers get \"budget\", the answer is dropped, its outstanding I/O is cancelled and it makes no more. The patch holds for one step with one content lookup on JSON-RPC alone, without redirects or 429s, ended by an answer crossing (enforced); the core's replies and aliasing decodes are its own tests.",
+          "text": "A session is charged for its name's copies (8 per byte of its in-flight key) as it starts, its requests (endpoint and body) as it makes them, and its answers as they arrive, at what their parsed JSON can hold: twice their bytes, 88 per JSON value or key and 80 per escaped surrogate. An anchor answer (eth_blockNumber, eth_getBlockByNumber) is charged only until it is read, which is at once. One an answer takes past 4000 bytes ends at once: its callers get \"budget\", the answer is dropped, its outstanding I/O is cancelled and it makes no more. The patch holds for one step with one content lookup on JSON-RPC alone, without redirects or 429s, ended by an answer crossing (enforced); the core's replies, aliasing decodes and its refusal of one answer over 1048576 bytes are its own tests.",
           "harness": [
             "memory-budgets"
           ]
@@ -38021,7 +38447,7 @@
           }
         },
         "bounds": {
-          "sessionBytes": 25000
+          "sessionBytes": 4000
         }
       },
       "steps": [
@@ -38144,10 +38570,10 @@
             false
           ],
           "end": 40,
-          "outcome": "answered",
-          "answer": {
-            "status": 200,
-            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          "outcome": "cancelled",
+          "rejected": {
+            "at": 300030,
+            "code": "TIMEOUT"
           }
         },
         {
@@ -38416,6 +38842,763 @@
               }
             },
             "settled": 3030
+          }
+        ]
+      ]
+    },
+    {
+      "id": "deviation-reverse-normalized",
+      "system": "ens",
+      "seed": 7,
+      "deviation": "reverse-normalized",
+      "patches": [
+        {
+          "id": "reverse-normalized",
+          "text": "An ENS primary name that is not its own ENSIP-15 normalization is not shown as the address's name: the reverse result is UNVERIFIED with the claimed name, on the quorum, Colibri and Myotis paths alike.",
+          "source": {
+            "ens-resolver.js": {
+              "edits": [
+                [
+                  "  if (decoded.status === REVERSE_OUTCOME.name) {\n    return {",
+                  "  if (decoded.status === REVERSE_OUTCOME.name) {\n    if (!__isNormalizedName(decoded.detail)) {\n      return unverifiedReverseResult(normalizedAddress, NAME_SYSTEMS.ens, decoded.detail, `Reverse record for ${normalizedAddress} claims a name that isn't normalized`, outcome.trust);\n    }\n    return {"
+                ],
+                [
+                  "  if (!name) return { ...noReverseResult(normalizedAddress), trust };\n  return { success: true, address: normalizedAddress, name, system: 'ens', trust };",
+                  "  if (!name) return { ...noReverseResult(normalizedAddress), trust };\n  if (!__isNormalizedName(name)) {\n    return unverifiedReverseResult(normalizedAddress, NAME_SYSTEMS.ens, name, `Reverse record for ${normalizedAddress} claims a name that isn't normalized`, trust);\n  }\n  return { success: true, address: normalizedAddress, name, system: 'ens', trust };"
+                ],
+                [
+                  "  if (ensRec.status === 'ok' && ensRec.name) {\n    return {",
+                  "  if (ensRec.status === 'ok' && ensRec.name) {\n    if (!__isNormalizedName(ensRec.name)) {\n      return unverifiedReverseResult(normalizedAddress, NAME_SYSTEMS.ens, ensRec.name, `Reverse record for ${normalizedAddress} claims a name that isn't normalized`, ensTrust);\n    }\n    return {"
+                ]
+              ],
+              "append": [
+                "function __isNormalizedName(name) {\n  if (typeof name !== 'string' || Buffer.byteLength(name) > 1024) return false;\n  try {\n    return ens_normalize(name) === name;\n  } catch {\n    return false;\n  }\n}"
+              ]
+            }
+          }
+        }
+      ],
+      "world": {
+        "endpoints": [
+          "https://a.rpc.example",
+          "https://b.rpc.example",
+          "https://c.rpc.example",
+          "https://d.rpc.example"
+        ],
+        "network": {
+          "verification": {
+            "order": [
+              "quorum"
+            ],
+            "preferVerified": false
+          },
+          "quorum": {
+            "k": 3,
+            "m": 2,
+            "timeoutMs": 5000,
+            "anchor": "latest",
+            "anchorTtlMs": 30000
+          }
+        },
+        "calls": {
+          "reverse": {
+            "data": "0x000000000000000000000000000000000000000000000000000000000000006000000000000000000000000022222222222222222222222222222222222222220000000000000000000000003333333333333333333333333333333333333333000000000000000000000000000000000000000000000000000000000000000b7669746149696b2e657468000000000000000000000000000000000000000000"
+          }
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "call": {
+            "fn": "resolveEnsReverse",
+            "args": [
+              "0xabababababababababababababababababababab"
+            ]
+          },
+          "results": [
+            {
+              "value": {
+                "success": false,
+                "address": "0xabababababababababababababababababababab",
+                "system": "ens",
+                "reason": "UNVERIFIED",
+                "claimedName": "vitaIik.eth",
+                "error": "Reverse record for 0xabababababababababababababababababababab claims a name that isn't normalized",
+                "trust": {
+                  "level": "verified",
+                  "system": "ens",
+                  "block": {
+                    "number": 19999992,
+                    "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+                  },
+                  "agreed": [
+                    "c.rpc.example",
+                    "b.rpc.example"
+                  ],
+                  "dissented": [],
+                  "queried": [
+                    "c.rpc.example",
+                    "b.rpc.example",
+                    "d.rpc.example"
+                  ],
+                  "quorum": {
+                    "k": 3,
+                    "m": 2,
+                    "achieved": true
+                  }
+                }
+              },
+              "settled": 60
+            }
+          ]
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 1,
+          "chain": 1,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 1,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 2,
+          "chain": 2,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 2,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 3,
+          "chain": 3,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 3,
+          "step": 0,
+          "t": 10,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 4,
+          "chain": 4,
+          "method": "eth_blockNumber",
+          "params": [],
+          "end": 20,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1312d00\"}"
+          }
+        },
+        {
+          "id": 4,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 5,
+          "chain": 5,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 5,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 6,
+          "chain": 6,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 6,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 7,
+          "chain": 7,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 7,
+          "step": 0,
+          "t": 30,
+          "kind": "rpc",
+          "host": "a.rpc.example",
+          "http": 8,
+          "chain": 8,
+          "method": "eth_getBlockByNumber",
+          "params": [
+            "0x1312cf8",
+            false
+          ],
+          "end": 40,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x1312cf8\",\"hash\":\"0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878\",\"parentHash\":\"0x8e2113c39b77e776d49c4bec6c88d9e7a7ae874f1ef9ba7126759e97182ad8ed\",\"timestamp\":\"0x1\",\"nonce\":\"0x0000000000000000\",\"difficulty\":\"0x0\",\"gasLimit\":\"0x1\",\"gasUsed\":\"0x0\",\"miner\":\"0x0000000000000000000000000000000000000000\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x1\",\"transactions\":[]}}"
+          }
+        },
+        {
+          "id": 8,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "c.rpc.example",
+          "http": 9,
+          "chain": 9,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x5d78a2170000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000003c0000000000000000000000000000000000000000000000000000000000000014abababababababababababababababababababab000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "reverse",
+          "end": 60,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x000000000000000000000000000000000000000000000000000000000000006000000000000000000000000022222222222222222222222222222222222222220000000000000000000000003333333333333333333333333333333333333333000000000000000000000000000000000000000000000000000000000000000b7669746149696b2e657468000000000000000000000000000000000000000000\"}"
+          }
+        },
+        {
+          "id": 9,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "b.rpc.example",
+          "http": 10,
+          "chain": 10,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x5d78a2170000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000003c0000000000000000000000000000000000000000000000000000000000000014abababababababababababababababababababab000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "reverse",
+          "end": 60,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x000000000000000000000000000000000000000000000000000000000000006000000000000000000000000022222222222222222222222222222222222222220000000000000000000000003333333333333333333333333333333333333333000000000000000000000000000000000000000000000000000000000000000b7669746149696b2e657468000000000000000000000000000000000000000000\"}"
+          }
+        },
+        {
+          "id": 10,
+          "step": 0,
+          "t": 50,
+          "kind": "rpc",
+          "host": "d.rpc.example",
+          "http": 11,
+          "chain": 11,
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x5d78a2170000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000003c0000000000000000000000000000000000000000000000000000000000000014abababababababababababababababababababab000000000000000000000000"
+            },
+            "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+          ],
+          "call": "reverse",
+          "end": 60,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x000000000000000000000000000000000000000000000000000000000000006000000000000000000000000022222222222222222222222222222222222222220000000000000000000000003333333333333333333333333333333333333333000000000000000000000000000000000000000000000000000000000000000b7669746149696b2e657468000000000000000000000000000000000000000000\"}"
+          }
+        }
+      ],
+      "unpatched": [
+        [
+          {
+            "value": {
+              "success": true,
+              "address": "0xabababababababababababababababababababab",
+              "name": "vitaIik.eth",
+              "system": "ens",
+              "trust": {
+                "level": "verified",
+                "system": "ens",
+                "block": {
+                  "number": 19999992,
+                  "hash": "0x4be63f085f8ba370ebbda152ea166c706c7456e0a760e43dd99fa20a90bbb878"
+                },
+                "agreed": [
+                  "c.rpc.example",
+                  "b.rpc.example"
+                ],
+                "dissented": [],
+                "queried": [
+                  "c.rpc.example",
+                  "b.rpc.example",
+                  "d.rpc.example"
+                ],
+                "quorum": {
+                  "k": 3,
+                  "m": 2,
+                  "achieved": true
+                }
+              }
+            },
+            "settled": 60
+          }
+        ]
+      ]
+    },
+    {
+      "id": "deviation-reverse-normalized-colibri",
+      "system": "ens",
+      "seed": 7,
+      "deviation": "reverse-normalized",
+      "patches": [
+        {
+          "id": "reverse-normalized",
+          "text": "An ENS primary name that is not its own ENSIP-15 normalization is not shown as the address's name: the reverse result is UNVERIFIED with the claimed name, on the quorum, Colibri and Myotis paths alike.",
+          "source": {
+            "ens-resolver.js": {
+              "edits": [
+                [
+                  "  if (decoded.status === REVERSE_OUTCOME.name) {\n    return {",
+                  "  if (decoded.status === REVERSE_OUTCOME.name) {\n    if (!__isNormalizedName(decoded.detail)) {\n      return unverifiedReverseResult(normalizedAddress, NAME_SYSTEMS.ens, decoded.detail, `Reverse record for ${normalizedAddress} claims a name that isn't normalized`, outcome.trust);\n    }\n    return {"
+                ],
+                [
+                  "  if (!name) return { ...noReverseResult(normalizedAddress), trust };\n  return { success: true, address: normalizedAddress, name, system: 'ens', trust };",
+                  "  if (!name) return { ...noReverseResult(normalizedAddress), trust };\n  if (!__isNormalizedName(name)) {\n    return unverifiedReverseResult(normalizedAddress, NAME_SYSTEMS.ens, name, `Reverse record for ${normalizedAddress} claims a name that isn't normalized`, trust);\n  }\n  return { success: true, address: normalizedAddress, name, system: 'ens', trust };"
+                ],
+                [
+                  "  if (ensRec.status === 'ok' && ensRec.name) {\n    return {",
+                  "  if (ensRec.status === 'ok' && ensRec.name) {\n    if (!__isNormalizedName(ensRec.name)) {\n      return unverifiedReverseResult(normalizedAddress, NAME_SYSTEMS.ens, ensRec.name, `Reverse record for ${normalizedAddress} claims a name that isn't normalized`, ensTrust);\n    }\n    return {"
+                ]
+              ],
+              "append": [
+                "function __isNormalizedName(name) {\n  if (typeof name !== 'string' || Buffer.byteLength(name) > 1024) return false;\n  try {\n    return ens_normalize(name) === name;\n  } catch {\n    return false;\n  }\n}"
+              ]
+            }
+          }
+        }
+      ],
+      "world": {
+        "endpoints": [
+          "https://a.rpc.example",
+          "https://b.rpc.example",
+          "https://c.rpc.example",
+          "https://d.rpc.example"
+        ],
+        "network": {
+          "verification": {
+            "order": [
+              "colibri"
+            ],
+            "preferVerified": false
+          },
+          "quorum": {
+            "k": 3,
+            "m": 2,
+            "timeoutMs": 5000,
+            "anchor": "latest",
+            "anchorTtlMs": 30000
+          }
+        },
+        "calls": {
+          "resolve": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000"
+          },
+          "callback": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000"
+          }
+        },
+        "colibri": {
+          "prover": "https://prover.example",
+          "calls": {
+            "reverse": {
+              "data": "0x000000000000000000000000000000000000000000000000000000000000006000000000000000000000000022222222222222222222222222222222222222220000000000000000000000003333333333333333333333333333333333333333000000000000000000000000000000000000000000000000000000000000000b7669746149696b2e657468000000000000000000000000000000000000000000"
+            }
+          }
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "call": {
+            "fn": "resolveEnsReverse",
+            "args": [
+              "0xabababababababababababababababababababab"
+            ]
+          },
+          "results": [
+            {
+              "value": {
+                "success": false,
+                "address": "0xabababababababababababababababababababab",
+                "system": "ens",
+                "reason": "UNVERIFIED",
+                "claimedName": "vitaIik.eth",
+                "error": "Reverse record for 0xabababababababababababababababababababab claims a name that isn't normalized",
+                "trust": {
+                  "level": "verified",
+                  "system": "ens",
+                  "method": "colibri",
+                  "prover": "prover.example",
+                  "proof": "ZK sync-committee proof",
+                  "block": null,
+                  "agreed": [
+                    "prover.example"
+                  ],
+                  "dissented": [],
+                  "queried": [
+                    "prover.example"
+                  ],
+                  "quorum": {
+                    "k": 1,
+                    "m": 1,
+                    "achieved": true
+                  }
+                }
+              },
+              "settled": 10
+            }
+          ]
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "t": 0,
+          "kind": "verified-op",
+          "host": "colibri",
+          "op": "reverse",
+          "params": {
+            "address": "0xabababababababababababababababababababab",
+            "coinType": "60"
+          },
+          "end": 10,
+          "outcome": "answered",
+          "answer": {
+            "result": {
+              "name": "vitaIik.eth"
+            }
+          }
+        },
+        {
+          "id": 1,
+          "step": 0,
+          "t": 0,
+          "kind": "verified",
+          "host": "colibri",
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+              "data": "0x5d78a2170000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000003c0000000000000000000000000000000000000000000000000000000000000014abababababababababababababababababababab000000000000000000000000"
+            },
+            "latest"
+          ],
+          "call": "reverse",
+          "within": 0,
+          "end": 10,
+          "outcome": "answered",
+          "answer": {
+            "data": "0x000000000000000000000000000000000000000000000000000000000000006000000000000000000000000022222222222222222222222222222222222222220000000000000000000000003333333333333333333333333333333333333333000000000000000000000000000000000000000000000000000000000000000b7669746149696b2e657468000000000000000000000000000000000000000000"
+          }
+        }
+      ],
+      "unpatched": [
+        [
+          {
+            "value": {
+              "success": true,
+              "address": "0xabababababababababababababababababababab",
+              "name": "vitaIik.eth",
+              "system": "ens",
+              "trust": {
+                "level": "verified",
+                "system": "ens",
+                "method": "colibri",
+                "prover": "prover.example",
+                "proof": "ZK sync-committee proof",
+                "block": null,
+                "agreed": [
+                  "prover.example"
+                ],
+                "dissented": [],
+                "queried": [
+                  "prover.example"
+                ],
+                "quorum": {
+                  "k": 1,
+                  "m": 1,
+                  "achieved": true
+                }
+              }
+            },
+            "settled": 10
+          }
+        ]
+      ]
+    },
+    {
+      "id": "deviation-reverse-normalized-myotis",
+      "system": "ens",
+      "seed": 7,
+      "deviation": "reverse-normalized",
+      "patches": [
+        {
+          "id": "reverse-normalized",
+          "text": "An ENS primary name that is not its own ENSIP-15 normalization is not shown as the address's name: the reverse result is UNVERIFIED with the claimed name, on the quorum, Colibri and Myotis paths alike.",
+          "source": {
+            "ens-resolver.js": {
+              "edits": [
+                [
+                  "  if (decoded.status === REVERSE_OUTCOME.name) {\n    return {",
+                  "  if (decoded.status === REVERSE_OUTCOME.name) {\n    if (!__isNormalizedName(decoded.detail)) {\n      return unverifiedReverseResult(normalizedAddress, NAME_SYSTEMS.ens, decoded.detail, `Reverse record for ${normalizedAddress} claims a name that isn't normalized`, outcome.trust);\n    }\n    return {"
+                ],
+                [
+                  "  if (!name) return { ...noReverseResult(normalizedAddress), trust };\n  return { success: true, address: normalizedAddress, name, system: 'ens', trust };",
+                  "  if (!name) return { ...noReverseResult(normalizedAddress), trust };\n  if (!__isNormalizedName(name)) {\n    return unverifiedReverseResult(normalizedAddress, NAME_SYSTEMS.ens, name, `Reverse record for ${normalizedAddress} claims a name that isn't normalized`, trust);\n  }\n  return { success: true, address: normalizedAddress, name, system: 'ens', trust };"
+                ],
+                [
+                  "  if (ensRec.status === 'ok' && ensRec.name) {\n    return {",
+                  "  if (ensRec.status === 'ok' && ensRec.name) {\n    if (!__isNormalizedName(ensRec.name)) {\n      return unverifiedReverseResult(normalizedAddress, NAME_SYSTEMS.ens, ensRec.name, `Reverse record for ${normalizedAddress} claims a name that isn't normalized`, ensTrust);\n    }\n    return {"
+                ]
+              ],
+              "append": [
+                "function __isNormalizedName(name) {\n  if (typeof name !== 'string' || Buffer.byteLength(name) > 1024) return false;\n  try {\n    return ens_normalize(name) === name;\n  } catch {\n    return false;\n  }\n}"
+              ]
+            }
+          }
+        }
+      ],
+      "world": {
+        "endpoints": [
+          "https://a.rpc.example",
+          "https://b.rpc.example",
+          "https://c.rpc.example",
+          "https://d.rpc.example"
+        ],
+        "network": {
+          "verification": {
+            "order": [
+              "myotis"
+            ],
+            "preferVerified": false
+          },
+          "quorum": {
+            "k": 3,
+            "m": 2,
+            "timeoutMs": 5000,
+            "anchor": "latest",
+            "anchorTtlMs": 30000
+          }
+        },
+        "calls": {
+          "resolve": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000"
+          },
+          "callback": {
+            "data": "0x00000000000000000000000000000000000000000000000000000000000000400000000000000000000000002222222222222222222222222222222222222222000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000026e3010170122073a0d88f400948a45b350423e94a7834ce96ef990fdb5da450d49f8bfed52c1f0000000000000000000000000000000000000000000000000000"
+          }
+        },
+        "myotis": {
+          "enabled": true,
+          "ready": true,
+          "block": 23456789,
+          "calls": {
+            "reverse": {
+              "data": "0x000000000000000000000000000000000000000000000000000000000000006000000000000000000000000022222222222222222222222222222222222222220000000000000000000000003333333333333333333333333333333333333333000000000000000000000000000000000000000000000000000000000000000b7669746149696b2e657468000000000000000000000000000000000000000000"
+            }
+          }
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "call": {
+            "fn": "resolveEnsReverse",
+            "args": [
+              "0xabababababababababababababababababababab"
+            ]
+          },
+          "results": [
+            {
+              "value": {
+                "success": false,
+                "address": "0xabababababababababababababababababababab",
+                "system": "ens",
+                "reason": "UNVERIFIED",
+                "claimedName": "vitaIik.eth",
+                "error": "Reverse record for 0xabababababababababababababababababababab claims a name that isn't normalized",
+                "trust": {
+                  "level": "verified",
+                  "system": "ens",
+                  "method": "myotis",
+                  "finality": "optimistic",
+                  "proof": "P2P light client (optimistic beacon root — attested, not finalized)",
+                  "block": null,
+                  "agreed": [
+                    "myotis-p2p"
+                  ],
+                  "dissented": [],
+                  "queried": [
+                    "myotis-p2p"
+                  ],
+                  "quorum": {
+                    "k": 1,
+                    "m": 1,
+                    "achieved": true
+                  }
+                }
+              },
+              "settled": 10
+            }
+          ]
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "t": 0,
+          "kind": "verified-op",
+          "host": "myotis",
+          "op": "record",
+          "params": {
+            "method": "reverse",
+            "name": null,
+            "address": "0xabababababababababababababababababababab",
+            "coinType": "60"
+          },
+          "end": 10,
+          "outcome": "answered",
+          "answer": {
+            "result": {
+              "verified": false,
+              "blockNumber": null,
+              "status": "ok",
+              "name": "vitaIik.eth"
+            }
+          }
+        },
+        {
+          "id": 1,
+          "step": 0,
+          "t": 0,
+          "kind": "verified",
+          "host": "myotis",
+          "method": "eth_call",
+          "params": [
+            {
+              "to": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
+              "data": "0x5d78a2170000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000003c0000000000000000000000000000000000000000000000000000000000000014abababababababababababababababababababab000000000000000000000000"
+            },
+            "latest"
+          ],
+          "call": "reverse",
+          "within": 0,
+          "end": 10,
+          "outcome": "answered",
+          "answer": {
+            "data": "0x000000000000000000000000000000000000000000000000000000000000006000000000000000000000000022222222222222222222222222222222222222220000000000000000000000003333333333333333333333333333333333333333000000000000000000000000000000000000000000000000000000000000000b7669746149696b2e657468000000000000000000000000000000000000000000"
+          }
+        }
+      ],
+      "unpatched": [
+        [
+          {
+            "value": {
+              "success": true,
+              "address": "0xabababababababababababababababababababab",
+              "name": "vitaIik.eth",
+              "system": "ens",
+              "trust": {
+                "level": "verified",
+                "system": "ens",
+                "method": "myotis",
+                "finality": "optimistic",
+                "proof": "P2P light client (optimistic beacon root — attested, not finalized)",
+                "block": null,
+                "agreed": [
+                  "myotis-p2p"
+                ],
+                "dissented": [],
+                "queried": [
+                  "myotis-p2p"
+                ],
+                "quorum": {
+                  "k": 1,
+                  "m": 1,
+                  "achieved": true
+                }
+              }
+            },
+            "settled": 10
           }
         ]
       ]
