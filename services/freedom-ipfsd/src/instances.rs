@@ -70,7 +70,7 @@ use serde_json::value::RawValue;
 use tokio::runtime::Handle;
 
 use crate::budget::{Budgets, Fixed};
-use crate::network::NetworkPolicy;
+use crate::network;
 use crate::params::{self, Start, Store};
 use crate::requests::Requests;
 use crate::stats::GatewayCounters;
@@ -533,11 +533,25 @@ impl Instances {
             ErrorBody::new(ErrorCode::Storage, "the store won't open")
                 .with_data(json!({ "kind": "store_open" }))
         })?;
-        // Today's transports: the only policy until step 8 (`network.rs`).
-        match start.network {
-            NetworkPolicy::Direct => {}
-        }
+        // The instance's network: its policy, and a capability of its own,
+        // which the teardown revokes (`network.rs`).
+        let network = match network::network(
+            start.network,
+            &start.routing.delegated_routers,
+            &start.routing.doh_endpoint,
+        ) {
+            Ok(network) => network,
+            Err(message) => {
+                let _ = store.close(STORE_CLOSE);
+                log::error(
+                    "an instance's network didn't build",
+                    json!({ "instance": start.instance }),
+                );
+                return Err(ErrorBody::new(ErrorCode::Internal, message));
+            }
+        };
         let builder = OnlineNode::builder(store.clone())
+            .network(network)
             .routing_mode(start.routing.mode)
             .delegated_routers(start.routing.delegated_routers.iter().cloned())
             .dht_query_timeout(start.routing.dht_query_timeout)
@@ -579,8 +593,7 @@ impl Instances {
                 ))
             }
             // One of its HTTP clients couldn't be built for its network
-            // (reqwest refused the configuration). Until the `network` field
-            // is wired (`network.rs`), its network is upstream's legacy one.
+            // (reqwest refused the configuration).
             Err(InstanceStartError::Network(_)) => {
                 let _ = store.close(STORE_CLOSE);
                 log::error(

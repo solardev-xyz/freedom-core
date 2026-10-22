@@ -325,6 +325,7 @@ mod tests {
                 "instance": "e-1",
                 "store": { "kind": "memory", "max_bytes": 1048576 },
                 "routing": { "mode": "offline", "delegated_routers": [],
+                    "doh_endpoint": "https://cloudflare-dns.com/dns-query",
                     "dht_query_timeout_s": 3, "dht_max_providers": 32 },
                 "gateway": { "max_concurrent_requests": 8, "request_queue_timeout_ms": 15000 },
                 "network": { "mode": "direct" }
@@ -445,6 +446,7 @@ mod tests {
                     "instance": "e-1",
                     "store": { "kind": "memory", "max_bytes": 1048576 },
                     "routing": { "mode": "offline", "delegated_routers": [],
+                    "doh_endpoint": "https://cloudflare-dns.com/dns-query",
                         "dht_query_timeout_s": 3, "dht_max_providers": 32 },
                     "gateway": { "max_concurrent_requests": 8, "request_queue_timeout_ms": 15000 },
                     "network": { "mode": "direct" }

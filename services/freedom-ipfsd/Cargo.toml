@@ -39,12 +39,12 @@ fc-service = { path = "../../crates/fc-service" }
 # (#43), and the network policy (0007 upstream item 3, #44-#50: the gate,
 # `NetworkPolicy` through the builder, a revocable capability, `direct`'s
 # HTTP clients and transports, and `socks5` behind the gateway's `socks`
-# feature, which this pin doesn't enable yet). src/build_info.rs reports the
-# same commit.
+# feature, which `network: { mode: socks5 }` needs). src/build_info.rs
+# reports the same commit.
 # freedom-ipfs-core: the memory budget's `Reservation`, which the gateway
 # crate doesn't re-export.
 freedom-ipfs-core = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "c88b711c5d9070eedd92cf92fa33f16f6e385606" }
-freedom-ipfs-gateway = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "c88b711c5d9070eedd92cf92fa33f16f6e385606" }
+freedom-ipfs-gateway = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "c88b711c5d9070eedd92cf92fa33f16f6e385606", features = ["socks"] }
 freedom-ipfs-store = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "c88b711c5d9070eedd92cf92fa33f16f6e385606" }
 # The `Stream` trait, to read a response's body as it comes; already in
 # freedom-ipfs's graph.
