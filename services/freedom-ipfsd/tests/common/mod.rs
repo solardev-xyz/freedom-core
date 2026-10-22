@@ -647,3 +647,20 @@ pub fn status<S: AsRef<OsStr>>(args: &[S]) -> Option<i32> {
         .unwrap()
         .code()
 }
+
+/// Each instance whose teardown began, in `stderr`'s order, with whether
+/// its network capability was revoked by then (the "instance stopping"
+/// lines): every fence revokes first (0007, teardown step 2).
+pub fn stopping(stderr: &str) -> Vec<(String, bool)> {
+    stderr
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|line| line["msg"] == "instance stopping")
+        .map(|line| {
+            (
+                line["instance"].as_str().unwrap_or_default().to_string(),
+                line["revoked"] == true,
+            )
+        })
+        .collect()
+}

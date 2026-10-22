@@ -25,8 +25,11 @@
 //!   1. **Fence:** the ID is retired at once, on the reader thread: a later
 //!      `ipfs.stop` for it gets `stopped`. The 5 s watchdog is armed at the
 //!      same moment.
-//!   2. **Revoke:** the network capability comes with the network policy
-//!      (upstream item 3, implementation step 8). Nothing to revoke yet.
+//!   2. **Revoke:** the instance's network capability is revoked at the
+//!      fence, under the same lock, so no socket, DNS query or redirect hop
+//!      of the instance starts from then on, whatever is still running. A
+//!      start fenced while it builds is revoked as soon as its instance
+//!      exists. Upstream's `begin_shutdown` revokes again, harmlessly.
 //!   3. **Cancel:** the instance's requests are settled `stopped` (an error
 //!      for those whose head isn't written, an abort for open streams;
 //!      [`Requests::stop_instance`]), then [`Instance::begin_shutdown`]
@@ -247,8 +250,12 @@ impl Slot {
         }
         match std::mem::replace(&mut self.state, State::Stopping { stops }) {
             // The shared gateway goes with the fence; requests still
-            // running hold their own clones until they end.
-            State::Live(running) => Some(running.instance),
+            // running hold their own clones until they end. Step 2, with
+            // the fence: nothing of the instance connects from now on.
+            State::Live(running) => {
+                running.instance.network_capability().revoke();
+                Some(running.instance)
+            }
             _ => None,
         }
     }
@@ -493,13 +500,15 @@ impl Instances {
             let _ = conn.head(id, &json!({ "instance": instance_id }), false);
             return;
         }
+        // Fenced while it built: step 2 as soon as the instance exists.
+        instance.network_capability().revoke();
         slot.state = State::Stopping { stops };
         drop(table);
         if fenced == Some(Fence::Stopped) {
             let _ = conn.reply_error(id, &stopped());
         }
-        // Fenced while it built: the bound armed at the fence goes on.
-        log::info("instance stopping", json!({ "instance": instance_id }));
+        // The bound armed at the fence goes on.
+        stopping(&instance_id, &instance);
         self.tear_down(conn, &instance_id, instance, bound);
     }
 
@@ -723,7 +732,7 @@ impl Instances {
         instance: Instance,
     ) {
         let watchdog = self.bound();
-        log::info("instance stopping", json!({ "instance": instance_id }));
+        stopping(&instance_id, &instance);
         let (instances, conn) = (self.clone(), conn.clone());
         drop(self.runtime.spawn_blocking(move || {
             with_kind(CONTROL, || {
@@ -775,7 +784,7 @@ impl Instances {
             instance,
             watchdog,
         } = retiring;
-        log::info("instance stopping", json!({ "instance": instance_id }));
+        stopping(&instance_id, &instance);
         let (instances, conn) = (self.clone(), conn.clone());
         drop(self.runtime.spawn_blocking(move || {
             with_kind(CONTROL, || {
@@ -868,7 +877,7 @@ impl Instances {
         let begun: Vec<_> = live
             .into_iter()
             .map(|(instance_id, instance)| {
-                log::info("instance stopping", json!({ "instance": instance_id }));
+                stopping(&instance_id, &instance);
                 self.requests.stop_instance(conn, &instance_id);
                 (instance_id, instance.begin_shutdown(DRAIN))
             })
@@ -884,6 +893,18 @@ impl Instances {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
         }
     }
+}
+
+/// Logs that a fenced instance's teardown begins, and whether its network
+/// capability is revoked (step 2, which every fence takes first).
+fn stopping(instance_id: &str, instance: &Instance) {
+    log::info(
+        "instance stopping",
+        json!({
+            "instance": instance_id,
+            "revoked": instance.network_capability().is_revoked(),
+        }),
+    );
 }
 
 /// The gateway configuration an instance is built with: `ipfs.start`'s,

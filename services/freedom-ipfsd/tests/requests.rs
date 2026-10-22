@@ -394,6 +394,13 @@ fn a_request_panic_is_internal_and_retires_its_instance_only() {
         "{stderr}"
     );
     assert!(!stderr.contains("SECRET"), "{stderr}");
+    // Each panic's fence revoked its instance's network first (0007,
+    // "Panics": steps 1 and 2 before anything else).
+    let revoked = stopping(&stderr);
+    assert!(
+        revoked.len() >= 2 && revoked.iter().all(|(_, revoked)| *revoked),
+        "{revoked:?}"
+    );
 }
 
 #[test]

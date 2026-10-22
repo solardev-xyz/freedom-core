@@ -289,6 +289,36 @@ fn a_stop_while_starting_answers_both() {
         2,
         "{stderr}"
     );
+    // Revoked first: p-1 as soon as it existed, fenced while it built; p-2
+    // at the connection's end.
+    assert_eq!(
+        stopping(&stderr),
+        [("p-1".to_string(), true), ("p-2".to_string(), true)],
+        "{stderr}"
+    );
+}
+
+/// Every fence revokes the instance's network first (0007, teardown step
+/// 2): a stop's, and the connection's end.
+#[test]
+fn every_fence_revokes_the_network_first() {
+    let mut ipfsd = Ipfsd::ephemeral(&[]);
+    ipfsd.hello();
+    for instance in ["e-1", "e-2"] {
+        assert_eq!(
+            ipfsd.start(memory(instance))["result"]["instance"],
+            instance
+        );
+    }
+    assert_eq!(ipfsd.stop("e-1")["result"], json!({ "instance": "e-1" }));
+    ipfsd.close_stdin();
+    assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
+    let stderr = ipfsd.stderr();
+    assert_eq!(
+        stopping(&stderr),
+        [("e-1".to_string(), true), ("e-2".to_string(), true)],
+        "{stderr}"
+    );
 }
 
 #[cfg(feature = "testhooks")]
@@ -314,6 +344,9 @@ fn a_cancelled_start_is_torn_down() {
     assert_eq!(ipfsd.stop("p-1")["error"]["code"], "stopped");
     ipfsd.shutdown();
     assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
+    // The cancelled start's instance was revoked as soon as it existed.
+    let stderr = ipfsd.stderr();
+    assert_eq!(stopping(&stderr)[0], ("p-1".to_string(), true), "{stderr}");
 }
 
 #[cfg(feature = "testhooks")]
