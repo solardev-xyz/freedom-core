@@ -84,16 +84,35 @@ impl Failure {
     }
 }
 
+/// Whether a query may send: the check and the send as one step, so
+/// nothing that ends the allowance can come between them.
+pub trait Gate: Sync {
+    /// Runs `send` if sends are allowed, the allowance held until it
+    /// returns, and gives its result; `None` once they aren't allowed.
+    fn run(&self, send: &dyn Fn() -> std::io::Result<usize>) -> Option<std::io::Result<usize>>;
+}
+
+/// Sends always allowed.
+pub struct Open;
+
+impl Gate for Open {
+    fn run(&self, send: &dyn Fn() -> std::io::Result<usize>) -> Option<std::io::Result<usize>> {
+        Some(send())
+    }
+}
+
 /// Asks `resolver` for `ipv4only.arpa`'s AAAA records, with query ID `id`:
-/// up to `attempts` sends of the same query, each waiting `attempt` for
-/// its reply, while `proceed` says it may still send. A reply with another
-/// ID is skipped, as a late one to another query would be.
+/// up to `attempts` sends of the same query, each through `gate`, each
+/// waiting `attempt` for its reply. A reply with another ID is skipped, as a
+/// late one to another query would be.
+///
+/// A send doesn't block: a gate may hold a lock across it.
 pub fn ask(
     resolver: SocketAddr,
     id: u16,
     attempt: Duration,
     attempts: u32,
-    proceed: &(dyn Fn() -> bool + Sync),
+    gate: &dyn Gate,
 ) -> Result<Answer, Failure> {
     let query = encode(id)?;
     let local: SocketAddr = if resolver.is_ipv4() {
@@ -105,10 +124,15 @@ pub fn ask(
     socket.connect(resolver).map_err(|_| Failure::Socket)?;
     let mut buffer = vec![0u8; MAX_REPLY + 1];
     for _ in 0..attempts.max(1) {
-        if !proceed() {
-            return Err(Failure::Abandoned);
+        socket.set_nonblocking(true).map_err(|_| Failure::Socket)?;
+        let sent = gate.run(&|| socket.send(&query));
+        socket.set_nonblocking(false).map_err(|_| Failure::Socket)?;
+        match sent {
+            None => return Err(Failure::Abandoned),
+            // A full send buffer (`WouldBlock`) included.
+            Some(Err(_)) => return Err(Failure::Socket),
+            Some(Ok(_)) => {}
         }
-        socket.send(&query).map_err(|_| Failure::Socket)?;
         let deadline = Instant::now() + attempt;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -359,7 +383,7 @@ pub mod tests {
                 |_| {},
             )]
         });
-        let answer = ask(addr, 7, ATTEMPT, 1, &|| true).unwrap();
+        let answer = ask(addr, 7, ATTEMPT, 1, &Open).unwrap();
         assert_eq!(
             answer.prefixes,
             vec![prefix("64:ff9b::", 96), prefix("2a00:1:2:3::", 64)]
@@ -378,7 +402,7 @@ pub mod tests {
             let (addr, _) =
                 resolver(move |query| vec![reply_to(query, rcode, &[], Some((900, 60)), |_| {})]);
             assert_eq!(
-                ask(addr, 9, ATTEMPT, 1, &|| true),
+                ask(addr, 9, ATTEMPT, 1, &Open),
                 Ok(Answer {
                     prefixes: vec![],
                     ttl: Some(Duration::from_secs(60)),
@@ -387,7 +411,7 @@ pub mod tests {
             );
             let (addr, _) = resolver(move |query| vec![reply_to(query, rcode, &[], None, |_| {})]);
             assert_eq!(
-                ask(addr, 9, ATTEMPT, 1, &|| true),
+                ask(addr, 9, ATTEMPT, 1, &Open),
                 Ok(Answer {
                     prefixes: vec![],
                     ttl: None,
@@ -410,7 +434,7 @@ pub mod tests {
                 )]
             });
             assert_eq!(
-                ask(addr, 9, ATTEMPT, 1, &|| true),
+                ask(addr, 9, ATTEMPT, 1, &Open),
                 Ok(Answer {
                     prefixes: vec![],
                     ttl: soa.map(|_| Duration::from_secs(60)),
@@ -436,7 +460,7 @@ pub mod tests {
             vec![reply]
         });
         assert_eq!(
-            ask(addr, 0x4242, ATTEMPT, 1, &|| true),
+            ask(addr, 0x4242, ATTEMPT, 1, &Open),
             Err(Failure::Truncated)
         );
         // One that fills the buffer exactly is read.
@@ -451,17 +475,25 @@ pub mod tests {
             reply.resize(MAX_REPLY, 0);
             vec![reply]
         });
-        assert!(ask(addr, 0x4242, ATTEMPT, 1, &|| true).is_ok());
+        assert!(ask(addr, 0x4242, ATTEMPT, 1, &Open).is_ok());
     }
 
     #[test]
     fn an_abandoned_query_sends_nothing_more() {
         let (addr, got) = resolver(|_| vec![]);
-        let sends = std::sync::atomic::AtomicUsize::new(0);
-        // Proceeds for the first send only.
-        let proceed = || sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+        /// Allows the first send only.
+        struct First(std::sync::atomic::AtomicUsize);
+        impl Gate for First {
+            fn run(
+                &self,
+                send: &dyn Fn() -> std::io::Result<usize>,
+            ) -> Option<std::io::Result<usize>> {
+                (self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0).then(send)
+            }
+        }
+        let gate = First(std::sync::atomic::AtomicUsize::new(0));
         assert_eq!(
-            ask(addr, 1, Duration::from_millis(100), 3, &proceed),
+            ask(addr, 1, Duration::from_millis(100), 3, &gate),
             Err(Failure::Abandoned)
         );
         std::thread::sleep(Duration::from_millis(100));
@@ -485,10 +517,7 @@ pub mod tests {
                     |_| {},
                 )]
             });
-            assert_eq!(
-                ask(addr, 1, ATTEMPT, 1, &|| true),
-                Err(Failure::Rcode(number))
-            );
+            assert_eq!(ask(addr, 1, ATTEMPT, 1, &Open), Err(Failure::Rcode(number)));
         }
     }
 
@@ -505,7 +534,7 @@ pub mod tests {
                 },
             )]
         });
-        assert_eq!(ask(addr, 1, ATTEMPT, 1, &|| true), Err(Failure::Truncated));
+        assert_eq!(ask(addr, 1, ATTEMPT, 1, &Open), Err(Failure::Truncated));
     }
 
     #[test]
@@ -543,11 +572,11 @@ pub mod tests {
                     edit,
                 )]
             });
-            assert_eq!(ask(addr, 1, ATTEMPT, 1, &|| true), Err(Failure::Malformed));
+            assert_eq!(ask(addr, 1, ATTEMPT, 1, &Open), Err(Failure::Malformed));
         }
         // Bytes that don't parse, under our ID.
         let (addr, _) = resolver(|query| vec![[&query[..2], &[0xff; 5][..]].concat()]);
-        assert_eq!(ask(addr, 1, ATTEMPT, 1, &|| true), Err(Failure::Malformed));
+        assert_eq!(ask(addr, 1, ATTEMPT, 1, &Open), Err(Failure::Malformed));
     }
 
     #[test]
@@ -566,7 +595,7 @@ pub mod tests {
             // Garbage under another ID, then a reply under another ID, then ours.
             vec![vec![0x00, 0x01, 0xff], stray, ours]
         });
-        let answer = ask(addr, 0x0203, ATTEMPT, 1, &|| true).unwrap();
+        let answer = ask(addr, 0x0203, ATTEMPT, 1, &Open).unwrap();
         assert_eq!(answer.prefixes, vec![prefix("64:ff9b::", 96)]);
     }
 
@@ -594,7 +623,7 @@ pub mod tests {
             socket.send_to(&genuine, from).unwrap();
         });
         assert_eq!(
-            ask(addr, 0x4242, ATTEMPT, 1, &|| true),
+            ask(addr, 0x4242, ATTEMPT, 1, &Open),
             Ok(Answer {
                 prefixes: vec![],
                 ttl: None,
@@ -607,7 +636,7 @@ pub mod tests {
         let (addr, got) = resolver(|_| vec![]);
         let started = Instant::now();
         assert_eq!(
-            ask(addr, 1, Duration::from_millis(100), 3, &|| true),
+            ask(addr, 1, Duration::from_millis(100), 3, &Open),
             Err(Failure::Timeout)
         );
         assert!(started.elapsed() >= Duration::from_millis(300));
@@ -627,7 +656,7 @@ pub mod tests {
                 vec![reply_to(query, ResponseCode::NoError, &[], None, |_| {})]
             }
         });
-        assert!(ask(addr, 1, Duration::from_millis(150), 2, &|| true).is_ok());
+        assert!(ask(addr, 1, Duration::from_millis(150), 2, &Open).is_ok());
     }
 
     #[test]
@@ -637,7 +666,7 @@ pub mod tests {
         let closed = UdpSocket::bind("127.0.0.1:0").unwrap();
         let addr = closed.local_addr().unwrap();
         drop(closed);
-        let result = ask(addr, 1, Duration::from_millis(200), 2, &|| true);
+        let result = ask(addr, 1, Duration::from_millis(200), 2, &Open);
         assert!(
             matches!(result, Err(Failure::Socket | Failure::Timeout)),
             "{result:?}"
