@@ -35,7 +35,12 @@
 //!   one listed past them isn't asked, and counts as a failure
 //!   (`over_limit`), so the state can't be known.
 //! - **A failure ends a known state at once:** the first one a round
-//!   establishes publishes unknown, before the others' answers.
+//!   establishes publishes **pending**, before the others' answers, and the
+//!   round's end publishes unknown, with every prefix it learned. Pending
+//!   keeps every IPv6 target but an IPv4-mapped one waiting, the fixed forms
+//!   included: an unknown published early would judge them by the prefixes
+//!   learned so far, while an answer still out could teach one that covers
+//!   a fixed form.
 //! - **The result belongs to the process,** not to an instance. It runs
 //!   only while a `direct` instance holds a [`Lease`]: a `socks5` instance
 //!   learns nothing (the exit makes every connection), and a process with
@@ -279,11 +284,12 @@ impl Shared {
                 shared: &self,
                 generation,
             };
-            // The first failure ends a known state at once.
-            let failed = |state: Nat64State, failures: &[Failed]| {
+            // The first failure ends a known state at once: pending until
+            // the round's end (see the module's comment).
+            let failed = |failures: &[Failed]| {
                 let control = self.lock();
                 if control.leases > 0 && control.generation == generation {
-                    self.publish(state, failures);
+                    self.publish(Nat64State::Pending, failures);
                 }
             };
             let started = Instant::now();
@@ -327,15 +333,15 @@ impl Shared {
 ///
 /// - **Each send goes through `gate`:** once it says no, the round sends
 ///   nothing more, and its caller doesn't publish it.
-/// - **The first failure is reported at once** (`failed`, with the state
-///   unknown and the failures so far), not when the round ends, so a known
-///   state never outlasts an established failure.
+/// - **The first failure is reported at once** (`failed`, with the failures
+///   so far), not when the round ends, so a known state never outlasts an
+///   established failure.
 pub fn round(
     learned: &[Learned],
     kept: &mut Vec<Nat64Prefix>,
     timing: &Timing,
     gate: &dyn query::Gate,
-    failed: &dyn Fn(Nat64State, &[Failed]),
+    failed: &dyn Fn(&[Failed]),
 ) -> Round {
     let mut failures: Vec<Failed> = Vec::new();
     let mut asked: Vec<SocketAddr> = Vec::new();
@@ -347,13 +353,13 @@ pub fn round(
         }
     }
     let mut reported = false;
-    let mut report = |failures: &[Failed], kept: &[Nat64Prefix]| {
+    let mut report = |failures: &[Failed]| {
         if !reported && !failures.is_empty() {
             reported = true;
-            failed(Nat64State::unknown(kept.iter().copied()), failures);
+            failed(failures);
         }
     };
-    report(&failures, kept);
+    report(&failures);
     let mut ttl: Option<Duration> = None;
     std::thread::scope(|scope| {
         let (sent, answers) = std::sync::mpsc::channel();
@@ -388,7 +394,7 @@ pub fn round(
                 }
                 Err(failure) => {
                     failures.push((addr.to_string(), failure.as_str()));
-                    report(&failures, kept);
+                    report(&failures);
                 }
             }
         }
@@ -553,7 +559,7 @@ mod tests {
             &mut kept,
             &FAST,
             &query::Open,
-            &|_, _| {},
+            &|_| {},
         );
         assert_eq!(
             union.state,
@@ -584,7 +590,7 @@ mod tests {
             &mut kept,
             &FAST,
             &query::Open,
-            &|_, _| {},
+            &|_| {},
         );
         assert_eq!(both.ttl, Some(Duration::from_secs(40)));
     }
@@ -599,7 +605,7 @@ mod tests {
             &mut kept,
             &FAST,
             &query::Open,
-            &|_, _| {},
+            &|_| {},
         );
         assert_eq!(
             failed.state,
@@ -613,7 +619,7 @@ mod tests {
             &mut kept,
             &FAST,
             &query::Open,
-            &|_, _| {},
+            &|_| {},
         );
         assert_eq!(
             unaskable.state,
@@ -628,7 +634,7 @@ mod tests {
     #[test]
     fn no_resolver_listed_is_known_and_empty() {
         let mut kept = Vec::new();
-        let none = round(&[], &mut kept, &FAST, &query::Open, &|_, _| {});
+        let none = round(&[], &mut kept, &FAST, &query::Open, &|_| {});
         assert_eq!(none.state, Nat64State::NONE);
         assert_eq!(none.ttl, None);
     }
@@ -638,17 +644,17 @@ mod tests {
         let answers = Arc::new(Mutex::new(Some(vec!["2a00:1:2:3::"])));
         let (addr, _) = dns64(answers.clone());
         let mut kept = Vec::new();
-        round(&[ask(addr)], &mut kept, &FAST, &query::Open, &|_, _| {});
+        round(&[ask(addr)], &mut kept, &FAST, &query::Open, &|_| {});
         // A refresh that drops the prefix doesn't forget it.
         *answers.lock().unwrap() = Some(vec![]);
         assert_eq!(
-            round(&[ask(addr)], &mut kept, &FAST, &query::Open, &|_, _| {}).state,
+            round(&[ask(addr)], &mut kept, &FAST, &query::Open, &|_| {}).state,
             Nat64State::Known(vec![prefix("2a00:1:2:3::", 96)])
         );
         // A failed refresh keeps it too.
         *answers.lock().unwrap() = None;
         assert_eq!(
-            round(&[ask(addr)], &mut kept, &FAST, &query::Open, &|_, _| {}).state,
+            round(&[ask(addr)], &mut kept, &FAST, &query::Open, &|_| {}).state,
             Nat64State::Unknown(vec![prefix("2a00:1:2:3::", 96)])
         );
         // Seventeen distinct prefixes: incomplete, for good.
@@ -672,14 +678,14 @@ mod tests {
             "2a00:1:11::",
         ];
         *answers.lock().unwrap() = Some(seventeen);
-        let state = round(&[ask(addr)], &mut kept, &FAST, &query::Open, &|_, _| {}).state;
+        let state = round(&[ask(addr)], &mut kept, &FAST, &query::Open, &|_| {}).state;
         assert!(
             matches!(state, Nat64State::Incomplete(ref kept) if kept.len() == 16),
             "{state:?}"
         );
         *answers.lock().unwrap() = Some(vec![]);
         assert!(matches!(
-            round(&[ask(addr)], &mut kept, &FAST, &query::Open, &|_, _| {}).state,
+            round(&[ask(addr)], &mut kept, &FAST, &query::Open, &|_| {}).state,
             Nat64State::Incomplete(_)
         ));
         assert_eq!(kept.len(), Nat64State::MAX_PREFIXES + 1);
@@ -820,7 +826,7 @@ mod tests {
             &mut kept,
             &FAST,
             &query::Open,
-            &|_, _| {},
+            &|_| {},
         );
         for queries in [one_queries, two_queries] {
             let sent: Vec<Vec<u8>> = queries.try_iter().collect();
@@ -879,37 +885,45 @@ mod tests {
 
     #[test]
     fn the_last_leases_drop_waits_for_the_send_it_allowed_and_nothing_follows() {
-        // The conformance review's probe, for a gate that holds the lock
-        // through the send: between the first send's check and the send,
-        // under the lock, the hook waits 200 ms. The last lease's drop,
-        // called then, returns only once that send is done.
-        let (addr, queries) = silent();
-        let discovery = Discovery::new(
-            Arc::new(move || vec![ask(addr)]),
-            slow(Duration::from_millis(300), 2),
-        );
-        let checked = Arc::new(std::sync::Barrier::new(2));
-        let hook_checked = checked.clone();
-        let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        *discovery.shared.before_send.lock().unwrap() = Some(Arc::new(move || {
-            if first.swap(false, Ordering::SeqCst) {
-                hook_checked.wait();
-                std::thread::sleep(Duration::from_millis(200));
+        // Both reviews' round 2 probes, for a gate that holds the lock
+        // through the send: between a send's check and the send, under the
+        // lock, the hook waits 200 ms, for the first send and for the
+        // resend. The last lease's drop, called then, returns only once
+        // that send is done, and nothing follows it.
+        for (delayed, sent_before) in [(1, 1), (2, 2)] {
+            let (addr, queries) = silent();
+            let discovery = Discovery::new(
+                Arc::new(move || vec![ask(addr)]),
+                slow(Duration::from_millis(300), 3),
+            );
+            let checked = Arc::new(std::sync::Barrier::new(2));
+            let hook_checked = checked.clone();
+            let sends = Arc::new(AtomicUsize::new(0));
+            *discovery.shared.before_send.lock().unwrap() = Some(Arc::new(move || {
+                if sends.fetch_add(1, Ordering::SeqCst) + 1 == delayed {
+                    hook_checked.wait();
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            }));
+            let lease = discovery.lease();
+            // That send has passed its check, and hasn't sent.
+            checked.wait();
+            let dropping = Instant::now();
+            drop(lease);
+            let waited = dropping.elapsed();
+            assert!(
+                waited >= Duration::from_millis(150),
+                "send {delayed}: {waited:?}"
+            );
+            // The sends it allowed, and nothing after.
+            for _ in 0..sent_before {
+                queries.recv_timeout(Duration::from_secs(1)).unwrap();
             }
-        }));
-        let lease = discovery.lease();
-        // A send has passed its check, and hasn't sent.
-        checked.wait();
-        let dropping = Instant::now();
-        drop(lease);
-        let waited = dropping.elapsed();
-        assert!(waited >= Duration::from_millis(150), "{waited:?}");
-        // The send it allowed, and nothing after: no resend.
-        queries.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(
-            queries.recv_timeout(Duration::from_millis(700)).is_err(),
-            "a send after the last lease's drop"
-        );
+            assert!(
+                queries.recv_timeout(Duration::from_millis(700)).is_err(),
+                "send {delayed}: a send after the last lease's drop"
+            );
+        }
     }
 
     #[test]
@@ -1003,7 +1017,7 @@ mod tests {
             .collect();
         let learned: Vec<Learned> = resolvers.iter().map(|(addr, _)| ask(*addr)).collect();
         let mut kept = Vec::new();
-        let round = round(&learned, &mut kept, &FAST, &query::Open, &|_, _| {});
+        let round = round(&learned, &mut kept, &FAST, &query::Open, &|_| {});
         assert_eq!(
             round.state,
             Nat64State::Unknown(vec![prefix("2001:db8:64::", 96)])
@@ -1022,8 +1036,9 @@ mod tests {
     }
 
     /// Discovery that knows no prefix from one answering resolver, then
-    /// refreshes against `then`, every 30 ms.
-    fn known_then(then: Vec<Learned>, attempt: Duration) -> Discovery {
+    /// refreshes against `then`, every 30 ms, or `backoff` after a failed
+    /// round's start.
+    fn known_then(then: Vec<Learned>, attempt: Duration, backoff: Duration) -> Discovery {
         let (good, _) = dns64(Arc::new(Mutex::new(Some(vec![]))));
         let calls = Arc::new(AtomicUsize::new(0));
         let counted = calls.clone();
@@ -1040,7 +1055,7 @@ mod tests {
                 attempts: 1,
                 floor: Duration::from_millis(30),
                 ceiling: Duration::from_millis(30),
-                backoff: Duration::from_millis(30),
+                backoff,
             },
         )
     }
@@ -1051,22 +1066,86 @@ mod tests {
         // fails at once, beside one that never answers within its 2 s.
         let (failing, _) = dns64(Arc::new(Mutex::new(None)));
         let (quiet, quiet_queries) = silent();
-        let discovery = known_then(vec![ask(failing), ask(quiet)], Duration::from_secs(2));
+        let discovery = known_then(
+            vec![ask(failing), ask(quiet)],
+            Duration::from_secs(2),
+            Duration::from_secs(4),
+        );
         let _lease = discovery.lease();
         assert_eq!(
             wait_for(&discovery, |state| *state != Nat64State::Pending),
             Nat64State::NONE
         );
         // The refresh is under way: the quiet one has its query, and won't
-        // time out for 2 s. The failure is established already.
+        // time out for 2 s. The failure is established already: pending,
+        // well before the quiet one's 2 s are up.
         quiet_queries.recv_timeout(Duration::from_secs(2)).unwrap();
-        // Well before the quiet one's 2 s are up.
         let state = wait_within(&discovery, Duration::from_millis(800), |state| {
-            matches!(state, Nat64State::Unknown(_))
+            *state == Nat64State::Pending
         });
-        assert!(matches!(state, Nat64State::Unknown(_)), "{state:?}");
+        assert_eq!(state, Nat64State::Pending);
         let target: std::net::IpAddr = "2a00:1:2:3::7f00:1".parse().unwrap();
         assert!(freedom_ipfs_gateway::net::gate::check_address(target, &state).is_err());
+        // The round's end: unknown.
+        let state = wait_for(&discovery, |state| matches!(state, Nat64State::Unknown(_)));
+        assert!(matches!(state, Nat64State::Unknown(_)), "{state:?}");
+        assert!(freedom_ipfs_gateway::net::gate::check_address(target, &state).is_err());
+    }
+
+    #[test]
+    fn an_early_failure_admits_no_fixed_form_before_the_rounds_other_answers() {
+        // The adversarial review's round 2 probe. Known without a prefix;
+        // on the refresh, one resolver fails at once while another is held
+        // before it advertises a /96 under 6to4. Read as 6to4,
+        // `2002:808:808::7f00:1` is 8.8.8.8; under that /96, 127.0.0.1.
+        let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let released = release.clone();
+        let (learning, learning_queries) = resolver(move |query| {
+            let (lock, wake) = &*released;
+            let ready = lock.lock().unwrap();
+            let _ready = wake.wait_while(ready, |ready| !*ready).unwrap();
+            vec![reply_to(
+                query,
+                ResponseCode::NoError,
+                &[(v6("2002:808:808::c000:aa"), 30)],
+                None,
+                |_| {},
+            )]
+        });
+        let (failing, _) = dns64(Arc::new(Mutex::new(None)));
+        let discovery = known_then(
+            vec![ask(learning), ask(failing)],
+            Duration::from_secs(2),
+            Duration::from_secs(4),
+        );
+        let _lease = discovery.lease();
+        assert_eq!(
+            wait_for(&discovery, |state| *state != Nat64State::Pending),
+            Nat64State::NONE
+        );
+        learning_queries
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        let target: std::net::IpAddr = "2002:808:808::7f00:1".parse().unwrap();
+        // While the learning answer is out: pending, which admits no IPv6
+        // target but an IPv4-mapped one.
+        let early = wait_within(&discovery, Duration::from_secs(1), |state| {
+            *state == Nat64State::Pending
+        });
+        assert_eq!(early, Nat64State::Pending);
+        assert!(freedom_ipfs_gateway::net::gate::check_address(target, &early).is_err());
+        let mapped: std::net::IpAddr = "::ffff:8.8.8.8".parse().unwrap();
+        assert!(freedom_ipfs_gateway::net::gate::check_address(mapped, &early).is_ok());
+        // Released: the round's end, unknown with the /96, refuses it.
+        let (lock, wake) = &*release;
+        *lock.lock().unwrap() = true;
+        wake.notify_all();
+        let end = wait_for(
+            &discovery,
+            |state| matches!(state, Nat64State::Unknown(prefixes) if !prefixes.is_empty()),
+        );
+        assert_eq!(end, Nat64State::unknown([prefix("2002:808:808::", 96)]));
+        assert!(freedom_ipfs_gateway::net::gate::check_address(target, &end).is_err());
     }
 
     #[test]
@@ -1075,18 +1154,18 @@ mod tests {
             (0..MAX_RESOLVERS).map(|_| silent()).collect();
         let mut then: Vec<Learned> = first.iter().map(|(addr, _)| ask(*addr)).collect();
         then.push(ask(silent().0));
-        let discovery = known_then(then, Duration::from_secs(2));
+        let discovery = known_then(then, Duration::from_secs(2), Duration::from_secs(4));
         let _lease = discovery.lease();
         assert_eq!(
             wait_for(&discovery, |state| *state != Nat64State::Pending),
             Nat64State::NONE
         );
         first[0].1.recv_timeout(Duration::from_secs(2)).unwrap();
-        // Well before any of the round's 2 s timeouts.
+        // Well before any of the round's 2 s timeouts: pending.
         let state = wait_within(&discovery, Duration::from_millis(800), |state| {
-            matches!(state, Nat64State::Unknown(_))
+            *state == Nat64State::Pending
         });
-        assert!(matches!(state, Nat64State::Unknown(_)), "{state:?}");
+        assert_eq!(state, Nat64State::Pending);
     }
 
     #[test]
