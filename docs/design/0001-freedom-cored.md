@@ -433,7 +433,7 @@ New code goes in `src/main/core/`:
 | `identity-manager.js` create, import, unlock, lock, status, change-password, delete, generate, validate | JS vault plus `derivedKeys` | `vault.*`, `keys.*` |
 | `identity-manager.js:263` publisher key; `swarm-provider-ipc.js:1046`, `feed-store.js:549` | `getPublisherKey` | `compat.publisher_key` for signing; `keys.addresses` for owner lookups |
 | `swarm-provider-ipc.js:1035`, `feed-store.js:534` (Bee identity) | `getDerivedKeys().beeWallet` | `compat.bee_wallet_key` for signing; `keys.addresses` for owner lookups |
-| `swarm-provider-ipc.js:1050` (`ethereum-wallet` identity), `identity-manager.js:281` | `getUserWalletKey` | `compat.private_key`. JS keeps the "existing mnemonic wallet record required" guard |
+| `swarm-provider-ipc.js:1050` (`ethereum-wallet` identity), `identity-manager.js:281` | `getUserWalletKey` | `compat.private_key`. JS keeps the "existing mnemonic wallet record required" guard. Phase 2 removes the mode instead of moving it ([0002](0002-signing.md), *Accounts as feed owners*) |
 | `wallet/vault-access.js` → `signers.js`, `x402/client.js`, `wallet-ipc.js`, Safe executor | `exportPrivateKey(walletIndex)` | `compat.private_key`. JS keeps the hardware-range and record-type guards at the adapter entry; Ledger, remote and Safe never touch the core |
 | `identity-manager.js:554`, `:630`, `:671` node injection | `injection.js` with `derivedKeys` | `nodes.write_identity` (Bee, Radicle). IPFS stays ephemeral, as today |
 | `identity-manager.js:719`, `:751` Radicle DID for status | full key derivation | `keys.addresses` / `keys.radicle_did` |
@@ -455,10 +455,10 @@ New code goes in `src/main/core/`:
 
 **Phase 2 removes `compat.*`:**
 - A core signer backend replaces the vault backend in `wallet/signers.js`.
-- `fc-swarm` takes over SOC and feed signing for all three identity modes.
+- `fc-swarm` takes over SOC and feed signing for the Bee wallet and publisher identities. Main removes the `ethereum-wallet` mode, and the core refuses account keys for SOCs ([0002](0002-signing.md), *Accounts as feed owners*).
 - Removal order:
   1. `compat.bee_wallet_key` and `compat.publisher_key` go once Swarm signing has moved.
-  2. `compat.private_key` goes only after **both** EVM signing and Swarm's `ethereum-wallet` mode have moved.
+  2. `compat.private_key` goes only after **both** EVM signing has moved and main has removed Swarm's `ethereum-wallet` mode.
 - Each removal PR includes a check that no call sites are left.
 
 ### Rollback
