@@ -1510,6 +1510,7 @@ Every body already passes through main today, so the pipe adds one copy into the
    - are 8 instances under a 448 MiB budget the right bound?
 3. **The proxy's scope:**
    - SOCKS5 to Arti only (this design), or also a user's HTTP proxy for the HTTP half? libp2p would need another custom transport for that.
+     - **Decided (the user, 2026-10-22): SOCKS5 to Arti only.** One proxy path to build and test. A user's HTTP proxy can be added later as a decision of its own.
    - Should Route IPFS through Tor follow a future "everything through Tor" mode, and be one switch with 0008's Radicle setting?
      - **Decided (the user, 2026-10-22): separate switches now, and a future "everything through Tor" mode turns both on.** IPFS gives up more under Tor than Radicle does (no QUIC, delegated routing only), so a user can take one without the other. An all-Tor mode, if one is added, sets both.
 4. **Routing under a proxy:** delegated only (recommended), or the light DHT through SOCKS, which costs many Tor circuits per query? And how many IPFS peers accept connections from Tor exits on their ports? That is to be measured before the setting ships.
