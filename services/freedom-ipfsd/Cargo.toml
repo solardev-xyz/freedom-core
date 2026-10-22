@@ -36,16 +36,17 @@ fc-service = { path = "../../crates/fc-service" }
 # instances (#28), shared limits, memory reservations and cache capacities
 # (item 8: #35-#37), v0.4.6, the parser's header-capacity refusal (#39), the
 # store's hot-cache fixed capacity (#40), the progress recorder per node
-# (#43), and the network policy (0007 upstream item 3, #44-#50: the gate,
+# (#43), the network policy (0007 upstream item 3, #44-#50: the gate,
 # `NetworkPolicy` through the builder, a revocable capability, `direct`'s
 # HTTP clients and transports, and `socks5` behind the gateway's `socks`
-# feature, which `network: { mode: socks5 }` needs). src/build_info.rs
-# reports the same commit.
+# feature, which `network: { mode: socks5 }` needs), its end-to-end tests
+# (#51), and stream isolation (#54: each `socks5` network's SOCKS5
+# credentials of its own). src/build_info.rs reports the same commit.
 # freedom-ipfs-core: the memory budget's `Reservation`, which the gateway
 # crate doesn't re-export.
-freedom-ipfs-core = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "c88b711c5d9070eedd92cf92fa33f16f6e385606" }
-freedom-ipfs-gateway = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "c88b711c5d9070eedd92cf92fa33f16f6e385606", features = ["socks"] }
-freedom-ipfs-store = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "c88b711c5d9070eedd92cf92fa33f16f6e385606" }
+freedom-ipfs-core = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "0f8ebc38df196b277851271290089892e4d20d45" }
+freedom-ipfs-gateway = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "0f8ebc38df196b277851271290089892e4d20d45", features = ["socks"] }
+freedom-ipfs-store = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "0f8ebc38df196b277851271290089892e4d20d45" }
 # The `Stream` trait, to read a response's body as it comes; already in
 # freedom-ipfs's graph.
 futures-core = "0.3"
@@ -58,7 +59,7 @@ tokio = { version = "1", default-features = false, features = ["rt-multi-thread"
 [dev-dependencies]
 # Upstream's SOCKS5 test proxy and test servers (its `test-util` feature),
 # for the `socks5` tests through the binary; the same pin as the gateway's.
-freedom-ipfs-net = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "c88b711c5d9070eedd92cf92fa33f16f6e385606", features = ["test-util"] }
+freedom-ipfs-net = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "0f8ebc38df196b277851271290089892e4d20d45", features = ["test-util"] }
 tempfile = "3"
 
 # The core's workspace lints, copied: workspace lints don't cross workspaces.

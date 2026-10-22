@@ -10,6 +10,9 @@
 //! - **A stop:** once acknowledged, no connection reaches the proxy or the
 //!   provider, and the process holds no socket to the proxy.
 //! - **Two instances in sequence** keep their own policies.
+//! - **Stream isolation:** two `socks5` instances side by side send SOCKS5
+//!   credentials of their own, the same on every stream of one, and an
+//!   instance started after a stop sends new ones.
 //! - **An unreachable proxy:** the instance still starts (nothing is sent at
 //!   start), and its requests fail 502 or 504, with nothing direct.
 //!
@@ -30,7 +33,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::*;
-use freedom_ipfs_net::socks::fixture::{Destination, SocksFixture};
+use freedom_ipfs_net::socks::fixture::{Answer, Destination, Request, SocksFixture};
 use serde_json::{Value, json};
 
 const PEER: &str = "12D3KooWAC7ALVECw2xQHccT3hSUcQU7pJ3hvwV77w1kEevC5kKG";
@@ -513,6 +516,176 @@ fn instances_in_sequence_keep_their_own_policies() {
         proxy.connects().len(),
         through,
         "the direct instance used the proxy"
+    );
+    ipfsd.close_stdin();
+    assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
+}
+
+/// One instance's own topology for the isolation test: its router, which
+/// advertises a peer at a public literal and at a name, and an HTTP
+/// provider at the literal; the proxy resolves the name to `resolved`.
+/// Every request the proxy records for these destinations is the
+/// instance's.
+struct Own {
+    router: Router,
+    literal: std::net::IpAddr,
+    name: String,
+    resolved: std::net::IpAddr,
+}
+
+impl Own {
+    fn start(proxy: &Proxy, literal: &str, name: &str, resolved: &str) -> Own {
+        let router = Router::start(
+            &[
+                (
+                    PEER,
+                    vec![
+                        format!("/ip4/{literal}/tcp/4001"),
+                        format!("/dns4/{name}/tcp/4001"),
+                    ],
+                ),
+                (OTHER_PEER, vec![format!("/ip4/{literal}/tcp/80/http")]),
+            ],
+            None,
+        );
+        proxy
+            .fixture
+            .forward(Destination::Ip(router.addr), router.addr);
+        let resolved = resolved.parse().unwrap();
+        proxy.fixture.answer(name, Answer::Ip(resolved));
+        Own {
+            router,
+            literal: literal.parse().unwrap(),
+            name: name.to_string(),
+            resolved,
+        }
+    }
+
+    fn owns(&self, request: &Request) -> bool {
+        match &request.destination {
+            Destination::Ip(addr) => {
+                *addr == self.router.addr || [self.literal, self.resolved].contains(&addr.ip())
+            }
+            Destination::Name(name, _) => *name == self.name,
+        }
+    }
+
+    /// The proxy's requests for this topology, from the `from`th on.
+    fn requests(&self, proxy: &Proxy, from: usize) -> Vec<Request> {
+        proxy.fixture.requests()[from..]
+            .iter()
+            .filter(|request| self.owns(request))
+            .cloned()
+            .collect()
+    }
+}
+
+/// What the proxy saw of one instance's streams, as (command, destination)
+/// kinds: `RESOLVE` of its name, and `CONNECT` to its router, to its
+/// literal's libp2p port and to its HTTP provider.
+fn kinds(own: &Own, requests: &[Request]) -> Vec<&'static str> {
+    let kind = |request: &Request| match (&request.destination, request.is_resolve()) {
+        (Destination::Name(..), true) => Some("resolve"),
+        (Destination::Ip(addr), false) if *addr == own.router.addr => Some("router"),
+        (Destination::Ip(addr), false) if addr.port() == 4001 => Some("libp2p"),
+        (Destination::Ip(addr), false) if addr.port() == 80 => Some("http provider"),
+        _ => None,
+    };
+    let mut kinds: Vec<&'static str> = requests.iter().filter_map(kind).collect();
+    kinds.sort_unstable();
+    kinds.dedup();
+    kinds
+}
+
+/// The one set of credentials every one of `requests` sent, each offering
+/// username/password alone: (username, password).
+fn one_set_of_credentials(requests: &[Request]) -> (String, String) {
+    let mut sent: Vec<(String, String)> = requests
+        .iter()
+        .map(|request| {
+            assert_eq!(request.methods, [0x02], "{request:?}");
+            let (username, password) = request.credentials.clone().expect("credentials");
+            (
+                String::from_utf8_lossy(&username).into_owned(),
+                String::from_utf8_lossy(&password).into_owned(),
+            )
+        })
+        .collect();
+    sent.sort_unstable();
+    sent.dedup();
+    assert_eq!(sent.len(), 1, "more than one set: {sent:?}");
+    sent.remove(0)
+}
+
+/// Stream isolation (design 0007, "Stream isolation"): two `socks5`
+/// instances, live side by side in one process, send SOCKS5 credentials
+/// of their own (RFC 1929), the same on every stream of one: the router's
+/// HTTP, the libp2p transport's `CONNECT`, `RESOLVE` for a name and the
+/// HTTP provider's `CONNECT`, a later request's included. An instance
+/// started after a stop sends new ones. Every greeting offers
+/// username/password alone, so none goes without them.
+#[test]
+fn each_socks5_instance_sends_credentials_of_its_own_on_every_stream() {
+    let proxy = Proxy::start();
+    let one = Own::start(&proxy, "8.8.8.8", "one.example", "1.1.1.1");
+    let two = Own::start(&proxy, "9.9.9.9", "two.example", "1.0.0.1");
+    let mut ipfsd = Ipfsd::ephemeral(&[]);
+    ipfsd.hello();
+    for (id, own) in [("e-1", &one), ("e-2", &two)] {
+        let started = ipfsd.start(instance(id, &own.router, proxy.network()));
+        assert_eq!(started["result"]["instance"], id, "{started}");
+    }
+    let every_kind = ["http provider", "libp2p", "resolve", "router"];
+    for (id, own) in [("e-1", &one), ("e-2", &two)] {
+        status(&mut ipfsd, id, &format!("/ipfs/{ABSENT}"));
+        let seen = || kinds(own, &own.requests(&proxy, 0)) == every_kind;
+        assert!(
+            wait_for(Duration::from_secs(10), seen),
+            "{id}: {:?}",
+            own.requests(&proxy, 0)
+        );
+    }
+    // A later request on e-1, after e-2's.
+    let later = proxy.fixture.requests().len();
+    status(&mut ipfsd, "e-1", &format!("/ipfs/{OTHER_ABSENT}"));
+    let seen = || !one.requests(&proxy, later).is_empty();
+    assert!(
+        wait_for(Duration::from_secs(10), seen),
+        "e-1's later request"
+    );
+
+    let greetings = proxy.fixture.greetings();
+    assert!(!greetings.is_empty());
+    assert!(
+        greetings.iter().all(|methods| methods == &[0x02]),
+        "{greetings:?}"
+    );
+    let requests = proxy.fixture.requests();
+    assert!(
+        requests
+            .iter()
+            .all(|request| one.owns(request) || two.owns(request)),
+        "a request outside both topologies: {requests:?}"
+    );
+    let first = one_set_of_credentials(&one.requests(&proxy, 0));
+    let second = one_set_of_credentials(&two.requests(&proxy, 0));
+    assert_eq!(first.0, "freedom-ipfs");
+    assert_eq!(second.0, "freedom-ipfs");
+    assert_ne!(first.1, second.1, "both instances sent the same password");
+
+    // e-1 stops; e-3 starts on its topology, and sends credentials of its own.
+    assert_eq!(ipfsd.stop("e-1")["result"], json!({ "instance": "e-1" }));
+    let after = proxy.fixture.requests().len();
+    let started = ipfsd.start(instance("e-3", &one.router, proxy.network()));
+    assert_eq!(started["result"]["instance"], "e-3", "{started}");
+    status(&mut ipfsd, "e-3", &format!("/ipfs/{ABSENT}"));
+    let seen = || !one.requests(&proxy, after).is_empty();
+    assert!(wait_for(Duration::from_secs(10), seen), "e-3's requests");
+    let third = one_set_of_credentials(&one.requests(&proxy, after));
+    assert_eq!(third.0, "freedom-ipfs");
+    assert!(
+        third.1 != first.1 && third.1 != second.1,
+        "e-3 reused an earlier instance's password"
     );
     ipfsd.close_stdin();
     assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
