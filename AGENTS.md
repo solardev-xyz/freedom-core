@@ -12,11 +12,10 @@ The code holds users' keys and money. Every rule below exists for that reason.
    - **Exceptions:**
      - user-requested backup exports (`vault.export_*`) and the onboarding display of the mnemonic, which are permanent;
      - the temporary `compat.*` exports listed in `docs/design/0001-freedom-cored.md`, which Phase 2 deletes;
-     - the node identity files that `nodes.write_identity` writes for the nodes main runs (0001, "Multi-file writes"), until their custody is decided:
-       - Bee's wallet, as a keystore whose password is in the node's `config.yaml`;
-       - the Radicle node key, as an unencrypted OpenSSH file (derived from the seed, or design 0008's random device key).
+     - Bee's node keystore, which `nodes.write_identity` writes for the Bee node main runs (0001, "Multi-file writes"), until Phase 5. It is in the format the JS reference writes, mode `0600` on Unix (on Windows it inherits its containing directory's ACL; 0001 describes the default profile's guarantee and the limit for alternate roots). Its password is in the node's `config.yaml` until Phase 5 moves it (0001, K-3);
+     - the sealed release of the Radicle node key to the Radicle service, through `nodes.seal_radicle_key`: sealed (HPKE) to a key the service makes at each start, and only while the vault is unlocked (design 0008, "Keys"). Main relays only ciphertext.
 
-       Both are in the formats the JS reference writes, mode `0600` on Unix (on Windows they inherit their containing directory's ACL; 0001 describes the default profile's guarantee and the limit for alternate roots). Phase 5 moves Bee's password out of `config.yaml` (0001, K-3). Radicle custody is design 0008's open question, the user's to decide. No other node key may be written this way.
+       No other node key may be released.
      Any new exception needs a design change.
    - Signing APIs take a key reference, never key bytes.
    - Secret types zeroize on drop.
