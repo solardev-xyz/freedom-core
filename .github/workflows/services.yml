@@ -101,7 +101,11 @@ jobs:
         with:
           workspaces: services/freedom-ipfsd -> target
       # --all-features: the test hooks (`testhooks`) the binary's tests use.
+      # The runners have resolvers, so NAT64 discovery's per-OS lists must
+      # find them (src/nat64/resolvers.rs).
       - run: cargo test --locked --workspace --all-features
+        env:
+          FREEDOM_IPFSD_TEST_OS_RESOLVERS: required
 
   ipfsd-deny:
     name: freedom-ipfsd cargo-deny
