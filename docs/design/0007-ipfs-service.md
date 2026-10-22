@@ -542,7 +542,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 | `deadline` | no head within `headers_ms` | `freedom-ipfs native request timeout` |
 | `cancelled` | main's `cancel` | `freedom-ipfs native request aborted` before the head; `…cancelled` for a body |
 | `busy` | admission is full, or a reservation can't be had in time ([Budgets](#budgets)), or 4 stats calls are outstanding ([Stats](#stats)) | `BackendBusy`, `freedom-ipfs native node is busy`, which the executor answers 503 (new) |
-| `internal` | a panic on the request's task, which then retires its instance | `freedom-ipfs native gateway error` |
+| `internal` | a panic on the request's task, which then retires its instance; or `ipfs.start`: the instance's network can't be built (its clients, or the randomness for its SOCKS credentials), so no instance exists and none is retired | `freedom-ipfs native gateway error`; for `ipfs.start`, the manager's `Failed to start freedom-ipfs native node` |
 | `storage` | `ipfs.start`: the store won't open (`data.kind`) | the manager's `Failed to start freedom-ipfs native node` |
 | `protocol_mismatch` | `ipfs.hello` | a startup error; no restart |
 
