@@ -257,7 +257,7 @@ One PR per step, each after the freedom-core release that provides it.
 - **A SOC signature is a `personal_sign` of 32 bytes.** `swarm.sign_soc` signs EIP-191 over `keccak256(identifier ‖ chunk address)`, which is `"\x19Ethereum Signed Message:\n32" ‖ digest`. `sign.message` of those 32 bytes signs exactly that. The format is Swarm's: Bee recovers a chunk's owner from EIP-191 over that digest, and bee-js signs it the same way. Neither side can add a domain separator.
 - **Who can exploit it:** any dApp the user has connected to an account that owns a feed: one made through the `ethereum-wallet` identity mode, until main removes it, or one made outside Freedom.
   1. Feed identifiers are public: a feed's manifest, which a name's contenthash points at, names its owner and topic, and an update's identifier is `keccak256(topic ‖ index)`. The dApp computes the next identifier of the user's feed, picks its own payload, and computes the chunk address and the digest.
-  2. It asks for `personal_sign` of the 32-byte digest. The prompt renders a message's bytes as text, and a digest's bytes read as nothing at all: the user can't tell a feed update from any other hash. A dApp whose permission has signing auto-approve (`getSigningAutoApprove`) isn't shown a prompt: main signs at once.
+  2. It asks for `personal_sign` of the 32-byte digest. The prompt renders a message's bytes as text, and a digest's bytes read as nothing at all: the user can't tell a feed update from any other hash. Today a dApp whose permission has signing auto-approve (`getSigningAutoApprove`) isn't shown a prompt: main signs at once.
   3. The signature is a valid single-owner chunk of the user's feed. The dApp uploads it, and the feed (an ENS-named site, say) serves the dApp's content.
 - **Only this one case collides.** Another message length has another EIP-191 prefix, and typed data and transactions have their own (`0x1901`, a type byte or RLP). The other direction is safe too: a SOC request signs `keccak256(identifier ‖ chunk address)` over a real chunk, and making that equal a chosen message needs a keccak preimage.
 - **Before this decision** the same was true of bee-js and ethers in main, so the core wasn't a regression. The core's guarantee that every SOC signature is bound to a real chunk only holds for keys that sign nothing else. A test in `fc-swarm` (`a_soc_signature_is_a_personal_sign_of_its_digest`) pins the collision.
@@ -269,7 +269,7 @@ One PR per step, each after the freedom-core release that provides it.
    - new feeds always use keys that sign nothing but SOCs: a per-origin publisher key, or the Bee wallet as today;
    - the core refuses account keys in `swarm.sign_soc`.
 2. **No migration and no ownership record.** The user states that no existing user owns a feed with a wallet key. There is nothing to move, so B's and B′'s record, and where it would live, are moot.
-3. **A dApp's 32-byte `personal_sign` gets a warning only (D).** Nothing is refused. The approval screen says plainly that a raw 32-byte value is being signed, and that it can authorise things the prompt can't show, such as a Swarm feed update. Blocking (B, B′ or C) would break dApps that sign a hash, for the rare account that owns a feed created outside Freedom.
+3. **A dApp's 32-byte `personal_sign` gets a warning only (D).** Nothing is refused. The approval screen says plainly that a raw 32-byte value is being signed, and that it can authorise things the prompt can't show, such as a Swarm feed update. The prompt always appears, even when the site has signing auto-approve: a warning that auto-approve can skip protects nothing. The user can still approve. Blocking (B, B′ or C) would break dApps that sign a hash, for the rare account that owns a feed created outside Freedom.
 4. **Wallet-owned feeds may come back later** (in the user's words, "it enables some amazing features"). Bringing them back needs a new design that avoids the signature collision: a key that answers dApps' 32-byte `personal_sign` can't safely own a feed. One possible direction, not designed here: a wallet-derived account dedicated to feeds and never exposed to dApps.
 
 ### What main does
@@ -282,9 +282,10 @@ One PR per step, each after the freedom-core release that provides it.
 - **Warns on a 32-byte `personal_sign`.**
   - The trigger is a dApp's `personal_sign` whose message is exactly 32 bytes as signed, after main's normalization. A 64-digit hex string and a 32-byte text both count: both get the same EIP-191 prefix.
   - The approval screen shows the bytes as hex. It says plainly that a raw 32-byte value is being signed, and that it can authorise things the prompt can't show, such as a Swarm feed update.
+  - The prompt always appears, even when the site has signing auto-approve: auto-approve doesn't apply at exactly 32 bytes. A warning that auto-approve could skip would protect nothing.
   - It appears whatever the account: a Ledger or phone account can own a feed made elsewhere too.
   - Approving signs exactly as before.
-- **Nothing else changes.** Other message lengths, typed data, transactions, Safe, x402 and signing auto-approve behave as they do today.
+- **Nothing else changes.** Other message lengths, typed data, transactions, Safe and x402 behave as they do today, and signing auto-approve still applies to everything but a 32-byte `personal_sign`.
 
 ### What the core does
 
@@ -295,9 +296,7 @@ One PR per step, each after the freedom-core release that provides it.
 
 ### What stays exposed
 
-D closes nothing, by design. What it leaves:
-- An account that owns a feed made outside Freedom (in another wallet on the same mnemonic, say) is as exposed as before. A dApp connected to it can still get a 32-byte `personal_sign` that is a valid update to that feed. The warning is the only guard.
-- A dApp with signing auto-approve isn't shown a prompt, so it isn't shown the warning either.
+D refuses nothing, by design. An account that owns a feed made outside Freedom (in another wallet on the same mnemonic, say) stays exposed: a dApp connected to it can still get a 32-byte `personal_sign` that is a valid update to that feed, if the user approves it. The warning, which auto-approve can't skip, is the only guard.
 
 ### Tests
 
@@ -312,7 +311,8 @@ D closes nothing, by design. What it leaves:
 1. `swarm_getCapabilities` lists neither the `ethereum-wallet` mode nor `extensions.ethereumWalletPublisherIdentity`.
 2. The publisher-identity UI doesn't offer the mode. A dApp request for it, and a stored feed identity in it, fail with the error, and make no signature with any key.
 3. A dApp's `personal_sign` of exactly 32 bytes shows the warning, given as hex or as text; 31 and 33 bytes don't. Approving it returns the same signature as before.
-4. **Nothing else in the signing paths changes:** other message lengths, typed data, transactions, Safe, x402 and signing auto-approve behave as before, and feeds with the Bee wallet and publisher identities sign and upload as before. The existing signing and Swarm suites pass, less the cases for the removed mode.
+4. **Auto-approve doesn't apply at exactly 32 bytes:** with signing auto-approve on, a 32-byte `personal_sign` still shows the prompt with the warning, and nothing is signed until the user approves. At 31 and 33 bytes, auto-approve still signs with no prompt.
+5. **Nothing else in the signing paths changes:** other message lengths, typed data, transactions, Safe, x402 and auto-approve outside the 32-byte case behave as before, and feeds with the Bee wallet and publisher identities sign and upload as before. The existing signing and Swarm suites pass, less the cases for the removed mode.
 
 ### Options weighed
 
@@ -337,7 +337,7 @@ The write-up set these out before the decision. They stay as its rationale.
 - **A** stops Freedom from making account-owned feeds. Its gap, the feeds accounts already own, which `sign.message` can still update, is empty: the user states that no user owns a feed with a wallet key.
 - **B and B′** need a durable record of owners. With no account-owned feeds in Freedom, B's record would be empty. B′ would refuse every restored account's 32-byte `personal_sign`, to protect the rare feed made outside Freedom. The write-up recommended B′ alongside A on the assumption that some accounts already owned feeds; the user's statement removes that case, and with it the question of where the record lives.
 - **C** breaks every dApp that signs a hash, from every account.
-- **D** breaks nothing, and tells the user what a 32-byte signature can do. The rare account that owns a feed made outside Freedom keeps the risk it had.
+- **D** breaks nothing, and tells the user what a 32-byte signature can do. Its one cost is a prompt at 32 bytes for a site with signing auto-approve. The rare account that owns a feed made outside Freedom keeps the risk the user accepts by approving.
 
 ## Open questions
 
