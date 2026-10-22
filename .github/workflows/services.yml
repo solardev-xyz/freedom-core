@@ -81,6 +81,15 @@ jobs:
           workspaces: services/freedom-ipfsd -> target
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      # The test hooks never build into a release binary: some take the
+      # address table away or pick discovery's resolvers (src/testhooks.rs).
+      - name: A release build with the test hooks doesn't compile
+        run: |
+          if cargo check --locked --release --features testhooks 2> testhooks-release.err; then
+            echo "a release build compiled with the testhooks feature" >&2
+            exit 1
+          fi
+          grep -F "the \`testhooks\` feature is for debug and test builds only" testhooks-release.err
 
   ipfsd-test:
     name: freedom-ipfsd test (${{ matrix.os }})
@@ -101,7 +110,11 @@ jobs:
         with:
           workspaces: services/freedom-ipfsd -> target
       # --all-features: the test hooks (`testhooks`) the binary's tests use.
+      # The runners have resolvers, so NAT64 discovery's per-OS lists must
+      # find them (src/nat64/resolvers.rs).
       - run: cargo test --locked --workspace --all-features
+        env:
+          FREEDOM_IPFSD_TEST_OS_RESOLVERS: required
 
   ipfsd-deny:
     name: freedom-ipfsd cargo-deny

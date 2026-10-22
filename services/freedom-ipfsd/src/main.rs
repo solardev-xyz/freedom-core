@@ -29,6 +29,7 @@ mod args;
 mod budget;
 mod build_info;
 mod instances;
+mod nat64;
 mod network;
 mod params;
 mod progress;
@@ -152,11 +153,17 @@ fn serve(kind: Kind, parent_pid: Option<u32>, started: Instant) -> Exit {
         }
     };
     let requests = Requests::new(runtime.handle().clone(), budgets.memory.clone());
+    // The process's NAT64 discovery: idle until a `direct` instance starts.
+    let discovery = nat64::Discovery::new(
+        testhooks::nat64_source().unwrap_or_else(nat64::Discovery::os_source),
+        nat64::Timing::DESIGN,
+    );
     let instances = Instances::new(
         kind,
         runtime.handle().clone(),
         requests.clone(),
         budgets.clone(),
+        discovery,
     );
     let stats = Stats::new(
         runtime.handle().clone(),
