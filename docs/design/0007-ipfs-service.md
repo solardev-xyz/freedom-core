@@ -1514,6 +1514,7 @@ Every body already passes through main today, so the pipe adds one copy into the
    - Should Route IPFS through Tor follow a future "everything through Tor" mode, and be one switch with 0008's Radicle setting?
 4. **Routing under a proxy:** delegated only (recommended), or the light DHT through SOCKS, which costs many Tor circuits per query? And how many IPFS peers accept connections from Tor exits on their ports? That is to be measured before the setting ships.
 5. **Local providers:** the address policy refuses untrusted local targets by default. Should a user setting allow providers on the local network?
+   - **Decided (the user, 2026-10-22): no setting.** The address policy ships as designed. A local node the user sets up deliberately is reached as a configured endpoint, which is exempt. A setting can be added later as a decision of its own, if users need one.
 6. **The musl build:** do SQLite and `ring` build statically for both Linux targets in this repository's release workflow? If not, the Linux builds need a glibc floor of their own, chosen with #350 in mind.
    - **They build, but the Linux builds link glibc 2.17 instead,** for [Cost](#cost).
      - The dry run of #144 built both targets static, with musl's C compiler wrapper, and on x86_64 the service's whole test suite passed against the musl build.
