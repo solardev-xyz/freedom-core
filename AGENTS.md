@@ -22,7 +22,7 @@ The code holds users' keys and money. Every rule below exists for that reason.
    - Secret types implement no `Debug`/`Display` that prints the bytes, and no `Serialize`.
    - Secret types implement `Clone` only when it's unavoidable.
 4. **Key storage:**
-   - One lock state: every cache of derived keys hangs off it, and any lock (auto or manual) wipes all of them. A node identity isn't such a cache: a running node keeps its key across a lock (design 0008, "Keys").
+   - One lock state: every cache of derived keys hangs off it, and any lock (auto or manual) wipes all of them. A node identity isn't such a cache: once released to its node, it stays there across a lock, for the rest of a start and while the node runs (design 0008, "Keys").
    - Secret files are written atomically (temp file, fsync, rename) with mode `0600`.
    - A password change keeps the old vault until the new one decrypts.
    - Never store a secret next to the thing it protects. The one known exception is Bee's keystore password in `config.yaml`, beside `keys/swarm.key`, as the JS reference writes it, until Phase 5 (0001, K-3). No new code may add another.

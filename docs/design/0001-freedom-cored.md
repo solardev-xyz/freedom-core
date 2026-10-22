@@ -69,7 +69,7 @@ Stage 1 trusts Electron main: it holds the pipe, fills in the caller context, an
   - **Bee's wallet, until Phase 5:** the keystore file `nodes.write_identity` writes ([Multi-file writes](#multi-file-writes)), in the JS reference's format, with the permissions in the table above (mode `0600` on Unix). Its password is in `config.yaml` beside it. As in JS today, that stores a secret next to the thing it protects, an exception to AGENTS.md rule 4 until Phase 5 (K-3);
   - **the Radicle node key,** which [0008](0008-radicle-service.md#keys) releases only to the Radicle service, sealed to a key the service makes at each start, while the vault is unlocked. 0008's switch removes the key file that Phase 1 writes.
 
-  No other node key is released. A node keeps its identity across a vault lock, so these keys are not the derived-key caches a lock wipes.
+  No other node key is released. Once released to its node, a key stays there across a vault lock, for the rest of a start and while the node runs, so these keys are not the derived-key caches a lock wipes.
 
 ## Process model
 
