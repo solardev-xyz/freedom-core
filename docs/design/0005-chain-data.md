@@ -613,7 +613,13 @@ Vectors pin the downgrade boundaries. Whether a derived base fee and a "verified
 - **A,** the cap at confirmation, with a threshold relative to the current network fee, not a fixed amount or the value sent;
 - **B,** widened from two endpoints to several, keeping the tightest constraints.
 
-C isn't adopted as a cap on quotes, and D isn't adopted. The options weighed are kept below. [B](#b-combining-directs-quotes) and [A](#a-the-check-at-confirmation) specify what was adopted.
+C isn't adopted as a cap on quotes, and D isn't adopted.
+
+**Tightened in #109's review** (2026-10-22):
+- where a verified header shows the chain takes EIP-1559, mixed quotes combine as EIP-1559;
+- a reference that is one endpoint's quote never permits auto-approval.
+
+The options weighed are kept below. [B](#b-combining-directs-quotes) and [A](#a-the-check-at-confirmation) specify what was adopted.
 
 - **Today** the only checks are a gas price above 0, a priority fee at most the gas price, and the 4096-bit width. Nodes rarely agree exactly on `eth_gasPrice`, so the quorum usually misses and Direct quotes, from one endpoint (`router-fee-quote-direct-same-endpoint`).
 - **What one endpoint can do:** answer both values with 1e18 wei. The quote becomes EIP-1559 with base fee 0 and a priority fee of 1e18 wei per gas, about 21,000 ETH for a plain transfer, all of it a tip. A node refuses a transaction the sender can't cover, so the real risk is a smaller inflation: ten or fifty times the going rate, which the user pays in full and may not notice.
@@ -624,7 +630,7 @@ C isn't adopted as a cap on quotes, and D isn't adopted. The options weighed are
 | Option | Bounds it | Cost |
 |---|---|---|
 | **A. A cap in the send path (main):** before every signature of a transaction, the confirmation shows the most it can cost (gas limit × max fee per gas, or × gas price) and asks again above a threshold | every transaction the wallet signs, whatever its fees' source: a quote (verified or not), fees a dApp supplied, a replacement. A send above the threshold is never auto-approved | a threshold per chain (absolute, or relative to the value sent): product |
-| **B. Two endpoints, the tighter constraints (core):** Direct asks a second endpoint where one exists, and combines the two quotes' constraints (below) | if one of the two is honest and answers, and both quotes are of one type, the transaction never pays more per gas than the honest quote's would at the same base fee, and a dishonest one can only underquote, which delays the payment (it can be replaced at the same nonce). With mixed types only the gas price is bounded ([B](#b-combining-directs-quotes)) | a second exchange per quote; a deviation from `requestDirectFeeQuote`'s single endpoint; a new replay scenario and a changed one |
+| **B. Two endpoints, the tighter constraints (core):** Direct asks a second endpoint where one exists, and combines the two quotes' constraints (below) | if one of the two is honest and answers, and both quotes are of one type, the transaction never pays more per gas than the honest quote's would at the same base fee, and a dishonest one can only underquote, which delays the payment (it can be replaced at the same nonce). With mixed types only the gas price is bounded, unless a verified header shows EIP-1559 ([B](#b-combining-directs-quotes)) | a second exchange per quote; a deviation from `requestDirectFeeQuote`'s single endpoint; a new replay scenario and a changed one |
 | **C. A reference (core):** cap the priority fee by `eth_feeHistory` percentiles and the max fee by the latest block's `baseFeePerGas` | only with a verified, independent reference (below); otherwise a consistency check | several reads per quote; `latest` reads that disagree across nodes; a deviation |
 | **D. A configured ceiling (main → core):** the snapshot carries a per-chain maximum fee per gas, and a quote above it fails | quotes only: not fees a caller supplies, nor the gas limit | a number per chain, which a custom chain has no good default for |
 
@@ -641,18 +647,24 @@ Deviation `fee-combination`. A fee quote's Direct step (today's `requestDirectFe
     - a failed gas price, a non-positive one or an unparseable priority hint fails that endpoint.
   - **Replacement:** until a quote has answered, an endpoint that fails is replaced by the next one not yet asked, so every endpoint can still be reached, as today's walk does. Once one has answered, no endpoint starts.
   - **Cutoff:** collection ends when no started endpoint is still running, or 1 s after the first quote answered, whichever is first. Outstanding exchanges are then cancelled, and an endpoint still waiting for either answer hasn't answered. The cutoff goes first in its tick: an answer in that tick is left out, as for a deadline.
-  - **No quote:** with every endpoint failed, Direct fails with the last error to arrive (in one tick, the higher registry index's). With no endpoint it is today's `No RPC endpoint configured`.
+  - **A header, for mixed quotes:** where the chain has a prover and its read order includes `colibri`, the collection also starts the verified header read that [A](#a-the-check-at-confirmation)'s evidence uses.
+    - **When it is used:** only if the answers are mixed. The combination then waits for it, within Colibri's budget.
+    - **Otherwise** nothing waits for it, and its outcome is dropped when it arrives (verifier operations hold their slot until main's reply).
+    - **Its age doesn't matter here:** a base fee in a verified header shows the chain takes EIP-1559 transactions.
+  - **No quote:** with every endpoint failed, Direct fails with the last error to arrive (in one tick, the higher registry index's). With no endpoint it is today's `No RPC endpoint configured`, and no header is read.
   - **Deadline, cancel and reconfiguration** work as for any fee quote ([Deadlines](#deadlines), [Cancellation](#cancellation), [Generations](#generations)): the request ends, and every outstanding exchange is cancelled.
 - **Combination.** Each answered quote is read as two constraints: a max fee per gas M and a priority fee P. An EIP-1559 quote gives its `maxFeePerGas` (2·G − P) and its P; a legacy quote's gas price G gives M = P = G. Under EIP-1559 a transaction pays min(M, base fee + P) per gas.
   - **Not the raw minima:** today's quote derives M = 2·G − P, so the lower G with the lower P can raise M. G = 100, P = 10 gives M = 190; a second answer of G = 100, P = 9 makes the minima give M = 191.
   - **All EIP-1559:** EIP-1559, with the lowest M and the lowest P (which is never above that M).
   - **All legacy:** legacy, at the lowest gas price.
-  - **Mixed** (an endpoint gave no valid priority hint): legacy, at the lowest gas price of all the quotes, an EIP-1559 quote's being its `effectiveGasPrice`.
+  - **Mixed** (an endpoint gave no valid priority hint), **where EIP-1559 is verified,** that is, the header read has a base fee: EIP-1559, under the all-EIP-1559 rule, a legacy quote counting as M = P = G. So the lowest M and the lowest P.
+  - **Mixed, otherwise** (no prover, Colibri out of the read order, a failed or malformed header, or one without a base fee): legacy, at the lowest gas price of all the quotes, an EIP-1559 quote's being its `effectiveGasPrice`. A missing hint alone doesn't show that the chain takes EIP-1559 transactions.
   - **One answer:** that quote, unchanged.
 - **What it guarantees,** when an honest endpoint answers before the cutoff:
-  - **All EIP-1559, or all legacy:** at every base fee, the transaction pays per gas at most what the honest quote's own transaction would, and can cost at most what that one could. Inflating the fee takes every answering endpoint. A dishonest or broken one can only underquote, which delays the payment; it can be replaced at the same nonce.
-  - **Mixed:** the gas price is at most the honest endpoint's, so the transaction can cost at most what the honest quote's could. But a legacy transaction pays its whole gas price at any base fee, where an honest EIP-1559 one pays less as the base fee falls. Any endpoint can force legacy by withholding its priority hint.
-    - **The boundary case:** an honest EIP-1559 quote G = 100, P = 1 (M = 199) and another endpoint's legacy G = 1000 combine to legacy G = 100. If the base fee falls to 1 before inclusion, the honest transaction would pay 2 per gas, and the combined one pays 100.
+  - **All EIP-1559, all legacy, or mixed where EIP-1559 is verified:** at every base fee, the transaction pays per gas at most what the honest quote's own transaction would, and can cost at most what that one could. Inflating the fee takes every answering endpoint. A dishonest or broken one can only underquote, which delays the payment; it can be replaced at the same nonce.
+  - **The boundary case:** an honest EIP-1559 quote G = 100, P = 1 (M = 199) and another endpoint's legacy G = 1000. Where EIP-1559 is verified, they combine to EIP-1559 with M = 199 and P = 1. If the base fee falls to 1 before inclusion, the transaction pays 2 per gas, as the honest one would.
+  - **Mixed, otherwise:** the gas price is at most the honest endpoint's, so the transaction can cost at most what the honest quote's could. But a legacy transaction pays its whole gas price at any base fee, where an honest EIP-1559 one pays less as the base fee falls. Any endpoint can force legacy by withholding its priority hint.
+    - **In the boundary case** without a verified header, the quotes combine to legacy G = 100, which pays 100 per gas at a base fee of 1.
     - A doesn't flag this: at confirmation the gas price is the network's current one.
   - **One answer:** no bound. The quote is that endpoint's, as today, and A judges it.
 - **The reply** keeps today's shape and key order, with one key added after `verified`: **`answered`**, the number of endpoints whose quotes were combined (1 to 3). `answered: 1` is the single-source marker. `source` stays `direct`, and `verified` stays `false` however many agree. Other sources' quotes keep today's shape exactly, without `answered`.
@@ -664,7 +676,9 @@ Deviation `fee-combination`. A fee quote's Direct step (today's `requestDirectFe
   - **The collection:** machine tests, named `boundary-fee-combine-*`:
     - three successes;
     - independent M and P minima, M − P odd included (10/1 with 10/2), and the raw-minima trap (100/10 with 100/9 gives M = 190, not 191);
-    - all legacy; mixed, with the base-fee boundary case above;
+    - all legacy;
+    - mixed with a verified header (the boundary case pays 2), and mixed without one (it pays 100): no prover, Colibri out of the read order, a failed or malformed header, a header without a base fee;
+    - mixed, with the header arriving after the collection ends; and a header read whose outcome is dropped when the answers aren't mixed;
     - partial failures: one fails and two combine; a failure replaced before any answer; an unparseable priority hint on one endpoint;
     - all failing, with the last error;
     - singletons: one endpoint configured, and one of three answering;
@@ -681,11 +695,12 @@ A runs in main, at the confirmation before every transaction signature: a send t
 - **The evidence** comes from **`chain.fee_reference`** `{ chain_id, deadline_ms }`, a new core request. It doesn't depend on how the transaction got its fees, or whether any quote was made.
   - **Its rules:** a fee quote's, for admission, deadline, cancel, generation, reply fencing and budget.
   - **Its two parts** run at once.
+  - **Only Colibri supplies the verified base fee today.** A Myotis head operation is a follow-up, and needs Myotis support (below).
   - **A verified header:** where the chain has a prover and its read order includes `colibri`, Colibri's `request` operation for `eth_getBlockByNumber` with `["latest", false]`, a method Colibri proves (its light client polls it for the head).
     - **The header** is the result's `number`, `timestamp` and `baseFeePerGas`, which must be quantities. A failed, malformed or `undefined` answer gives no header. A header without `baseFeePerGas` (a chain without EIP-1559) has no base fee.
     - **Myotis** has no operation that returns a header ([Verified operations](#verified-operations)). Its `fee` estimate is a gas price and a priority fee. The base fee a quote derives from them (gas price − priority), Myotis's or any source's, is never taken for a header's.
     - **A later Myotis source:** an operation returning Myotis's verified head (number, timestamp, base fee) would make Myotis a second source of headers. It needs Myotis support, and is a follow-up.
-  - **B's quotes:** B's collection, run for the reference itself, where the chain's read order includes `quorum` or `direct`, the sources that reach those endpoints. It runs even when an earlier source (Myotis, Colibri, the quorum) quoted the transaction, and it never asks those sources.
+  - **B's quotes:** B's collection, run for the reference itself, where the chain's read order includes `quorum` or `direct`, the sources that reach those endpoints. It runs even when an earlier source (Myotis, Colibri, the quorum) quoted the transaction, and it never asks those sources. Its mixed rule uses this request's own header read.
   - **The reply:** `{ header, lowest_priority, quote, generation }`, numbers as decimal strings:
     - `header`: `{ source: "colibri", number, timestamp, base_fee }`, with `base_fee` null on a chain without one; or null;
     - `lowest_priority`: the lowest priority fee among B's EIP-1559 quotes, or null when none gave a valid hint;
@@ -696,18 +711,19 @@ A runs in main, at the confirmation before every transaction signature: a send t
   2. **Combined quote:** otherwise, the combined-quote fallback, when B's combined quote arrived at most 60 s ago. R is its `maxFeePerGas`, or its `gasPrice` if legacy. It applies with no prover, Colibri out of the read order or failing, a malformed or stale header, or a chain without EIP-1559.
   3. **None:** otherwise, or when R is 0.
   - **No reference:** the confirmation shows the most the transaction can cost, says it couldn't be compared, and the send isn't auto-approved.
+  - **One endpoint's reference:** when R is a combined quote with `answered: 1`, it is that endpoint's word, and a Direct quote from it has a ratio of 1 against it. The confirmation still compares and shows the ratio, and a send above the threshold is still asked again. But no send judged against it is auto-approved: A can't judge it reliably. On a chain with one RPC endpoint and no verified header, no send is auto-approved.
   - **A spike before signing:** the check uses evidence at most 60 s old at the moment of approval, by the user or automatically. Older evidence is gathered again before the signature, and the user is asked again if the new R puts the send above the threshold.
     - **A rising base fee** raises R with it.
     - **During a spike** 2·B is headroom, not a forecast. A transaction quoted after the evidence was gathered can be asked about though it would pay little. The multiple and the 60 s are tuned together.
   - **A wrong clock** makes every header stale; R then falls back to the combined quote.
 - **What A detects:**
   - **Verified:** a max fee above about 3·R, whoever set it: an inflated base-fee part, a dApp's fee, a replacement's.
-    - **Its priority part** comes from B's quotes. A tip that every answering endpoint inflates moves R with it, and isn't detected ([Open questions](#open-questions) 12).
+    - **Its priority part** comes from B's quotes. A tip that every answering endpoint inflates moves R with it, and isn't detected ([Open questions](#open-questions) 10).
     - **An endpoint that underquotes** can lower R. That costs a question, never a payment.
   - **Combined quote:** R comes from the same endpoints, combined the same way, as a Direct quote. A quote they all inflate has a ratio near 1, so this fallback can't detect inflation of that quote.
     - **What it still detects:** fees set elsewhere far above the endpoints' quotes, a dApp's, a replacement's or another source's.
-    - **With one answering endpoint,** R is that endpoint's word ([Open questions](#open-questions) 11).
-  - **Mixed types:** B's mixed-type excess stays within the threshold in both cases ([Open questions](#open-questions) 10).
+    - **With one answering endpoint,** R is that endpoint's word, so nothing judged against it is auto-approved (above).
+  - **Mixed types without a verified header:** B's legacy excess is below the honest gas price, so it stays within the threshold whichever R applies. Where a header is verified, B combines mixed quotes as EIP-1559, and there is no such excess.
   - **Not a proof:** the ratio is a confirmation heuristic, not proof that a fee is honest.
 - **Tests,** required of the implementing PRs:
   - **The core's machine tests for `chain.fee_reference`:**
@@ -723,8 +739,9 @@ A runs in main, at the confirmation before every transaction signature: a send t
     - a quote's derived `baseFee` never used as the header's: a Myotis quote with Colibri down takes the combined quote, or no reference;
     - unavailable and stale header evidence (61 s old, 61 s ahead), with and without B's quote;
     - no reference: the most shown, "couldn't compare", never auto-approved; R of 0 likewise;
+    - one endpoint's reference (`answered: 1`): the ratio shown, a send above the threshold asked again, and a send below it still not auto-approved;
     - a base-fee spike before signing: evidence 61 s old gathered again, and the user asked again only when the send is newly above;
-    - the mixed-type boundary case, shown not flagged.
+    - the mixed-type boundary case without a verified header, shown not flagged.
 
 ## Errors and text
 
@@ -814,7 +831,7 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 | `broadcast-outcome` | the last error wins; lost replies look like failures | attempt classes, exact refusals, `sent` / `uncertain` / `rejected` / `not_sent`, reconciliation, main's record | a lost reply is `uncertain`, not a failure |
 | `nonce-retry` | a retry re-signs at the `pending` count, possibly a new nonce; history is written after broadcast and can be cleared | durable intent records committed before broadcast; an intent keeps its nonce for good, with retries only as the same bytes or a replacement at that nonce; labels (paid, failed, taken, held) read from verified evidence tied to one finalized block by hash, which authorize no retry; reservations under a per-account lock | the wallet never pays one intent twice; failed and taken intents go back to the user, who may start a new payment |
 | `monotonic-time` | cooldowns on `Date.now()` | the monotonic clock | |
-| `fee-combination` | a fee quote's Direct step walks the endpoints one at a time, and the first quote that answers wins | up to three endpoints at once, a failure replaced until one answers, a 1 s cutoff after the first answer; their quotes combined by normalized constraints, the reply marked with `answered` ([B](#b-combining-directs-quotes)) | different requests, starts and cancels; with one type of quote, the transaction pays no more than an honest answering endpoint's would; a combined quote's `baseFee` and `effectiveGasPrice` are rounded estimates |
+| `fee-combination` | a fee quote's Direct step walks the endpoints one at a time, and the first quote that answers wins | up to three endpoints at once, a failure replaced until one answers, a 1 s cutoff after the first answer; their quotes combined by normalized constraints, mixed ones as EIP-1559 where a Colibri header read alongside shows a base fee; the reply marked with `answered` ([B](#b-combining-directs-quotes)) | different requests, starts and cancels, and a Colibri operation where the chain has a prover and `colibri` in its read order; with one type of quote, or mixed ones where EIP-1559 is verified, the transaction pays no more than an honest answering endpoint's would; a combined quote's `baseFee` and `effectiveGasPrice` are rounded estimates |
 
 ## Replay
 
@@ -860,7 +877,7 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
     - `router-fee-quote-direct-same-endpoint`: both endpoints asked at 0, the same values, `answered: 2`;
     - `boundary-fee-direct-priority-unparseable` and `boundary-fee-direct-gas-price-fails-first`: b asked at once with a, not after it, and `answered: 1`.
 
-    The other fee-quote scenarios don't reach Direct with more than one endpoint, and stay as they are.
+    The other fee-quote scenarios don't reach Direct with more than one endpoint, and stay as they are. None of the three has `colibri` in its read order, so B's header read adds nothing to them.
   - **None is skipped.**
 - **Not replayed:** the machine's own tests cover the second, third, fifth and sixth (`crates/fc-chain/tests/machine.rs` and its unit tests); the first and fourth are main's (step 5):
   - a read's reply overtaken by a configuration change after it was made: that is main's reply fencing ([Generations](#generations)), and the reference has no seam for it;
@@ -907,11 +924,5 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
 6. **HTTP statuses on broadcast.** A 401, 403 or 429 is ambiguous here, although a gateway usually answers it before forwarding. Is a misconfigured key showing `uncertain` acceptable, or should these be refusals?
 7. **Pinning and trust** (roadmap 3.1): whether a quorum of unpinned `latest` reads may be called `verified`.
 8. **Endpoints' chain** (#93): **decided** (the user, 2026-10-22): in main, re-checked hourly, and a mismatched user source isn't saved. See [Endpoints serve their chain](#endpoints-serve-their-chain-decided-93).
-9. **Fee plausibility** (#92): **decided** (the user, 2026-10-22): A, with a threshold relative to the current network fee, and B across several endpoints. See [Plausibility](#plausibility-decided-92). Items 10 and 11 are proposals that tighten it, and neither is adopted.
-10. **Mixed quotes where EIP-1559 is verified** (a proposal). When the fee quote has a fresh verified header with a base fee (A's evidence), mixed quotes could combine under the all-EIP-1559 rule, a legacy quote counting as M = P = G: the lowest M and the lowest P.
-    - **What it gains:** the transaction then pays, at every base fee, at most what each answering quote's own transaction would, the honest EIP-1559 one included. Withholding a priority hint gains an endpoint nothing, and the boundary case in [B](#b-combining-directs-quotes) pays 2, not 100.
-    - **Why only then:** the header proves the chain takes EIP-1559 transactions. A missing hint alone doesn't, which is why the adopted rule goes legacy.
-    - **Cost:** the fee quote's Direct step also reads the header, one Colibri operation per quote.
-11. **A single endpoint's reference** (a proposal). When R falls back to a combined quote with `answered: 1`, it is one endpoint's word, and a Direct quote from that endpoint has a ratio of 1 against it. Such a reference could still be compared and its ratio shown, with a send above the threshold still asked again, but no send judged against it auto-approved.
-    - **Cost:** on a chain with one RPC endpoint and no verified header, no send is auto-approved.
-12. **An independent tip reference.** In A's verified case, R's priority part comes from B's quotes. The tips paid in Colibri's verified latest block, read with its transactions, would bound it independently. That read is heavier and close to C, which isn't adopted; this is open, not proposed.
+9. **Fee plausibility** (#92): **decided** (the user, 2026-10-22): A, with a threshold relative to the current network fee, and B across several endpoints; tightened in #109's review: mixed quotes combine as EIP-1559 where a verified header shows it, and one endpoint's reference permits no auto-approval. See [Plausibility](#plausibility-decided-92).
+10. **An independent tip reference.** In A's verified case, R's priority part comes from B's quotes. The tips paid in Colibri's verified latest block, read with its transactions, would bound it independently. That read is heavier and close to C, which isn't adopted; this is open, not proposed.
