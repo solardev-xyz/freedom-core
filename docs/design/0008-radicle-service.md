@@ -267,7 +267,10 @@ Every potentially long step is a **unit**. Each unit has a work limit and a time
   - An entry is written in the same transaction as the work it records. For a re-sign, it is written after the ref update has been flushed.
   - So the state never claims work that isn't durable.
   - **It is bound to its input:** each repository's checkpoints carry the repository's input version, a hash over its refs taken when its repair began. A resumed repair whose input version differs discards that repository's staging and starts it over.
-  - **And to the identity:** each namespace check's checkpoint names the node ID it checks, and the node ID of the key that could sign it, if any. A check resumed under another running key starts that namespace over, as a check that can't sign.
+  - **And to the signing authority:** each namespace check's checkpoint names the namespace it checks (its node ID), that namespace's input version (a hash over its refs), and the signing authority that applies: the namespace's own identity when the running key is that identity, and otherwise none.
+    - A resumed check keeps its checkpoint while all three are unchanged, whatever the running key. So successive throwaway keys, none of which can sign A's namespace, each continue A's read-only check where the last one stopped.
+    - It starts that namespace over only when its input version or the authority changes: A's key arrives, or A's key goes. A retry alone never changes either.
+    - A namespace is never signed with any key but its own.
   - **Online,** a repository's progress rows are deleted in its publication transaction. So a completed repair can't be reused once later mutations begin.
 - **Before `RUNNING`:** once every repository is done or quarantined, the progress state is cleared in one durable transaction, before `rad.reconcile` replies. No completion record survives into a run whose new mutations could make it wrong.
 
@@ -282,7 +285,7 @@ Every potentially long step is a **unit**. Each unit has a work limit and a time
   - keeps the marker and the progress state;
   - answers `deadline`.
 - **A cutoff is not an overrun.** `deadline` is a normal reply, and Retry continues. A unit that exceeds its own 30 s is a [unit overrun](#the-unit-watchdog): the process ends with 70, and the next attempt treats that unit as interrupted.
-- Main shows "Radicle is still repairing its data" with **Retry**. A retry spawns a new process, which continues from the checkpoints. There is no automatic restart loop.
+- Main shows "Radicle is still repairing its data" with **Retry**. A retry spawns a new process, which continues from the checkpoints, with a new throwaway key too ([the progress state](#work-units)). There is no automatic restart loop.
 - **Shutdown and kill:** `rad.shutdown` stops after the current unit. A kill is safe at any point, since every unit is idempotent and is recorded only once it is durable.
 
 #### The unit watchdog
@@ -758,7 +761,7 @@ Main sees the recipient, `enc` and the ciphertext, and never the key.
 - **Its node runs with a throwaway Ed25519 key:**
   - on `rad.identity { ephemeral: true }`, the service checks `keys/radicle` first, then fills a `HostKey` with 32 bytes from the OS's randomness, and replies `{ did, nid, ephemeral: true }`. `rad.start` runs `start_with_key` with it, as with a sealed key;
   - the key is made in memory at each start and never written to a file. Nothing secret is stored;
-  - so each start is a new node ID to peers.
+  - so each start is a new node ID to peers. A new throwaway key resets no repair checkpoint, since none can sign an earlier identity's namespace ([Work units](#work-units)).
 - **Main asks for it only on the core's `no_vault`,** never while the vault is locked, and never after another error. The service can't tell a profile without a vault from a main that asks for a throwaway key anyway: under 0001's threat model, main is trusted to choose.
 - **Reading and browsing, with no identity of its own:**
   - reads, clones, seeding and syncing work as on any profile;
@@ -1002,7 +1005,7 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
     - typed recognition of temporary clones (`<RID>.tmp`, legacy `<RID>.lock`) and ref lock files, with no symlinks followed;
     - validation of every namespace the marker names, and re-signing of the running identity's, with a signer the host passes in (the key from `rad.identity`), since the node isn't running yet. A namespace whose node ID isn't the signer's is never signed;
     - a COB cache rebuild in batches into a staging table, with durable checkpoints and atomic publication;
-    - progress state written in the same transactions as the work, bound to each repository's input version, with an in-progress record for every unit;
+    - progress state written in the same transactions as the work, bound to each repository's input version and to each namespace check's signing authority, with an in-progress record for every unit;
     - namespace checks in units of 1,024 refs, with checkpoints;
     - a cancel token and a deadline checked between units;
     - a `quarantine` table with its two kinds, and `remove_repo`;
@@ -1153,6 +1156,7 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
 
     Each time, the reconciliation checks A's namespace, quarantines the repository as `namespace` with every byte kept, writes no key file, and signs nothing with the new key. The marker then names only the running identity, and a clean stop clears it. With A's vault kept or restored instead, or with the core's derived key file before the switch, the start runs as A and re-signs;
   - **a resumed check across a key change:** a check of A's namespace cut off by the deadline while A runs, then a start under another key. The check starts over, and doesn't sign;
+  - **successive throwaway keys:** A's vault deleted, A's refs unchanged, and a namespace check of A that needs several reconciliation deadlines. Each Retry runs a fresh throwaway key, and each continues from the last checkpoint. The check completes, or quarantines the repository as `namespace`, within a bounded number of retries, and A's key is never recovered or used;
 - **Progress:** more than 16 failed candidates with a paused writer, then a cancel: the summary counts every failure, the terminal `cancelled` arrives, and memory stays bounded. Also an oversized `reason`, and a summary whose reasons are NULs and backslashes: the encoded event stays within 4 KiB, cut at character boundaries.
 - **Rust tests through the binary,** with test hooks behind a feature:
   - the lock and `hold-lock`;
