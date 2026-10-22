@@ -25,7 +25,7 @@ The code holds users' keys and money. Every rule below exists for that reason.
    - Unlock attempts are throttled.
    These rules come from weaknesses found in the desktop JS code.
 5. **The desktop JS implementation is the reference.** Anything that reads or writes user data must reproduce `vectors/` exactly. Never edit a vector to make a test pass. If a vector looks wrong, stop and raise it.
-6. **No `unsafe`** (`forbid` at workspace level). **No panics in library code:** `unwrap`, `expect` and `panic!` are linted, so return typed errors instead.
+6. **No `unsafe`** (`forbid` at workspace level). The one exception is `fc-sys`, which holds the few OS calls the standard library lacks, each a single reviewed FFI call with a `SAFETY` comment behind a safe function. Every other crate inherits `forbid`, which no `#[allow]` can lift. **No panics in library code:** `unwrap`, `expect` and `panic!` are linted, so return typed errors instead.
 7. **Dependencies:**
    - Prefer crates that `freedom-mobile-ffi` already links: `k256`, `alloy-primitives`, `sha2`, `sha3`, `hmac`, `pbkdf2`, `aes-gcm`, `ed25519-dalek`, `zeroize`, `secrecy`, `rusqlite`.
    - Justify every new dependency in the PR description.
