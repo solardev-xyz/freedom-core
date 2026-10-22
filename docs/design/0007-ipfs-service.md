@@ -491,7 +491,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
     - `{ "mode": "socks5", "ip", "port" }`.
       - `ip` is an IPv4 or IPv6 address written plainly: no brackets, no zone, no shorthand, no hex or octal. An IPv4-mapped IPv6 address is read as the IPv4 address it maps. It may not be unspecified, multicast or broadcast. Loopback and private addresses are allowed, since an external Tor may sit on the LAN.
       - `port` is from 1 to 65535.
-      - No credentials are taken ([Open questions](#open-questions), 11).
+      - No credentials are taken: the service makes each instance's own ([The SOCKS contract](#the-gate), *Stream isolation*).
       - `socks5` takes `routing.mode` `delegated` or `offline` only ([Open questions](#open-questions), 4).
   - The persistent process accepts one `disk` instance at a time. The ephemeral process accepts only `memory` instances of at most 32 MiB, and at most 8 of them.
   - A start is admitted only within the free [budget](#budgets). Anything else is `invalid_argument`, or `busy` when the budget isn't free.
@@ -542,7 +542,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 | `deadline` | no head within `headers_ms` | `freedom-ipfs native request timeout` |
 | `cancelled` | main's `cancel` | `freedom-ipfs native request aborted` before the head; `…cancelled` for a body |
 | `busy` | admission is full, or a reservation can't be had in time ([Budgets](#budgets)), or 4 stats calls are outstanding ([Stats](#stats)) | `BackendBusy`, `freedom-ipfs native node is busy`, which the executor answers 503 (new) |
-| `internal` | a panic on the request's task, which then retires its instance | `freedom-ipfs native gateway error` |
+| `internal` | a panic on the request's task, which then retires its instance; or `ipfs.start`: the instance's network can't be built (its clients, or the randomness for its SOCKS credentials), so no instance exists and none is retired | `freedom-ipfs native gateway error`; for `ipfs.start`, the manager's `Failed to start freedom-ipfs native node` |
 | `storage` | `ipfs.start`: the store won't open (`data.kind`) | the manager's `Failed to start freedom-ipfs native node` |
 | `protocol_mismatch` | `ipfs.hello` | a startup error; no restart |
 
@@ -918,7 +918,8 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
    - **Schemes:** a `Location` must be `http` or `https`; any other scheme is refused. HTTPS to HTTP is followed, as reqwest's default acceptance follows it today (parity), and like every hop it sends no `Referer`.
    - **IP-literal hosts are checked by the loop itself:** without a proxy, a literal never reaches the client's resolver.
    - **Each hop is a fresh request,** built from the operation's own fixed headers, never by copying the previous hop's. Because the service follows redirects itself, it doesn't rely on reqwest's header stripping:
-     - The service sends no credentials. A configured endpoint can't carry userinfo, `Authorization`, cookies or proxy credentials: a URL with userinfo is refused when the setting is read, and no client has a cookie store.
+     - The service sends no request credentials. A configured endpoint can't carry userinfo, `Authorization`, cookies or proxy credentials: a URL with userinfo is refused when the setting is read, and no client has a cookie store.
+       - Under `socks5` the instance's SOCKS credentials are a different thing: they go only to the proxy, in its handshake, never in a request header. Every hop carries them, the configured and onion clients' included ([The SOCKS contract](#the-gate), *Stream isolation*).
      - Even so, a hop that changes scheme, host or port drops every header scoped to an authority (`Authorization`, `Cookie`, `Proxy-Authorization`).
      - No hop sends `Referer`.
      - Methods follow reqwest's rules: 303, and 301 or 302 after a `POST`, become a `GET` without a body; 307 and 308 keep the method and body.
@@ -933,6 +934,13 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   The address policy is then the same promise in both modes, enforced by the service itself, for every address the service resolves and pins. Translation on the exit's own network is outside it ([What the gate can't see](#what-the-gate-cant-see)).
 - **(b), rejected:** delegate the policy to the proxy. Tor's exits refuse private destinations by default, but that is an exit operator's setting and Arti's configuration, neither of which the service can guarantee. And a SOCKS reply doesn't prove which address was connected.
 - **If the pinned Arti can't `RESOLVE`,** the setting doesn't ship until it can, unless the user accepts (b) as an explicit deviation ([Open questions](#open-questions)).
+- **Stream isolation** (the user's decision, [Open questions](#open-questions), 11): each instance sends SOCKS5 credentials of its own, so Arti keeps its streams on circuits of their own.
+  - **Who is kept apart:** the profile's instance and each private window's, from one another, and from other users of the same Arti that send no credentials.
+  - **The credentials** (RFC 1929) are made when the instance's network is built: a fixed username, and a password of 128 random bits from the operating system.
+    - They live in memory for the network's lifetime, and are never persisted or logged. Their `Debug` form is redacted, and no error carries them. They leave the process only to the proxy.
+    - **If the operating system can't supply the randomness,** `ipfs.start` fails with `internal` and a fixed message. No instance is built, and nothing falls back to a fixed password or to no authentication.
+  - **Every stream carries them:** `RESOLVE`, the libp2p transport's `CONNECT`, and the HTTP clients', the onion client's included.
+  - **No fallback:** each client offers only username/password authentication, so a proxy that won't take it fails closed rather than sharing circuits silently.
 
 #### Addresses
 
@@ -1358,7 +1366,13 @@ As 0006's 4.7 did, before anything moves:
     - an HTTPS URL that redirects to HTTP sends no `Referer`;
     - a chain that moves between the ordinary and onion clients is counted against one hop budget, and fails at the limit;
     - an endpoint URL with userinfo is refused when the setting is read.
-  - **Arti qualification:** the pinned Arti answers `RESOLVE`, run in the release pipeline before the setting ships.
+  - **Arti qualification:** the pinned Arti answers `RESOLVE`, with username/password credentials as well as without, run in the release pipeline before the setting ships.
+  - **Stream isolation:**
+    - two instances send different credentials;
+    - every stream of one instance (`RESOLVE`, libp2p and HTTP `CONNECT`, onion, every redirect hop) sends the same ones;
+    - a proxy that selects only no authentication fails the dial;
+    - neither the username nor the password appears in any `Debug` output or error;
+    - an injected randomness failure refuses the start, with no instance built.
   - **Onion:** `.onion` and `/onion3` targets in `direct` mode open no socket.
 - **Live:** `ipfs:native:smoke` re-pointed at the service, with `/ipns/ipfs.tech/` and #102's fan-out of 48 concurrent requests and no `gateway_busy`.
 
@@ -1515,4 +1529,6 @@ Every body already passes through main today, so the pipe adds one copy into the
 8. **Streams in the core:** should 4.5's protocol version 2 for `freedom-cored` adopt these four frames as they are, with an explicit global credit added?
 9. **An OS memory limit:** should each service run under `RLIMIT_AS`, or a Windows job memory limit, as a backstop for what its budget can't see?
 10. **If Arti can't `RESOLVE`:** should the Tor setting wait until it can, or ship with the proxy's own policy (option (b)) as an explicit deviation? This design waits (the user's decision).
-11. **Stream isolation under Tor:** should each instance (the profile's, and each private window's) send SOCKS credentials of its own, so Arti keeps their streams on separate circuits? This design is silent on it so far. Isolation needs `RESOLVE` with authentication, which tokio-socks doesn't offer, so it means a small SOCKS5 client of the service's own (the user's decision).
+    - **Moot for now:** the pinned Arti 2.7.0 qualifies (freedom-browser #771). It answers `RESOLVE` with one address, with credentials and without. The qualification runs again whenever the pin moves.
+11. **Stream isolation under Tor:** should each instance (the profile's, and each private window's) send SOCKS credentials of its own, so Arti keeps their streams on separate circuits?
+    - **Decided (the user, 2026-10-22): yes, isolate** ([The SOCKS contract](#the-gate), *Stream isolation*). It needs `RESOLVE` with authentication, which tokio-socks doesn't offer, so the service uses a small SOCKS5 client of its own.
