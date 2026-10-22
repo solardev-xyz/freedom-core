@@ -1102,10 +1102,15 @@ dependencies = [
  "freedom-ipfs-net",
  "freedom-ipfs-store",
  "futures-core",
+ "hickory-proto",
+ "if-addrs",
+ "ipconfig",
  "serde",
  "serde_json",
+ "system-configuration",
  "tempfile",
  "tokio",
+ "windows-registry",
 ]
 
 [[package]]

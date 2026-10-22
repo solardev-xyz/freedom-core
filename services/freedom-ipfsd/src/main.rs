@@ -29,6 +29,7 @@ mod args;
 mod budget;
 mod build_info;
 mod instances;
+mod nat64;
 mod network;
 mod params;
 mod progress;

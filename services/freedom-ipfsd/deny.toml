@@ -13,16 +13,20 @@ all-features = true
 yanked = "deny"
 ignore = [
     # hickory-proto 0.25.2, through libp2p-dns 0.44 (libp2p's `/dns`
-    # resolver) and freedom-ipfs-net (the HTTP resolver of `direct` with
-    # checked addresses, design 0007's gate). The NSEC3 loop is in DNSSEC
-    # validation, which needs the `dnssec-ring` or `dnssec-aws-lc-rs`
-    # feature: this graph builds hickory-proto without either. The fix is
-    # hickory 0.26, which needs a libp2p-dns release that takes it. Design
-    # 0007 turns both resolvers off under a proxy (implementation step 8).
+    # resolver), freedom-ipfs-net (the HTTP resolver of `direct` with
+    # checked addresses, design 0007's gate) and this service's NAT64
+    # discovery (src/nat64/query.rs: its one `ipv4only.arpa` query and the
+    # answers). The NSEC3 loop is in DNSSEC validation, which needs the
+    # `dnssec-ring` or `dnssec-aws-lc-rs` feature: this graph builds
+    # hickory-proto without either. The fix is hickory 0.26, which needs a
+    # libp2p-dns release that takes it. Design 0007 turns both resolvers
+    # off under a proxy (implementation step 8), and discovery runs only
+    # for `direct`.
     { id = "RUSTSEC-2026-0118", reason = "DNSSEC validation only; hickory-proto is built without its dnssec features" },
-    # Same crate and path. The quadratic name compression is in message
-    # encoding: a stub resolver encodes only its own one-question queries,
-    # and decodes the answers. The fix needs hickory 0.26, as above.
+    # Same crate and paths. The quadratic name compression is in message
+    # encoding: a stub resolver, and discovery, encode only their own
+    # one-question queries, and decode the answers. The fix needs hickory
+    # 0.26, as above.
     { id = "RUSTSEC-2026-0119", reason = "encoding only: the resolver encodes its own queries, never a received message" },
     # paste 1.0.15, a proc macro through netlink-packet-core (if-watch, for
     # libp2p-quic): unmaintained, with no safe upgrade. Its code runs at
