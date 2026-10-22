@@ -457,6 +457,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
     "store":   { "kind": "disk", "max_bytes": 268435456 },        // or { "kind": "memory", "max_bytes": 33554432 }
     "routing": { "mode": "auto",
                  "delegated_routers": ["https://delegated-ipfs.dev/routing/v1", "https://cid.contact/routing/v1"],
+                 "doh_endpoint": "https://cloudflare-dns.com/dns-query",
                  "dht_query_timeout_s": 3, "dht_max_providers": 32 },
     "gateway": { "max_concurrent_requests": 8, "request_queue_timeout_ms": 15000 },
     "network": { "mode": "direct" } } }                            // or { "mode": "socks5", "ip": "127.0.0.1", "port": 9150 }
@@ -481,6 +482,17 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 - **`ipfs.start`:**
   - The values above are exactly today's (v0.4.6's defaults where the add-on passes 0), sent explicitly.
   - `delegated_routers` serves provider and IPNS lookups alike, as the add-on's one string does. If upstream takes separate IPNS endpoints ([freedom-ipfs#30](https://github.com/solardev-xyz/freedom-ipfs/issues/30)), `routing` gains a list for them.
+  - **`doh_endpoint`** is the DoH endpoint that DNSLink and `/dnsaddr` expansion ask. Main sends today's, Cloudflare's, explicitly.
+    - It sits in `routing` beside the routers because it is checked and exempted exactly as they are: a [configured target](#the-gate).
+  - **The routers and the DoH endpoint** are `http` or `https` URLs, read as the gate reads a configured endpoint: WHATWG, ASCII, no userinfo, a host it classifies, and no fragment.
+    - An onion among them needs `socks5`: `direct` has [no route to one](#the-onion-route).
+  - **`network`** is one of two forms:
+    - `{ "mode": "direct" }`;
+    - `{ "mode": "socks5", "ip", "port" }`.
+      - `ip` is an IPv4 or IPv6 address written plainly: no brackets, no zone, no shorthand, no hex or octal. An IPv4-mapped IPv6 address is read as the IPv4 address it maps. It may not be unspecified, multicast or broadcast. Loopback and private addresses are allowed, since an external Tor may sit on the LAN.
+      - `port` is from 1 to 65535.
+      - No credentials are taken ([Open questions](#open-questions), 11).
+      - `socks5` takes `routing.mode` `delegated` or `offline` only ([Open questions](#open-questions), 4).
   - The persistent process accepts one `disk` instance at a time. The ephemeral process accepts only `memory` instances of at most 32 MiB, and at most 8 of them.
   - A start is admitted only within the free [budget](#budgets). Anything else is `invalid_argument`, or `busy` when the budget isn't free.
 - **`ipfs.request`:**
@@ -863,7 +875,7 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   **The same shapes apply after expansion:** every multiaddr a `/dnsaddr` answer yields is checked whole again ([check 2](#the-gate)).
 
 **The policy:**
-- **Configured targets** are the delegated routers and DoH endpoint in `ipfs.start`. They are exempt from the address policy, by exact host (and port), including when one is local.
+- **Configured targets** are the delegated routers and DoH endpoint in `ipfs.start` (`routing.delegated_routers` and `routing.doh_endpoint`). They are exempt from the address policy, by exact host (and port), including when one is local.
   - An HTTP client's resolver sees a name, never its port, so configured targets are reached through clients of their own, whose resolver doesn't filter but still never answers empty. The redirect loop picks the client for each hop from its scheme, host and port: a configured host on another port, reached by a redirect, is untrusted.
   - **Arti's endpoint is not a target.** In `socks5` mode it is the transport that every connection goes through, so the service connects to it without asking the gate. A target at its address, as a literal or as a name's answer, is untrusted like any other, so the network can't point the service at the proxy's port.
 - **Untrusted targets** are everything learned from the network:

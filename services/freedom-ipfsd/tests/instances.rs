@@ -107,9 +107,10 @@ fn ephemeral_instances() {
 fn start_params_are_checked() {
     let mut ipfsd = Ipfsd::ephemeral(&[]);
     ipfsd.hello();
-    // The network policy is step 8's: only direct, for now.
+    // `socks5` takes delegated or offline routing only (decision D6).
     let mut socks = memory("e-1");
     socks["network"] = json!({ "mode": "socks5", "ip": "127.0.0.1", "port": 9150 });
+    socks["routing"]["mode"] = json!("auto");
     let reply = ipfsd.start(socks);
     assert_eq!(reply["error"]["code"], "invalid_argument");
     assert!(
@@ -121,6 +122,23 @@ fn start_params_are_checked() {
     );
     for (pointer, value) in [
         ("/network/mode", json!("tor")),
+        (
+            "/network",
+            json!({ "mode": "socks5", "ip": "localhost", "port": 9150 }),
+        ),
+        (
+            "/network",
+            json!({ "mode": "socks5", "ip": "0.0.0.0", "port": 9150 }),
+        ),
+        (
+            "/routing/doh_endpoint",
+            json!("https://u@cloudflare-dns.com/"),
+        ),
+        // `direct` reaches no onion.
+        (
+            "/routing/delegated_routers",
+            json!(["https://router.onion/routing/v1"]),
+        ),
         ("/routing/mode", json!("everything")),
         ("/routing/dht_query_timeout_s", json!(0)),
         ("/gateway/max_concurrent_requests", json!(0)),
@@ -145,6 +163,11 @@ fn start_params_are_checked() {
     );
     // None of them took e-1.
     assert_eq!(ipfsd.start(memory("e-1"))["result"]["instance"], "e-1");
+    // `socks5` with offline routing starts: nothing is sent at start, so
+    // the proxy needn't be up.
+    let mut socks = memory("e-2");
+    socks["network"] = json!({ "mode": "socks5", "ip": "127.0.0.1", "port": 9 });
+    assert_eq!(ipfsd.start(socks)["result"]["instance"], "e-2");
     ipfsd.close_stdin();
     assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
 }

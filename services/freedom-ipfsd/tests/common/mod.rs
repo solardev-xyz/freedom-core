@@ -452,6 +452,7 @@ pub fn start_params(instance: &str, store: Value) -> Value {
         "store": store,
         "routing": { "mode": "offline",
             "delegated_routers": ["https://delegated-ipfs.dev/routing/v1", "https://cid.contact/routing/v1"],
+            "doh_endpoint": "https://cloudflare-dns.com/dns-query",
             "dht_query_timeout_s": 3, "dht_max_providers": 32 },
         "gateway": { "max_concurrent_requests": 8, "request_queue_timeout_ms": 15000 },
         "network": { "mode": "direct" }
