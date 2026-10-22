@@ -1505,6 +1505,7 @@ Every body already passes through main today, so the pipe adds one copy into the
 ## Open questions
 
 1. **Where the code lives:** a separate workspace in this repository (recommended), a member of the core's workspace, upstream, or a new repository (the user's decision).
+   - **Decided (the user, 2026-10-22): a separate workspace in this repository, `services/freedom-ipfsd`, as built.** It keeps IPFS's dependencies out of the key-holding core's lockfile and checks, while sharing `fc-protocol` and the release pipeline. Being self-contained, it can still move later.
 2. **Private windows:**
    - an in-memory instance per private partition in one process (recommended), one instance shared by all private windows, or a process per window, which would also separate address spaces?
    - are 8 instances under a 448 MiB budget the right bound?

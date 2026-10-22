@@ -1156,6 +1156,7 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 ## Open questions
 
 1. **Where the code lives:** a separate workspace here (recommended), upstream libradicle, or a new repository (the user's decision).
+   - **Decided (the user, 2026-10-22): a separate workspace here,** following 0007's `services/freedom-ipfsd`.
 2. **Key custody:** keep the key file (this design), or move to a sealed host key with no file at rest? The latter needs a new exception to rule 3, and an unlocked vault for every start (the user's decision).
 3. **AGENTS.md, a prerequisite to the custody choice:** should rules 3 and 4 name node identities: 0001's node identity writes (Bee and Radicle), and keys that outlive a vault lock? (The user's decision.)
 4. **The device key:** this design has the core write the random key on profiles without a vault. Is a device identity that isn't derived from the wallet still wanted there, or should Radicle require a vault?
