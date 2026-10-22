@@ -62,10 +62,13 @@ pub fn parse(network: &Value) -> Result<NetworkPolicy, &'static str> {
             {
                 return Err("network mode socks5 takes mode, ip and port only");
             }
+            // An IPv4-mapped address is judged, and used, as the IPv4
+            // address it maps.
             let ip = members
                 .get("ip")
                 .and_then(Value::as_str)
                 .and_then(|ip| ip.parse::<IpAddr>().ok())
+                .map(|ip| ip.to_canonical())
                 .ok_or("network.ip must be an IPv4 or IPv6 address, written plainly")?;
             if ip.is_unspecified() || ip.is_multicast() || ip == IpAddr::from([255, 255, 255, 255])
             {
@@ -168,6 +171,20 @@ mod tests {
                 "{ip}"
             );
         }
+        // An IPv4-mapped address is the IPv4 address it maps.
+        for (mapped, ip) in [
+            ("::ffff:127.0.0.1", "127.0.0.1"),
+            ("::ffff:7f00:1", "127.0.0.1"),
+            ("::ffff:192.168.1.5", "192.168.1.5"),
+        ] {
+            assert_eq!(
+                parse(&json!({ "mode": "socks5", "ip": mapped, "port": 9150 })),
+                Ok(NetworkPolicy::Socks5 {
+                    proxy: SocketAddr::new(ip.parse().unwrap(), 9150)
+                }),
+                "{mapped}"
+            );
+        }
     }
 
     #[test]
@@ -196,6 +213,13 @@ mod tests {
             json!({ "mode": "socks5", "ip": "224.0.0.1", "port": 9150 }),
             json!({ "mode": "socks5", "ip": "ff02::1", "port": 9150 }),
             json!({ "mode": "socks5", "ip": "255.255.255.255", "port": 9150 }),
+            // The same, IPv4-mapped, dotted and in hex.
+            json!({ "mode": "socks5", "ip": "::ffff:0.0.0.0", "port": 9150 }),
+            json!({ "mode": "socks5", "ip": "::ffff:0:0", "port": 9150 }),
+            json!({ "mode": "socks5", "ip": "::ffff:224.0.0.1", "port": 9150 }),
+            json!({ "mode": "socks5", "ip": "::ffff:e000:1", "port": 9150 }),
+            json!({ "mode": "socks5", "ip": "::ffff:255.255.255.255", "port": 9150 }),
+            json!({ "mode": "socks5", "ip": "::ffff:ffff:ffff", "port": 9150 }),
             // Ports.
             json!({ "mode": "socks5", "ip": "127.0.0.1", "port": 0 }),
             json!({ "mode": "socks5", "ip": "127.0.0.1", "port": 65536 }),
