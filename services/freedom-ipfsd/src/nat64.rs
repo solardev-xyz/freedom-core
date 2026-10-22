@@ -35,11 +35,6 @@
 //!   none sends no query. Resumed after a pause, the state is pending
 //!   again, since the network may have changed meanwhile.
 
-// Step 8's wiring (a `direct` instance's lease, and its address table)
-// comes in its own change, which removes this: until then only the tests
-// use this module.
-#![allow(dead_code)]
-
 pub mod query;
 pub mod resolvers;
 
@@ -101,6 +96,9 @@ struct Shared {
     publisher: Nat64Publisher,
     /// The state as published.
     handle: Nat64Handle,
+    /// Why the last round's resolvers failed, each a fixed name: none since
+    /// a resume until a round publishes.
+    failures: Mutex<Vec<&'static str>>,
     source: Source,
     timing: Timing,
     control: Mutex<Control>,
@@ -131,12 +129,20 @@ impl Discovery {
             shared: Arc::new(Shared {
                 publisher,
                 handle,
+                failures: Mutex::new(Vec::new()),
                 source,
                 timing,
                 control: Mutex::new(Control::default()),
                 wake: Condvar::new(),
             }),
         }
+    }
+
+    /// Discovery over no resolver, for tests: known, with no prefix, once
+    /// a lease starts it.
+    #[cfg(test)]
+    pub fn none() -> Discovery {
+        Discovery::new(Arc::new(Vec::new), Timing::DESIGN)
     }
 
     /// The OS's resolvers ([`resolvers::learned`]).
@@ -152,6 +158,28 @@ impl Discovery {
     /// The state now.
     pub fn state(&self) -> Nat64State {
         self.shared.handle.current()
+    }
+
+    /// What `ipfs.stats` reports of it: the state's name, the prefixes
+    /// learned (`addr/len`), and why the last round's resolvers failed,
+    /// each a fixed name (never an address).
+    pub fn stats(&self) -> serde_json::Value {
+        let state = self.state();
+        let failures = self
+            .shared
+            .failures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        json!({
+            "state": state_name(&state),
+            "prefixes": state
+                .prefixes()
+                .iter()
+                .map(|prefix| prefix.cidr().to_string())
+                .collect::<Vec<_>>(),
+            "failures": failures,
+        })
     }
 
     /// Holds discovery running until the lease is dropped. The first lease
@@ -208,8 +236,13 @@ impl Shared {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Publishes `state` if it changed, and logs it.
+    /// Publishes `state` and its round's failures, and logs a change.
     fn publish(&self, state: Nat64State, failures: &[(String, &'static str)]) {
+        *self
+            .failures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            failures.iter().map(|(_, why)| *why).collect();
         if self.handle.current() == state {
             return;
         }
@@ -659,6 +692,55 @@ mod tests {
             wait_for(&discovery, |state| *state != Nat64State::Pending),
             Nat64State::Known(_)
         ));
+    }
+
+    #[test]
+    fn stats_give_the_state_its_prefixes_and_why_resolvers_failed() {
+        let answers = Arc::new(Mutex::new(Some(vec!["2001:db8:64::"])));
+        let (addr, _) = dns64(answers.clone());
+        let listed = Arc::new(Mutex::new(vec![Learned::Ask(addr)]));
+        let source = listed.clone();
+        let discovery = Discovery::new(Arc::new(move || source.lock().unwrap().clone()), FAST);
+        assert_eq!(
+            discovery.stats(),
+            json!({ "state": "pending", "prefixes": [], "failures": [] })
+        );
+        let lease = discovery.lease();
+        wait_for(&discovery, |state| matches!(state, Nat64State::Known(_)));
+        assert_eq!(
+            discovery.stats(),
+            json!({ "state": "known", "prefixes": ["2001:db8:64::/96"], "failures": [] })
+        );
+        // Unknown, then unknown for another reason: the reasons follow the
+        // last round, though the state doesn't change.
+        *answers.lock().unwrap() = None;
+        wait_for(&discovery, |state| matches!(state, Nat64State::Unknown(_)));
+        let failed = |discovery: &Discovery| discovery.stats()["failures"].clone();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while failed(&discovery) != json!(["rcode"]) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(failed(&discovery), json!(["rcode"]));
+        *listed.lock().unwrap() = vec![Learned::Unaskable("fe80::1".into())];
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while failed(&discovery) != json!(["unaskable"]) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            discovery.stats(),
+            json!({ "state": "unknown", "prefixes": ["2001:db8:64::/96"], "failures": ["unaskable"] })
+        );
+        // Paused, then resumed: pending, with no failure of its own yet. The
+        // resumed round asks a resolver that never answers, so it is still
+        // pending when read.
+        let (silent, _) = resolver(|_| vec![]);
+        *listed.lock().unwrap() = vec![Learned::Ask(silent)];
+        drop(lease);
+        let _lease = discovery.lease();
+        assert_eq!(
+            discovery.stats(),
+            json!({ "state": "pending", "prefixes": [], "failures": [] })
+        );
     }
 
     #[test]

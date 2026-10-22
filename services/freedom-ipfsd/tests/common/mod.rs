@@ -95,9 +95,12 @@ impl Ipfsd {
         Ipfsd::spawn(command, env)
     }
 
-    /// Any command whose stdout carries frames.
+    /// Any command whose stdout carries frames. NAT64 discovery asks no
+    /// resolver (known, with no prefix), unless `env` names the test's own:
+    /// no test queries the host's.
     pub fn spawn(mut command: Command, env: &[(&str, &str)]) -> Ipfsd {
         let mut child = command
+            .env("FREEDOM_IPFSD_TEST_NAT64_RESOLVERS", "")
             .envs(env.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -445,6 +448,11 @@ pub fn disk(instance: &str) -> Value {
 pub fn memory(instance: &str) -> Value {
     start_params(instance, json!({ "kind": "memory", "max_bytes": 33554432 }))
 }
+
+/// A `direct` instance with no address table, for a test whose providers
+/// are on loopback, which the table refuses (a testhook): the providers
+/// stay untrusted, as a real one is, and only the check is off.
+pub const LOOPBACK_PROVIDERS: (&str, &str) = ("FREEDOM_IPFSD_TEST_DIRECT_UNCHECKED", "1");
 
 pub fn start_params(instance: &str, store: Value) -> Value {
     json!({

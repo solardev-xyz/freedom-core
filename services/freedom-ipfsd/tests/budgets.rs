@@ -113,6 +113,7 @@ fn starved(dirs: &Dirs, env: &[(&str, &str)]) -> Ipfsd {
     let limit = budget(WRITER + PERSISTENT + MIB);
     let mut env = env.to_vec();
     env.push(("FREEDOM_IPFSD_TEST_MEMORY_BUDGET", &limit));
+    env.push(LOOPBACK_PROVIDERS);
     let mut ipfsd = Ipfsd::persistent(dirs, &env);
     ipfsd.hello();
     assert_eq!(ipfsd.start(disk("p-1"))["result"]["instance"], "p-1");
@@ -235,7 +236,10 @@ fn prefetching(budget: Option<String>) -> (Ipfsd, Server) {
             .map(|(name, cid)| (name.as_str(), cid.to_bytes(), 10)),
     );
     let directory = seed_blocks(&dirs, &[(DAG_PB, pb_directory(&entries))]);
-    let mut env = vec![("FREEDOM_IPFSD_TEST_HTML_PREFETCH_ASSETS", "200")];
+    let mut env = vec![
+        ("FREEDOM_IPFSD_TEST_HTML_PREFETCH_ASSETS", "200"),
+        LOOPBACK_PROVIDERS,
+    ];
     if let Some(budget) = &budget {
         env.push(("FREEDOM_IPFSD_TEST_MEMORY_BUDGET", budget));
     }
@@ -407,7 +411,7 @@ fn stats_count_the_gateways_busy_heads() {
     let dirs = Dirs::new();
     let missing = freedom_ipfs_core::cid_from_data(RAW, b"held at its provider").to_string();
     seed_provider(&dirs, std::slice::from_ref(&missing), &provider);
-    let mut ipfsd = Ipfsd::persistent(&dirs, &[]);
+    let mut ipfsd = Ipfsd::persistent(&dirs, &[LOOPBACK_PROVIDERS]);
     ipfsd.hello();
     // One request at a time in the gateway, and 100 ms in its queue.
     let mut params = disk("p-1");

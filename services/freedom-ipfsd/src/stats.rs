@@ -57,6 +57,7 @@ use tokio::task::AbortHandle;
 
 use crate::budget::Budgets;
 use crate::instances::Instances;
+use crate::network::NetworkPolicy;
 use crate::requests::{MAX_ADMITTED, Requests};
 use crate::{params, progress, testhooks};
 
@@ -296,13 +297,14 @@ impl Stats {
                 return;
             }
         };
-        let Some((store, counters, background, recorder)) =
+        let Some((store, counters, background, recorder, policy)) =
             instances.with_live(&instance_id, |running| {
                 (
                     running.instance.node().store().clone(),
                     running.counters.clone(),
                     running.instance.node().background_queue().clone(),
                     running.instance.progress().clone(),
+                    running.policy,
                 )
             })
         else {
@@ -340,6 +342,12 @@ impl Stats {
         };
         let gateway = counters.snapshot();
         let budget = self.budget(requests, conn, &background);
+        // A `direct` instance's address table reads the process's NAT64
+        // discovery; a `socks5` one learns nothing.
+        let network = match policy {
+            NetworkPolicy::Direct => json!({ "mode": "direct", "nat64": instances.nat64() }),
+            NetworkPolicy::Socks5 { .. } => json!({ "mode": "socks5", "nat64": null }),
+        };
         let (reply, timer) = (conn.clone(), conn.clone());
         let stats = self.clone();
         let job = self.runtime.spawn_blocking(move || {
@@ -382,7 +390,7 @@ impl Stats {
                     Value::Null
                 };
                 let mut result = json!({ "gateway": gateway, "progress": progress,
-                    "store": store, "budget": budget });
+                    "store": store, "budget": budget, "network": network });
                 if let Some(counts) = testhooks::progress_counts(&recorder) {
                     result["test_progress"] = counts;
                 }

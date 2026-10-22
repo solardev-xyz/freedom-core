@@ -108,6 +108,40 @@ pub fn progress_counts(
     None
 }
 
+/// NAT64 discovery's resolvers: the OS's (`None`), unless a test names its
+/// own in `FREEDOM_IPFSD_TEST_NAT64_RESOLVERS`, comma-separated: each a
+/// socket address to ask, or anything else, which is a resolver that can't
+/// be asked. Empty is none, so discovery knows no prefix at once.
+pub fn nat64_source() -> Option<crate::nat64::Source> {
+    #[cfg(feature = "testhooks")]
+    if let Ok(list) = std::env::var("FREEDOM_IPFSD_TEST_NAT64_RESOLVERS") {
+        use crate::nat64::resolvers::Learned;
+        let learned: Vec<Learned> = list
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(|item| match item.parse() {
+                Ok(addr) => Learned::Ask(addr),
+                Err(_) => Learned::Unaskable(item.to_string()),
+            })
+            .collect();
+        return Some(std::sync::Arc::new(move || learned.clone()));
+    }
+    None
+}
+
+/// A `direct` instance's address table: `checked`, unless a test turns it
+/// off (`FREEDOM_IPFSD_TEST_DIRECT_UNCHECKED`), for providers on loopback.
+pub fn direct_addresses(
+    checked: freedom_ipfs_gateway::net::Addresses,
+) -> freedom_ipfs_gateway::net::Addresses {
+    #[cfg(feature = "testhooks")]
+    if std::env::var_os("FREEDOM_IPFSD_TEST_DIRECT_UNCHECKED").is_some() {
+        return freedom_ipfs_gateway::net::Addresses::Unchecked;
+    }
+    checked
+}
+
 /// The process's memory budget: `default`, unless a test replaces it.
 pub fn memory_budget(default: usize) -> usize {
     #[cfg(feature = "testhooks")]
