@@ -115,6 +115,9 @@ struct Shared {
     timing: Timing,
     control: Mutex<Control>,
     wake: Condvar,
+    /// Run between a send's check and the send, under the lock: tests.
+    #[cfg(test)]
+    before_send: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 #[derive(Default)]
@@ -145,6 +148,8 @@ impl Discovery {
                 timing,
                 control: Mutex::new(Control::default()),
                 wake: Condvar::new(),
+                #[cfg(test)]
+                before_send: Mutex::new(None),
             }),
         }
     }
@@ -215,6 +220,18 @@ pub struct Round {
 }
 
 impl Shared {
+    #[cfg(test)]
+    fn before_send(&self) {
+        let hook = self
+            .before_send
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
     fn lock(&self) -> MutexGuard<'_, Control> {
         self.control
             .lock()
@@ -258,9 +275,9 @@ impl Shared {
             };
             // A round sends while its lease holds: once the last one goes,
             // or a resume begins another generation, it sends nothing more.
-            let proceed = || {
-                let control = self.lock();
-                control.leases > 0 && control.generation == generation
+            let gate = LeaseGate {
+                shared: &self,
+                generation,
             };
             // The first failure ends a known state at once.
             let failed = |state: Nat64State, failures: &[Failed]| {
@@ -270,7 +287,7 @@ impl Shared {
                 }
             };
             let started = Instant::now();
-            let round = round(&(self.source)(), &mut kept, &self.timing, &proceed, &failed);
+            let round = round(&(self.source)(), &mut kept, &self.timing, &gate, &failed);
             let mut control = self.lock();
             if control.leases == 0 || control.generation != generation {
                 // Abandoned: paused, or resumed meanwhile. Nothing is
@@ -308,7 +325,7 @@ impl Shared {
 /// the prefixes learned so far. A resolver listed past them isn't asked, and
 /// counts as a failure (`over_limit`), as one that can't be asked does.
 ///
-/// - **Each send asks `proceed` first:** once it says no, the round sends
+/// - **Each send goes through `gate`:** once it says no, the round sends
 ///   nothing more, and its caller doesn't publish it.
 /// - **The first failure is reported at once** (`failed`, with the state
 ///   unknown and the failures so far), not when the round ends, so a known
@@ -317,7 +334,7 @@ pub fn round(
     learned: &[Learned],
     kept: &mut Vec<Nat64Prefix>,
     timing: &Timing,
-    proceed: &(dyn Fn() -> bool + Sync),
+    gate: &dyn query::Gate,
     failed: &dyn Fn(Nat64State, &[Failed]),
 ) -> Round {
     let mut failures: Vec<Failed> = Vec::new();
@@ -346,7 +363,7 @@ pub fn round(
                 let (addr, sent) = (*addr, sent.clone());
                 scope.spawn(move || {
                     let answer =
-                        query::ask(addr, query_id(), timing.attempt, timing.attempts, proceed);
+                        query::ask(addr, query_id(), timing.attempt, timing.attempts, gate);
                     let _ = sent.send((addr, answer));
                 })
             })
@@ -393,6 +410,29 @@ pub fn round(
         state,
         failures,
         ttl,
+    }
+}
+
+/// A round's sends, allowed while a lease of its generation is held. The
+/// check and the send are one step, under the lock [`Lease`]'s drop takes,
+/// so once the last lease's drop has returned, no send it didn't cover can
+/// follow; the send itself doesn't block ([`query::ask`]).
+struct LeaseGate<'a> {
+    shared: &'a Shared,
+    generation: u64,
+}
+
+impl query::Gate for LeaseGate<'_> {
+    fn run(&self, send: &dyn Fn() -> std::io::Result<usize>) -> Option<std::io::Result<usize>> {
+        let control = self.shared.lock();
+        if control.leases == 0 || control.generation != self.generation {
+            return None;
+        }
+        #[cfg(test)]
+        self.shared.before_send();
+        let sent = send();
+        drop(control);
+        Some(sent)
     }
 }
 
@@ -512,7 +552,7 @@ mod tests {
             &[ask(one), ask(other)],
             &mut kept,
             &FAST,
-            &|| true,
+            &query::Open,
             &|_, _| {},
         );
         assert_eq!(
@@ -543,7 +583,7 @@ mod tests {
             &[ask(long), ask(short)],
             &mut kept,
             &FAST,
-            &|| true,
+            &query::Open,
             &|_, _| {},
         );
         assert_eq!(both.ttl, Some(Duration::from_secs(40)));
@@ -558,7 +598,7 @@ mod tests {
             &[ask(answers), ask(failing)],
             &mut kept,
             &FAST,
-            &|| true,
+            &query::Open,
             &|_, _| {},
         );
         assert_eq!(
@@ -572,7 +612,7 @@ mod tests {
             &[ask(answers), Learned::Unaskable("fe80::1%wlan9".into())],
             &mut kept,
             &FAST,
-            &|| true,
+            &query::Open,
             &|_, _| {},
         );
         assert_eq!(
@@ -588,7 +628,7 @@ mod tests {
     #[test]
     fn no_resolver_listed_is_known_and_empty() {
         let mut kept = Vec::new();
-        let none = round(&[], &mut kept, &FAST, &|| true, &|_, _| {});
+        let none = round(&[], &mut kept, &FAST, &query::Open, &|_, _| {});
         assert_eq!(none.state, Nat64State::NONE);
         assert_eq!(none.ttl, None);
     }
@@ -598,17 +638,17 @@ mod tests {
         let answers = Arc::new(Mutex::new(Some(vec!["2a00:1:2:3::"])));
         let (addr, _) = dns64(answers.clone());
         let mut kept = Vec::new();
-        round(&[ask(addr)], &mut kept, &FAST, &|| true, &|_, _| {});
+        round(&[ask(addr)], &mut kept, &FAST, &query::Open, &|_, _| {});
         // A refresh that drops the prefix doesn't forget it.
         *answers.lock().unwrap() = Some(vec![]);
         assert_eq!(
-            round(&[ask(addr)], &mut kept, &FAST, &|| true, &|_, _| {}).state,
+            round(&[ask(addr)], &mut kept, &FAST, &query::Open, &|_, _| {}).state,
             Nat64State::Known(vec![prefix("2a00:1:2:3::", 96)])
         );
         // A failed refresh keeps it too.
         *answers.lock().unwrap() = None;
         assert_eq!(
-            round(&[ask(addr)], &mut kept, &FAST, &|| true, &|_, _| {}).state,
+            round(&[ask(addr)], &mut kept, &FAST, &query::Open, &|_, _| {}).state,
             Nat64State::Unknown(vec![prefix("2a00:1:2:3::", 96)])
         );
         // Seventeen distinct prefixes: incomplete, for good.
@@ -632,14 +672,14 @@ mod tests {
             "2a00:1:11::",
         ];
         *answers.lock().unwrap() = Some(seventeen);
-        let state = round(&[ask(addr)], &mut kept, &FAST, &|| true, &|_, _| {}).state;
+        let state = round(&[ask(addr)], &mut kept, &FAST, &query::Open, &|_, _| {}).state;
         assert!(
             matches!(state, Nat64State::Incomplete(ref kept) if kept.len() == 16),
             "{state:?}"
         );
         *answers.lock().unwrap() = Some(vec![]);
         assert!(matches!(
-            round(&[ask(addr)], &mut kept, &FAST, &|| true, &|_, _| {}).state,
+            round(&[ask(addr)], &mut kept, &FAST, &query::Open, &|_, _| {}).state,
             Nat64State::Incomplete(_)
         ));
         assert_eq!(kept.len(), Nat64State::MAX_PREFIXES + 1);
@@ -779,7 +819,7 @@ mod tests {
             &[ask(one), ask(two), ask(one)],
             &mut kept,
             &FAST,
-            &|| true,
+            &query::Open,
             &|_, _| {},
         );
         for queries in [one_queries, two_queries] {
@@ -835,6 +875,41 @@ mod tests {
             assert!(queries.try_recv().is_err(), "a resend after the pause");
         }
         assert_eq!(discovery.state(), Nat64State::Pending);
+    }
+
+    #[test]
+    fn the_last_leases_drop_waits_for_the_send_it_allowed_and_nothing_follows() {
+        // The conformance review's probe, for a gate that holds the lock
+        // through the send: between the first send's check and the send,
+        // under the lock, the hook waits 200 ms. The last lease's drop,
+        // called then, returns only once that send is done.
+        let (addr, queries) = silent();
+        let discovery = Discovery::new(
+            Arc::new(move || vec![ask(addr)]),
+            slow(Duration::from_millis(300), 2),
+        );
+        let checked = Arc::new(std::sync::Barrier::new(2));
+        let hook_checked = checked.clone();
+        let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        *discovery.shared.before_send.lock().unwrap() = Some(Arc::new(move || {
+            if first.swap(false, Ordering::SeqCst) {
+                hook_checked.wait();
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }));
+        let lease = discovery.lease();
+        // A send has passed its check, and hasn't sent.
+        checked.wait();
+        let dropping = Instant::now();
+        drop(lease);
+        let waited = dropping.elapsed();
+        assert!(waited >= Duration::from_millis(150), "{waited:?}");
+        // The send it allowed, and nothing after: no resend.
+        queries.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(
+            queries.recv_timeout(Duration::from_millis(700)).is_err(),
+            "a send after the last lease's drop"
+        );
     }
 
     #[test]
@@ -928,7 +1003,7 @@ mod tests {
             .collect();
         let learned: Vec<Learned> = resolvers.iter().map(|(addr, _)| ask(*addr)).collect();
         let mut kept = Vec::new();
-        let round = round(&learned, &mut kept, &FAST, &|| true, &|_, _| {});
+        let round = round(&learned, &mut kept, &FAST, &query::Open, &|_, _| {});
         assert_eq!(
             round.state,
             Nat64State::Unknown(vec![prefix("2001:db8:64::", 96)])
