@@ -645,10 +645,12 @@ mod tests {
         let (addr, queries) = dns64(answers.clone());
         let asked = Arc::new(AtomicUsize::new(0));
         let counted = asked.clone();
+        let target = Arc::new(Mutex::new(addr));
+        let listed = target.clone();
         let discovery = Discovery::new(
             Arc::new(move || {
                 counted.fetch_add(1, Ordering::SeqCst);
-                vec![Learned::Ask(addr)]
+                vec![Learned::Ask(*listed.lock().unwrap())]
             }),
             FAST,
         );
@@ -685,11 +687,15 @@ mod tests {
         std::thread::sleep(Duration::from_millis(500));
         assert!(queries.try_recv().is_err(), "a query while paused");
 
-        // Resumed: pending at once, then known again.
+        // Resumed: pending at once. Its first round asks a resolver that
+        // never answers, so it is still pending when read; then known again.
+        let (silent, _) = resolver(|_| vec![]);
+        *target.lock().unwrap() = silent;
         let _lease = discovery.lease();
         assert_eq!(discovery.state(), Nat64State::Pending);
+        *target.lock().unwrap() = addr;
         assert!(matches!(
-            wait_for(&discovery, |state| *state != Nat64State::Pending),
+            wait_for(&discovery, |state| matches!(state, Nat64State::Known(_))),
             Nat64State::Known(_)
         ));
     }
