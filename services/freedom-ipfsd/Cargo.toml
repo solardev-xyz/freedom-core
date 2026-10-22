@@ -56,6 +56,9 @@ serde_json = "1"
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time"] }
 
 [dev-dependencies]
+# Upstream's SOCKS5 test proxy and test servers (its `test-util` feature),
+# for the `socks5` tests through the binary; the same pin as the gateway's.
+freedom-ipfs-net = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "c88b711c5d9070eedd92cf92fa33f16f6e385606", features = ["test-util"] }
 tempfile = "3"
 
 # The core's workspace lints, copied: workspace lints don't cross workspaces.

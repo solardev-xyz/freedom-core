@@ -1098,6 +1098,7 @@ dependencies = [
  "fc-service",
  "freedom-ipfs-core",
  "freedom-ipfs-gateway",
+ "freedom-ipfs-net",
  "freedom-ipfs-store",
  "futures-core",
  "serde",
