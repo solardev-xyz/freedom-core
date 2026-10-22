@@ -21,9 +21,9 @@
 
 mod common;
 
-#[cfg(target_os = "linux")]
-use std::collections::BTreeSet;
 use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::net::{SocketAddr, TcpListener, UdpSocket};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -272,44 +272,56 @@ fn wait_for(timeout: Duration, done: impl Fn() -> bool) -> bool {
     true
 }
 
-/// The remote ports of process `pid`'s TCP sockets, from `/proc` (Linux).
-/// An error if its tables can't be read.
+/// How many TCP sockets in this network namespace still hold a connection
+/// to `server`, from `/proc` (Linux): connecting, established, or closed by
+/// the server but not yet by their own end (`CLOSE_WAIT`). A socket whose
+/// own end has closed (`FIN_WAIT`, `TIME_WAIT`, `LAST_ACK`) doesn't count.
+/// An error if the tables can't be read.
+///
+/// The namespace's tables, not the service's own: fc-service's hardening
+/// makes the service non-dumpable, so its `/proc/<pid>/fd` is closed even
+/// to its own user. Only the service connects to a test's proxy, so a
+/// socket holding a connection to it is the service's.
 #[cfg(target_os = "linux")]
-fn remote_ports(pid: u32) -> std::io::Result<BTreeSet<u16>> {
-    let own: BTreeSet<String> = std::fs::read_dir(format!("/proc/{pid}/fd"))?
-        .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
-        .filter_map(|target| {
-            let target = target.to_string_lossy().into_owned();
-            Some(
-                target
-                    .strip_prefix("socket:[")?
-                    .strip_suffix(']')?
-                    .to_string(),
-            )
-        })
-        .collect();
-    let mut ports = BTreeSet::new();
+fn connections_held_to(server: SocketAddr) -> std::io::Result<usize> {
+    // 01 ESTABLISHED, 02 SYN_SENT, 08 CLOSE_WAIT.
+    const HELD: [&str; 3] = ["01", "02", "08"];
+    let mut held = 0;
     for table in ["tcp", "tcp6"] {
-        let text = std::fs::read_to_string(format!("/proc/{pid}/net/{table}"))?;
+        let text = std::fs::read_to_string(format!("/proc/self/net/{table}"))?;
         for line in text.lines().skip(1) {
             let fields: Vec<&str> = line.split_whitespace().collect();
-            let (Some(remote), Some(inode)) = (fields.get(2), fields.get(9)) else {
+            let (Some(remote), Some(state)) = (fields.get(2), fields.get(3)) else {
                 continue;
             };
-            if !own.contains(*inode) {
-                continue;
-            }
-            if let Some(port) = remote
-                .rsplit(':')
-                .next()
-                .and_then(|port| u16::from_str_radix(port, 16).ok())
-                .filter(|port| *port != 0)
-            {
-                ports.insert(port);
+            if HELD.contains(state) && proc_net_address(remote) == Some(server) {
+                held += 1;
             }
         }
     }
-    Ok(ports)
+    Ok(held)
+}
+
+/// An address as `/proc/net/tcp*` prints it: the IP's 32-bit words in hex,
+/// each in the host's byte order, then `:` and the port in hex.
+#[cfg(target_os = "linux")]
+fn proc_net_address(text: &str) -> Option<SocketAddr> {
+    let (ip, port) = text.split_once(':')?;
+    let port = u16::from_str_radix(port, 16).ok()?;
+    let words = (0..ip.len() / 8)
+        .map(|i| u32::from_str_radix(ip.get(i * 8..i * 8 + 8)?, 16).ok())
+        .collect::<Option<Vec<u32>>>()?;
+    let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_ne_bytes()).collect();
+    let ip = match (
+        ip.len(),
+        <[u8; 4]>::try_from(bytes.as_slice()),
+        <[u8; 16]>::try_from(bytes.as_slice()),
+    ) {
+        (8, Ok(v4), _) => IpAddr::V4(Ipv4Addr::from(v4)),
+        (32, _, Ok(v6)) => IpAddr::V6(Ipv6Addr::from(v6)).to_canonical(),
+        _ => return None,
+    };
+    Some(SocketAddr::new(ip, port))
 }
 
 /// Under `socks5` the canary (TCP, QUIC and an HTTP provider in the
@@ -434,22 +446,27 @@ fn a_stop_leaves_no_connection_after_its_acknowledgement() {
         wait_for(Duration::from_secs(20), || provider.seen().0 > 0),
         "the provider was never reached through the proxy"
     );
+    // The control for the check after the stop: the held request's
+    // connection to the proxy is seen.
+    #[cfg(target_os = "linux")]
+    assert!(
+        connections_held_to(proxy.fixture.addr()).expect("the namespace's socket tables") > 0,
+        "the held request's connection to the proxy wasn't seen"
+    );
     let stop = ipfsd.request("ipfs.stop", json!({ "instance": "e-1" }));
     let reply = ipfsd.reply(held);
     assert_eq!(reply["error"]["code"], "stopped", "{reply}");
     let stopped = ipfsd.reply(stop);
     assert_eq!(stopped["result"], json!({ "instance": "e-1" }), "{stopped}");
     let (proxied, reached) = (proxy.fixture.connections(), provider.seen().0);
-    // The process's own view, where the kernel gives one (Linux's /proc):
-    // no socket to the proxy is left.
+    // The kernel's view, where it gives one (Linux's /proc): no socket
+    // holds a connection to the proxy any more.
     #[cfg(target_os = "linux")]
-    {
-        let ports = remote_ports(ipfsd.child.id()).expect("the process's socket tables");
-        assert!(
-            !ports.contains(&proxy.fixture.addr().port()),
-            "a socket to the proxy outlived the stop: {ports:?}"
-        );
-    }
+    assert_eq!(
+        connections_held_to(proxy.fixture.addr()).expect("the namespace's socket tables"),
+        0,
+        "a connection to the proxy outlived the stop"
+    );
     std::thread::sleep(Duration::from_secs(1));
     assert_eq!(
         proxy.fixture.connections(),
