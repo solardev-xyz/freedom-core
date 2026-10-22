@@ -13,11 +13,12 @@ all-features = true
 yanked = "deny"
 ignore = [
     # hickory-proto 0.25.2, through libp2p-dns 0.44 (libp2p's `/dns`
-    # resolver). The NSEC3 loop is in DNSSEC validation, which needs the
-    # `dnssec-ring` or `dnssec-aws-lc-rs` feature: this graph builds
-    # hickory-proto without either. The fix is hickory 0.26, which needs a
-    # libp2p-dns release that takes it. Design 0007 turns this resolver off
-    # under a proxy (implementation step 8).
+    # resolver) and freedom-ipfs-net (the HTTP resolver of `direct` with
+    # checked addresses, design 0007's gate). The NSEC3 loop is in DNSSEC
+    # validation, which needs the `dnssec-ring` or `dnssec-aws-lc-rs`
+    # feature: this graph builds hickory-proto without either. The fix is
+    # hickory 0.26, which needs a libp2p-dns release that takes it. Design
+    # 0007 turns both resolvers off under a proxy (implementation step 8).
     { id = "RUSTSEC-2026-0118", reason = "DNSSEC validation only; hickory-proto is built without its dnssec features" },
     # Same crate and path. The quadratic name compression is in message
     # encoding: a stub resolver encodes only its own one-question queries,

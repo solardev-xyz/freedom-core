@@ -91,6 +91,7 @@ Crates:
 - freedom-ipfs-core 0.4.6: MIT OR Apache-2.0
 - freedom-ipfs-gateway 0.4.6: MIT OR Apache-2.0
 - freedom-ipfs-namesys 0.4.6: MIT OR Apache-2.0
+- freedom-ipfs-net 0.4.6: MIT OR Apache-2.0
 - freedom-ipfs-retrieval 0.4.6: MIT OR Apache-2.0
 - freedom-ipfs-routing 0.4.6: MIT OR Apache-2.0
 - freedom-ipfs-store 0.4.6: MIT OR Apache-2.0
@@ -5704,7 +5705,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-Used by: freedom-ipfs-core 0.4.6 (LICENSE-APACHE), freedom-ipfs-gateway 0.4.6 (LICENSE-APACHE), freedom-ipfs-namesys 0.4.6 (LICENSE-APACHE), freedom-ipfs-retrieval 0.4.6 (LICENSE-APACHE), freedom-ipfs-routing 0.4.6 (LICENSE-APACHE), freedom-ipfs-store 0.4.6 (LICENSE-APACHE), freedom-ipfs-unixfs 0.4.6 (LICENSE-APACHE)
+Used by: freedom-ipfs-core 0.4.6 (LICENSE-APACHE), freedom-ipfs-gateway 0.4.6 (LICENSE-APACHE), freedom-ipfs-namesys 0.4.6 (LICENSE-APACHE), freedom-ipfs-net 0.4.6 (LICENSE-APACHE), freedom-ipfs-retrieval 0.4.6 (LICENSE-APACHE), freedom-ipfs-routing 0.4.6 (LICENSE-APACHE), freedom-ipfs-store 0.4.6 (LICENSE-APACHE), freedom-ipfs-unixfs 0.4.6 (LICENSE-APACHE)
 ------------------------------------------------------------------------
 Apache License
 Version 2.0, January 2004
@@ -5865,7 +5866,7 @@ such warranty or additional liability.
 END OF TERMS AND CONDITIONS
 
 ========================================================================
-Used by: freedom-ipfs-core 0.4.6 (LICENSE-MIT), freedom-ipfs-gateway 0.4.6 (LICENSE-MIT), freedom-ipfs-namesys 0.4.6 (LICENSE-MIT), freedom-ipfs-retrieval 0.4.6 (LICENSE-MIT), freedom-ipfs-routing 0.4.6 (LICENSE-MIT), freedom-ipfs-store 0.4.6 (LICENSE-MIT), freedom-ipfs-unixfs 0.4.6 (LICENSE-MIT)
+Used by: freedom-ipfs-core 0.4.6 (LICENSE-MIT), freedom-ipfs-gateway 0.4.6 (LICENSE-MIT), freedom-ipfs-namesys 0.4.6 (LICENSE-MIT), freedom-ipfs-net 0.4.6 (LICENSE-MIT), freedom-ipfs-retrieval 0.4.6 (LICENSE-MIT), freedom-ipfs-routing 0.4.6 (LICENSE-MIT), freedom-ipfs-store 0.4.6 (LICENSE-MIT), freedom-ipfs-unixfs 0.4.6 (LICENSE-MIT)
 ------------------------------------------------------------------------
 MIT License
 
