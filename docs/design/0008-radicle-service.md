@@ -805,7 +805,7 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
   - **only onion names** are handed to the proxy as names, through a separate, explicit route;
   - nothing falls back to a direct socket;
   - if the pinned Arti can't `RESOLVE`, the setting waits, as 0007 decides.
-- **The setting:** a per-profile **Route Radicle through Tor**, off by default, using `tor-manager`'s endpoint. Whether it and 0007's IPFS setting become one switch is an [open question](#open-questions).
+- **The setting:** a per-profile **Route Radicle through Tor**, off by default, using `tor-manager`'s endpoint. It is a switch of its own, apart from 0007's IPFS setting; a future "everything through Tor" mode would turn both on ([Open questions](#open-questions), 9).
 - **Changing the policy restarts the process.** Nothing of the old policy survives its process, since there is no child.
 
 ### The address policy
@@ -1164,5 +1164,6 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 7. **Caps:** are 64 MiB per blob, 32 MiB per JSON result and 64 MiB of built data per read right?
 8. **The address policy:** are these the right ranges, and is the exact-address exemption for configured seeds enough for LAN setups?
 9. **One Tor switch:** should Route Radicle through Tor and 0007's Route IPFS through Tor be one setting?
+   - **Decided (the user, 2026-10-22): separate switches now, and a future "everything through Tor" mode turns both on.** The two protocols pay different costs under Tor, so a user can take one without the other.
 10. **heartwood's memory:** should the service run under an OS-level limit (`RLIMIT_AS`, or a Windows job memory limit), given that heartwood's own buffers aren't bounded by the service?
 11. **Private windows:** is read-only the right rule for private partitions, or should an explicit, user-initiated seed be allowed there?
