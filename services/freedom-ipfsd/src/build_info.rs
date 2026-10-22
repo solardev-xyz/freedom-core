@@ -10,7 +10,7 @@
 /// The freedom-ipfs release the pinned commit carries.
 pub const FREEDOM_IPFS_VERSION: &str = "0.4.6";
 /// The pinned commit, on freedom-ipfs's `integration/rust-core`.
-pub const FREEDOM_IPFS_COMMIT: &str = "c88b711c5d9070eedd92cf92fa33f16f6e385606";
+pub const FREEDOM_IPFS_COMMIT: &str = "0f8ebc38df196b277851271290089892e4d20d45";
 
 #[cfg(test)]
 mod tests {
