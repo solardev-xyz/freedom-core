@@ -60,7 +60,7 @@ This design moves it into **its own supervised process, `freedom-radicled`**. It
   - An address policy covers addresses learned from peers.
   - The node listens on nothing: no inbound port, and, after an upstream change, no control socket.
 - **Private windows** read the profile's node, as today. A private read sends nothing, signs nothing, writes nothing and records nothing. Private partitions can't seed, sync or write.
-- **The code goes beside 0007's,** as `services/freedom-radicled` in its own Cargo workspace. A new repository remains the user's call.
+- **The code goes beside 0007's,** as `services/freedom-radicled` in its own Cargo workspace (the user's decision, 2026-10-22). Moving it to a new repository later would be a new decision.
 - **Tests come first:**
   - a contract suite over the add-on's 30 exports;
   - golden JSON recorded from v0.8.0 on a fixture repository, which the service must reproduce byte for byte.
@@ -900,9 +900,9 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
 
 ## Where the code lives
 
-0007's options and recommendation apply.
+**Decided (the user, 2026-10-22): the first option,** as for 0007. The others are kept as the reasons for that choice.
 
-1. **This repository, `services/freedom-radicled`, its own Cargo workspace** (recommended):
+1. **This repository, `services/freedom-radicled`, its own Cargo workspace** (chosen):
    - it shares `fc-protocol` and 0007's service skeleton;
    - it has its own lockfile and `deny.toml`. libradicle's lockfile, which also covers its add-on and UniFFI bindings, has 453 packages, including vendored libgit2 (C; GPL-2.0 with a linking exception, which the notices must carry) and bundled SQLite;
    - heartwood comes from `solardev-xyz/heartwood`, which `deny.toml`'s organization allowlist covers.
@@ -910,7 +910,7 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
 3. **Upstream libradicle,** as a binary beside `napi/` and `uniffi/`.
    - **For:** the closest home.
    - **Against:** the frame protocol, lock and supervision contract are Freedom's, and this repository's lack of a license blocks depending on `fc-protocol`.
-4. **A new repository:** the user's decision.
+4. **A new repository:** not chosen. Moving later would be a new decision.
 
 **Scope of the separation:**
 - A separate workspace separates dependency resolution and advisory gates. It is not supply-chain isolation: build scripts and proc macros still run with the build host's authority.

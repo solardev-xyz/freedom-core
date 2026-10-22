@@ -69,7 +69,7 @@ This design moves it into **its own supervised process, `freedom-ipfsd`**:
   - freedom-ipfs has no hook for any of this today, so it needs upstream changes, [listed](#upstream-changes-in-freedom-ipfs) by file and line.
 - **The code lives in this repository, in its own Cargo workspace** (`services/freedom-ipfsd`).
   - It shares `fc-protocol` and the release workflow, but not the core's lockfile, build jobs or credentials.
-  - A new repository remains the user's call ([Where the code lives](#where-the-code-lives)).
+  - The user decided this on 2026-10-22. Moving it to a new repository later would be a new decision ([Where the code lives](#where-the-code-lives)).
 - **Tests come first.** #704's native-backend cases become one contract suite, run against the add-on before anything moves, and then against the service.
 
 ## Goals and non-goals
@@ -1182,9 +1182,9 @@ Each is a pull request to freedom-ipfs, and none changes mobile's behavior by de
 
 ## Where the code lives
 
-Four options. A new repository is the user's decision; this design recommends the first.
+**Decided (the user, 2026-10-22): the first option.** The other three are kept as the reasons for that choice. Moving the service later would be a new decision.
 
-1. **This repository, as `services/freedom-ipfsd`, a separate Cargo workspace** (recommended).
+1. **This repository, as `services/freedom-ipfsd`, a separate Cargo workspace** (chosen).
    - **For:**
      - `fc-protocol` by path, so one frame and stream codec;
      - one release workflow, with Linux builds against glibc 2.17, which also closes #350's GLIBC floor ([Open questions](#open-questions));
