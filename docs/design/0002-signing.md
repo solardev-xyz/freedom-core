@@ -158,7 +158,7 @@ This is EIP-712 with ethers v6 `TypedDataEncoder` semantics, which is what `Wall
 
 ### Errors
 
-- **`invalid_argument`** (0001's code) covers every malformed input: wrong key kind, an invalid quantity, range, length, checksum or type, an unsupported transaction type, a typed-data violation, an oversize payload, or an exceeded limit. It also covers a typed-data digest that isn't `expected_hash`, and a typed-data reply that wouldn't fit one frame ([#88](#amendment-what-the-user-is-shown-88)). It carries a description. Main maps it the way it maps ethers' errors today: a dApp request fails, and no signature is made.
+- **`invalid_argument`** (0001's code) covers every malformed input: wrong key kind, an invalid quantity, range, length, checksum or type, an unsupported transaction type, a typed-data violation, an oversize payload, or an exceeded limit. It also covers a typed-data digest that isn't `expected_hash`, and typed data whose signing reply wouldn't fit one frame, one bound for both methods ([#88](#amendment-what-the-user-is-shown-88)). It carries a description. Main maps it the way it maps ethers' errors today: a dApp request fails, and no signature is made.
 - **Locked vault:** `vault_locked`, as for `compat.*`.
 
 ## Deviations from ethers
@@ -175,7 +175,7 @@ ethers accepts each input below; the core refuses it. Each is a `deviation` vect
 | a struct value that isn't an object: `null`, a string, or missing, for a struct with no fields | reads no fields, so anything passes | error: a struct value must be an object |
 | inputs past the [limits](#limits) | no limits; its subtype walk is exponential on diamond-shaped type graphs | error |
 | type 0 `chain_id` above 2^255 − 19 | at 2^255 − 18, a valid transaction for parity 0; further above, a `v` wider than 256 bits that ethers itself can't parse | error: the bound guarantees `v` fits for both parities |
-| typed data whose reply, with its `view`, wouldn't fit one 1 MiB frame (`view-size`, [#88](#amendment-what-the-user-is-shown-88)) | signs it: ethers has no view and no frame | error, from `typed_data.hash` and `sign.typed_data` alike, measured before any key is derived |
+| typed data whose signing reply, with its `view` and at the largest ID, wouldn't fit one 1 MiB frame (`view-size`, [#88](#amendment-what-the-user-is-shown-88)) | signs it: ethers has no view and no frame | error, from `typed_data.hash` and `sign.typed_data` alike, at that one bound, measured before any key is derived |
 
 **Reported, not refused** ([#88](#amendment-what-the-user-is-shown-88)). Two cases sign exactly as ethers signs, and the view reports them for the approval UI to warn:
 - **`primary-type`:** a `primary_type` that isn't the inferred root. ethers ignores `primaryType`, and the core signs the inferred root too, byte for byte. Proposed as a refusal; the user decided on a warning, so it isn't a deviation.
@@ -252,7 +252,7 @@ The core hashes and signs `{ domain, types, message }`. The approval UI builds i
 ### Decision (#88)
 
 1. **The view, now.** `typed_data.hash` and `sign.typed_data` return `view`, the core's account of exactly what is signed, and the approval UI renders it in place of the dApp's JSON. Main gets it before the prompt, and `sign.typed_data` signs only the hash the user confirmed.
-2. **A view too big for one reply is refused.** The core measures the reply before it derives any key, and returns `invalid_argument` (deviation `view-size`).
+2. **A view too big for one reply is refused.** The core measures the reply before it derives any key, and returns `invalid_argument` (deviation `view-size`). Both methods use one bound, the signing reply's, so a request `typed_data.hash` answers is never refused for size once confirmed.
 3. **A `primaryType` that isn't the inferred root is warned about, and signed as ethers signs it.** The core signs the inferred root, the view reports the mismatch, and the approval screen warns that the site named a different primary type, and that other wallets could sign something different. The proposal was to refuse it; the user overrode that, so it isn't a deviation.
 4. **A domain `chainId` that differs from the dApp's chain, or is absent, is warned about, and signed.**
 5. **`personal_sign`** is shown from the bytes main sends, as part of the UI's move.
@@ -273,21 +273,25 @@ The core hashes and signs `{ domain, types, message }`. The approval UI builds i
   Values are normalized as `getPayload` does: integers as decimal strings, bytes and addresses as lowercase hex, and the domain's `chainId` as a hex quantity (`"0x1"`, not `1`: pinned ethers tests `Number.isSafeInteger` on a `BigInt`, which never holds).
 - **Three reports** are part of the view too:
   - **`ignored`:** the message's top-level keys the types don't declare, so the UI can say that the dApp sent fields that aren't signed.
-  - **`named_type`:** `match` when the `primary_type` parameter is the inferred root, `mismatch` when it is any other string, and `unknown` without the parameter. Any string is accepted, a declared type's name or not, and compared exactly. The view doesn't echo it.
+  - **`named_type`:** `match` when the `primary_type` parameter is a string equal to the inferred root, `mismatch` for any other value, and `unknown` without the parameter.
+    - **Any JSON value is accepted,** and only a string can match. A string is compared exactly, a declared type's name or not.
+    - **A non-string is always `mismatch`,** whatever the types: `true`, `false` and `null` are valid struct names, so comparing a non-string's JSON text could match a root of that name. A `null` is such a value, not an absent parameter.
+    - **The view doesn't echo it.**
   - **`chain`:** `absent` when the domain has no `chainId`, or a null one, whatever the parameter. Otherwise `match` or `mismatch`, comparing the domain's `chainId` with `chain_id` (a quantity) as numbers, and `unknown` without the parameter, never `match`.
 - **Nothing reported changes what is signed.** The hash and the signature are ethers', byte for byte, whatever `primary_type` and `chain_id` say. A mismatch is reported, never refused.
 - **Parity:** the reference's `getPayload` gives the view's vectors, as `TypedDataEncoder.hash` does for `hash`, with `chainId` cases at 0, 1, 2^53 − 1 and 2^53. The reports have no counterpart in ethers; their expected values come from this text.
 - **The confirmed hash.** `expected_hash` is required. The digest is part of the public work, and one that isn't `expected_hash` is `invalid_argument`, before any key is derived.
 - **Size: refused (`view-size`).** The [limits](#limits) bound the hashing work, not the view. Integers become quoted strings, so the view can outgrow its input: a `uint256[]` of 99,000 zeros beside 330,000 bytes of `bytes` is about 858 KB of request and 1,056 KB of `getPayload` output, before the reply's envelope. Signing replies leave through the vault loop, which writes whole frames of at most 1 MiB.
-  - The core measures the reply's serialized size while it encodes, since each value's normalized length is known then. A request whose reply wouldn't fit one frame is `invalid_argument`, before any key is derived.
-  - `typed_data.hash` refuses the same requests, so main learns before the prompt that one can't be signed.
+  - **One bound for both methods:** the serialized size of the signing response, `{ "type": "response", "id": …, "result": { "signature": …, "view": … } }`, as the core writes it, with the largest ID a request may have (2^53 − 1, 16 digits, [0001](0001-freedom-cored.md#messages)). It must fit one frame. The signing envelope is the larger: `{ signature, view }` is 71 bytes more than `{ hash, view }` at the same ID.
+  - **Measured while encoding,** since each value's normalized length is known then. Both methods refuse a request over the bound with `invalid_argument`, `sign.typed_data` before any key is derived. Neither measures its own reply, nor the request's actual ID.
+  - **So the preflight is exact:** `typed_data.hash` refuses exactly the requests `sign.typed_data` would, whatever either request's ID, and main learns before the prompt that one can't be signed.
   - Real payloads are far below the frame.
 - **Timing:** `expected_hash` is required from the core release that adds the view. A browser that pins that release must pass it, so main's move onto the view ([Migration](#migration-in-freedom-browser) step 4) lands with that pin, and reverting the move means reverting the pin.
 
 ### What main does (#88)
 
 - **Gets the view before the prompt,** from `typed_data.hash`, for every signer kind: vault, Ledger, phone and Safe alike. It needs no key and works while locked. Main passes:
-  - **`primary_type`:** the dApp's `primaryType`, when the request has one. A value that isn't a string is passed as its JSON text, which names no type and so reads `mismatch`. A request without one is passed without it, and reads `unknown`: a wallet that honors `primaryType` refuses such a request rather than reading it differently.
+  - **`primary_type`:** the dApp's `primaryType` as it came, whatever its JSON type, when the request has one. A value that isn't a string keeps its type, never converted to text, so it reads `mismatch` and is warned about. A request without one is passed without it, and reads `unknown`: a wallet that honors `primaryType` refuses such a request rather than reading it differently.
   - **`chain_id`:** the dApp's active chain.
 - **Renders the view,** every field, untruncated, instead of the dApp's JSON. Keys in `ignored` are listed as sent by the site and not signed.
 - **Binds the confirmation to the hash.** The confirmation token binds `hash`, and a vault account's `sign.typed_data` passes it as `expected_hash`. A request that changed after the user confirmed it fails, and nothing is signed.
@@ -311,8 +315,12 @@ The core hashes and signs `{ domain, types, message }`. The approval UI builds i
 **The core:**
 1. **The view is the signed data.** For every EIP-712 vector that hashes, `view` equals the reference's `getPayload`, normalized as above, and `typed_data.hash` and `sign.typed_data` return the same view. Hashing the view's own `types` (less `EIP712Domain`), `domain` and `message` gives the returned hash. Undeclared top-level keys appear only in `ignored`, and undeclared nested ones nowhere.
 2. **The confirmed hash:** `sign.typed_data` signs with the hash `typed_data.hash` returned. With any other (one bit changed, another request's hash), it returns `invalid_argument` and no signature, and without one the request is malformed. With the vault locked, these refusals are still `invalid_argument`, not `vault_locked`: they come before the key.
-3. **The oversize refusal:** a request whose reply would be one byte over the frame is `invalid_argument` from both methods, with no key derived (likewise `invalid_argument` while locked). One whose reply exactly fills the frame is answered and signed. The measured size equals the written reply's length, across the vectors and at the boundary.
-4. **The `primaryType` report:** the root gives `match`; another declared type, an undeclared name, `EIP712Domain` and a JSON text give `mismatch`; no parameter gives `unknown`. The hash and the signature equal ethers' in every case.
+3. **The oversize refusal**, at the one bound:
+   - a request whose signing response at ID 2^53 − 1 exactly fills the frame is answered by both methods, and signed at that ID; one byte more is `invalid_argument` from both, with no key derived (likewise `invalid_argument` while locked);
+   - a request whose hash reply would fit but whose signing reply wouldn't, by the 71 bytes between the envelopes, is refused by both methods, `typed_data.hash` included;
+   - so is one whose signing reply would fit at a short ID but not at 2^53 − 1: `typed_data.hash` at ID 1 refuses it, and `sign.typed_data` refuses it at every ID;
+   - the measured size equals the length of the signing response written at ID 2^53 − 1, across the vectors and at the boundary.
+4. **The `primaryType` report:** the root gives `match`; another declared type, an undeclared name and `EIP712Domain` give `mismatch`; so do the non-strings `true`, `false` and `null`, each with a struct of that name as the inferred root, and a number, an array and an object; no parameter gives `unknown`. The hash and the signature equal ethers' in every case.
 5. **The `chainId` report:** an equal chain gives `match`, with the domain's `chainId` as a number and as a hex string; another chain gives `mismatch`; a domain without `chainId`, or with a null one, gives `absent` with or without the parameter; no parameter otherwise gives `unknown`. The hash and the signature equal ethers' in every case, chain id 0 included.
 
 **Main** (freedom-browser, migration step 4):
@@ -320,10 +328,10 @@ The core hashes and signs `{ domain, types, message }`. The approval UI builds i
 2. **Every signer kind** gets the view before the prompt: vault, Ledger, phone and Safe.
 3. **The binding:** a vault signature passes the confirmed hash, and a request altered after confirmation (a test hook) fails with nothing signed. SafeTx, SafeMessage and x402 signatures pass their own hashes.
 4. **The oversize refusal** fails the request before the prompt, mapped like any `invalid_argument`.
-5. **The `primaryType` warning** is shown on a mismatch, a non-string `primaryType` included, and not on a match or without one. Approving returns ethers' signature over the inferred root.
+5. **The `primaryType` warning** is shown on a mismatch, and not on a match or without one. A non-string `primaryType` is passed with its type and warned about: `true`, `false` and `null`, each with a struct of that name as the root, among them. Approving returns ethers' signature over the inferred root.
 6. **The `chainId` warning** is shown on a mismatch, naming both chains, and on an absent `chainId`, and not on a match. Approving signs, and `unknown` is never shown as a match.
 7. **`personal_sign`** is shown from the bytes it signs.
-8. **A warned request prompts under auto-approve:** with signing auto-approve on, a `primaryType` mismatch, a mismatched `chainId` and an absent one each show the prompt with the warning, and nothing is signed until the user approves.
+8. **A warned request prompts under auto-approve:** with signing auto-approve on, a `primaryType` mismatch, a non-string `primaryType` (`true`, `false` and `null`, each with a struct of that name as the root), a mismatched `chainId` and an absent one each show the prompt with the warning, and nothing is signed until the user approves.
 9. **An unwarned request still auto-signs:** with signing auto-approve on, a request whose view reports `named_type` `match` or `unknown`, and `chain` `match` or `unknown`, is signed with no prompt, as before.
 
 ### Options weighed (#88)
