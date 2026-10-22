@@ -546,7 +546,7 @@ Main's wallet chooses nonces for the sends it controls (0002). The guarantee cov
   - **Paid:** one of the intent's own transactions is included in a block of the finalized chain, with status 1.
   - **Failed:** one is included there with status 0. It consumed N and executed nothing.
   - **Taken:** another transaction of the sender, in a block of the finalized chain, has nonce N. It may be a payment of this very intent signed elsewhere, so the payment may or may not have happened.
-  - **Held:** anything else. A chain without a finalized block keeps its intents held, as does evidence deeper than the bound in rule 2.
+  - **Held:** anything else. A chain without a finalized block keeps its intents held, as does evidence deeper than the bound in rule 2. A held intent whose label can't be read for a day is shown as *Couldn't confirm* ([State history](#state-history)).
 - **Failed and taken go back to the user.** The wallet explains what it knows and offers no retry. A new payment is the user's own act from the send screen: a new intent, with its own nonce and its own confirmation.
 - <a id="evidence-for-labels"></a>**Evidence for labels.** Every read comes from a verified source: Myotis, Colibri, or a quorum of at least two agreeing endpoints. A quorum with m = 1 counts as Direct. Without such a source, an intent stays held.
   - **The core's labels carry this rule** (deviations `singleton-quorum` and `endpoint-dedup`): a quorum's reply is `verified`, with trust `level: "verified"`, only when m > 1, and its agreeing members are distinct endpoint references. A wallet that checks `level`, `achieved` and `m ≥ 2` therefore never counts one node's answer twice, nor a singleton quorum. Two references can still be one node behind two URLs; main's [configuration](#configuration) lists each host once for that reason.
@@ -566,10 +566,70 @@ Main's wallet chooses nonces for the sends it controls (0002). The guarantee cov
     4. **Well-formed evidence.** Only an explicit `null` receipt means absence. Receipts and blocks must be well formed, with 32-byte hashes, and a block's number must be the height that was asked for. An undefined or malformed answer leaves the intent held.
     5. **Settlement against what was read.** A settlement is conditional on the intent's hashes (or revision) that the label was read for. That condition is checked in line with the record's other writes. If a replacement was committed meanwhile, even one still being written, nothing is settled, and the intent is read again.
   - **What a provider can do.** A dishonest provider, or a pair of them agreeing, can delay a label: withholding evidence keeps an intent held. Forging one takes every member of an agreeing pair lying.
+  - <a id="state-history"></a>**State history** (decided, #94). Rule 1 and rule 3's search read the sender's nonce at a block's hash, which a node can answer only while it serves that block's state.
+    - **Status:** decided (the user, 2026-10-22):
+      - the search starts from a bracket, and uses Colibri's proven reads where Colibri covers them;
+      - no block scan, and no state-serving or archive endpoint required beyond Colibri;
+      - evidence out of reach leaves the intent held, shown as *Couldn't confirm* with its hashes and a block-explorer link;
+      - the 8192-block bound stays;
+      - the user may close an intent by hand only when the verified nonce at a finalized block is past N, under the locking of automatic settlement, with a durable retirement record and text that says closing proves nothing about the payment.
+
+      The options weighed are kept below, as the decision's rationale.
+    - **What nodes serve:** a node answers state queries for a window W of recent blocks. W depends on the client and its configuration: geth keeps the state of the last 128 blocks by default, and some clients and configurations keep a longer queryable history or all of it. Myotis reads only at `latest`, so these reads come from Colibri, where it proves them, or from a quorum, both of whose agreeing members must serve them.
+    - **Rule 1** fits a default window, with little room: F is about two epochs (64 to 96 blocks) behind the head on Ethereum, more while finality is delayed.
+    - **Rule 3's search** reads the nonce at blocks as deep as the one that used N. The state is a need of that search, not of the evidence: the evidence is the sender's nonce-N transaction in a block of the verified chain. When the probed blocks fall outside every source's reach, the search fails and the intent stays held. That fails safe, but *taken* may then never be reached on public endpoints, and the intent's record, bytes and floor stay.
+    - **The search,** as decided:
+      1. **From the bracket.** The bracket is the last finalized block at which the sender's nonce was still below N: a verified read there, by its hash, gave a transaction count of at most N. It is kept (number and hash) with the intent's record.
+         - **When it is taken:** on the tracker's first pass after the record is committed, and again on each pass while N is still unused at F, so it moves up.
+         - **The search** for the block that used N runs above the bracket, up to F, over rule 2's verified headers.
+         - **Its reach:** the deepest probe lies below the head by F's lag plus the blocks between the bracket and F, and must stay within W. At the tracker's 10-minute interval a bracket is about 50 blocks on Ethereum and 120 on Gnosis, which with F's lag already reaches past a 128-block window. So while it holds a broadcast intent with no terminal label, the tracker runs at its fast interval.
+         - **It fails** when observations stop for long enough: the browser closed, a pass missed or failed, the system suspended, finality delayed.
+      2. **Colibri, where it proves the reads.** The search's reads go through `chain.request` with trust, as every label's reads do, and the read order asks Colibri before the quorum. Where Colibri proves a read (the sender's nonce at a block hash, or a block with its transactions), its answer is evidence from as deep as its prover reaches, beyond the endpoints' W. Where it doesn't, the read falls to the quorum, within W. Which reads Colibri proves, and how deep, is [open question 2](#open-questions).
+      3. **No block scan.** The search reads one block with its transactions per intent: the one its probes located (rule 3). It never reads a range of blocks to look for the transaction.
+      4. **No new endpoint requirement.** Nothing beyond Colibri has to serve historical state: no archive endpoint, and no endpoint chosen for its window. The quorum's endpoints answer what their window allows.
+      5. **Couldn't confirm.** An intent whose evidence is out of reach stays held: its record, bytes and nonce floor stay, and later passes keep searching, so a source that reaches the evidence still settles it.
+         - **When it is shown:** after a day of passes that couldn't read a label (a constant to tune): the verified nonce at F couldn't be read, or it is past N and the block that used N couldn't be found or verified within reach and rule 2's bound.
+         - **What it shows:** the intent's nonce, its hashes, and a block-explorer link for each.
+         - **Not an unmined intent:** one whose verified nonce at F is N or below isn't *Couldn't confirm*. It is offered sending again, or a replacement, as before.
+      6. **The bound stays.** Evidence deeper than 8192 blocks below F stays out of reach (rule 2), whatever the source: neither Colibri nor an archive node changes that.
+    - **The bracket is verified** like any header: both blocks are finalized, so the earlier one is an ancestor of F, which rule 2's walk checks. A bracket that doesn't verify is dropped, and the search falls back to the window. It is not secret.
+    - **Closing by hand** (decided: offered). The wallet offers it on an intent shown as *Couldn't confirm*, only under the condition designed for it, which keeps the evidence rules that make forgetting safe:
+      - **The condition:** the account's verified nonce at a finalized block F is past N (rule 1: from a verified source, by F's hash). N is then used on the finalized chain, so none of the intent's signed versions can be mined. Otherwise the offer isn't shown.
+      - **The locking:** the same as automatic settlement's, rule 5's fencing: under the account's reservation lock, and conditional on the revision the user saw. A replacement committed meanwhile, even one still being written, closes nothing, and the intent is read again.
+      - **The retirement record:** closing writes a durable retirement record (atomically, with fsync) that keeps the intent's hashes and says it was closed by hand, so a recovery can't revive it. The bytes are forgotten, as at any settlement.
+      - **The text** says plainly that closing proves nothing about whether the payment was made: one of the intent's own transactions, or a copy signed elsewhere, may have paid. For example: "We couldn't confirm whether this payment went through. It can no longer be sent. Check the explorer to see what happened."
+    - **Options weighed.** They combine, and the decision takes bracketing first, Colibri, and staying held:
+      - **State-serving members** (adopted for Colibri only): Colibri, where it proves these reads, or agreeing endpoints whose W reaches the probed blocks. Few reads, but most public endpoints don't qualify, and the user or the registry would have to pick ones that do. The decision requires no state-serving or archive endpoint beyond Colibri.
+      - **Bracketing** (adopted, first): it costs nothing more, and works while an observation is recent enough (above).
+      - **Block scan** (rejected): read the verified blocks between the bracket, or F − 8192, and F with their transactions, and look for the sender's nonce-N transaction. Nodes serve block bodies without historical state, and each block would be checked against the verified header chain (rule 2). But it costs up to 8192 blocks with transactions per scan, from every agreeing member, which on Ethereum is gigabytes for the whole window. One scan would serve every held intent of the chain, bounded per pass, resumable and cancellable. The user rejected downloading gigabytes.
+      - **Stay held** (adopted, as *Couldn't confirm*): the record, its bytes and the nonce floor stay, and the wallet says it couldn't confirm.
+    - **Tests,** required of the implementing PR (freedom-browser, step 5), against a scripted chain and a fake clock:
+      - **Bracketing:**
+        - the first pass after the record is committed takes the bracket (number and hash) where the verified count at F is at most N, and later passes move it up while N is unused;
+        - once N is used, the search runs above the bracket and labels the intent paid, failed or taken from probes within W;
+        - a bracket that doesn't verify (its hash isn't the verified header's at its height, or it isn't an ancestor of F) is dropped, and the search falls back to the window;
+        - probes beyond W (the endpoints' missing-state errors) leave the intent held;
+        - the tracker runs at its fast interval while a broadcast intent has no terminal label, and returns to its normal one after.
+      - **Colibri:**
+        - with a prover, and Colibri proving the reads, the search reaches a block beyond the endpoints' W and labels the intent;
+        - with no prover, Colibri out of the read order, Colibri failing, or a read Colibri doesn't prove, the read falls to the quorum, within W;
+        - a Direct answer, or a quorum with m = 1, never counts as evidence.
+      - **No block scan:** the search requests at most one block with its transactions per intent, the one its probes located.
+      - **The bound:** evidence at F − 8192 settles the intent; at F − 8193 it stays held.
+      - **Couldn't confirm:**
+        - with the verified nonce at F past N and the block that used N out of reach, the intent shows *Couldn't confirm*, with its nonce, its hashes and an explorer link for each, after a day of failed passes, and not before;
+        - likewise when the verified nonce at F can't be read for a day; then closing by hand isn't offered;
+        - an intent whose verified nonce at F is N or below is never *Couldn't confirm*, and is offered sending again and a replacement;
+        - its record, bytes and floor stay, and a later pass that reaches the evidence labels and settles it.
+      - **Closing by hand:**
+        - offered only when the verified nonce at F is past N: not when it is N or below, not when it came from Direct or a quorum with m = 1, and not when it couldn't be read;
+        - it takes the account's reservation lock, and a replacement committed meanwhile, one still being written included, closes nothing;
+        - its retirement record is durable: with a crash at each step and a restart, the intent is either still held or retired with its hashes, never revived;
+        - its confirmation shows the text that closing proves nothing about the payment, pinned in the test.
 - **Records.** Each intent has a durable record in main, separate from the display history, which can be cleared: `{ intent_id, chain_id, sender, nonce, hashes }`. Every hash in it was signed at that one nonce: main decodes each signed transaction before committing it and refuses one whose nonce, chain, sender or hash differs.
   - **What else it holds:** each hash's signed bytes, and the intent's unsigned fields and origin. Then "send again" needs neither the vault nor a device after a restart, and a replacement at N reuses the confirmed content. They are written with the record (mode 0600), never logged, and deleted when the intent settles.
   - **Committed first:** the record, with each new hash, is committed (written atomically, with fsync) before those bytes are handed to a broadcaster.
-  - **Kept** until the intent is paid, failed or taken at finality, and never removed by clearing the history.
+  - **Kept** until the intent is paid, failed or taken at finality, or closed by hand ([State history](#state-history)), and never removed by clearing the history.
   - **Handoffs are recorded too.** Before main hands an intent's bytes to a broadcaster, it commits a handoff line naming that broadcast, and later its outcome. A handoff with no recorded outcome (a lost reply, a crash, the core dying) stays possibly sent for good: no later result can clear it.
   - **Void, the one exception:** the user may void an intent only when all of these hold.
     - **Every handoff closed `not_sent`:** every handoff of every one of its hashes has a recorded outcome of `not_sent` (main's `not_sent`, Myotis's `{ not_sent }`, or an attempt the core never sent).
@@ -837,7 +897,7 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 | `myotis-readiness` | `isReady()` sampled live | the last `chain.availability` | |
 | `memory-budgets` | unbounded | per request and in total | `budget`, `busy` |
 | `broadcast-outcome` | the last error wins; lost replies look like failures | attempt classes, exact refusals, `sent` / `uncertain` / `rejected` / `not_sent`, reconciliation, main's record | a lost reply is `uncertain`, not a failure |
-| `nonce-retry` | a retry re-signs at the `pending` count, possibly a new nonce; history is written after broadcast and can be cleared | durable intent records committed before broadcast; an intent keeps its nonce for good, with retries only as the same bytes or a replacement at that nonce; labels (paid, failed, taken, held) read from verified evidence tied to one finalized block by hash, which authorize no retry; reservations under a per-account lock | the wallet never pays one intent twice; failed and taken intents go back to the user, who may start a new payment |
+| `nonce-retry` | a retry re-signs at the `pending` count, possibly a new nonce; history is written after broadcast and can be cleared | durable intent records committed before broadcast; an intent keeps its nonce for good, with retries only as the same bytes or a replacement at that nonce; labels (paid, failed, taken, held) read from verified evidence tied to one finalized block by hash, which authorize no retry; *taken* searched from a verified bracket and Colibri's proven reads, never by a block scan; an intent whose label is out of reach shown as *Couldn't confirm*, and closed by hand only when the verified nonce at F is past N; reservations under a per-account lock | the wallet never pays one intent twice; failed and taken intents go back to the user, who may start a new payment; an intent closed by hand is retired durably, its payment unconfirmed |
 | `monotonic-time` | cooldowns on `Date.now()` | the monotonic clock | |
 | `fee-combination` | a fee quote's Direct step walks the endpoints one at a time, and the first quote that answers wins | up to three endpoints at once, a failure replaced until one answers, a 1 s cutoff after the first answer; their quotes combined by normalized constraints, mixed ones as EIP-1559 where a Colibri header read alongside shows a base fee; the reply marked with `answered` ([B](#b-combining-directs-quotes)) | different requests, starts and cancels, and a Colibri operation where the chain has a prover and `colibri` in its read order; with one type of quote, or mixed ones where EIP-1559 is verified, the transaction pays no more than an honest answering endpoint's would; a combined quote's `baseFee` and `effectiveGasPrice` are rounded estimates |
 
@@ -927,7 +987,7 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
    - main's chain I/O pool and fragment handling;
    - the router, the fee quote and the broadcast become drivers, with main's broadcast record and reply fencing;
    - A's check at confirmation, from `chain.fee_reference`;
-   - the wallet's intent records, nonce reservations and retry rule;
+   - the wallet's intent records, nonce reservations and retry rule, with the *taken* search from its bracket, *Couldn't confirm* and closing by hand ([State history](#state-history));
    - delete the JS router.
 
 [0002](0002-signing.md)'s non-goal on fee estimation and broadcasting is amended there: fee quotes, reads and broadcast routing move into the core with step 5, while nonces and gas limits stay in main.
@@ -935,12 +995,13 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
 ## Open questions
 
 1. **Revert agreement.** Today reverts never agree in a quorum, so a dApp loses the revert data unless Myotis or Colibri gave it. Should identical error objects (code and data) count as agreement?
-2. **Colibri's coverage.** Which methods does Colibri's `VerifiedOnly` client actually prove (`eth_gasPrice`, `eth_feeHistory`, `eth_blockNumber`, `pending` reads)? Today any Colibri success is labelled verified.
+2. **Colibri's coverage.** Which methods does Colibri's `VerifiedOnly` client actually prove (`eth_gasPrice`, `eth_feeHistory`, `eth_blockNumber`, `pending` reads)? Today any Colibri success is labelled verified. [State history](#state-history) depends on it too: whether Colibri proves the sender's nonce at a block hash (EIP-1898) and a block with its transactions, and how far back.
 3. **Gnosis' Direct after a failed quorum** has nothing to ask without API keys. Intended?
 4. **Myotis' head-of-line wait.** Methods Myotis doesn't serve take a slot before being refused. Checking the method first is a pure improvement, but observable in timing.
-5. **The wallet's texts and UI** (step 5): how to show "sent, unconfirmed", unresolved and "taken" intents, and how to offer the same bytes again or a replacement at the same nonce.
+5. **The wallet's texts and UI** (step 5): how to show "sent, unconfirmed", unresolved and "taken" intents, and how to offer the same bytes again or a replacement at the same nonce. [State history](#state-history) decides one part (#94): *Couldn't confirm*, and closing such an intent by hand, with its text.
 6. **HTTP statuses on broadcast.** A 401, 403 or 429 is ambiguous here, although a gateway usually answers it before forwarding. Is a misconfigured key showing `uncertain` acceptable, or should these be refusals?
 7. **Pinning and trust** (roadmap 3.1): whether a quorum of unpinned `latest` reads may be called `verified`.
 8. **Endpoints' chain** (#93): **decided** (the user, 2026-10-22): in main, re-checked hourly, and a mismatched user source isn't saved. See [Endpoints serve their chain](#endpoints-serve-their-chain-decided-93).
 9. **Fee plausibility** (#92): **decided** (the user, 2026-10-22): A, with a threshold relative to the current network fee, and B across several endpoints; tightened in #109's review: mixed quotes combine as EIP-1559 where a verified header shows it, and one endpoint's reference permits no auto-approval. See [Plausibility](#plausibility-decided-92).
 10. **An independent tip reference.** In A's verified case, R's priority part comes from B's quotes. The tips paid in Colibri's verified latest block, read with its transactions, would bound it independently. That read is heavier and close to C, which isn't adopted; this is open, not proposed.
+11. **'Taken' evidence** (#94): **decided** (the user, 2026-10-22): the search starts from a bracket, with Colibri's proven reads where Colibri covers them; no block scan, and no state-serving or archive endpoint beyond Colibri; out of reach, an intent stays held and is shown as *Couldn't confirm*; the 8192-block bound stays; closing by hand only when the verified nonce at F is past N, with text that says it proves nothing about the payment. See [State history](#state-history).
