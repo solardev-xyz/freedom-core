@@ -18,6 +18,7 @@
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const { loadWithInternals } = require('./naming');
+const { routerPatch, patchedSource } = require('./chain-replay');
 
 const SILENT_LOG = { verbose() {}, info() {}, warn() {}, error() {}, debug() {}, log() {} };
 const ELECTRON = {
@@ -95,7 +96,7 @@ function createWorld() {
   return world;
 }
 
-function loadRouter(checkout, world) {
+function loadRouter(checkout, world, patches = []) {
   const registry = {
     getNetwork: () => world.network,
     getEndpoints: (_chainId, kind) => world.endpoints[kind] || [],
@@ -124,7 +125,9 @@ function loadRouter(checkout, world) {
       './network-registry': registry,
       '../myotis/myotis-manager': myotis,
       '../ens/colibri-resolver': colibri,
-    }, OBSERVER);
+    }, OBSERVER, patches.length === 0
+      ? null
+      : (source, filename) => patchedSource(source, routerPatch(patches), filename));
   world.router = router;
   return router;
 }
@@ -540,7 +543,8 @@ async function buildAnswers(router) {
 // feeQuote
 
 function feeInputs() {
-  const big = (n) => jsonText('0x' + n.toString(16));
+  // A hex quantity as JSON text, or (`plain`) as the string itself.
+  const big = (n, plain = false) => (plain ? '0x' + n.toString(16) : jsonText('0x' + n.toString(16)));
   const max = 2n ** BigInt(BIGINT_BITS) - 1n;
   return [
     ['eip1559', 'quorum', '"0x3b9aca00"', '"0x5f5e100"'],
@@ -604,79 +608,191 @@ function feeInputs() {
     ['gas-price-width-over-decimal', 'quorum', jsonText((max + 1n).toString()), null, 'bigint-width'],
     ['gas-price-width-far-over-negative', 'quorum', jsonText('-' + '9'.repeat(5000)), null],
     ['gas-price-width-far-over-invalid', 'quorum', jsonText('9'.repeat(5000) + '.'), null],
+    // Main's #749: the tip floor, and a hint that can't form a type-2
+    // quote priced from the source's block (the fifth field; the cases
+    // above that ask for one get a block without a base fee).
+    ['dust-tip', 'myotis', '"137168303"', '"3901"'],
+    ['tip-at-floor', 'direct', jsonText(String(GWEI)), jsonText(String(MIN_TIP))],
+    ['gas-price-under-floor', 'direct', '"0x3e8"', '"0x1"'],
+    ['block-base-fee-hex', 'direct', '"0x64"', '"0x65"', null, block({ baseFeePerGas: '0x50' })],
+    ['block-tip-from-gas-price', 'direct', big(100n * GWEI), null, null, block({ number: '0x10', baseFeePerGas: big(80n * GWEI, true) })],
+    ['block-base-fee-above-gas-price', 'direct', big(100n * GWEI), null, null, block({ baseFeePerGas: big(120n * GWEI, true) })],
+    ['block-base-fee-zero', 'direct', big(100n * GWEI), '"-1"', null, block({ baseFeePerGas: '0x0' })],
+    ['block-base-fee-decimal', 'colibri', big(100n * GWEI), null, null, block({ baseFeePerGas: (80n * GWEI).toString() })],
+    ['block-base-fee-number', 'quorum', big(100n * GWEI), null, null, blockText('{"baseFeePerGas":80000000000}')],
+    ['block-base-fee-true', 'direct', '"0x64"', null, null, blockText('{"baseFeePerGas":true}')],
+    ['block-base-fee-null', 'direct', '"0x64"', null, null, blockText('{"baseFeePerGas":null}')],
+    ['block-without-base-fee', 'colibri', big(8n * GWEI), null, null, block({ number: '0x10' })],
+    ['block-array', 'direct', '"0x64"', null, null, blockText('[]')],
+    ['block-null', 'direct', '"0x64"', null, null, blockText('null')],
+    ['block-undefined', 'direct', '"0x64"', null, null, { json: null }],
+    ['block-string', 'direct', '"0x64"', null, null, blockText('"0x11"')],
+    ['block-number', 'direct', '"0x64"', null, null, blockText('5')],
+    ['block-base-fee-negative', 'direct', '"0x64"', null, null, block({ baseFeePerGas: '-1' })],
+    ['block-base-fee-negative-hex', 'direct', '"0x64"', null, null, block({ baseFeePerGas: '-0x1' })],
+    ['block-base-fee-invalid', 'direct', '"0x64"', null, null, block({ baseFeePerGas: 'xyz' })],
+    ['block-base-fee-fraction', 'direct', '"0x64"', null, null, blockText('{"baseFeePerGas":1.5}')],
+    ['block-base-fee-object', 'direct', '"0x64"', null, null, blockText('{"baseFeePerGas":{}}')],
+    ['block-base-fee-uint256', 'direct', big(2n ** 256n), null, null, block({ baseFeePerGas: big(2n ** 256n - 1n, true) })],
+    ['block-base-fee-width-over', 'direct', big(100n * GWEI), null, 'bigint-width', block({ baseFeePerGas: (2n ** BigInt(BIGINT_BITS)).toString() })],
+    ['block-read-fails', 'direct', big(4n * GWEI), null, null, { fails: 'fetch failed' }],
+    ['block-read-fails-colibri', 'colibri', big(4n * GWEI), '"0x' + (5n * GWEI).toString(16) + '"', null, { fails: 'proof failed' }],
+    ['block-read-fails-myotis', 'myotis', '"100"', null, null, { fails: 'All chain sources failed for eth_getBlockByNumber' }],
+    ['legacy-headroom-rounds-down', 'direct', '"0x7"', null, null, block({ number: '0x10' })],
+    ['legacy-headroom-width-max', 'quorum', big(max), null, null, block({ number: '0x10' })],
   ];
 }
 
-function buildFeeQuotes(router) {
-  const { feeQuote } = router.__internals;
+const GWEI = 1_000_000_000n;
+// main's MIN_PRIORITY_FEE_WEI (#749)
+const MIN_TIP = 50_000_000n;
+/** A scripted block: the result getBlock returns, as its JSON text. */
+const block = (value) => ({ json: jsonText(value) });
+const blockText = (json) => ({ json });
+// Cases above that ask for a block get one without a base fee: they then
+// quote legacy, with the headroom.
+const NO_BASE_FEE_BLOCK = block({ number: '0x10' });
+
+/**
+ * One source's quote through `feeQuote` with main's #749 (the `fee-headroom`
+ * patch): the quote, or what it throws, with the legacy last resort a failed
+ * block read leaves (`last_resort_json`). `asked` says whether it read the
+ * block, which a case must script when it does.
+ */
+async function headroomQuote(feeQuote, id, source, gasPrice, priority, scripted) {
   const parse = (text) => (text === null ? undefined : JSON.parse(text));
-  return feeInputs().map(([id, source, gasPrice, priority, deviation]) => {
-    let js;
-    try {
-      js = { quote_json: jsonText(feeQuote(source, parse(gasPrice), parse(priority))) };
-    } catch (error) {
-      js = { error: describeError(error) };
-    }
-    return { id, source, gas_price: gasPrice, priority, ...(deviation ? { deviation } : {}), js };
-  });
+  let asked = false;
+  const getBlock = async () => {
+    asked = true;
+    if (scripted.fails !== undefined) throw new Error(scripted.fails);
+    return scripted.json === null ? undefined : JSON.parse(scripted.json);
+  };
+  try {
+    const quote = await feeQuote(source, parse(gasPrice), parse(priority), getBlock);
+    return { asked, js: { quote_json: jsonText(quote) } };
+  } catch (error) {
+    return {
+      asked,
+      js: {
+        error: describeError(error),
+        ...(error.legacyFallback ? { last_resort_json: jsonText(error.legacyFallback) } : {}),
+      },
+    };
+  }
+}
+
+/** The pinned `feeQuote`, without the patch. */
+function pinnedQuote(feeQuote, source, gasPrice, priority) {
+  const parse = (text) => (text === null ? undefined : JSON.parse(text));
+  try {
+    return { quote_json: jsonText(feeQuote(source, parse(gasPrice), parse(priority))) };
+  } catch (error) {
+    return { error: describeError(error) };
+  }
+}
+
+async function buildFeeQuotes(router, pinned) {
+  const { feeQuote } = router.__internals;
+  const cases = [];
+  for (const [id, source, gasPrice, priority, deviation, scripted = NO_BASE_FEE_BLOCK] of feeInputs()) {
+    const { asked, js } = await headroomQuote(feeQuote, id, source, gasPrice, priority, scripted);
+    const unpatched = pinnedQuote(pinned.__internals.feeQuote, source, gasPrice, priority);
+    const changed = JSON.stringify(unpatched) !== JSON.stringify(js);
+    cases.push({
+      id, source, gas_price: gasPrice, priority,
+      // The block the quote read, when it read one: its result's JSON text
+      // (null: undefined), or the failure it threw.
+      ...(asked ? { block: scripted.fails === undefined ? { json: scripted.json } : { fails: scripted.fails } } : {}),
+      ...(deviation ? { deviation } : {}),
+      ...(changed ? { patches: ['fee-headroom'], unpatched } : {}),
+      js,
+    });
+  }
+  return cases;
 }
 
 // ---------------------------------------------------------------------------
 // B's combination of Direct's quotes: design 0005's own (deviation
-// fee-combination, #92)
+// fee-combination, #92), with main's #749 headroom
 //
 // The reference has no counterpart: its Direct step returns the first
 // endpoint's quote that answers. Each endpoint's quote here still comes from
-// the reference's feeQuote; the combined quote is the design's, its
-// expected values taken from design 0005's text (Plausibility, B: combining
-// Direct's quotes): each quote read as a max fee per gas M (2·G − P, or G
-// for legacy) and a priority fee P (or G); EIP-1559 with the lowest M and
-// the lowest P when all are EIP-1559, or mixed where a verified header shows
-// EIP-1559; legacy at the lowest gas price (an EIP-1559 quote's
-// effectiveGasPrice) when all are legacy, or mixed otherwise; one answer
-// unchanged. The reply adds `answered` after `verified`; an EIP-1559
-// combination's baseFee is ⌊(M − P)/2⌋ and its effectiveGasPrice
-// baseFee + P.
+// the reference's feeQuote, with the `fee-headroom` patch; the combined quote
+// is the design's, its expected values taken from design 0005's text
+// (Plausibility, B: combining Direct's quotes, as amended for main's #749):
+// each quote read, headroom included, as a max fee per gas M (2·base + tip,
+// or a legacy quote's signed gas price G') and a priority fee P (the floored
+// tip, or G'); EIP-1559 with the lowest M and the lowest P when all are
+// EIP-1559, or mixed where a verified header shows EIP-1559; legacy at the
+// lowest signed gas price when all are legacy; mixed otherwise, legacy at
+// the lowest raw gas price with the headroom once (⌊G·125/100⌋ + the
+// floor); one answer unchanged. An endpoint whose block read failed isn't
+// combined; with only such endpoints, the last resort is legacy at the
+// headroom of their lowest raw gas price. The reply adds `answered` after
+// `verified`; an EIP-1559 combination's baseFee is ⌊(M − P)/2⌋ and its
+// effectiveGasPrice baseFee + P.
 
 function feeCombinationInputs() {
   const big = (n) => jsonText('0x' + n.toString(16));
+  const g = (n) => n * GWEI;
   const max = 2n ** BigInt(BIGINT_BITS) - 1n;
+  const headroom = (gasPrice) => (gasPrice * 125n) / 100n + MIN_TIP;
   const legacy = (gasPrice) => ({ type: 'legacy', gasPrice });
   const eip1559 = (baseFee, priority, maxFee, effective) => ({ type: 'eip1559', baseFee, priority, maxFee, effective });
-  // [id, eip1559_verified, [[gas price, priority hint (null: none)], ...], combined]
+  // An endpoint: [gas price, priority hint (null: none), its block if it
+  // reads one]. Blocks: with a base fee, without one, or a failed read.
+  const quote = (gasPrice, priority) => [big(gasPrice), priority === null ? null : big(priority)];
+  const priced = (gasPrice, baseFee) => [big(gasPrice), null, block({ baseFeePerGas: '0x' + baseFee.toString(16) })];
+  const legacyBlock = (gasPrice, hint = null) => [big(gasPrice), hint, block({ number: '0x10' })];
+  const failedBlock = (gasPrice) => [big(gasPrice), null, { fails: 'fetch failed' }];
+  // [id, eip1559_verified, endpoints, combined, kind ('quote' | 'last-resort')]
   return [
-    // One answer: that quote, unchanged, wherever EIP-1559 is verified.
-    ['one-eip1559', false, [['"0x64"', '"0xa"']], eip1559(90n, 10n, 190n, 100n)],
-    ['one-legacy-hint-over-gas-price', true, [['"0x10"', '"0x11"']], legacy(16n)],
-    ['one-legacy-no-hint', false, [['"0x10"', null]], legacy(16n)],
-    // All EIP-1559: the lowest M (190) and the lowest P (5).
-    ['three-eip1559', false, [['"0x64"', '"0xa"'], ['"0x78"', '"0x5"'], ['"0x6e"', '"0x14"']], eip1559(92n, 5n, 190n, 97n)],
-    // 10/1 with 10/2: M = 18, P = 1; (M − P)/2 would be 8.5 wei.
-    ['independent-minima-odd', false, [['"0xa"', '"0x1"'], ['"0xa"', '"0x2"']], eip1559(8n, 1n, 18n, 9n)],
-    // 100/10 with 100/9: M = 190, not the raw minima's 191.
-    ['raw-minima-trap', false, [['"0x64"', '"0xa"'], ['"0x64"', '"0x9"']], eip1559(90n, 9n, 190n, 99n)],
-    ['priority-equals-gas-price', false, [['"0x64"', '"0x64"'], ['"0x64"', '"0xa"']], eip1559(45n, 10n, 100n, 55n)],
-    ['priority-zero', false, [['"0x64"', '"0x0"'], ['"0x5a"', '"0xa"']], eip1559(85n, 0n, 170n, 85n)],
-    ['decimal-and-number-inputs', false, [['"30000000000"', '"1000000000"'], ['31000000000', '2000000000']], eip1559(29000000000n, 1000000000n, 59000000000n, 30000000000n)],
+    // One answer: that quote, unchanged.
+    ['one-eip1559', false, [quote(g(100n), g(10n))], eip1559(g(90n), g(10n), g(190n), g(100n))],
+    ['one-legacy-block', true, [legacyBlock(g(16n), big(g(17n)))], legacy(headroom(g(16n)))],
+    ['one-block-priced', false, [priced(g(100n), g(80n))], eip1559(g(80n), g(20n), g(180n), g(100n))],
+    ['one-gas-price-under-floor', false, [quote(1000n, 1n)], eip1559(999n, MIN_TIP, 1998n + MIN_TIP, 999n + MIN_TIP)],
+    ['one-block-base-fee-above-gas-price', false, [priced(g(100n), g(120n))], eip1559(g(120n), MIN_TIP, g(240n) + MIN_TIP, g(120n) + MIN_TIP)],
+    // All EIP-1559: the lowest M (190 gwei) and the lowest P (5 gwei).
+    ['three-eip1559', false, [quote(g(100n), g(10n)), quote(g(120n), g(5n)), quote(g(110n), g(20n))], eip1559(92_500_000_000n, g(5n), g(190n), 97_500_000_000n)],
+    // Hints of 60,000,001 and 60,000,000 at 1 gwei: M − P is odd.
+    ['independent-minima-odd', false, [quote(g(1n), 60_000_001n), quote(g(1n), 60_000_000n)], eip1559(939_999_999n, 60_000_000n, 1_939_999_999n, 999_999_999n)],
+    // 100/10 with 100/9 gwei: M = 190, not the raw minima's 191.
+    ['raw-minima-trap', false, [quote(g(100n), g(10n)), quote(g(100n), g(9n))], eip1559(90_500_000_000n, g(9n), g(190n), 99_500_000_000n)],
+    // Tips under the floor: both floored, the lower M kept.
+    ['floor-binds', false, [quote(g(1n), 1000n), quote(g(2n), 0n)], eip1559(999_999_000n, MIN_TIP, 2_049_998_000n, 1_049_999_000n)],
     // The replay's router-fee-quote-direct-same-endpoint: 3773/1 with 1/1.
-    ['replay-same-endpoint', false, [['"0xebd"', '"0x1"'], ['"0x1"', '"0x1"']], eip1559(0n, 1n, 1n, 1n)],
-    // All legacy (no hint, a hint above G, a negative hint): the lowest G,
+    ['replay-same-endpoint', false, [quote(3773n, 1n), quote(1n, 1n)], eip1559(0n, MIN_TIP, MIN_TIP, MIN_TIP)],
+    // A hint, and a block-priced quote: all EIP-1559.
+    ['hint-and-block-priced', false, [quote(g(100n), g(10n)), priced(g(100n), g(80n))], eip1559(g(85n), g(10n), g(180n), g(95n))],
+    // All legacy (blocks without a base fee): the lowest signed gas price,
     // and still legacy where EIP-1559 is verified.
-    ['all-legacy', false, [['"0x10"', null], ['"0xc"', '"0xd"'], ['"0x14"', '"-1"']], legacy(12n)],
-    ['all-legacy-verified', true, [['"0x10"', null], ['"0xc"', '"0xd"'], ['"0x14"', '"-1"']], legacy(12n)],
-    // The boundary case: an EIP-1559 100/1 (M = 199) with a legacy 1000.
-    // Verified, EIP-1559 with M = 199, P = 1: at a base fee of 1 it pays 2.
-    ['mixed-verified-boundary', true, [['"0x64"', '"0x1"'], ['"0x3e8"', null]], eip1559(99n, 1n, 199n, 100n)],
-    // Without a verified header, legacy at G = 100: it pays 100.
-    ['mixed-unverified-boundary', false, [['"0x64"', '"0x1"'], ['"0x3e8"', null]], legacy(100n)],
-    ['mixed-verified-legacy-lowest', true, [['"0x64"', '"0xa"'], ['"0x32"', null]], eip1559(20n, 10n, 50n, 30n)],
-    ['mixed-unverified-legacy-lowest', false, [['"0x64"', '"0xa"'], ['"0x32"', null]], legacy(50n)],
-    ['three-mixed-verified', true, [['"0x64"', '"0xa"'], ['"0x3e8"', null], ['"0x78"', '"0x5"']], eip1559(92n, 5n, 190n, 97n)],
-    ['three-mixed-unverified', false, [['"0x64"', '"0xa"'], ['"0x3e8"', null], ['"0x96"', '"0x200"']], legacy(100n)],
-    // Widths: a gas price of 2^4096 − 1 makes M one bit wider, and it
-    // prints; 256-bit quantities mixed where EIP-1559 is verified.
-    ['width-max', false, [[big(max), '"0x1"'], [big(max), '"0x0"']], eip1559(max - 1n, 0n, 2n * max - 1n, max - 1n)],
-    ['uint256-mixed-verified', true, [[big(2n ** 256n - 1n), big(2n ** 255n)], [big(2n ** 200n), null]], eip1559(0n, 2n ** 200n, 2n ** 200n, 2n ** 200n)],
+    ['all-legacy', false, [legacyBlock(g(16n)), legacyBlock(g(12n), '"-1"'), legacyBlock(g(20n), big(g(21n)))], legacy(headroom(g(12n)))],
+    ['all-legacy-verified', true, [legacyBlock(g(16n)), legacyBlock(g(12n), '"-1"'), legacyBlock(g(20n), big(g(21n)))], legacy(headroom(g(12n)))],
+    // The boundary case: an EIP-1559 100/1 gwei (M = 199) with a legacy
+    // 1000 gwei (signed 1250.05). Verified, EIP-1559 with M = 199, P = 1:
+    // at a base fee of 1 gwei it pays 2.
+    ['mixed-verified-boundary', true, [quote(g(100n), g(1n)), legacyBlock(g(1000n))], eip1559(g(99n), g(1n), g(199n), g(100n))],
+    // Without a verified header, legacy at the headroom of G* = 100 gwei.
+    ['mixed-unverified-boundary', false, [quote(g(100n), g(1n)), legacyBlock(g(1000n))], legacy(headroom(g(100n)))],
+    // The legacy one's signed price (62.55 gwei) is the lowest M.
+    ['mixed-verified-legacy-lowest', true, [quote(g(100n), g(10n)), legacyBlock(g(50n))], eip1559(26_275_000_000n, g(10n), headroom(g(50n)), 36_275_000_000n)],
+    ['mixed-unverified-legacy-lowest', false, [quote(g(100n), g(10n)), legacyBlock(g(50n))], legacy(headroom(g(50n)))],
+    // The trap: the EIP-1559 quote's effectiveGasPrice (100 gwei) is below
+    // the legacy one's signed price (150.05), but has no headroom: the
+    // combination signs the headroom of the lowest raw gas price, 125.05.
+    ['mixed-unverified-raw-gas-price', false, [quote(g(100n), g(1n)), legacyBlock(g(120n))], legacy(headroom(g(100n)))],
+    ['three-mixed-verified', true, [quote(g(100n), g(10n)), legacyBlock(g(1000n)), quote(g(120n), g(5n))], eip1559(92_500_000_000n, g(5n), g(190n), 97_500_000_000n)],
+    ['three-mixed-unverified', false, [quote(g(100n), g(10n)), legacyBlock(g(1000n)), quote(g(150n), g(200n))], legacy(headroom(g(100n)))],
+    // A block-failed endpoint isn't combined.
+    ['block-failed-left-out', false, [quote(g(100n), g(10n)), failedBlock(g(50n))], eip1559(g(90n), g(10n), g(190n), g(100n)), 'quote', 1],
+    // Only block-failed endpoints: the last resort, at the headroom of
+    // their lowest raw gas price, `answered` counting them.
+    ['last-resort', false, [failedBlock(g(40n)), failedBlock(g(30n))], legacy(headroom(g(30n))), 'last-resort'],
+    // Widths: a gas price of 2^4096 − 1 makes M wider, and it prints;
+    // 256-bit quantities mixed where EIP-1559 is verified.
+    ['width-max', false, [quote(max, 1n), quote(max, 0n)], eip1559(max - 1n, MIN_TIP, 2n * (max - 1n) + MIN_TIP, max - 1n + MIN_TIP)],
+    ['uint256-mixed-verified', true, [quote(2n ** 256n - 1n, 2n ** 255n), legacyBlock(2n ** 200n)], eip1559(0n, headroom(2n ** 200n), headroom(2n ** 200n), headroom(2n ** 200n))],
   ];
 }
 
@@ -702,21 +818,33 @@ function combinedQuoteJson(combined, answered) {
   });
 }
 
-function buildFeeCombinations(router) {
+async function buildFeeCombinations(router) {
   const { feeQuote } = router.__internals;
-  const parse = (text) => (text === null ? undefined : JSON.parse(text));
-  const cases = feeCombinationInputs().map(([id, verified, endpoints, combined]) => ({
-    id,
-    eip1559_verified: verified,
-    endpoints: endpoints.map(([gasPrice, priority]) => ({
-      gas_price: gasPrice,
-      priority,
-      // Each endpoint's quote is today's: it answers, or it isn't combined.
-      js: { quote_json: jsonText(feeQuote('direct', parse(gasPrice), parse(priority))) },
-    })),
-    design: { quote_json: combinedQuoteJson(combined, endpoints.length) },
-  }));
-  return { deviation: 'fee-combination', cases };
+  const cases = [];
+  for (const [id, verified, endpoints, combined, kind = 'quote', answered] of feeCombinationInputs()) {
+    const quoted = [];
+    for (const [gasPrice, priority, scripted = NO_BASE_FEE_BLOCK] of endpoints) {
+      const { asked, js } = await headroomQuote(feeQuote, id, 'direct', gasPrice, priority, scripted);
+      quoted.push({
+        gas_price: gasPrice,
+        priority,
+        ...(asked ? { block: scripted.fails === undefined ? { json: scripted.json } : { fails: scripted.fails } } : {}),
+        // Each endpoint's quote is main's: it answers, or its block read
+        // failed (it isn't combined), or it fails.
+        js,
+      });
+    }
+    const failed = quoted.filter((endpoint) => endpoint.js.last_resort_json).length;
+    const count = answered ?? (kind === 'last-resort' ? failed : quoted.length - failed);
+    cases.push({
+      id,
+      eip1559_verified: verified,
+      ...(kind === 'last-resort' ? { last_resort: true } : {}),
+      endpoints: quoted,
+      design: { quote_json: combinedQuoteJson(combined, count) },
+    });
+  }
+  return { deviation: 'fee-combination', patches: ['fee-headroom'], cases };
 }
 
 // ---------------------------------------------------------------------------
@@ -2247,6 +2375,10 @@ function assertWellFormed(value, where = '') {
 
 async function buildChain(checkout, ethers, privateKey, meta) {
   const world = createWorld();
+  // Main's #749, patched in (chain-replay.js's PATCHES), for the fee
+  // quotes. It is loaded first, on the same world: the loader's hook stays
+  // with the router loaded last, which every other case uses.
+  const headroom = loadRouter(checkout, world, ['fee-headroom']);
   const router = loadRouter(checkout, world);
   assert.equal(router.__internals.stableValue({ b: 1, a: [2] }), '{"a":[2],"b":1}', 'STOP: stableValue sanity check failed');
   const normalization = buildNormalization(router);
@@ -2259,8 +2391,8 @@ async function buildChain(checkout, ethers, privateKey, meta) {
     stable: stable.cases,
     equivalence: stable.equivalence,
     answers: await buildAnswers(router),
-    fee_quotes: buildFeeQuotes(router),
-    fee_combinations: buildFeeCombinations(router),
+    fee_quotes: await buildFeeQuotes(headroom, router),
+    fee_combinations: await buildFeeCombinations(headroom),
     safe_error_message: safe.cases,
     safe_error_whitespace: safe.whitespace,
     failure_texts: {

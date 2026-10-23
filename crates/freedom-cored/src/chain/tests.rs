@@ -120,6 +120,15 @@ impl Test {
 }
 
 /// A JSON `\\u` escape of `hex`, made at run time.
+/// Direct's quote values for a gas price and a usable hint, each given as
+/// its JSON text.
+fn quote_values(gas_price: &str, priority: &str) -> Option<fc_chain::QuoteValues> {
+    match fc_chain::fee_quote_values("direct", Some(gas_price), Some(priority), None) {
+        fc_chain::FeeOutcome::Quote(values) => Some(values),
+        _ => None,
+    }
+}
+
 fn u(hex: &str) -> String {
     format!("{}u{hex}", '\\')
 }
@@ -537,9 +546,9 @@ fn a_fee_quote_and_a_broadcast_reply_in_their_forms() {
         json!({
             "type": "eip1559",
             "baseFee": "90",
-            "maxPriorityFeePerGas": "10",
-            "maxFeePerGas": "190",
-            "effectiveGasPrice": "100",
+            "maxPriorityFeePerGas": "50000000",
+            "maxFeePerGas": "50000180",
+            "effectiveGasPrice": "50000090",
             "source": "direct",
             "verified": false,
             "answered": 1,
@@ -550,14 +559,16 @@ fn a_fee_quote_and_a_broadcast_reply_in_their_forms() {
     // generation; another source's keeps today's shape.
     for (quote, tail) in [
         (
-            fc_chain::fee_quote_values("direct", Some("16"), None)
-                .ok()
+            quote_values("16", "3")
                 .and_then(|values| fc_chain::combine_fee_quotes(&[values], false))
                 .unwrap(),
             r#""source":"direct","verified":false,"answered":1,"generation":3}}"#,
         ),
         (
-            fc_chain::fee_quote("myotis", Some("16"), None).unwrap(),
+            match fc_chain::fee_quote("myotis", Some("16"), Some("3"), None) {
+                fc_chain::FeeOutcome::Quote(quote) => quote,
+                other => panic!("{other:?}"),
+            },
             r#""source":"myotis","verified":true,"generation":3}}"#,
         ),
     ] {
@@ -917,13 +928,27 @@ fn a_fee_reference_replies_in_its_form() {
         .map(|r| r["id"].as_u64().unwrap())
         .collect::<Vec<_>>();
     answer(&mut t, hints[0], r#""0x1""#);
-    // b has no hint: legacy.
+    // b has no hint: its own block prices it, and one without a base fee
+    // is legacy.
     assert!(
         t.answer(
             hints[1],
             rpc_answer(r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"no"}}"#)
         )
         .is_ok()
+    );
+    let frames = t.written();
+    assert!(frames.iter().all(|f| f["id"] != 3));
+    let block = requests(&frames);
+    assert_eq!(block.len(), 1);
+    let body: Value = serde_json::from_str(block[0]["params"]["body"].as_str().unwrap()).unwrap();
+    assert_eq!(block[0]["params"]["endpoint"], "b");
+    assert_eq!(body["method"], "eth_getBlockByNumber");
+    assert_eq!(body["params"], json!(["latest", false]));
+    answer(
+        &mut t,
+        block[0]["id"].as_u64().unwrap(),
+        r#"{"number":"0x1"}"#,
     );
     assert!(t.written().iter().all(|f| f["id"] != 3));
     assert!(
@@ -947,13 +972,13 @@ fn a_fee_reference_replies_in_its_form() {
                 "timestamp": "1700000000",
                 "base_fee": "7",
             },
-            "lowest_priority": "1",
+            "lowest_priority": "50000000",
             "quote": {
                 "type": "eip1559",
                 "baseFee": "99",
-                "maxPriorityFeePerGas": "1",
-                "maxFeePerGas": "199",
-                "effectiveGasPrice": "100",
+                "maxPriorityFeePerGas": "50000000",
+                "maxFeePerGas": "50000198",
+                "effectiveGasPrice": "50000099",
                 "source": "direct",
                 "verified": false,
                 "answered": 2,
@@ -980,13 +1005,12 @@ fn a_fee_reference_replies_in_its_form() {
             FeeReference {
                 header: None,
                 lowest_priority: Some("3".into()),
-                quote: fc_chain::fee_quote_values("direct", Some("16"), Some("3"))
-                    .ok()
+                quote: quote_values("16", "3")
                     .and_then(|values| fc_chain::combine_fee_quotes(&[values], false)),
             },
             format!(
                 r#"{{"type":"response","id":5,"result":{{"header":null,"lowest_priority":"3","quote":{},"generation":4}}}}"#,
-                r#"{"type":"eip1559","baseFee":"13","maxPriorityFeePerGas":"3","maxFeePerGas":"29","effectiveGasPrice":"16","source":"direct","verified":false,"answered":1}"#
+                r#"{"type":"eip1559","baseFee":"13","maxPriorityFeePerGas":"50000000","maxFeePerGas":"50000026","effectiveGasPrice":"50000013","source":"direct","verified":false,"answered":1}"#
             ),
         ),
     ] {
@@ -1004,13 +1028,8 @@ fn a_fee_reference_replies_in_its_form() {
     // The machine measures the result as written, whatever its width
     // (181-m1): here a 1,234-digit priority fee and a 78-digit base fee.
     let wide = "9".repeat(1_234);
-    let quote = fc_chain::fee_quote_values(
-        "direct",
-        Some(&format!("\"0x{}\"", "f".repeat(1_024))),
-        Some("\"0x1\""),
-    )
-    .ok()
-    .and_then(|values| fc_chain::combine_fee_quotes(&[values], false));
+    let quote = quote_values(&format!("\"0x{}\"", "f".repeat(1_024)), "\"0x1\"")
+        .and_then(|values| fc_chain::combine_fee_quotes(&[values], false));
     for reference in [
         FeeReference {
             header: Some(fc_chain::machine::Header {

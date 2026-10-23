@@ -458,6 +458,21 @@ fn verified_answer(record: &Json, before: Option<String>, after: Option<String>)
     )))))
 }
 
+/// Whether a scripted JSON value is written in the generator's key order
+/// once parsed: serde_json's map sorts its keys, which keeps that order only
+/// for an object with one key, or a JSON-RPC error's `code` and `message`
+/// (the generator's `rpcError` writes them in that order).
+fn written_in_order(value: &Json) -> bool {
+    match value {
+        Json::Object(map) => {
+            let keys: Vec<&str> = map.keys().map(String::as_str).collect();
+            (keys.len() <= 1 || keys == ["code", "message"]) && map.values().all(written_in_order)
+        }
+        Json::Array(items) => items.iter().all(written_in_order),
+        _ => true,
+    }
+}
+
 fn myotis_class(class: &str) -> MyotisClass {
     match class {
         "not_running" => MyotisClass::NotRunning,
@@ -1091,8 +1106,11 @@ impl Driver {
     /// its URL, picked by the machine's call index and the request's
     /// method, with its delay. `None` for a plan that hangs.
     fn scripted(&self, io: &Request) -> Option<(Answer, u64)> {
+        if let Request::Verified(VerifiedOp::Colibri { method, .. }) = io {
+            return self.scripted_colibri(method);
+        }
         let Request::Rpc { endpoint, body, .. } = io else {
-            panic!("only JSON-RPC exchanges are scripted: {io:?}");
+            panic!("only JSON-RPC exchanges and Colibri operations are scripted: {io:?}");
         };
         let method = serde_json::from_str::<Json>(body).unwrap()["method"]
             .as_str()
@@ -1111,7 +1129,7 @@ impl Driver {
         let status = answer.get("status").and_then(Json::as_u64).unwrap_or(200);
         let envelope = |key: &str, value: &Json| {
             assert!(
-                !value.is_object() && !value.is_array(),
+                written_in_order(value),
                 "a scripted {key} the driver can't write in its key order: {value}"
             );
             format!(r#"{{"jsonrpc":"2.0","id":1,"{key}":{value}}}"#)
@@ -1120,6 +1138,8 @@ impl Driver {
             body.as_str().unwrap().to_owned()
         } else if let Some(result) = answer.get("result") {
             envelope("result", result)
+        } else if let Some(error) = answer.get("error") {
+            envelope("error", error)
         } else if answer.get("noResult").is_some() {
             r#"{"jsonrpc":"2.0","id":1}"#.to_owned()
         } else if answer.get("status").is_some() {
@@ -1136,6 +1156,59 @@ impl Driver {
                 status: u16::try_from(status).unwrap(),
                 body: body.into_bytes(),
             },
+            delay,
+        ))
+    }
+
+    /// The world's scripted answer to a Colibri operation the reference
+    /// never made (`world.colibri`, picked by the request's method): its
+    /// result, or its error, classed as main classes a thrown one.
+    fn scripted_colibri(&self, method: &str) -> Option<(Answer, u64)> {
+        let plan = self.world.get("colibri")?;
+        assert!(
+            !plan.is_array(),
+            "a Colibri plan by call index the driver doesn't script: {plan}"
+        );
+        let answer = pick(plan, method, 0)?;
+        if answer.get("hang").is_some() {
+            return None;
+        }
+        let delay = answer.get("delay").and_then(Json::as_u64).unwrap_or(0);
+        if let Some(result) = answer.get("result") {
+            assert!(
+                written_in_order(result),
+                "a scripted Colibri result the driver can't write in its key order: {result}"
+            );
+            return Some((
+                Answer::Colibri(ColibriReply::Result(result.to_string())),
+                delay,
+            ));
+        }
+        let error = answer.get("error")?;
+        assert!(
+            error
+                .as_object()
+                .unwrap()
+                .keys()
+                .all(|key| key == "message"),
+            "a scripted Colibri error the driver doesn't class: {error}"
+        );
+        let message = error.get("message").and_then(Json::as_str).unwrap_or("");
+        let thrown = serde_json::json!({
+            "name": "Error",
+            "message_json": serde_json::to_string(message).unwrap(),
+            "props": [],
+        });
+        let class = if capacity(&thrown) {
+            ColibriClass::Capacity
+        } else {
+            ColibriClass::Error
+        };
+        Some((
+            Answer::Colibri(ColibriReply::Failure {
+                class,
+                fault: fault(&thrown),
+            }),
             delay,
         ))
     }
@@ -2487,17 +2560,19 @@ const DEVIATIONS: &[Expected] = &[
                 2,
                 0,
                 400,
+                // With main's #749 (`fee-headroom`), its tip is floored.
                 Want::Quote(
-                    r#"{"type":"eip1559","baseFee":"15","maxPriorityFeePerGas":"1","maxFeePerGas":"31","effectiveGasPrice":"16","source":"quorum","verified":false}"#,
+                    r#"{"type":"eip1559","baseFee":"15","maxPriorityFeePerGas":"50000000","maxFeePerGas":"50000030","effectiveGasPrice":"50000015","source":"quorum","verified":false}"#,
                 ),
             ),
         ],
         ..EXPECTED
     },
     // B asks up to three endpoints at once and combines their quotes
-    // (#92). The reference asked primary alone and returned its quote;
-    // secondary, asked with it, answers `0x1` to both, as its script says,
-    // so the combined M and P are 1: base fee 0, effective gas price 1.
+    // (#92), each with main's #749 headroom (`fee-headroom`). The
+    // reference asked primary alone and returned its quote, M = 50,007,544;
+    // secondary, asked with it, answers `0x1` to both, as its script says:
+    // its tip floored, M = P = 0.05 gwei, the combined base fee 0.
     Expected {
         id: "router-fee-quote-direct-same-endpoint",
         deviation: "fee-combination",
@@ -2506,7 +2581,7 @@ const DEVIATIONS: &[Expected] = &[
             0,
             0,
             Want::Quote(
-                r#"{"type":"eip1559","baseFee":"0","maxPriorityFeePerGas":"1","maxFeePerGas":"1","effectiveGasPrice":"1","source":"direct","verified":false,"answered":2}"#,
+                r#"{"type":"eip1559","baseFee":"0","maxPriorityFeePerGas":"50000000","maxFeePerGas":"50000000","effectiveGasPrice":"50000000","source":"direct","verified":false,"answered":2}"#,
             ),
         )],
         requests: &[
@@ -2517,8 +2592,10 @@ const DEVIATIONS: &[Expected] = &[
         ],
         ..EXPECTED
     },
-    // b is asked at once with a, not after it: a's unparseable hint fails
-    // a, and b's legacy quote stands alone.
+    // b is asked at once with a, not after it. a's unparseable hint fails
+    // a; b's hint over its gas price has it read its block, which is the
+    // string `0x11`: b fails at its block, and Direct's last resort is
+    // b's legacy quote.
     Expected {
         id: "boundary-fee-direct-priority-unparseable",
         deviation: "fee-combination",
@@ -2527,7 +2604,7 @@ const DEVIATIONS: &[Expected] = &[
             0,
             0,
             Want::Quote(
-                r#"{"type":"legacy","gasPrice":"16","effectiveGasPrice":"16","source":"direct","verified":false,"answered":1}"#,
+                r#"{"type":"legacy","gasPrice":"50000020","effectiveGasPrice":"50000020","source":"direct","verified":false,"answered":1}"#,
             ),
         )],
         requests: &[
@@ -2535,10 +2612,12 @@ const DEVIATIONS: &[Expected] = &[
             r#"rpc https://b.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_gasPrice","params":[]}"#,
             r#"rpc https://a.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_maxPriorityFeePerGas","params":[]}"#,
             r#"rpc https://b.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_maxPriorityFeePerGas","params":[]}"#,
+            r#"rpc https://b.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_getBlockByNumber","params":["latest",false]}"#,
         ],
         ..EXPECTED
     },
-    // b is asked at once with a: a fails, and b's legacy quote stands.
+    // b is asked at once with a: a fails, and b's hint and its block read
+    // fail; Direct's last resort is b's legacy quote.
     Expected {
         id: "boundary-fee-direct-gas-price-fails-first",
         deviation: "fee-combination",
@@ -2547,13 +2626,148 @@ const DEVIATIONS: &[Expected] = &[
             0,
             0,
             Want::Quote(
-                r#"{"type":"legacy","gasPrice":"1000000000","effectiveGasPrice":"1000000000","source":"direct","verified":false,"answered":1}"#,
+                r#"{"type":"legacy","gasPrice":"1300000000","effectiveGasPrice":"1300000000","source":"direct","verified":false,"answered":1}"#,
             ),
         )],
         requests: &[
             r#"rpc https://a.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_gasPrice","params":[]}"#,
             r#"rpc https://b.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_gasPrice","params":[]}"#,
             r#"rpc https://b.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_maxPriorityFeePerGas","params":[]}"#,
+            r#"rpc https://b.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_getBlockByNumber","params":["latest",false]}"#,
+        ],
+        ..EXPECTED
+    },
+    // The quorum's block disagrees, so it leaves its last resort, and the
+    // walk reaches Direct with three endpoints. The reference quotes the
+    // first alone, M = 2,049,999,998; B combines all three.
+    Expected {
+        id: "boundary-fee-quorum-priority-disagrees",
+        deviation: "fee-combination",
+        replies: &[(
+            0,
+            0,
+            0,
+            Want::Quote(
+                r#"{"type":"eip1559","baseFee":"999999997","maxPriorityFeePerGas":"50000000","maxFeePerGas":"2049999994","effectiveGasPrice":"1049999997","source":"direct","verified":false,"answered":3}"#,
+            ),
+        )],
+        requests: &[
+            r#"rpc https://a.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_gasPrice","params":[]}"#,
+            r#"rpc https://b.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_gasPrice","params":[]}"#,
+            r#"rpc https://c.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_gasPrice","params":[]} cancelled at 0"#,
+            r#"rpc https://a.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_maxPriorityFeePerGas","params":[]}"#,
+            r#"rpc https://b.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_maxPriorityFeePerGas","params":[]}"#,
+            r#"rpc https://c.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_maxPriorityFeePerGas","params":[]}"#,
+            r#"rpc https://a.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_getBlockByNumber","params":["latest",false]}"#,
+            r#"rpc https://b.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_getBlockByNumber","params":["latest",false]}"#,
+            r#"rpc https://c.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_getBlockByNumber","params":["latest",false]}"#,
+            r#"rpc https://a.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_gasPrice","params":[]}"#,
+            r#"rpc https://b.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_gasPrice","params":[]}"#,
+            r#"rpc https://c.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_gasPrice","params":[]}"#,
+            r#"rpc https://a.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_maxPriorityFeePerGas","params":[]}"#,
+            r#"rpc https://b.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_maxPriorityFeePerGas","params":[]}"#,
+            r#"rpc https://c.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_maxPriorityFeePerGas","params":[]}"#,
+        ],
+        ..EXPECTED
+    },
+    // Main's #749 tests, ported (`fee-headroom-*`): those whose Direct
+    // step B changes. Each endpoint is asked at once; one answer is marked
+    // `answered: 1`.
+    Expected {
+        id: "fee-headroom-direct-same-endpoint",
+        deviation: "fee-combination",
+        replies: &[(
+            0,
+            0,
+            0,
+            Want::Quote(
+                r#"{"type":"eip1559","baseFee":"327300000","maxPriorityFeePerGas":"50000000","maxFeePerGas":"704600000","effectiveGasPrice":"377300000","source":"direct","verified":false,"answered":2}"#,
+            ),
+        )],
+        requests: &[
+            r#"rpc https://primary.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_gasPrice","params":[]}"#,
+            r#"rpc https://secondary.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_gasPrice","params":[]}"#,
+            r#"rpc https://primary.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_maxPriorityFeePerGas","params":[]}"#,
+            r#"rpc https://secondary.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_maxPriorityFeePerGas","params":[]}"#,
+        ],
+        ..EXPECTED
+    },
+    Expected {
+        id: "fee-headroom-direct-block",
+        deviation: "fee-combination",
+        replies: &[(
+            0,
+            0,
+            0,
+            Want::Quote(
+                r#"{"type":"eip1559","baseFee":"4000000000","maxPriorityFeePerGas":"1000000000","maxFeePerGas":"9000000000","effectiveGasPrice":"5000000000","source":"direct","verified":false,"answered":2}"#,
+            ),
+        )],
+        requests: &[
+            r#"rpc https://primary.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_gasPrice","params":[]}"#,
+            r#"rpc https://secondary.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_gasPrice","params":[]}"#,
+            r#"rpc https://primary.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_maxPriorityFeePerGas","params":[]}"#,
+            r#"rpc https://secondary.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_maxPriorityFeePerGas","params":[]}"#,
+            r#"rpc https://primary.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_getBlockByNumber","params":["latest",false]}"#,
+            r#"rpc https://secondary.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_getBlockByNumber","params":["latest",false]}"#,
+        ],
+        ..EXPECTED
+    },
+    Expected {
+        id: "fee-headroom-legacy-chain",
+        deviation: "fee-combination",
+        replies: &[(
+            0,
+            0,
+            0,
+            Want::Quote(
+                r#"{"type":"legacy","gasPrice":"10050000000","effectiveGasPrice":"10050000000","source":"direct","verified":false,"answered":1}"#,
+            ),
+        )],
+        ..EXPECTED
+    },
+    // Colibri's block fails, and Direct's quote wins over its last resort.
+    // B's header read starts with Direct's collection and fails as the
+    // world's Colibri fails every block; nothing waits for it.
+    Expected {
+        id: "fee-headroom-later-type-2-wins",
+        deviation: "fee-combination",
+        replies: &[(
+            0,
+            0,
+            0,
+            Want::Quote(
+                r#"{"type":"eip1559","baseFee":"2000000000","maxPriorityFeePerGas":"1000000000","maxFeePerGas":"5000000000","effectiveGasPrice":"3000000000","source":"direct","verified":false,"answered":1}"#,
+            ),
+        )],
+        requests: &[
+            r#"colibri request chain 1 at 0 {"method":"eth_gasPrice","params":[],"deadline_ms":1000}"#,
+            r#"colibri request chain 1 at 0 {"method":"eth_maxPriorityFeePerGas","params":[],"deadline_ms":1000}"#,
+            r#"colibri request chain 1 at 0 {"method":"eth_getBlockByNumber","params":["latest",false],"deadline_ms":1000}"#,
+            r#"rpc https://rpc.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_gasPrice","params":[]}"#,
+            r#"colibri request chain 1 at 0 {"method":"eth_getBlockByNumber","params":["latest",false],"deadline_ms":1000}"#,
+            r#"rpc https://rpc.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_maxPriorityFeePerGas","params":[]}"#,
+        ],
+        ..EXPECTED
+    },
+    // Both endpoints asked at once: primary fails at its block, secondary
+    // outright; Direct's last resort is primary's.
+    Expected {
+        id: "fee-headroom-direct-last-resort",
+        deviation: "fee-combination",
+        replies: &[(
+            0,
+            0,
+            0,
+            Want::Quote(
+                r#"{"type":"legacy","gasPrice":"5050000000","effectiveGasPrice":"5050000000","source":"direct","verified":false,"answered":1}"#,
+            ),
+        )],
+        requests: &[
+            r#"rpc https://primary.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_gasPrice","params":[]}"#,
+            r#"rpc https://secondary.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_gasPrice","params":[]}"#,
+            r#"rpc https://primary.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_maxPriorityFeePerGas","params":[]}"#,
+            r#"rpc https://primary.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_getBlockByNumber","params":["latest",false]}"#,
         ],
         ..EXPECTED
     },
@@ -2561,7 +2775,7 @@ const DEVIATIONS: &[Expected] = &[
 
 /// The score: scenarios replayed exactly (deviation scenarios with their
 /// asserted difference included), and those not replayed yet.
-const PASSING: usize = 331;
+const PASSING: usize = 343;
 const NOT_REPLAYED: usize = 0;
 /// The permitted races, counted: each is a cancel the machine made in the
 /// tick the reference's exchange settled, after what [`race`] names. Main
