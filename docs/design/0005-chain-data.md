@@ -50,7 +50,7 @@ All accept caller kinds `chrome` and `shell`.
 |---|---|---|---|
 | `chain.configure` | a [snapshot](#configuration) for every configured chain | `{ generations }` | the router's registry reads |
 | `chain.availability` | `{ chain_id, ready }` for each Myotis chain | `{}` | the router's live `myotis.isReady()` samples |
-| `chain.request` | `{ chain_id, method, params, include_trust, origin?, background, profile, deadline_ms }` | `{ result, source, verified, trust? }` | `request()` |
+| `chain.request` | `{ chain_id, method, params, include_trust, origin?, background, profile, exclude_sources?, deadline_ms }` | `{ result, source, verified, trust? }` | `request()` |
 | `chain.fee_quote` | `{ chain_id, deadline_ms }` | today's quote shape; Direct's adds `answered` (deviation `fee-combination`) | `getFeeQuote()` |
 | `chain.fee_reference` | `{ chain_id, deadline_ms }` | `{ header, lowest_priority, quote, generation }` | nothing: new, the evidence for main's fee check ([A](#a-the-check-at-confirmation)) |
 | `chain.broadcast` | `{ chain_id, raw, deadline_ms }` | `{ hash, source, outcome }` | `broadcastRawTransaction()` |
@@ -59,6 +59,7 @@ All accept caller kinds `chrome` and `shell`.
 - **`origin`** is the router's routing context: the dApp's permission key or the `web3:` page's. It makes the read *interactive*. The core keeps it only in memory, for the [adaptive bypass](#adaptive-bypass), and never logs it.
 - **`profile`** is `default` or `ant_scan`. Callers can't pass functions over the pipe, so the Ant bridge's options (`rankError`, `rangeCapOf`, the exclusions, Blockscout, the widened quorum budget) become one named profile, ported with vectors ([Logs](#logs)).
 - **`background`** is the Ant bridge's flag: never queue for Myotis.
+- **`exclude_sources`** is the router's `excludeSources`: sources this read must not ask, each one the router knows (`myotis`, `colibri`, `quorum`, `direct`, `blockscout`) and named at most once. Anything else makes the request invalid. Absent is none. It adds to the profile's own exclusions. An order it empties fails with the [no-source text](#methods-and-sources), which names the dropped sources in read order. Main's wallet uses it as the reference does (freedom-browser #749): payment history's sweep reads receipts without Colibri, and its dropped check re-reads a receipt from the one source that answered the nonce. **Negotiated:** `core.hello`'s capabilities gain `exclude_sources`, and main sends the field only to a core that offers it, since an older core refuses a request with a field it doesn't know. To an older core the read goes without it, in its profile's order, as main's reads did before.
 - **`deadline_ms`** is what is left of the caller's overall deadline when main sends the request, as naming's driver does; at most 120 s ([Deadlines](#deadlines)).
 - **Cancellation** is 0001's `cancel`, which replaces the router's `AbortSignal` ([Cancellation](#cancellation)).
 - **`isReadMethod`** stays in main: it is a constant table, mirrored with a vector.

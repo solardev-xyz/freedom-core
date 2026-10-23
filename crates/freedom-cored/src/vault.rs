@@ -2661,6 +2661,95 @@ mod tests {
         assert!(!vault.state.is_unlocked());
     }
 
+    /// The one payload a request answered with.
+    fn sent(outs: Vec<Out>) -> Vec<u8> {
+        match outs.as_slice() {
+            [Out::Send(payload)] => payload.to_vec(),
+            _ => panic!("expected one reply"),
+        }
+    }
+
+    /// Typed data for the size bound: `count` zeros (each `"0"` in the view)
+    /// and a string of `len` bytes.
+    fn sized_typed_data(count: usize, len: usize) -> serde_json::Value {
+        serde_json::json!({
+            "domain": {},
+            "types": { "M": [{ "name": "v", "type": "uint8[]" }, { "name": "s", "type": "string" }] },
+            "message": { "v": vec![0; count], "s": "x".repeat(len) },
+        })
+    }
+
+    /// #88, test 3: the length both typed-data methods measure is the
+    /// signing response's, written at ID 2^53 - 1, across the vectors and
+    /// at the boundary, where that response fills the frame exactly.
+    #[test]
+    fn the_view_bound_is_the_signing_reply_at_the_largest_id() {
+        use fc_protocol::frame::MAX_PAYLOAD;
+        use fc_protocol::message::MAX_ID;
+        let mut vault = unlocked();
+        let overhead = MAX_PAYLOAD - crate::signing::max_view_len();
+        let view_of = |data: &serde_json::Value| {
+            let request = fc_evm::ViewRequest {
+                primary_type: None,
+                chain_id: None,
+                max_len: usize::MAX,
+            };
+            fc_evm::typed_data_view(&data["domain"], &data["types"], &data["message"], &request)
+                .unwrap()
+        };
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vectors/signing.json");
+        let vectors: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let mut checked = 0;
+        for case in vectors["typedData"].as_array().unwrap() {
+            if case["keyId"] != "account-0" || case["result"].get("payload").is_none() {
+                continue;
+            }
+            let data = &case["typed_data"];
+            let hashed = view_of(data);
+            let params = serde_json::json!({
+                "key": { "kind": "account", "index": 0 },
+                "typed_data": data,
+                "expected_hash": case["result"]["hash"],
+            })
+            .to_string();
+            let payload = sent(vault.request(MAX_ID, "sign.typed_data", Some(&params)));
+            assert_eq!(
+                payload.len(),
+                overhead + hashed.view.len(),
+                "{}",
+                case["id"]
+            );
+            let reply: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            assert_eq!(reply["result"]["signature"], case["result"]["signature"]);
+            checked += 1;
+        }
+        assert!(checked >= 60, "{checked}");
+        // At the boundary: a view of exactly the bound's length makes a
+        // signing response that fills the frame; one byte more is refused.
+        let probe = view_of(&sized_typed_data(90_000, 0)).view.len();
+        let exact = crate::signing::max_view_len() - probe;
+        for (len, fits) in [(exact, true), (exact + 1, false)] {
+            let data = sized_typed_data(90_000, len);
+            let hash =
+                fc_evm::typed_data_hash(&data["domain"], &data["types"], &data["message"]).unwrap();
+            let params = serde_json::json!({
+                "key": { "kind": "account", "index": 0 },
+                "typed_data": data,
+                "expected_hash": fc_evm::to_hex(&hash),
+            })
+            .to_string();
+            let payload = sent(vault.request(MAX_ID, "sign.typed_data", Some(&params)));
+            let reply: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            if fits {
+                assert_eq!(payload.len(), MAX_PAYLOAD);
+                assert!(reply["result"]["signature"].is_string());
+            } else {
+                assert_eq!(reply["error"]["code"], "invalid_argument", "{reply}");
+            }
+        }
+    }
+
     /// #80: while unlocked, the loop never waits longer than SUSPEND_CHECK,
     /// so it sees a suspend within that much of waking, however much of the
     /// auto-lock delay is left.
