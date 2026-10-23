@@ -120,12 +120,21 @@ jobs:
   fuzz:
     # cargo-fuzz targets for the parsers that take untrusted bytes (design
     # 0001, Testing): fc-json, fc-protocol's frames, fragments, stream
-    # frames, messages and secret fields, and the vault file. Each target
+    # frames, messages and secret fields, the vault file, fc-keys' OpenSSH
+    # readers, fc-seal's open and seal, fc-chain's reading of an RPC answer
+    # and fc-naming's of a resolver's or gateway's. Each target
     # runs for a fixed time: a minute on pushes and PRs, five on the daily
     # run. A crash fails the job and uploads the input that caused it.
     name: fuzz (nightly, time-boxed)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Sized for the daily run with a cold cache: 8 targets x 300 s = 40 min
+    # of fuzzing (each ends a second or two after its time), plus about
+    # 10 min before it (the toolchain, building cargo-fuzz, then the lints
+    # and every target from clean, about 4 min of that) and the cache save
+    # after, about 50 min in all. 75 leaves 25 for a slow runner. A PR run
+    # fuzzes 8 x 60 s = 8 min. Each new target adds 5 min to the daily run:
+    # raise this with it.
+    timeout-minutes: 75
     env:
       # cargo-fuzz needs nightly (sanitizers, coverage instrumentation).
       # Pinned, so a nightly regression can't fail unrelated PRs.
