@@ -23,12 +23,11 @@ workspace = "../freedom-ipfsd"
 [dependencies]
 # Logging, as the services log: JSON lines on stderr.
 fc-service = { path = "../../crates/fc-service" }
-# The state discovery publishes and the RFC 6052 arithmetic
-# (`gate::{Nat64State, Nat64Prefix}`): freedom-ipfs's gate, at the commit
-# freedom-ipfsd pins, so both resolve to one package. Its pure half is to
-# move into a dependency-light crate of freedom-ipfs's (design 0008's plan,
-# F1); this dependency then becomes that crate.
-freedom-ipfs-net = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "0f8ebc38df196b277851271290089892e4d20d45" }
+# The state discovery publishes and the RFC 6052 arithmetic (`Nat64State`,
+# `Nat64Prefix`): freedom-ipfs-addr, the gate's pure half with no network
+# stack (freedom-ipfs #55), at the commit freedom-ipfsd pins, so both resolve
+# to one package, which freedom-ipfs-net re-exports as its gate.
+freedom-ipfs-addr = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "e7dcc6f60b2a30932e6f95a58e30cbf5fdc9f353" }
 # Discovery's one query and its answers (src/query.rs): DNS messages, already
 # in every platform's graph (freedom-ipfs-net's resolver, libp2p-dns). It
 # encodes only its own one-question query, and decodes the answers, as

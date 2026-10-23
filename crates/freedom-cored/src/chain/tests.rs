@@ -2632,3 +2632,48 @@ fn nesting_counts_as_the_byte_scan_did() {
     assert_eq!(nesting(&reply), reference_nesting(&reply));
     assert_eq!(nesting(&reply), 2);
 }
+
+/// `exclude_sources` adds to the profile's exclusions, keeping the
+/// profile's first and each source once (design 0005, Methods main calls).
+#[test]
+fn a_request_excludes_on_top_of_its_profile() {
+    let params = |profile: &str, excluded: Value| {
+        json!({
+            "chain_id": 1,
+            "method": "eth_getLogs",
+            "params": [],
+            "include_trust": false,
+            "background": true,
+            "profile": profile,
+            "exclude_sources": excluded,
+            "deadline_ms": 1000,
+        })
+        .to_string()
+    };
+    let excluded = |text: &str| match call_params("chain.request", text) {
+        Some((Call::Read { options, .. }, _)) => options.exclude_sources,
+        other => panic!("{other:?}"),
+    };
+    let ant: Vec<String> = fc_chain::ANT_EXCLUDE_SOURCES
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    assert_eq!(excluded(&params("ant_scan", json!([]))), ant);
+    let mut widened = ant.clone();
+    widened.push("quorum".to_owned());
+    assert_eq!(
+        excluded(&params("ant_scan", json!(["colibri", "quorum"]))),
+        widened
+    );
+    assert_eq!(
+        excluded(&params("default", json!(["colibri", "quorum"]))),
+        ["colibri", "quorum"]
+    );
+    assert!(
+        call_params(
+            "chain.request",
+            &params("default", json!(["blockscout", "nobody"]))
+        )
+        .is_none()
+    );
+}

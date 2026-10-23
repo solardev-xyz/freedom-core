@@ -16,7 +16,7 @@ mod tx;
 mod u256;
 
 pub use address::{address_of, checksum_address, keccak256, parse_address};
-pub use eip712::typed_data_hash;
+pub use eip712::{TypedDataView, ViewRequest, typed_data_hash, typed_data_view};
 pub use error::{Error, MAX_QUOTED_CHARS, MAX_QUOTED_NAMES, quoted, quoted_list, shortened};
 pub use hex::{parse_bytes, to_hex};
 pub use json::parse_json;

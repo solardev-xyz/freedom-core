@@ -1,5 +1,11 @@
 //! Shared test harness: the real binary over its pipes, with timeouts on
 //! every read and a kill-and-reap guard.
+//!
+//! **One spawn at a time** ([`spawning`]): on macOS std makes a child's
+//! pipes with `pipe()` and only then marks them close-on-exec, so a child
+//! spawned from another test's thread in between inherits them, and holding
+//! the write end of another child's stdin keeps that child from seeing EOF
+//! (issue #171; freedom-ipfsd's harness has the details).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, dead_code)]
 
@@ -19,6 +25,16 @@ pub const BIN: &str = env!("CARGO_BIN_EXE_freedom-cored");
 /// silence, and a test whose timing matters asserts it itself (as
 /// `auto_lock_fires` does). A generous guard only slows a failing test.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Held across every spawn of this test process (see the module's doc).
+static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The spawn lock: hold it across `Command::spawn` (never across a wait).
+pub fn spawning() -> std::sync::MutexGuard<'static, ()> {
+    SPAWN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// stdout, read on a thread: either frames (serve) or lines (hold-lock,
 /// recover).
@@ -97,7 +113,8 @@ pub fn spawn_env(
     extra: &[&str],
     env: &[(&str, &str)],
 ) -> Core {
-    let mut child = Command::new(BIN)
+    let mut spawned = Command::new(BIN);
+    spawned
         .envs(env.iter().copied())
         .arg(command)
         .arg("--data-dir")
@@ -107,9 +124,11 @@ pub fn spawn_env(
         .args(extra)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::piped());
+    let mut child = {
+        let _spawning = spawning();
+        spawned.spawn().unwrap()
+    };
     let stdin = child.stdin.take();
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
