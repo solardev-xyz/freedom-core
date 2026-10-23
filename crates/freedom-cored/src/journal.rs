@@ -51,7 +51,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use crate::anchor::{Dir, Resolve};
+use crate::anchor::{Dir, DirIdentity, Resolve};
 use crate::fsx::{self, Done};
 
 pub const JOURNAL: &str = "node-identity-journal.json";
@@ -300,13 +300,14 @@ impl<'a> Plan<'a> {
 /// How recovery takes a Radicle home's gate (design 0008, "Identity
 /// changes"): under the lock directory main and the Radicle service share,
 /// retrying for `retry`. `held` is the canonical home whose gate the caller
-/// already holds: a write recovers a journal of its own home under its own
-/// gate.
+/// already holds, and `held_identity` the directory identity that gate
+/// recorded: a write recovers a journal of its own home under its own gate.
 #[derive(Debug, Clone)]
 pub struct Gates {
     pub lock_dir: PathBuf,
     pub retry: std::time::Duration,
     pub held: Option<PathBuf>,
+    pub held_identity: Option<DirIdentity>,
 }
 
 /// The Radicle home gate's namespace: the Radicle service's own.
@@ -557,8 +558,14 @@ pub fn recover(identity_dir: &Path, gates: &Gates) -> std::io::Result<Recovered>
     drop(handle);
     sync_dir(identity_dir)?;
     // The root, opened once, after the gate: everything below it is reached
-    // from this handle. Gone, nothing under it exists.
-    let top = open_root(&journal.node, &journal.root)?;
+    // from this handle. Gone, nothing under it exists. A Radicle home must
+    // be the directory its gate was taken for.
+    let identity = match &_home_gate {
+        Some(gate) => gate.identity,
+        None if gates.held.as_deref() == Some(journal.root.as_path()) => gates.held_identity,
+        None => None,
+    };
+    let top = open_root(&journal.node, &journal.root, identity)?;
     let status = conclude(identity_dir, &journal, top.as_ref())?;
     let _ = fsx::remove(&identity_dir.join(STAGING), || true);
     Ok(Recovered::Finished {
@@ -569,32 +576,38 @@ pub fn recover(identity_dir: &Path, gates: &Gates) -> std::io::Result<Recovered>
 }
 
 /// How a node's root is opened: a Radicle home as its gate's canonical
-/// path, through no symlink and still where that path says; Bee's data
+/// path, through no symlink, still where that path says, and (with the
+/// gate's `identity`) the directory the gate was taken for; Bee's data
 /// directory as main names it ([`Resolve`]).
-fn resolve(node: &str) -> Resolve {
+fn resolve(node: &str, identity: Option<DirIdentity>) -> Resolve {
     if node == "radicle" {
-        Resolve::Canonical
+        Resolve::Canonical(identity)
     } else {
         Resolve::Follow
     }
 }
 
 /// A journal's or an intent's root, opened once: `None` if it is gone.
-fn open_root(node: &str, root: &Path) -> std::io::Result<Option<Dir>> {
-    Dir::open_root(root, resolve(node))
+fn open_root(
+    node: &str,
+    root: &Path,
+    identity: Option<DirIdentity>,
+) -> std::io::Result<Option<Dir>> {
+    Dir::open_root(root, resolve(node, identity))
 }
 
 /// A writer's root, opened once before anything under it is read: a
-/// Radicle home after its gate is taken (the gate made it), Bee's data
-/// directory made if missing.
-pub fn write_root(node: &str, root: &Path) -> std::io::Result<Dir> {
+/// Radicle home after its gate is taken (the gate made it), which must be
+/// the directory that gate recorded (`identity`); Bee's data directory,
+/// made if missing.
+pub fn write_root(node: &str, root: &Path, identity: Option<DirIdentity>) -> std::io::Result<Dir> {
     if !normalized_absolute(root) {
         return Err(std::io::Error::other("a node's root that isn't absolute"));
     }
     if node != "radicle" {
         ensure_dir(root)?;
     }
-    open_root(node, root)?.ok_or_else(|| std::io::Error::other("a node's root is gone"))
+    open_root(node, root, identity)?.ok_or_else(|| std::io::Error::other("a node's root is gone"))
 }
 
 enum HomeGate {
@@ -976,7 +989,7 @@ fn discard_intent(identity_dir: &Path) -> std::io::Result<Recovered> {
         // Through no symlink below the root, as every node file is. A root
         // that is gone holds none: the operation died before it made it
         // (review of #177, round 2), or it was removed since.
-        if let Some(top) = open_root(&intent.node, &intent.root)? {
+        if let Some(top) = open_root(&intent.node, &intent.root, None)? {
             for target in staged_targets(&intent.node, &intent.root) {
                 if let Some((dir, name)) = top.under(&target, false)? {
                     dir.unlink(&staged_name(&name))?;
@@ -1101,6 +1114,7 @@ mod tests {
             lock_dir: identity.parent().unwrap().join("locks"),
             retry: std::time::Duration::ZERO,
             held: None,
+            held_identity: None,
         }
     }
 
@@ -1117,7 +1131,7 @@ mod tests {
         if !normalized_absolute(root) {
             return Err(WriteError::Layout);
         }
-        let top = super::write_root(node, root)?;
+        let top = super::write_root(node, root, None)?;
         super::write(
             identity,
             op_id,
@@ -1175,7 +1189,7 @@ mod tests {
             node: "bee".into(),
             root: root.to_owned(),
             files: {
-                let top = write_root("bee", root).unwrap();
+                let top = write_root("bee", root, None).unwrap();
                 files.iter().map(|f| stage(&top, f).unwrap()).collect()
             },
             wipe: Vec::new(),
@@ -1438,7 +1452,7 @@ mod tests {
         )
         .unwrap();
         for file in bee_files(&root, b"k", b"c") {
-            stage(&write_root("bee", &root).unwrap(), &file).unwrap();
+            stage(&write_root("bee", &root, None).unwrap(), &file).unwrap();
         }
         assert_eq!(staged_left(&root).len(), 2);
         assert_eq!(recover(&identity).unwrap(), Recovered::Discarded);
@@ -1567,6 +1581,7 @@ mod tests {
             lock_dir: locks,
             retry: zero,
             held: Some(home.clone()),
+            held_identity: gate.identity,
         };
         let plan = Plan {
             entries: vec![
@@ -1579,7 +1594,7 @@ mod tests {
             ],
             wipe: Vec::new(),
         };
-        let top = write_root("radicle", &home).unwrap();
+        let top = write_root("radicle", &home, gate.identity).unwrap();
         let outcome = super::write(
             &identity,
             "root-swap",
@@ -1609,6 +1624,44 @@ mod tests {
         assert_eq!(std::fs::read(moved.join("config.json")).unwrap(), b"{}");
         // And a write that finds the home replaced before it opens it is
         // refused: the canonical home isn't where its gate is.
-        assert!(write_root("radicle", &home).is_err());
+        assert!(write_root("radicle", &home, gate.identity).is_err());
+    }
+
+    /// Review of #177, round 3 (m1): a home replaced after its gate was
+    /// taken by another real directory, no symlink anywhere, is refused
+    /// where the gate recorded the directory's identity (Unix), and nothing
+    /// of either directory is touched. Without that identity (Windows has
+    /// none), the open checks the path alone, and takes what is there: the
+    /// limit design 0001 states.
+    #[cfg(unix)]
+    #[test]
+    fn a_home_replaced_by_another_directory_after_its_gate_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let locks = tmp.path().join("locks");
+        for dir in ["home", "elsewhere"] {
+            let keys = tmp.path().join(dir).join("keys");
+            std::fs::create_dir_all(&keys).unwrap();
+            std::fs::write(keys.join("radicle"), dir).unwrap();
+        }
+        let zero = std::time::Duration::ZERO;
+        let gate = fc_service::gate::acquire(&tmp.path().join("home"), &locks, RADICLE_GATE, zero)
+            .unwrap();
+        assert!(gate.identity.is_some());
+        let home = gate.data_dir.clone();
+        std::fs::rename(&home, home.with_file_name("away")).unwrap();
+        std::fs::rename(home.with_file_name("elsewhere"), &home).unwrap();
+        let refused = write_root("radicle", &home, gate.identity);
+        assert!(refused.is_err());
+        assert_eq!(
+            std::fs::read(home.join("keys/radicle")).unwrap(),
+            b"elsewhere"
+        );
+        assert_eq!(
+            std::fs::read(home.with_file_name("away").join("keys/radicle")).unwrap(),
+            b"home"
+        );
+        // The path's checks alone pass: a real directory is at the
+        // canonical path.
+        assert!(write_root("radicle", &home, None).is_ok());
     }
 }

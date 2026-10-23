@@ -239,24 +239,114 @@ fn a_canonical_root_is_the_directory_at_its_path() {
     let real = base.join("real");
     std::fs::create_dir_all(real.join("inner")).unwrap();
     std::fs::write(base.join("file"), b"x").unwrap();
-    let opened = Dir::open_root(&real, Resolve::Canonical).unwrap().unwrap();
+    let opened = Dir::open_root(&real, Resolve::Canonical(None))
+        .unwrap()
+        .unwrap();
     assert_eq!(opened.location(), real);
     assert!(
-        Dir::open_root(&base.join("missing"), Resolve::Canonical)
+        Dir::open_root(&base.join("missing"), Resolve::Canonical(None))
             .unwrap()
             .is_none()
     );
-    assert!(Dir::open_root(&base.join("file"), Resolve::Canonical).is_err());
+    assert!(Dir::open_root(&base.join("file"), Resolve::Canonical(None)).is_err());
     assert!(Dir::open_root(&base.join("file"), Resolve::Follow).is_err());
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(&real, base.join("link")).unwrap();
-        assert!(Dir::open_root(&base.join("link"), Resolve::Canonical).is_err());
-        assert!(Dir::open_root(&base.join("link/inner"), Resolve::Canonical).is_err());
+        assert!(Dir::open_root(&base.join("link"), Resolve::Canonical(None)).is_err());
+        assert!(Dir::open_root(&base.join("link/inner"), Resolve::Canonical(None)).is_err());
         assert!(
             Dir::open_root(&base.join("link"), Resolve::Follow)
                 .unwrap()
                 .is_some()
         );
     }
+}
+
+/// Review of #177, round 3 (m1): a canonical root opened with its gate's
+/// recorded identity must be that directory.
+#[cfg(unix)]
+#[test]
+fn a_canonical_root_must_be_its_gates_directory() {
+    use std::os::unix::fs::MetadataExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(tmp.path()).unwrap();
+    let real = base.join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    std::fs::create_dir_all(base.join("other")).unwrap();
+    let metadata = std::fs::metadata(&real).unwrap();
+    let identity = DirIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    };
+    assert!(
+        Dir::open_root(&real, Resolve::Canonical(Some(identity)))
+            .unwrap()
+            .is_some()
+    );
+    std::fs::rename(&real, base.join("away")).unwrap();
+    std::fs::rename(base.join("other"), &real).unwrap();
+    assert!(Dir::open_root(&real, Resolve::Canonical(Some(identity))).is_err());
+    assert!(
+        Dir::open_root(&real, Resolve::Canonical(None))
+            .unwrap()
+            .is_some()
+    );
+}
+
+/// Review of #177, round 3 (m2): the wipe holds a bounded number of
+/// handles, so a tree deeper than the process may hold descriptors is
+/// still removed whole. The removal runs in a child of this test binary
+/// whose descriptor limit is 64; the tree is 300 directories deep, with
+/// files and a symlink along the way.
+#[cfg(unix)]
+#[test]
+fn a_deep_tree_is_removed_within_a_small_descriptor_limit() {
+    const CHILD: &str = "FREEDOM_CORED_TEST_DEEP_TREE";
+    if let Some(root) = std::env::var_os(CHILD) {
+        use rustix::process::{Resource, Rlimit, setrlimit};
+        setrlimit(
+            Resource::Nofile,
+            Rlimit {
+                current: Some(64),
+                maximum: Some(64),
+            },
+        )
+        .unwrap();
+        let root = PathBuf::from(root);
+        assert!(
+            top(&root)
+                .remove_tree(std::ffi::OsStr::new("tree"))
+                .unwrap()
+        );
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("keep"), b"keep").unwrap();
+    let mut deep = root.join("tree");
+    for level in 0..300 {
+        deep.push("d");
+        std::fs::create_dir_all(&deep).unwrap();
+        if level % 50 == 0 {
+            std::fs::write(deep.join("file"), b"x").unwrap();
+            std::os::unix::fs::symlink(&outside, deep.join("link")).unwrap();
+        }
+    }
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "anchor::tests::a_deep_tree_is_removed_within_a_small_descriptor_limit",
+            "--test-threads=1",
+        ])
+        .env(CHILD, &root)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "{status}");
+    assert!(!root.join("tree").exists());
+    assert_eq!(std::fs::read(outside.join("keep")).unwrap(), b"keep");
 }

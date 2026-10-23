@@ -154,6 +154,7 @@ fn recover(data_dir: &std::path::Path, lock_dir: &std::path::Path) -> Exit {
         lock_dir: lock_dir.to_owned(),
         retry: fc_service::gate::CONTENTION_RETRY,
         held: None,
+        held_identity: None,
     };
     let line = match journal::recover(data_dir, &gates) {
         Ok(journal::Recovered::Waiting { node, .. }) => {

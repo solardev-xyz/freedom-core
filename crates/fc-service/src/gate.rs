@@ -77,6 +77,37 @@ pub struct Gate {
     pub lock_path: PathBuf,
     /// The canonical data directory. Every operation uses this path.
     pub data_dir: PathBuf,
+    /// The data directory's identity once the lock is held: the directory
+    /// this gate was taken for. A caller that opens it later can tell it
+    /// from another directory moved into its path meanwhile. `None` where
+    /// std exposes no file identity (Windows).
+    pub identity: Option<DirIdentity>,
+}
+
+/// A directory's identity: its device and inode (Unix).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirIdentity {
+    pub dev: u64,
+    pub ino: u64,
+}
+
+impl DirIdentity {
+    /// The identity of what `metadata` describes (Unix); `None` elsewhere.
+    pub fn of(metadata: &std::fs::Metadata) -> Option<DirIdentity> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Some(DirIdentity {
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = metadata;
+            None
+        }
+    }
 }
 
 /// Qualifies storage, then takes `namespace`'s gate for `data_dir`,
@@ -130,10 +161,15 @@ pub fn acquire(
     if std::fs::canonicalize(data_dir).map_err(GateError::Storage)? != canonical_data {
         return Err(GateError::Moved);
     }
+    // What is at the canonical path now, under the lock: the directory this
+    // gate protects (a symlink there resolved differently just above).
+    let identity =
+        DirIdentity::of(&std::fs::symlink_metadata(&canonical_data).map_err(GateError::Storage)?);
     Ok(Gate {
         _file: file,
         lock_path,
         data_dir: canonical_data,
+        identity,
     })
 }
 

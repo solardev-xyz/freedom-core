@@ -1994,6 +1994,7 @@ fn startup_recovery(dir: &Path, lock_dir: &Path) -> NodeRecovery {
         lock_dir: lock_dir.to_owned(),
         retry: Duration::ZERO,
         held: None,
+        held_identity: None,
     };
     match journal::recover(dir, &gates) {
         Ok(journal::Recovered::Waiting { op_id, node }) => {
@@ -2422,6 +2423,24 @@ fn job_node_write(
     if control.abandoned() {
         return Err(OpError::Abandoned);
     }
+    // Design 0001: recovery runs before any node write, and here before
+    // anything of the requested node is made, taken or read: an outstanding
+    // journal (for this root or another) is finished first, under its own
+    // home's gate if it is a Radicle one, so the plan sees what it
+    // installed. If it can't be finished, nothing is made or written, not
+    // even the requested Radicle home, which taking its gate would create
+    // (review of #177, round 3).
+    let recovering = journal::Gates {
+        lock_dir: lock_dir.to_owned(),
+        retry: fc_service::gate::CONTENTION_RETRY,
+        held: None,
+        held_identity: None,
+    };
+    match journal::recover(identity_dir, &recovering) {
+        Ok(journal::Recovered::Waiting { .. }) => return Err(OpError::LockHeld),
+        Ok(_) => {}
+        Err(e) => return Err(storage(&e)),
+    }
     // A Radicle write holds the home's gate for its whole length, from
     // before it reads anything of the home (design 0008, "Identity changes"):
     // a running Radicle service holds it, so the write answers `lock_held`
@@ -2443,9 +2462,9 @@ fn job_node_write(
         NodeSpec::Bee { .. } => None,
     };
     let gates = journal::Gates {
-        lock_dir: lock_dir.to_owned(),
-        retry: fc_service::gate::CONTENTION_RETRY,
         held: home_gate.as_ref().map(|gate| gate.data_dir.clone()),
+        held_identity: home_gate.as_ref().and_then(|gate| gate.identity),
+        ..recovering
     };
     let write_error = |e: journal::WriteError| match e {
         journal::WriteError::Io(e) => storage(&e),
@@ -2476,21 +2495,16 @@ fn job_node_write(
         }
         _ => spec,
     };
-    // Design 0001: recovery runs before any node write, and here before the
-    // plan reads anything of the node: an outstanding journal for the same
-    // root is finished first, so the plan sees what it installed. If it
-    // can't be finished, nothing is made or written.
-    match journal::recover(identity_dir, &gates) {
-        Ok(journal::Recovered::Waiting { .. }) => return Err(OpError::LockHeld),
-        Ok(_) => {}
-        Err(e) => return Err(storage(&e)),
-    }
     // The node's root, opened once, now: a Radicle home after its gate was
     // taken, before anything of it is read. The plan, the staging, the
     // install and the cleanup all reach what is below it from this handle,
-    // never by its path again, so a home renamed or replaced meanwhile
+    // never by its path again, so a home renamed or replaced after the open
     // redirects nothing (review of #177, round 2).
-    let top = journal::write_root(spec.name(), spec.root()).map_err(|e| storage(&e))?;
+    // A Radicle home must be the very directory its gate was taken for (the
+    // identity the gate recorded, Unix): one moved into its path since is
+    // refused (review of #177, round 3).
+    let top = journal::write_root(spec.name(), spec.root(), gates.held_identity)
+        .map_err(|e| storage(&e))?;
     if let NodeSpec::Radicle {
         alias,
         custody: Custody::Sealed { wipe },

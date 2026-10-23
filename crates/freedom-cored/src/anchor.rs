@@ -12,11 +12,16 @@
 //!   all reach what is below it from that handle, never by its path again
 //!   (review of #177, round 2). A Radicle home is opened after its gate is
 //!   taken, as the gate's canonical path ([`Resolve::Canonical`]): no
-//!   symlink is followed at it, and the directory now at that path, resolved
-//!   afresh, must be the one opened, so a home moved or replaced since the
-//!   gate was taken is refused. Bee's root is the data directory main
-//!   names, which may itself be a symlink ([`Resolve::Follow`]). A root
-//!   that doesn't exist is no target (`None`): nothing under it exists.
+//!   symlink is followed at it; the directory at that path, resolved again,
+//!   must be the one opened; and on Unix it must be the very directory the
+//!   gate was taken for, by the device and inode the gate recorded once its
+//!   lock was held (review of #177, round 3). So a home replaced since the
+//!   gate was taken, by a symlink or by another real directory, is refused,
+//!   and one moved after the open keeps receiving its operation. Windows
+//!   exposes no file identity: there the check is the path's alone. Bee's
+//!   root is the data directory main names, which may itself be a symlink
+//!   ([`Resolve::Follow`]). A root that doesn't exist is no target
+//!   (`None`): nothing under it exists.
 //! - **Each directory below it** is opened through its parent, refusing a
 //!   symlink (`O_NOFOLLOW`, `O_DIRECTORY`), and created (`0700`) when a
 //!   write needs it.
@@ -24,7 +29,8 @@
 //!   (`openat`, `unlinkat`, `renameat`, `fstatat` without following), so a
 //!   directory swapped for a symlink after it was opened can't redirect it.
 //!   A tree's removal ([`Dir::remove_tree`]) walks it the same way, from
-//!   handle to handle, and unlinks each entry relative to its directory's.
+//!   handle to handle, and unlinks each entry relative to its directory's,
+//!   holding a bounded number of handles however deep the tree is.
 //! - **On Windows** the root and each directory below it are checked to be
 //!   directories, not reparse points (a symlink or a junction), then used by
 //!   path: std exposes no handle-relative calls, so a same-user process
@@ -40,6 +46,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use crate::fsx::Regular;
+pub use fc_service::gate::DirIdentity;
 
 /// What is at a name, not following a symlink.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,10 +65,11 @@ pub enum Resolve {
     /// As named, following symlinks: Bee's data directory, which main names.
     Follow,
     /// A gate's canonical path (a Radicle home's): no symlink is followed at
-    /// it, and the directory at that path now, resolved afresh, must be the
-    /// one opened. A home moved or replaced since its gate was taken (a
-    /// symlink in its place or above it) is refused.
-    Canonical,
+    /// it, and the directory at that path now, resolved again, must be the
+    /// one opened. With the identity the gate recorded (`Some`, Unix), it
+    /// must also be the directory the gate was taken for: one moved into its
+    /// path since, a real directory as much as a symlink, is refused.
+    Canonical(Option<DirIdentity>),
 }
 
 /// A node's root, or a directory under it, opened through no symlink.
@@ -73,7 +81,8 @@ pub struct Dir {
 
 impl Dir {
     /// The root, opened once: `None` if it doesn't exist. A root that isn't
-    /// a directory, or (`Canonical`) isn't where its path says, is an error.
+    /// a directory, or (`Canonical`) isn't where its path says or isn't its
+    /// gate's directory, is an error.
     pub fn open_root(root: &Path, resolve: Resolve) -> io::Result<Option<Dir>> {
         imp::open_root(root, resolve)
     }
@@ -190,7 +199,7 @@ impl Dir {
 
 #[cfg(unix)]
 mod imp {
-    use super::{Dir, Kind, Resolve};
+    use super::{Dir, DirIdentity, Kind, Resolve};
     use crate::fsx::Regular;
     use rustix::fd::OwnedFd;
     use rustix::fs::{AtFlags, FileType, Mode, OFlags};
@@ -218,7 +227,7 @@ mod imp {
 
     pub fn open_root(root: &Path, resolve: Resolve) -> io::Result<Option<Dir>> {
         let mut flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
-        if resolve == Resolve::Canonical {
+        if let Resolve::Canonical(_) = resolve {
             flags |= OFlags::NOFOLLOW;
         }
         let fd = match rustix::fs::open(root, flags, Mode::empty()) {
@@ -226,14 +235,26 @@ mod imp {
             Err(Errno::NOENT) => return Ok(None),
             Err(e) => return Err(refused(e)),
         };
-        if resolve == Resolve::Canonical {
-            // The directory at the canonical path now, resolved afresh,
-            // must be the one opened: a symlink above it, or a directory
-            // swapped in and out, is refused.
+        if let Resolve::Canonical(gated) = resolve {
+            // The directory at the canonical path now, resolved again, must
+            // be the one opened: a symlink above it, or a directory swapped
+            // in and out, is refused. And it must be the one the gate was
+            // taken for: another directory moved into its path is too.
             let held = rustix::fs::fstat(&fd)?;
             let resolved = std::fs::canonicalize(root)?;
             let now = rustix::fs::lstat(root)?;
             if resolved != root || held.st_dev != now.st_dev || held.st_ino != now.st_ino {
+                return Err(io::Error::other(
+                    "a node's root that isn't the directory at its canonical path",
+                ));
+            }
+            // st_dev and st_ino are u64 on Linux, but not on every Unix.
+            #[allow(clippy::unnecessary_cast)]
+            let identity = DirIdentity {
+                dev: held.st_dev as u64,
+                ino: held.st_ino as u64,
+            };
+            if gated.is_some_and(|gated| gated != identity) {
                 return Err(io::Error::other(
                     "a node's root that isn't the directory its gate was taken for",
                 ));
@@ -347,12 +368,20 @@ mod imp {
         Ok(())
     }
 
-    /// A directory of the tree: its handle, its name in its parent, and the
-    /// entries in it still to remove.
+    /// A directory of the tree being removed: its name in its parent, its
+    /// identity (to know it again when it is reopened), and the entries in
+    /// it still to remove. No handle: the walk holds only the deepest one.
     struct Level {
-        fd: OwnedFd,
         name: std::ffi::OsString,
+        identity: (u64, u64),
         left: Vec<std::ffi::OsString>,
+    }
+
+    fn identity(fd: &OwnedFd) -> io::Result<(u64, u64)> {
+        let stat = rustix::fs::fstat(fd)?;
+        // st_dev and st_ino are u64 on Linux, but not on every Unix.
+        #[allow(clippy::unnecessary_cast)]
+        Ok((stat.st_dev as u64, stat.st_ino as u64))
     }
 
     /// The names in the directory `fd`, but `.` and `..`, read whole before
@@ -370,40 +399,70 @@ mod imp {
         Ok(names)
     }
 
-    /// Depth first, one handle per level: each directory is opened through
-    /// its parent's handle without following a symlink, and each entry is
-    /// unlinked, or removed once empty, relative to its directory's handle.
-    /// Anything that isn't a directory (a symlink included) is unlinked
-    /// itself. So nothing outside the tree is reached, whatever is renamed
-    /// or swapped above it meanwhile.
+    /// The directory `levels` lead to, reopened from `top` down: each
+    /// through its parent's handle without following a symlink, and each
+    /// the very directory it was when the walk first opened it. One swapped
+    /// since is an error, and the walk stops. Two handles at a time.
+    fn reopen(top: &OwnedFd, levels: &[Level]) -> io::Result<OwnedFd> {
+        use rustix::fd::AsFd;
+        let mut fd: Option<OwnedFd> = None;
+        for level in levels {
+            let parent = fd.as_ref().map_or(top.as_fd(), |fd| fd.as_fd());
+            let next = rustix::fs::openat(parent, &level.name, TREE_FLAGS, Mode::empty())
+                .map_err(refused)?;
+            if identity(&next)? != level.identity {
+                return Err(io::Error::other(
+                    "a directory of a tree changed during its removal",
+                ));
+            }
+            fd = Some(next);
+        }
+        fd.ok_or_else(|| io::Error::other("no directory to reopen"))
+    }
+
+    /// Depth first, holding at most a few handles however deep the tree is
+    /// (review of #177, round 3): the directory being emptied, and while one
+    /// is reopened, two more. Each directory is opened through its parent's
+    /// handle without following a symlink, and each entry is unlinked, or
+    /// removed once empty, relative to its directory's handle. Anything
+    /// that isn't a directory (a symlink included) is unlinked itself. A
+    /// parent is reopened from the held directory, level by level, and must
+    /// be the directory it was ([`reopen`]). So nothing outside the tree is
+    /// reached, whatever is renamed or swapped above or inside it meanwhile.
     pub fn remove_tree(dir: &Dir, name: &OsStr) -> io::Result<bool> {
-        let top = match rustix::fs::openat(&dir.fd, name, TREE_FLAGS, Mode::empty()) {
+        let first = match rustix::fs::openat(&dir.fd, name, TREE_FLAGS, Mode::empty()) {
             Ok(fd) => fd,
             Err(Errno::NOENT) => return Ok(false),
             // Not a directory, or a symlink: removed itself.
             Err(Errno::LOOP | Errno::NOTDIR) => return unlink(dir, name),
             Err(e) => return Err(e.into()),
         };
-        let left = entries(&top)?;
         let mut levels = vec![Level {
-            fd: top,
             name: name.to_owned(),
-            left,
+            identity: identity(&first)?,
+            left: entries(&first)?,
         }];
-        while let Some(level) = levels.last_mut() {
+        // The handle of the deepest level, the one being emptied.
+        let mut current = first;
+        loop {
+            let Some(level) = levels.last_mut() else {
+                return Ok(true);
+            };
             if let Some(entry) = level.left.pop() {
-                match rustix::fs::openat(&level.fd, &entry, TREE_FLAGS, Mode::empty()) {
-                    Ok(fd) => {
-                        let left = entries(&fd)?;
+                match rustix::fs::openat(&current, &entry, TREE_FLAGS, Mode::empty()) {
+                    Ok(child) => {
                         levels.push(Level {
-                            fd,
                             name: entry,
-                            left,
+                            identity: identity(&child)?,
+                            left: entries(&child)?,
                         });
+                        // The parent's handle closes; it is reopened once
+                        // this child is gone.
+                        current = child;
                     }
                     Err(Errno::NOENT) => {}
                     Err(Errno::LOOP | Errno::NOTDIR) => {
-                        match rustix::fs::unlinkat(&level.fd, &entry, AtFlags::empty()) {
+                        match rustix::fs::unlinkat(&current, &entry, AtFlags::empty()) {
                             Ok(()) | Err(Errno::NOENT) => {}
                             Err(e) => return Err(e.into()),
                         }
@@ -413,15 +472,22 @@ mod imp {
                 continue;
             }
             // Empty now: removed from its parent, through the parent's handle.
-            let Some(done) = levels.pop() else { break };
-            drop(done.fd);
-            let parent = levels.last().map_or(&dir.fd, |level| &level.fd);
-            match rustix::fs::unlinkat(parent, &done.name, AtFlags::REMOVEDIR) {
+            let Some(done) = levels.pop() else {
+                return Ok(true);
+            };
+            drop(current);
+            if levels.is_empty() {
+                return match rustix::fs::unlinkat(&dir.fd, &done.name, AtFlags::REMOVEDIR) {
+                    Ok(()) | Err(Errno::NOENT) => Ok(true),
+                    Err(e) => Err(e.into()),
+                };
+            }
+            current = reopen(&dir.fd, &levels)?;
+            match rustix::fs::unlinkat(&current, &done.name, AtFlags::REMOVEDIR) {
                 Ok(()) | Err(Errno::NOENT) => {}
                 Err(e) => return Err(e.into()),
             }
         }
-        Ok(true)
     }
 
     pub fn same_file(dir: &Dir, handle: &File, name: &OsStr) -> io::Result<bool> {
@@ -484,8 +550,9 @@ mod imp {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => None,
                 Err(e) => return Err(e),
             },
-            // Not a reparse point, and still its own canonical path.
-            Resolve::Canonical => match plain_dir(root)? {
+            // Not a reparse point, and still its own canonical path. No file
+            // identity is exposed here, so the gate's isn't compared.
+            Resolve::Canonical(_) => match plain_dir(root)? {
                 Some(true) => Some(std::fs::canonicalize(root)? == root),
                 other => other,
             },
