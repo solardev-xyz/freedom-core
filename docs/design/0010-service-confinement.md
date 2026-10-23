@@ -92,7 +92,7 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
 - one AAAA query for `ipv4only.arpa`, over plain DNS on port 53, to each resolver the interfaces learned, which is often on loopback (`127.0.0.53`) or a private address (a LAN router);
 - the files that list them, on Linux. Network changes replace these files, so the grant must survive a replacement ([The recommendation](#the-recommendation));
 - on Linux, a link-local resolver's interface index, for a named zone such as `fe80::1%eth0`:
-  - **How:** the kernel's `SIOCGIFINDEX` on a datagram socket, the one `ioctl` `freedom-ipfsd`'s policy adds to the allowlist. It reads one index, changes nothing, and finds an interface that appears after the process starts.
+  - **How:** the kernel's `SIOCGIFINDEX` on a datagram socket, the one `ioctl` `freedom-ipfsd`'s policy adds to the allowlist, in `direct` mode alone, where discovery runs. It reads one index, changes nothing, and finds an interface that appears after the process starts.
   - **Not through sysfs:** `/sys/class/net/<name>/ifindex` resolves into `/sys/devices`, far more than a grant should cover, so none is given;
 - on macOS, SystemConfiguration's dynamic store (`State:/Network/Service/<id>/DNS`), a Mach lookup of `com.apple.SystemConfiguration.configd`;
 - on Windows, `GetAdaptersAddresses`, and the registry value `DhcpNameServer` under each interface's `Tcpip` parameters.
@@ -153,7 +153,7 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
     - mode and owner: `chmod`, `fchmod`, `fchmodat`, `fchmodat2`, `chown`, `fchown`, `lchown`, `fchownat`;
     - xattrs: `setxattr`, `lsetxattr`, `fsetxattr`, `setxattrat`, and the matching `removexattr` calls;
     - times and attributes: `utime`, `utimes`, `futimesat`, `utimensat`, `file_setattr`;
-    - **`ioctl`, by an allowlist** of the commands the services make, compared on the command's low 32 bits, as the kernel reads it: `FIONBIO`, `FIOCLEX`, `FIONCLEX`, `FIONREAD`, and the terminal queries `TCGETS` and `TIOCGWINSZ` (`isatty`). For `freedom-ipfsd` alone it adds `SIOCGIFINDEX`, an interface's index by its name, for NAT64 discovery's named zones ([What each service needs](#what-each-service-needs)). Every other command answers `ENOTTY`, as an unknown one would. A denylist can't be complete: besides the inode-flag commands (`FS_IOC_SETFLAGS`, `FS_IOC_FSSETXATTR`), `FS_IOC_ENABLE_VERITY` takes a read-only descriptor and makes a file permanently read-only, `FS_IOC_SET_ENCRYPTION_POLICY` sets an empty directory's policy, and ext4's `SETVERSION` changes the inode generation, and filesystems add more. Landlock's ioctl right (ABI 5) covers devices only.
+    - **`ioctl`, by an allowlist** of the commands the services make, compared on the command's low 32 bits, as the kernel reads it: `FIONBIO`, `FIOCLEX`, `FIONCLEX`, `FIONREAD`, and the terminal queries `TCGETS` and `TIOCGWINSZ` (`isatty`). For `freedom-ipfsd` in `direct` mode alone it adds `SIOCGIFINDEX`, an interface's index by its name, for NAT64 discovery's named zones ([What each service needs](#what-each-service-needs)). Every other command answers `ENOTTY`, as an unknown one would. A denylist can't be complete: besides the inode-flag commands (`FS_IOC_SETFLAGS`, `FS_IOC_FSSETXATTR`), `FS_IOC_ENABLE_VERITY` takes a read-only descriptor and makes a file permanently read-only, `FS_IOC_SET_ENCRYPTION_POLICY` sets an empty directory's policy, and ext4's `SETVERSION` changes the inode generation, and filesystems add more. Landlock's ioctl right (ABI 5) covers devices only.
 
     So no file's metadata changes: not one outside the grant, nor one under a read-only grant, such as the import's source. Files in the data directory keep the modes they were created with.
     - **Who makes them,** and none fails for it (the `ioctl` list is the qualification's record of the release binaries' calls; a command outside it fails CI):
@@ -391,9 +391,10 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
 
 7. **Main's check,** before it spawns a service:
    - **The grant:** this service's own directory: the persistent IPFS data directory, or the Radicle home with its `HOME` directory.
-   - **The protected roots:** the lock directory, and the identity directory and every other component's data directory (Bee, Ant, Myotis, Tor, the other service), for this profile and the catalog's others.
+   - **The protected roots:** the lock directory; this profile's identity directory and every other component's data directory (Bee, Ant, Myotis, Tor, the other service); and each of the catalog's other profiles, by its whole userData root, or by its components' directories when that root holds this profile's (the default profile, kept in the app data root).
    - **The rule:** main refuses a grant that is, contains, or lies inside a protected root. The service's own directory is the grant, never a protected root.
    - **Compared as canonical paths,** under 0001's rules: symlinks resolved, and case folded on case-insensitive volumes. So an override such as `FREEDOM_IPFS_DATA` can't widen the grant over the secrets.
+   - **Radicle's part comes later:** main checks the IPFS grant first; the Radicle home's check, and `--network` for `freedom-radicled`, come with that service's integration in the browser.
 
 **Later:**
 - a seccomp allowlist, once the release builds' syscalls are measured, as a decision of its own;
@@ -502,7 +503,7 @@ Through the binary, in CI's job for each OS:
     - with no `dns` source, `confinement` reports `files_only`;
   - **policy changes:** `direct` → `socks5` → `direct`, and Arti's port P → Q. Each runs in a new generation with the new `--network`; the old generation's process has exited; and a private instance, recreated after each change, gets the new rules;
   - **NAT64 discovery:** a fake resolver on a loopback address, listed in a fixture resolver file, sees one AAAA query for `ipv4only.arpa` per refresh. From `freedom-ipfsd` it sees no other DNS. `freedom-radicled`'s ordinary lookups use the system resolver in `direct` mode (0008), so for it the check is that discovery sends nothing else.
-  - **NAT64's named zones,** confined with `freedom-ipfsd`'s policy: `fe80::1%lo` is looked up through `SIOCGIFINDEX`, a numeric zone needs no lookup, and an unknown name stays unaskable. Without the `ioctl` rule, the control, the named zone is unaskable;
+  - **NAT64's named zones,** confined with `freedom-ipfsd`'s `direct` policy: `fe80::1%lo` is looked up through `SIOCGIFINDEX`, a numeric zone needs no lookup, and an unknown name stays unaskable. Without the `ioctl` rule, the control, the named zone is unaskable, and so it is under the `socks5` policy, which has no rule;
 - **Reporting:**
   - `hello` reports the mechanism and each property's status;
   - where CI's kernel offers Landlock, the test requires the ABI it offers, so a silent downgrade fails CI.

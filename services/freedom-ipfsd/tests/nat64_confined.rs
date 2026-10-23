@@ -1,10 +1,11 @@
 //! NAT64 discovery's link-local resolvers, confined with the service's own
 //! policy (`src/confinement.rs`, included as it is): a named zone
 //! (`fe80::1%lo`) is still looked up, through `SIOCGIFINDEX`, the one
-//! `ioctl` the policy adds; a numeric zone needs no lookup; a name the
-//! kernel doesn't know stays unaskable. Without the rule, the control, a
-//! named zone is unaskable: so the rule is what the lookup needs (design
-//! 0010).
+//! `ioctl` the policy adds in `direct` mode; a numeric zone needs no lookup;
+//! a name the kernel doesn't know stays unaskable. Without the rule, the
+//! control, a named zone is unaskable: so the rule is what the lookup needs.
+//! The `socks5` policy, where discovery never runs, has no rule: there the
+//! named zone is unaskable too (design 0010).
 //!
 //! Each case runs in a child of its own (this binary again, with
 //! `NAT64_CONFINED_CASE` set), which confines itself once, as the service
@@ -42,7 +43,14 @@ fn child(case: &str) {
     let _ = confine::clean_entry();
     let fixture = std::path::PathBuf::from(std::env::var(FIXTURE).unwrap());
     // The ephemeral process's policy: nothing writable, the lock absent.
-    let mut policy = confinement::policy(Vec::new(), &NetworkPolicy::Direct, Vec::new());
+    let network = if case == "named-socks5" {
+        NetworkPolicy::Socks5 {
+            proxy: "127.0.0.1:9150".parse().unwrap(),
+        }
+    } else {
+        NetworkPolicy::Direct
+    };
+    let mut policy = confinement::policy(Vec::new(), &network, Vec::new());
     policy.read_only.push(fixture.clone());
     if case == "named-without-rule" {
         policy.interface_index = false;
@@ -81,6 +89,17 @@ fn run(case: &str, nameserver: &str) -> String {
 }
 
 fn parent() {
+    // The rule is direct mode's alone: discovery never runs in socks5 mode.
+    {
+        use fc_service::network::NetworkPolicy;
+        let socks5 = NetworkPolicy::Socks5 {
+            proxy: "127.0.0.1:9150".parse().unwrap(),
+        };
+        assert!(
+            confinement::policy(Vec::new(), &NetworkPolicy::Direct, Vec::new()).interface_index
+        );
+        assert!(!confinement::policy(Vec::new(), &socks5, Vec::new()).interface_index);
+    }
     #[cfg(target_os = "linux")]
     {
         use fc_nat64::resolvers::Learned;
@@ -108,6 +127,14 @@ fn parent() {
             unaskable("fe80::1%lo"),
             "a named zone without SIOCGIFINDEX"
         );
-        println!("nat64_confined: named zones resolve confined, through SIOCGIFINDEX alone");
+        // The socks5 policy, exactly as the service sets it: no rule.
+        assert_eq!(
+            run("named-socks5", "fe80::1%lo"),
+            unaskable("fe80::1%lo"),
+            "a named zone under the socks5 policy"
+        );
+        println!(
+            "nat64_confined: named zones resolve confined in direct mode, through SIOCGIFINDEX alone"
+        );
     }
 }

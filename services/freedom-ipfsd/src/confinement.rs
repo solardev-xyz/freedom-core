@@ -17,8 +17,9 @@ use fc_service::network::NetworkPolicy;
 ///   library (`getaddrinfo`), so the report says whether that reaches DNS.
 /// - **`interface_index`:** NAT64 discovery looks up a link-local
 ///   resolver's named zone (`fe80::1%eth0`) through `SIOCGIFINDEX`, the one
-///   `ioctl` this adds. Sysfs's `/sys/class/net/<name>` resolves into
-///   `/sys/devices`, which no grant should cover.
+///   `ioctl` this adds, in `direct` mode alone: discovery runs only there.
+///   Sysfs's `/sys/class/net/<name>` resolves into `/sys/devices`, which no
+///   grant should cover.
 pub fn policy(
     read_write: Vec<PathBuf>,
     network: &NetworkPolicy,
@@ -32,7 +33,7 @@ pub fn policy(
         network: network.confinement(),
         system_resolver: true,
         descriptors,
-        interface_index: true,
+        interface_index: matches!(network, NetworkPolicy::Direct),
     }
 }
 
