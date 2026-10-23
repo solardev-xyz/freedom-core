@@ -2,7 +2,6 @@
 //! (design 0010, "What each service needs" and "Name resolution through
 //! glibc").
 
-use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 
 use super::Resolution;
@@ -85,14 +84,6 @@ fn libc_directory() -> Option<PathBuf> {
         })
         .and_then(|path| std::fs::canonicalize(path).ok())
         .and_then(|path| path.parent().map(Path::to_path_buf))
-}
-
-/// Resolves `localhost` once through the C library, before the rules, so
-/// glibc has read its configuration and loaded the sources a local answer
-/// reaches while every file is readable. A failure is the resolver's own,
-/// and shows before any untrusted input; it doesn't stop confinement.
-pub(super) fn warm_up() -> bool {
-    ("localhost", 0).to_socket_addrs().is_ok()
 }
 
 /// The NSS sources that need a local socket, which confinement refuses:

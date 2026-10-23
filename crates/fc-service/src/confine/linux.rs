@@ -33,11 +33,15 @@ pub(super) fn confine(policy: &Policy, options: &Options) -> Result<Report, Inva
     if threads != 1 {
         return Err(Invalid::Threads(threads));
     }
-    // Before the rules: the resolver, while every file is readable.
-    let resolution = (policy.system_resolver && policy.network == Network::Direct).then(|| {
-        resolver::warm_up();
-        resolver::resolution()
-    });
+    // Landlock and seccomp check new opens and calls only: a socket opened
+    // before them stays usable, so none may cross.
+    if let Some(fd) = socket_above_stderr() {
+        return Err(Invalid::Socket(fd));
+    }
+    // Read from nsswitch.conf; no lookup is made before the rules, so no
+    // NSS source can connect (and keep) a socket across them.
+    let resolution =
+        (policy.system_resolver && policy.network == Network::Direct).then(resolver::resolution);
     // Both mechanisms need it, and it is wanted whatever they do.
     let _ = rustix::thread::set_no_new_privs(true);
     let landlock = landlock(policy, options)?;
@@ -62,6 +66,21 @@ pub(super) fn confine(policy: &Policy, options: &Options) -> Result<Report, Inva
 /// which is never one.
 fn thread_count() -> usize {
     std::fs::read_dir("/proc/self/task").map_or(0, |dir| dir.count())
+}
+
+/// A socket descriptor above stderr, from `/proc/self/fd`: only something
+/// before `confine` can have opened it. stdio may be a socket pair main
+/// made. The directory listing's own descriptor is a directory, never a
+/// socket.
+fn socket_above_stderr() -> Option<i32> {
+    let dir = std::fs::read_dir("/proc/self/fd").ok()?;
+    dir.filter_map(Result::ok)
+        .filter_map(|entry| {
+            let fd: i32 = entry.file_name().to_str()?.parse().ok()?;
+            let target = std::fs::read_link(entry.path()).ok()?;
+            (fd > 2 && target.to_str()?.starts_with("socket:")).then_some(fd)
+        })
+        .min()
 }
 
 /// Applies Landlock at the kernel's ABI (capped by `options`), or says why

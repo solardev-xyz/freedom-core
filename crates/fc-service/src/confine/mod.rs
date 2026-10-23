@@ -16,7 +16,9 @@
 //! - **Elsewhere,** for now: nothing is applied, and every property is
 //!   `unavailable` (macOS and Windows follow).
 //!
-//! Before it, the service calls [`close_inherited`].
+//! Before it, the service calls [`close_inherited`], and opens nothing but
+//! its lock and its own directories: no socket and no name lookup. A socket
+//! above stderr at `confine` is [`Invalid`].
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -50,8 +52,9 @@ pub struct Policy {
     pub network: Network,
     /// Whether the service resolves names through the C library in
     /// `direct` mode (0010, "Name resolution through glibc"): then the
-    /// resolver is warmed up before the rules, and the report says whether
-    /// it can reach DNS while confined.
+    /// report says whether it can reach DNS while confined. No lookup is
+    /// made before the rules: glibc loads its sources at the first one
+    /// after, from the read grants.
     pub system_resolver: bool,
 }
 
@@ -125,6 +128,9 @@ pub enum Invalid {
     /// More than one thread before the rules: a thread started earlier
     /// would stay unconfined.
     Threads(usize),
+    /// A socket open above stderr before the rules: Landlock and seccomp
+    /// revoke nothing opened before them, so it would stay usable.
+    Socket(i32),
     /// The mechanism refused the service's own rules, or stopped halfway.
     Rules(String),
 }
@@ -133,6 +139,7 @@ impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Invalid::Threads(n) => write!(f, "{n} threads before confinement"),
+            Invalid::Socket(fd) => write!(f, "socket descriptor {fd} open before confinement"),
             Invalid::Rules(why) => f.write_str(why),
         }
     }

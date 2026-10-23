@@ -104,6 +104,17 @@ mod linux {
             }
             _ => {}
         }
+        if case == "socket-first" {
+            // An NSS client's cached connection, made before the rules.
+            let stream = UnixStream::connect(&p.socket).unwrap();
+            let result = confine::confine(&policy(&p, network, min_abi));
+            println!(
+                "INVALID {}",
+                matches!(result, Err(confine::Invalid::Socket(_)))
+            );
+            drop(stream);
+            return;
+        }
         if case == "thread-first" {
             let handle =
                 std::thread::spawn(|| std::thread::sleep(std::time::Duration::from_millis(500)));
@@ -122,7 +133,7 @@ mod linux {
             "ipc" => ipc(&p),
             "socks5" | "direct" | "offline" => tcp(&p),
             "threads" => threads(&p),
-            "resolver" | "resolver-cold" => resolver(),
+            "resolver" => resolver(),
             #[cfg(target_arch = "x86_64")]
             "x32" => {
                 println!("CALLING");
@@ -154,9 +165,9 @@ mod linux {
             refer: false,
             min_abi,
             network,
-            // `resolver-cold` skips the warm-up, so its first lookup comes
-            // after confinement and needs the read grants alone.
-            system_resolver: std::env::var(CASE).as_deref() != Ok("resolver-cold"),
+            // No lookup comes before confinement: the first needs the
+            // read grants alone.
+            system_resolver: true,
         }
     }
 
@@ -548,7 +559,7 @@ mod linux {
             "the read-only file's mode changed".into(),
         );
 
-        for case in ["processes", "ipc", "threads", "resolver", "resolver-cold"] {
+        for case in ["processes", "ipc", "threads", "resolver"] {
             failures.extend(passed(case, &run(&world, case)));
         }
 
@@ -647,6 +658,15 @@ mod linux {
             &mut failures,
             r.files == Status::Blocked && r.exec == Status::Blocked && r.mechanism == "none",
             format!("forced blocked: {r:?}"),
+        );
+
+        // A socket connected before confine (as an NSS source's would be):
+        // refused, so the service exits 77.
+        let output = run(&world, "socket-first");
+        expect(
+            &mut failures,
+            lines(&output).contains("INVALID true"),
+            format!("socket first: {}", lines(&output)),
         );
 
         // A thread before confine: refused, so the service exits 77.
