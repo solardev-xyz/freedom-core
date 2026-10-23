@@ -122,11 +122,15 @@ pub fn acquire(
     acquire_as(data_dir, lock_dir, namespace, retry, true)
 }
 
-/// [`acquire`], for a `data_dir` that must already exist: it is never made.
-/// One that is missing is `GateError::Storage` (`NotFound`), before any
-/// lock is taken. A caller that saw the directory, and must act on that one
-/// directory or on nothing, compares the gate's [`Gate::identity`] with
-/// what it saw (freedom-cored's intent cleanup, design 0001).
+/// [`acquire`], for a `data_dir` and a `lock_dir` that must already exist:
+/// it creates nothing. A missing directory is `GateError::Storage`
+/// (`NotFound`), before any lock is taken, and neither is made, so a data
+/// directory renamed away can't be made again under its old name through
+/// its lock directory. The one file it may create is the gate's lock file,
+/// in the existing lock directory, outside the data directory. A caller that
+/// saw the directory, and must act on that one directory or on nothing,
+/// compares the gate's [`Gate::identity`] with what it saw (freedom-cored's
+/// intent cleanup, design 0001).
 pub fn acquire_existing(
     data_dir: &Path,
     lock_dir: &Path,
@@ -143,19 +147,15 @@ fn acquire_as(
     retry: Duration,
     create: bool,
 ) -> Result<Gate, GateError> {
-    // A data directory that must already exist is resolved before anything
-    // is made: a lock directory at or under it would otherwise make it.
-    let existing = if create {
+    // Without `create`, both directories must already exist: nothing is made,
+    // so nothing can be made again in place of one renamed away.
+    if create {
         create_private_dir(data_dir).map_err(GateError::Storage)?;
-        None
-    } else {
-        Some(std::fs::canonicalize(data_dir).map_err(GateError::Storage)?)
-    };
-    create_private_dir(lock_dir).map_err(GateError::Storage)?;
-    let canonical_data = match existing {
-        Some(canonical) => canonical,
-        None => std::fs::canonicalize(data_dir).map_err(GateError::Storage)?,
-    };
+        create_private_dir(lock_dir).map_err(GateError::Storage)?;
+    }
+    let canonical_data = std::fs::canonicalize(data_dir).map_err(GateError::Storage)?;
+    #[cfg(test)]
+    tests::after_data_resolved();
     let canonical_locks = std::fs::canonicalize(lock_dir).map_err(GateError::Storage)?;
     if canonical_locks.starts_with(&canonical_data) {
         return Err(GateError::LockInsideData);
@@ -424,6 +424,19 @@ mod tests {
         );
     }
 
+    std::thread_local! {
+        /// Run once, on this thread, right after `acquire_as` resolves the
+        /// data directory.
+        static AFTER_DATA_RESOLVED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn after_data_resolved() {
+        if let Some(hook) = AFTER_DATA_RESOLVED.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+    }
+
     // Review of #177, round 6: a lock directory at or under the missing data
     // directory doesn't make it either.
     #[test]
@@ -436,6 +449,55 @@ mod tests {
             assert!(!locks.exists());
             assert!(matches!(result, Err(GateError::Storage(ref e))
                 if e.kind() == std::io::ErrorKind::NotFound));
+        }
+    }
+
+    // Review of #177, round 7: a missing lock directory isn't made either.
+    #[test]
+    fn acquire_existing_needs_an_existing_lock_directory() {
+        let (_root, data, locks) = dirs();
+        std::fs::create_dir_all(&data).unwrap();
+        let result = acquire_existing(&data, &locks, "radicle", Duration::ZERO);
+        assert!(matches!(result, Err(GateError::Storage(ref e))
+            if e.kind() == std::io::ErrorKind::NotFound));
+        assert!(!locks.exists());
+    }
+
+    // Review of #177, round 7: a data directory renamed away right after it
+    // is resolved isn't made again through a lock directory at or under it.
+    #[test]
+    fn acquire_existing_makes_nothing_when_the_data_directory_moves_after_it_is_resolved() {
+        for (layout, inside, made) in [
+            ("the data directory itself", "", false),
+            ("a missing lock directory under it", "locks", false),
+            ("an existing lock directory under it", "locks", true),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let data = root.path().join("data");
+            let moved = root.path().join("moved");
+            let locks = if inside.is_empty() {
+                data.clone()
+            } else {
+                data.join(inside)
+            };
+            std::fs::create_dir(&data).unwrap();
+            if made {
+                std::fs::create_dir(&locks).unwrap();
+            }
+            let (from, to) = (data.clone(), moved.clone());
+            AFTER_DATA_RESOLVED.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || std::fs::rename(from, to).unwrap()));
+            });
+            let result = acquire_existing(&data, &locks, "radicle", Duration::ZERO);
+            assert!(!data.exists(), "{layout}: made again: {result:?}");
+            assert!(
+                matches!(result, Err(GateError::Storage(ref e))
+                if e.kind() == std::io::ErrorKind::NotFound),
+                "{layout}: {result:?}"
+            );
+            // The moved directory is as it was: nothing added.
+            let entries = std::fs::read_dir(&moved).unwrap().count();
+            assert_eq!(entries, usize::from(made), "{layout}");
         }
     }
 
