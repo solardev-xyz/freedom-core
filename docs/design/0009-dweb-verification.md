@@ -752,7 +752,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
     - each with erasure coding at every redundancy level;
     - **both shapes where Ant's splitter and Bee's differ** ([Files](#files)), at 524,289 and 67,108,865 bytes: Ant's tree with its one-reference wrapper, and Bee's tree as a case of its own;
     - manifests with an index document, an error document, nested paths, a path that is a prefix of another, prefixes longer than one fork can hold, Unicode names, every metadata field Ant reads, an obfuscated node, and an empty node with a zero reference size;
-    - a sequence feed with several updates, v1 and v2, and its manifest; a feed whose latest update names raw bytes; an empty feed;
+    - sequence feeds and their manifests: v1 updates; v2 updates whose latest is a manifest, served with `swarm-feed-resolved-version: v2`; a feed whose latest update names raw bytes; an empty feed;
     - **encrypted content only where the walk meets it:** a feed whose v1 update is 80 bytes, and a manifest node with 64-byte references below a plain root, each `unverifiable` with nothing released ([Encrypted references](#encrypted-references));
     - for each, every chunk by address, and Ant's answers to a request list (`/bzz/<ref>/<path>` with and without a query, `Range`, `If-Range`, `If-None-Match` and `HEAD`): status, headers and body.
   - **Swarm shapes Ant accepts that a simple reader wouldn't,** recorded from Ant too:

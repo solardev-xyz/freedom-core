@@ -1139,6 +1139,26 @@ impl Swarm {
         }
         self.feed_manifest("feed-v2", &owner, &topic_v2, updates)?;
 
+        // v2 again, its latest update a manifest: the answers carry
+        // swarm-feed-resolved-version v2.
+        let topic_v2m = ant_crypto::keccak256(b"topic-v2-manifest");
+        let mut updates = Vec::new();
+        for (i, r) in [small, site_b].iter().enumerate() {
+            let wire = self.network.get(r).cloned().ok_or("v2 content root")?;
+            let span = u64::from_le_bytes(wire[..8].try_into().map_err(|_| "span")?);
+            updates.push(self.feed_update_wrapping(
+                &secret,
+                &owner,
+                &topic_v2m,
+                i as u64,
+                span,
+                &wire[8..],
+                "v2",
+                h(r),
+            )?);
+        }
+        self.feed_manifest("feed-v2-manifest", &owner, &topic_v2m, updates)?;
+
         // An 80-byte v1 update: its reference is 64 bytes, encrypted.
         let data = content::bytes("feed-encrypted-file", 3000);
         let enc = split_bytes_encrypted_with_keys(&data, 0, key_stream("feed-encrypted-file"));
