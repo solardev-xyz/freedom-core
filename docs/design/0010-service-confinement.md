@@ -184,7 +184,9 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
   - each file's real location after its symlinks, as for the resolver files ([The recommendation](#the-recommendation)).
 
   Loading a library needs only the read right: Landlock's execute right covers `execve`, not mapping a library that is open for reading. Nothing in the C library's directory is secret: it is the system's own code.
-- **A warm-up before `confine`:** in `direct` mode, the service resolves `localhost` once (`getaddrinfo`) before it confines itself. So glibc has read its configuration and loaded the sources a local answer reaches while every file is still readable, and a broken resolver shows up before untrusted input. Sources a lookup reaches later load from the granted directory.
+- **No lookup before `confine`,** in either mode. glibc reads its configuration and loads its sources at the first lookup after it, from the grants above.
+  - **A warm-up would gain nothing:** a `localhost` lookup stops at `files` and loads no `dns`.
+  - **It could also keep a socket across the boundary.** With `hosts: sss files dns`, SSSD's client would connect to its socket and keep that connection cached, and neither Landlock nor seccomp revokes a connection made before them. So no source ever connects before the rules ([The recommendation](#the-recommendation), step 1).
 - **Sources that need a local socket are refused:**
   - **Which:** `resolve` (systemd-resolved's varlink socket), `mdns` and `mdns4_minimal` (avahi), nscd's cache, and `sss`.
   - **What happens:** seccomp refuses the socket. The source answers that it is unavailable, and glibc goes on to the next source, as its default action for an unavailable source says.
@@ -195,8 +197,8 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
   - **The report:** the service reads `/etc/nsswitch.conf` before `confine`, and `confinement` gives `"resolution": "system"`, or `"files_only"` with its reason, so main can show why. It doesn't confine less for it.
 - **Qualified on the release runtime,** not only CI's (Tests, *Before shipping*):
   - the release binaries;
-  - the oldest glibc the browser runs on (Electron's floor is 2.25; Ubuntu 18.04's 2.27, say), one from before 2.34, and a current one;
-  - in each, a fresh first lookup after confinement, with nothing but the warm-up before it;
+  - glibc 2.25, the oldest the browser runs on (Electron's floor), another from before 2.34, and a current one;
+  - in each, a first lookup after confinement, with no lookup before it;
   - with systemd-resolved's `resolve` source and avahi's `mdns4_minimal` in `nsswitch.conf`, and without them.
 
 **Namespaces** (an unprivileged user namespace, then mount, PID, IPC and network namespaces, as `bubblewrap` builds them) would give a private view of the filesystem and of processes. They aren't recommended:
@@ -309,14 +311,16 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
      - every inherited descriptor above 2 is closed (`close_range` on Linux, a loop over `/dev/fd` on macOS), so no connection main's process leaked stays usable;
      - the panic hook is installed, and the process hardened;
      - for the persistent IPFS process and `freedom-radicled`: the lock is taken, and the data directory is created and opened. The ephemeral IPFS process takes no lock and opens no directory: its read-write grant is empty.
+     - **Nothing else:** no socket, no name lookup, and no file outside the grants. Logging writes stderr only, NAT64 discovery starts with the runtime after `confine`, and the TLS roots are built in.
    - **After it,** everything that starts a thread: logging's writer (`log::init`; lines before it are written directly), the async runtimes (built explicitly, never by `#[tokio::main]`), `conn::run`'s reader, writer, stdin and lifecycle threads, and the watchdogs. Then the handshake, and only then any untrusted input.
    - **Why:** before ABI 8, Landlock restricts only the calling thread and the threads it starts later. A thread started earlier stays unconfined, and a compromise could use it. seccomp is installed with `TSYNC`, and Landlock with its `TSYNC` from ABI 8, as backstops. The order doesn't rely on them.
    - **Checked:** `confine` counts the process's threads first (`/proc/self/task` on Linux). More than one is a bug, so the service exits 77 rather than report confinement.
+   - **Checked too: no socket crosses.** Landlock and seccomp check new opens and calls only. Nothing they do closes or revokes a descriptor opened before them, and a connected socket stays usable. So `confine` reads its descriptor table (`/proc/self/fd`). A socket above stderr, which only something before it can have opened (an NSS source, say), is a bug, and the service exits 77. The descriptors that may cross are stdio, the lock and the service's own directories.
 2. **Linux:**
    - No-new-privileges.
    - Landlock at the best ABI available, with every right that ABI knows handled:
      - read and write on the data directory, with no execute and no special files (sockets, FIFOs, devices); `refer` on it for `freedom-radicled`; nothing at all for the ephemeral IPFS process;
-     - read only on glibc's resolver configuration and the C library's directory ([Name resolution](#name-resolution-through-glibc)), `/proc/self` and the cgroup files, after the `direct`-mode warm-up. For a resolver file, the grant names the directory that holds it after its symlinks are followed (`/run/systemd/resolve/` with systemd-resolved), so a replaced file stays readable. A file that sits in `/etc` itself is granted alone. Once replaced, it is unreadable until the next process: NAT64 discovery then reports `unknown` and fails closed, as 0007 says for a failed resolver, and lookups may use stale or default servers;
+     - read only on glibc's resolver configuration and the C library's directory ([Name resolution](#name-resolution-through-glibc)), `/proc/self` and the cgroup files. For a resolver file, the grant names the directory that holds it after its symlinks are followed (`/run/systemd/resolve/` with systemd-resolved), so a replaced file stays readable. A file that sits in `/etc` itself is granted alone. Once replaced, it is unreadable until the next process: NAT64 discovery then reports `unknown` and fails closed, as 0007 says for a failed resolver, and lookups may use stale or default servers;
      - no execute right anywhere.
      - From ABI 4: TCP `connect` to any port in `direct` mode, and only the proxy's port in `socks5` mode, on any address, since Landlock's rules name ports only; no TCP `bind`.
      - From ABI 6: both scopes. From ABI 9: `resolve_unix`, with no rule.
@@ -440,6 +444,7 @@ Through the binary, in CI's job for each OS:
   - **qualification under the metadata rule:** SQLite creates and checkpoints its journal and WAL, and libgit2 creates a repository, writes loose objects and packs, and writes an existing object again, all without error;
   - a resolver file replaced by a rename while the service runs: still readable through its directory's grant; in `/etc`, discovery reports `unknown`;
   - the service still passes its contract suite confined.
+- **Descriptors:** a UNIX socket connected before `confine`, as an NSS client's cached connection would be, makes it refuse (exit 77). In each service, the descriptors open at `confine` are exactly stdio, the lock and the data directory's.
 - **Threads:** a test hook reads a canary from every kind of thread the real binary has: the main thread, the log writer, the reader, writer, stdin and lifecycle threads, a runtime worker and a blocking-pool thread. Each fails. A hook that starts a thread before `confine` makes the service exit 77.
 - **Processes:**
   - a test hook's attempt to run `/bin/sh` (`cmd.exe` on Windows) fails;
@@ -453,7 +458,7 @@ Through the binary, in CI's job for each OS:
   - in `socks5` mode, a TCP connection to any port but the proxy's is refused by the kernel, on Linux from ABI 4 and on macOS;
   - **a LAN proxy:** `--network socks5:<a private address>:<port>`, with a SOCKS proxy listening there: the service reaches it, and on macOS its profile has the port-only rule;
   - **name resolution, on Linux** (`freedom-radicled`, and `freedom-ipfsd`'s `getaddrinfo` if it makes any):
-    - a fresh first lookup after confinement resolves a name in `/etc/hosts` and one through DNS, with nothing before it but the warm-up;
+    - a first lookup after confinement, with no lookup before it, resolves a name in `/etc/hosts` and one through DNS;
     - with `resolve` before `dns` in a fixture `nsswitch.conf`, the lookup falls back to `dns`;
     - with no `dns` source, `confinement` reports `files_only`;
   - **policy changes:** `direct` → `socks5` → `direct`, and Arti's port P → Q. Each runs in a new generation with the new `--network`; the old generation's process has exited; and a private instance, recreated after each change, gets the new rules;
@@ -475,7 +480,7 @@ Through the binary, in CI's job for each OS:
   - a kill and a timeout during the import, then a restart: the marker stays, the service reconciles, and the reply is `outcome_unknown`;
   - **an unclean stop before admission:** a write and a fetch unfinished at the stop's 5 s exit, leaving the marker and a ref lock file. The import process repairs them before it admits the import. A `rad.import_repo` sent before `rad.reconcile` has replied gets `stopped` and changes nothing. A reconciliation that reaches its deadline imports nothing.
 - **Windows:** the job is assigned inside libuv's job, and each mitigation reads back as set.
-- **Before shipping, on the release runtime** (each release's checklist): the release binaries, confined, on the oldest glibc the browser runs on, one from before 2.34 and a current one, each with a fresh first lookup after confinement; with and without `resolve` and `mdns4_minimal` in `nsswitch.conf`; and `socks5` mode through a LAN proxy, on Linux and macOS.
+- **Before shipping, on the release runtime** (each release's checklist): the release binaries, confined, on glibc 2.25 (the oldest the browser runs on), another from before 2.34 and a current one, each with a first lookup after confinement and none before it; with and without `resolve` and `mdns4_minimal` in `nsswitch.conf`; and `socks5` mode through a LAN proxy, on Linux and macOS.
 - **Before shipping, measured:**
   - cold start to `hello`;
   - IPFS over direct TCP and QUIC, `socks5` reconnects to Arti, and SQLite;
