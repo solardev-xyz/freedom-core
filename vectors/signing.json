@@ -20,6 +20,7 @@
     "deviation": "ethers signs these; the core must reject them (design 0002)",
     "typed_data_json": "typed data as JSON text, which ethers signs as JSON.parse reads it; the core must read the text the same way",
     "payload": "TypedDataEncoder.getPayload's output, for each typed-data case the core accepts: the core's view is it, with primaryType as primary_type (design 0002, #88)",
+    "reference": "for a type or field named __proto__, which the core refuses (proto-name): ethers' TypedDataEncoder.hash and getPayload of the input alone, beside the signing result",
     "report": "the view's named_type and chain for the primary_type and chain_id given, from the design text: ethers ignores both"
   },
   "keys": [
@@ -29114,6 +29115,1284 @@
         "status": "success",
         "signature": "0xc1fb7ea0132a130b1c7bc69eec5893976dfeb05b45990551857d9973a8d1ce5174174d27534ae397db65034327dd94154baaf5e62191b4829d7487abb4f9ccbf1b",
         "hash": "0x0ecf28593a6e3383005c560b250c81754f4f6d4528e6f95d8e3766abf03b8dea"
+      }
+    },
+    {
+      "id": "error-proto-type-name/account-0",
+      "keyId": "account-0",
+      "typed_data": {
+        "domain": {
+          "name": "P"
+        },
+        "types": {
+          "__proto__": [
+            {
+              "name": "v",
+              "type": "uint8"
+            }
+          ]
+        },
+        "message": {
+          "v": 1
+        }
+      },
+      "result": {
+        "status": "error",
+        "message": "types[name] is not iterable"
+      },
+      "reference": {
+        "status": "error",
+        "message": "types[name] is not iterable"
+      }
+    },
+    {
+      "id": "error-proto-type-name/account-max",
+      "keyId": "account-max",
+      "typed_data": {
+        "domain": {
+          "name": "P"
+        },
+        "types": {
+          "__proto__": [
+            {
+              "name": "v",
+              "type": "uint8"
+            }
+          ]
+        },
+        "message": {
+          "v": 1
+        }
+      },
+      "result": {
+        "status": "error",
+        "message": "types[name] is not iterable"
+      },
+      "reference": {
+        "status": "error",
+        "message": "types[name] is not iterable"
+      }
+    },
+    {
+      "id": "error-proto-type-name/legal-account-1",
+      "keyId": "legal-account-1",
+      "typed_data": {
+        "domain": {
+          "name": "P"
+        },
+        "types": {
+          "__proto__": [
+            {
+              "name": "v",
+              "type": "uint8"
+            }
+          ]
+        },
+        "message": {
+          "v": 1
+        }
+      },
+      "result": {
+        "status": "error",
+        "message": "types[name] is not iterable"
+      },
+      "reference": {
+        "status": "error",
+        "message": "types[name] is not iterable"
+      }
+    },
+    {
+      "id": "error-proto-type-name-referenced/account-0",
+      "keyId": "account-0",
+      "typed_data": {
+        "domain": {
+          "name": "P"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "p",
+              "type": "__proto__"
+            }
+          ],
+          "__proto__": [
+            {
+              "name": "v",
+              "type": "uint8"
+            }
+          ]
+        },
+        "message": {
+          "p": {
+            "v": 1
+          }
+        }
+      },
+      "result": {
+        "status": "error",
+        "message": "types[name] is not iterable"
+      },
+      "reference": {
+        "status": "error",
+        "message": "types[name] is not iterable"
+      }
+    },
+    {
+      "id": "error-proto-type-name-referenced/account-max",
+      "keyId": "account-max",
+      "typed_data": {
+        "domain": {
+          "name": "P"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "p",
+              "type": "__proto__"
+            }
+          ],
+          "__proto__": [
+            {
+              "name": "v",
+              "type": "uint8"
+            }
+          ]
+        },
+        "message": {
+          "p": {
+            "v": 1
+          }
+        }
+      },
+      "result": {
+        "status": "error",
+        "message": "types[name] is not iterable"
+      },
+      "reference": {
+        "status": "error",
+        "message": "types[name] is not iterable"
+      }
+    },
+    {
+      "id": "error-proto-type-name-referenced/legal-account-1",
+      "keyId": "legal-account-1",
+      "typed_data": {
+        "domain": {
+          "name": "P"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "p",
+              "type": "__proto__"
+            }
+          ],
+          "__proto__": [
+            {
+              "name": "v",
+              "type": "uint8"
+            }
+          ]
+        },
+        "message": {
+          "p": {
+            "v": 1
+          }
+        }
+      },
+      "result": {
+        "status": "error",
+        "message": "types[name] is not iterable"
+      },
+      "reference": {
+        "status": "error",
+        "message": "types[name] is not iterable"
+      }
+    },
+    {
+      "id": "error-proto-field-uint/account-0",
+      "keyId": "account-0",
+      "typed_data": {
+        "domain": {
+          "name": "P"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "__proto__",
+              "type": "uint256"
+            }
+          ]
+        },
+        "message": {
+          "__proto__": 1
+        }
+      },
+      "result": {
+        "status": "error",
+        "message": "invalid BigNumberish value"
+      },
+      "reference": {
+        "status": "success",
+        "hash": "0xa201f7607dc367cc7658c386d5a7ff99f7ac9d219a3c5cf6940ffaef0fe4eac7",
+        "payload": {
+          "types": {
+            "M": [
+              {
+                "name": "__proto__",
+                "type": "uint256"
+              }
+            ],
+            "EIP712Domain": [
+              {
+                "name": "name",
+                "type": "string"
+              }
+            ]
+          },
+          "domain": {
+            "name": "P"
+          },
+          "primaryType": "M",
+          "message": {}
+        }
+      }
+    },
+    {
+      "id": "error-proto-field-uint/account-max",
+      "keyId": "account-max",
+      "typed_data": {
+        "domain": {
+          "name": "P"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "__proto__",
+              "type": "uint256"
+            }
+          ]
+        },
+        "message": {
+          "__proto__": 1
+        }
+      },
+      "result": {
+        "status": "error",
+        "message": "invalid BigNumberish value"
+      },
+      "reference": {
+        "status": "success",
+        "hash": "0xa201f7607dc367cc7658c386d5a7ff99f7ac9d219a3c5cf6940ffaef0fe4eac7",
+        "payload": {
+          "types": {
+            "M": [
+              {
+                "name": "__proto__",
+                "type": "uint256"
+              }
+            ],
+            "EIP712Domain": [
+              {
+                "name": "name",
+                "type": "string"
+              }
+            ]
+          },
+          "domain": {
+            "name": "P"
+          },
+          "primaryType": "M",
+          "message": {}
+        }
+      }
+    },
+    {
+      "id": "error-proto-field-uint/legal-account-1",
+      "keyId": "legal-account-1",
+      "typed_data": {
+        "domain": {
+          "name": "P"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "__proto__",
+              "type": "uint256"
+            }
+          ]
+        },
+        "message": {
+          "__proto__": 1
+        }
+      },
+      "result": {
+        "status": "error",
+        "message": "invalid BigNumberish value"
+      },
+      "reference": {
+        "status": "success",
+        "hash": "0xa201f7607dc367cc7658c386d5a7ff99f7ac9d219a3c5cf6940ffaef0fe4eac7",
+        "payload": {
+          "types": {
+            "M": [
+              {
+                "name": "__proto__",
+                "type": "uint256"
+              }
+            ],
+            "EIP712Domain": [
+              {
+                "name": "name",
+                "type": "string"
+              }
+            ]
+          },
+          "domain": {
+            "name": "P"
+          },
+          "primaryType": "M",
+          "message": {}
+        }
+      }
+    },
+    {
+      "id": "error-proto-field-string/account-0",
+      "keyId": "account-0",
+      "typed_data": {
+        "domain": {
+          "name": "P"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "__proto__",
+              "type": "string"
+            },
+            {
+              "name": "a",
+              "type": "uint8"
+            }
+          ]
+        },
+        "message": {
+          "__proto__": "x",
+          "a": 1
+        }
+      },
+      "result": {
+        "status": "error",
+        "message": "invalid string value"
+      },
+      "reference": {
+        "status": "success",
+        "hash": "0x93d903f27fa3700c844cadef2ae7a681ccc1bec735b77105c2ef23a3bcd90b9b",
+        "payload": {
+          "types": {
+            "M": [
+              {
+                "name": "__proto__",
+                "type": "string"
+              },
+              {
+                "name": "a",
+                "type": "uint8"
+              }
+            ],
+            "EIP712Domain": [
+              {
+                "name": "name",
+                "type": "string"
+              }
+            ]
+          },
+          "domain": {
+            "name": "P"
+          },
+          "primaryType": "M",
+          "message": {
+            "a": "1"
+          }
+        }
+      }
+    },
+    {
+      "id": "error-proto-field-string/account-max",
+      "keyId": "account-max",
+      "typed_data": {
+        "domain": {
+          "name": "P"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "__proto__",
+              "type": "string"
+            },
+            {
+              "name": "a",
+              "type": "uint8"
+            }
+          ]
+        },
+        "message": {
+          "__proto__": "x",
+          "a": 1
+        }
+      },
+      "result": {
+        "status": "error",
+        "message": "invalid string value"
+      },
+      "reference": {
+        "status": "success",
+        "hash": "0x93d903f27fa3700c844cadef2ae7a681ccc1bec735b77105c2ef23a3bcd90b9b",
+        "payload": {
+          "types": {
+            "M": [
+              {
+                "name": "__proto__",
+                "type": "string"
+              },
+              {
+                "name": "a",
+                "type": "uint8"
+              }
+            ],
+            "EIP712Domain": [
+              {
+                "name": "name",
+                "type": "string"
+              }
+            ]
+          },
+          "domain": {
+            "name": "P"
+          },
+          "primaryType": "M",
+          "message": {
+            "a": "1"
+          }
+        }
+      }
+    },
+    {
+      "id": "error-proto-field-string/legal-account-1",
+      "keyId": "legal-account-1",
+      "typed_data": {
+        "domain": {
+          "name": "P"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "__proto__",
+              "type": "string"
+            },
+            {
+              "name": "a",
+              "type": "uint8"
+            }
+          ]
+        },
+        "message": {
+          "__proto__": "x",
+          "a": 1
+        }
+      },
+      "result": {
+        "status": "error",
+        "message": "invalid string value"
+      },
+      "reference": {
+        "status": "success",
+        "hash": "0x93d903f27fa3700c844cadef2ae7a681ccc1bec735b77105c2ef23a3bcd90b9b",
+        "payload": {
+          "types": {
+            "M": [
+              {
+                "name": "__proto__",
+                "type": "string"
+              },
+              {
+                "name": "a",
+                "type": "uint8"
+              }
+            ],
+            "EIP712Domain": [
+              {
+                "name": "name",
+                "type": "string"
+              }
+            ]
+          },
+          "domain": {
+            "name": "P"
+          },
+          "primaryType": "M",
+          "message": {
+            "a": "1"
+          }
+        }
+      }
+    },
+    {
+      "id": "deviation-proto-field-struct/account-0",
+      "keyId": "account-0",
+      "typed_data": {
+        "domain": {
+          "name": "P"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "__proto__",
+              "type": "S"
+            }
+          ],
+          "S": [
+            {
+              "name": "v",
+              "type": "uint8"
+            }
+          ]
+        },
+        "message": {
+          "__proto__": {
+            "v": 1
+          }
+        }
+      },
+      "deviation": "proto-name",
+      "result": {
+        "status": "success",
+        "signature": "0x56b4bee8054898b559cea4a995f0bc283da0b8d09289257718c4ad1af200546d6d63b86ad3b0e85c71f4a1a8ee54a51b6fadae9f0ab0ec6441b99b78bcde364d1b",
+        "hash": "0xbf3aae88b4bd881bcf70ed3c07e36106af33885d3b557032b96a1e109fff7399"
+      },
+      "reference": {
+        "status": "success",
+        "hash": "0xbf3aae88b4bd881bcf70ed3c07e36106af33885d3b557032b96a1e109fff7399",
+        "payload": {
+          "types": {
+            "M": [
+              {
+                "name": "__proto__",
+                "type": "S"
+              }
+            ],
+            "S": [
+              {
+                "name": "v",
+                "type": "uint8"
+              }
+            ],
+            "EIP712Domain": [
+              {
+                "name": "name",
+                "type": "string"
+              }
+            ]
+          },
+          "domain": {
+            "name": "P"
+          },
+          "primaryType": "M",
+          "message": {}
+        }
+      }
+    },
+    {
+      "id": "deviation-proto-field-struct/account-max",
+      "keyId": "account-max",
+      "typed_data": {
+        "domain": {
+          "name": "P"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "__proto__",
+              "type": "S"
+            }
+          ],
+          "S": [
+            {
+              "name": "v",
+              "type": "uint8"
+            }
+          ]
+        },
+        "message": {
+          "__proto__": {
+            "v": 1
+          }
+        }
+      },
+      "deviation": "proto-name",
+      "result": {
+        "status": "success",
+        "signature": "0x4ef22635245183ed91029218b2ba91a5b420f1845866d7b541a75895a019e7df26f4b348f8192b95978e85c5cd373c2693dc728786da65853e384a7b4ffef1491c",
+        "hash": "0xbf3aae88b4bd881bcf70ed3c07e36106af33885d3b557032b96a1e109fff7399"
+      },
+      "reference": {
+        "status": "success",
+        "hash": "0xbf3aae88b4bd881bcf70ed3c07e36106af33885d3b557032b96a1e109fff7399",
+        "payload": {
+          "types": {
+            "M": [
+              {
+                "name": "__proto__",
+                "type": "S"
+              }
+            ],
+            "S": [
+              {
+                "name": "v",
+                "type": "uint8"
+              }
+            ],
+            "EIP712Domain": [
+              {
+                "name": "name",
+                "type": "string"
+              }
+            ]
+          },
+          "domain": {
+            "name": "P"
+          },
+          "primaryType": "M",
+          "message": {}
+        }
+      }
+    },
+    {
+      "id": "deviation-proto-field-struct/legal-account-1",
+      "keyId": "legal-account-1",
+      "typed_data": {
+        "domain": {
+          "name": "P"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "__proto__",
+              "type": "S"
+            }
+          ],
+          "S": [
+            {
+              "name": "v",
+              "type": "uint8"
+            }
+          ]
+        },
+        "message": {
+          "__proto__": {
+            "v": 1
+          }
+        }
+      },
+      "deviation": "proto-name",
+      "result": {
+        "status": "success",
+        "signature": "0x286351c1848bad75dae97b56a1d34dc0ee3b524ee2c0d3231497f6fddacdba581a032b8315245bb3e10507a28aad9ecc7e1650150559a6ced7e3bedc14208a731b",
+        "hash": "0xbf3aae88b4bd881bcf70ed3c07e36106af33885d3b557032b96a1e109fff7399"
+      },
+      "reference": {
+        "status": "success",
+        "hash": "0xbf3aae88b4bd881bcf70ed3c07e36106af33885d3b557032b96a1e109fff7399",
+        "payload": {
+          "types": {
+            "M": [
+              {
+                "name": "__proto__",
+                "type": "S"
+              }
+            ],
+            "S": [
+              {
+                "name": "v",
+                "type": "uint8"
+              }
+            ],
+            "EIP712Domain": [
+              {
+                "name": "name",
+                "type": "string"
+              }
+            ]
+          },
+          "domain": {
+            "name": "P"
+          },
+          "primaryType": "M",
+          "message": {}
+        }
+      }
+    },
+    {
+      "id": "deviation-proto-field-array/account-0",
+      "keyId": "account-0",
+      "typed_data": {
+        "domain": {
+          "name": "P"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "__proto__",
+              "type": "uint8[]"
+            }
+          ]
+        },
+        "message": {
+          "__proto__": [
+            1,
+            2
+          ]
+        }
+      },
+      "deviation": "proto-name",
+      "result": {
+        "status": "success",
+        "signature": "0x1983c6ddbd8e3b214b021c34998ee1ce876f28271d8be3fbe5e738fab549bc862899867865ea7df0a1f007d84857040f738ae2b96aca9d8de827aaab7361e0c01c",
+        "hash": "0xf2050362d9243bc9ad26927e490c7e7dfb57eb247ef715f03a006adad2670351"
+      },
+      "reference": {
+        "status": "success",
+        "hash": "0xf2050362d9243bc9ad26927e490c7e7dfb57eb247ef715f03a006adad2670351",
+        "payload": {
+          "types": {
+            "M": [
+              {
+                "name": "__proto__",
+                "type": "uint8[]"
+              }
+            ],
+            "EIP712Domain": [
+              {
+                "name": "name",
+                "type": "string"
+              }
+            ]
+          },
+          "domain": {
+            "name": "P"
+          },
+          "primaryType": "M",
+          "message": {}
+        }
+      }
+    },
+    {
+      "id": "deviation-proto-field-array/account-max",
+      "keyId": "account-max",
+      "typed_data": {
+        "domain": {
+          "name": "P"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "__proto__",
+              "type": "uint8[]"
+            }
+          ]
+        },
+        "message": {
+          "__proto__": [
+            1,
+            2
+          ]
+        }
+      },
+      "deviation": "proto-name",
+      "result": {
+        "status": "success",
+        "signature": "0xc48c8105b0588055804886d4235d9667628f49e07ba8b9da71f4889bc5d6623c5f9a10aacb187f20a1a017307a13adc47552788bcefd1a17fccf6070706cb03a1b",
+        "hash": "0xf2050362d9243bc9ad26927e490c7e7dfb57eb247ef715f03a006adad2670351"
+      },
+      "reference": {
+        "status": "success",
+        "hash": "0xf2050362d9243bc9ad26927e490c7e7dfb57eb247ef715f03a006adad2670351",
+        "payload": {
+          "types": {
+            "M": [
+              {
+                "name": "__proto__",
+                "type": "uint8[]"
+              }
+            ],
+            "EIP712Domain": [
+              {
+                "name": "name",
+                "type": "string"
+              }
+            ]
+          },
+          "domain": {
+            "name": "P"
+          },
+          "primaryType": "M",
+          "message": {}
+        }
+      }
+    },
+    {
+      "id": "deviation-proto-field-array/legal-account-1",
+      "keyId": "legal-account-1",
+      "typed_data": {
+        "domain": {
+          "name": "P"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "__proto__",
+              "type": "uint8[]"
+            }
+          ]
+        },
+        "message": {
+          "__proto__": [
+            1,
+            2
+          ]
+        }
+      },
+      "deviation": "proto-name",
+      "result": {
+        "status": "success",
+        "signature": "0xf955a397adf336a98e8edc0236de42876e86af9b815102a513e5ea03bd005292245e62acdd9752d4e3951a40c03db4c2963b8895e2100d0d0a8cb22c0182b73d1b",
+        "hash": "0xf2050362d9243bc9ad26927e490c7e7dfb57eb247ef715f03a006adad2670351"
+      },
+      "reference": {
+        "status": "success",
+        "hash": "0xf2050362d9243bc9ad26927e490c7e7dfb57eb247ef715f03a006adad2670351",
+        "payload": {
+          "types": {
+            "M": [
+              {
+                "name": "__proto__",
+                "type": "uint8[]"
+              }
+            ],
+            "EIP712Domain": [
+              {
+                "name": "name",
+                "type": "string"
+              }
+            ]
+          },
+          "domain": {
+            "name": "P"
+          },
+          "primaryType": "M",
+          "message": {}
+        }
+      }
+    },
+    {
+      "id": "deviation-proto-field-struct-array/account-0",
+      "keyId": "account-0",
+      "typed_data": {
+        "domain": {
+          "name": "P"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "__proto__",
+              "type": "S[]"
+            }
+          ],
+          "S": [
+            {
+              "name": "v",
+              "type": "uint8"
+            }
+          ]
+        },
+        "message": {
+          "__proto__": [
+            {
+              "v": 1
+            }
+          ]
+        }
+      },
+      "deviation": "proto-name",
+      "result": {
+        "status": "success",
+        "signature": "0x6a1b64db99e544419808b908b8e7147349c8f64d85d87f0dc7c9b547a73f3d9a52402298494977af3757556cddc8738aeaae8b3e2e8c68f1ee932b6191040a581c",
+        "hash": "0x6085fe9c5ad35eaf26e7841dcf4d8e86867bdb1d75cae3aa8a9f46e6bc5a315d"
+      },
+      "reference": {
+        "status": "success",
+        "hash": "0x6085fe9c5ad35eaf26e7841dcf4d8e86867bdb1d75cae3aa8a9f46e6bc5a315d",
+        "payload": {
+          "types": {
+            "M": [
+              {
+                "name": "__proto__",
+                "type": "S[]"
+              }
+            ],
+            "S": [
+              {
+                "name": "v",
+                "type": "uint8"
+              }
+            ],
+            "EIP712Domain": [
+              {
+                "name": "name",
+                "type": "string"
+              }
+            ]
+          },
+          "domain": {
+            "name": "P"
+          },
+          "primaryType": "M",
+          "message": {}
+        }
+      }
+    },
+    {
+      "id": "deviation-proto-field-struct-array/account-max",
+      "keyId": "account-max",
+      "typed_data": {
+        "domain": {
+          "name": "P"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "__proto__",
+              "type": "S[]"
+            }
+          ],
+          "S": [
+            {
+              "name": "v",
+              "type": "uint8"
+            }
+          ]
+        },
+        "message": {
+          "__proto__": [
+            {
+              "v": 1
+            }
+          ]
+        }
+      },
+      "deviation": "proto-name",
+      "result": {
+        "status": "success",
+        "signature": "0x530cad4015a836c5f84ff170b437662101867c295e8122e1f5eb3f6b18d66756123f7444103a49eef0b1c18ccbb37719bfcbfd989c4deb22bc5aeae995da064b1c",
+        "hash": "0x6085fe9c5ad35eaf26e7841dcf4d8e86867bdb1d75cae3aa8a9f46e6bc5a315d"
+      },
+      "reference": {
+        "status": "success",
+        "hash": "0x6085fe9c5ad35eaf26e7841dcf4d8e86867bdb1d75cae3aa8a9f46e6bc5a315d",
+        "payload": {
+          "types": {
+            "M": [
+              {
+                "name": "__proto__",
+                "type": "S[]"
+              }
+            ],
+            "S": [
+              {
+                "name": "v",
+                "type": "uint8"
+              }
+            ],
+            "EIP712Domain": [
+              {
+                "name": "name",
+                "type": "string"
+              }
+            ]
+          },
+          "domain": {
+            "name": "P"
+          },
+          "primaryType": "M",
+          "message": {}
+        }
+      }
+    },
+    {
+      "id": "deviation-proto-field-struct-array/legal-account-1",
+      "keyId": "legal-account-1",
+      "typed_data": {
+        "domain": {
+          "name": "P"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "__proto__",
+              "type": "S[]"
+            }
+          ],
+          "S": [
+            {
+              "name": "v",
+              "type": "uint8"
+            }
+          ]
+        },
+        "message": {
+          "__proto__": [
+            {
+              "v": 1
+            }
+          ]
+        }
+      },
+      "deviation": "proto-name",
+      "result": {
+        "status": "success",
+        "signature": "0x5a6aead09030c31747339cc422731b7c0d50db34ef08647491cb69ee6a5801c22d996f40298f75c15a3299fd4aadf4aac4a2e2c038d4cdad87797f9c919639081b",
+        "hash": "0x6085fe9c5ad35eaf26e7841dcf4d8e86867bdb1d75cae3aa8a9f46e6bc5a315d"
+      },
+      "reference": {
+        "status": "success",
+        "hash": "0x6085fe9c5ad35eaf26e7841dcf4d8e86867bdb1d75cae3aa8a9f46e6bc5a315d",
+        "payload": {
+          "types": {
+            "M": [
+              {
+                "name": "__proto__",
+                "type": "S[]"
+              }
+            ],
+            "S": [
+              {
+                "name": "v",
+                "type": "uint8"
+              }
+            ],
+            "EIP712Domain": [
+              {
+                "name": "name",
+                "type": "string"
+              }
+            ]
+          },
+          "domain": {
+            "name": "P"
+          },
+          "primaryType": "M",
+          "message": {}
+        }
+      }
+    },
+    {
+      "id": "deviation-proto-field-nested-bool/account-0",
+      "keyId": "account-0",
+      "typed_data": {
+        "domain": {
+          "name": "P"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "s",
+              "type": "S"
+            }
+          ],
+          "S": [
+            {
+              "name": "__proto__",
+              "type": "bool"
+            }
+          ]
+        },
+        "message": {
+          "s": {
+            "__proto__": true
+          }
+        }
+      },
+      "deviation": "proto-name",
+      "result": {
+        "status": "success",
+        "signature": "0xcbf65956354f78d4d419dc082240554189dad27e26a1c02be4eff01f82a26d7f24b173272a99e12ca043be1f7719bfdd69e6083be56ce5e03f5f57a876837a231b",
+        "hash": "0x198304e6d8b1ce86d8cdbdd66e9ec9d994b7d209c32bf3ce6eeb0d96822bdbbf"
+      },
+      "reference": {
+        "status": "success",
+        "hash": "0x198304e6d8b1ce86d8cdbdd66e9ec9d994b7d209c32bf3ce6eeb0d96822bdbbf",
+        "payload": {
+          "types": {
+            "M": [
+              {
+                "name": "s",
+                "type": "S"
+              }
+            ],
+            "S": [
+              {
+                "name": "__proto__",
+                "type": "bool"
+              }
+            ],
+            "EIP712Domain": [
+              {
+                "name": "name",
+                "type": "string"
+              }
+            ]
+          },
+          "domain": {
+            "name": "P"
+          },
+          "primaryType": "M",
+          "message": {
+            "s": {}
+          }
+        }
+      }
+    },
+    {
+      "id": "deviation-proto-field-nested-bool/account-max",
+      "keyId": "account-max",
+      "typed_data": {
+        "domain": {
+          "name": "P"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "s",
+              "type": "S"
+            }
+          ],
+          "S": [
+            {
+              "name": "__proto__",
+              "type": "bool"
+            }
+          ]
+        },
+        "message": {
+          "s": {
+            "__proto__": true
+          }
+        }
+      },
+      "deviation": "proto-name",
+      "result": {
+        "status": "success",
+        "signature": "0x438ee25699dbdd12638fccc3b715d15ba499ea4e887bcf1f559de23eb8c1cdb23e05f51167b5813777cbbff3f894a585be499463a2baeaa591f758adde11a5c31b",
+        "hash": "0x198304e6d8b1ce86d8cdbdd66e9ec9d994b7d209c32bf3ce6eeb0d96822bdbbf"
+      },
+      "reference": {
+        "status": "success",
+        "hash": "0x198304e6d8b1ce86d8cdbdd66e9ec9d994b7d209c32bf3ce6eeb0d96822bdbbf",
+        "payload": {
+          "types": {
+            "M": [
+              {
+                "name": "s",
+                "type": "S"
+              }
+            ],
+            "S": [
+              {
+                "name": "__proto__",
+                "type": "bool"
+              }
+            ],
+            "EIP712Domain": [
+              {
+                "name": "name",
+                "type": "string"
+              }
+            ]
+          },
+          "domain": {
+            "name": "P"
+          },
+          "primaryType": "M",
+          "message": {
+            "s": {}
+          }
+        }
+      }
+    },
+    {
+      "id": "deviation-proto-field-nested-bool/legal-account-1",
+      "keyId": "legal-account-1",
+      "typed_data": {
+        "domain": {
+          "name": "P"
+        },
+        "types": {
+          "M": [
+            {
+              "name": "s",
+              "type": "S"
+            }
+          ],
+          "S": [
+            {
+              "name": "__proto__",
+              "type": "bool"
+            }
+          ]
+        },
+        "message": {
+          "s": {
+            "__proto__": true
+          }
+        }
+      },
+      "deviation": "proto-name",
+      "result": {
+        "status": "success",
+        "signature": "0x574faf16be7bd802f9723e5183d827b495851e19ddfde20566675e325d66ab417e123bcf4a5aceaecbcb8761acab40723ecafdaff9e364142f77e95a002a4e3e1c",
+        "hash": "0x198304e6d8b1ce86d8cdbdd66e9ec9d994b7d209c32bf3ce6eeb0d96822bdbbf"
+      },
+      "reference": {
+        "status": "success",
+        "hash": "0x198304e6d8b1ce86d8cdbdd66e9ec9d994b7d209c32bf3ce6eeb0d96822bdbbf",
+        "payload": {
+          "types": {
+            "M": [
+              {
+                "name": "s",
+                "type": "S"
+              }
+            ],
+            "S": [
+              {
+                "name": "__proto__",
+                "type": "bool"
+              }
+            ],
+            "EIP712Domain": [
+              {
+                "name": "name",
+                "type": "string"
+              }
+            ]
+          },
+          "domain": {
+            "name": "P"
+          },
+          "primaryType": "M",
+          "message": {
+            "s": {}
+          }
+        }
       }
     },
     {

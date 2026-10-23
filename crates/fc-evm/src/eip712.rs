@@ -21,6 +21,10 @@
 //!   input size and these limits.
 //! - A type named `EIP712Domain` is refused, as ethers' `getPayload` refuses
 //!   it: the view adds that type itself (#88).
+//! - A type or field named `__proto__` is refused (`proto-name`): ethers
+//!   loses a type of that name, and its visitor drops a field of that name
+//!   from its payload while its hash keeps it, so there is no view to match;
+//!   main, in JavaScript, couldn't carry the key either (#88).
 //!
 //! The pass that hashes also writes the view of what is signed (design 0002,
 //! "What the user is shown", #88): ethers' `getPayload(domain, types,
@@ -55,6 +59,8 @@ const MAX_NAME: usize = 256;
 /// The largest integer a JS number holds exactly.
 const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 const DOMAIN_TYPE: &str = "EIP712Domain";
+/// The one name a JavaScript object can't hold as an ordinary key.
+const PROTO_NAME: &str = "__proto__";
 const DOMAIN_FIELDS: [(&str, &str); 5] = [
     ("name", "string"),
     ("version", "string"),
@@ -218,6 +224,9 @@ impl Types {
             if name == DOMAIN_TYPE {
                 return Err(err("types must not contain EIP712Domain"));
             }
+            if name == PROTO_NAME {
+                return Err(err("a type may not be named __proto__"));
+            }
             if !is_identifier(name) {
                 return Err(err(format!(
                     "type name {} is not an identifier",
@@ -259,6 +268,12 @@ impl Types {
                     return Err(err(format!(
                         "field name {} is not an identifier",
                         quoted(field_name)
+                    )));
+                }
+                if field_name == PROTO_NAME {
+                    return Err(err(format!(
+                        "{}: a field may not be named __proto__",
+                        shortened(name)
                     )));
                 }
                 if !seen.insert(field_name) {
@@ -1130,6 +1145,84 @@ mod tests {
         let message = json!({ "d": { "name": "x" } });
         assert!(typed_data_hash(&json!({}), &types, &message).is_err());
         assert!(typed_data_view(&json!({}), &types, &message, &unbounded()).is_err());
+    }
+
+    /// A type or field named `__proto__` is refused (#88, `proto-name`),
+    /// by the hash and the view alike: primitive, struct and array fields,
+    /// at the top and nested, and the type name, declared or referenced.
+    #[test]
+    fn the_name_proto_is_refused() {
+        let cases = [
+            (
+                r#"{"__proto__":[{"name":"v","type":"uint8"}]}"#,
+                r#"{"v":1}"#,
+            ),
+            (
+                r#"{"M":[{"name":"p","type":"__proto__"}],"__proto__":[{"name":"v","type":"uint8"}]}"#,
+                r#"{"p":{"v":1}}"#,
+            ),
+            (
+                r#"{"M":[{"name":"__proto__","type":"uint256"}]}"#,
+                r#"{"__proto__":1}"#,
+            ),
+            (
+                r#"{"M":[{"name":"__proto__","type":"string"}]}"#,
+                r#"{"__proto__":"x"}"#,
+            ),
+            (
+                r#"{"M":[{"name":"__proto__","type":"bool"}]}"#,
+                r#"{"__proto__":true}"#,
+            ),
+            (
+                r#"{"M":[{"name":"__proto__","type":"S"}],"S":[{"name":"v","type":"uint8"}]}"#,
+                r#"{"__proto__":{"v":1}}"#,
+            ),
+            (
+                r#"{"M":[{"name":"__proto__","type":"uint8[]"}]}"#,
+                r#"{"__proto__":[1,2]}"#,
+            ),
+            (
+                r#"{"M":[{"name":"__proto__","type":"S[2]"}],"S":[]}"#,
+                r#"{"__proto__":[{},{}]}"#,
+            ),
+            (
+                r#"{"M":[{"name":"s","type":"S"}],"S":[{"name":"__proto__","type":"bool"}]}"#,
+                r#"{"s":{"__proto__":true}}"#,
+            ),
+        ];
+        for (types, message) in cases {
+            let types = crate::parse_json(types).unwrap();
+            let message = crate::parse_json(message).unwrap();
+            let hashed = typed_data_hash(&json!({}), &types, &message);
+            assert!(hashed.is_err(), "{types}");
+            let viewed = typed_data_view(&json!({}), &types, &message, &unbounded());
+            assert!(
+                matches!(&viewed, Err(Error::TypedData(m)) if m.contains("__proto__")),
+                "{types}: {viewed:?}"
+            );
+        }
+        // Undeclared, it is only a key the site sent: listed, not signed.
+        let types = json!({ "M": [{ "name": "v", "type": "uint8" }] });
+        let message = crate::parse_json(r#"{"v":1,"__proto__":2}"#).unwrap();
+        let hashed = typed_data_view(&json!({}), &types, &message, &unbounded()).unwrap();
+        let view: Value = serde_json::from_str(&hashed.view).unwrap();
+        assert_eq!(view["ignored"], json!(["__proto__"]));
+        assert_eq!(view["message"], json!({ "v": "1" }));
+        // Other names Object.prototype has are ordinary keys.
+        for name in [
+            "constructor",
+            "toString",
+            "hasOwnProperty",
+            "__proto",
+            "proto__",
+        ] {
+            let types = json!({ "M": [{ "name": name, "type": "uint8" }] });
+            let message = json!({ name: 1 });
+            assert!(
+                typed_data_hash(&json!({}), &types, &message).is_ok(),
+                "{name}"
+            );
+        }
     }
 
     /// The reports compare and never change what is signed (#88).

@@ -77,6 +77,21 @@ const SAFE_TX_TYPES = {
 };
 const SAFE = '0x1234567890AbcdEF1234567890aBcdef12345678';
 
+const PROTO = (types, message) =>
+  JSON.parse(`{"domain":{"name":"P"},"types":${types},"message":${message}}`);
+const PROTO_CASES = [
+  { id: 'error-proto-type-name', proto: true, typed_data: PROTO('{"__proto__":[{"name":"v","type":"uint8"}]}', '{"v":1}') },
+  { id: 'error-proto-type-name-referenced', proto: true, typed_data: PROTO('{"M":[{"name":"p","type":"__proto__"}],"__proto__":[{"name":"v","type":"uint8"}]}', '{"p":{"v":1}}') },
+  { id: 'error-proto-field-uint', proto: true, typed_data: PROTO('{"M":[{"name":"__proto__","type":"uint256"}]}', '{"__proto__":1}') },
+  { id: 'error-proto-field-string', proto: true, typed_data: PROTO('{"M":[{"name":"__proto__","type":"string"},{"name":"a","type":"uint8"}]}', '{"__proto__":"x","a":1}') },
+  { id: 'deviation-proto-field-struct', deviation: 'proto-name', proto: true, typed_data: PROTO('{"M":[{"name":"__proto__","type":"S"}],"S":[{"name":"v","type":"uint8"}]}', '{"__proto__":{"v":1}}') },
+  { id: 'deviation-proto-field-array', deviation: 'proto-name', proto: true, typed_data: PROTO('{"M":[{"name":"__proto__","type":"uint8[]"}]}', '{"__proto__":[1,2]}') },
+  { id: 'deviation-proto-field-struct-array', deviation: 'proto-name', proto: true, typed_data: PROTO('{"M":[{"name":"__proto__","type":"S[]"}],"S":[{"name":"v","type":"uint8"}]}', '{"__proto__":[{"v":1}]}') },
+  // Nested, and a bool: signTypedData signs the field as false (missing),
+  // while TypedDataEncoder.hash hashes it as true.
+  { id: 'deviation-proto-field-nested-bool', deviation: 'proto-name', proto: true, typed_data: PROTO('{"M":[{"name":"s","type":"S"}],"S":[{"name":"__proto__","type":"bool"}]}', '{"s":{"__proto__":true}}') },
+];
+
 const TYPED_DATA = [
   { id: 'mail', typed_data: { domain: MAIL_DOMAIN, types: MAIL_TYPES, message: MAIL_MESSAGE } },
   { id: 'mail-extra-field-ignored', typed_data: { domain: MAIL_DOMAIN, types: MAIL_TYPES, message: { ...MAIL_MESSAGE, unused: 'x' } } },
@@ -162,6 +177,16 @@ const TYPED_DATA = [
   // type references, but its getPayload refuses such types, so there is no
   // view of what is signed (#88); the core refuses the name.
   { id: 'deviation-domain-type-referenced', deviation: 'domain-type', typed_data: { domain: { name: 'D' }, types: { M: [{ name: 'd', type: 'EIP712Domain' }], EIP712Domain: [{ name: 'name', type: 'string' }] }, message: { d: { name: 'x' } } } },
+  // A type or field named __proto__ (#88, deviation proto-name). JSON.parse
+  // makes it an own key, as a dApp's JSON does; an object literal would set
+  // the prototype instead. ethers' TypedDataEncoder can't keep it: a type of
+  // that name is lost (an error), and its visitor assigns a field of that
+  // name into a plain object, so its payload, and the copy signTypedData
+  // signs, lose the field, while TypedDataEncoder.hash still hashes it.
+  // There is no view to match, and main (JavaScript) couldn't carry the
+  // key either: the core refuses the name. `reference` records ethers' hash
+  // and payload for each.
+  ...PROTO_CASES,
   // ethers reads no fields of an empty struct, so any value (or none)
   // passes; the core wants an object, like every struct.
   { id: 'deviation-empty-struct-null', deviation: 'struct-object', typed_data: { domain: { name: 'D' }, types: { E: [], M: [{ name: 'e', type: 'E' }] }, message: { e: null } } },
@@ -333,7 +358,15 @@ async function buildSigning(reference, mnemonicFor, meta) {
   };
 
   const typedData = [];
-  for (const { id, typed_data: data, deviation } of TYPED_DATA) {
+  for (const { id, typed_data: data, deviation, proto } of TYPED_DATA) {
+    // What ethers' encoder alone makes of a __proto__ name: its hash and
+    // its payload, recorded beside the signing result.
+    const reference = proto
+      ? await settle(async () => ({
+        hash: ethers.TypedDataEncoder.hash(data.domain, data.types, data.message),
+        payload: ethers.TypedDataEncoder.getPayload(data.domain, data.types, data.message),
+      }))
+      : null;
     for (const signer of accounts) {
       typedData.push({
         id: `${id}/${signer.id}`, keyId: signer.id, typed_data: data,
@@ -342,6 +375,7 @@ async function buildSigning(reference, mnemonicFor, meta) {
           signature: await signer.wallet.signTypedData(data.domain, data.types, data.message),
           hash: ethers.TypedDataEncoder.hash(data.domain, data.types, data.message),
         })), data, deviation),
+        ...(reference ? { reference } : {}),
       });
     }
   }
@@ -416,6 +450,7 @@ async function buildSigning(reference, mnemonicFor, meta) {
       deviation: 'ethers signs these; the core must reject them (design 0002)',
       typed_data_json: 'typed data as JSON text, which ethers signs as JSON.parse reads it; the core must read the text the same way',
       payload: "TypedDataEncoder.getPayload's output, for each typed-data case the core accepts: the core's view is it, with primaryType as primary_type (design 0002, #88)",
+      reference: 'for a type or field named __proto__, which the core refuses (proto-name): ethers\' TypedDataEncoder.hash and getPayload of the input alone, beside the signing result',
       report: 'the view\'s named_type and chain for the primary_type and chain_id given, from the design text: ethers ignores both',
     },
     keys: keys.map(({ id, mnemonicId, key, address }) => ({ id, mnemonicId, key, address })),
