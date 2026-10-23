@@ -13,6 +13,9 @@ on:
     paths:
       - "services/freedom-ipfsd/**"
       - "services/freedom-radicled/**"
+      # NAT64 discovery, shared by the services: a member of freedom-ipfsd's
+      # workspace, so the freedom-ipfsd jobs lint, test and deny it.
+      - "services/nat64/**"
       - "crates/fc-protocol/**"
       - "crates/fc-service/**"
       # freedom-radicled opens the sealed node key with it (design 0008).
@@ -35,6 +38,9 @@ on:
     paths:
       - "services/freedom-ipfsd/**"
       - "services/freedom-radicled/**"
+      # NAT64 discovery, shared by the services: a member of freedom-ipfsd's
+      # workspace, so the freedom-ipfsd jobs lint, test and deny it.
+      - "services/nat64/**"
       - "crates/fc-protocol/**"
       - "crates/fc-service/**"
       # freedom-radicled opens the sealed node key with it (design 0008).
@@ -116,11 +122,12 @@ jobs:
         with:
           workspaces: services/freedom-ipfsd -> target
       # --all-features: the test hooks (`testhooks`) the binary's tests use.
-      # The runners have resolvers, so NAT64 discovery's per-OS lists must
-      # find them (src/nat64/resolvers.rs).
+      # --workspace includes fc-nat64 (services/nat64). The runners have
+      # resolvers, so NAT64 discovery's per-OS lists must find them
+      # (services/nat64/src/resolvers.rs).
       - run: cargo test --locked --workspace --all-features
         env:
-          FREEDOM_IPFSD_TEST_OS_RESOLVERS: required
+          FC_NAT64_TEST_OS_RESOLVERS: required
 
   ipfsd-deny:
     name: freedom-ipfsd cargo-deny

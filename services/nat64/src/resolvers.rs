@@ -35,9 +35,10 @@ pub enum Learned {
     Unaskable(String),
 }
 
-/// The resolvers the OS lists now, each once, in the order found.
-pub fn learned() -> Vec<Learned> {
-    dedup(os::learned())
+/// The resolvers the OS lists now, each once, in the order found, read as
+/// `client` (the name macOS's dynamic store session carries).
+pub fn learned(client: &'static str) -> Vec<Learned> {
+    dedup(os::learned(client))
 }
 
 /// Each resolver once, in the order first found.
@@ -143,7 +144,7 @@ mod os {
     /// exports when it runs.
     const FILES: [&str; 2] = ["/etc/resolv.conf", "/run/systemd/resolve/resolv.conf"];
 
-    pub fn learned() -> Vec<Learned> {
+    pub fn learned(_client: &'static str) -> Vec<Learned> {
         FILES
             .iter()
             .filter_map(|path| std::fs::read_to_string(path).ok())
@@ -176,7 +177,7 @@ mod os {
     /// The network services' DNS state.
     const PATTERN: &str = "State:/Network/Service/[^/]+/DNS";
 
-    pub fn learned() -> Vec<Learned> {
+    pub fn learned(client: &'static str) -> Vec<Learned> {
         let interfaces = if_addrs::get_if_addrs().unwrap_or_default();
         let index = |name: &str| {
             interfaces
@@ -184,7 +185,7 @@ mod os {
                 .find(|interface| interface.name == name)
                 .and_then(|interface| interface.index)
         };
-        let mut found = dynamic_store(index);
+        let mut found = dynamic_store(client, index);
         if let Ok(text) = std::fs::read_to_string("/etc/resolv.conf") {
             found.extend(
                 resolv_conf(&text)
@@ -196,9 +197,12 @@ mod os {
     }
 
     /// The network services' resolvers, from the dynamic store.
-    pub fn dynamic_store(index: impl Fn(&str) -> Option<u32>) -> Vec<Learned> {
+    pub fn dynamic_store(
+        client: &'static str,
+        index: impl Fn(&str) -> Option<u32>,
+    ) -> Vec<Learned> {
         let mut found: Vec<Learned> = Vec::new();
-        if let Some(store) = SCDynamicStoreBuilder::new("freedom-ipfsd").build()
+        if let Some(store) = SCDynamicStoreBuilder::new(client).build()
             && let Some(keys) = store.get_keys(PATTERN)
         {
             for key in keys.iter() {
@@ -229,7 +233,7 @@ mod os {
     use ipconfig::OperStatus;
     use std::net::IpAddr;
 
-    pub fn learned() -> Vec<Learned> {
+    pub fn learned(_client: &'static str) -> Vec<Learned> {
         let Ok(adapters) = ipconfig::get_adapters() else {
             return Vec::new();
         };
@@ -400,22 +404,22 @@ nameserver 9.9.9.9;comment
 
     /// The OS's list reads without failing; what it holds depends on the
     /// host. Where a host is known to have resolvers (CI's runners set
-    /// `FREEDOM_IPFSD_TEST_OS_RESOLVERS`), the list has one, and on macOS
-    /// the dynamic store alone does.
+    /// `FC_NAT64_TEST_OS_RESOLVERS`), the list has one, and on macOS the
+    /// dynamic store alone does.
     #[test]
     fn the_os_list_reads() {
-        let found = learned();
+        let found = learned("fc-nat64-test");
         for resolver in &found {
             match resolver {
                 Learned::Ask(addr) => assert_eq!(addr.port(), PORT),
                 Learned::Unaskable(text) => assert!(!text.is_empty()),
             }
         }
-        if std::env::var_os("FREEDOM_IPFSD_TEST_OS_RESOLVERS").is_some() {
+        if std::env::var_os("FC_NAT64_TEST_OS_RESOLVERS").is_some() {
             assert!(!found.is_empty(), "the OS lists no resolver");
             #[cfg(target_os = "macos")]
             {
-                let services = os::dynamic_store(|_| None);
+                let services = os::dynamic_store("fc-nat64-test", |_| None);
                 assert!(
                     !services.is_empty(),
                     "the dynamic store lists none: {found:?}"
