@@ -28,7 +28,7 @@ Crates:
 - crypto-bigint 0.7.5: Apache-2.0 OR MIT
 - crypto-common 0.2.2: MIT OR Apache-2.0
 - ctr 0.10.1: MIT OR Apache-2.0
-- ctutils 0.4.3: Apache-2.0 OR MIT
+- ctutils 0.4.4: Apache-2.0 OR MIT
 - curve25519-dalek 5.0.0: BSD-3-Clause
 - der 0.8.2: Apache-2.0 OR MIT
 - digest 0.11.3: MIT OR Apache-2.0
@@ -1796,7 +1796,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-Used by: cmov 0.5.4 (LICENSE-APACHE), ctutils 0.4.3 (LICENSE-APACHE), tinyvec 1.13.3 (LICENSE-APACHE.md), utf8_iter 1.0.4 (LICENSE-APACHE), zeroize 1.9.1 (LICENSE-APACHE)
+Used by: cmov 0.5.4 (LICENSE-APACHE), ctutils 0.4.4 (LICENSE-APACHE), tinyvec 1.13.3 (LICENSE-APACHE.md), utf8_iter 1.0.4 (LICENSE-APACHE), zeroize 1.9.1 (LICENSE-APACHE)
 ------------------------------------------------------------------------
 Apache License
                            Version 2.0, January 2004
@@ -2455,7 +2455,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-Used by: ctutils 0.4.3 (LICENSE-MIT)
+Used by: ctutils 0.4.4 (LICENSE-MIT)
 ------------------------------------------------------------------------
 Copyright (c) 2025-2026 The RustCrypto Project Developers
 
