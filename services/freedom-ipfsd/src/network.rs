@@ -1,12 +1,7 @@
 //! The network policy an instance runs under (design 0007, "Network
-//! policy", "Modes").
-//!
-//! `ipfs.start`'s `network` member:
-//!
-//! ```jsonc
-//! "network": { "mode": "direct" }
-//! "network": { "mode": "socks5", "ip": "127.0.0.1", "port": 9150 }
-//! ```
+//! policy", "Modes"): the process's, from `--network` at spawn
+//! ([`NetworkPolicy`], `fc_service::network`), fixed for its life, so
+//! confinement applies it before `ipfs.hello` (design 0010).
 //!
 //! - **`direct`:** the gate's first part (0007, "Modes": "the gate comes to
 //!   `direct` in two parts"): every target classified, onions and
@@ -26,70 +21,13 @@
 //! port, are the delegated routers and the DoH endpoint (0007, "The gate").
 //! The proxy's own endpoint isn't one: it is the transport (0007 as amended
 //! by #158).
-//!
-//! The policy is parsed here, apart from the rest of `ipfs.start`, so it can
-//! move as a unit if it becomes a spawn argument (`--network`) rather than
-//! a member of `ipfs.start`: only the caller of [`parse`] would change.
-
-use std::net::{IpAddr, SocketAddr};
 
 use freedom_ipfs_gateway::net::gate::{ConfiguredTargets, Target, parse_url};
 use freedom_ipfs_gateway::net::{Addresses, Nat64Handle, Network};
-use serde_json::Value;
 
 use crate::testhooks;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NetworkPolicy {
-    /// Direct connections, behind the gate's classification and the
-    /// capability: the default.
-    Direct,
-    /// Every connection through the SOCKS5 proxy at this endpoint.
-    Socks5 { proxy: SocketAddr },
-}
-
-/// Parses `ipfs.start`'s `network` member. The error is a fixed message for
-/// `invalid_argument`, which never quotes the input.
-pub fn parse(network: &Value) -> Result<NetworkPolicy, &'static str> {
-    let Some(members) = network.as_object() else {
-        return Err("network must be an object");
-    };
-    match members.get("mode").and_then(Value::as_str) {
-        Some("direct") if members.len() == 1 => Ok(NetworkPolicy::Direct),
-        Some("direct") => Err("network mode direct takes no other members"),
-        Some("socks5") => {
-            if members
-                .keys()
-                .any(|key| !matches!(key.as_str(), "mode" | "ip" | "port"))
-            {
-                return Err("network mode socks5 takes mode, ip and port only");
-            }
-            // An IPv4-mapped address is judged, and used, as the IPv4
-            // address it maps.
-            let ip = members
-                .get("ip")
-                .and_then(Value::as_str)
-                .and_then(|ip| ip.parse::<IpAddr>().ok())
-                .map(|ip| ip.to_canonical())
-                .ok_or("network.ip must be an IPv4 or IPv6 address, written plainly")?;
-            if ip.is_unspecified() || ip.is_multicast() || ip == IpAddr::from([255, 255, 255, 255])
-            {
-                return Err("network.ip can't be unspecified, multicast or broadcast");
-            }
-            let port = members
-                .get("port")
-                .and_then(Value::as_u64)
-                .and_then(|port| u16::try_from(port).ok())
-                .filter(|port| *port != 0)
-                .ok_or("network.port must be an integer from 1 to 65535")?;
-            Ok(NetworkPolicy::Socks5 {
-                proxy: SocketAddr::new(ip, port),
-            })
-        }
-        Some(_) => Err("network.mode must be direct or socks5"),
-        None => Err("network.mode must be a string"),
-    }
-}
+pub use fc_service::network::NetworkPolicy;
 
 /// Checks a configured endpoint (a delegated router, or the DoH endpoint):
 /// an `http` or `https` URL, read as the gate reads a configured endpoint
@@ -160,106 +98,9 @@ pub fn network(
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
+
     use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn direct_and_socks5_are_accepted() {
-        assert_eq!(
-            parse(&json!({ "mode": "direct" })),
-            Ok(NetworkPolicy::Direct)
-        );
-        for (ip, port) in [
-            ("127.0.0.1", 9150),
-            ("192.168.1.5", 9050),
-            ("::1", 1),
-            ("fd00::5", 65535),
-        ] {
-            assert_eq!(
-                parse(&json!({ "mode": "socks5", "ip": ip, "port": port })),
-                Ok(NetworkPolicy::Socks5 {
-                    proxy: SocketAddr::new(ip.parse().unwrap(), port)
-                }),
-                "{ip}"
-            );
-        }
-        // An IPv4-mapped address is the IPv4 address it maps.
-        for (mapped, ip) in [
-            ("::ffff:127.0.0.1", "127.0.0.1"),
-            ("::ffff:7f00:1", "127.0.0.1"),
-            ("::ffff:192.168.1.5", "192.168.1.5"),
-        ] {
-            assert_eq!(
-                parse(&json!({ "mode": "socks5", "ip": mapped, "port": 9150 })),
-                Ok(NetworkPolicy::Socks5 {
-                    proxy: SocketAddr::new(ip.parse().unwrap(), 9150)
-                }),
-                "{mapped}"
-            );
-        }
-    }
-
-    #[test]
-    fn everything_else_is_refused() {
-        for refused in [
-            // Not an object, or no mode.
-            json!("direct"),
-            Value::Null,
-            json!({}),
-            json!({ "mode": 1 }),
-            json!({ "mode": "tor" }),
-            json!({ "mode": "direct", "ip": "127.0.0.1" }),
-            // An address written any other way than plainly: shorthand,
-            // hex, octal, brackets, a zone, spaces, a name.
-            json!({ "mode": "socks5", "ip": "127.1", "port": 9150 }),
-            json!({ "mode": "socks5", "ip": "0x7f.0.0.1", "port": 9150 }),
-            json!({ "mode": "socks5", "ip": "0177.0.0.1", "port": 9150 }),
-            json!({ "mode": "socks5", "ip": "[::1]", "port": 9150 }),
-            json!({ "mode": "socks5", "ip": "fe80::1%eth0", "port": 9150 }),
-            json!({ "mode": "socks5", "ip": " 127.0.0.1", "port": 9150 }),
-            json!({ "mode": "socks5", "ip": "localhost", "port": 9150 }),
-            json!({ "mode": "socks5", "ip": 2130706433, "port": 9150 }),
-            // Addresses a proxy can't be at.
-            json!({ "mode": "socks5", "ip": "0.0.0.0", "port": 9150 }),
-            json!({ "mode": "socks5", "ip": "::", "port": 9150 }),
-            json!({ "mode": "socks5", "ip": "224.0.0.1", "port": 9150 }),
-            json!({ "mode": "socks5", "ip": "ff02::1", "port": 9150 }),
-            json!({ "mode": "socks5", "ip": "255.255.255.255", "port": 9150 }),
-            // The same, IPv4-mapped, dotted and in hex.
-            json!({ "mode": "socks5", "ip": "::ffff:0.0.0.0", "port": 9150 }),
-            json!({ "mode": "socks5", "ip": "::ffff:0:0", "port": 9150 }),
-            json!({ "mode": "socks5", "ip": "::ffff:224.0.0.1", "port": 9150 }),
-            json!({ "mode": "socks5", "ip": "::ffff:e000:1", "port": 9150 }),
-            json!({ "mode": "socks5", "ip": "::ffff:255.255.255.255", "port": 9150 }),
-            json!({ "mode": "socks5", "ip": "::ffff:ffff:ffff", "port": 9150 }),
-            // Ports.
-            json!({ "mode": "socks5", "ip": "127.0.0.1", "port": 0 }),
-            json!({ "mode": "socks5", "ip": "127.0.0.1", "port": 65536 }),
-            json!({ "mode": "socks5", "ip": "127.0.0.1", "port": -1 }),
-            json!({ "mode": "socks5", "ip": "127.0.0.1", "port": 1.5 }),
-            json!({ "mode": "socks5", "ip": "127.0.0.1", "port": "9150" }),
-            // Missing members, and credentials, which 0007 doesn't take.
-            json!({ "mode": "socks5", "port": 9150 }),
-            json!({ "mode": "socks5", "ip": "127.0.0.1" }),
-            json!({ "mode": "socks5", "ip": "127.0.0.1", "port": 9150, "username": "u" }),
-            json!({ "mode": "socks5", "ip": "127.0.0.1", "port": 9150, "password": "p" }),
-        ] {
-            assert!(parse(&refused).is_err(), "{refused}");
-        }
-    }
-
-    #[test]
-    fn a_refusal_never_quotes_its_input() {
-        let marker = "q7x9marker";
-        for refused in [
-            json!({ "mode": marker }),
-            json!({ "mode": "socks5", "ip": marker, "port": 9150 }),
-            json!({ "mode": "socks5", "ip": "127.0.0.1", "port": 9150, marker: 1 }),
-        ] {
-            let message = parse(&refused).unwrap_err();
-            assert!(!message.contains(marker), "{message}");
-        }
-    }
 
     #[test]
     fn endpoints_are_read_as_the_gate_reads_a_configured_one() {

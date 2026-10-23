@@ -46,14 +46,16 @@ fc-service = { path = "../../crates/fc-service" }
 # HTTP clients and transports, and `socks5` behind the gateway's `socks`
 # feature, which `network: { mode: socks5 }` needs), its end-to-end tests
 # (#51), stream isolation (#54: each `socks5` network's SOCKS5
-# credentials of its own), and the gate's pure half as freedom-ipfs-addr
-# (#55), which fc-nat64 takes its NAT64 state from. src/build_info.rs
-# reports the same commit.
+# credentials of its own), the gate's pure half as freedom-ipfs-addr
+# (#55), which fc-nat64 takes its NAT64 state from, the SOCKS5 byte layer
+# as freedom-ipfs-socks (#56), and the store's temp-store option (#57),
+# which keeps SQLite's temporary data in memory under confinement (design
+# 0010). src/build_info.rs reports the same commit.
 # freedom-ipfs-core: the memory budget's `Reservation`, which the gateway
 # crate doesn't re-export.
-freedom-ipfs-core = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "e7dcc6f60b2a30932e6f95a58e30cbf5fdc9f353" }
-freedom-ipfs-gateway = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "e7dcc6f60b2a30932e6f95a58e30cbf5fdc9f353", features = ["socks"] }
-freedom-ipfs-store = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "e7dcc6f60b2a30932e6f95a58e30cbf5fdc9f353" }
+freedom-ipfs-core = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "2664d71f2019f8e690b0ec959180bec707a06f32" }
+freedom-ipfs-gateway = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "2664d71f2019f8e690b0ec959180bec707a06f32", features = ["socks"] }
+freedom-ipfs-store = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "2664d71f2019f8e690b0ec959180bec707a06f32" }
 # The `Stream` trait, to read a response's body as it comes; already in
 # freedom-ipfs's graph.
 futures-core = "0.3"
@@ -71,8 +73,20 @@ tokio = { version = "1", default-features = false, features = ["rt-multi-thread"
 hickory-proto = { version = "0.25", default-features = false, features = ["std"] }
 # Upstream's SOCKS5 test proxy and test servers (its `test-util` feature),
 # for the `socks5` tests through the binary; the same pin as the gateway's.
-freedom-ipfs-net = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "e7dcc6f60b2a30932e6f95a58e30cbf5fdc9f353", features = ["test-util"] }
+freedom-ipfs-net = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "2664d71f2019f8e690b0ec959180bec707a06f32", features = ["test-util"] }
 tempfile = "3"
+
+# tests/confinement.rs: the kernel's Landlock ABI, which the report must name
+# (design 0010, Tests: a silent downgrade fails).
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+fc-sys = { path = "../../crates/fc-sys" }
+
+# A store confined to its directory completes a statement that spills past
+# the page cache (design 0010): each case in a child of its own, which
+# confines itself once, so no harness threads.
+[[test]]
+name = "store_confined"
+harness = false
 
 # The core's workspace lints, copied: workspace lints don't cross workspaces.
 [lints.rust]

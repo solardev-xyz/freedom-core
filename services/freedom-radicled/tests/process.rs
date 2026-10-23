@@ -73,6 +73,24 @@ fn hello_names_this_starts_recipient_and_the_libradicle_it_links() {
         .decode(result["recipient"].as_str().unwrap())
         .unwrap();
     assert_eq!(recipient.len(), 32);
+    // The policy as passed, and what confinement it got (design 0010).
+    assert_eq!(result["network"], json!({ "mode": "direct" }));
+    let confinement = &result["confinement"];
+    #[cfg(target_os = "linux")]
+    if let Ok(abi) = fc_sys::linux::landlock_abi() {
+        let abi = abi.min(9);
+        // The ABI the kernel offers: no silent downgrade.
+        assert_eq!(
+            confinement["mechanism"],
+            format!("landlock-{abi}+seccomp"),
+            "{confinement}"
+        );
+        // `refer` needs ABI 2; below it files are unavailable.
+        let files = if abi >= 2 { "enforced" } else { "unavailable" };
+        assert_eq!(confinement["files"], files, "{confinement}");
+        assert_eq!(confinement["exec"], "enforced", "{confinement}");
+    }
+    assert!(confinement.is_object(), "{confinement}");
     a.close_stdin();
     assert_eq!(a.exit_code(EXIT_TIMEOUT), Some(0));
     // A new start, a new key.
@@ -301,6 +319,7 @@ fn an_environment_main_should_have_cleared_refuses_the_start() {
         .arg(&dirs.home)
         .arg("--lock-dir")
         .arg(&dirs.locks)
+        .args(["--network", "direct"])
         .env_clear();
     let mut radicled = Radicled::spawn(command);
     assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(64));
@@ -325,6 +344,26 @@ fn the_confinement_point_is_single_threaded() {
         .unwrap_or_else(|| panic!("no confinement point in {log}"));
     let line: Value = serde_json::from_str(line).unwrap();
     assert_eq!(line["threads"], 1, "{line}");
+    // stdio and the lock: nothing else crosses confinement.
+    let descriptors = line["descriptors"].as_array().unwrap();
+    assert!(
+        descriptors.len() == 1 && descriptors[0].as_str().unwrap().ends_with(".lock"),
+        "{line}"
+    );
+}
+
+/// Under `socks5`, `rad.hello` reports the policy as passed.
+#[test]
+fn hello_reports_a_socks5_policy() {
+    let dirs = Dirs::new();
+    let mut radicled = Radicled::serve_on(&dirs, "socks5:[::1]:9150", &[]);
+    let hello = radicled.hello();
+    assert_eq!(
+        hello["result"]["network"],
+        json!({ "mode": "socks5", "ip": "::1", "port": 9150 })
+    );
+    radicled.close_stdin();
+    assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
 }
 
 #[test]
@@ -343,6 +382,35 @@ fn usage_errors_exit_64() {
         vec!["serve", "--home"],
         vec!["start"],
         vec!["serve", "--network", "direct"],
+        // `--network`: required, and each form it refuses.
+        vec!["serve", "--home", "h", "--lock-dir", "l"],
+        vec![
+            "serve",
+            "--home",
+            "h",
+            "--lock-dir",
+            "l",
+            "--network",
+            "socks5:localhost:9150",
+        ],
+        vec![
+            "serve",
+            "--home",
+            "h",
+            "--lock-dir",
+            "l",
+            "--network",
+            "socks5:::1:9150",
+        ],
+        vec![
+            "serve",
+            "--home",
+            "h",
+            "--lock-dir",
+            "l",
+            "--network",
+            "socks5:127.0.0.1:0",
+        ],
     ] {
         let mut command = std::process::Command::new(BIN);
         command.args(&args);

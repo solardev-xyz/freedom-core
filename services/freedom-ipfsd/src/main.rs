@@ -1,8 +1,8 @@
 //! `freedom-ipfsd`: the freedom-ipfs service process (design 0007).
 //!
 //! ```text
-//! freedom-ipfsd serve     --data-dir <dir> --lock-dir <dir> [--parent-pid <pid>]
-//! freedom-ipfsd serve     --ephemeral [--parent-pid <pid>]
+//! freedom-ipfsd serve     --data-dir <dir> --lock-dir <dir> --network <policy> [--parent-pid <pid>]
+//! freedom-ipfsd serve     --ephemeral --network <policy> [--parent-pid <pid>]
 //! freedom-ipfsd hold-lock --data-dir <dir> --lock-dir <dir>
 //! ```
 //!
@@ -15,15 +15,26 @@
 //! - **`hold-lock`** holds the gate until stdin closes: profile delete,
 //!   reset and `ipfs:reset` run under it.
 //!
-//! **`serve`, in order:** the panic hook, before any other work; logging;
-//! hardening; the gate (persistent only); then the connection to main on
-//! stdin and stdout, until it ends and every instance is torn down.
+//! **`serve`, in order** (design 0010, "The recommendation", step 1):
+//! 1. the panic hook, before any other work, and the entry's one re-exec if
+//!    a descriptor is inherited ([`confine::clean_entry`]);
+//! 2. hardening, the arguments (`--network` among them) and, for the
+//!    persistent process, the gate, which creates the data directory;
+//! 3. **confinement** ([`confine::confine`]), while the process has one
+//!    thread: its data directory read-write (none for the ephemeral
+//!    process), NAT64's resolver files read-only, the network policy, and
+//!    the lock as the one descriptor it keeps;
+//! 4. only then logging's writer, the runtime and the connection to main on
+//!    stdin and stdout, until it ends and every instance is torn down.
+//!    Lines before logging's writer are written directly.
 //!
-//! **Exit codes** (0001's, and 0007's 70): 0 after `ipfs.shutdown`, stdin
-//! EOF or the parent gone; 64 for usage; 70 for a panic outside a request,
-//! or a teardown that couldn't prove quiescence; 74 for storage; 75 when the
-//! gate is held; 76 for a protocol error, the handshake's deadline or the
-//! writer stall.
+//! **Exit codes** (0001's, and 0007's 70 and 77): 0 after `ipfs.shutdown`,
+//! stdin EOF or the parent gone; 64 for usage; 70 for a panic outside a
+//! request, or a teardown that couldn't prove quiescence; 74 for storage; 75
+//! when the gate is held; 76 for a protocol error, the handshake's deadline
+//! or the writer stall; 77 when confinement refuses the process
+//! (`confinement`: a thread or descriptor it didn't expect, or its own rules
+//! refused).
 
 mod args;
 mod budget;
@@ -43,8 +54,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fc_service::conn::{self, Options};
-use fc_service::{Exit, gate, log};
-use serde_json::json;
+use fc_service::network::NetworkPolicy;
+use fc_service::{Exit, confine, gate, log};
+use serde_json::{Value, json};
 
 use crate::args::{Command, Mode};
 use crate::budget::Budgets;
@@ -69,9 +81,11 @@ fn main() -> ExitCode {
     let started = Instant::now();
     // First, before any other work (0007, "Panics").
     fc_service::panic::install();
-    log::init();
+    // Before anything opens a descriptor (0010, step 1): returns only when
+    // nothing needed dropping, or this is the one re-exec, or it failed.
+    let entry = confine::clean_entry();
     fc_service::hardening::harden();
-    let exit = run(started);
+    let exit = run(started, &entry);
     // The process's exit is this thread's from here, unless a hook's or a
     // watchdog's has begun: that one ends the process first.
     fc_service::exit::claim();
@@ -79,11 +93,25 @@ fn main() -> ExitCode {
     ExitCode::from(exit.code())
 }
 
-fn run(started: Instant) -> Exit {
+fn run(started: Instant, entry: &confine::Entry) -> Exit {
     let Some(command) = args::parse(std::env::args_os().skip(1)) else {
         log::error(args::USAGE, json!({}));
         return Exit::Usage;
     };
+    match entry {
+        confine::Entry::Clean => {}
+        confine::Entry::Reexeced => log::info(
+            "re-executed once at entry: descriptors were inherited",
+            json!({}),
+        ),
+        confine::Entry::Left { reexeced, error } => log::error(
+            "descriptors inherited at entry are left",
+            json!({
+                "reexeced": reexeced,
+                "error": error.as_ref().map(|e| e.kind().to_string()),
+            }),
+        ),
+    }
     match command {
         Command::HoldLock { data_dir, lock_dir } => gate::hold_lock(
             &data_dir,
@@ -94,6 +122,7 @@ fn run(started: Instant) -> Exit {
         ),
         Command::Serve {
             mode: Mode::Persistent { data_dir, lock_dir },
+            network,
             parent_pid,
         } => {
             // Held until the process exits.
@@ -105,22 +134,82 @@ fn run(started: Instant) -> Exit {
                     return Exit::from(&e);
                 }
             };
+            let policy = policy(vec![gate.data_dir.clone()], &network, gate.descriptors());
+            let confinement = match confined(&policy) {
+                Ok(report) => report,
+                Err(exit) => return exit,
+            };
             let kind = Kind::Persistent {
                 store: gate.data_dir.join(STORE_FILE),
             };
-            let exit = serve(kind, parent_pid, started);
+            let exit = serve(kind, network, confinement, parent_pid, started);
             drop(gate);
             exit
         }
         Command::Serve {
             mode: Mode::Ephemeral,
+            network,
             parent_pid,
-        } => serve(Kind::Ephemeral, parent_pid, started),
+        } => {
+            // No lock and no directory: nothing writable, nothing kept.
+            let confinement = match confined(&policy(Vec::new(), &network, Vec::new())) {
+                Ok(report) => report,
+                Err(exit) => return exit,
+            };
+            serve(Kind::Ephemeral, network, confinement, parent_pid, started)
+        }
+    }
+}
+
+/// The process's confinement (design 0010, "What each service needs"): the
+/// data directory read-write (none for the ephemeral process), NAT64
+/// discovery's resolver files read-only, beside the system's own, and TCP to
+/// the proxy's port alone in `socks5` mode. freedom-ipfs-net resolves names
+/// through the C library (`getaddrinfo`), so the report says whether that
+/// reaches DNS.
+fn policy(
+    read_write: Vec<std::path::PathBuf>,
+    network: &NetworkPolicy,
+    descriptors: Vec<i32>,
+) -> confine::Policy {
+    confine::Policy {
+        read_write,
+        read_only: nat64::resolver_grants(),
+        refer: false,
+        min_abi: 1,
+        network: network.confinement(),
+        system_resolver: true,
+        descriptors,
+    }
+}
+
+/// Confines the process to `policy`, on the main thread while it is the
+/// only one. A refusal is exit 77, which main doesn't restart.
+fn confined(policy: &confine::Policy) -> Result<Value, Exit> {
+    testhooks::at_confinement_point();
+    match confine::confine(policy) {
+        Ok(report) => Ok(report.to_json()),
+        Err(invalid) => {
+            log::error(
+                "confinement refused the process",
+                json!({ "reason": invalid.to_string() }),
+            );
+            Err(Exit::Confinement)
+        }
     }
 }
 
 /// Runs the connection with main until it ends, and every instance with it.
-fn serve(kind: Kind, parent_pid: Option<u32>, started: Instant) -> Exit {
+/// Every thread the process starts, logging's writer included, starts here,
+/// after confinement.
+fn serve(
+    kind: Kind,
+    network: NetworkPolicy,
+    confinement: Value,
+    parent_pid: Option<u32>,
+    started: Instant,
+) -> Exit {
+    log::init();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(PROCESS_WORKERS)
         .max_blocking_threads(PROCESS_BLOCKING)
@@ -137,7 +226,11 @@ fn serve(kind: Kind, parent_pid: Option<u32>, started: Instant) -> Exit {
             return Exit::Internal;
         }
     };
-    log::info("serving", json!({ "kind": kind.name() }));
+    log::info(
+        "serving",
+        json!({ "kind": kind.name(), "network": network.to_json(), "confinement": confinement }),
+    );
+    testhooks::after_confinement(runtime.handle());
     // Before anything of freedom-ipfs runs: the persistent process records
     // progress, the ephemeral one never does (0007, "Stats").
     let records_progress = matches!(kind, Kind::Persistent { .. });
@@ -160,6 +253,7 @@ fn serve(kind: Kind, parent_pid: Option<u32>, started: Instant) -> Exit {
     );
     let instances = Instances::new(
         kind,
+        network,
         runtime.handle().clone(),
         requests.clone(),
         budgets.clone(),
@@ -171,7 +265,13 @@ fn serve(kind: Kind, parent_pid: Option<u32>, started: Instant) -> Exit {
         STATS_DEADLINE,
         records_progress,
     );
-    let service = Arc::new(IpfsService::new(instances, requests, stats));
+    let service = Arc::new(IpfsService::new(
+        instances,
+        requests,
+        stats,
+        &network,
+        confinement,
+    ));
     let mut options = Options::new(SERVICE, PROTOCOL, started);
     options.parent_pid = parent_pid;
     let exit = conn::run(service, options, std::io::stdin(), std::io::stdout());

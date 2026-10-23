@@ -1,7 +1,8 @@
 //! The `ipfs.*` methods on fc-service's connection (design 0007, "Methods").
 //!
 //! - `ipfs.hello` answers the service's version, the freedom-ipfs build it
-//!   links, and which process this is. The connection checks the protocol
+//!   links, which process this is, its network policy (`--network`) and the
+//!   confinement it got (design 0010). The connection checks the protocol
 //!   and frame kinds first, and adds `protocol`.
 //! - `ipfs.start` and `ipfs.stop`: [`Instances`].
 //! - `ipfs.request`: [`Requests`].
@@ -25,6 +26,10 @@ pub struct IpfsService {
     instances: Arc<Instances>,
     requests: Arc<Requests>,
     stats: Arc<Stats>,
+    /// `hello`'s `network`: the process's policy.
+    network: Value,
+    /// `hello`'s `confinement`: what `confine` reported.
+    confinement: Value,
 }
 
 impl IpfsService {
@@ -32,11 +37,15 @@ impl IpfsService {
         instances: Arc<Instances>,
         requests: Arc<Requests>,
         stats: Arc<Stats>,
+        network: &crate::network::NetworkPolicy,
+        confinement: Value,
     ) -> IpfsService {
         IpfsService {
             instances,
             requests,
             stats,
+            network: network.to_json(),
+            confinement,
         }
     }
 }
@@ -53,6 +62,8 @@ impl Service for IpfsService {
             }),
         );
         members.insert("kind".into(), self.instances.kind().name().into());
+        members.insert("network".into(), self.network.clone());
+        members.insert("confinement".into(), self.confinement.clone());
         Ok(members)
     }
 
@@ -106,6 +117,7 @@ mod tests {
     use super::*;
     use crate::budget::Budgets;
     use crate::instances::Kind;
+    use crate::network::NetworkPolicy;
     use crate::stats::STATS_DEADLINE;
 
     const WAIT: Duration = Duration::from_secs(10);
@@ -278,6 +290,7 @@ mod tests {
         let requests = Requests::new(runtime.handle().clone(), budgets.memory.clone());
         let instances = Instances::new(
             Kind::Ephemeral,
+            NetworkPolicy::Direct,
             runtime.handle().clone(),
             requests.clone(),
             budgets.clone(),
@@ -289,6 +302,8 @@ mod tests {
                 instances.clone(),
                 requests,
                 Stats::new(runtime.handle().clone(), budgets, STATS_DEADLINE, false),
+                &NetworkPolicy::Direct,
+                json!({}),
             ),
             seen,
         });
@@ -328,8 +343,7 @@ mod tests {
                 "routing": { "mode": "offline", "delegated_routers": [],
                     "doh_endpoint": "https://cloudflare-dns.com/dns-query",
                     "dht_query_timeout_s": 3, "dht_max_providers": 32 },
-                "gateway": { "max_concurrent_requests": 8, "request_queue_timeout_ms": 15000 },
-                "network": { "mode": "direct" }
+                "gateway": { "max_concurrent_requests": 8, "request_queue_timeout_ms": 15000 }
             }),
         );
         let deadline = Instant::now() + WAIT;
@@ -402,6 +416,7 @@ mod tests {
             let requests = Requests::new(runtime.handle().clone(), budgets.memory.clone());
             let instances = Instances::new(
                 Kind::Ephemeral,
+                NetworkPolicy::Direct,
                 runtime.handle().clone(),
                 requests.clone(),
                 budgets.clone(),
@@ -416,7 +431,13 @@ mod tests {
             let cancel_gate = Arc::new(Mutex::new(None));
             let handled = Arc::new(std::sync::atomic::AtomicU64::new(0));
             let service = Arc::new(Delayed {
-                inner: IpfsService::new(instances.clone(), requests.clone(), stats.clone()),
+                inner: IpfsService::new(
+                    instances.clone(),
+                    requests.clone(),
+                    stats.clone(),
+                    &NetworkPolicy::Direct,
+                    json!({}),
+                ),
                 gate: cancel_gate.clone(),
                 handled: handled.clone(),
             });
@@ -450,8 +471,7 @@ mod tests {
                     "routing": { "mode": "offline", "delegated_routers": [],
                     "doh_endpoint": "https://cloudflare-dns.com/dns-query",
                         "dht_query_timeout_s": 3, "dht_max_providers": 32 },
-                    "gateway": { "max_concurrent_requests": 8, "request_queue_timeout_ms": 15000 },
-                    "network": { "mode": "direct" }
+                    "gateway": { "max_concurrent_requests": 8, "request_queue_timeout_ms": 15000 }
                 }),
             );
             assert_eq!(
