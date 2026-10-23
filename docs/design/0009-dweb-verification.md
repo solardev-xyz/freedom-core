@@ -746,7 +746,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
     - directories with and without `index.html`, a HAMT-sharded directory, Unicode names, an identity CID;
     - for each request shape, the CAR Kubo sends (path, `dag-scope=entity`, `entity-bytes`) and the raw blocks;
     - IPNS records: V2-only and with legacy fields, with unknown fields and unknown signed keys, expired, for another key, without `signatureV2`, and with a legacy value that differs from the signed one;
-    - **RSA-keyed IPNS records,** with Kubo's keys at 2,048 and 4,096 bits, and with the generator's own at the bounds: 2,048 and 8,192 bits, and the exponents 3, 65,537 and 2^33 − 1; and a name whose record names another RSA-keyed name.
+    - **RSA-keyed IPNS records,** with seeded keys: 2,048 and 4,096 bits with the exponent 65,537, as Kubo makes them, and the bounds, 2,048 and 8,192 bits with the exponents 3 and 2^33 − 1; and a name whose record names another RSA-keyed name.
   - **The verifier's own,** marked `deviation` in the file as 0006's are, where the design deliberately differs from the pinned native reader:
     - `unixfs-sizes`: a file whose declared child size disagrees with its raw leaf, and one whose content doesn't add up to `filesize`. The native reader slices by the declared size; the core cuts the body as malformed at that point;
     - `hamt-lookup`: an entry that isn't where its hash and the bitfield point. The native reader finds it by name; the core answers 404;
