@@ -1,4 +1,4 @@
-//! `network: { mode: socks5 }` through the binary, against upstream's SOCKS5
+//! `--network socks5:<ip>:<port>` through the binary, against upstream's SOCKS5
 //! test proxy (design 0007, "Modes", "Instances and their teardown", and
 //! its tests).
 //!
@@ -9,7 +9,8 @@
 //!   reaches both canaries and never the proxy.
 //! - **A stop:** once acknowledged, no connection reaches the proxy or the
 //!   provider, and the process holds no socket to the proxy.
-//! - **Two instances in sequence** keep their own policies.
+//! - **A policy is its process's** (design 0010, "The network policy and the
+//!   lifecycle"): a `socks5` process and then a `direct` one keep their own.
 //! - **Stream isolation:** two `socks5` instances side by side send SOCKS5
 //!   credentials of their own, the same on every stream of one, and an
 //!   instance started after a stop sends new ones.
@@ -65,8 +66,9 @@ impl Proxy {
         }
     }
 
-    fn network(&self) -> Value {
-        json!({ "mode": "socks5", "ip": "127.0.0.1", "port": self.fixture.addr().port() })
+    /// `--network` for this proxy.
+    fn arg(&self) -> String {
+        format!("socks5:127.0.0.1:{}", self.fixture.addr().port())
     }
 
     fn connects(&self) -> Vec<Destination> {
@@ -261,13 +263,12 @@ fn serve(
 }
 
 /// A private instance with delegated routing to `router` (its DoH endpoint
-/// the router's too), under `network`.
-fn instance(id: &str, router: &Router, network: Value) -> Value {
+/// the router's too), under its process's policy.
+fn instance(id: &str, router: &Router) -> Value {
     let mut params = memory(id);
     params["routing"]["mode"] = json!("delegated");
     params["routing"]["delegated_routers"] = json!([format!("http://{}/routing/v1", router.addr)]);
     params["routing"]["doh_endpoint"] = json!(format!("http://{}/dns-query", router.addr));
-    params["network"] = network;
     params
 }
 
@@ -377,10 +378,10 @@ fn under_socks5_the_canary_sees_nothing_and_the_proxy_everything() {
     // The control reaches canaries on loopback, which `direct`'s address
     // table refuses: it runs without the table (the testhook leaves
     // `socks5` as it is).
-    let mut ipfsd = Ipfsd::ephemeral(&[LOOPBACK_PROVIDERS]);
+    let mut ipfsd = Ipfsd::ephemeral_on(&proxy.arg(), &[LOOPBACK_PROVIDERS]);
     ipfsd.hello();
 
-    let started = ipfsd.start(instance("e-1", &router, proxy.network()));
+    let started = ipfsd.start(instance("e-1", &router));
     assert_eq!(started["result"]["instance"], "e-1", "{started}");
     for path in [format!("/ipns/{PEER}"), format!("/ipfs/{ABSENT}")] {
         let status = status(&mut ipfsd, "e-1", &path);
@@ -409,9 +410,13 @@ fn under_socks5_the_canary_sees_nothing_and_the_proxy_everything() {
     assert_eq!(router.accepted(), connects.len(), "{connects:?}");
     assert_eq!(router.datagrams(), 0, "a datagram to the router");
     assert_eq!(ipfsd.stop("e-1")["result"], json!({ "instance": "e-1" }));
+    ipfsd.close_stdin();
+    assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
 
-    // The control: `direct`, the same topology, other names.
-    let started = ipfsd.start(instance("e-2", &router, json!({ "mode": "direct" })));
+    // The control: a `direct` process, the same topology, other names.
+    let mut ipfsd = Ipfsd::ephemeral(&[LOOPBACK_PROVIDERS]);
+    ipfsd.hello();
+    let started = ipfsd.start(instance("e-2", &router));
     assert_eq!(started["result"]["instance"], "e-2", "{started}");
     let proxied = proxy.fixture.connections();
     // The canary holds what reaches it open, so these may end at their
@@ -460,9 +465,9 @@ fn a_stop_leaves_no_connection_after_its_acknowledgement() {
         .fixture
         .forward(Destination::Ip(router.addr), router.addr);
     proxy.fixture.forward(Destination::Ip(public), provider.tcp);
-    let mut ipfsd = Ipfsd::ephemeral(&[]);
+    let mut ipfsd = Ipfsd::ephemeral_on(&proxy.arg(), &[]);
     ipfsd.hello();
-    let started = ipfsd.start(instance("e-1", &router, proxy.network()));
+    let started = ipfsd.start(instance("e-1", &router));
     assert_eq!(started["result"]["instance"], "e-1", "{started}");
     let held = ipfsd.request("ipfs.request", get("e-1", &format!("/ipfs/{ABSENT}")));
     assert!(
@@ -501,20 +506,21 @@ fn a_stop_leaves_no_connection_after_its_acknowledgement() {
     assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
 }
 
-/// Two instances in sequence, under different policies: the `socks5` one's
-/// router is reached through the proxy, the `direct` one's directly, and
-/// the proxy sees nothing of the second.
+/// A policy is its process's: a `socks5` process, then a `direct` one, as a
+/// policy change starts a new generation (design 0010). The `socks5` one's
+/// router is reached through the proxy, the `direct` one's directly, and the
+/// proxy sees nothing of the second.
 #[test]
-fn instances_in_sequence_keep_their_own_policies() {
+fn processes_in_sequence_keep_their_own_policies() {
     let router = Router::start(&[(PEER, Vec::new())], None);
     let proxy = Proxy::start();
     proxy
         .fixture
         .forward(Destination::Ip(router.addr), router.addr);
-    let mut ipfsd = Ipfsd::ephemeral(&[]);
+    let mut ipfsd = Ipfsd::ephemeral_on(&proxy.arg(), &[]);
     ipfsd.hello();
 
-    let started = ipfsd.start(instance("e-1", &router, proxy.network()));
+    let started = ipfsd.start(instance("e-1", &router));
     assert_eq!(started["result"]["instance"], "e-1", "{started}");
     status(&mut ipfsd, "e-1", &format!("/ipfs/{ABSENT}"));
     let through = proxy.connects().len();
@@ -524,8 +530,12 @@ fn instances_in_sequence_keep_their_own_policies() {
     );
     assert_eq!(router.accepted(), through);
     assert_eq!(ipfsd.stop("e-1")["result"], json!({ "instance": "e-1" }));
+    ipfsd.close_stdin();
+    assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
 
-    let started = ipfsd.start(instance("e-2", &router, json!({ "mode": "direct" })));
+    let mut ipfsd = Ipfsd::ephemeral(&[]);
+    ipfsd.hello();
+    let started = ipfsd.start(instance("e-2", &router));
     assert_eq!(started["result"]["instance"], "e-2", "{started}");
     status(&mut ipfsd, "e-2", &format!("/ipfs/{OTHER_ABSENT}"));
     assert!(
@@ -649,10 +659,10 @@ fn each_socks5_instance_sends_credentials_of_its_own_on_every_stream() {
     let proxy = Proxy::start();
     let one = Own::start(&proxy, "8.8.8.8", "one.example", "1.1.1.1");
     let two = Own::start(&proxy, "9.9.9.9", "two.example", "1.0.0.1");
-    let mut ipfsd = Ipfsd::ephemeral(&[]);
+    let mut ipfsd = Ipfsd::ephemeral_on(&proxy.arg(), &[]);
     ipfsd.hello();
     for (id, own) in [("e-1", &one), ("e-2", &two)] {
-        let started = ipfsd.start(instance(id, &own.router, proxy.network()));
+        let started = ipfsd.start(instance(id, &own.router));
         assert_eq!(started["result"]["instance"], id, "{started}");
     }
     let every_kind = ["http provider", "libp2p", "resolve", "router"];
@@ -696,7 +706,7 @@ fn each_socks5_instance_sends_credentials_of_its_own_on_every_stream() {
     // e-1 stops; e-3 starts on its topology, and sends credentials of its own.
     assert_eq!(ipfsd.stop("e-1")["result"], json!({ "instance": "e-1" }));
     let after = proxy.fixture.requests().len();
-    let started = ipfsd.start(instance("e-3", &one.router, proxy.network()));
+    let started = ipfsd.start(instance("e-3", &one.router));
     assert_eq!(started["result"]["instance"], "e-3", "{started}");
     status(&mut ipfsd, "e-3", &format!("/ipfs/{ABSENT}"));
     let seen = || !one.requests(&proxy, after).is_empty();
@@ -722,13 +732,9 @@ fn an_unreachable_proxy_fails_requests_and_never_falls_back() {
         .unwrap()
         .local_addr()
         .unwrap();
-    let mut ipfsd = Ipfsd::ephemeral(&[]);
+    let mut ipfsd = Ipfsd::ephemeral_on(&socks5(closed), &[]);
     ipfsd.hello();
-    let started = ipfsd.start(instance(
-        "e-1",
-        &router,
-        json!({ "mode": "socks5", "ip": "127.0.0.1", "port": closed.port() }),
-    ));
+    let started = ipfsd.start(instance("e-1", &router));
     assert_eq!(started["result"]["instance"], "e-1", "{started}");
     let status = status(&mut ipfsd, "e-1", &format!("/ipfs/{ABSENT}"));
     assert!(matches!(status, 502 | 504), "{status}");

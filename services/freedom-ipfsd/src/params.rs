@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use freedom_ipfs_gateway::{NativeRequestHeader, RoutingMode};
 use serde::Deserialize;
-use serde_json::Value;
 use serde_json::value::RawValue;
 
 use crate::network::{self, NetworkPolicy};
@@ -71,7 +70,6 @@ struct StartWire {
     store: StoreWire,
     routing: RoutingWire,
     gateway: GatewayWire,
-    network: Value,
 }
 
 #[derive(Deserialize)]
@@ -140,8 +138,10 @@ fn object<'a, T: Deserialize<'a>>(params: Option<&'a RawValue>) -> Result<T, &'s
         .map_err(|_| "params are malformed: a member is missing, unknown or of the wrong type")
 }
 
-/// Parses and checks `ipfs.start`'s params.
-pub fn start(params: Option<&RawValue>) -> Result<Start, &'static str> {
+/// Parses and checks `ipfs.start`'s params, under the process's network
+/// policy (`--network`, which `ipfs.start` no longer carries: a `network`
+/// member is unknown, so refused).
+pub fn start(params: Option<&RawValue>, network: NetworkPolicy) -> Result<Start, &'static str> {
     let wire: StartWire = object(params)?;
     check_instance(&wire.instance)?;
     let store = match wire.store.kind.as_str() {
@@ -194,7 +194,6 @@ pub fn start(params: Option<&RawValue>) -> Result<Start, &'static str> {
     if !(1..=60_000).contains(&wire.gateway.request_queue_timeout_ms) {
         return Err("gateway.request_queue_timeout_ms must be between 1 and 60000");
     }
-    let network = network::parse(&wire.network)?;
     match network {
         // `direct` has no route to an onion (0007, "The onion route").
         NetworkPolicy::Direct
@@ -275,6 +274,7 @@ fn check_instance(instance: &str) -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use serde_json::json;
 
     /// Today's values (0007, "Methods"), with a disk store.
@@ -286,14 +286,18 @@ mod tests {
                 "delegated_routers": ["https://delegated-ipfs.dev/routing/v1", "https://cid.contact/routing/v1"],
                 "doh_endpoint": "https://cloudflare-dns.com/dns-query",
                 "dht_query_timeout_s": 3, "dht_max_providers": 32 },
-            "gateway": { "max_concurrent_requests": 8, "request_queue_timeout_ms": 15000 },
-            "network": { "mode": "direct" }
+            "gateway": { "max_concurrent_requests": 8, "request_queue_timeout_ms": 15000 }
         })
     }
 
+    /// `ipfs.start` in a `direct` process.
     fn parse(value: &Value) -> Result<Start, &'static str> {
+        parse_under(value, NetworkPolicy::Direct)
+    }
+
+    fn parse_under(value: &Value, network: NetworkPolicy) -> Result<Start, &'static str> {
         let raw = serde_json::value::to_raw_value(value).unwrap();
-        start(Some(&raw))
+        start(Some(&raw), network)
     }
 
     #[test]
@@ -396,13 +400,8 @@ mod tests {
             ("/gateway/max_concurrent_requests", json!(65)),
             ("/gateway/request_queue_timeout_ms", json!(0)),
             ("/gateway/request_queue_timeout_ms", json!(60_001)),
-            // `socks5` takes delegated or offline routing; `todays()` is auto.
-            (
-                "/network",
-                json!({ "mode": "socks5", "ip": "127.0.0.1", "port": 9150 }),
-            ),
-            ("/network/mode", json!("tor")),
-            ("/network/port", json!(0)),
+            // The policy is `--network`'s now: `ipfs.start` can't carry it.
+            ("/network", json!({ "mode": "direct" })),
             ("/extra", json!(1)),
             ("/routing/extra", json!(1)),
         ];
@@ -420,7 +419,7 @@ mod tests {
         let mut memory = todays();
         memory["store"] = json!({ "kind": "memory", "max_bytes": (32 << 20) + 1 });
         assert!(parse(&memory).is_err());
-        for missing in ["instance", "store", "routing", "gateway", "network"] {
+        for missing in ["instance", "store", "routing", "gateway"] {
             let mut params = todays();
             params.as_object_mut().unwrap().remove(missing);
             assert!(parse(&params).is_err(), "{missing}");
@@ -431,23 +430,25 @@ mod tests {
             .unwrap()
             .remove("doh_endpoint");
         assert!(parse(&no_doh).is_err());
-        assert!(start(None).is_err());
+        assert!(start(None, NetworkPolicy::Direct).is_err());
         let array = serde_json::value::to_raw_value(&json!([1])).unwrap();
-        assert!(start(Some(&array)).is_err());
+        assert!(start(Some(&array), NetworkPolicy::Direct).is_err());
     }
 
-    /// `socks5` with delegated or offline routing: an onion router or DoH
-    /// endpoint is accepted there, where `direct` refuses it; every other
-    /// routing mode is refused (decision D6).
+    /// In a `socks5` process, delegated or offline routing: an onion router
+    /// or DoH endpoint is accepted there, where `direct` refuses it; every
+    /// other routing mode is refused (decision D6).
     #[test]
     fn socks5_takes_delegated_or_offline_routing_and_reaches_onions() {
+        let policy = NetworkPolicy::Socks5 {
+            proxy: "127.0.0.1:9150".parse().unwrap(),
+        };
         let socks5 = |mode: &str| {
             let mut params = todays();
             params["routing"]["mode"] = mode.into();
             params["routing"]["delegated_routers"] = json!(["https://router.onion/routing/v1"]);
             params["routing"]["doh_endpoint"] = json!("https://dns.onion/dns-query");
-            params["network"] = json!({ "mode": "socks5", "ip": "127.0.0.1", "port": 9150 });
-            parse(&params)
+            parse_under(&params, policy)
         };
         for (mode, expected) in [
             ("delegated", RoutingMode::Delegated),
@@ -455,12 +456,7 @@ mod tests {
         ] {
             let start = socks5(mode).unwrap();
             assert_eq!(start.routing.mode, expected);
-            assert_eq!(
-                start.network,
-                NetworkPolicy::Socks5 {
-                    proxy: "127.0.0.1:9150".parse().unwrap()
-                }
-            );
+            assert_eq!(start.network, policy);
         }
         for mode in ["auto", "light_dht"] {
             assert_eq!(

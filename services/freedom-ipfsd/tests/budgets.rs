@@ -537,6 +537,7 @@ fn a_tiny_disk_target_starts_at_exactly_its_fixed_reservation() {
         hot_cache_bytes: None,
         max_page_count: None,
         cache_kib: Some(8 << 10),
+        temp_store: freedom_ipfs_store::TempStore::Memory,
     }
     .hot_cache_fixed_bytes() as usize;
     assert!(hot > 1, "{hot}");

@@ -358,6 +358,7 @@ mod linux {
             // read grants alone.
             system_resolver: true,
             descriptors,
+            interface_index: false,
         }
     }
 

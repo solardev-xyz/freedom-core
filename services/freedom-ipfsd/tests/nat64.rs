@@ -119,16 +119,20 @@ fn network_stats_until(ipfsd: &mut Ipfsd, instance: &str, done: impl Fn(&Value) 
     }
 }
 
-/// A private instance under `socks5`, to a proxy on a closed port: it
-/// starts, since nothing is sent at start.
-fn socks5_instance(id: &str) -> Value {
+/// `--network` for a proxy on a closed port: an instance under it starts,
+/// since nothing is sent at start.
+fn socks5_closed() -> String {
     let closed = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
         .unwrap();
+    socks5(closed)
+}
+
+/// A private instance for a `socks5` process: delegated routing.
+fn socks5_instance(id: &str) -> Value {
     let mut params = memory(id);
     params["routing"]["mode"] = json!("delegated");
-    params["network"] = json!({ "mode": "socks5", "ip": "127.0.0.1", "port": closed.port() });
     params
 }
 
@@ -186,6 +190,14 @@ fn stats_report_what_discovery_knows_under_direct_and_nothing_under_socks5() {
         json!({ "mode": "direct", "nat64": {
             "state": "known", "prefixes": ["2001:db8:64::/96"], "failures": [] } })
     );
+    ipfsd.close_stdin();
+    assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
+    // A `socks5` process learns nothing.
+    let mut ipfsd = Ipfsd::ephemeral_on(
+        &socks5_closed(),
+        &[("FREEDOM_IPFSD_TEST_NAT64_RESOLVERS", &resolvers)],
+    );
+    ipfsd.hello();
     assert_eq!(
         ipfsd.start(socks5_instance("e-2"))["result"]["instance"],
         "e-2"
@@ -224,18 +236,26 @@ fn stats_report_what_discovery_knows_under_direct_and_nothing_under_socks5() {
 fn discovery_queries_only_while_a_direct_instance_lives() {
     let dns64 = Dns64::start(&["2001:db8:64::"], false);
     let resolvers = dns64.addr.to_string();
-    let mut ipfsd = Ipfsd::ephemeral(&[("FREEDOM_IPFSD_TEST_NAT64_RESOLVERS", &resolvers)]);
+    // A `socks5` process, with an instance: no query.
+    let mut ipfsd = Ipfsd::ephemeral_on(
+        &socks5_closed(),
+        &[("FREEDOM_IPFSD_TEST_NAT64_RESOLVERS", &resolvers)],
+    );
     ipfsd.hello();
-
-    // A `socks5` instance alone: no query.
     assert_eq!(
         ipfsd.start(socks5_instance("e-1"))["result"]["instance"],
         "e-1"
     );
     std::thread::sleep(Duration::from_secs(1));
     assert_eq!(dns64.queries(), 0, "a query with no direct instance");
+    ipfsd.close_stdin();
+    assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
 
-    // A `direct` one: discovery runs.
+    // A `direct` one: discovery runs while an instance lives.
+    let mut ipfsd = Ipfsd::ephemeral(&[("FREEDOM_IPFSD_TEST_NAT64_RESOLVERS", &resolvers)]);
+    ipfsd.hello();
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(dns64.queries(), 0, "a query with no instance");
     assert_eq!(ipfsd.start(memory("e-2"))["result"]["instance"], "e-2");
     let network = network_stats_until(&mut ipfsd, "e-2", |network| {
         network["nat64"]["state"] == "known"
