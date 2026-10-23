@@ -308,21 +308,30 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
 **The first step, with the services (0007 and 0008, step 4):**
 1. **A `confine` step in `fc-service`,** run once on the main thread **while it is the process's only thread**:
    - **Before it, in this order:**
-     1. **Only the listed setup:**
-        - the panic hook is installed, first, and the process hardened;
+     1. **At entry, one re-exec if anything is inherited.** Right after the panic hook, before anything opens a descriptor, the service lists its descriptors.
+        - **If one is open above stderr** and `FREEDOM_SERVICE_REEXEC` isn't set, the service:
+          - marks every descriptor above stderr close-on-exec: `close_range(3, ~0, CLOSE_RANGE_CLOEXEC)` from Linux 5.11, or an `fcntl(F_SETFD)` loop over `/proc/self/fd` before it;
+          - executes itself again through `/proc/self/exe`, with the same arguments and environment plus the marker. `/proc/self/exe` is the running image even if its file was replaced.
+
+          The kernel then closes them all.
+        - **The re-executed image removes the marker** from its environment before anything else, so it goes no further.
+        - **On macOS** (with the Seatbelt work): a loop over `/dev/fd`, and `execv` of `_NSGetExecutablePath`'s path.
+        - **Why a re-exec:** a close can't prove that no Rust object owns the descriptor it closes. Close-on-exec closes nothing, and the exec replaces the whole image, so no owner of a closed descriptor survives. If the exec fails, close-on-exec is merely set, and every owner is still valid. The calls are `fc-sys`'s, as rule 6 says, and the exec is std's.
+     2. **Only the listed setup:**
+        - the process is hardened;
         - the arguments are parsed, the network policy included;
         - for the persistent IPFS process and `freedom-radicled`: the lock is taken, and the data directory is created and opened. The service registers the lock's descriptor, and any directory it holds open, with `confine`. The ephemeral IPFS process takes no lock and opens no directory: its read-write grant is empty, and it registers nothing.
         - **Nothing else:** no socket, no name lookup, and no file outside the grants. Logging writes stderr only, NAT64 discovery starts with the runtime after `confine`, and the TLS roots are built in.
-     2. **`confine` checks** the threads and the whole descriptor table (below), and only then installs the rules.
-   - **Nothing is closed: unexpected descriptors are refused at `confine`.** A safe close can't prove that no Rust object owns the descriptor it closes, and rule 6 keeps `unsafe` in `fc-sys`.
+     3. **`confine` checks** the threads and the whole descriptor table (below), and only then installs the rules.
+   - **Refusal is the backstop.** After the re-exec, or with the marker already set, a descriptor still there is refused at `confine`: exit 77, logged by its kind.
      - Main spawns each service with stdio alone: Node and libuv open their own descriptors close-on-exec, as Rust's `Command` does.
-     - So a descriptor that reaches a service anyway is a launcher bug. `confine` refuses it, with its kind in the log, rather than run with it.
+     - So the re-exec should seldom happen. It means the launcher leaked a descriptor into main.
    - **After it,** everything that starts a thread: logging's writer (`log::init`; lines before it are written directly), the async runtimes (built explicitly, never by `#[tokio::main]`), `conn::run`'s reader, writer, stdin and lifecycle threads, and the watchdogs. Then the handshake, and only then any untrusted input.
    - **Why:** before ABI 8, Landlock restricts only the calling thread and the threads it starts later. A thread started earlier stays unconfined, and a compromise could use it. seccomp is installed with `TSYNC`, and Landlock with its `TSYNC` from ABI 8, as backstops. The order doesn't rely on them.
    - **Checked:** `confine` counts the process's threads first (`/proc/self/task` on Linux). More than one is a bug, so the service exits 77 rather than report confinement.
    - **Checked too: only the registered descriptors cross.** Landlock and seccomp check new opens and calls only. Nothing they do closes or revokes a descriptor opened before them: a connected socket, a pipe or FIFO, or a file opened outside the grants stays usable.
      - **The check:** `confine` compares every descriptor in the process's table (`/proc/self/fd` on Linux, `/dev/fd` on macOS) with stdio and the descriptors the service registered, whatever its type. The table's own descriptor, which `confine` opens to read it, is known by its number and skipped, and nothing else is opened while it reads.
-     - **Anything else** above stderr, inherited from the launcher or opened by the setup before `confine`, is a bug, and the service exits 77:
+     - **Anything else** above stderr, opened by the setup or left after the entry's re-exec, is a bug, and the service exits 77:
        - a socket, pipe or FIFO: a channel the rules wouldn't see, such as an NSS source's cached connection;
        - a regular file or directory: access the grants may not give;
        - an `eventfd` or `epoll` descriptor: no channel of its own, but a sign that a runtime was built early, which the thread count misses for a runtime on the current thread.
@@ -459,8 +468,10 @@ Through the binary, in CI's job for each OS:
   - a resolver file replaced by a rename while the service runs: still readable through its directory's grant; in `/etc`, discovery reports `unknown`;
   - the service still passes its contract suite confined.
 - **Descriptors,** each case stating where its descriptor comes from:
-  - **inherited from the parent:** an extra pipe, and an extra socket, are refused, not closed (exit 77);
-  - **opened by the process's own startup, before `confine`:** a UNIX socket connected to a listener, as an NSS client's cached connection would be, a pipe, a file opened outside the grants, an `eventfd` and an `epoll` descriptor. Each makes `confine` refuse (exit 77);
+  - **inherited from the parent:** an extra pipe, and an extra socket, each give exactly one re-exec, then a clean start with the marker gone. This holds through `close_range` and through the `fcntl` fallback;
+  - **the marker set with a descriptor still there:** no re-exec, and exit 77;
+  - **a re-exec that fails:** a descriptor the process owns still works after close-on-exec is set, and the inherited one is refused (exit 77);
+  - **opened by the process's own startup, after its entry and before `confine`:** a UNIX socket connected to a listener, as an NSS client's cached connection would be, a pipe, a file opened outside the grants, an `eventfd` and an `epoll` descriptor. Each makes `confine` refuse (exit 77);
   - **hidden:** with a socket connected, an outer Landlock layer that hides `/proc/self/fd`, or `/proc/self/task`, makes `confine` refuse, and no report comes back;
   - **allowed:** stdio as pipes, and as a socket pair, with a registered lock and directory, passes. So does the ephemeral IPFS process, which registers nothing;
   - **in each service,** the descriptors open at `confine` are exactly stdio and the lock, and the ephemeral process's are stdio alone.
@@ -500,7 +511,7 @@ Through the binary, in CI's job for each OS:
   - a kill and a timeout during the import, then a restart: the marker stays, the service reconciles, and the reply is `outcome_unknown`;
   - **an unclean stop before admission:** a write and a fetch unfinished at the stop's 5 s exit, leaving the marker and a ref lock file. The import process repairs them before it admits the import. A `rad.import_repo` sent before `rad.reconcile` has replied gets `stopped` and changes nothing. A reconciliation that reaches its deadline imports nothing.
 - **Windows:** the job is assigned inside libuv's job, and each mitigation reads back as set.
-- **Before shipping, on the release runtime** (each release's checklist): the release binaries, confined, on glibc 2.25 (the oldest the browser runs on), another from before 2.34 and a current one, each with a first lookup after confinement and none before it; with and without `resolve` and `mdns4_minimal` in `nsswitch.conf`; `socks5` mode through a LAN proxy, on Linux and macOS; and the packaged app started each way users start it (the desktop entry, a terminal, each Linux package format, macOS's Finder and Dock), each time spawning both services with no descriptor beyond stdio. A descriptor the app itself inherited without close-on-exec would pass through to them on Linux, and they would exit 77.
+- **Before shipping, on the release runtime** (each release's checklist): the release binaries, confined, on glibc 2.25 (the oldest the browser runs on), another from before 2.34 and a current one, each with a first lookup after confinement and none before it; with and without `resolve` and `mdns4_minimal` in `nsswitch.conf`; `socks5` mode through a LAN proxy, on Linux and macOS; and the packaged app started each way users start it (the desktop entry, a terminal, each Linux package format, macOS's Finder and Dock), checking from the services' logs that their entry re-exec seldom happens. A descriptor the app itself inherited without close-on-exec passes through to the services on Linux, and each start then re-executes once.
 - **Before shipping, measured:**
   - cold start to `hello`;
   - IPFS over direct TCP and QUIC, `socks5` reconnects to Arti, and SQLite;
@@ -536,7 +547,7 @@ Each is decided (the user, 2026-10-23), as recommended. The options weighed stay
   - the `landlock` crate (MIT or Apache-2.0) and `seccompiler` (Apache-2.0 or BSD-3-Clause), which keep their `unsafe` inside them, pinned to exact versions (today `landlock` 0.4.7 and `seccompiler` 0.5.0). Each mechanism maps to one status: Landlock's from its `RestrictionStatus` and the kernel's ABI; seccomp's from installing both filters; each Windows mitigation from its read-back;
   - or hand-written FFI.
 
-  The macOS and Windows calls need FFI either way. AGENTS.md rule 6 puts every `unsafe` of this workspace in `fc-sys`, each a single reviewed call with a `SAFETY` comment behind a safe function, as `fc-service`'s Windows calls already are (#116). `fc-service` keeps `forbid(unsafe_code)`, and calls them through `fc-sys`'s safe functions; Landlock's version query goes there too. A range close doesn't: a safe function can't prove that no Rust object owns what it closes, so `confine` refuses unexpected descriptors instead (step 1).
+  The macOS and Windows calls need FFI either way. AGENTS.md rule 6 puts every `unsafe` of this workspace in `fc-sys`, each a single reviewed call with a `SAFETY` comment behind a safe function, as `fc-service`'s Windows calls already are (#116). `fc-service` keeps `forbid(unsafe_code)`, and calls them through `fc-sys`'s safe functions; So do Landlock's version query, the entry's close-on-exec marks, and the marker's removal (step 1). None of them closes a descriptor, so none can invalidate an owner, and the exec that drops the marked descriptors is std's. A range close isn't among them: a safe function can't prove that no Rust object owns what it closes.
   - **Decided: the `landlock` and `seccompiler` crates, pinned to exact versions,** with `cargo deny` checking them.
 - **D7. `freedom-cored`:** confine it too, in a later design, or not.
   - **Decided: confine it too, in a later design.**
