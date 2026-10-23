@@ -406,6 +406,7 @@ pub fn round(
             _ if index >= MAX_RESOLVERS => failures.push((describe(resolver), "over_limit")),
             Learned::Ask(addr) => asked.push(*addr),
             Learned::Unaskable(text) => failures.push((text.clone(), "unaskable")),
+            Learned::Unreadable => failures.push((describe(resolver), "unreadable")),
         }
     }
     let mut reported = false;
@@ -503,6 +504,7 @@ fn describe(resolver: &Learned) -> String {
     match resolver {
         Learned::Ask(addr) => addr.to_string(),
         Learned::Unaskable(text) => text.clone(),
+        Learned::Unreadable => "a resolver file".to_string(),
     }
 }
 
@@ -704,6 +706,32 @@ mod tests {
             unaskable.failures,
             vec![("fe80::1%wlan9".to_string(), "unaskable")]
         );
+        // And so does a resolver file that can't be read: what it lists is
+        // unknown, never none (design 0010: a file replaced while confined).
+        let mut kept = Vec::new();
+        let unreadable = round(
+            &[ask(answers), Learned::Unreadable],
+            &mut kept,
+            &FAST,
+            &query::Open,
+            &|_| {},
+        );
+        assert_eq!(
+            unreadable.state,
+            Nat64State::Unknown(vec![prefix("2a00:1:2:3::", 96)])
+        );
+        assert_eq!(
+            unreadable.failures,
+            vec![("a resolver file".to_string(), "unreadable")]
+        );
+        let alone = round(
+            &[Learned::Unreadable],
+            &mut Vec::new(),
+            &FAST,
+            &query::Open,
+            &|_| {},
+        );
+        assert_eq!(alone.state, Nat64State::Unknown(Vec::new()));
     }
 
     #[test]

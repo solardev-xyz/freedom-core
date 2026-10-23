@@ -23,6 +23,8 @@
 //! - [`confine`]: OS confinement (design 0010), applied once on the main
 //!   thread while it is the only one: Landlock and seccomp on Linux, with
 //!   one status per property for `hello`.
+//! - [`network`]: the `--network` spawn argument both services take, which
+//!   confinement applies and `hello` reports.
 //! - [`watchdog`]: plain threads that end the process unless disarmed in
 //!   time: the exit watchdog after EOF, and a teardown's 5 s bound
 //!   (`teardown_unproven`, exit 70).
@@ -44,6 +46,7 @@ pub mod exit;
 pub mod gate;
 pub mod hardening;
 pub mod log;
+pub mod network;
 pub mod panic;
 pub mod storage;
 pub mod watchdog;

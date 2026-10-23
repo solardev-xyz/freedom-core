@@ -320,6 +320,37 @@ fn unconfined(why: &str) -> Report {
     }
 }
 
+/// The read-only grant for a resolver file the service reads itself, such
+/// as NAT64 discovery's (design 0010, "The recommendation", step 2): on
+/// Linux, the file alone when it sits in `/etc` itself, or else the directory
+/// that holds it after its symlinks are followed, so a replacement there
+/// stays readable. `None` if it doesn't exist, or elsewhere.
+pub fn resolver_grant(file: &Path) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        resolver::grant_in(file, Path::new(resolver::ETC))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = file;
+        None
+    }
+}
+
+/// [`resolver_grant`], with `etc` standing for `/etc`: a test seam.
+#[doc(hidden)]
+pub fn resolver_grant_in(file: &Path, etc: &Path) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        resolver::grant_in(file, etc)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (file, etc);
+        None
+    }
+}
+
 /// The system files a confined service reads (design 0010, "What each
 /// service needs"): on Linux, glibc's resolver configuration,
 /// `ld.so.cache`, the C library's own directory, `/proc/self` and the
