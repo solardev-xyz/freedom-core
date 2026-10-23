@@ -312,7 +312,7 @@ impl Swarm {
         file.insert("size".into(), json!(size));
         file.insert("redundancy".into(), json!(level));
         file.insert("root".into(), json!(h(&split.root)));
-        file.insert("tree".into(), Value::Array(tree));
+        file.insert("tree".into(), Value::Array(canonical_tree(tree)));
         file.insert("data_leaves".into(), json!(data_leaves));
         // Every chunk the split wrote that the join didn't read.
         file.insert("parities".into(), json!(all.len() - seen.len()));
@@ -390,7 +390,7 @@ impl Swarm {
             "size": size,
             "redundancy": 0,
             "root": h(&root),
-            "tree": tree,
+            "tree": canonical_tree(tree),
             "data_leaves": data.len().div_ceil(4096),
             "parities": 0,
             "joined_equals_content": true,
@@ -1503,6 +1503,15 @@ impl Swarm {
         }
         Ok(())
     }
+}
+
+/// A tree's chunks: the root, then the rest by address. The joiner fetches
+/// children concurrently, so the order it reads them in isn't stable.
+fn canonical_tree(mut tree: Vec<Value>) -> Vec<Value> {
+    if tree.len() > 1 {
+        tree[1..].sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    }
+    tree
 }
 
 fn replace_bytes(hay: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
