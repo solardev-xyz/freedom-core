@@ -61,6 +61,7 @@ pub const METHODS: &[&str] = &[
     "chain.availability",
     "chain.request",
     "chain.fee_quote",
+    "chain.fee_reference",
     "chain.broadcast",
     "chain.html",
 ];
@@ -561,7 +562,11 @@ impl Chain {
                 self.machine.availability(params.chain_id, params.ready);
                 self.result(id, b"{}".to_vec())
             }
-            "chain.request" | "chain.fee_quote" | "chain.broadcast" | "chain.html" => {
+            "chain.request"
+            | "chain.fee_quote"
+            | "chain.fee_reference"
+            | "chain.broadcast"
+            | "chain.html" => {
                 let Some((call, deadline_ms)) = call_params(method, params) else {
                     return self.error(id, invalid());
                 };
@@ -1996,6 +2001,7 @@ struct RequestParams<'a> {
     deadline_ms: u64,
 }
 
+/// `chain.fee_quote`'s params, and `chain.fee_reference`'s.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FeeQuoteParams {
@@ -2065,6 +2071,16 @@ fn call_params(method: &str, params: &str) -> Option<(Call, Ms)> {
                 deadline_ms,
             ))
         }
+        "chain.fee_reference" => {
+            let p: FeeQuoteParams = parse(params)?;
+            let deadline_ms = valid(p.chain_id, p.deadline_ms)?;
+            Some((
+                Call::FeeReference {
+                    chain_id: p.chain_id,
+                },
+                deadline_ms,
+            ))
+        }
         "chain.broadcast" => {
             let p: BroadcastParams = parse(params)?;
             let deadline_ms = valid(p.chain_id, p.deadline_ms)?;
@@ -2098,6 +2114,7 @@ fn call_chain(call: &Call) -> u64 {
     match call {
         Call::Read { chain_id, .. }
         | Call::FeeQuote { chain_id }
+        | Call::FeeReference { chain_id }
         | Call::Broadcast { chain_id, .. }
         | Call::Html { chain_id, .. } => *chain_id,
     }
@@ -2113,6 +2130,7 @@ fn label(call: &Call) -> &'static str {
             .copied()
             .unwrap_or("unsupported"),
         Call::FeeQuote { .. } => "fee_quote",
+        Call::FeeReference { .. } => "fee_reference",
         Call::Broadcast { .. } => "broadcast",
         Call::Html { .. } => "html",
     }
@@ -2144,7 +2162,8 @@ fn log_outcome(caller: &Caller, done: &Done) {
             };
             SOURCES.iter().find(|known| **known == named).copied()
         }
-        Err(_) => None,
+        // The evidence has two parts, neither a source of the request.
+        Ok(Success::FeeReference(_)) | Err(_) => None,
     };
     let outcome = match &done.result {
         Ok(Success::Broadcast { outcome, .. }) => outcome.as_str(),
@@ -2369,8 +2388,13 @@ fn tail(message: &mut Message<'_>, outcome: Option<BroadcastOutcome>, generation
 ///   generation }`, `result` embedded as the answer's raw JSON. A missing
 ///   `result` (JavaScript's `undefined`) is left out and named in
 ///   `undefined_keys`; main restores it first in key order.
-/// - `chain.fee_quote`: today's quote, keys in the router's order, then
-///   `generation`.
+/// - `chain.fee_quote`: today's quote, keys in the router's order (Direct's
+///   with `answered`), then `generation`.
+/// - `chain.fee_reference`: `{ header, lowest_priority, quote, generation }`
+///   (design 0005, A: The evidence), numbers as decimal strings: `header`
+///   is `{ source: "colibri", number, timestamp, base_fee }`, `base_fee`
+///   null on a chain without one; `quote` is B's combined quote. A part
+///   that failed is null.
 /// - `chain.broadcast`: `{ hash, source, outcome, generation }`.
 /// - `chain.html` (design 0006): `{ html_base64, hash, source, verified,
 ///   trust?, class, generation }`: the document's UTF-8 as base64, its
@@ -2428,6 +2452,38 @@ fn reply_message(id: u64, done: &Done) -> Message<'_> {
                 .text(r#""result":"#)
                 .owned(json)
                 .owned(format!(r#","generation":{generation}}}}}"#));
+        }
+        Ok(Success::FeeReference(reference)) => {
+            message.text(r#""result":{"header":"#);
+            match &reference.header {
+                Some(header) => {
+                    message
+                        .text(r#"{"source":"colibri","number":"#)
+                        .string(&header.number)
+                        .text(r#","timestamp":"#)
+                        .string(&header.timestamp)
+                        .text(r#","base_fee":"#);
+                    match &header.base_fee {
+                        Some(base_fee) => message.string(base_fee),
+                        None => message.text("null"),
+                    };
+                    message.text("}");
+                }
+                None => {
+                    message.text("null");
+                }
+            }
+            message.text(r#","lowest_priority":"#);
+            match &reference.lowest_priority {
+                Some(priority) => message.string(priority),
+                None => message.text("null"),
+            };
+            message.text(r#","quote":"#);
+            match &reference.quote {
+                Some(quote) => message.owned(quote.to_json()),
+                None => message.text("null"),
+            };
+            message.owned(format!(r#","generation":{generation}}}}}"#));
         }
         Ok(Success::Broadcast {
             hash,

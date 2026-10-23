@@ -5,10 +5,11 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use fc_chain::FeeQuote;
 use fc_chain::machine::{
     Answer, Bounds, BroadcastOutcome, Call, ChainConfig, ChainError, ColibriReply, Effect, Emitted,
-    Machine, MyotisClass, MyotisRejection, MyotisReply, Prop, Protocol, Prover, QuorumConfig,
-    ReadOptions, Reply, Request, RpcEndpoint, Success, Transport, VerifiedOp,
+    FeeReference, Header, Machine, MyotisClass, MyotisRejection, MyotisReply, Prop, Protocol,
+    Prover, QuorumConfig, ReadOptions, Reply, Request, RpcEndpoint, Success, Transport, VerifiedOp,
 };
 
 /// A test world: the machine and everything it emitted.
@@ -2520,4 +2521,352 @@ fn boundary_fee_combine_races() {
     for io in outstanding(&world) {
         assert_eq!(world.cancelled(io), Some(400));
     }
+}
+
+// ---------------------------------------------------------------------------
+// chain.fee_reference (design 0005, A: The evidence): the core's machine
+// tests.
+
+const REFERENCE: Call = Call::FeeReference { chain_id: 1 };
+
+fn evidence(reply: &Reply) -> &FeeReference {
+    match &reply.result {
+        Ok(Success::FeeReference(reference)) => reference,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The header `header(Some(base_fee))` answers, in decimal.
+fn verified_header(base_fee: Option<&str>) -> Header {
+    Header {
+        number: "20000000".into(),
+        timestamp: "1700000000".into(),
+        base_fee: base_fee.map(str::to_owned),
+    }
+}
+
+fn no_myotis_operation(world: &World) -> bool {
+    !world.requests.iter().any(|(_, _, request, _)| {
+        matches!(request, Request::Verified(VerifiedOp::MyotisRead { .. }))
+    })
+}
+
+/// Colibri asked for anything but the header (a quote's components).
+fn colibri_quotes(world: &World) -> usize {
+    world
+        .requests
+        .iter()
+        .filter(|(_, _, request, _)| {
+            matches!(request, Request::Verified(VerifiedOp::Colibri { method, .. })
+                if method != "eth_getBlockByNumber")
+        })
+        .count()
+}
+
+#[test]
+fn fee_reference_header_and_quotes() {
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["colibri", "direct"], &["a", "b", "c"], true)],
+    );
+    let id = world.submit(REFERENCE, None);
+    // Both parts at once: B's first exchanges, then the header.
+    assert_eq!(
+        world.asked(),
+        ["a", "b", "c"].map(|e| (e.to_owned(), "eth_gasPrice".to_owned(), 0))
+    );
+    let reads = world.header_reads();
+    assert_eq!(reads, [(reads[0].0, 0)]);
+    world.quote_from("a", "0x64", Some("0xa"));
+    world.quote_from("b", "0x3e8", None);
+    world.quote_from("c", "0x78", Some("0x5"));
+    // B is done; the reply waits for the header.
+    world.run(250);
+    assert!(!world.replied(id));
+    world.answer(reads[0].0, header(Some("0x7")));
+    let reply = world.reply(id);
+    assert_eq!(reply.settled, 250);
+    assert_eq!(reply.generation, 1);
+    let reference = evidence(reply);
+    assert_eq!(reference.header, Some(verified_header(Some("7"))));
+    assert_eq!(reference.lowest_priority.as_deref(), Some("5"));
+    // Mixed, and this request's header has a base fee: EIP-1559.
+    assert_eq!(
+        reference.quote.as_ref().map(FeeQuote::to_json),
+        Some(eip1559("92", "5", "190", "97", 3))
+    );
+    // Colibri gave only the header; nobody asked Colibri for a quote.
+    assert_eq!(colibri_quotes(&world), 0);
+}
+
+#[test]
+fn fee_reference_runs_past_an_earlier_sources_success() {
+    // A read order that starts with Myotis, ready: a fee quote would take
+    // Myotis's; the reference asks Myotis nothing, and still gets Colibri's
+    // header and B's quotes, the quorum's endpoints included.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(
+            &["myotis", "colibri", "quorum", "direct"],
+            &["a", "b"],
+            true,
+        )],
+    );
+    world.machine.availability(1, true);
+    let id = world.submit(REFERENCE, None);
+    world.quote_from("a", "0x64", Some("0xa"));
+    world.quote_from("b", "0x64", Some("0x9"));
+    world.answer(world.header_reads()[0].0, header(Some("0x1")));
+    let reference = evidence(world.reply(id));
+    assert_eq!(reference.header, Some(verified_header(Some("1"))));
+    assert_eq!(reference.lowest_priority.as_deref(), Some("9"));
+    assert_eq!(
+        reference.quote.as_ref().map(FeeQuote::to_json),
+        Some(eip1559("90", "9", "190", "99", 2))
+    );
+    assert!(no_myotis_operation(&world));
+    assert_eq!(colibri_quotes(&world), 0);
+    // The quorum, as a source, asks nothing either: one exchange pair per
+    // endpoint, B's.
+    assert_eq!(world.rpcs().len(), 4);
+}
+
+#[test]
+fn fee_reference_without_a_header() {
+    for config in [
+        // No prover.
+        fee_chain(&["colibri", "direct"], &["a", "b"], false),
+        // Colibri out of the read order.
+        fee_chain(&["myotis", "quorum", "direct"], &["a", "b"], true),
+    ] {
+        let mut world = World::new(Bounds::default(), &[config]);
+        let id = world.submit(REFERENCE, None);
+        assert!(world.header_reads().is_empty());
+        world.quote_from("a", "0x64", Some("0x1"));
+        world.quote_from("b", "0x3e8", None);
+        let reference = evidence(world.reply(id));
+        assert_eq!(reference.header, None);
+        assert_eq!(reference.lowest_priority.as_deref(), Some("1"));
+        // Mixed without a verified header: legacy.
+        assert_eq!(
+            reference.quote.as_ref().map(FeeQuote::to_json),
+            Some(legacy("100", 2))
+        );
+        assert_eq!(world.reply(id).settled, 0);
+    }
+}
+
+#[test]
+fn fee_reference_without_quorum_or_direct() {
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["myotis", "colibri"], &["a", "b"], true)],
+    );
+    world.machine.availability(1, true);
+    let id = world.submit(REFERENCE, None);
+    // Only the header: no endpoint is asked.
+    assert!(world.rpcs().is_empty());
+    assert_eq!(world.requests.len(), 1);
+    world.answer(world.header_reads()[0].0, header(Some("0x2a")));
+    let reference = evidence(world.reply(id));
+    assert_eq!(reference.header, Some(verified_header(Some("42"))));
+    assert_eq!(reference.lowest_priority, None);
+    assert_eq!(reference.quote, None);
+}
+
+#[test]
+fn fee_reference_when_colibri_fails_or_is_malformed() {
+    let answers = [
+        Answer::Colibri(ColibriReply::Failure(
+            fc_chain::machine::ColibriClass::Error,
+        )),
+        Answer::Colibri(ColibriReply::Undefined),
+        Answer::Colibri(ColibriReply::Result("null".into())),
+        Answer::Colibri(ColibriReply::Result(
+            r#"{"number":"0x10","timestamp":"0x10","baseFeePerGas":"0x007"}"#.into(),
+        )),
+        Answer::Colibri(ColibriReply::Revert {
+            data: "0x".into(),
+            capacity: false,
+        }),
+    ];
+    for answer in answers {
+        let mut world = World::new(
+            Bounds::default(),
+            &[fee_chain(&["colibri", "direct"], &["a", "b"], true)],
+        );
+        let id = world.submit(REFERENCE, None);
+        world.quote_from("a", "0x64", Some("0x1"));
+        world.quote_from("b", "0x3e8", None);
+        world.answer(world.header_reads()[0].0, answer.clone());
+        let reference = evidence(world.reply(id));
+        assert_eq!(reference.header, None, "{answer:?}");
+        assert_eq!(
+            reference.quote.as_ref().map(FeeQuote::to_json),
+            Some(legacy("100", 2)),
+            "{answer:?}"
+        );
+    }
+
+    // Colibri's own budget: at `configured` the header has failed.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["colibri", "direct"], &["a"], true)],
+    );
+    let id = world.submit(REFERENCE, None);
+    world.quote_from("a", "0x64", Some("0x1"));
+    world.run(4_999);
+    assert!(!world.replied(id));
+    world.run(5_000);
+    let reference = evidence(world.reply(id));
+    assert_eq!(reference.header, None);
+    assert_eq!(
+        reference.quote.as_ref().map(FeeQuote::to_json),
+        Some(eip1559("99", "1", "199", "100", 1))
+    );
+
+    // A header without `baseFeePerGas`: a chain without EIP-1559. Mixed
+    // quotes stay legacy.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["colibri", "direct"], &["a", "b"], true)],
+    );
+    let id = world.submit(REFERENCE, None);
+    world.quote_from("a", "0x64", Some("0x1"));
+    world.quote_from("b", "0x3e8", None);
+    world.answer(world.header_reads()[0].0, header(None));
+    let reference = evidence(world.reply(id));
+    assert_eq!(reference.header, Some(verified_header(None)));
+    assert_eq!(
+        reference.quote.as_ref().map(FeeQuote::to_json),
+        Some(legacy("100", 2))
+    );
+}
+
+#[test]
+fn fee_reference_when_no_endpoint_answers() {
+    // No endpoint: the header is still read; the quote is null.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["colibri", "direct"], &[], true)],
+    );
+    let id = world.submit(REFERENCE, None);
+    assert_eq!(world.requests.len(), 1);
+    world.answer(world.header_reads()[0].0, header(Some("0x7")));
+    let reference = evidence(world.reply(id));
+    assert_eq!(reference.header, Some(verified_header(Some("7"))));
+    assert_eq!(
+        (&reference.lowest_priority, &reference.quote),
+        (&None, &None)
+    );
+
+    // Every endpoint failing, and all-legacy quotes: no priority fee.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b"], false)],
+    );
+    let id = world.submit(REFERENCE, None);
+    world.answer(
+        world.rpc_to("a", "eth_gasPrice"),
+        node_error(-32000, "a down"),
+    );
+    world.answer(
+        world.rpc_to("b", "eth_gasPrice"),
+        node_error(-32000, "b down"),
+    );
+    let reference = evidence(world.reply(id));
+    assert_eq!(
+        *reference,
+        FeeReference {
+            header: None,
+            lowest_priority: None,
+            quote: None,
+        }
+    );
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b"], false)],
+    );
+    let id = world.submit(REFERENCE, None);
+    world.quote_from("a", "0x10", None);
+    world.quote_from("b", "0xc", Some("0xd"));
+    let reference = evidence(world.reply(id));
+    assert_eq!(reference.lowest_priority, None);
+    assert_eq!(
+        reference.quote.as_ref().map(FeeQuote::to_json),
+        Some(legacy("12", 2))
+    );
+}
+
+#[test]
+fn fee_reference_races() {
+    let chains = [fee_chain(&["colibri", "direct"], &["a", "b", "c"], true)];
+    let rpc_ios = |world: &World| -> Vec<u64> { world.rpcs().iter().map(|r| r.0).collect() };
+
+    // The deadline, B done and the header outstanding: the request ends
+    // with `deadline`; the header's operation keeps its slot.
+    let mut world = World::new(Bounds::default(), &chains);
+    let id = world.submit(REFERENCE, Some(800));
+    world.quote_from("a", "0x64", Some("0xa"));
+    world.quote_from("b", "0x64", Some("0x9"));
+    world.quote_from("c", "0x64", Some("0x8"));
+    world.run(800);
+    assert_eq!(protocol(world.reply(id)), Some(Protocol::Deadline));
+    assert_eq!(world.reply(id).settled, 800);
+    assert_eq!(world.machine.state_tables().colibri_in_flight, 1);
+    assert!(!world.machine.wants(world.header_reads()[0].0));
+
+    // A cancel, with exchanges outstanding.
+    let mut world = World::new(Bounds::default(), &chains);
+    let id = world.submit(REFERENCE, None);
+    world.run(100);
+    assert!(world.machine.cancel(id));
+    world.collect();
+    assert_eq!(protocol(world.reply(id)), Some(Protocol::Cancelled));
+    for io in rpc_ios(&world) {
+        assert_eq!(world.cancelled(io), Some(100));
+    }
+
+    // A configuration change ends it with `reconfigured`, under its own
+    // generation.
+    let mut world = World::new(Bounds::default(), &chains);
+    let id = world.submit(REFERENCE, None);
+    world.quote_from("a", "0x64", Some("0xa"));
+    world.run(300);
+    let generations =
+        world
+            .machine
+            .configure(&[fee_chain(&["colibri", "direct"], &["a", "d"], true)]);
+    world.collect();
+    assert_eq!(generations.get(&1), Some(&2));
+    assert_eq!(protocol(world.reply(id)), Some(Protocol::Reconfigured));
+    assert_eq!(world.reply(id).generation, 1);
+    for endpoint in ["b", "c"] {
+        let io = world.rpc_to(endpoint, "eth_gasPrice");
+        assert_eq!(world.cancelled(io), Some(300), "{endpoint}");
+    }
+    // The header's operation keeps its slot until main's reply.
+    assert_eq!(world.machine.state_tables().colibri_in_flight, 1);
+}
+
+#[test]
+fn fee_reference_work_counts_against_the_budget() {
+    // As for a fee quote: an endpoint's gas price whose codec index the
+    // request's budget can't hold ends the request with `budget`, not a
+    // null part.
+    let gas = format!("[{}]", vec!["null"; 1_000].join(","));
+    let mut world = World::new(
+        Bounds {
+            request_bytes: 15_000,
+            ..Bounds::default()
+        },
+        &[fee_chain(&["direct"], &["a"], false)],
+    );
+    let id = world.submit(REFERENCE, None);
+    world.answer(world.rpc_to("a", "eth_gasPrice"), ok(&gas));
+    world.answer(
+        world.rpc_to("a", "eth_maxPriorityFeePerGas"),
+        ok(&format!("\"{}\"", "a".repeat(9_000))),
+    );
+    assert_eq!(protocol(world.reply(id)), Some(Protocol::Budget));
 }

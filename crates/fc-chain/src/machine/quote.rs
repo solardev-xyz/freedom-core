@@ -15,7 +15,7 @@ use super::budget::Charge;
 use super::ctx::{Over, Release, Req, reply, reserve, started, within};
 use super::error::{ErrorClass, Thrown};
 use super::exchange::{ResultText, exchange};
-use super::header::{HeaderRead, reads_header};
+use super::header::{Header, HeaderRead, reads_header};
 use super::io::{Answer, Delivered, Ms, MyotisReply, Request, VerifiedOp};
 use super::logs::Keeper;
 use super::read::{
@@ -23,7 +23,7 @@ use super::read::{
 };
 use crate::fee::{
     FeeQuote, QUOTE_BYTES, QuoteValues, combine_fee_quotes, fee_quote_reserving,
-    fee_quote_values_reserving,
+    fee_quote_values_reserving, lowest_priority,
 };
 use crate::js::JsError;
 use crate::myotis::{MYOTIS_NOT_READY, MyotisOperation, myotis_fee_values};
@@ -318,6 +318,84 @@ async fn direct(req: &Req) -> Result<FeeQuote, Thrown> {
         _ => false,
     };
     combined(req, &collected, eip1559_verified).await
+}
+
+/// `chain.fee_reference`'s evidence (design 0005, A: The evidence): the
+/// verified header, and B's quotes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FeeReference {
+    /// Colibri's verified header, or none: no prover, Colibri out of the
+    /// read order, or a failed or malformed read.
+    pub header: Option<Header>,
+    /// The lowest priority fee among B's EIP-1559 quotes, in decimal.
+    pub lowest_priority: Option<String>,
+    /// B's combined quote, with `answered`; none when no endpoint
+    /// answered, or the read order has neither `quorum` nor `direct`.
+    pub quote: Option<FeeQuote>,
+}
+
+impl FeeReference {
+    /// What its texts hold on the heap.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.header.as_ref().map_or(0, |header| {
+            header.number.capacity()
+                + header.timestamp.capacity()
+                + header.base_fee.as_ref().map_or(0, String::capacity)
+        }) + self.lowest_priority.as_ref().map_or(0, String::capacity)
+            + self.quote.as_ref().map_or(0, FeeQuote::heap_bytes)
+    }
+}
+
+/// `chain.fee_reference` (design 0005, A: The evidence). Its two parts run
+/// at once:
+///
+/// - **The verified header,** where the chain has a prover and its read
+///   order includes `colibri` ([`HeaderRead`]).
+/// - **B's quotes,** where the read order includes `quorum` or `direct`:
+///   B's collection, run for the reference itself even when an earlier
+///   source would quote, and never asking Myotis, Colibri or the quorum
+///   for quotes. Mixed answers combine as EIP-1559 when this request's
+///   header has a base fee.
+///
+/// A part that fails is none; the request itself fails only as a fee quote
+/// can (its deadline, a cancel, a configuration change, its budget).
+pub(crate) async fn fee_reference(req: &Req) -> FeeReference {
+    let mut header = reads_header(&req.chain).then(|| HeaderRead::new(req));
+    let quotes = req
+        .chain
+        .read_order
+        .iter()
+        .any(|source| matches!(*source, "quorum" | "direct"));
+    let collected = if quotes {
+        collect(req, header.as_mut()).await.ok()
+    } else {
+        None
+    };
+    let header = match header.as_mut() {
+        Some(read) => read.outcome().await.cloned(),
+        None => None,
+    };
+    let Some(collected) = collected else {
+        return FeeReference {
+            header,
+            lowest_priority: None,
+            quote: None,
+        };
+    };
+    let eip1559_verified = collected.mixed()
+        && header
+            .as_ref()
+            .is_some_and(|header| header.base_fee.is_some());
+    let quote = combined(req, &collected, eip1559_verified).await.ok();
+    let lowest_priority = {
+        let _work = reserve!(req.ctx, QUOTE_BYTES);
+        lowest_priority(&collected.values)
+    };
+    FeeReference {
+        header,
+        lowest_priority,
+        quote,
+    }
 }
 
 /// Colibri and the quorum make two requests; any other source fails as

@@ -366,6 +366,148 @@ fn a_fee_quote() {
     );
 }
 
+/// Chain 1 with Myotis (ready), Colibri's prover and two endpoints, every
+/// source in its read order.
+fn reference_chain(core: &mut Core) {
+    let mut chain = snapshot(
+        &["myotis", "colibri", "quorum", "direct"],
+        &["a", "b"],
+        5000,
+    );
+    chain["myotis"] = json!(true);
+    chain["prover"] = json!({ "endpoint": "p1", "zk": true });
+    configure(core, 2, &[chain]);
+    call(
+        core,
+        3,
+        "chain.availability",
+        json!({ "chain_id": 1, "ready": true }),
+    );
+}
+
+#[test]
+fn a_fee_reference() {
+    let (_root, mut core) = core();
+    reference_chain(&mut core);
+    core.send(&request(
+        4,
+        "chain.fee_reference",
+        json!({ "chain_id": 1, "deadline_ms": 30_000 }),
+    ));
+    let (reply, seen) = serve(&mut core, 4, |request| {
+        let endpoint = request["params"]["endpoint"].as_str().unwrap_or("");
+        Some(
+            match (request["method"].as_str(), rpc_method(request).as_str()) {
+                (Some("shell.verified"), _) => {
+                    // Colibri's header, never a Myotis operation.
+                    assert_eq!(request["params"]["colibri"], "request", "{request}");
+                    assert_eq!(request["params"]["method"], "eth_getBlockByNumber");
+                    assert_eq!(request["params"]["params"], json!(["latest", false]));
+                    json!({ "result": { "result": {
+                    "number": "0x1312d00",
+                    "timestamp": "0x6553f100",
+                    "baseFeePerGas": "0x3b9aca00",
+                } } })
+                }
+                (_, "eth_gasPrice") if endpoint == "a" => rpc_result(r#""0x3b9aca00""#),
+                (_, "eth_gasPrice") => rpc_result(r#""0x77359400""#),
+                (_, "eth_maxPriorityFeePerGas") if endpoint == "a" => rpc_result(r#""0x5f5e100""#),
+                (_, "eth_maxPriorityFeePerGas") => rpc_result(r#""0xbebc200""#),
+                (_, other) => panic!("{other}"),
+            },
+        )
+    });
+    // B's four exchanges and the header, nothing else.
+    assert_eq!(seen.requests.len(), 5);
+    assert_eq!(
+        reply["result"],
+        json!({
+            "header": {
+                "source": "colibri",
+                "number": "20000000",
+                "timestamp": "1700000000",
+                "base_fee": "1000000000",
+            },
+            "lowest_priority": "100000000",
+            "quote": {
+                "type": "eip1559",
+                "baseFee": "900000000",
+                "maxPriorityFeePerGas": "100000000",
+                "maxFeePerGas": "1900000000",
+                "effectiveGasPrice": "1000000000",
+                "source": "direct",
+                "verified": false,
+                "answered": 2,
+            },
+            "generation": 1,
+        })
+    );
+}
+
+#[test]
+fn a_fee_reference_with_failed_parts_and_its_failures() {
+    let (_root, mut core) = core();
+    reference_chain(&mut core);
+    // Colibri fails and no endpoint answers: both parts null, no error.
+    core.send(&request(
+        4,
+        "chain.fee_reference",
+        json!({ "chain_id": 1, "deadline_ms": 30_000 }),
+    ));
+    let (nulls, _) = serve(&mut core, 4, |request| {
+        Some(match request["method"].as_str() {
+            Some("shell.verified") => json!({ "result": { "failure": "error" } }),
+            _ => failure("network"),
+        })
+    });
+    assert_eq!(
+        nulls["result"],
+        json!({ "header": null, "lowest_priority": null, "quote": null, "generation": 1 })
+    );
+    // A cancel ends it as it ends a fee quote, its exchanges cancelled.
+    core.send(&request(
+        5,
+        "chain.fee_reference",
+        json!({ "chain_id": 1, "deadline_ms": 30_000 }),
+    ));
+    let held = requests_only(&mut core, 3);
+    core.send(&json!({ "type": "cancel", "id": 5 }));
+    let mut cancels = Vec::new();
+    let mut cancelled = None;
+    while cancelled.is_none() || cancels.len() < 2 {
+        let message = core.recv();
+        match message["type"].as_str() {
+            Some("cancel") => cancels.push(message["id"].clone()),
+            Some("response") => cancelled = Some(message),
+            _ => panic!("unexpected {message}"),
+        }
+    }
+    let cancelled = cancelled.unwrap();
+    assert_eq!(cancelled["id"], 5);
+    assert_eq!(cancelled["error"]["code"], "cancelled", "{cancelled}");
+    assert_eq!(cancelled["error"]["data"], json!({ "generation": 1 }));
+    // The two exchanges; the header's operation runs on to main's reply.
+    let exchanges: Vec<Value> = held
+        .iter()
+        .filter(|r| r["method"] == "shell.rpc")
+        .map(|r| r["id"].clone())
+        .collect();
+    assert_eq!(cancels, exchanges);
+    for request in &held {
+        reply(&mut core, request, failure("cancelled"));
+    }
+    // No time left: `deadline` before any I/O, under the chain's
+    // generation.
+    let expired = call(
+        &mut core,
+        6,
+        "chain.fee_reference",
+        json!({ "chain_id": 1, "deadline_ms": 0 }),
+    );
+    assert_eq!(expired["error"]["code"], "deadline");
+    assert_eq!(expired["error"]["data"], json!({ "generation": 1 }));
+}
+
 fn broadcast(id: u64) -> Value {
     request(
         id,
