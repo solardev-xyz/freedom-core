@@ -143,11 +143,19 @@ fn acquire_as(
     retry: Duration,
     create: bool,
 ) -> Result<Gate, GateError> {
-    if create {
+    // A data directory that must already exist is resolved before anything
+    // is made: a lock directory at or under it would otherwise make it.
+    let existing = if create {
         create_private_dir(data_dir).map_err(GateError::Storage)?;
-    }
+        None
+    } else {
+        Some(std::fs::canonicalize(data_dir).map_err(GateError::Storage)?)
+    };
     create_private_dir(lock_dir).map_err(GateError::Storage)?;
-    let canonical_data = std::fs::canonicalize(data_dir).map_err(GateError::Storage)?;
+    let canonical_data = match existing {
+        Some(canonical) => canonical,
+        None => std::fs::canonicalize(data_dir).map_err(GateError::Storage)?,
+    };
     let canonical_locks = std::fs::canonicalize(lock_dir).map_err(GateError::Storage)?;
     if canonical_locks.starts_with(&canonical_data) {
         return Err(GateError::LockInsideData);
@@ -414,6 +422,21 @@ mod tests {
             gate.identity,
             DirIdentity::of(&std::fs::metadata(&data).unwrap())
         );
+    }
+
+    // Review of #177, round 6: a lock directory at or under the missing data
+    // directory doesn't make it either.
+    #[test]
+    fn acquire_existing_never_makes_the_data_directory_through_its_locks() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("missing-data");
+        for locks in [data.clone(), data.join("lock-parent")] {
+            let result = acquire_existing(&data, &locks, "radicle", Duration::ZERO);
+            assert!(!data.exists(), "recreated through {locks:?}: {result:?}");
+            assert!(!locks.exists());
+            assert!(matches!(result, Err(GateError::Storage(ref e))
+                if e.kind() == std::io::ErrorKind::NotFound));
+        }
     }
 
     #[test]
