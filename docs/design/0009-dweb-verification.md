@@ -1,6 +1,6 @@
 # 0009: Verifying dweb content
 
-**Status:** proposed. Roadmap Phase 4 (item 4.5). Builds on [0001](0001-freedom-cored.md) (framing; streams as protocol version 2), [0005](0005-chain-data.md) (requests the core makes, memory reserved before it is allocated), [0006](0006-dweb-transports.md) (plans, main's executor, trust labels, and the prerequisites in *Later designs*) and [0007](0007-ipfs-service.md) (stream frames, credit and rings).
+**Status:** decided (the user, 2026-10-23): open questions 1–11, which [Decisions](#decisions) records. Roadmap Phase 4 (item 4.5). Builds on [0001](0001-freedom-cored.md) (framing; streams as protocol version 2), [0005](0005-chain-data.md) (requests the core makes, memory reserved before it is allocated), [0006](0006-dweb-transports.md) (plans, main's executor, trust labels, and the prerequisites in *Later designs*) and [0007](0007-ipfs-service.md) (stream frames, credit and rings).
 
 **The references:**
 - **freedom-browser** at `aebf5ec9` (`integration/rust-core`):
@@ -12,6 +12,7 @@
 - **Bee** at `a93fb7a7` (v2.8.2-rc1 and four commits), for the formats Ant reads and writes.
 - **freedom-ipfs** v0.4.6 (`ee6b95c`), the native node 0007 moves into `freedom-ipfsd`: `freedom-ipfs-core`, `freedom-ipfs-unixfs` and `freedom-ipfs-gateway` (`GatewayCore`).
 - **IPFS specifications,** as published on 2026-10-13: the Trustless Gateway, CAR v1, UnixFS and IPNS Record specifications.
+- **libp2p,** for RSA-keyed IPNS names: the peer-ID specification (libp2p/specs `peer-ids/peer-ids.md`, at `d2106f43`); go-libp2p v0.51.0 (`core/crypto/rsa_common.go` and `rsa_go.go`); and what freedom-ipfs v0.4.6 locks, `libp2p-identity` 0.2.13 (`src/rsa.rs`, `src/keypair.rs`, `src/peer_id.rs`) with ring 0.17.14.
 
 Vectors are generated from the bundled nodes, Ant and freedom-ipfs, as 0003–0006's were generated from the JS ([Tests first](#tests-first)).
 
@@ -27,14 +28,21 @@ This design adds a **verified mode** for those backends. In it, the core proves 
   - The core opens no sockets. Main keeps the transport, the admission, the Ant guard and the body it hands to Chromium. What changes is that a verified body passes through the core on its way, because the core is the verifier: the case 0006 deferred.
 - **Streams in the core** are protocol version 2 (0001): 0007's four frames, sent by whichever side answers a request. Credit bounds every byte in flight, so bulk data never delays a `vault.lock`.
 - **Swarm:** the core walks the manifest and the file's chunk tree itself, checking every chunk it fetches (`GET /chunks/<address>`), and reads the file's data as one ranged `GET /bytes/<reference>` stream. It checks every 4 KiB leaf against its address before releasing it. That is two to seven chunk requests per MiB, depending on erasure coding, and one stream, not the 256 requests per MiB 0006 estimated for chunk-by-chunk retrieval. Single-owner chunks are accepted only as feed updates.
+  - **Encrypted (128-hex) references** keep today's unverified fetch, decided from the reference: checking one would take every chunk as its own request ([Encrypted references](#encrypted-references)).
 - **IPFS:** the core asks the gateway for a trustless CAR of the path and the file, ordered depth-first with duplicates (`?format=car&dag-scope=entity`, `entity-bytes` for ranges). It checks each block against its CID as it arrives and walks the path, HAMT shards and the UnixFS DAG itself. Blocks are at most 2 MiB, as the native node allows, and are released whole.
   - **The CAR is only a block source.** When a gateway's CAR doesn't carry what the walk needs, in its order (some ignore `entity-bytes`; Kubo sends no duplicates unless asked), the core fetches the rest as raw blocks (`?format=raw`), the one response type every trustless gateway must serve.
-  - **DNSLink names and RSA-keyed IPNS names** keep today's unverified fetch: `dweb.open` decides it from the name, so no node can steer a request out of verified mode.
+  - **IPNS names** with an Ed25519 or an RSA key are verified against their signed records. RSA keys need an RSA verifier, which checks signatures only ([IPNS and DNSLink](#ipns-and-dnslink)).
+  - **DNSLink names** keep today's unverified fetch: `dweb.open` decides it from the name, so no node can steer a request out of verified mode.
 - **Heads come from the core,** built from verified data with the bundled node's rules: Ant's for `bzz:`, `GatewayCore`'s for `ipfs:`. Vectors recorded from those nodes pin them. Nothing the external node says reaches the page unchecked, error bodies included. What can't be proven is labelled or answered as the node's word: a "not found", the latest update of a feed or an IPNS name.
 - **Failure:** a mismatch before the head is a 502, "Swarm content verification failed" or "IPFS content verification failed". After the head, the body is truncated: the page keeps a prefix of verified bytes, which may end inside a chunk or block that had passed its check. No unverified byte reaches Chromium.
+  - A failed navigation shows an error page in plain words, not the JSON body.
+  - A node that fails verification stays in use; only the requests that fail, fail.
 - **Labels:** `verified`, `latest_asserted` (verified against an owner-signed update whose freshness is the node's word), `node_asserted` (the bundled nodes, unchanged) and `unverified`. The address bar's trust panel shows them.
-- **Modes:** verification is a per-backend setting, recommended on by default (the user's decision). A gateway's support is probed when it is activated, and a backend never falls back to unverified per request.
-- **Budgets,** estimated and measured before the default switches. Measured hashing on the development server this design was written on: a 4 KiB Swarm leaf costs about 55–100 µs on one thread (40–74 MiB/s); SHA-256 runs at 0.7–1.6 GiB/s. Two hashing threads keep verified Swarm bodies above an estimated 80 MiB/s.
+- **Modes:**
+  - Verification is a per-backend setting, on by default for every external backend, a node on the user's own machine included.
+  - A gateway's support is probed when it is activated, and a backend never falls back to unverified per request.
+  - A strict mode, a profile setting that is off by default, refuses unverified external content outright.
+- **Budgets,** estimated, and measured before verification ships on by default. Measured hashing on the development server this design was written on: a 4 KiB Swarm leaf costs about 55–100 µs on one thread (40–74 MiB/s); SHA-256 runs at 0.7–1.6 GiB/s. Two hashing threads keep verified Swarm bodies above an estimated 80 MiB/s.
 - **Tests come first:** vectors recorded from Ant, Bee and freedom-ipfs over fixtures, adversarial vectors from a lying node, and the real-handler harness with a fake Ant and a fake trustless gateway.
 
 ## Goals and non-goals
@@ -49,13 +57,14 @@ This design adds a **verified mode** for those backends. In it, the core proves 
 - **Bounded resources:** every byte the core holds is reserved first, decoders included, which count what a block declares before they build anything ([Bounded decoding](#bounded-decoding)). Every bound has a defined result when exhausted ([Bounds](#bounds)).
 
 **Non-goals**
-- **The bundled nodes.** The bundled Ant validates the chunks it retrieves, and the native IPFS node hash-checks blocks. Their content stays `node_asserted`; the core doesn't check it again ([Open questions](#open-questions)).
+- **The bundled nodes.** The bundled Ant validates the chunks it retrieves, and the native IPFS node hash-checks blocks. Their content stays `node_asserted`; the core doesn't check it again ([Decisions](#decisions), 6).
 - **Availability and privacy.** A node can still withhold content, answer "not found", or learn what the user reads. Verification proves integrity, not retrieval.
 - **Freshness of mutable pointers.** A feed's or an IPNS name's latest update can't be proven; it is labelled ([Labels](#labels)).
 - **Names.** Naming's trust (0004) covers the name; this design covers the content the name points at.
 - **`rad:`, `radapi:` and `web3:`.** heartwood verifies refs against signed sigrefs (0008), and `chain.html` has its own trust (0006).
 - **The `window.swarm` backend (4.6)** and uploads.
-- **Caching content bytes.** Only verified structure is cached, briefly ([The structure cache](#the-structure-cache)).
+- **Caching content bytes.** Only verified structure is cached, briefly, and a private window's apart ([The structure cache](#the-structure-cache)).
+- **Encrypted Swarm references** from external nodes, for now ([Encrypted references](#encrypted-references)).
 
 ## Today
 
@@ -76,6 +85,9 @@ This design adds a **verified mode** for those backends. In it, the core proves 
   - **"Not found" or an error for a piece:** the node may be withholding it. The status is passed on, with a fixed body from the core, never the node's.
   - **The latest update** of a Swarm feed or an IPNS name: the update is checked against its owner's signature, but the node chooses which signed update to serve, so it may serve an old one (`latest_asserted`).
   - **A DNSLink name** under `ipns:`: its root comes from DNS, through the gateway. Checking a DAG against a root the gateway chose would prove nothing about the name, so DNSLink keeps today's fetch, labelled `unverified` ([IPNS and DNSLink](#ipns-and-dnslink)).
+- **Not checked at all,** and so labelled `unverified` with today's fetch:
+  - **an encrypted Swarm reference** (128 hex): its plaintext can't be checked against its address, and checking its ciphertext would take every chunk as its own request ([Encrypted references](#encrypted-references));
+  - **an IPNS name with an inlined key other than Ed25519** (secp256k1), which the native node doesn't verify either ([IPNS and DNSLink](#ipns-and-dnslink)).
 - **Out of scope:** a compromised main, which Stage 1 trusts (0001), and a compromised core.
 
 ## Where verification runs
@@ -85,7 +97,7 @@ This design adds a **verified mode** for those backends. In it, the core proves 
 ```
 Chromium ◀─body── main ◀─verified body (stream)── freedom-cored
                    │                                  │ dweb thread: walk, check, build the head
-                   │◀──── shell.dweb_get ─────────────┘ hashing pool: BMT, SHA-256
+                   │◀──── shell.dweb_get ─────────────┘ hashing pool: BMT, SHA-256, RSA
                    │───── node's answer (stream) ────▶
                    ▼
           external Ant or gateway (main's transport: undici on loopback, the session's stack otherwise)
@@ -96,7 +108,7 @@ Chromium ◀─body── main ◀─verified body (stream)── freedom-cored
   - **The logic belongs in the shared crates.** A sans-I/O verifier in `fc-dweb` is what the Chromium build's URL loaders and mobile can call in process, with the same vectors. On desktop, the core is where those crates run.
   - **0006 anticipated it:** "bytes through a verifier", over protocol version 2's streams, once the core checks them.
 - **What it costs, and what bounds it:**
-  - **Every verified byte crosses the pipe twice,** in and out. A pipe moves gigabytes per second; hashing moves tens to hundreds of megabytes ([Performance](#performance)), so hashing is the bound, not the pipe (an estimate, measured before the default switches).
+  - **Every verified byte crosses the pipe twice,** in and out. A pipe moves gigabytes per second; hashing moves tens to hundreds of megabytes ([Performance](#performance)), so hashing is the bound, not the pipe (an estimate, measured before verification ships on by default).
   - **The vault shares a process with bulk data.** Credit bounds every byte in flight, the reader never waits on dweb data, and the dweb thread and its hashing pool are separate from the vault loop ([Streams](#streams-in-the-core)). A test pins a `vault.lock` acknowledged on time under full dweb load.
   - **A core restart truncates verified bodies.** 0006 kept bodies out of the core partly for this. Here it is the price of checking them, and listed as deviation `core-data-path`. A restart is a crash, which 0001 restarts with back-off.
 - **Main keeps** its transport (loopback undici, or `net.request` on the request's session with the proxy and onion rules), the Ant guard's announcements, fetch admission, plan validation, the response operations, the body idle timer and the stream it hands to Chromium.
@@ -120,17 +132,19 @@ Chromium ◀─body── main ◀─verified body (stream)── freedom-cored
 
 ### Verify plans
 
-- **`backend`** (0006) gains `verify` for an external backend whose verification is on and supported ([Modes](#modes)):
-  - `{ ant: "external", up, verify: true }`;
-  - `{ ipfs: "gateway", up, verify: true }`.
+- **`backend`** (0006) gains two members for an external backend:
+  - `verify: true`, when its verification is on and supported ([Modes](#modes));
+  - `strict: true`, when the profile's [strict mode](#strict-mode) is on.
 
-  `verify` is absent for the bundled nodes and for an external backend that doesn't verify, so those keep their exact two-key form and today's plans.
+  For example `{ ant: "external", up, verify: true }` or `{ ipfs: "gateway", up, verify: true, strict: true }`. Both are absent for the bundled nodes, and each is absent when off, so a backend with neither keeps its exact two-key form and today's plans.
 - **With `verify`, a `{ fetch }` plan becomes a `{ verify }` plan.** Redirect and error plans are unchanged: the same URL checks, name results, 404/415/502 mapping, gateway-form 307s and 503s for a backend that isn't up.
+  - **What stays a `{ fetch }`,** decided from the URL or the name's result before anything is fetched: an encrypted Swarm reference, a DNSLink name, and an IPNS name with an inlined key other than Ed25519 ([Modes](#modes)). Each keeps today's fetch plan, labelled `unverified`.
+  - **With `strict`,** any plan whose content would be `unverified` becomes an error plan, a 403 that says why ([Strict mode](#strict-mode)).
 
   ```jsonc
   { "verify": {
       "node": "ant",                                    // or "ipfs": a reference, as in a fetch plan
-      "root": { "swarm": "<64 or 128 hex>" },           // or { "ipfs": "<CIDv1, base32>" }, { "ipns": "<Ed25519-keyed name>" }
+      "root": { "swarm": "<64 hex>" },                  // or { "ipfs": "<CIDv1, base32>" }, { "ipns": "<a name with an Ed25519 or RSA key>" }
       "path": "/docs/page.html",                        // below the root, normalized, as an HTTP client sends it
       "query": "?state=1",                              // the request's query, for redirects only; "" when none
       "headers": [["range", "bytes=0-"]],               // the request headers the verifier honours
@@ -147,7 +161,8 @@ Chromium ◀─body── main ◀─verified body (stream)── freedom-cored
   - **`response`** names the bundled node's operations, as its own plans name them: `canonicalize_redirect` and `strip_page_state` for `bzz:`, since the core writes Ant's redirects in Ant's URL space and main rewrites them as today; `strip_page_state`, and `small_text` for a GET navigation, for IPFS.
   - **`trust.content`** is `verified`: the promise for the mode. The head carries the final label ([Labels](#labels)).
 - **Why a plan, then a second call.** `dweb.open` runs on the naming thread, stateless once it answers, and main fences its plans against naming's generations (0006). A verified fetch is long-lived and stateful. Splitting them means a plan overtaken by a naming change is planned again before any piece is fetched, and naming's thread never holds a fetch.
-- **Validation** (`validate_plan`, and main's `plan-validation.js`, with the same vectors): `shape`, `node` (the admitted backend, up, with `verify`), `root` (a 64- or 128-hex reference; a CIDv1 in lowercase base32; an IPNS name whose key is Ed25519), `path`, `query` (equal to the admitted URL's query, and within 0006's URL bound), `header`, `retry`, `timers`, `response` and `trust` (`content` is `verified`). A refused plan is a 502 and a logged core fault, as in 0006.
+- **Validation** (`validate_plan`, and main's `plan-validation.js`, with the same vectors): `shape`, `node` (the admitted backend, up, with `verify`), `root` (a 64-hex reference; a CIDv1 in lowercase base32; an IPNS name whose key is an inlined Ed25519 key, or whose multihash is sha2-256), `path`, `query` (equal to the admitted URL's query, and within 0006's URL bound), `header`, `retry`, `timers`, `response` and `trust` (`content` is `verified`). A refused plan is a 502 and a logged core fault, as in 0006.
+  - **Against a strict backend,** 0006's checks change in two places: a `{ fetch }` plan is refused at `trust`, since its content would be `unverified`; and an `error` may also be a 403, with exactly one of strict mode's fixed messages. A 403 for a backend that isn't strict is refused at `error`.
 
 ### `dweb.verify`
 
@@ -164,7 +179,7 @@ Chromium ◀─body── main ◀─verified body (stream)── freedom-cored
 - **The head** is the core's, built from verified data ([Heads](#heads)). Main runs the plan's response operations on it, the security operations always, then hands Chromium a `Response` whose body reads the stream.
 - **`trust`** is `{ name, content }`: the plan's name trust and the final content label.
 - **Errors:** `busy` and `deadline` before the head; `cancelled`. Every outcome that reaches the page as HTTP, a verification failure included, is a head with a status, not an error reply ([Failures](#failures)).
-- **Thread:** the **dweb thread**, a new thread beside naming's and chain's, runs one sans-I/O machine per request (`fc-dweb`'s verifier). A pool of two hashing threads computes BMT roots and SHA-256 digests for it.
+- **Thread:** the **dweb thread**, a new thread beside naming's and chain's, runs one sans-I/O machine per request (`fc-dweb`'s verifier). A pool of two hashing threads computes BMT roots and SHA-256 digests, and checks RSA signatures, for it.
 
 ### `shell.dweb_get`
 
@@ -214,7 +229,7 @@ What the core asks main for while a `dweb.verify` runs.
 ### Admission, deadlines and cancel
 
 - **Admission in the core:** at most 64 running `dweb.verify` requests and 256 waiting; beyond that, `busy`, which main answers 503. Main's own admission (256 active dweb fetches, 0006) applies first; a verified request holds its slot until its body ends.
-- **Pieces in flight:** per request, at most 8: a `/bytes` stream and 4 intermediate chunks ahead of it ([Leaves](#leaves)); 8 chunks on the [encrypted path](#encrypted-references); one CAR; or 8 raw blocks ([Raw blocks](#raw-blocks)). Across requests, at most 256 `shell.dweb_get` are outstanding, as 0004 bounds naming's requests to main; more wait in the dweb thread, first in, first out, and their memory counts against their request. So main never dials the node more than 256 times at once for verified requests.
+- **Pieces in flight:** per request, at most 8: a `/bytes` stream and 4 intermediate chunks ahead of it ([Leaves](#leaves)); one CAR; or 8 raw blocks ([Raw blocks](#raw-blocks)). Across requests, at most 256 `shell.dweb_get` are outstanding, as 0004 bounds naming's requests to main; more wait in the dweb thread, first in, first out, and their memory counts against their request. So main never dials the node more than 256 times at once for verified requests.
 - **Deadlines:** the head's `deadline_ms`; each piece's header deadline and retries in main; main's body idle timer on each piece stream and on the verified body. The external gateway's pieces have no header deadline, as today's gateway requests have none; after the head, a piece that never answers leaves the verified body's read pending, and the body idle timer ends it after 60 s.
 - **Cancel:**
   - the page's abort, a body cancelled by Chromium, or the session closing makes main send `cancel` for `dweb.verify`;
@@ -239,7 +254,7 @@ The formats Ant and Bee share, with Ant's reading where they differ, since the b
   - The wrapped chunk may carry any span, so it can be the root of a larger tree.
 - **What `/chunks/<address>` returns:** the chunk's wire bytes, a CAC's or a whole SOC's, as `binary/octet-stream` (`ag/retrieval.rs:307`–`403`). Bee does the same.
 - **Where a SOC is accepted: only as a feed update,** at the address the walk computed from the feed's topic, owner and index ([The Swarm walk](#the-swarm-walk)).
-  - **Everywhere else** (a root, a manifest node, a file's root, an intermediate chunk, a leaf, an encrypted chunk) the piece must be a CAC whose address is the reference. A SOC there, even a valid one, is `unverifiable` and never followed (deviation `soc-references`).
+  - **Everywhere else** (a root, a manifest node, a file's root, an intermediate chunk, a leaf) the piece must be a CAC whose address is the reference. A SOC there, even a valid one, is `unverifiable` and never followed (deviation `soc-references`).
   - **Why:** a SOC's address commits to its identifier and owner, not to its payload, so its owner can sign different payloads at one address. A result that rested on one couldn't be called `verified` or cached as immutable.
   - **So** every verified result is CAC-addressed from its root down, except one that crossed a feed. That result is labelled `latest_asserted` and sent with `Cache-Control: no-cache`, as Ant sends it, and its SOC is never cached.
 
@@ -260,7 +275,7 @@ The formats Ant and Bee share, with Ant's reading where they differ, since the b
 - **A mantaray node** (`ar/mantaray.rs:1355`–`1543`; Bee `pkg/manifest/mantaray/marshal.go`):
   - a 32-byte obfuscation key in the clear; everything after it XORed with the key, repeated. Bee and bee-js write a zero key for unencrypted manifests;
   - the version hash (the first 31 bytes of `keccak256("mantaray:0.2")`, or of `0.1`);
-  - the reference size: 32, 64 in an encrypted manifest, or 0 in an empty node, which Ant accepts and the core reads as Ant does;
+  - the reference size: 32, 64 in an encrypted manifest, or 0 in an empty node, which Ant accepts and the core reads as Ant does. A node whose references are 64 bytes names encrypted content, which the walk doesn't read: `unverifiable` ([Encrypted references](#encrypted-references));
   - the node's entry, all zeros when it has none;
   - a 32-byte bitmap of forks, one bit per first byte;
   - each fork, in byte order: a type byte, a prefix length (1 to 30), a 30-byte prefix, the child's reference, and, when the type has bit 16, a 2-byte length and a flat JSON object of strings.
@@ -271,6 +286,7 @@ The formats Ant and Bee share, with Ant's reading where they differ, since the b
 - **Feeds:** a root whose `/` fork carries `swarm-feed-owner` and `swarm-feed-topic` (and `swarm-feed-type` absent or `Sequence`; Ant refuses epoch feeds) is a feed manifest (`ar/feed.rs:95`–`231`).
   - The update at index `i` is the SOC with `id = keccak256(topic ‖ u64_be(i))` and the feed's owner.
   - **v1 updates** wrap 48 or 80 bytes, `span ‖ timestamp(8, big-endian) ‖ reference`; **v2 updates** wrap the content's root chunk itself. Ant tries v1 first, then fails (`ar/feed.rs:1444`–`1511`); the core does the same.
+  - An 80-byte v1 update carries a 64-byte, encrypted reference, which the walk doesn't follow: `unverifiable`, never a fallback to an unverified fetch, which the node could otherwise choose by the update it serves.
 
 ### The Swarm walk
 
@@ -316,18 +332,26 @@ Ant's `/bytes` supports a single range on 64-hex references (206 with `Content-R
 
 ### Encrypted references
 
-- **The format:** a reference of 64 bytes, the chunk's address and a key. A chunk is `encrypted span ‖ encrypted payload`, the payload always padded to 4,096 bytes. Segment `i` is XORed with `keccak256(keccak256(key ‖ u32_le(i + c)))`, with `c` = 0 for the payload and 128 for the span (`ac/encryption.rs:57`–`96`; Bee `pkg/encryption`). Intermediate chunks hold 64 references of 64 bytes.
-- **The plaintext can't be checked against the address.** The padding is random, and so is each chunk's key, so the ciphertext can't be rebuilt from what `/bytes` returns.
-- **So the core takes every chunk from `/chunks`,** checks it as a CAC against its address, and decrypts it itself with the key from its reference, up to 8 chunk requests at once. That is about 260 requests per MiB (256 leaves and 4 intermediates).
-  - On a loopback node with cached chunks, an estimated 10–30 MiB/s; across a network, far less.
-  - Encrypted references are rare in browsing. Whether this path should exist, or encrypted references stay `unverified`, is an [open question](#open-questions).
+**Decided: encrypted references stay `unverified` from external nodes** ([Decisions](#decisions), 8). The chunk-by-chunk path that would check them isn't built. It is kept in the [appendix](#appendix-the-encrypted-path-not-built), and revisited when Ant can serve many raw chunks in one request ([freedom-hq/ant#233](https://github.com/freedom-hq/ant/issues/233)).
+
+- **Why:** a reference of 64 bytes is the chunk's address and a key. The plaintext `/bytes` returns can't be checked against the address, because each chunk's padding and key are random, so the ciphertext can't be rebuilt from it. Checking means fetching every chunk from `/chunks` and decrypting it in the core: about 260 requests per MiB through Ant's API today.
+- **A 128-hex reference in the URL** gets today's fetch plan, labelled `unverified`. (A name can't carry one: naming decodes only 32-byte Swarm contenthashes, and answers any other as unsupported, a 415, as today.) `dweb.open` decides this from the reference before anything is fetched, as it decides DNSLink from the name, so no node can steer a request there.
+- **An encrypted reference met inside a verified walk** is `unverifiable` (502), and nothing from it is released:
+  - a manifest node whose references are 64 bytes ([Manifests and feeds](#manifests-and-feeds));
+  - a feed's v1 update of 80 bytes, which carries a 64-byte reference.
+
+  The plan has already promised verified content, and a node chooses which feed update it serves, so falling back to an unverified fetch here would let the node take the request out of verified mode (deviation `encrypted-in-walk`).
+- **Under [strict mode](#strict-mode),** a 128-hex reference is refused with a 403, as any `unverified` external content is.
 
 ### The structure cache
 
 - **What it holds:** verified chunks that are structure, never data: manifest node chunks and intermediate chunks. Not leaves, and never SOCs, whose content at an address can change.
-- **What an entry is:** the chunk's wire bytes as checked against its address. For an encrypted tree that is the ciphertext; the key from the reference that names it is applied on every use, and plaintext is never cached. So a reference with another key at the same address can't read anything from the cache that it couldn't fetch.
+- **What an entry is:** the chunk's wire bytes as checked against its address.
 - **Key and bound:** `(partition, address)`; 8 MiB across partitions, least recently used out first.
-- **Private partitions:** each has its own entries, dropped when main sends `dweb.forget` for it, with the partition's IPNS floors. Nothing is written to disk. A private window never reads the profile's entries, so it can't time another session's loads.
+- **Private partitions** (decided, [Decisions](#decisions), 10): each private window's partition has its own short-lived cache.
+  - Its entries live only while the window does: main sends `dweb.forget` when the partition closes, and they go with the partition's IPNS floors.
+  - Nothing is written to disk.
+  - A private window never reads the profile's entries or another window's, so it can't time another session's loads.
 - **Late results:** `dweb.forget` advances the partition's epoch. A cache insert or a floor update carries the epoch its request started under, and one from an older epoch is dropped, so a piece reply or hashing result that arrives after the forget leaves nothing behind.
 - **Why:** a site's subresources share the upper manifest nodes, and a video's seeks share the file's root and upper intermediates. With the cache, a later request costs one or two chunks before its stream.
 
@@ -355,7 +379,7 @@ Ant's `/bytes` supports a single range on 64-hex references (206 with `Content-R
 
 The 2 MiB block limit bounds a block's bytes, not what decoding it allocates: a block of minimal repeated fields can declare far more entries than its size suggests, and nesting can cost stack. So no decoder in the verifier allocates from a count it hasn't checked and reserved, and none recurses.
 
-- **One rule for every decoder:** dag-pb, UnixFS `Data`, the CAR header, the IPNS record and its signed data, mantaray nodes and Swarm intermediate chunks.
+- **One rule for every decoder:** dag-pb, UnixFS `Data`, the CAR header, the IPNS record and its signed data, an RSA key's protobuf and DER, mantaray nodes and Swarm intermediate chunks.
   - **Its input is already held and reserved:** a block that passed its hash, a chunk, a record within its cap.
   - **A first pass** validates the structure and counts what the second will keep (links, entries, copied bytes), without allocating.
   - **Each count is checked** against its cap and the request's budget, and its memory reserved (0005's rule), before the second pass builds anything.
@@ -366,7 +390,12 @@ The 2 MiB block limit bounds a block's bytes, not what decoding it allocates: a 
   - varints of at most 10 bytes; every length within its enclosing message;
   - unknown fields skipped by wire type (varint, 64-bit, length-delimited, 32-bit) without allocating; groups refused. A message of many unknown fields costs time linear in its bytes and no memory;
   - `PBNode`'s fields in either order (IPIP-0550);
-  - a `PBLink` without a hash refused in the first pass, before anything is kept.
+  - a `PBLink` without a hash refused in the first pass, before anything is kept;
+  - an RSA key's `PublicKey` read only in libp2p's deterministic encoding, so no field is skipped there ([IPNS and DNSLink](#ipns-and-dnslink)).
+- **DER** (an RSA key's `SubjectPublicKeyInfo`):
+  - definite lengths in their shortest form, as DER requires, each checked against the bytes remaining;
+  - the key's one fixed structure (the algorithm, then the bit string holding the `RSAPublicKey`) read at a fixed depth, without recursion;
+  - integers positive and minimally encoded, the modulus at most 8,192 bits and the exponent at most 33 bits, both checked before a big integer is built.
 - **CBOR** (the CAR header, the IPNS record's signed data):
   - definite lengths only, as DAG-CBOR requires, each checked against the bytes remaining;
   - nesting at most 8 levels, on an explicit stack;
@@ -376,7 +405,7 @@ The 2 MiB block limit bounds a block's bytes, not what decoding it allocates: a 
 - **Caps on decoded structure,** beyond the wire caps:
   - 65,536 links per dag-pb node. This is a supported-content limit, not a malformedness test. Typical directories and files are far below it, but valid content can exceed it within 2 MiB: compact links, such as identity CIDs with short names, need only about 17 bytes each. Such a node is refused as `unverifiable`, never reported as malformed;
   - 256 forks per mantaray node (one per first byte), and fork metadata within its 2-byte length, read with `fc-json`'s depth bound. Only a flat object of strings is accepted, and only the keys the walk reads are kept.
-- **What this means for sharing code:** `fc-ipfs` can't use `freedom-ipfs-unixfs`'s decoders as they are. They decode with `prost`, which allocates repeated fields while it reads, before any reservation can be made. `fc-ipfs` carries its own bounded decoders, held to vectors from the native reader on the blocks both accept ([Open questions](#open-questions)).
+- **What this means for sharing code:** `fc-ipfs` can't use `freedom-ipfs-unixfs`'s decoders as they are. They decode with `prost`, which allocates repeated fields while it reads, before any reservation can be made. `fc-ipfs` carries its own bounded decoders, held to vectors from the native reader on the blocks both accept. freedom-ipfs adopts them later, so there is one reader, not two ([Decisions](#decisions), 11).
 
 ### The CAR request
 
@@ -421,20 +450,35 @@ For `ipfs://<cid><path>`, with `GatewayCore`'s rules:
 
 ### IPNS and DNSLink
 
-- **A name with an Ed25519 key** (its key inlined in the name) gets a verify plan:
+- **A name with an Ed25519 or an RSA key** gets a verify plan. The name shows which form its key takes (libp2p's peer-ID specification, *Peer Ids*):
+  - **an Ed25519 key** is inlined in the name, as the identity multihash of its libp2p `PublicKey` protobuf;
+  - **an RSA key** is too large to inline, so the name is the sha2-256 multihash of that protobuf, and the record carries the key in `pubKey` (the IPNS record specification, *Public Key*).
+
+  Every name with a sha2-256 multihash gets a verify plan. Its record's key must then be RSA: any other type (ECDSA, which the native node doesn't verify either) is `unverifiable`, never a fallback to an unverified fetch.
+- **The record:**
   - the core asks `GET /ipns/<name>?format=ipns-record` with `Accept: application/vnd.ipfs.ipns-record`, at most 10 KiB;
   - it checks the record as freedom-ipfs's `verify_ipns_record` does (`freedom-ipfs-namesys/src/lib.rs:586`–`649`), with [bounded decoding](#bounded-decoding): the key matches the name, `signatureV2` over `"ipns-signature:" ‖ data` verifies, the DAG-CBOR data parses, the validity type is EOL and the EOL is after now, and the value starts with `/ipfs/` or `/ipns/`;
   - **V2-only records are accepted.** The legacy V1 fields are optional; when present, they must equal the signed ones. Unknown fields in the entry and unknown keys in the signed data are skipped, not refused, as the IPNS record specification allows;
-  - the value's path, then the request's path, are walked as above. A value naming another Ed25519-keyed name is followed the same way, at most 4 times in all (`GatewayCore`'s limit on DNSLink chains); one naming a DNSLink or an RSA-keyed name is `unverifiable`.
+  - the value's path, then the request's path, are walked as above. A value naming another name with an Ed25519 or RSA key is followed the same way, at most 4 times in all (`GatewayCore`'s limit on DNSLink chains); one naming a DNSLink name, or a name with another inlined key, is `unverifiable`.
   - The label is `latest_asserted`: a gateway can serve an older record that hasn't expired yet.
   - **The core keeps a floor in memory:** the highest sequence it has verified per name and partition. A record below the floor is refused while the floor's record is still valid.
     - **Bounds:** at most 1,024 names, least recently used out first. An evicted name has no floor until its next record, so the protection is best-effort, and lost on a restart.
     - **Concurrent requests:** the floor only rises, atomically, to the highest sequence verified. A request that verified its record before a higher one arrived keeps the record it verified; only records checked after the rise are held to it.
     - This narrows rollback within a session; it proves nothing across restarts.
   - **"Now"** is the core's wall clock, passed into the logic crates as a parameter (AGENTS.md rule 2).
-- **Names with other keys** (RSA, which needs the record's `pubKey` and an RSA verifier the core doesn't link) and **DNSLink names** (`ipns://example.com`, whose root comes from DNS) get today's fetch plan and the `unverified` label.
+- **RSA keys** (decided, [Decisions](#decisions), 9) are read as libp2p defines them, and checked as the native node checks them except where listed:
+  - **Encoding:** `pubKey` is a libp2p `PublicKey` protobuf with `Type` RSA (0), whose `Data` is the key in PKIX form: a DER `SubjectPublicKeyInfo` with the `rsaEncryption` algorithm (OID 1.2.840.113549.1.1.1, NULL parameters), around a PKCS#1 `RSAPublicKey` (libp2p's peer-ID specification, *RSA*; go-libp2p's `UnmarshalRsaPublicKey`, through Go's `x509.ParsePKIXPublicKey`; rust-libp2p's `rsa::PublicKey::try_decode_x509`).
+  - **The name binds the bytes:** the name must be the sha2-256 multihash of `pubKey` exactly as it arrived.
+    - libp2p requires every key to be encoded deterministically: varints minimal, the fields in tag order, both present, and no others (the peer-ID specification, *Keys*). The core reads only that form, and DER only in its canonical form, so the bytes it hashes are the key it verifies with.
+    - The native reader (`libp2p-identity` 0.2.13) instead decodes the key and hashes its own re-encoding, so it also takes a key encoded another way (deviation `rsa-keys`).
+  - **The signature:** RSASSA-PKCS1-v1_5 with SHA-256 (RFC 8017, section 8.2), over `"ipns-signature:" ‖ data` as for Ed25519, and exactly as long as the modulus. That is libp2p's RSA signature (the peer-ID specification, *RSA*; go-libp2p's `RsaPublicKey.Verify`; rust-libp2p's, through ring's `RSA_PKCS1_2048_8192_SHA256`).
+  - **The key's size:** a modulus of 2,048 to 8,192 bits, go-libp2p's `MinRsaKeyBits` and `maxRsaKeyBits`, which rust-libp2p's ring algorithm also bounds. ring counts the minimum in whole bytes, so it also takes a modulus of 2,041 to 2,047 bits, which the core refuses with go-libp2p (deviation `rsa-keys`). The exponent is odd, from 3 to 2^33 − 1, ring's bounds.
+  - **A key or signature outside these rules** fails the record's check: `verification_failed`, as a bad Ed25519 signature does.
+  - **The verifier is the `rsa` crate, for verification only** ([Upstream](#upstream)). The core builds a public key from the parsed modulus and exponent and checks one signature with it; it never holds an RSA private key, so it never makes a private-key operation.
+  - **Cost:** one signature check per record, measured at 0.15 ms for a 2,048-bit key and 3.7 ms for an 8,192-bit key with the largest exponent ([Measured](#measured)). It runs on the hashing pool.
+- **DNSLink names** (`ipns://example.com`, whose root comes from DNS) and **names with another inlined key** (secp256k1, which the native node doesn't verify either) get today's fetch plan and the `unverified` label. For DNSLink this is decided ([Decisions](#decisions), 7).
   - `dweb.open` decides this from the name itself, so no node can steer a request out of verified mode.
-  - Supporting RSA-keyed names is an [open question](#open-questions).
+  - **A possible later step, not planned work:** the core could resolve DNSLink itself, over DNS-over-HTTPS exchanges main performs, with two independent resolvers that must agree. The root would then come from resolvers Freedom chooses, not from the gateway.
 
 ### Gateways in practice
 
@@ -490,15 +534,18 @@ The core builds every head from verified data, by the bundled node's rules. The 
 |---|---|---|
 | bundled Ant; native IPFS node | none: they check what they retrieve | `node_asserted`, as today |
 | external or reused Ant, verification on | a 64-hex reference, or a name's Swarm contenthash | `verified` |
-| | a 128-hex (encrypted) reference | `verified`, on the slow path ([Encrypted references](#encrypted-references)) |
 | | a feed manifest anywhere on the path | `latest_asserted` |
+| | a 128-hex (encrypted) reference | `unverified`: today's fetch plan, decided by the reference ([Encrypted references](#encrypted-references)) |
+| | an encrypted reference inside a walk: a manifest node's, a feed update's | none: the request is `unverifiable` (502) |
 | external gateway, verification on and supported | a CID, or a name's IPFS contenthash | `verified` |
-| | an IPNS name with an Ed25519 key, directly or as a name's contenthash | `latest_asserted` |
-| | a DNSLink name, or an IPNS name with an RSA key | `unverified`: today's fetch plan, decided by the name |
+| | an IPNS name with an Ed25519 or RSA key, directly or as a name's contenthash | `latest_asserted` |
+| | a DNSLink name, or an IPNS name with another inlined key | `unverified`: today's fetch plan, decided by the name |
 | any external backend, verification off | today's fetch plan | `unverified` |
 | external gateway without trustless support | today's fetch plan | `unverified`, and the nodes panel says why |
+| any external backend, [strict mode](#strict-mode) on | every row above that is `unverified` becomes a 403 error plan | none |
 
-- **The setting:** per profile and per external backend, "Verify content from this node", in the node's settings beside its endpoint. On by default is the recommendation; the default is the user's decision ([Open questions](#open-questions)).
+- **The setting:** per profile and per external backend, "Verify content from this node", in the node's settings beside its endpoint. **On by default** for every external backend (decided, [Decisions](#decisions), 1).
+- **The user's own node is verified too** (decided, 5). A loopback Bee, Ant or Kubo the user runs is often as trusted as the bundled node, but the cost of checking it on loopback is small, and there is no "trust this node" switch. Turning verification off for it is the setting above.
 - **Support is probed once, at activation,** not per request:
   - **The gateway,** after today's `bafkqaaa` probe, two more requests for the same empty identity CID, which needs no retrieval, so each answers at once:
     - `?format=raw` with the raw `Accept`: a 200 of type `application/vnd.ipld.raw` means the gateway can be verified at all;
@@ -507,7 +554,27 @@ The core builds every head from verified data, by the bundled node's rules. The 
     A gateway that fails the first serves `unverified`, and the nodes panel says "This gateway doesn't serve verifiable responses". A probe can't show whether a gateway honours `entity-bytes`; the [CAR request](#the-car-request) copes when one doesn't.
   - **Ant:** no probe. Bee's API, which Ant follows, always serves `/chunks` and `/bytes`, and Bee 2.8 has no restricted mode. A `HEAD /chunks/…` on Ant retrieves from the network, so it would be no cheap probe anyway (`ag/retrieval.rs:307`–`403`). A node that refuses those paths fails each verified request with its own status.
   - The result is fixed for the backend's activation and is part of the backend main captures. A gateway that later stops answering trustless requests fails them; nothing falls back to an unverified fetch per request, which a hostile node could otherwise trigger at will.
-- **No new setting for the bundled nodes.**
+- **No new setting for the bundled nodes.** The core doesn't check their output again (decided, 6).
+
+### Strict mode
+
+- **The setting** (decided, [Decisions](#decisions), 2): per profile, "Load only verified content from external nodes", beside the nodes' verification settings, **off by default**. Where `blockUnverifiedEns` sends an unverified name through an interstitial, strict mode refuses unverified content outright. It doesn't touch the bundled nodes, whose content is `node_asserted`, or a name's own trust, which naming labels (0004).
+- **What it refuses:** every request to an external backend whose content would be `unverified`:
+  - a DNSLink name, or an IPNS name with an inlined key other than Ed25519;
+  - an encrypted (128-hex) Swarm reference;
+  - anything from an external backend whose verification is off, or from a gateway the probe found without raw blocks.
+
+  RSA-keyed IPNS names are verified (decision 9), so they still load, as does content labelled `latest_asserted`.
+- **The core decides it, from the plan:** main sends `strict: true` in the backend reference it captured ([Verify plans](#verify-plans)). In place of an unverified fetch plan, `dweb.open` returns an error plan, before anything is fetched: status 403 and `code` 403, since this is the profile's refusal, not a node's failure. A strict backend never gets a `{ fetch }` plan, and validation refuses one.
+- **Its messages,** fixed, one per cause, the first that applies in this order (proposed wording, the user's to change):
+  - `This profile loads only verified content, and verification is off for this node`;
+  - `This profile loads only verified content, and this gateway doesn't serve verifiable responses`;
+  - `This profile loads only verified content, and a DNSLink name can't be verified`;
+  - `This profile loads only verified content, and this IPNS name's key type can't be verified`;
+  - `This profile loads only verified content, and an encrypted Swarm reference can't be verified with an external node`.
+
+  A navigation shows them on the [error page](#the-error-page).
+- **Binding:** the setting is captured with the backend at admission, so a change applies to requests admitted after it (0006, *Binding*).
 
 ### Labels
 
@@ -515,7 +582,7 @@ The core builds every head from verified data, by the bundled node's rules. The 
   - **`verified`:** every byte checked against the root the URL or the name names.
   - **`latest_asserted`:** checked against an update its owner signed (a feed's single-owner chunk, an IPNS record); that the update is the latest is the node's word.
   - **`node_asserted`:** the bundled nodes, which check what they retrieve themselves.
-  - **`unverified`:** verification is off or unsupported, or the name can't be verified (DNSLink, RSA-keyed IPNS).
+  - **`unverified`:** verification is off or unsupported, the name can't be verified (DNSLink, an IPNS name with another inlined key), or the reference is encrypted.
 - **Where it is decided:** the plan carries `verified`, the mode's promise. The head carries the final label: a walk that crosses a feed or an IPNS record lowers it to `latest_asserted`. Main keeps the head's label for the navigation.
 - **Where it is shown** (0006's open question 5): the address bar's trust panel, which today shows a name's trust in rows (`navigation-utils.js`), gains a content row for `bzz:`, `ipfs:` and `ipns:` pages. Proposed wording, the user's to change:
   - `verified`: "Content verified by Freedom";
@@ -526,12 +593,12 @@ The core builds every head from verified data, by the bundled node's rules. The 
 
 ## Failures
 
-**Before the head,** the page gets a JSON body `{ code, message }` with the status as `code`, as 0006's error plans do. The body is the core's; the node's error body never passes.
+**Before the head,** the page gets a JSON body `{ code, message }` with the status as `code`, as 0006's error plans do, and a navigation gets the [error page](#the-error-page) instead. The body is the core's; the node's error body never passes.
 
 | Cause | Status | Message |
 |---|---|---|
-| a chunk, block, manifest node, directory, CAR or record fails its check | 502 | `Swarm content verification failed` / `IPFS content verification failed` |
-| content the core can't check: an unsupported hash function, codec or node type; a single-owner chunk off the feed path; a Swarm leaf shorter than its logical length; a manifest node over 1 MiB; structure past the decoders' caps; a walk past its [bounds](#bounds) or its request's memory | 502 | `This content can't be verified with the external Swarm node` / `… IPFS gateway` |
+| a chunk, block, manifest node, directory, CAR or record fails its check (an IPNS record's key or signature outside libp2p's rules included) | 502 | `Swarm content verification failed` / `IPFS content verification failed` |
+| content the core can't check: an unsupported hash function, codec or node type; a single-owner chunk off the feed path; an encrypted reference inside a walk; a Swarm leaf shorter than its logical length; a manifest node over 1 MiB; an IPNS record whose key is neither Ed25519 nor RSA; structure past the decoders' caps; a walk past its [bounds](#bounds) or its request's memory | 502 | `This content can't be verified with the external Swarm node` / `… IPFS gateway` |
 | content that passes its hashes but is inconsistent: a UnixFS file whose sizes disagree (deviation `unixfs-sizes`) | 502 | `This IPFS content is malformed` |
 | the path isn't in a verified manifest or directory | 404, through the bundled node's rules ([Heads](#heads)) | the bundled node's |
 | a piece's final answer is 404 | 404 | `Not found on the external Swarm node` / `… IPFS gateway` (node-asserted) |
@@ -539,6 +606,7 @@ The core builds every head from verified data, by the bundled node's rules. The 
 | a piece's dial failed | as today: 503 or 502 for Ant, 502 for the gateway (`failure::after_dial`) | today's |
 | the dweb thread is full, or memory can't be reserved in time | 503 | `Too many requests`, as a `busy` from `dweb.open` reads today |
 | no head within `deadline_ms` | 504 | `Deadline passed` |
+| [strict mode](#strict-mode) refuses unverified content (an error plan, before `dweb.verify`) | 403 | strict mode's, by cause |
 
 **After the head,** the body is truncated: the core sends `abort { code, message }`, and main errors the body, as a node's mid-body failure is surfaced today (0006). The codes are `verification_failed`, `unverifiable`, `malformed`, `piece_failed`, `busy` and `cancelled`.
 
@@ -547,12 +615,34 @@ The core builds every head from verified data, by the bundled node's rules. The 
   - **Why not deliver blocks whole:** holding back a checked block until all of it fits the window would need up to 2 MiB of extra credit per stream, and a cancel would still have to purge. Partial delivery of checked bytes loses nothing the guarantee needs.
   - Chromium treats the resource as truncated: a script or image fails, a navigation shows what it had rendered, and a download fails as interrupted.
 - **Logging:** a fixed code, the backend's mode and the piece's kind (chunk, stream, CAR, record), never a reference or a path in a private window.
-- **The nodes panel** counts verification failures per backend and shows "Your external node served content that failed verification" while any occurred in the last 10 minutes. Whether repeated failures should stop using the node is the user's decision ([Open questions](#open-questions)).
+- **A node that fails verification stays in use** (decided, [Decisions](#decisions), 3). Only the requests that fail, fail; its other requests, and its later ones, are verified as usual. Each failure is caught where it happens, so nothing unverified reaches the page either way.
+- **The nodes panel** counts verification failures per backend and shows "Your external node served content that failed verification" while any occurred in the last 10 minutes. The notice informs the user; it switches nothing.
+
+### The error page
+
+**Decided: a failed navigation gets an error page in plain words, not the JSON body** ([Decisions](#decisions), 4).
+
+- **Which answers:** a GET navigation whose answer is a `{ code, message }` body written by the core or by main:
+  - the failures above, before the head;
+  - strict mode's refusals;
+  - error plans and main's local failures (0006), in every mode.
+
+  A node's own answer, which unverified mode passes as it is, and the bundled node's bodies the core reproduces in verified mode (Ant's 404 JSON, `GatewayCore`'s HTML errors), are unchanged: parity covers them as content.
+- **How main tells a navigation:** by the rule `small_text` reads, a first `Accept` token of exactly `text/html`. A `protocol.handle` request carries no other sign of a document load, since custom schemes get no `Sec-Fetch-Dest`. Subresources, `fetch` calls and the in-process callers (`permission-manifests.js`, `http-fetch.js`, downloads) keep the JSON body, which they read.
+- **The page:**
+  - the same status, and a fixed template in plain words: what failed, whose node, and what the user can do, with the URL and a "Try again" link;
+  - no script, under `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'`, and `Cache-Control: no-store`;
+  - nothing from the node.
+
+  The handler answers a request, not a tab, so it can't send the tab to the shell's own `pages/error.html`; the page follows that page's look and words.
+- **Its texts** are plain-words versions of the messages above, one per cause (proposed, the user's to change). For example, a verification failure reads "The content your external Swarm node sent doesn't match its address, so Freedom didn't show it", and a strict refusal "This profile loads only content Freedom can verify, and this page can't be verified: <cause>".
+- **After the head,** a failure truncates the body, and a navigation keeps what it had rendered (above). No page replaces it.
 
 ## Main's side
 
-- **`plan-validation.js`:** the `{ verify }` variant, with `fc-dweb`'s vectors.
+- **`plan-validation.js`:** the `{ verify }` variant, and strict mode's checks, with `fc-dweb`'s vectors.
 - **`dweb-handler.js`:** a `{ verify }` plan takes a fetch admission slot, then calls `dweb.verify` through the core client. The head becomes a `Response` after the response operations; its body reads the stream's ring through the body idle wrapper (`idleBoundBody`), whose `onEnd` releases the slot.
+  - **The error page:** a navigation's `{ code, message }` answer becomes the [error page](#the-error-page) wherever the handler or the executor would write `jsonErrorResponse`.
 - **A verified head is not a gateway response.** `strip_decoded_encoding` exists because the transport has already decoded a gateway's body, so its `Content-Length` and `Content-Encoding` are wrong. A head from the core describes exactly the bytes the core will send. So main picks the operations by the head's source, not by the backend:
   - a core head gets the plan's operations and `strip_page_state`, and never `strip_decoded_encoding`, so its `Content-Length` stays;
   - `small_text` runs for an IPFS GET navigation, as on the native node's answers, which needs that `Content-Length`.
@@ -564,9 +654,10 @@ The core builds every head from verified data, by the bundled node's rules. The 
   - A whole piece is read up to `max_bytes`; more is `failed: "too_large"`. A streamed piece is pulled only as the core's credit allows.
   - Every terminal path frees the piece's dial and buffers: its end, the core's cancel, the `dweb.verify` request ending, the session closing.
 - **`frame.js` and `core-client.js`:** stream frames in both directions on the core's connection ([Streams](#streams-in-the-core)), with 0007's rings for the bodies main receives.
-- **`ant-manager.js` and `ipfs-manager.js`:** the setting, the probe, and `verify` in the captured backend. A reused Ant counts as external, as `antBackend()` reports it today, so it verifies too.
-- **The trust panel and the nodes panel** in the renderer ([Labels](#labels), [Failures](#failures)).
-- **The core's cache:** when a private partition closes, main sends `dweb.forget { partition }`, and the core drops the partition's [structure cache](#the-structure-cache) and IPNS floors.
+- **`ant-manager.js` and `ipfs-manager.js`:** the setting, on by default, the probe, and `verify` in the captured backend. A reused Ant counts as external, as `antBackend()` reports it today, so it verifies too, as does any loopback node.
+- **Strict mode:** the profile setting, off by default, read when the backend is captured, and `strict` in the backend reference ([Strict mode](#strict-mode)).
+- **The trust panel and the nodes panel** in the renderer ([Labels](#labels), [Failures](#failures)); the settings page gains strict mode beside the nodes' verification settings.
+- **The core's cache:** when a private partition closes, main sends `dweb.forget { partition }`, and the core drops the partition's [structure cache](#the-structure-cache) and IPNS floors (decision 10).
 - **In-process callers** (`permission-manifests.js`, `http-fetch.js`, downloads) go through the same handlers, so they get verified content too: Swarm permission manifests among them. `ens-prefetch.js` keeps warming the node as today; nothing verified depends on it.
 
 ## Performance
@@ -585,6 +676,17 @@ Hashing, in release builds on the development server this design was written on 
 - **So a Swarm leaf costs 55–100 µs to check,** 127 keccak hashes of 64 bytes for the tree and one for the address. That is the bound on verified Swarm throughput: 40–74 MiB/s per hashing thread, and an estimated 80–150 MiB/s with the pool's two, if they scale.
 - **IPFS's hashing is not a bound.** The CAR's parsing and copying, and the pipe, are (unmeasured).
 
+RSA signature checks for IPNS records, in a release build on the same server at a load average of about 2 (PKCS#1 v1.5 with SHA-256, keys and signatures made by OpenSSL; the range over five runs of 200 to 2,000 checks):
+
+| Key | `rsa` 0.10.0-rc.19, one thread | `rsa` 0.9.10, for comparison |
+|---|---|---|
+| 2,048 bits, exponent 65,537 | 0.15–0.16 ms | 0.32–0.33 ms |
+| 4,096 bits, exponent 65,537 | 0.60–0.61 ms | 1.2–1.3 ms |
+| 8,192 bits, exponent 65,537 | 2.3–2.4 ms | 4.8–5.0 ms |
+| 8,192 bits, exponent 2^33 − 1, the largest allowed | 3.6–3.7 ms | 8.4–8.7 ms |
+
+- **So a record costs at most about 4 ms of one hashing thread,** and a request at most 4 records (the IPNS hops): about 15 ms, whatever key sizes a hostile gateway chooses. Kubo made 2,048-bit RSA keys by default, which cost 0.15 ms.
+
 ### Estimates
 
 - **Requests:**
@@ -596,9 +698,8 @@ Hashing, in release builds on the development server this design was written on 
     | erasure coding level 1, the upload default in Ant and Bee | 119 | 2.2 |
     | level 2 / level 3 | 107 / 97 | 2.4 / 2.6 |
     | level 4 | 39 | 6.6 |
-    | encrypted | 64 | 4.0, and every leaf as a chunk ([Encrypted references](#encrypted-references)) |
 
-    Higher levels add a chunk per MiB at the next level up too, which is small beside these.
+    Higher levels add a chunk per MiB at the next level up too, which is small beside these. Encrypted trees aren't walked ([Encrypted references](#encrypted-references)).
   - **IPFS:** one CAR per request; two for a directory URL served by its `index.html`. On raw blocks, one request per path segment and HAMT level, then one per block, up to 8 at once.
 - **Time to first byte,** over today's for the same request:
   - **Swarm, loopback node, chunks cached in the node:** four to seven sequential chunk requests before the first leaf, each well under a millisecond on loopback: a few milliseconds at p50 (an estimate).
@@ -612,13 +713,13 @@ Hashing, in release builds on the development server this design was written on 
 
 ### Gates
 
-Measured before the default switches, on linux-x64, macOS arm64 and win-x64, verified against unverified on the same node:
-- **Swarm, loopback Ant, cached content:** a 1 KB file, a 10 MiB file and a seek into it, at 1, 50 and 200 concurrent requests, for a plain tree, erasure coding at levels 1 and 4, and an encrypted reference. For plain and level-1 trees, verified time to first byte within 10 ms of unverified at p50 one at a time, and throughput of at least 40 MiB/s for the 10 MiB file. Level 4 and encrypted references are measured and reported against those figures.
+Measured before verification ships on by default (decision 1), on linux-x64, macOS arm64 and win-x64, verified against unverified on the same node:
+- **Swarm, loopback Ant, cached content:** a 1 KB file, a 10 MiB file and a seek into it, at 1, 50 and 200 concurrent requests, for a plain tree and erasure coding at levels 1 and 4. For plain and level-1 trees, verified time to first byte within 10 ms of unverified at p50 one at a time, and throughput of at least 40 MiB/s for the 10 MiB file. Level 4 is measured and reported against those figures.
 - **IPFS, loopback Kubo:** the same shapes. Verified throughput at least 80 % of unverified.
 - **The vault under load:** with 64 verified bodies streaming at full speed, a `vault.lock` is acknowledged within 50 ms at p99.
 - **A real page load** of a Swarm site and an IPFS site, verified against unverified, in Chromium.
 
-If a gate fails, the [open questions](#open-questions) on the default and on the service alternative are revisited with the numbers.
+If a gate fails, the default ([Decisions](#decisions), 1) and the [service alternative](#where-verification-runs) go back to the user with the numbers.
 
 ## Tests first
 
@@ -631,9 +732,10 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
     - **everything that varies is pinned:** the exact Kubo release and the other versions are in the file's `meta`; the clock is fixed, which sets IPNS validity and feed timestamps; and every random input (encryption keys and padding, obfuscation keys, IPNS keys) comes from a seed recorded with the case. The core's tests pass the same `now`.
   - **Swarm,** recorded from Ant v0.5.71's splitter and manifest writer, and cross-checked against Bee's for the formats Bee also writes:
     - files of 0, 1, 4095, 4096, 4097, 524,288, 524,289 and 67,108,865 bytes, from a single chunk to three levels of intermediate chunks;
-    - each with erasure coding at every redundancy level, and encrypted;
+    - each with erasure coding at every redundancy level;
     - manifests with an index document, an error document, nested paths, a path that is a prefix of another, prefixes longer than one fork can hold, Unicode names, every metadata field Ant reads, an obfuscated node, and an empty node with a zero reference size;
     - a sequence feed with several updates, v1 and v2, and its manifest;
+    - **encrypted content only where the walk meets it:** a feed whose v1 update is 80 bytes, and a manifest node with 64-byte references below a plain root, each `unverifiable` with nothing released ([Encrypted references](#encrypted-references));
     - for each, every chunk by address, and Ant's answers to a request list (`/bzz/<ref>/<path>` with and without a query, `Range`, `If-Range`, `If-None-Match` and `HEAD`): status, headers and body.
   - **Swarm shapes Ant accepts that a simple reader wouldn't,** recorded from Ant too:
     - a last leaf whose authentic payload is longer than the logical length its parent gives it (the surplus-payload tail). Ant serves the logical prefix, and so must the core;
@@ -643,13 +745,16 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
     - files of 0, 1, 262,143, 262,144, 262,145 and 10 MiB, as CIDv0 with dag-pb leaves and CIDv1 with raw leaves, balanced and trickle;
     - directories with and without `index.html`, a HAMT-sharded directory, Unicode names, an identity CID;
     - for each request shape, the CAR Kubo sends (path, `dag-scope=entity`, `entity-bytes`) and the raw blocks;
-    - IPNS records: V2-only and with legacy fields, with unknown fields and unknown signed keys, expired, for another key, without `signatureV2`, and with a legacy value that differs from the signed one.
+    - IPNS records: V2-only and with legacy fields, with unknown fields and unknown signed keys, expired, for another key, without `signatureV2`, and with a legacy value that differs from the signed one;
+    - **RSA-keyed IPNS records,** with Kubo's keys at 2,048 and 4,096 bits, and with the generator's own at the bounds: 2,048 and 8,192 bits, and the exponents 3, 65,537 and 2^33 − 1; and a name whose record names another RSA-keyed name.
   - **The verifier's own,** marked `deviation` in the file as 0006's are, where the design deliberately differs from the pinned native reader:
     - `unixfs-sizes`: a file whose declared child size disagrees with its raw leaf, and one whose content doesn't add up to `filesize`. The native reader slices by the declared size; the core cuts the body as malformed at that point;
-    - `hamt-lookup`: an entry that isn't where its hash and the bitfield point. The native reader finds it by name; the core answers 404.
+    - `hamt-lookup`: an entry that isn't where its hash and the bitfield point. The native reader finds it by name; the core answers 404;
+    - `rsa-keys`: an RSA key encoded otherwise than libp2p's deterministic form (an unknown protobuf field, the fields out of order, a long-form DER length), which the native reader re-encodes and accepts, and a modulus of 2,041 bits, which ring accepts. The core refuses each as a failed check.
+- **Plan vectors,** which `validate_plan` and main's `plan-validation.js` both pass: `{ verify }` plans and their refusals, and what stays a `{ fetch }`: a 128-hex reference, a DNSLink name, an IPNS name with an inlined secp256k1 key. Each again with `strict`, as its 403 and message, and a `{ fetch }` plan against a strict backend refused at `trust`.
 - **Adversarial vectors,** the design's own: each takes an honest exchange and changes one thing, and states the outcome.
   - **Swarm:**
-    - a bit flipped in a leaf, an intermediate chunk, a manifest node, an encrypted chunk and a feed update;
+    - a bit flipped in a leaf, an intermediate chunk, a manifest node and a feed update;
     - a leaf whose authentic payload is shorter than its logical length (`unverifiable`);
     - a chunk over its size limit;
     - a feed update signed by another owner, or at another index;
@@ -660,6 +765,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
     - a 200 that is short, or that holds the range's bytes at offset 0;
     - a source that stalls after the needed prefix (no effect, since the piece is already cancelled) and one that stalls before it (body idle).
   - **IPFS, lies:** a bit flipped in a path block, a HAMT shard, a file node and a leaf; a raw block that isn't its CID's; a block over 2 MiB; a section length past the block limit; an over-long varint; a malformed header; an identity CID whose digest isn't its data; an IPNS record for another key, expired, or below the session's sequence floor.
+  - **IPNS, RSA lies:** a key that doesn't hash to the name; a modulus of 2,040 or 8,193 bits; an even exponent, an exponent of 1, and one of 2^33 + 1; a signature a byte short, one equal to the modulus, and one over the right message with SHA-1; a record whose `pubKey` is absent under a sha2-256 name; and an ECDSA key under a sha2-256 name, which is `unverifiable`.
   - **IPFS, unhelpful but honest:** a CAR that ignores `entity-bytes` and sends the whole DAG; one ordered otherwise, or without duplicates; one that reads the path differently; one that ends early with boxo's marker. Each must still give the right body, through raw blocks, or a piece failure for the early end. Also `blake3`, which is `unverifiable`.
   - **Within the wire caps, against the decoders** ([Bounded decoding](#bounded-decoding)). Each input is within every byte limit, yet would amplify allocation or nesting in a naive decoder. Each must end with its stated failure, or its correct answer, with reservations never above the request's budget:
     - a maximal block of minimal repeated fields, for dag-pb links and for UnixFS `blocksizes`;
@@ -667,6 +773,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
     - a maximal block of unknown fields;
     - a directory of as many entries as a block holds, served as a listing;
     - a CAR header and an IPNS record's signed data nested to the depth bound and one past it, and declaring lengths past the bytes remaining;
+    - an RSA key's DER declaring lengths past the bytes remaining, and a modulus whose length field claims more than the record holds;
     - a mantaray node with maximal fork metadata and a deeply nested metadata value.
   - **Both:** the node's error body is never released; no byte of a chunk or block that failed its check reaches the page.
 - **Machine tests** (`fc-dweb`, sans-I/O):
@@ -674,7 +781,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
   - ranges at every leaf and block boundary; `HEAD`; `If-None-Match`; `If-Range` ignored as the bundled nodes ignore it;
   - **truncation:** a failure, a cancel and a core restart after part of a verified block was released, and while verified output is queued. The page gets a prefix of verified bytes, possibly inside the block, then the error;
   - **IPNS floors:** eviction at 1,024 names, and concurrent requests verifying records of different sequences;
-  - **the structure cache:** an encrypted tree's ciphertext reused under the right key, and nothing from it under another key at the same address;
+  - **the structure cache, per partition:** a private partition never reads the profile's entries or another partition's, and `dweb.forget` leaves none of its own;
   - **late results after `dweb.forget`:** a piece reply, a hashing result and a floor update for the forgotten partition leave no entry behind.
 - **Stream tests** (`fc-protocol`, and through the binary): both directions on one connection, the global bound, data beyond credit, late credit, and a `vault.lock` behind 128 full incoming windows, acknowledged on time.
 - **freedom-browser:**
@@ -684,7 +791,10 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
   - **heads:** core heads through main's real response helper keep their `Content-Length`, and an IPFS navigation gets `small_text`;
   - **redirects:** `bzz://<root>/docs?state=1` for a directory answers 308 to `./docs/?state=1`;
   - **rings:** four batches of 64 small verified bodies completed but never read. The core finishes each batch and admits the next; main holds 256 rings and no more, the next fetch waits in admission, and reading or cancelling the bodies frees them;
-  - a core restart mid-body truncates; a private partition's cache and floors are dropped on close; the probes (raw and CAR, raw only, neither); the labels.
+  - a core restart mid-body truncates; a private partition's cache and floors are dropped on close; the probes (raw and CAR, raw only, neither); the labels;
+  - **the default:** a new external backend verifies, a loopback one included, until the user turns it off;
+  - **strict mode:** off by default; with it on, each refused shape gets its 403 and message, verified and `latest_asserted` content still loads, and the bundled nodes are untouched;
+  - **the error page:** a navigation whose answer is an error of the core's or main's gets the page, with the same status, in every mode; a subresource, a `fetch` and `permission-manifests.js` get the JSON body; a node's own error answer and a truncation after the head are unchanged.
 - **Live:** the `e2e-ant` job gains an external-mode run with verification on, and a Kubo gateway job does the same for IPFS.
 
 ## Bounds
@@ -703,7 +813,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 | the dweb writer | 8 MiB of unwritten data | the machines wait for credit |
 | memory, per request | 8 MiB, reserved before allocation: its windows, leaves and blocks in flight, the walk's parsed nodes | fewer pieces in flight; a walk that can't fit at all is `unverifiable` |
 | memory, the dweb thread | 128 MiB in all, the structure cache included | new requests `busy` (503); admitted work waits up to 10 s, then ends `busy`: 503 before the head, a truncation after |
-| the structure cache | 8 MiB, keyed by partition | least recently used first |
+| the structure cache | 8 MiB, keyed by partition; a private window's entries only until it closes | least recently used first; `dweb.forget` |
 | an IPFS block | 2 MiB (freedom-ipfs's limit) | `verification_failed` |
 | a Swarm manifest node | 1 MiB (Ant: 32 MiB) | `unverifiable` |
 | Swarm walk | 8 levels of intermediate chunks (Bee's cap); 64 manifest nodes per lookup; one feed per walk | `unverifiable` |
@@ -711,6 +821,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 | a CAR header; a CAR section | 64 KiB; 2 MiB plus the CID | `verification_failed` |
 | decoded structure | 65,536 links per dag-pb node; CBOR nested 8 levels; 256 forks per mantaray node | `unverifiable` |
 | an IPNS record | 10 KiB | `verification_failed` |
+| an IPNS record's RSA key | a modulus of 2,048 to 8,192 bits; an odd exponent from 3 to 2^33 − 1; one signature check per record | `verification_failed` |
 | IPNS sequence floors | 1,024 names, in memory | least recently used first |
 | hashing pool | 2 threads | jobs queue in the dweb thread, under the request's memory |
 
@@ -719,23 +830,45 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 - **Reusing Ant's crates** (MIT OR Apache-2.0, which `deny.toml` allows from freedom-hq):
   - `ant-crypto` is sans-I/O (k256, sha3, getrandom, thiserror) and has BMT, CAC, SOC and decryption. But it pins k256 0.13 where the core uses 0.14, and `fc-swarm` already has BMT. So `fc-swarm` implements the checks itself and tests them against `ant-crypto` as a dev-dependency.
   - `ant-retrieval`'s joiner, mantaray and feed code is async over tokio, and its parsers are private (`Node::unmarshal`, `parse_intermediate`). `fc-swarm` reimplements them as sans-I/O state, held to vectors from Ant.
-- **Ant:** nothing is required. A batch chunk read (several addresses per request), or a ranged read that carries each leaf's chunk path, would cut the walk's round trips. Neither is proposed until the [gates](#gates) show the walk costs users time.
+- **Ant:** nothing is required for what is built.
+  - [freedom-hq/ant#233](https://github.com/freedom-hq/ant/issues/233) asks for a way to fetch many raw chunks in one request. It would make the [encrypted path](#appendix-the-encrypted-path-not-built) practical, and cut the plain walk's round trips too. Encrypted references are revisited when it lands (decision 8).
+  - A ranged read that carries each leaf's chunk path isn't proposed until the [gates](#gates) show the walk costs users time.
 - **freedom-ipfs:**
   - **`fc-ipfs` carries its own bounded decoders** ([Bounded decoding](#bounded-decoding)). The native ones (`freedom-ipfs-unixfs/src/lib.rs:42`–`85`, `1100`–`1110`) are private, and they allocate while decoding, so they couldn't run under the core's reservations even if they were public.
-  - Whether the native node should adopt a bounded reader shared with `fc-ipfs`, so both modes read the same way by construction, is an [open question](#open-questions).
+  - **freedom-ipfs adopts the core's reader later** (decided, [Decisions](#decisions), 11), so there is one reader, not two.
+    - **What:** `fc-ipfs`'s bounded dag-pb, UnixFS and HAMT reader, with its caps and its stricter size and HAMT rules. The native node and verified mode then read files and directories the same way by construction, and deviations `unixfs-sizes`, `hamt-lookup` and `decoder-caps` describe both.
+    - **When:** a separate freedom-ipfs pull request, once the reader exists here ([Implementation steps](#implementation-steps), 8). Whether it changes what the native node answers for malformed content, and how, is that pull request's to state.
+    - **License:** freedom-ipfs is dual-licensed MIT or Apache-2.0, and this repository carries no license (0007, *Where the code lives*). So the reader needs a license freedom-ipfs can take: the user licenses that code, or it moves into freedom-ipfs and `fc-ipfs` pins it from there. That choice is the user's, before the step.
 - **What `fc-ipfs` takes from freedom-ipfs:** `freedom-ipfs-core`'s `verify_block` and block limit, by a git dependency pinned to v0.4.6 (allowed from solardev-xyz). Not its whole-buffer CAR parser: the core reads CARs as streams. Not `freedom-ipfs-unixfs`'s resolver, which pulls blocks through a synchronous provider, and so can't suspend while main fetches.
+- **The `rsa` crate** (MIT OR Apache-2.0), for RSA-keyed IPNS names (decided, [Decisions](#decisions), 9):
+  - **For verification only.** `fc-ipfs` builds an `RsaPublicKey` from the modulus and exponent its own DER reader parsed, and checks a signature with `Pkcs1v15Sign` and SHA-256. Nothing in the core generates, loads or holds an RSA private key, so no private-key operation exists to be timed. The crate's default features (`std`, and `encoding`, which brings its own PKCS#1 and PKCS#8 parsers) are off.
+  - **Pinned exactly, at 0.10.0-rc.19,** a release candidate:
+    - it is on the core's RustCrypto generation (`crypto-bigint` 0.7, `digest` 0.11, `signature` 3, `rand_core` 0.10), so it adds two crates to what the core builds, `rsa` and `crypto-primes` (MIT OR Apache-2.0);
+    - its default size limit is libp2p's 8,192 bits;
+    - 0.9.10, the latest stable release, would add about two dozen crates, a second RustCrypto generation among them (`digest` 0.10, `der` 0.7, `num-bigint-dig`), and checks a signature at half the speed ([Measured](#measured));
+    - a release candidate's API can change before 0.10.0. The exact pin holds it, and moving to 0.10.0 is a reviewed change of its own.
+  - **RUSTSEC-2023-0071** (the Marvin attack: timing that leaks the private key through RSA decryption and signing) covers every release, so `cargo deny` needs a reviewed exception.
+    - **No release fixes it,** checked on 2026-10-23. The advisory lists no patched version; on 2026-09-14 it recorded 0.9.10 and the 0.10 release candidates as still affected, and 0.10.0-rc.19, released on 2026-10-06, is too. The tracking issue (RustCrypto/RSA#626) and the two pull requests toward a fix (#680, implicit rejection for PKCS#1 v1.5 decryption; #702, blinding the default decryption paths) are open.
+    - **Why the exception holds:** the advisory concerns operations with a private key, and the core makes none. It only checks signatures, with public keys taken from records.
+    - **The entry,** in the core's `deny.toml`, worded as `freedom-radicled`'s is: a comment naming the crate, its version and the one use, then `{ id = "RUSTSEC-2023-0071", reason = "no RSA private-key operation is ever made: fc-ipfs only verifies IPNS record signatures with public keys" }`.
+    - It is revisited when a fixed release ships, and before the crate is used for anything but verification.
 
 ## Parity
 
-- **Unverified mode is today's,** byte for byte: verification off, a gateway without support, and every bundled backend plan exactly as 0006 does.
+- **Unverified mode is today's,** byte for byte: verification off, a gateway without support, an encrypted reference, a DNSLink name, and every bundled backend plan exactly as 0006 does. Two listed deviations change it:
+  - strict mode, when the user turns it on, refuses the unverified plans (`strict-mode`);
+  - a navigation's error answer from the core or main becomes the error page, in every mode (`navigation-error-page`).
 - **A verified response is the bundled node's,** not the external node's: what Ant v0.5.71 answers for `bzz:`, and what freedom-ipfs v0.4.6's `GatewayCore` answers for `ipfs:` and `ipns:`, over the same content. The vectors hold the core to it, header by header, with the exceptions listed in [Heads](#heads).
 - **Qualified: for content both accept.** Where the verifier is deliberately stricter than the pinned reader, the difference is a listed deviation with vectors of its own, kept apart from the native-generated ones ([Tests first](#tests-first)):
   - `unixfs-sizes` and `hamt-lookup`, for malformed UnixFS files and HAMT directories;
   - `soc-references`, for single-owner chunks off the feed path;
   - `decoder-caps` and `manifest-node-cap`, for structure past the decoders' caps;
+  - `rsa-keys`, for RSA keys encoded otherwise than libp2p's deterministic form, or of 2,041 to 2,047 bits;
+  - `encrypted-in-walk`, for encrypted references a verified walk meets;
   - a Swarm leaf whose authentic payload is shorter than its logical length, which the core doesn't support.
 
-  Within the supported formats and the stated limits, these never apply to well-formed content. Content that is valid but outside them stays `unverifiable`: a SOC off the feed path, structure past a decoder or manifest cap. It isn't reported as malformed.
+  Within the supported formats and the stated limits, these never apply to well-formed content. Content that is valid but outside them stays `unverifiable`: a SOC off the feed path, an encrypted reference inside a walk, structure past a decoder or manifest cap. It isn't reported as malformed.
+  - **Once freedom-ipfs adopts the core's reader** ([Upstream](#upstream)), `unixfs-sizes`, `hamt-lookup` and `decoder-caps` describe the native node too, and stop setting the two modes apart.
   - **Why the bundled node, not the external one:** the external node's headers are the assertions being replaced, and it may be a different implementation (a reused Bee, a Kubo, a public gateway). One rule per scheme, whatever the backend, is also what a user switching modes expects.
 - **The same as today, per piece:** the request headers Swarm needs, the retry table and its delays, the header deadline, the body idle bound, the transport and its proxy and onion rules, the Ant guard, fetch admission, the dial failure statuses, and the security response operations.
 
@@ -743,7 +876,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 
 | ID | Today | After | Effect |
 |---|---|---|---|
-| `verified-content` | an external node's answer passes whole | checked against the root; a mismatch is a 502 before the head, a truncation after it | a lying or broken node can't change what a page receives |
+| `verified-content` | an external node's answer passes whole | checked against the root, by default, for every external node, a loopback one included; a mismatch is a 502 before the head, a truncation after it | a lying or broken node can't change what a page receives |
 | `verified-heads` | the external node's headers, after the response operations | the core's, by the bundled node's rules | `Content-Type`, `ETag`, caching headers, listings and redirects follow Ant or `GatewayCore`; the external node's own headers go |
 | `node-error-bodies` | a node's error body reaches the page | the core's fixed `{ code, message }`, with the node's status | the status stays; the text is the core's |
 | `verified-requests` | one request to the node per page request | chunk, byte-stream and feed requests (Ant); CAR, raw block and record requests (gateway) | more requests reach the node, and its logs show chunk addresses and CIDs |
@@ -754,37 +887,82 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 | `structure-cache` | the core holds no content | up to 8 MiB of verified Swarm structure, per partition | |
 | `multi-range` | Ant answers several ranges with `multipart/byteranges` | 200 with the whole body | only clients that ask for several ranges see it |
 | `manifest-node-cap` | Ant loads a manifest node of up to 32 MiB | 1 MiB | a manifest with a larger node is `unverifiable` |
-| `encrypted-chunks` | the node decrypts a 128-hex reference's content and serves the plaintext | the core fetches the chunks and decrypts them | about 260 requests per MiB |
+| `encrypted-in-walk` | an external node serves the encrypted reference a manifest node or a feed update names | a verified walk that meets one is `unverifiable`; a 128-hex reference in the URL keeps today's fetch, `unverified` | content with encrypted parts below a plain root or a feed doesn't load in verified mode |
 | `ipns-floor` | the gateway resolves an IPNS name as it likes | a record below the highest sequence verified in the session is refused while that one is valid | a gateway that rolls a name back within a session gets a 502 |
 | `soc-references` | an external node may answer a reference with a single-owner chunk, and what it serves then rests on that chunk | the core accepts one only as a feed update; elsewhere it is `unverifiable` | content reached through a SOC outside a feed doesn't load in verified mode |
 | `unixfs-sizes` | the native reader (the parity target) slices a child by its declared size | a declared size that disagrees with a raw leaf, or content that doesn't add up to `filesize`, cuts the body as malformed | only malformed files differ |
 | `hamt-lookup` | the native reader finds a HAMT entry by its name | the core follows the name's hash and the bitfield | an entry that isn't where its hash points is a 404; only malformed directories differ |
 | `decoder-caps` | the native reader decodes any structure a block holds | at most 65,536 links per dag-pb node, and CBOR nested at most 8 levels | structure past the caps is refused as `unverifiable`. That is mostly degenerate encodings, but also rare valid content such as a directory of more than 65,536 compact identity-CID links |
+| `rsa-keys` | the native reader hashes its own re-encoding of an RSA key, so it takes a key encoded another way; ring takes a modulus of 2,041 to 2,047 bits | the record's `pubKey` must hash to the name as it arrived, in libp2p's deterministic encoding and canonical DER, and the modulus is at least 2,048 bits, as go-libp2p requires | only keys no libp2p implementation writes differ: such a record fails its check |
+| `strict-mode` | none | a profile setting, off by default, that answers every unverified external request with a 403 that says why | with it on, DNSLink names, encrypted references, IPNS names with other inlined keys, and backends that don't verify stop loading |
+| `navigation-error-page` | a failed navigation shows the `{ code, message }` JSON the core or main wrote | an HTML error page in plain words, with the same status | subresources and in-process callers keep the JSON; a node's own answers, and the bundled node's bodies the core reproduces, are unchanged |
 
 ## Implementation steps
 
-1. **Tests first:** the generators and `vectors/dweb-verify.json`; the adversarial vectors; the fake Ant and fake trustless gateway in freedom-browser's harness.
+1. **Tests first:** the generators and `vectors/dweb-verify.json`, RSA-keyed records included; the plan vectors, strict mode's among them; the adversarial vectors; the fake Ant and fake trustless gateway in freedom-browser's harness.
 2. **Formats, sans-I/O:**
    - `fc-evm`: signature recovery, for single-owner chunks;
-   - `fc-swarm`: chunk and SOC checks (the empty chunk included; SOCs only where a feed update is expected), intermediate chunks with erasure coding, logical leaf lengths from the parent, encrypted chunks, mantaray nodes and lookup (empty nodes included), feed identifiers;
-   - `fc-ipfs` (new, logic): CIDs and the native node's block check; the bounded protobuf and CBOR readers, with their counting first pass; a streaming CAR reader; dag-pb and UnixFS with the stricter size rules; hash-directed HAMT lookup; offsets; IPNS records, V2-only included;
-   - **new dependencies,** each justified in its PR (AGENTS.md rule 7): `freedom-ipfs-core` (git, pinned to v0.4.6) and the `cid`, `multihash` and `unsigned-varint` crates it brings, which `freedom-mobile-ffi` already links through freedom-ipfs; `mime_guess` 2.0.5, for `GatewayCore`'s types; `ed25519-dalek`, already on the preferred list. MurmurHash3 and the DAG-CBOR subset an IPNS record needs are small enough to write, against vectors.
-3. **`fc-dweb`:** verify plans (with their `query`) and their validation; the verifier machine, with its walks, heads, ranges (the exact-206 and whole-200 policies), conditionals and failures; the structure cache with its partition epochs; the IPNS floors.
+   - `fc-swarm`: chunk and SOC checks (the empty chunk included; SOCs only where a feed update is expected), intermediate chunks with erasure coding, logical leaf lengths from the parent, mantaray nodes and lookup (empty nodes included, and 64-byte references recognized so the walk refuses them), feed identifiers. Encrypted chunks aren't built ([Encrypted references](#encrypted-references));
+   - `fc-ipfs` (new, logic): CIDs and the native node's block check; the bounded protobuf, CBOR and DER readers, with their counting first pass; a streaming CAR reader; dag-pb and UnixFS with the stricter size rules; hash-directed HAMT lookup; offsets; IPNS records, V2-only included, with Ed25519 and RSA keys;
+   - **new dependencies,** each justified in its PR (AGENTS.md rule 7): `freedom-ipfs-core` (git, pinned to v0.4.6) and the `cid`, `multihash` and `unsigned-varint` crates it brings, which `freedom-mobile-ffi` already links through freedom-ipfs; `mime_guess` 2.0.5, for `GatewayCore`'s types; `ed25519-dalek`, already on the preferred list; `rsa` 0.10.0-rc.19, pinned exactly, for verification only, with its `cargo deny` exception ([Upstream](#upstream)). MurmurHash3 and the DAG-CBOR subset an IPNS record needs are small enough to write, against vectors.
+3. **`fc-dweb`:** verify plans (with their `query`) and their validation; what stays a `{ fetch }` (encrypted references, DNSLink names, other inlined keys); strict mode's error plans and checks; the verifier machine, with its walks, heads, ranges (the exact-206 and whole-200 policies), conditionals and failures; the structure cache with its partition epochs, one short-lived cache per private window; the IPNS floors.
 4. **`fc-protocol`:** streams in both directions, protocol version 2 (on #72).
 5. **`freedom-cored`:** the dweb thread and hashing pool, `dweb.verify`, `shell.dweb_get`, `dweb.forget`, admission, budgets and cancel, with tests through the binary.
-6. **freedom-browser:** verify plans in validation and the handler, `dweb-shell.js`, stream frames on the core's connection, the setting and the probe, the labels and the nodes panel; then the [gates](#gates).
-7. **The default** switches only after the gates pass and the user decides it.
+6. **freedom-browser:**
+   - verify plans in validation and the handler, `dweb-shell.js`, and stream frames on the core's connection;
+   - the verification setting, on by default, and the probe;
+   - strict mode: the profile setting, off by default, and `strict` in the captured backend;
+   - the error page for a failed navigation;
+   - `dweb.forget` when a private window's partition closes;
+   - the labels and the nodes panel;
+   - then the [gates](#gates).
+7. **The default:** on for every external backend (decided, 1). Verification ships on once the gates pass; a gate that fails brings the default back to the user with its numbers.
+8. **freedom-ipfs:** a pull request of its own that adopts `fc-ipfs`'s bounded reader, once the reader exists here (decided, 11), after the user has settled its license ([Upstream](#upstream)).
 
-## Open questions
+## Decisions
+
+Each was decided by the user on 2026-10-23. The questions and their options stay, as the decisions' rationale.
 
 1. **The default:** verification on for every external backend (recommended), or opt-in?
+   - **Decided: on by default, for every external backend** ([Modes](#modes)). It ships on once the [gates](#gates) pass; a gate that fails brings this back to the user with the numbers.
 2. **A stricter mode:** should a profile be able to refuse unverified external content outright, as `blockUnverifiedEns` gates unverified names? Under it, DNSLink names, RSA-keyed IPNS names and gateways without raw blocks would stop loading.
+   - **Decided: yes, as a profile setting, off by default** ([Strict mode](#strict-mode)). Under it, DNSLink names, encrypted Swarm references, IPNS names with an inlined key other than Ed25519, and backends that don't verify (verification off, or a gateway without raw blocks) stop loading, each with a 403 that says why. RSA-keyed IPNS names are verified (9), so they still load.
 3. **A node that fails verification:** keep using it and fail only the requests that fail (proposed), or stop using it after repeated failures until the user acts?
+   - **Decided: it stays in use; only its failing requests fail** ([Failures](#failures)). The nodes panel's notice informs; it switches nothing.
 4. **Wording and place:** the trust panel's content row ([Labels](#labels)) and the error texts ([Failures](#failures)). Should a failed navigation get an error page instead of today's JSON body?
+   - **Decided: a failed navigation shows a proper error page in plain words, not the raw JSON body** ([The error page](#the-error-page)). The trust panel's wording and the texts stay as proposed, the user's to change.
 5. **The user's own node:** a loopback Bee or Kubo the user runs is often as trusted as the bundled node. Verify it anyway (proposed: the cost on loopback is small), or offer "trust this node"?
+   - **Decided: verified anyway** ([Modes](#modes)). There is no "trust this node" switch; the per-node setting can still turn verification off.
 6. **The bundled nodes:** should the core also check their output, as defense in depth, at the cost above?
+   - **Decided: no.** The bundled nodes check what they retrieve, and their content stays `node_asserted` ([Goals and non-goals](#goals-and-non-goals)).
 7. **DNSLink:** accept the `unverified` label, or have the core resolve DNSLink itself through DNS-over-HTTPS exchanges main performs, so the root comes from a resolver Freedom chooses rather than from the gateway?
+   - **Decided: DNSLink names stay `unverified` for now** ([IPNS and DNSLink](#ipns-and-dnslink)). Resolving DNSLink in the core over DNS-over-HTTPS, with two independent resolvers that must agree, is noted as a possible later step, not planned work.
 8. **Encrypted references:** verify them chunk by chunk ([Encrypted references](#encrypted-references), about 260 requests per MiB), or leave 128-hex references `unverified` until Ant offers something better, such as a batch chunk endpoint?
+   - **Decided: encrypted references stay `unverified` from external nodes** ([Encrypted references](#encrypted-references)). The chunk-by-chunk path isn't built for now; it stays described in the [appendix](#appendix-the-encrypted-path-not-built). [freedom-hq/ant#233](https://github.com/freedom-hq/ant/issues/233) asks Ant for a batch raw-chunk endpoint, and the question is revisited when it lands. An encrypted reference met inside a verified walk is `unverifiable`, never a fallback.
 9. **RSA-keyed IPNS names:** add an RSA verifier, or keep them `unverified`? The `rsa` crate would be a new dependency, and `cargo deny` may need a reviewed exception for its timing advisory (RUSTSEC-2023-0071), which concerns private-key operations, not verification. Whether the current release still carries the advisory, and how many names use RSA keys, are unverified.
+   - **Decided: add an RSA verifier,** so RSA-keyed names are verified like Ed25519-keyed ones ([IPNS and DNSLink](#ipns-and-dnslink)):
+     - the `rsa` crate, for verification only, pinned exactly (0.10.0-rc.19), with a reviewed `cargo deny` exception for RUSTSEC-2023-0071 ([Upstream](#upstream));
+     - libp2p's encoding (a PKIX DER key inside the record's `pubKey`), signature scheme (RSASSA-PKCS1-v1_5 with SHA-256) and key sizes (2,048 to 8,192 bits), with the sources [IPNS and DNSLink](#ipns-and-dnslink) cites;
+     - **the advisory, checked on 2026-10-23:** no release fixes it. 0.9.10 is the latest stable release and 0.10.0-rc.19 the latest release candidate, and the advisory lists no patched version.
+
+     How many names use RSA keys remains unmeasured; RSA was IPNS's key type before Ed25519 (the IPNS record specification, *Key Types*).
 10. **Private windows:** a structure cache per private partition (proposed), or none?
+    - **Decided: each private window gets its own short-lived structure cache** ([The structure cache](#the-structure-cache)), dropped when the window closes.
 11. **Upstream:** `fc-ipfs` can't share the native decoders as they are, since they allocate before anything can be reserved. Should freedom-ipfs adopt a bounded reader shared with `fc-ipfs` (its decoders, and its stricter size and HAMT rules), so both modes read files and directories the same way by construction rather than differing on malformed content?
+    - **Decided: yes, later.** freedom-ipfs adopts the core's bounded sans-I/O block reader in a freedom-ipfs pull request of its own, after the core's reader exists, so there is one reader, not two ([Upstream](#upstream); [Implementation steps](#implementation-steps), 8).
+    - **Still open:** the license that lets freedom-ipfs take the reader, the user's to choose before that step ([Upstream](#upstream)).
+
+## Appendix: the encrypted path (not built)
+
+Kept for when encrypted references are revisited ([Decisions](#decisions), 8), with [freedom-hq/ant#233](https://github.com/freedom-hq/ant/issues/233) or anything else that makes it practical. Nothing here is built, tested or bounded today.
+
+- **The format:** a reference of 64 bytes, the chunk's address and a key. A chunk is `encrypted span ‖ encrypted payload`, the payload always padded to 4,096 bytes. Segment `i` is XORed with `keccak256(keccak256(key ‖ u32_le(i + c)))`, with `c` = 0 for the payload and 128 for the span (`ac/encryption.rs:57`–`96`; Bee `pkg/encryption`). Intermediate chunks hold 64 references of 64 bytes, so a level-1 chunk covers 256 KiB: 4.0 level-1 chunks per MiB of body.
+- **The plaintext can't be checked against the address.** The padding is random, and so is each chunk's key, so the ciphertext can't be rebuilt from what `/bytes` returns.
+- **So the core would take every chunk from `/chunks`,** check it as a CAC against its address, and decrypt it itself with the key from its reference, up to 8 chunk requests at once. That is about 260 requests per MiB (256 leaves and 4 intermediates) through today's API. On a loopback node with cached chunks, an estimated 10–30 MiB/s; across a network, far less.
+- **The structure cache** would hold an encrypted tree's ciphertext, never its plaintext: the key from the reference that names a chunk is applied on every use. So a reference with another key at the same address couldn't read anything from the cache that it couldn't fetch.
+- **What building it would add:**
+  - `fc-swarm`: encrypted chunks and 64-byte references, in intermediate chunks, manifest nodes and v1 feed updates;
+  - plans: 128-hex references as `{ verify }` plans, labelled `verified`, where they are a `{ fetch }` today; and naming decoding a 64-byte Swarm contenthash, which it answers as unsupported today;
+  - vectors: every Swarm format case encrypted too, a bit flipped in an encrypted chunk, and an encrypted tree's ciphertext reused from the cache under the right key and nothing under another key at the same address;
+  - a gate: an encrypted reference measured beside the plain tree's figures;
+  - a deviation in place of `encrypted-in-walk`: the core fetching an encrypted reference's chunks and decrypting them itself, where the node decrypts today.
