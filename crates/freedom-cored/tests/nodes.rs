@@ -435,6 +435,18 @@ fn an_unfinishable_recovery_is_reported_and_blocks_new_writes() {
     assert!(!other.exists());
     let status = core.call_shell(4, "nodes.op_status", json!({ "op_id": "op-stuck" }));
     assert_eq!(status["result"]["status"], "pending_recovery");
+    // A Radicle write too, to a home that isn't there: refused, and the home
+    // isn't made, though taking its gate would make it (review of #177,
+    // round 3).
+    let home = root.path().join("radicle");
+    let refused = core.call(
+        5,
+        "nodes.write_identity",
+        json!({ "op_id": "op-radicle", "node": "radicle", "home": home,
+            "alias": "me", "custody": "sealed" }),
+    );
+    assert_eq!(refused["error"]["code"], "storage", "{refused}");
+    assert!(!home.exists());
     core.close_stdin();
     assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
 
