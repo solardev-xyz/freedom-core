@@ -342,6 +342,26 @@ fn capacity(thrown: &Json) -> bool {
     .is_match(&safe.to_string_lossy())
 }
 
+/// Main's `isColibriFault(error)` (freedom-browser 94b0af4e), which marks
+/// a Colibri failure or revert `fault` (design 0005, The rest): not one the
+/// worker host marked `colibriBystander`, and a `RuntimeError` by name or
+/// the pattern on the raw message.
+fn fault(thrown: &Json) -> bool {
+    let bystander = thrown_prop(thrown, "colibriBystander")
+        .and_then(|e| e.get("json"))
+        .and_then(Json::as_str)
+        .is_some_and(|json| !matches!(json, "false" | "null" | "0" | "-0" | r#""""#));
+    if bystander {
+        return false;
+    }
+    str_of(thrown, "name") == "RuntimeError"
+        || regex::Regex::new(
+            r"(?i-u)memory access out of bounds|(?:^|: )unreachable(?: executed)?$|retired after a trap|Colibri worker replaced",
+        )
+        .unwrap()
+        .is_match(&thrown_message(thrown))
+}
+
 fn is_hex_data(text: &str) -> bool {
     text.strip_prefix("0x")
         .is_some_and(|d| d.len() % 2 == 0 && d.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -383,13 +403,15 @@ fn verified_answer(record: &Json, before: Option<String>, after: Option<String>)
             .and_then(Json::as_str)
             .and_then(|t| serde_json::from_str::<String>(t).ok());
         // A verified revert, with `capacity: true` when main's
-        // `isCapacityFailure` also holds for the error.
+        // `isCapacityFailure` also holds for the error, and `fault: true`
+        // when its `isColibriFault` does.
         if code == Some("3")
             && let Some(data) = data.filter(|d| is_hex_data(d))
         {
             return Some(Answer::Colibri(ColibriReply::Revert {
                 data,
                 capacity: capacity(thrown),
+                fault: fault(thrown),
             }));
         }
         let class = if capacity(thrown) {
@@ -397,7 +419,10 @@ fn verified_answer(record: &Json, before: Option<String>, after: Option<String>)
         } else {
             ColibriClass::Error
         };
-        return Some(Answer::Colibri(ColibriReply::Failure(class)));
+        return Some(Answer::Colibri(ColibriReply::Failure {
+            class,
+            fault: fault(thrown),
+        }));
     }
     if op == "broadcast" {
         if let Some(payload) = text_field(answer, "payload_json") {
@@ -1640,6 +1665,25 @@ fn tables_json(tables: &StateTables) -> Json {
             ),
         );
     }
+    // The `tx-lookups` reference patch's table (design 0005, Main's #752).
+    if !tables.colibri_faults.is_empty() {
+        out.insert(
+            "colibri_faults".into(),
+            Json::Array(
+                tables
+                    .colibri_faults
+                    .iter()
+                    .map(|(key, record)| {
+                        serde_json::json!([key, {
+                            "faults": record.faults,
+                            "strikes": record.strikes,
+                            "coolUntil": record.cool_until,
+                        }])
+                    })
+                    .collect(),
+            ),
+        );
+    }
     Json::Object(out)
 }
 
@@ -2159,8 +2203,10 @@ const DEVIATIONS: &[Expected] = &[
         id: "router-myotis-broadcast-in-band-failure",
         deviation: "broadcast-outcome",
         replies: &[(0, 0, 0, Want::Uncertain("myotis"))],
+        // A transaction lookup: Direct before Colibri, and its `null` is
+        // final (design 0005, Colibri: transaction lookups).
         extra: &[
-            r#"colibri request chain 1 at 0 {"method":"eth_getTransactionByHash","params":["{hash}"],"deadline_ms":1000}"#,
+            r#"rpc https://rpc.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_getTransactionByHash","params":["{hash}"]}"#,
         ],
         ..EXPECTED
     },
@@ -2169,7 +2215,7 @@ const DEVIATIONS: &[Expected] = &[
         deviation: "broadcast-outcome",
         replies: &[(0, 0, 0, Want::Uncertain("myotis"))],
         extra: &[
-            r#"colibri request chain 100 at 0 {"method":"eth_getTransactionByHash","params":["{hash}"],"deadline_ms":1000}"#,
+            r#"rpc https://rpc.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_getTransactionByHash","params":["{hash}"]}"#,
         ],
         ..EXPECTED
     },
@@ -2343,6 +2389,25 @@ const DEVIATIONS: &[Expected] = &[
     // `execution reverted` with its code and data, where the reference
     // rethrows the adapter's error with its own text. The route is blocked
     // alike, so the same call again never asks Colibri.
+    // Colibri's own error, with no RPC error to prefer, reaches the caller
+    // with the core's fixed text, which is main's too since #681 (design
+    // 0005, Main's #752); the pinned router rethrows the adapter's.
+    Expected {
+        id: "tx-lookup-all-sources-fail",
+        deviation: "adapter-error-text",
+        replies: &[(
+            1,
+            0,
+            0,
+            Want::Thrown {
+                class: "Error",
+                name: "Error",
+                message: "Colibri request failed",
+                props: &[],
+            },
+        )],
+        ..EXPECTED
+    },
     Expected {
         id: "boundary-colibri-revert-capacity",
         deviation: "adapter-error-text",
@@ -2496,13 +2561,13 @@ const DEVIATIONS: &[Expected] = &[
 
 /// The score: scenarios replayed exactly (deviation scenarios with their
 /// asserted difference included), and those not replayed yet.
-const PASSING: usize = 306;
+const PASSING: usize = 331;
 const NOT_REPLAYED: usize = 0;
 /// The permitted races, counted: each is a cancel the machine made in the
 /// tick the reference's exchange settled, after what [`race`] names. Main
 /// withholds each quorum member's answer; a page's deadline failure is the
 /// machine's own timer.
-const RACES: &[(Race, usize)] = &[(Race::QuorumTail, 127), (Race::PageDeadline, 4)];
+const RACES: &[(Race, usize)] = &[(Race::QuorumTail, 128), (Race::PageDeadline, 4)];
 
 #[test]
 // The score is the test's report, printed with `--nocapture`.

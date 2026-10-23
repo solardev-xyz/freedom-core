@@ -324,6 +324,33 @@ const SCENARIO_IDS: &[&str] = &[
     "boundary-agreement-proto-key",
     "boundary-agreement-lone-surrogates",
     "boundary-unsupported-requests",
+    // Main's #752, 22 of them with the `tx-lookups` reference patch
+    // (design 0005, Main's #752).
+    "tx-lookup-unproven-receipt-null",
+    "tx-lookup-unproven-tx-null",
+    "tx-lookup-unproven-tx-pending",
+    "tx-lookup-mined-receipt-proven",
+    "tx-lookup-mined-tx-proven",
+    "tx-lookup-proof-fails-keeps-answer",
+    "tx-lookup-later-sources-failed",
+    "tx-lookup-all-sources-fail",
+    "tx-lookup-caller-exclusions-named",
+    "tx-lookup-backed-off-serves-answer",
+    "tx-lookup-colibri-only-order",
+    "tx-lookup-quorum-terminal-full-budget",
+    "tx-lookup-excluded-source-left-out",
+    "colibri-fault-backoff-escalates",
+    "colibri-fault-only-faults-count",
+    "colibri-fault-bystander-not-counted",
+    "colibri-fault-late-still-counts",
+    "boundary-colibri-fault-cooldown-caps",
+    "boundary-colibri-fault-during-cooldown-ignored",
+    "boundary-colibri-fault-answer-ends-cooldown",
+    "boundary-colibri-fault-classes",
+    "boundary-tx-lookup-undefined-final",
+    "boundary-tx-lookup-myotis-keeps-its-place",
+    "boundary-tx-lookup-bypassed-colibri-not-deferred",
+    "boundary-tx-lookup-deferred-colibri-error-precedence",
 ];
 
 const CALLS: &[&str] = &["request", "getFeeQuote", "broadcastRawTransaction"];
@@ -339,6 +366,8 @@ const KINDS: &[&str] = &[
 ];
 const OUTCOMES: &[&str] = &["answered", "failed", "aborted", "refused", "open", "fired"];
 const DEVIATIONS: &[&str] = &["json-depth", "endpoint-dedup", "singleton-quorum"];
+/// The reference patches a scenario may name (design 0005, Main's #752).
+const PATCHES: &[&str] = &["tx-lookups"];
 
 fn vectors() -> Json {
     let path = concat!(
@@ -521,6 +550,26 @@ fn scenarios_follow_the_schema() {
         object(&scenario["world"], id);
         let steps = array(&scenario["steps"], id);
         assert!(!steps.is_empty(), "{id}: no steps");
+        // A patched scenario names its patches, and has the unpatched
+        // reference's results for each step; an unpatched one has neither.
+        match (scenario.get("patches"), scenario.get("unpatched")) {
+            (Some(patches), Some(unpatched)) => {
+                let patches = array(patches, id);
+                assert!(!patches.is_empty(), "{id}: patches");
+                for patch in patches {
+                    assert!(PATCHES.contains(&text(patch, id)), "{id}: patch");
+                }
+                let unpatched = array(unpatched, id);
+                assert_eq!(unpatched.len(), steps.len(), "{id}: unpatched");
+                for (index, results) in unpatched.iter().enumerate() {
+                    let at = format!("{id} unpatched step {index}");
+                    let calls = array(&steps[index]["calls"], &at);
+                    assert_eq!(array(results, &at).len(), calls.len(), "{at}");
+                }
+            }
+            (None, None) => {}
+            _ => panic!("{id}: patches and unpatched go together"),
+        }
         let mut previous = 0;
         for (index, step) in steps.iter().enumerate() {
             let at = format!("{id} step {index}");

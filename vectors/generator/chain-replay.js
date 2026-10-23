@@ -208,6 +208,187 @@ const BLOCKSCOUT_PAGES = `
 ;module.exports.__observePages = (wrap) => { fetchPage = wrap(fetchPage); };
 `;
 
+// Reference patches (design 0005, Replay): a rule freedom-browser's main
+// took after the pinned commit, applied to the pinned router in memory, so
+// a scenario that names it records main's behaviour without moving the pin.
+// Each edit's text must occur exactly once; `append` adds functions at the
+// module's end. A patched scenario records its patches and the unpatched
+// reference's results (`unpatched`), and generation fails unless the
+// patches change its results or its I/O.
+//
+// `tx-lookups` is main's #752 (94b0af4e, from #750's 17b2fe7f, 765d91ea and
+// 45cec03f): a transaction lookup asks the sources after Colibri first and
+// has Colibri prove only a transaction they report as mined; Colibri is
+// backed off a (chain, method) after verifier faults. Its router code is
+// main's, but for two parts the pinned router doesn't have: a Colibri error
+// is rethrown as it is (main's #681 replaces its text for callers, which
+// the core's fixed texts already do: deviation adapter-error-text), and the
+// backoff's log line, which the stubbed logger drops. Its state table is
+// read through `__colibriFaults`.
+const PATCHES = {
+  'tx-lookups': {
+    edits: [
+      ['const MAX_COLIBRI_IN_FLIGHT_PER_ROUTE = 2;\n', `const MAX_COLIBRI_IN_FLIGHT_PER_ROUTE = 2;
+const TX_LOOKUP_METHODS = new Set(['eth_getTransactionReceipt', 'eth_getTransactionByHash']);
+const COLIBRI_FAULT_WINDOW_MS = 60_000;
+const COLIBRI_FAULT_THRESHOLD = 2;
+const COLIBRI_FAULT_COOLDOWNS_MS = [60_000, 5 * 60_000, 15 * 60_000];
+const COLIBRI_FAULT_PATTERN =
+  /memory access out of bounds|(?:^|: )unreachable(?: executed)?$|retired after a trap|Colibri worker replaced/i;
+`],
+      ['const colibriInFlightByRoute = new Map();\n', `const colibriInFlightByRoute = new Map();
+const colibriFaults = new Map();
+`],
+      ['    throw new SourceUnavailableError(`Colibri does not support ${method}`);\n  }\n', `    throw new SourceUnavailableError(\`Colibri does not support \${method}\`);
+  }
+  if (colibriBackedOff(chainId, method)) {
+    throw new SourceUnavailableError(
+      \`Colibri backed off for \${method} after repeated verifier faults\`
+    );
+  }
+`],
+      [`  const requestPromise = Promise.resolve().then(() =>
+    requestViaColibri(chainId, method, params, { deadlineMs: budgetMs })
+  );
+`, `  const requestPromise = Promise.resolve()
+    .then(() => requestViaColibri(chainId, method, params, { deadlineMs: budgetMs }))
+    .then(
+      (result) => {
+        noteColibriAnswer(chainId, method);
+        return result;
+      },
+      (err) => {
+        if (isColibriFault(err)) noteColibriFault(chainId, method);
+        throw err;
+      }
+    );
+`],
+      ['  const keeper = createErrorKeeper(rankError);\n', `  const keeper = createErrorKeeper(rankError);
+  const txLookup = { colibriDeferred: false, unverified: null };
+`],
+      ['      failures.push(`${source}: temporarily bypassed for this app workload`);\n      continue;\n    }\n', `      failures.push(\`\${source}: temporarily bypassed for this app workload\`);
+      continue;
+    }
+    if (
+      source === 'colibri' && TX_LOOKUP_METHODS.has(method) &&
+      !txLookup.colibriDeferred && sourceIndex + 1 < order.length
+    ) {
+      txLookup.colibriDeferred = true;
+      order.splice(sourceIndex, 1);
+      order.push('colibri');
+      sourceIndex -= 1;
+      continue;
+    }
+`],
+      [`          hasFallbackSource: sourceIndex + 1 < order.length,
+        }),
+      });
+      signal?.throwIfAborted();
+      const result = includeTrust ? sourceResult.result : sourceResult;
+`, `          hasFallbackSource: (txLookup.colibriDeferred && source !== 'colibri'
+            ? sourceIndex + 2 < order.length
+            : sourceIndex + 1 < order.length) || txLookup.unverified !== null,
+        }),
+      });
+      signal?.throwIfAborted();
+      const result = includeTrust ? sourceResult.result : sourceResult;
+      if (
+        txLookup.colibriDeferred && source !== 'colibri' &&
+        txLookupNeedsProof(method, result)
+      ) {
+        recordAdaptiveSuccess(routeKey);
+        txLookup.unverified = {
+          result,
+          source,
+          verified: ['myotis', 'colibri', 'quorum', 'blockscout'].includes(source),
+          ...(includeTrust && sourceResult.trust ? { trust: sourceResult.trust } : {}),
+        };
+        sourceIndex = order.length - 2;
+        continue;
+      }
+`],
+      ['      failures.push(`${source}: ${message}`);\n      if (!(err instanceof SourceUnavailableError)) lastRpcError = err;\n', `      failures.push(\`\${source}: \${message}\`);
+      if (
+        !(err instanceof SourceUnavailableError) &&
+        !(source === 'colibri' && txLookup.colibriDeferred && lastRpcError)
+      ) {
+        lastRpcError = err;
+      }
+`],
+      ['  if (keeper.error) throw keeper.error;\n', `  if (txLookup.unverified) return txLookup.unverified;
+  if (keeper.error) throw keeper.error;
+`],
+    ],
+    append: [`function colibriFaultKey(chainId, method) {
+  return \`\${Number(chainId)} \${method}\`;
+}
+
+function isColibriFault(err) {
+  if (err?.colibriBystander) return false;
+  return err?.name === 'RuntimeError' ||
+    COLIBRI_FAULT_PATTERN.test(String(err?.message || ''));
+}
+
+function colibriBackedOff(chainId, method, now = Date.now()) {
+  return (colibriFaults.get(colibriFaultKey(chainId, method))?.coolUntil || 0) > now;
+}
+
+function noteColibriAnswer(chainId, method) {
+  colibriFaults.delete(colibriFaultKey(chainId, method));
+}
+
+function noteColibriFault(chainId, method, now = Date.now()) {
+  const key = colibriFaultKey(chainId, method);
+  const state = colibriFaults.get(key) || { faults: [], strikes: 0, coolUntil: 0 };
+  if (state.coolUntil > now) return;
+  state.faults = state.faults.filter((at) => now - at < COLIBRI_FAULT_WINDOW_MS);
+  state.faults.push(now);
+  if (state.faults.length >= COLIBRI_FAULT_THRESHOLD) {
+    const cooldownMs = COLIBRI_FAULT_COOLDOWNS_MS[
+      Math.min(state.strikes, COLIBRI_FAULT_COOLDOWNS_MS.length - 1)
+    ];
+    state.strikes += 1;
+    state.faults = [];
+    state.coolUntil = now + cooldownMs;
+  }
+  colibriFaults.set(key, state);
+}
+
+function txLookupNeedsProof(method, result) {
+  if (result === null || result === undefined) return false;
+  if (method === 'eth_getTransactionByHash') {
+    return result.blockNumber != null && result.blockHash != null;
+  }
+  return true;
+}
+
+module.exports.__colibriFaults = () => [...colibriFaults].map(([key, value]) => [key, { faults: [...value.faults], strikes: value.strikes, coolUntil: value.coolUntil }]);`],
+  },
+};
+
+/** The router's source patch for these patch names (see PATCHES), or null. */
+function routerPatch(names) {
+  if (names.length === 0) return null;
+  const patch = { edits: [], append: [] };
+  for (const name of names) {
+    if (!Object.hasOwn(PATCHES, name)) throw new Error(`unknown reference patch ${name}`);
+    patch.edits.push(...PATCHES[name].edits);
+    patch.append.push(...PATCHES[name].append);
+  }
+  return patch;
+}
+
+/** A module's source with a patch's edits applied (see PATCHES). */
+function patchedSource(source, patch, file) {
+  let text = source;
+  for (const [find, replace] of patch.edits) {
+    const count = text.split(find).length - 1;
+    if (count !== 1) throw new Error(`patch for ${file}: ${count} matches for ${JSON.stringify(find)}`);
+    text = text.replace(find, () => replace);
+  }
+  return patch.append.length > 0 ? `${text}\n${patch.append.join('\n')}\n` : text;
+}
+
 /**
  * Loads fresh copies of the router, blockscout-logs.js and the Ant bridge.
  * `stubs` stands in for the router's own requires; `dns` for
@@ -215,7 +396,7 @@ const BLOCKSCOUT_PAGES = `
  * every checkout module under src/, so no state survives into the next
  * scenario; a failed load restores before throwing.
  */
-function loadReference(checkout, stubs, dns) {
+function loadReference(checkout, stubs, dns, patches = []) {
   const src = path.join(checkout, 'src');
   const main = path.join(src, 'main');
   const routerFile = path.join(main, 'networks', 'chain-data-router.js');
@@ -235,12 +416,13 @@ function loadReference(checkout, stubs, dns) {
     if (request === 'electron' && parent?.filename?.startsWith(src + path.sep)) throw new Error('the replay loads no Electron module');
     return originalLoad.call(this, request, parent, isMain);
   };
-  const compile = (filename, extra = '') => {
+  const compile = (filename, extra = '', patch = null) => {
     const mod = new Module(filename, null);
     mod.filename = filename;
     mod.paths = Module._nodeModulePaths(path.dirname(filename));
     Module._cache[filename] = mod;
-    mod._compile(fs.readFileSync(filename, 'utf8') + extra, filename);
+    const source = fs.readFileSync(filename, 'utf8');
+    mod._compile((patch ? patchedSource(source, patch, path.relative(main, filename)) : source) + extra, filename);
     mod.loaded = true;
     return mod.exports;
   };
@@ -248,7 +430,7 @@ function loadReference(checkout, stubs, dns) {
     evict();
     // blockscout-logs.js first: the router's require finds this copy.
     const blockscout = compile(blockscoutFile, BLOCKSCOUT_PAGES);
-    const router = compile(routerFile, ROUTER_STATE);
+    const router = compile(routerFile, ROUTER_STATE, routerPatch(patches));
     const bridge = compile(bridgeFile);
     return { router, blockscout, bridge, restore };
   } catch (err) {
@@ -697,7 +879,7 @@ async function runScenario(checkout, FakeTimers, scenario) {
       '../myotis/myotis-manager': MYOTIS,
       '../ens/colibri-resolver': COLIBRI,
       '../logger': { verbose() {}, info() {}, warn() {}, error() {}, debug() {} },
-    }, dns);
+    }, dns, scenario.patches ?? []);
     undo.push(loaded.restore);
     const { router, blockscout, bridge } = loaded;
     // A Blockscout read (fetchBlockscoutTransferLogs, as the router calls
@@ -806,6 +988,10 @@ async function runScenario(checkout, FakeTimers, scenario) {
         }]),
         log_index_cool_until: raw.log_index_cool_until.map(([key, value]) => [key, at(value)]),
         log_index_pair_cool_until: raw.log_index_pair_cool_until.map(([key, value]) => [key, at(value)]),
+        // `tx-lookups` only (PATCHES).
+        colibri_faults: (router.__colibriFaults?.() ?? []).map(([key, value]) => [key, {
+          faults: value.faults.map(at), strikes: value.strikes, coolUntil: at(value.coolUntil),
+        }]),
       };
       // Empty tables are left out.
       return plain(Object.fromEntries(Object.entries(state).filter(([, value]) => (Array.isArray(value) ? value.length > 0 : value > 0))), 'state');
@@ -864,6 +1050,7 @@ async function runScenario(checkout, FakeTimers, scenario) {
       id: scenario.id,
       from: scenario.from,
       ...(scenario.deviation ? { deviation: scenario.deviation } : {}),
+      ...(scenario.patches?.length ? { patches: [...scenario.patches] } : {}),
       world: plain(scenario.world, 'world'),
       steps,
       io: plain(io, 'io'),
@@ -2266,6 +2453,188 @@ function signedTransactions(ethers, privateKey) {
 }
 
 /** Every scenario, in file order. */
+/**
+ * Main's #752 (freedom-browser 94b0af4e): chain-data-router.test.js's
+ * 'transaction lookups and Colibri verifier faults (#750)', run on the
+ * pinned router with the `tx-lookups` patch (PATCHES), and the design's
+ * boundary cases for it. A scenario the patch leaves unchanged is kept
+ * unpatched (`unpatched: false` below): the pinned router already does
+ * what main does there.
+ */
+function txLookupScenarios() {
+  const M = (line) => `chain-data-router.test.js@94b0af4e:${line}`;
+  const D_ = 'design 0005: Colibri, transaction lookups (#752)';
+  const DF = 'design 0005: Colibri, verifier faults (#752)';
+  const RECEIPT = 'eth_getTransactionReceipt';
+  const BY_HASH = 'eth_getTransactionByHash';
+  const MINED_RECEIPT = { transactionHash: '0xmined', blockNumber: '0x10', blockHash: '0xb', status: '0x1' };
+  const MINED_TX = { hash: '0xmined', blockNumber: '0x10', blockHash: '0xb' };
+  const PENDING_TX = { hash: '0xpending', blockNumber: null, blockHash: null };
+  // What the worker host rejects with when the verifier traps, and when it
+  // replaces a worker stuck verifying past a deadline (the test's own).
+  const trap = (delay) => ({ error: { message: 'Error in rpc call eth_getTransactionReceipt["0xf7aa"] : memory access out of bounds', name: 'ProviderRpcError', code: -32603 }, ...(delay === undefined ? {} : { delay }) });
+  const replaced = (delay, extra = {}) => ({ error: { message: 'Colibri worker replaced: verification still running after its deadline', name: 'ColibriWorkerError', ...extra }, ...(delay === undefined ? {} : { delay }) });
+  const failing = (message, extra = {}) => ({ error: { message, ...extra } });
+  const order = (readOrder, quorum = { k: 3, m: 2, timeoutMs: 1000 }) => ({ access: { readOrder }, quorum });
+  const lookupWorld = (extra = {}) => routerWorld({ network: order(['colibri', 'direct']), ...extra });
+  const app = { origin: 'https://app.example' };
+  // A call target the router keys a route by: an address.
+  const address = (n) => `0x${String(n).repeat(40)}`;
+  const call = (to = '0xabc') => req(1, 'eth_call', [{ to, data: '0x' }, 'latest']);
+  const byMethod = (answers) => ({ rules: Object.entries(answers).map(([method, then]) => ({ when: { method }, then })) });
+  const patched = (s, keep = true) => (keep ? { ...s, patches: ['tx-lookups'] } : s);
+  return [
+    // 1785: an unproven null or pending answer is final; Colibri is never asked.
+    ...[['receipt-null', RECEIPT, null], ['tx-null', BY_HASH, null], ['tx-pending', BY_HASH, PENDING_TX]].map(([name, method, answer]) =>
+      patched(scenario(`tx-lookup-unproven-${name}`, M(1785), lookupWorld({ rpc: { [RPC]: ok(answer) }, colibri: trap() }),
+        req(1, method, ['0xf7aa'])))),
+    // 1797: a mined one goes on to Colibri, whose proof replaces it.
+    ...[['receipt', RECEIPT, MINED_RECEIPT], ['tx', BY_HASH, MINED_TX]].map(([name, method, answer]) =>
+      patched(scenario(`tx-lookup-mined-${name}-proven`, M(1797), lookupWorld({ rpc: { [RPC]: ok(answer) }, colibri: ok({ ...answer, proven: true }) }),
+        req(1, method, ['0xmined'], { include_trust: true })))),
+    patched(scenario('tx-lookup-proof-fails-keeps-answer', M(1807), lookupWorld({ rpc: { [RPC]: ok(MINED_RECEIPT) }, colibri: trap() }),
+      req(1, RECEIPT, ['0xmined']))),
+    // 1816: with every later source failed, Colibri is the last source left,
+    // with the chain's full timeout even for a page's read.
+    patched(scenario('tx-lookup-later-sources-failed', M(1816), lookupWorld({
+      network: order(['colibri', 'direct'], { k: 3, m: 2, timeoutMs: 5000 }),
+      // The test's fetch rejects with ECONNREFUSED; the core's text for any
+      // failed exchange is `fetch failed` (design 0005, Errors and text).
+      rpc: { [RPC]: { fail: 'fetch failed' } },
+      colibri: [ok(MINED_RECEIPT), trap()],
+    }), req(1, RECEIPT, ['0xmined'], app), req(1, RECEIPT, ['0xf7aa']))),
+    // 1836: every source's failure is reported, Colibri's last; then a real
+    // Colibri error, with no RPC error to prefer, reaches the caller.
+    patched(scenario('tx-lookup-all-sources-fail', M(1836), {
+      chains: { 1: chainEntry(order(['myotis', 'colibri', 'quorum', 'direct']), [], []) },
+      myotis: { 1: { ready: false } },
+      colibri: trap(),
+    }, req(1, RECEIPT, ['0xf7aa']), {
+      world: { chains: { 1: chainEntry(order(['myotis', 'colibri', 'quorum', 'direct']), [], [PROVER]) } },
+      calls: [req(1, RECEIPT, ['0xf7aa'])],
+    })),
+    patched(scenario('tx-lookup-caller-exclusions-named', M(1862), {
+      chains: { 1: chainEntry(order(['colibri', 'quorum', 'direct']), [RPC], []) },
+    }, req(1, RECEIPT, ['0xf7aa'], { options: { excludeSources: ['direct'] } }))),
+    patched(scenario('tx-lookup-backed-off-serves-answer', M(1877), lookupWorld({ rpc: { [RPC]: ok(MINED_RECEIPT) }, colibri: trap() }),
+      ...[0, 1, 2].map(() => req(1, RECEIPT, ['0xmined'])))),
+    patched(scenario('tx-lookup-colibri-only-order', M(1890), lookupWorld({ network: order(['colibri'], { timeoutMs: 1000 }), colibri: ok(null) }),
+      req(1, RECEIPT, ['0xf7aa'])), false),
+    // 1903: a deferred Colibri is no fallback, so a page's lookup on a
+    // quorum-terminal order keeps the quorum's configured budget.
+    patched(scenario('tx-lookup-quorum-terminal-full-budget', M(1903), {
+      chains: { 1: chainEntry(order(['colibri', 'quorum'], { k: 2, m: 2, timeoutMs: 5000 }), [A, B], [PROVER]) },
+      rpc: { [A]: ok(null, 3000), [B]: ok(null, 3000) },
+      colibri: trap(),
+    }, req(1, RECEIPT, ['0xf7aa'], { ...app, ...settles(3000) }))),
+    patched(scenario('tx-lookup-excluded-source-left-out', M(1924), {
+      chains: { 1: chainEntry(order(['colibri', 'quorum', 'direct']), [RPC], [PROVER]) },
+      rpc: { [RPC]: ok(null) },
+      colibri: ok(MINED_RECEIPT),
+    }, req(1, RECEIPT, ['0xmined'], { options: { excludeSources: ['direct'] } })), false),
+    // 1938: two faults within 60 s back Colibri off that method on that
+    // chain, for 60 s, then 5 min; another method and another chain still
+    // go to it.
+    patched(scenario('colibri-fault-backoff-escalates', M(1938), lookupWorld({
+      rpc: { [RPC]: byMethod({ eth_call: ok('0xrpc'), eth_getBalance: ok('0x1') }) },
+      colibri: [trap(), replaced(), ok('0xproven'), ok('0xproven'), trap(), trap(), ok('0xproven')],
+    }), call(), call(), call(), req(1, 'eth_getBalance', ['0xabc', 'latest']), req(100, 'eth_call', [{ to: '0xabc', data: '0x' }, 'latest']),
+    { after: 60_000, calls: [call()] }, call(), { after: 299_999, calls: [call()] }, { after: 1, calls: [call()] })),
+    // 1971: only verifier faults count, and a Colibri answer clears them;
+    // faults 60 s apart never meet.
+    patched(scenario('colibri-fault-only-faults-count', M(1971), lookupWorld({
+      rpc: { [RPC]: ok('0xrpc') },
+      colibri: [
+        failing('Request to https://p failed: fetch failed', { code: -32603 }), failing('Request to https://p failed: fetch failed', { code: -32603 }),
+        trap(), ok('0xproven'), trap(), ok('0xproven'), trap(), trap(), ok('0xproven'),
+      ],
+    }), call(), call(), call(), call(), call(), call(), call(), { after: 60_000, calls: [call()] }, call())),
+    // 1995: a request the worker host failed only because another one
+    // trapped or overran on its worker counts for nothing.
+    patched(scenario('colibri-fault-bystander-not-counted', M(1995), lookupWorld({
+      rpc: { [RPC]: ok('0xrpc') },
+      colibri: [
+        replaced(undefined, { colibriBystander: true }),
+        failing('Colibri WASM runtime was retired after a trap; refusing execute()', { name: 'ProviderRpcError', colibriBystander: true }),
+        replaced(undefined, { colibriBystander: true }),
+        ok('0xproven'),
+      ],
+    }), call(), call(), call(), call()), false),
+    // 2019: a fault that lands after the caller's deadline moved it on
+    // still counts. Each lands 1 ms after its page's budget (the chain's
+    // 1 s timeout), and the next step starts as it lands.
+    patched(scenario('colibri-fault-late-still-counts', M(2019), lookupWorld({
+      rpc: { [RPC]: ok('0xrpc') },
+      colibri: [replaced(1001), replaced(1001), ok('0xproven')],
+    }), req(1, 'eth_call', [{ to: address(0), data: '0x' }, 'latest'], { ...app, ...settles(1000) }),
+    { after: 1, calls: [req(1, 'eth_call', [{ to: address(1), data: '0x' }, 'latest'], { ...app, ...settles(1000) })] },
+    { after: 1, calls: [call('0xdef')] })),
+
+    // The design's boundary cases.
+    // The third and later cooldowns stay at 15 minutes.
+    patched(scenario('boundary-colibri-fault-cooldown-caps', DF, lookupWorld({
+      rpc: { [RPC]: ok('0xrpc') },
+      colibri: [trap(), trap(), trap(), trap(), trap(), trap(), trap(), trap(), ok('0xproven')],
+    }), call(), call(), { after: 60_000, calls: [call()] }, call(), { after: 300_000, calls: [call()] }, call(),
+    { after: 900_000, calls: [call()] }, call(), { after: 899_999, calls: [call()] }, { after: 1, calls: [call()] })),
+    // A fault landing while the backoff runs adds nothing: the third of
+    // three concurrent requests' faults is dropped.
+    patched(scenario('boundary-colibri-fault-during-cooldown-ignored', DF, lookupWorld({
+      rpc: { [RPC]: ok('0xrpc') },
+      colibri: [trap(10), trap(20), trap(30), trap(), ok('0xproven')],
+    }), [call(address(1)), call(address(2)), call(address(3))], { after: 60_000, calls: [call()] }, call())),
+    // An answer from a request asked before the cooldown began deletes the
+    // record, and so ends the cooldown, though it lands after its page's
+    // 1 s budget moved that read on.
+    patched(scenario('boundary-colibri-fault-answer-ends-cooldown', DF, lookupWorld({
+      rpc: { [RPC]: ok('0xrpc') },
+      colibri: [trap(10), trap(20), ok('0xlate', 1500), ok('0xproven')],
+    }), [call(address(1)), call(address(2)), req(1, 'eth_call', [{ to: address(3), data: '0x' }, 'latest'], { ...app, ...settles(1000) })],
+    { after: 600, calls: [call()] })),
+    // What counts as a fault: a RuntimeError by name, or the pattern on the
+    // raw message, case aside; each answer in between clears the record.
+    patched(scenario('boundary-colibri-fault-classes', DF, lookupWorld({
+      rpc: { [RPC]: ok('0xrpc') },
+      colibri: [
+        failing('boom', { name: 'RuntimeError' }), ok('0xproven'),
+        failing('host unreachable: retry'),
+        failing('wasm trap: unreachable'), ok('0xproven'),
+        failing('unreachable executed'), ok('0xproven'),
+        failing('Colibri WASM runtime was retired after a trap; refusing execute()'), ok('0xproven'),
+        failing('MEMORY ACCESS OUT OF BOUNDS'), ok('0xproven'),
+        failing('unreachable code'),
+        failing('Error: unreachable'), ok('0xproven'),
+      ],
+    }), ...Array.from({ length: 15 }, () => call()))),
+    // A body without `result` answers undefined: final, Colibri not asked.
+    patched(scenario('boundary-tx-lookup-undefined-final', D_, lookupWorld({ rpc: { [RPC]: { noResult: true } }, colibri: trap() }),
+      req(1, RECEIPT, ['0xf7aa']))),
+    // Sources before Colibri keep their place: Myotis first (it serves no
+    // receipts), then the quorum; Colibri's failed proof returns the
+    // quorum's held answer with its trust.
+    patched(scenario('boundary-tx-lookup-myotis-keeps-its-place', D_, {
+      chains: { 1: chainEntry(order(['myotis', 'colibri', 'quorum', 'direct']), [A, B, C], [PROVER]) },
+      myotis: myotisOn(1),
+      rpc: { [A]: ok(MINED_RECEIPT), [B]: ok(MINED_RECEIPT), [C]: ok(MINED_RECEIPT) },
+      colibri: trap(),
+    }, req(1, RECEIPT, ['0xmined'], { include_trust: true }))),
+    // A page's Colibri route opened by a proof's timeout is bypassed where
+    // Colibri stands, not deferred: the next lookup takes Direct's mined
+    // answer as it is.
+    patched(scenario('boundary-tx-lookup-bypassed-colibri-not-deferred', D_, lookupWorld({
+      network: order(['colibri', 'direct'], { k: 3, m: 2, timeoutMs: 5000 }),
+      rpc: { [RPC]: ok(MINED_RECEIPT) },
+      colibri: { hang: true },
+    }), req(1, RECEIPT, ['0xmined'], { ...app, ...settles(2000) }), req(1, RECEIPT, ['0xmined'], { ...app, ...settles(0) }))),
+    // A deferred Colibri keeps the precedence it had when it was asked
+    // first: Direct's own error is what the caller sees.
+    patched(scenario('boundary-tx-lookup-deferred-colibri-error-precedence', D_, lookupWorld({
+      rpc: { [RPC]: rpcError(-32000, 'header not found') },
+      colibri: { error: { message: 'execution reverted', code: 3, data: '0x1234' } },
+    }), req(1, RECEIPT, ['0xf7aa']))),
+  ];
+}
+
 function scenarioDefinitions(ethers, privateKey) {
   const tx = signedTransactions(ethers, privateKey);
   const scenarios = [
@@ -2276,6 +2645,7 @@ function scenarioDefinitions(ethers, privateKey) {
     ...bridgeRouterScenarios(),
     ...blockscoutScenarios(),
     ...boundaryScenarios(ethers, tx),
+    ...txLookupScenarios(),
   ];
   const ids = new Set();
   for (const { id } of scenarios) {
@@ -2293,7 +2663,18 @@ function loadFakeTimers(checkout) {
 async function buildChainReplay(checkout, ethers, privateKey, meta) {
   const FakeTimers = loadFakeTimers(checkout);
   const scenarios = [];
-  for (const definition of scenarioDefinitions(ethers, privateKey)) scenarios.push(await runScenario(checkout, FakeTimers, definition));
+  for (const definition of scenarioDefinitions(ethers, privateKey)) {
+    const run = await runScenario(checkout, FakeTimers, definition);
+    if (definition.patches?.length) {
+      // The patch must show: the unpatched reference differs in its steps
+      // (results and state) or its I/O.
+      const plain = await runScenario(checkout, FakeTimers, { ...definition, patches: [] });
+      const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+      if (same(plain.steps, run.steps) && same(plain.io, run.io)) throw new Error(`patched scenario ${definition.id}: the patches change nothing`);
+      run.unpatched = plain.steps.map((step) => step.results);
+    }
+    scenarios.push(run);
+  }
   return {
     meta,
     encodings: {

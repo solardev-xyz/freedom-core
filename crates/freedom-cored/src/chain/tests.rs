@@ -1049,6 +1049,60 @@ fn raw(text: &str) -> Result<Box<RawValue>, ErrorBody> {
 }
 
 #[test]
+fn colibri_answers_carry_a_fault_beside_a_failure_or_a_revert() {
+    // Main's `fault: true` (design 0005, The rest): beside a failure or a
+    // revert, with `capacity` too, members in any order; only ever `true`.
+    let colibri = |text: &str| answer(Kind::Colibri, raw(text));
+    let failure = |class| {
+        Some(Answer::Colibri(ColibriReply::Failure {
+            class,
+            fault: true,
+        }))
+    };
+    assert_eq!(
+        colibri(r#"{"failure":"error","fault":true}"#),
+        failure(ColibriClass::Error)
+    );
+    assert_eq!(
+        colibri(r#"{"fault":true,"failure":"capacity"}"#),
+        failure(ColibriClass::Capacity)
+    );
+    let revert = |capacity| {
+        Some(Answer::Colibri(ColibriReply::Revert {
+            data: "0x12".into(),
+            capacity,
+            fault: true,
+        }))
+    };
+    assert_eq!(
+        colibri(r#"{"revert":{"data":"0x12"},"fault":true}"#),
+        revert(false)
+    );
+    for text in [
+        r#"{"revert":{"data":"0x12"},"capacity":true,"fault":true}"#,
+        r#"{"fault":true,"revert":{"data":"0x12"},"capacity":true}"#,
+        r#"{"capacity":true,"fault":true,"revert":{"data":"0x12"}}"#,
+    ] {
+        assert_eq!(colibri(text), revert(true), "{text}");
+    }
+    for text in [
+        r#"{"failure":"error","fault":false}"#,
+        r#"{"failure":"error","fault":null}"#,
+        r#"{"failure":"error","fault":"true"}"#,
+        r#"{"failure":"error","fault":1}"#,
+        r#"{"revert":{"data":"0x12"},"fault":false}"#,
+        r#"{"revert":{"data":"0x12","fault":true}}"#,
+        r#"{"revert":{"data":"0x12"},"capacity":false,"fault":true}"#,
+        r#"{"failure":"error","capacity":true,"fault":true}"#,
+        r#"{"fault":true}"#,
+        r#"{"result":"0x1","fault":true}"#,
+        r#"{"undefined_keys":["result"],"fault":true}"#,
+    ] {
+        assert_eq!(colibri(text), None, "{text}");
+    }
+}
+
+#[test]
 fn colibri_answers_carry_a_revert_with_capacity_and_an_undefined_result() {
     // A verified revert that is also a capacity failure, and a result of
     // `undefined` (design 0005, Verified operations): each in exactly one
@@ -1058,6 +1112,7 @@ fn colibri_answers_carry_a_revert_with_capacity_and_an_undefined_result() {
         Some(Answer::Colibri(ColibriReply::Revert {
             data: "0x12".into(),
             capacity,
+            fault: false,
         }))
     };
     assert_eq!(
@@ -1191,6 +1246,86 @@ fn a_colibri_revert_with_capacity_blocks_the_apps_route() {
     );
 }
 
+/// Main's late reply to Colibri operation `op`, its result written as
+/// `result`'s raw JSON: text `serde_json::Value` couldn't hold.
+fn answer_raw(t: &mut Test, op: u64, result: &str) {
+    assert_eq!(t.chain.requests.answered(op), Some(Owner::Chain));
+    let reply = shell_result(op, &format!(r#"{{"result":{result}}}"#));
+    assert!(t.chain.handle(In::Response { id: op, reply }).is_ok());
+    assert!(t.chain.flush().is_ok());
+}
+
+#[test]
+fn a_late_colibri_answer_at_the_depth_bound_still_clears_its_fault_record() {
+    // #189 review: a Colibri result nested 512 levels, the bound a value
+    // may nest (deviation `json-depth`), answers after its read moved on to
+    // Direct. The reply's own object makes it 513, and it still counts as
+    // an answer for its method's fault record (design 0005, Colibri:
+    // verifier faults); one a level deeper stays unread and counts for
+    // nothing.
+    let mut t = test();
+    let mut config = chain_snapshot(&["colibri", "direct"], &["a"]);
+    config["prover"] = json!({ "endpoint": "p", "zk": false });
+    t.configure(json!([config]));
+    let direct = |t: &mut Test, frames: &[Value]| {
+        for rpc in requests(frames)
+            .into_iter()
+            .filter(|f| f["method"] == "shell.rpc")
+        {
+            let body = r#"{"jsonrpc":"2.0","id":1,"result":"0x1"}"#;
+            assert!(
+                t.answer(rpc["id"].as_u64().unwrap(), rpc_answer(body))
+                    .is_ok()
+            );
+        }
+    };
+    let call = |id: u64, to: &str, origin: Option<&str>| {
+        let (id, mut params) = read(id, "eth_call", json!([{ "to": to }, "latest"]));
+        if let Some(origin) = origin {
+            params["origin"] = json!(origin);
+        }
+        (id, params)
+    };
+    let faults = |t: &Test| t.chain.machine.state_tables().colibri_faults;
+    // One fault, then Direct's answer.
+    let (id, params) = call(3, "0xabc", None);
+    t.call(id, "chain.request", &params);
+    let op = verified(&t.written())[0]["id"].as_u64().unwrap();
+    assert!(
+        t.answer(op, Ok(json!({ "failure": "error", "fault": true })))
+            .is_ok()
+    );
+    let frames = t.written();
+    direct(&mut t, &frames);
+    assert_eq!(faults(&t).len(), 1);
+    // Two page reads whose Colibri operations outlive their 2 s budget.
+    let mut held = Vec::new();
+    for (id, to) in [
+        (4, "0x1111111111111111111111111111111111111111"),
+        (5, "0x2222222222222222222222222222222222222222"),
+    ] {
+        let (id, params) = call(id, to, Some("https://app.example"));
+        t.call(id, "chain.request", &params);
+        held.push(verified(&t.written())[0]["id"].as_u64().unwrap());
+    }
+    t.at(2_000);
+    let frames = t.written();
+    direct(&mut t, &frames);
+    let replies: Vec<Value> = t
+        .written()
+        .into_iter()
+        .filter(|f| f["type"] == "response")
+        .collect();
+    assert_eq!(replies.len(), 2, "{replies:?}");
+    let nested = |depth: usize| format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
+    // Past the bound: unread, so the fault stays.
+    answer_raw(&mut t, held[0], &nested(513));
+    assert_eq!(faults(&t).len(), 1);
+    // At it: an answer, which deletes the record.
+    answer_raw(&mut t, held[1], &nested(512));
+    assert!(faults(&t).is_empty(), "{:?}", faults(&t));
+}
+
 #[test]
 fn mains_answers_take_one_closed_shape() {
     // Transport failures are a closed set and carry no text; only
@@ -1314,6 +1449,7 @@ fn mains_answers_take_one_closed_shape() {
         Some(Answer::Colibri(ColibriReply::Revert {
             data: "0x12".into(),
             capacity: false,
+            fault: false,
         }))
     );
     for (class, expected) in [
@@ -1325,7 +1461,10 @@ fn mains_answers_take_one_closed_shape() {
     ] {
         assert_eq!(
             colibri(&format!(r#"{{"failure":"{class}"}}"#)),
-            Some(Answer::Colibri(ColibriReply::Failure(expected)))
+            Some(Answer::Colibri(ColibriReply::Failure {
+                class: expected,
+                fault: false
+            }))
         );
     }
     // Text where a class goes, two shapes at once, members of another
