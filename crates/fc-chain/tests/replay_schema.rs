@@ -351,6 +351,18 @@ const SCENARIO_IDS: &[&str] = &[
     "boundary-tx-lookup-myotis-keeps-its-place",
     "boundary-tx-lookup-bypassed-colibri-not-deferred",
     "boundary-tx-lookup-deferred-colibri-error-precedence",
+    "fee-headroom-myotis-complete",
+    "fee-headroom-dust-tip",
+    "fee-headroom-colibri-inconsistent",
+    "fee-headroom-no-hint-method",
+    "fee-headroom-myotis-read-path",
+    "fee-headroom-myotis-unverified-block",
+    "fee-headroom-direct-same-endpoint",
+    "fee-headroom-direct-block",
+    "fee-headroom-legacy-chain",
+    "fee-headroom-later-type-2-wins",
+    "fee-headroom-last-resort",
+    "fee-headroom-direct-last-resort",
 ];
 
 const CALLS: &[&str] = &["request", "getFeeQuote", "broadcastRawTransaction"];
@@ -367,7 +379,7 @@ const KINDS: &[&str] = &[
 const OUTCOMES: &[&str] = &["answered", "failed", "aborted", "refused", "open", "fired"];
 const DEVIATIONS: &[&str] = &["json-depth", "endpoint-dedup", "singleton-quorum"];
 /// The reference patches a scenario may name (design 0005, Main's #752).
-const PATCHES: &[&str] = &["tx-lookups"];
+const PATCHES: &[&str] = &["tx-lookups", "fee-headroom"];
 
 fn vectors() -> Json {
     let path = concat!(
