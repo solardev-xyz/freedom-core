@@ -77,6 +77,14 @@ impl BigInt {
         self.limbs.capacity().saturating_mul(8)
     }
 
+    /// The same value, its limbs holding no more than it needs: a value
+    /// parsed from a long text with leading zeros keeps that text's room
+    /// until it is compacted.
+    pub(crate) fn compact(mut self) -> Self {
+        self.limbs.shrink_to_fit();
+        self
+    }
+
     /// The magnitude's width in bits.
     pub(crate) fn bits(&self) -> usize {
         self.limbs.last().map_or(0, |top| {

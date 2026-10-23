@@ -22,8 +22,8 @@ use super::read::{
     MYOTIS_FAILED, SourceOptions, charged, myotis_adapter_error, myotis_failure, request_source,
 };
 use crate::fee::{
-    FeeQuote, QUOTE_BYTES, QuoteValues, combine_fee_quotes, fee_quote_reserving,
-    fee_quote_values_reserving, lowest_priority,
+    FeeQuote, GasPrice, QUOTE_BYTES, QuoteValues, combine_fee_quotes, fee_quote_reserving,
+    fee_quote_values_with_reserving, gas_price_reserving, lowest_priority,
 };
 use crate::js::JsError;
 use crate::myotis::{MYOTIS_NOT_READY, MyotisOperation, myotis_fee_values};
@@ -133,17 +133,37 @@ pub(crate) const FEE_ENDPOINTS: usize = 3;
 /// How long B's collection waits for more quotes after the first answered.
 pub(crate) const FEE_CUTOFF_MS: Ms = 1_000;
 
-/// `feeQuote`'s values with every allocation reserved first, as
-/// [`quote_within`] reserves them. They stay charged, at what they hold,
-/// while they are kept.
-async fn values_within(
+/// The gas price half of `feeQuote`, with every allocation reserved
+/// first, as [`quote_within`] reserves them: the value, charged at what it
+/// holds, or the codec's error, charged at its size.
+async fn gas_within(
     req: &Req,
     source: &str,
     gas_price: Option<&str>,
+) -> Result<(GasPrice, Charge), Thrown> {
+    let mut work = reserve!(req.ctx, 0);
+    let read = gas_price_reserving(source, gas_price, |bytes| {
+        work.settle(work.bytes().saturating_add(bytes))
+            .map_err(|()| Over)
+    });
+    match within!(read) {
+        Ok(gas) => {
+            within!(work.settle(gas.heap_bytes()).map_err(|()| Over));
+            Ok((gas, work))
+        }
+        Err(error) => Err(within!(charged(js(error), work))),
+    }
+}
+
+/// The rest of `feeQuote`'s values, from a gas price [`gas_within`] read,
+/// with every allocation reserved first. They stay charged, at what they
+/// hold, while they are kept.
+async fn values_within(
+    source: &str,
+    (gas_price, mut work): (GasPrice, Charge),
     priority: Option<&str>,
 ) -> Result<(QuoteValues, Charge), Thrown> {
-    let mut work = reserve!(req.ctx, 0);
-    let quoted = fee_quote_values_reserving(source, gas_price, priority, |bytes| {
+    let quoted = fee_quote_values_with_reserving(source, gas_price, priority, |bytes| {
         work.settle(work.bytes().saturating_add(bytes))
             .map_err(|()| Over)
     });
@@ -161,13 +181,22 @@ async fn values_within(
 /// of the same endpoint, each within `configured`. A failed hint gives a
 /// legacy quote; a failed gas price, a non-positive one or an unparseable
 /// hint fails the endpoint.
+///
+/// The gas price is read as it arrives, and only its value (or its error)
+/// is kept while the hint is asked for: three endpoints run at once, and
+/// their raw answers, each up to the answer cap, would otherwise all be
+/// kept across those requests. The requests are the same, and so is the
+/// error: a gas price that fails the codec fails the endpoint once the
+/// hint's exchange has ended, as before.
 async fn endpoint_quote(req: &Req, url: &str) -> Result<(QuoteValues, Charge), Thrown> {
     let timeout = req.chain.timeout;
-    let gas = exchange(req, url, "eth_gasPrice", "[]", timeout).await?;
+    let answer = exchange(req, url, "eth_gasPrice", "[]", timeout).await?;
+    let gas = gas_within(req, "direct", json(&answer)).await;
+    drop(answer);
     let priority = exchange(req, url, "eth_maxPriorityFeePerGas", "[]", timeout)
         .await
         .unwrap_or(None);
-    values_within(req, "direct", json(&gas), json(&priority)).await
+    values_within("direct", gas?, json(&priority)).await
 }
 
 /// B's answered quotes, each charged while it is kept.
@@ -193,7 +222,8 @@ type Asking<'a> = Pin<Box<dyn Future<Output = Result<(QuoteValues, Charge), Thro
 ///   quorum's included; the first three start together.
 /// - **Replacement:** until a quote has answered, an endpoint that fails
 ///   is replaced by the next one not yet asked. Once one has answered, no
-///   endpoint starts.
+///   endpoint starts: a tick's answers count before its failures, so a
+///   failure in the tick a quote answered isn't replaced.
 /// - **Cutoff:** collection ends when no started endpoint is still
 ///   running, or [`FEE_CUTOFF_MS`] after the first quote answered. The
 ///   cutoff goes first in its tick: an answer in that tick is left out.
@@ -228,36 +258,49 @@ pub(crate) async fn collect(
         if cutoff.as_ref().is_some_and(|(at, _)| req.now() >= *at) {
             return Poll::Ready(());
         }
+        // A tick's answers count before its failures: a failure is replaced
+        // only while no quote has answered, this tick's included. A
+        // replacement is polled in the same tick.
         let mut i = 0;
-        while i < asking.len() {
-            let Poll::Ready(settled) = asking[i].1.as_mut().poll(cx) else {
-                i += 1;
-                continue;
-            };
-            let (index, _) = asking.remove(i);
-            match settled {
-                Ok((quote, charge)) => {
-                    values.push(quote);
-                    charges.push(charge);
-                    if cutoff.is_none() {
-                        let at = req.now().saturating_add(FEE_CUTOFF_MS);
-                        cutoff = Some((at, started(req.ctx.rt.sleep(FEE_CUTOFF_MS))));
+        let mut failed: Vec<(usize, Thrown)> = Vec::new();
+        loop {
+            while i < asking.len() {
+                let Poll::Ready(settled) = asking[i].1.as_mut().poll(cx) else {
+                    i += 1;
+                    continue;
+                };
+                let (index, _) = asking.remove(i);
+                match settled {
+                    Ok((quote, charge)) => {
+                        values.push(quote);
+                        charges.push(charge);
+                        // An error is the reply only when no quote answers.
+                        last = None;
+                        if cutoff.is_none() {
+                            let at = req.now().saturating_add(FEE_CUTOFF_MS);
+                            cutoff = Some((at, started(req.ctx.rt.sleep(FEE_CUTOFF_MS))));
+                        }
                     }
+                    Err(error) => failed.push((index, error)),
                 }
-                Err(error) => {
-                    let now = req.now();
-                    if last
-                        .as_ref()
-                        .is_none_or(|(at, at_index, _)| now > *at || index > *at_index)
-                    {
-                        last = Some((now, index, error));
-                    }
-                    if values.is_empty()
-                        && let Some(url) = urls.get(next)
-                    {
-                        asking.push((next, Box::pin(endpoint_quote(req, url))));
-                        next += 1;
-                    }
+            }
+            if failed.is_empty() {
+                break;
+            }
+            let now = req.now();
+            for (index, error) in failed.drain(..) {
+                if !values.is_empty() {
+                    continue;
+                }
+                if last
+                    .as_ref()
+                    .is_none_or(|(at, at_index, _)| now > *at || index > *at_index)
+                {
+                    last = Some((now, index, error));
+                }
+                if let Some(url) = urls.get(next) {
+                    asking.push((next, Box::pin(endpoint_quote(req, url))));
+                    next += 1;
                 }
             }
         }

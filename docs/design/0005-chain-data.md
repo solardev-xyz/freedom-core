@@ -705,7 +705,8 @@ Deviation `fee-combination`. A fee quote's Direct step (today's `requestDirectFe
   - **Three at once:** it starts the first three. Each asks `eth_gasPrice`, then, once that has answered, `eth_maxPriorityFeePerGas`, each exchange within `configured`. Each endpoint's quote comes from today's codec:
     - a failed, missing, negative or too-high priority hint gives a legacy quote;
     - a failed gas price, a non-positive one or an unparseable priority hint fails that endpoint.
-  - **Replacement:** until a quote has answered, an endpoint that fails is replaced by the next one not yet asked, so every endpoint can still be reached, as today's walk does. Once one has answered, no endpoint starts.
+    - **Memory:** the gas price is read as it arrives, and only its value, or the codec's error, is kept while the hint is asked for. Three raw answers, each up to the answer cap, are never kept across those exchanges, so large valid answers can't take the request over its budget and discard a quote that answered. An unreadable gas price still fails its endpoint once the hint's exchange has ended, with the same requests and error as today's codec.
+  - **Replacement:** until a quote has answered, an endpoint that fails is replaced by the next one not yet asked, so every endpoint can still be reached, as today's walk does. Once one has answered, no endpoint starts. A tick's answers count before its failures: a failure in the tick a quote answered isn't replaced. An error is kept only while no quote has answered.
   - **Cutoff:** collection ends when no started endpoint is still running, or 1 s after the first quote answered, whichever is first. Outstanding exchanges are then cancelled, and an endpoint still waiting for either answer hasn't answered. The cutoff goes first in its tick: an answer in that tick is left out, as for a deadline.
   - **A header, for mixed quotes:** where the chain has a prover and its read order includes `colibri`, the collection also starts the verified header read that [A](#a-the-check-at-confirmation)'s evidence uses.
     - **When it is used:** only if the answers are mixed. The combination then waits for it, within Colibri's budget.
@@ -739,7 +740,8 @@ Deviation `fee-combination`. A fee quote's Direct step (today's `requestDirectFe
     - all legacy;
     - mixed with a verified header (the boundary case pays 2), and mixed without one (it pays 100): no prover, Colibri out of the read order, a failed or malformed header, a header without a base fee;
     - mixed, with the header arriving after the collection ends; and a header read whose outcome is dropped when the answers aren't mixed;
-    - partial failures: one fails and two combine; a failure replaced before any answer; an unparseable priority hint on one endpoint;
+    - partial failures: one fails and two combine; a failure replaced before any answer, and not in the tick a quote answered; an unparseable priority hint on one endpoint; an unreadable gas price failing its endpoint after the hint;
+    - memory: gas prices and hints near the answer cap on several endpoints at once, within the request's budget;
     - all failing, with the last error;
     - singletons: one endpoint configured, and one of three answering;
     - the cutoff: a third answer after it is cancelled and left out, an endpoint whose priority exchange is outstanding at it is left out, and an answer in its tick;
