@@ -23,7 +23,7 @@ use std::io::ErrorKind;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
-use freedom_ipfs_net::gate::Nat64Prefix;
+use freedom_ipfs_addr::Nat64Prefix;
 use hickory_proto::op::{Edns, Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{DNSClass, Name, RData, RecordType};
 
@@ -33,7 +33,7 @@ pub const NAME: &str = "ipv4only.arpa.";
 /// The UDP payload the query offers (EDNS0): the DNS flag day's 1232 bytes,
 /// room for many more AAAA records than [`Nat64State::MAX_PREFIXES`].
 ///
-/// [`Nat64State::MAX_PREFIXES`]: freedom_ipfs_net::gate::Nat64State::MAX_PREFIXES
+/// [`Nat64State::MAX_PREFIXES`]: freedom_ipfs_addr::Nat64State::MAX_PREFIXES
 const PAYLOAD: u16 = 1232;
 
 /// The largest reply read. One that doesn't fit is refused, not read cut

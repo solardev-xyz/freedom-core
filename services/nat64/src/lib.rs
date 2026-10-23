@@ -62,7 +62,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use fc_service::log;
-use freedom_ipfs_net::gate::{Nat64Prefix, Nat64State};
+use freedom_ipfs_addr::{Nat64Prefix, Nat64State};
 use serde_json::json;
 
 use self::query::Failure;
@@ -926,14 +926,15 @@ mod tests {
         }
         assert_eq!(failed(&discovery), json!(["rcode"]));
         *listed.lock().unwrap() = vec![Learned::Unaskable("fe80::1".into())];
+        // The round's first failure publishes pending, with that failure, and
+        // its end publishes unknown with the round's prefixes: wait for the
+        // end, not only for the failure (a race the macOS runner found).
+        let expected = json!({ "state": "unknown", "prefixes": ["2001:db8:64::/96"], "failures": ["unaskable"] });
         let deadline = Instant::now() + Duration::from_secs(5);
-        while failed(&discovery) != json!(["unaskable"]) && Instant::now() < deadline {
+        while discovery.stats() != expected && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert_eq!(
-            discovery.stats(),
-            json!({ "state": "unknown", "prefixes": ["2001:db8:64::/96"], "failures": ["unaskable"] })
-        );
+        assert_eq!(discovery.stats(), expected);
         // Paused, then resumed: pending, with no failure of its own yet. The
         // resumed round asks a resolver that never answers, so it is still
         // pending when read.
@@ -1221,14 +1222,14 @@ mod tests {
         });
         assert_eq!(state, Nat64State::Pending);
         let target: std::net::IpAddr = "2a00:1:2:3::7f00:1".parse().unwrap();
-        assert!(freedom_ipfs_net::gate::check_address(target, &state).is_err());
+        assert!(freedom_ipfs_addr::check_address(target, &state).is_err());
         // Pending, with the failure it is pending for.
         assert_eq!(discovery.stats()["state"], "pending");
         assert_eq!(discovery.stats()["failures"], json!(["rcode"]));
         // The round's end: unknown.
         let state = wait_for(&discovery, |state| matches!(state, Nat64State::Unknown(_)));
         assert!(matches!(state, Nat64State::Unknown(_)), "{state:?}");
-        assert!(freedom_ipfs_net::gate::check_address(target, &state).is_err());
+        assert!(freedom_ipfs_addr::check_address(target, &state).is_err());
     }
 
     #[test]
@@ -1272,9 +1273,9 @@ mod tests {
             *state == Nat64State::Pending
         });
         assert_eq!(early, Nat64State::Pending);
-        assert!(freedom_ipfs_net::gate::check_address(target, &early).is_err());
+        assert!(freedom_ipfs_addr::check_address(target, &early).is_err());
         let mapped: std::net::IpAddr = "::ffff:8.8.8.8".parse().unwrap();
-        assert!(freedom_ipfs_net::gate::check_address(mapped, &early).is_ok());
+        assert!(freedom_ipfs_addr::check_address(mapped, &early).is_ok());
         // Released: the round's end, unknown with the /96, refuses it.
         let (lock, wake) = &*release;
         *lock.lock().unwrap() = true;
@@ -1284,7 +1285,7 @@ mod tests {
             |state| matches!(state, Nat64State::Unknown(prefixes) if !prefixes.is_empty()),
         );
         assert_eq!(end, Nat64State::unknown([prefix("2002:808:808::", 96)]));
-        assert!(freedom_ipfs_net::gate::check_address(target, &end).is_err());
+        assert!(freedom_ipfs_addr::check_address(target, &end).is_err());
     }
 
     #[test]
