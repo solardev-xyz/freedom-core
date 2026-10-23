@@ -102,8 +102,10 @@ gh attestation verify freedom-cored-vX.Y.Z-linux-amd64.tar.gz \
   (`https://in-toto.io/attestation/release/v0.2`). That one is signed by
   GitHub's release service. It binds the assets to the tag and its commit,
   but says nothing about what built them.
-- **freedom-browser should verify the provenance** of what it fetches, as
-  well as the pinned `SHA256SUMS` digest. That is a freedom-browser change.
+- **freedom-browser's CI is to verify the provenance** of every pinned
+  asset, as above, besides the pinned digests (design 0001, *Packaging and
+  release*). That freedom-browser change is pending. The pins remain what
+  a local build checks.
 
 # Releasing freedom-ipfsd
 

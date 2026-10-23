@@ -2774,9 +2774,10 @@ fn fee_reference_without_quorum_or_direct() {
 #[test]
 fn fee_reference_when_colibri_fails_or_is_malformed() {
     let answers = [
-        Answer::Colibri(ColibriReply::Failure(
-            fc_chain::machine::ColibriClass::Error,
-        )),
+        Answer::Colibri(ColibriReply::Failure {
+            class: fc_chain::machine::ColibriClass::Error,
+            fault: false,
+        }),
         Answer::Colibri(ColibriReply::Undefined),
         Answer::Colibri(ColibriReply::Result("null".into())),
         Answer::Colibri(ColibriReply::Result(
@@ -2785,6 +2786,7 @@ fn fee_reference_when_colibri_fails_or_is_malformed() {
         Answer::Colibri(ColibriReply::Revert {
             data: "0x".into(),
             capacity: false,
+            fault: false,
         }),
     ];
     for answer in answers {
