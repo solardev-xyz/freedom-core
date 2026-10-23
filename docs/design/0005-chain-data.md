@@ -3,7 +3,7 @@
 **Status:** proposed. Builds on [0001](0001-freedom-cored.md) (process, framing, deadlines), [0002](0002-signing.md) (signing) and [0004](0004-naming-sessions.md) (sessions, `shell.*` requests, verified operations, endpoint references, budgets). It is roadmap item 3.4: freedom-browser's chain-data router moves into the core.
 
 **The reference** is `src/main/networks/chain-data-router.js` at freedom-browser `fb540328`, with `blockscout-logs.js` and the Ant bridge's router options (`swarm/ant-chain-bridge.js`).
-- **One later rule** of main's is ported without moving the pin: #752's Colibri ordering for transaction lookups and its verifier-fault backoff (main `94b0af4e`; [Colibri](#colibri)). Its vectors run the pinned router with that rule patched in ([Replay](#replay)).
+- **Two later rules** of main's are ported without moving the pin, both from main `94b0af4e`: #752's Colibri ordering for transaction lookups and its verifier-fault backoff ([Colibri](#colibri)), and #749's fee headroom ([Fee quotes](#fee-quotes)). Their vectors run the pinned router with those rules patched in, as the reference patches `tx-lookups` and `fee-headroom` ([Replay](#replay)).
 - **Ground truth** will be a replay harness, `vectors/chain-replay.json`, built like 0004's: it runs the pinned router through scripted worlds and records every exchange, verifier operation, timing, result and error. Its scenario IDs are cited below where a rule depends on them.
 - **Conflicts:** where this document and a vector disagree, the vector wins and the document has a bug.
 
@@ -701,17 +701,35 @@ The core can die mid-broadcast: an exit, the watchdog, a protocol error. Main th
 
 ## Fee quotes
 
-`chain.fee_quote` follows `getFeeQuote` exactly, except in Direct's step, which B changes (deviation `fee-combination`, [B](#b-combining-directs-quotes)). It walks the read order with no capabilities, exclusions, bypass or Myotis slots.
+`chain.fee_quote` follows `getFeeQuote` with main's #749 fee headroom ([Main's #749](#mains-749), the reference patch `fee-headroom`), except in Direct's step, which B changes (deviation `fee-combination`, [B](#b-combining-directs-quotes)). It walks the read order with no capabilities, exclusions, bypass or Myotis slots.
 - **Myotis** answers both components in one operation.
-- **Direct** asks an endpoint for both. Today it walks them one at a time, and the first quote that answers wins; with B, it asks up to three at once and combines their quotes.
-- **Other sources** make two requests.
-- **The quote:**
-  - legacy when there's no priority fee, or when it is negative or above the gas price;
-  - a priority fee `BigInt` can't parse (such as `-0x1`) doesn't downgrade: it fails that source's quote, and Direct moves on to its next endpoint (`boundary-fee-direct-priority-unparseable`);
-  - otherwise EIP-1559, with `baseFee = gasPrice − priority` and `maxFee = 2·baseFee + priority`;
-  - decimal strings, `verified` for myotis, colibri and quorum; a quorum's only when its m is more than 1 (deviation `singleton-quorum`).
+- **Direct** asks an endpoint for both, and for its block when its hint is unusable (below). Today it walks them one at a time, and the first quote that answers wins; with B, it asks up to three at once and combines their quotes.
+- **Other sources** make two requests, and a third for their block when the hint is unusable.
+- **A source's quote** (`feeQuote`), from its gas price G and its priority hint P:
+  - **A usable hint** (0 ≤ P ≤ G) prices it: EIP-1559, with base = G − P and P as its tip.
+  - **An unusable one** (missing, negative, or above G) never makes the quote legacy on its own. The source's own latest block prices it, `eth_getBlockByNumber` with `["latest", false]`:
+    - **Whose block:** Direct's from the same endpoint, Colibri's and the quorum's from that source, each one more request after the hint's. Myotis serves no blocks, so its block is a read through the router's read path ([Myotis's block](#myotiss-block)).
+    - **A block with a base fee:** EIP-1559 at that base fee, with the source's own tip suggestion max(G − base, 0).
+    - **A block without one** (`baseFeePerGas` missing or null, a chain without EIP-1559): legacy.
+    - **A block read that fails** (the read's error, a result that isn't an object, a base fee `BigInt` can't read, or a negative one): no quote from that source. It leaves a legacy quote, headroom included, as the walk's last resort (below).
+  - **A priority fee `BigInt` can't parse** (such as `-0x1`) fails that source's quote, and Direct moves on to its next endpoint (`boundary-fee-direct-priority-unparseable`).
+  - **The headroom,** on every quote:
+    - **The tip floor:** `MIN_PRIORITY_FEE_WEI`, 0.05 gwei (50,000,000 wei). An EIP-1559 quote's tip is max(its tip, the floor): a tip of a few thousand wei gives a builder no reason to include the transaction.
+    - **EIP-1559:** `baseFee` is the base, `maxPriorityFeePerGas` the floored tip, `maxFeePerGas` 2·base + tip (the 2× base-fee cap: just under six blocks of maximum base-fee growth, 1.125⁶ ≈ 2.03), and `effectiveGasPrice` base + tip.
+    - **Legacy:** `gasPrice` and `effectiveGasPrice` are ⌊G·125/100⌋ + the floor. A legacy transaction pays its whole gas price, so its margin is smaller. The 25% is main's chosen margin: slightly less than two blocks of maximum base-fee growth (1.125² = 1.265625), or a market move on a chain without a base fee.
+    - **Why:** a quote signed at the raw gas price puts the fee cap on the base fee, and the transaction is dropped as soon as the base fee rises (#749).
+  - **Decimal strings,** `verified` for myotis, colibri and quorum; a quorum's only when its m is more than 1 (deviation `singleton-quorum`). A Myotis quote priced from a block also names that block's source, `baseFeeSource` (its last key), and is `verified` only if that read was.
+- **The last resort** (main's `legacyFallback`): the first source in the walk whose block read failed leaves its legacy quote. Any later source's quote wins over it. With none, the walk replies with it, before any error. A block failure's own text is therefore never in a reply.
+- **Widths** (deviation `bigint-width`): a block's base fee is read as `BigInt` reads it, and one wider than 4096 bits as a decimal fails the block read. The headroom's fields can print two bits wider than an accepted value.
 
-Vectors pin the downgrade boundaries. Whether a derived base fee and a "verified" Myotis fee are right is a product question, not a parity one.
+Vectors pin the boundaries: a usable hint, the floor, a block with and without a base fee, a failed one, and the last resort. Whether a derived base fee and a "verified" Myotis fee are right is a product question, not a parity one.
+
+### Myotis's block
+
+A Myotis estimate whose hint is unusable is priced from a block that Myotis can't serve. The block is `request(chainId, 'eth_getBlockByNumber', ['latest', false])`, as the router makes it: a read with the read path's order, capabilities and fallthrough. Myotis's own adapter refuses the method, as it does any read its addon doesn't serve, and the read goes on to the next source. It runs within the fee quote's request, with its deadline and budget.
+- **Its source and trust:** the read's result names the source that served it. The quote's `baseFeeSource` is that source, and its `verified` is Myotis's `verified` and the read's.
+- **Why it is safe to mix:** the quote's tip comes from Myotis, and its fee cap from 2·base. That covers the base fee doubling, so a block a little behind or ahead of Myotis's head still prices a transaction that can be included.
+- **Never A's header:** a base fee read this way is a quote's, and is never taken for [A](#a-the-check-at-confirmation)'s verified header.
 
 ### Plausibility (decided, #92)
 
@@ -724,6 +742,8 @@ C isn't adopted as a cap on quotes, and D isn't adopted.
 **Tightened in #109's review** (2026-10-22):
 - where a verified header shows the chain takes EIP-1559, mixed quotes combine as EIP-1559;
 - a reference that is one endpoint's quote never permits auto-approval.
+
+**Amended for main's #749** (the user, 2026-10-23): the core's quotes carry main's headroom ([Fee quotes](#fee-quotes)). B combines each endpoint's quote with its headroom, and A's R carries the tip floor from main's pin bump to those quotes ([B](#b-combining-directs-quotes), [A](#a-the-check-at-confirmation)).
 
 The options weighed are kept below. [B](#b-combining-directs-quotes) and [A](#a-the-check-at-confirmation) specify what was adopted.
 
@@ -745,44 +765,58 @@ The options weighed are kept below. [B](#b-combining-directs-quotes) and [A](#a-
 
 #### B: combining Direct's quotes
 
-Deviation `fee-combination`. A fee quote's Direct step (today's `requestDirectFeeQuote`) asks several endpoints and combines their quotes. Myotis, Colibri and the quorum quote as today.
+Deviation `fee-combination`. A fee quote's Direct step (today's `requestDirectFeeQuote`) asks several endpoints and combines their quotes. Myotis, Colibri and the quorum quote as [Fee quotes](#fee-quotes) says, headroom included.
+
+**Amended for main's #749** (the user, 2026-10-23): each endpoint's quote carries main's headroom before it is combined, its own block prices an unusable hint, an endpoint whose block read fails counts as failed, and the mixed rule without a verified header takes the lowest raw gas price, then the headroom once.
 - **Collection:**
   - **Endpoints:** the chain's `rpc` endpoints in registry order, the quorum's included, as today's Direct quote.
-  - **Three at once:** it starts the first three. Each asks `eth_gasPrice`, then, once that has answered, `eth_maxPriorityFeePerGas`, each exchange within `configured`. Each endpoint's quote comes from today's codec:
-    - a failed, missing, negative or too-high priority hint gives a legacy quote;
-    - a failed gas price, a non-positive one or an unparseable priority hint fails that endpoint.
-    - **Memory:** the gas price is read as it arrives, and only its value, or the codec's error, is kept while the hint is asked for. Three raw answers, each up to the answer cap, are never kept across those exchanges, so large valid answers can't take the request over its budget and discard a quote that answered. An unreadable gas price still fails its endpoint once the hint's exchange has ended, with the same requests and error as today's codec.
-  - **Replacement:** until a quote has answered, an endpoint that fails is replaced by the next one not yet asked, so every endpoint can still be reached, as today's walk does. Once one has answered, no endpoint starts. A tick's answers count before its failures: a failure in the tick a quote answered isn't replaced. An error is kept only while no quote has answered.
-  - **Cutoff:** collection ends when no started endpoint is still running, or 1 s after the first quote answered, whichever is first. Outstanding exchanges are then cancelled, and an endpoint still waiting for either answer hasn't answered. The cutoff goes first in its tick: an answer in that tick is left out, as for a deadline.
+  - **Three at once:** it starts the first three. Each asks `eth_gasPrice`, then, once that has answered, `eth_maxPriorityFeePerGas`, and, when that hint is unusable, its own latest block (`eth_getBlockByNumber` with `["latest", false]`). Each exchange has its own `configured`. Each endpoint's quote is a source's quote ([Fee quotes](#fee-quotes)), headroom included:
+    - a failed, missing, negative or too-high priority hint prices the quote from the endpoint's block: EIP-1559 where the block has a base fee, legacy where it has none;
+    - a failed gas price, a non-positive one or an unparseable priority hint fails that endpoint;
+    - so does a failed block read, which leaves the endpoint's legacy quote as a last resort (No quote, below).
+    - **Answered:** an endpoint has answered once its quote is complete, its block read included. The cutoff counts from the first such answer.
+    - **Memory:** the gas price is read as it arrives, and only its value, or the codec's error, is kept while the hint is asked for. Likewise, of a block, only its base fee is kept. Three raw answers, each up to the answer cap, are never kept across those exchanges, so large valid answers can't take the request over its budget and discard a quote that answered. An unreadable gas price still fails its endpoint once the hint's exchange has ended, with the same requests and error as today's codec.
+  - **Replacement:** until a quote has answered, an endpoint that fails is replaced by the next one not yet asked, so every endpoint can still be reached, as today's walk does. A failed block read is a failure: main's walk moves on from it too. Once one has answered, no endpoint starts. A tick's answers count before its failures: a failure in the tick a quote answered isn't replaced. An error, and a last resort, are kept only while no quote has answered.
+  - **Cutoff:** collection ends when no started endpoint is still running, or 1 s after the first quote answered, whichever is first. Outstanding exchanges are then cancelled, and an endpoint still waiting for any of its answers, its block's included, hasn't answered. The cutoff goes first in its tick: an answer in that tick is left out, as for a deadline.
   - **A header, for mixed quotes:** where the chain has a prover and its read order includes `colibri`, the collection also starts the verified header read that [A](#a-the-check-at-confirmation)'s evidence uses.
     - **When it is used:** only if the answers are mixed. The combination then waits for it, within Colibri's budget.
     - **Otherwise** nothing waits for it, and its outcome is dropped when it arrives (verifier operations hold their slot until main's reply).
     - **Its age doesn't matter here:** a base fee in a verified header shows the chain takes EIP-1559 transactions.
   - **No quote:** with every endpoint failed, Direct fails with the last error to arrive (in one tick, the higher registry index's). With no endpoint it is today's `No RPC endpoint configured`, and no header is read.
+    - **A last resort:** when some of those endpoints failed only at their block read, Direct's failure carries a legacy quote: ⌊G*·125/100⌋ + the floor, G* being the lowest of their gas prices, with `answered` the number of those endpoints. That number can be more than three, since failures were replaced. The walk keeps it as it keeps any source's last resort ([Fee quotes](#fee-quotes)): an earlier source's is kept first, and any later source's quote wins over it.
   - **Deadline, cancel and reconfiguration** work as for any fee quote ([Deadlines](#deadlines), [Cancellation](#cancellation), [Generations](#generations)): the request ends, and every outstanding exchange is cancelled.
-- **Combination.** Each answered quote is read as two constraints: a max fee per gas M and a priority fee P. An EIP-1559 quote gives its `maxFeePerGas` (2·G − P) and its P; a legacy quote's gas price G gives M = P = G. Under EIP-1559 a transaction pays min(M, base fee + P) per gas.
-  - **Not the raw minima:** today's quote derives M = 2·G − P, so the lower G with the lower P can raise M. G = 100, P = 10 gives M = 190; a second answer of G = 100, P = 9 makes the minima give M = 191.
+- **Combination.** Each answered quote is read as two constraints, a max fee per gas M and a priority fee P, as the endpoint's own quote signs them, headroom included. An EIP-1559 quote gives its `maxFeePerGas` (2·base + tip) and its floored tip; a legacy quote's signed gas price G' (⌊G·125/100⌋ + the floor) gives M = P = G'. Under EIP-1559 a transaction pays min(M, base fee + P) per gas.
+  - **The headroom first, then the minima:** the floor, the 2·base and the 125% are all monotone, so the lowest of the endpoints' signed values is what the headroom of their lowest would be, and each constraint keeps its bound. M ≥ P still holds after the minima, since each endpoint's M is at least its P, which is at least the floor.
+  - **Not the raw minima:** a quote derives M = 2·base + tip, so the lower gas price with the lower tip can raise M. G = 100, P = 10 gwei gives M = 190 gwei; a second answer of G = 100, P = 9 gwei makes the minima of G and P give M = 191 gwei.
   - **All EIP-1559:** EIP-1559, with the lowest M and the lowest P (which is never above that M).
-  - **All legacy:** legacy, at the lowest gas price.
-  - **Mixed** (an endpoint gave no valid priority hint), **where EIP-1559 is verified,** that is, the header read has a base fee: EIP-1559, under the all-EIP-1559 rule, a legacy quote counting as M = P = G. So the lowest M and the lowest P.
-  - **Mixed, otherwise** (no prover, Colibri out of the read order, a failed or malformed header, or one without a base fee): legacy, at the lowest gas price of all the quotes, an EIP-1559 quote's being its `effectiveGasPrice`. A missing hint alone doesn't show that the chain takes EIP-1559 transactions.
-  - **One answer:** that quote, unchanged.
+  - **All legacy:** legacy, at the lowest signed gas price, which is the headroom of the lowest raw one.
+  - **Mixed** (an endpoint's block had no base fee), **where EIP-1559 is verified,** that is, the header read has a base fee: EIP-1559, under the all-EIP-1559 rule, a legacy quote counting as M = P = G'. So the lowest M and the lowest P.
+  - **Mixed, otherwise** (no prover, Colibri out of the read order, a failed or malformed header, or one without a base fee): legacy, at the lowest raw gas price G* of all the quotes (each endpoint's `eth_gasPrice`, an EIP-1559 quote's included), with the headroom applied once: ⌊G*·125/100⌋ + the floor.
+    - **Not the lowest `effectiveGasPrice`:** a legacy quote's already carries the headroom, and an EIP-1559 quote's (base + tip) doesn't. The lowest would be headroom-free, and a legacy transaction signed at it has its fee cap on the base fee, which is #749's failure.
+    - **Why legacy:** a block without a base fee from one endpoint, against blocks with one from the others, doesn't show which the chain is.
+  - **One answer:** that quote, unchanged: the endpoint's own, as main's #749 quote would be.
+  - **Mixed is now rare:** a missing hint prices from the endpoint's own block, so it gives EIP-1559 wherever that block has a base fee. Answers are mixed only when an endpoint answers a block without one; one whose block read fails has failed (above).
 - **What it guarantees,** when an honest endpoint answers before the cutoff:
-  - **All EIP-1559, all legacy, or mixed where EIP-1559 is verified:** at every base fee, the transaction pays per gas at most what the honest quote's own transaction would, and can cost at most what that one could. Inflating the fee takes every answering endpoint. A dishonest or broken one can only underquote, which delays the payment; it can be replaced at the same nonce.
-  - **The boundary case:** an honest EIP-1559 quote G = 100, P = 1 (M = 199) and another endpoint's legacy G = 1000. Where EIP-1559 is verified, they combine to EIP-1559 with M = 199 and P = 1. If the base fee falls to 1 before inclusion, the transaction pays 2 per gas, as the honest one would.
-  - **Mixed, otherwise:** the gas price is at most the honest endpoint's, so the transaction can cost at most what the honest quote's could. But a legacy transaction pays its whole gas price at any base fee, where an honest EIP-1559 one pays less as the base fee falls. Any endpoint can force legacy by withholding its priority hint.
-    - **In the boundary case** without a verified header, the quotes combine to legacy G = 100, which pays 100 per gas at a base fee of 1.
-    - A doesn't flag this: at confirmation the gas price is the network's current one.
+  - **All EIP-1559, all legacy, or mixed where EIP-1559 is verified:** at every base fee, the transaction pays per gas at most what the honest quote's own transaction would, headroom included, and can cost at most what that one could. Inflating the fee takes every answering endpoint. A dishonest or broken one can only underquote, which delays the payment; it can be replaced at the same nonce.
+    - **A block's base fee** is the endpoint's own word, unverified. It prices only that endpoint's quote, so it can't raise the lowest M above an honest endpoint's.
+  - **The boundary case** (in gwei): an honest EIP-1559 quote G = 100, P = 1 (base 99, M = 199) and another endpoint's legacy G = 1000 (signed 1250.05), its block without a base fee. Where EIP-1559 is verified, they combine to EIP-1559 with M = 199 and P = 1. If the base fee falls to 1 before inclusion, the transaction pays 2 per gas, as the honest one would.
+  - **Mixed, otherwise:** the raw gas price it takes is at most an honest endpoint's, and the headroom is applied to it once. That bounds the gas price, not the cost. A legacy transaction pays its whole gas price at any base fee, where an honest EIP-1559 one pays less as the base fee falls, so the result can cost more than the honest quote's transaction could: an honest G = 100, P = 90 gwei (M = 110) can combine to legacy at 125.05.
+    - **Forcing legacy** takes an endpoint that answers a block without a base fee, not just one that withholds its hint: a missing hint prices from the endpoint's own block. Where Colibri's header shows a base fee, mixed answers combine as EIP-1559 anyway.
+    - **In the boundary case** without a verified header, the quotes combine to legacy at G* = 100, signed 125.05, which pays 125.05 per gas at a base fee of 1.
+    - A doesn't flag this: at confirmation the gas price is the network's current one, with the headroom a legacy quote always signs.
   - **One answer:** no bound. The quote is that endpoint's, as today, and A judges it.
-- **The reply** keeps today's shape and key order, with one key added after `verified`: **`answered`**, the number of endpoints whose quotes were combined (1 to 3). `answered: 1` is the single-source marker. `source` stays `direct`, and `verified` stays `false` however many agree. Other sources' quotes keep today's shape exactly, without `answered`.
-  - **Legacy:** `gasPrice` and `effectiveGasPrice` are the combined gas price.
-  - **EIP-1559:** `maxFeePerGas` is M and `maxPriorityFeePerGas` is P, exactly, since they are what is signed. `baseFee` is ⌊(M − P)/2⌋ and `effectiveGasPrice` is `baseFee` + P: estimates for display, never above any answering endpoint's gas price.
-  - **Today's relation `maxFeePerGas = 2·baseFee + maxPriorityFeePerGas`** can't survive independent minima. G/P answers 10/1 and 10/2 combine to M = 18, P = 1, where (M − P)/2 would be 8.5 wei. The quote reads `baseFee` 8 and `effectiveGasPrice` 9, so 2·`baseFee` + P is M or one less. With one answer, M − P is even, and every field is today's.
+- **The reply** keeps today's shape and key order, with one key added after `verified`: **`answered`**, the number of endpoints whose quotes were combined (1 to 3; a last resort's can be more). `answered: 1` is the single-source marker. `source` stays `direct`, and `verified` stays `false` however many agree. Other sources' quotes keep today's shape exactly, without `answered`.
+  - **Legacy:** `gasPrice` and `effectiveGasPrice` are the combined, signed gas price.
+  - **EIP-1559:** `maxFeePerGas` is M and `maxPriorityFeePerGas` is P, exactly, since they are what is signed. `baseFee` is ⌊(M − P)/2⌋ and `effectiveGasPrice` is `baseFee` + P, that is ⌊(M + P)/2⌋: estimates for display, never above any answering endpoint's `effectiveGasPrice`, which is (Mᵢ + Pᵢ)/2.
+  - **The relation `maxFeePerGas = 2·baseFee + maxPriorityFeePerGas`** can't survive independent minima. Gas prices of 1,000,000,000 wei with hints of 60,000,001 and 60,000,000 give M = 1,939,999,999 and M = 1,940,000,000. They combine to M = 1,939,999,999 and P = 60,000,000, where (M − P)/2 would end in .5 wei. The quote reads `baseFee` 939,999,999 and `effectiveGasPrice` 999,999,999, so 2·`baseFee` + P is M or one less. With one answer, M − P is twice its base, and every field is main's.
 - **Tests,** required of the implementing PR ([Replay](#replay) lists the scenarios it changes):
-  - **The combination:** codec vectors, `fee_combinations` in `vectors/chain.json`. The reference has no counterpart, so their expected values come from this text.
+  - **The combination:** codec vectors, `fee_combinations` in `vectors/chain.json`. Each endpoint's quote comes from the patched reference ([Main's #749](#mains-749)); the reference has no combination, so the combined values come from this text. They include the headroom on every input, block-priced quotes, and the mixed trap without a verified header: an EIP-1559 quote whose `effectiveGasPrice` is below a legacy quote's signed gas price, combining at the headroom of the lowest raw gas price.
   - **The collection:** machine tests, named `boundary-fee-combine-*`:
     - three successes;
-    - independent M and P minima, M − P odd included (10/1 with 10/2), and the raw-minima trap (100/10 with 100/9 gives M = 190, not 191);
+    - independent M and P minima, M − P odd included (hints of 60,000,001 and 60,000,000 wei at one gas price), and the raw-minima trap (100/10 with 100/9 gwei gives M = 190 gwei, not 191);
+    - the headroom: a tip under the floor on one endpoint, and a gas price under the floor;
+    - a hint priced from the endpoint's block: with a base fee, without one (mixed), and a block read that fails (the endpoint replaced, and its quote left out);
+    - every answering endpoint failing at its block: the last resort, its `answered`, and a later source's quote winning over it;
     - all legacy;
     - mixed with a verified header (the boundary case pays 2), and mixed without one (it pays 100): no prover, Colibri out of the read order, a failed or malformed header, a header without a base fee;
     - mixed, with the header arriving after the collection ends; and a header read whose outcome is dropped when the answers aren't mixed;
@@ -790,7 +824,7 @@ Deviation `fee-combination`. A fee quote's Direct step (today's `requestDirectFe
     - memory: gas prices and hints near the answer cap on several endpoints at once, within the request's budget;
     - all failing, with the last error;
     - singletons: one endpoint configured, and one of three answering;
-    - the cutoff: a third answer after it is cancelled and left out, an endpoint whose priority exchange is outstanding at it is left out, and an answer in its tick;
+    - the cutoff: a third answer after it is cancelled and left out, an endpoint whose priority exchange, or block read, is outstanding at it is left out, an answer in its tick, and the block read's own `configured`;
     - races: the deadline, a `cancel` and a configuration change while exchanges are outstanding.
 
 #### A: the check at confirmation
@@ -811,12 +845,12 @@ A runs in main, at the confirmation before every transaction signature: a send t
   - **B's quotes:** B's collection, run for the reference itself, where the chain's read order includes `quorum` or `direct`, the sources that reach those endpoints. It runs even when an earlier source (Myotis, Colibri, the quorum) quoted the transaction, and it never asks those sources. Its mixed rule uses this request's own header read.
   - **The reply:** `{ header, lowest_priority, quote, generation }`, numbers as decimal strings:
     - `header`: `{ source: "colibri", number, timestamp, base_fee }`, with `base_fee` null on a chain without one; or null;
-    - `lowest_priority`: the lowest priority fee among B's EIP-1559 quotes, or null when none gave a valid hint;
-    - `quote`: B's combined quote, with `answered`; or null when no endpoint answered.
+    - `lowest_priority`: the lowest priority fee among B's EIP-1559 quotes, block-priced ones included: their floored tips, so never below the floor. Null when none is EIP-1559;
+    - `quote`: B's combined quote, with `answered`. When every answering endpoint failed at its block read, Direct's last resort, with its `answered`. Null when no endpoint answered.
   - **Failures:** a part that fails is null. The request fails only as a fee quote can (`deadline`, `cancelled`, `busy`, `budget`, or `reconfigured` after main's one resend), and main then has no reference.
 - **The reference R,** per gas, computed by main from the reply:
-  1. **Verified:** the header has a base fee B and is fresh, its `timestamp` within 60 s of main's clock either way. R = 2·B + `lowest_priority`, or 2·B when that is null (all of B's quotes legacy on an EIP-1559 chain, or none answered).
-  2. **Combined quote:** otherwise, the combined-quote fallback, when B's combined quote is at most 60 s old. R is its `maxFeePerGas`, or its `gasPrice` if legacy. It applies with no prover, Colibri out of the read order or failing, a malformed or stale header, or a chain without EIP-1559.
+  1. **Verified:** the header has a base fee B and is fresh, its `timestamp` within 60 s of main's clock either way. R = 2·B + `lowest_priority`, or, when that is null (all of B's quotes legacy on an EIP-1559 chain, or none answered), 2·B + `MIN_PRIORITY_FEE_WEI`: what any type-2 quote signs at that base fee. Until main's pin bump to floored quotes, it is 2·B there (The headroom and R, below).
+  2. **Combined quote:** otherwise, the combined-quote fallback, when B's combined quote is at most 60 s old. R is its `maxFeePerGas`, or its `gasPrice` if legacy. It applies with no prover, Colibri out of the read order or failing, a malformed or stale header, or a chain without EIP-1559. B's quote carries the headroom, so a Direct quote compared with it has a ratio of about 1, and on a legacy chain R is the ⌊G*·125/100⌋ + floor the transaction signs.
      - **The quote's age** counts from the moment main sent the `chain.fee_reference` that returned it, not from the reply's arrival. The quote was made after that moment, so its true age is never more.
      - **Everything after counts:** the time the request spent waiting for its header, the transport, and any time main holds the reply.
      - **A slow header part** can therefore deliver a quote that is already too old. If B finishes at 0.1 s and the header fails at 60 s, the quote is past 60 s by the time the reply is used, and this branch doesn't apply.
@@ -828,7 +862,13 @@ A runs in main, at the confirmation before every transaction signature: a send t
     - **Evidence gathered again** has a new request start.
     - **A rising base fee** raises R with it.
     - **During a spike** 2·B is headroom, not a forecast. A transaction quoted after the evidence was gathered can be asked about though it would pay little. The multiple and the 60 s are tuned together.
+    - **Headroom against the threshold:** R's 2·B is the same 2× base-fee cap a quote signs, so neither flags the other. The 3× multiple has only to absorb the tip spread and the 60 s of drift.
   - **A wrong clock** makes every header stale; R then falls back to the combined quote.
+- **The headroom and R** (amended for main's #749, the user, 2026-10-23):
+  - **Why R carries the floor:** every quote signs a tip of at least the floor. On a chain with a base fee of 0.001 gwei and a market tip of 0.001 gwei, a quote signs M ≥ 2·0.001 + 0.05 = 0.052 gwei. Against R = 0.003 gwei (an unfloored tip) that is about 17×, and against R = 0.002 gwei (2·B alone) about 26×: every quoted send would be asked again.
+  - **The rule:** `lowest_priority` is the lowest floored tip ([`chain.fee_reference`](#a-the-check-at-confirmation), above), and R = 2·B + `MIN_PRIORITY_FEE_WEI` when it is null. Both use the one constant the quotes use, 0.05 gwei.
+  - **When it lands:** with the core release whose quotes carry the floor, at main's pin bump to it, not before. While quotes carry no floor, a floored R loosens A on low-base-fee chains: in the example, a quote 17× today's fee would pass. Once they carry it, any fee up to 3·(2·B + floor) passes there, a dApp's included; that cost comes with the floor itself.
+  - **The header stays independent:** a Myotis quote priced from a block the read path read ([Myotis's block](#myotiss-block)) is never taken for A's header. The verified branch still needs Colibri's.
 - **What A detects:**
   - **Verified:** a max fee above about 3·R, whoever set it: an inflated base-fee part, a dApp's fee, a replacement's.
     - **Its priority part** comes from B's quotes. A tip that every answering endpoint inflates moves R with it, and isn't detected ([Open questions](#open-questions) 10).
@@ -844,11 +884,13 @@ A runs in main, at the confirmation before every transaction signature: a send t
     - an earlier source's success: a read order that starts with Myotis still gets Colibri's header and B's quotes, with no Myotis `fee`;
     - no prover; Colibri out of the read order; no `quorum` or `direct` in it;
     - Colibri failing or malformed; a header without `baseFeePerGas`;
+    - the headroom: `lowest_priority` floored, a block-priced EIP-1559 quote's tip included, and Direct's last resort as the reference's quote;
     - the deadline, a `cancel` and a configuration change.
   - **Main's tests for A** (freedom-browser, step 5):
     - fees from a Myotis, Colibri, quorum and Direct quote, a dApp's EIP-1559 and legacy fields, and a replacement, each judged against the same R;
     - the threshold, at and just above 3·R;
-    - all-legacy quotes on an EIP-1559 chain (R = 2·B), and a legacy chain (the combined quote);
+    - all-legacy quotes on an EIP-1559 chain (R = 2·B, and 2·B + the floor from the pin bump that brings floored quotes), and a legacy chain (the combined quote);
+    - from that pin bump, a low-base-fee chain: floored quotes judged against an R that carries the floor, and not flagged;
     - a quote's derived `baseFee` never used as the header's: a Myotis quote with Colibri down takes the combined quote, or no reference;
     - unavailable and stale header evidence (61 s old, 61 s ahead), with and without B's quote;
     - no reference: the most shown, "couldn't compare", never auto-approved; R of 0 likewise;
@@ -927,7 +969,7 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 | `response-caps` | none | 18 MiB per answer | `too_large`, a source failure |
 | `request-size` | unbounded | one frame (1 MiB) per chain request | `too_large` |
 | `json-depth` | V8's parser, no fixed depth | 512 levels, in answers, Myotis payloads and Blockscout pages | a source failure; a deeper Blockscout page is `answer is not JSON` |
-| `bigint-width` | `BigInt` of any decimal width, in time quadratic in its length | decimal input, gas prices and Myotis numbers (balances, nonces, fees, estimates) wider than 4096 bits are refused: such a call-object quantity is left as sent, such a gas price fails its source, and such a Myotis number is a plain error; fees computed from an accepted gas price can print one bit wider | no minutes-long conversions on the chain thread; hex, octal and binary stay exact |
+| `bigint-width` | `BigInt` of any decimal width, in time quadratic in its length | decimal input, gas prices, a block's base fee and Myotis numbers (balances, nonces, fees, estimates) wider than 4096 bits are refused: such a call-object quantity is left as sent, such a gas price fails its source, such a base fee fails the block read, and such a Myotis number is a plain error; fees computed from an accepted value can print two bits wider (the headroom's 2·base + tip and 125% + floor) | no minutes-long conversions on the chain thread; hex, octal and binary stay exact |
 | `blockscout-page-bytes` | a page capped at 8 Mi UTF-16 units | 8 MiB of bytes | a page with many multi-byte characters may fail as too large |
 | `overall-deadline` | none | 120 s | `deadline` |
 | `admission` | unbounded | 64 running, 256 waiting | `busy` |
@@ -947,7 +989,7 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 | `broadcast-outcome` | the last error wins; lost replies look like failures | attempt classes, exact refusals, `sent` / `uncertain` / `rejected` / `not_sent`, reconciliation, main's record | a lost reply is `uncertain`, not a failure |
 | `nonce-retry` | a retry re-signs at the `pending` count, possibly a new nonce; history is written after broadcast and can be cleared | durable intent records committed before broadcast; an intent keeps its nonce for good, with retries only as the same bytes or a replacement at that nonce; labels (paid, failed, taken, held) read from verified evidence tied to one finalized block by hash, which authorize no retry; *taken* searched from a verified bracket and Colibri's proven reads, never by a block scan; an intent whose label is out of reach shown as *Couldn't confirm*, and closed by hand only when the verified nonce at F is past N; reservations under a per-account lock | the wallet never pays one intent twice; failed and taken intents go back to the user, who may start a new payment; an intent closed by hand is retired durably, its payment unconfirmed |
 | `monotonic-time` | cooldowns on `Date.now()` | the monotonic clock | |
-| `fee-combination` | a fee quote's Direct step walks the endpoints one at a time, and the first quote that answers wins | up to three endpoints at once, a failure replaced until one answers, a 1 s cutoff after the first answer; their quotes combined by normalized constraints, mixed ones as EIP-1559 where a Colibri header read alongside shows a base fee; the reply marked with `answered` ([B](#b-combining-directs-quotes)) | different requests, starts and cancels, and a Colibri operation where the chain has a prover and `colibri` in its read order; with one type of quote, or mixed ones where EIP-1559 is verified, the transaction pays no more than an honest answering endpoint's would; a combined quote's `baseFee` and `effectiveGasPrice` are rounded estimates |
+| `fee-combination` | a fee quote's Direct step walks the endpoints one at a time, each priced from its own block when its hint is unusable, and the first quote that answers wins; an endpoint whose block read failed leaves a legacy last resort | up to three endpoints at once, a failure (a failed block read included) replaced until one answers, a 1 s cutoff after the first complete answer; their quotes, headroom included, combined by normalized constraints, mixed ones as EIP-1559 where a Colibri header read alongside shows a base fee, and otherwise as legacy at the lowest raw gas price with the headroom once; with only block-failed answers, their lowest legacy quote as the last resort; the reply marked with `answered` ([B](#b-combining-directs-quotes)) | different requests, starts and cancels, and a Colibri operation where the chain has a prover and `colibri` in its read order; with one type of quote, or mixed ones where EIP-1559 is verified, the transaction pays no more than an honest answering endpoint's would; a combined quote's `baseFee` and `effectiveGasPrice` are rounded estimates |
 
 ## Replay
 
@@ -979,22 +1021,22 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
   - nesting at 512 and 513 levels (`boundary-json-depth-512`, and `boundary-json-depth-513` for deviation `json-depth`);
   - canonical-equivalence pairs through the quorum: duplicate keys, number spellings, `__proto__`, lone surrogates (`boundary-agreement-*`);
   - `isCapacityFailure` on Colibri's errors: collapsed whitespace, a phrase past 500 units, elided hex and an error's own `failureKind` (`boundary-adaptive-capacity-*`).
-- **The harness** (`vectors/generator/chain-replay.js`) has 331 scenarios, each with a stable ID and a `from` field citing its source test or this document: 306 from the pinned router, and 25 for main's #752 ([Main's #752](#mains-752)).
+- **The harness** (`vectors/generator/chain-replay.js`) has 343 scenarios, each with a stable ID and a `from` field citing its source test or this document: 306 from the pinned router, 25 for main's #752 ([Main's #752](#mains-752)) and 12 for main's #749 ([Main's #749](#mains-749)).
   - **Values as text:** every value the reference produced or was given is recorded as JSON text, and `undefined` as a field of its own. No value can pass for an encoding, and every value `JSON.parse` makes survives: lone surrogates, any depth, `-0` and infinities.
   - **Large texts:** a text over 64 KiB is stored in its field's repeat form, a repeat unit plus a SHA-256, which keeps the 8 MiB `html()` answers small.
   - **Settle times:** ported scenarios carry the settle times their tests assert, and generation fails if a fixture drifts from them.
-- **The machine replays all 331** (`crates/fc-chain/tests/replay.rs`). A driver plays main from the records: it starts each call when the reference did, and answers each request with the answer its record got, at the time it got it, delivering answers due in one tick in the reference's microtask order (a failed fetch or a non-2xx status settles before a body is read; equal delays settle in registration order). It compares exactly:
+- **The machine replays all 343** (`crates/fc-chain/tests/replay.rs`). A driver plays main from the records: it starts each call when the reference did, and answers each request with the answer its record got, at the time it got it, delivering answers due in one tick in the reference's microtask order (a failed fetch or a non-2xx status settles before a body is read; equal delays settle in registration order). It compares exactly:
   - **every request the core owns** (`shell.rpc`'s endpoint and body with its `id` normalized, a verifier operation and its params, a Blockscout page) with its start, matched to a record of the same call, and **in the reference's order**: no request answers a ledger entry earlier than one already matched. No allowance for unordered concurrency is needed; the order holds across every call of every step. Main's own I/O (Blockscout's hops and DNS lookups, Myotis status samples) feeds the replies main sends instead;
   - **every cancel:** an exchange the reference aborted at T is cancelled at T, and no other is cancelled, except in two permitted races, each counted: a quorum member cancelled when a sibling launched in the same tick answered the same call in the tick both settled (128; the reference's abort came after the member's answer), and a Blockscout page cancelled by the scan's deadline in the tick its own fetch failed with `no answer within` (4). Main never delivers an answer to an exchange the machine cancelled first: it aborted it;
   - **every result and error,** with its settle time: key order, constructor, `name`, message, own properties, `-0` and UTF-16 strings;
   - **the state tables** after each step. Route keys whose target lists several addresses are compared with that list digested ([Adaptive bypass](#adaptive-bypass)). A patched scenario's tables add `colibri_faults`: `["<chain> <method>", { faults, strikes, coolUntil }]` per record, in the reference's insertion order.
   - **24 scenarios show a deviation's difference,** each listed in the test with the whole reply, the requests and the state it must show instead, and every field the deviation doesn't change still compared: `broadcast-outcome` (13: today's error, or a success with another hash, becomes `uncertain`, reporting keccak256 of the raw bytes, with each reconciliation lookup made listed with its endpoint and its whole body or params, the hash included), `config-change` (`boundary-registry-change-mid-request`: the three members asked again at 1,000 listed whole, and the one exchange the change moves, Direct's, given its new start), `order-validation` (`boundary-order-duplicates-and-unknown`), `endpoint-dedup` (`boundary-quorum-duplicate-endpoint`: a asked once, its second exchange never made, and the quorum's miss handed to Direct), `singleton-quorum` (`boundary-quorum-singleton-not-verified`: the same requests, two reads and a fee quote labelled as Direct would), `json-depth` (`boundary-json-depth-513`), `cancel-promptly` (`cancel-read-no-fallthrough`) and `adapter-error-text` (`boundary-colibri-revert-capacity`: the revert reads `execution reverted`, its route blocked as today; `tx-lookup-all-sources-fail`: Colibri's own error reads `Colibri request failed`, as main's has since #681).
-  - **`fee-combination`** ([B](#b-combining-directs-quotes)) changes three more.
+  - **`fee-combination`** ([B](#b-combining-directs-quotes)) changes nine more: three of the 306 (below); `boundary-fee-quorum-priority-disagrees`, which main's #749 makes reach Direct with three endpoints; and five of #749's twelve new scenarios ([Main's #749](#mains-749)).
     - **What each lists:** its whole requests, with their starts and cancels, and its whole reply.
     - **What is compared:** each reply's values and key order, `answered` last.
     - **The inputs stay:** the endpoints' scripted answers are unchanged.
 
-    The three:
+    The three of the 306, as they read before #749's patch (their patched replies are in [Main's #749](#mains-749)):
     - **`router-fee-quote-direct-same-endpoint`:**
       - both endpoints asked at 0;
       - the inputs: primary answers G = 3773, P = 1 (M = 7545), and secondary answers `0x1` to both (G = 1, P = 1, M = 1);
@@ -1003,7 +1045,7 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
     - **`boundary-fee-direct-priority-unparseable`:** b asked at once with a, not after it. a fails, and b's legacy quote stands: `{"type":"legacy","gasPrice":"16","effectiveGasPrice":"16","source":"direct","verified":false,"answered":1}`.
     - **`boundary-fee-direct-gas-price-fails-first`:** b asked at once with a. a fails, and b's legacy quote stands: `{"type":"legacy","gasPrice":"1000000000","effectiveGasPrice":"1000000000","source":"direct","verified":false,"answered":1}`.
 
-    The other fee-quote scenarios don't reach Direct with more than one endpoint, and stay as they are. None of the three has `colibri` in its read order, so B's header read adds nothing to them.
+    Before #749's patch, the other fee-quote scenarios among the 306 don't reach Direct with more than one endpoint. None of the three has `colibri` in its read order, so B's header read adds nothing to them. With the patch, the three's replies change and `boundary-fee-quorum-priority-disagrees` joins them ([Main's #749](#mains-749)).
   - **None is skipped.**
 - **Not replayed:** the machine's own tests cover the second, third, fifth and sixth (`crates/fc-chain/tests/machine.rs` and its unit tests); the first and fourth are main's (step 5):
   - a read's reply overtaken by a configuration change after it was made: that is main's reply fencing ([Generations](#generations)), and the reference has no seam for it;
@@ -1053,11 +1095,51 @@ The 25, by the test each ports from `chain-data-router.test.js` at `94b0af4e` (i
 | `boundary-tx-lookup-bypassed-colibri-not-deferred` | this document | a proof's timeout opens the page's Colibri route; the next lookup bypasses it in place and returns Direct's answer at once |
 | `boundary-tx-lookup-deferred-colibri-error-precedence` | this document | Direct's node error, not Colibri's revert, is the last error |
 
+#### Main's #749
+
+Main's #749 (`3d9e7b33`, merged in #751) prices fee quotes with headroom ([Fee quotes](#fee-quotes)). The core follows it. The pin stays at `fb540328`, and #749's router rule is a **reference patch**, `fee-headroom` in the generator's `PATCHES`, as #752's `tx-lookups` is ([Main's #752](#mains-752)).
+- **Why not a pin move:** moving the pin to main's `94b0af4e` would also bring #681's Colibri texts and #752's rule, which change other scenarios; #752 is already a patch. A patch keeps each change to the reference on its own, with the scenarios it changes named.
+- **What it is:** main's router code for the rule at `94b0af4e`, applied in memory to the pinned router. Each edit's text must occur exactly once, and it must compose with `tx-lookups`: the two touch different functions.
+  - **In:** `MIN_PRIORITY_FEE_WEI`, `LEGACY_GAS_PRICE_HEADROOM_PERCENT`, `blockBaseFee`, `eip1559Quote`, `legacyQuote`, `feeQuote` with its block, `requestDirectFeeQuote`'s block read and last resort, and `getFeeQuote`'s Myotis block, block reads and `legacyFallback`.
+  - **Out:** the `log.verbose` lines, which the harness's logger drops, and #749's changes outside the router (payment history's `dropped`, the recorder's nonce, `resolveFeeParams`), which are main's.
+- **What a patched scenario records:** `patches: ["fee-headroom"]` and the unpatched reference's results (`unpatched`), as `tx-lookups` does. Generation fails unless the patch changes the scenario's results, its state tables or its I/O.
+- **The 306 records:** the fee-quote scenarios among them change, and are recorded patched. Two come out the same and stay unpatched: `boundary-fee-all-sources-unavailable` (no source reaches a quote) and `boundary-unsupported-requests` (an unsupported chain). The rest are unchanged byte for byte: none of them makes a fee quote.
+- **The changed ones,** by what the patch does to them:
+  - **The floor and the 2·base cap** on a usable hint: `router-fee-quote-myotis`, `boundary-fee-myotis-priority-equals-gas-price`, `boundary-fee-myotis-priority-zero`, `boundary-fee-myotis-non-positive-gas-price` (Colibri's quote), and `boundary-quorum-singleton-not-verified`'s fee quote (deviation `singleton-quorum` still listed). For example, `router-fee-quote-myotis`'s 100/2 becomes `baseFee` 98, `maxPriorityFeePerGas` 50,000,000, `maxFeePerGas` 50,000,196 and `effectiveGasPrice` 50,000,098.
+  - **An unusable hint priced from a block, or its last resort:** `router-fee-quote-inconsistent`, `boundary-fee-myotis-priority-over-gas-price`, `boundary-fee-myotis-priority-negative` and `boundary-fee-myotis-no-priority` (Myotis's block through the read path); `boundary-fee-quorum-priority-disagrees` (the quorum's block); and B's two Direct boundaries (below).
+- **B's list changes with it** (`fee-combination`, compared as above):
+  - **`router-fee-quote-direct-same-endpoint`:** both quotes floored. Primary's is M = 50,007,544, P = 50,000,000; secondary's M = P = 50,000,000. B's reply: `{"type":"eip1559","baseFee":"0","maxPriorityFeePerGas":"50000000","maxFeePerGas":"50000000","effectiveGasPrice":"50000000","source":"direct","verified":false,"answered":2}`. The patched reference's is primary's alone: `baseFee` 3772, `maxFeePerGas` 50,007,544, `effectiveGasPrice` 50,003,772.
+  - **`boundary-fee-direct-priority-unparseable`:** a fails as before. b's hint (17, above 16) is unusable, and b's block is the string `0x11`, which isn't one: b fails at its block read. Direct's last resort: `{"type":"legacy","gasPrice":"50000020","effectiveGasPrice":"50000020","source":"direct","verified":false,"answered":1}`. b is asked at once with a, its block read after its hint.
+  - **`boundary-fee-direct-gas-price-fails-first`:** a fails as before. b's hint fails, and so does its block read, so Direct's last resort is ⌊1,000,000,000·125/100⌋ + the floor: `{"type":"legacy","gasPrice":"1300000000","effectiveGasPrice":"1300000000","source":"direct","verified":false,"answered":1}`.
+  - **`boundary-fee-quorum-priority-disagrees`,** a fourth: the quorum's block disagrees, so the quorum leaves its last resort. The walk now reaches Direct with three endpoints, whose hints 1, 2 and 3 are usable. The patched reference quotes the first endpoint alone: M = 2,049,999,998. B combines all three: `{"type":"eip1559","baseFee":"999999997","maxPriorityFeePerGas":"50000000","maxFeePerGas":"2049999994","effectiveGasPrice":"1049999997","source":"direct","verified":false,"answered":3}`.
+- **New scenarios** port #749's tests in `chain-data-router.test.js` at `94b0af4e`, each patched:
+
+| Scenario | From | Shows |
+|---|---|---|
+| `fee-headroom-myotis-complete` | 517 | one Myotis operation, a usable hint, no block |
+| `fee-headroom-dust-tip` | 538 | a tip of 3,901 wei floored at 0.05 gwei |
+| `fee-headroom-colibri-inconsistent` | 558 | Colibri's 1 gwei hint over its gas price, priced from Colibri's own verified block, the floor as its tip |
+| `fee-headroom-no-hint-method` | 588 | a source without `eth_maxPriorityFeePerGas`: G − base as the tip |
+| `fee-headroom-myotis-read-path` | 611 | Myotis without a hint, its block read through the read path from Colibri: `baseFeeSource` `colibri`, verified |
+| `fee-headroom-myotis-unverified-block` | 635 | the same read from Direct: `baseFeeSource` `direct`, not verified |
+| `fee-headroom-direct-same-endpoint` | 652 | Direct's components from one endpoint (`fee-combination`: both endpoints asked) |
+| `fee-headroom-direct-block` | 674 | Direct without a hint, priced from that endpoint's block (`fee-combination`) |
+| `fee-headroom-legacy-chain` | 697 | a block without a base fee: legacy at 125% + the floor (`fee-combination`: `answered: 1`) |
+| `fee-headroom-later-type-2-wins` | 715 | Colibri's block fails; Direct's type-2 quote wins over Colibri's last resort (`fee-combination`: `answered: 1`, and B's header read, which fails as Colibri's block did) |
+| `fee-headroom-last-resort` | 736 | no source can read a block: Colibri's last resort, verified |
+| `fee-headroom-direct-last-resort` | 753 | a Direct endpoint's last resort kept when a later endpoint fails outright (`fee-combination`: both asked, `answered: 1`) |
+
+  Those marked `fee-combination` are compared under B, as its other changed scenarios are, and listed in the test with B's requests and reply.
+- **The codec vectors** in `vectors/chain.json` are regenerated with the patch:
+  - **`fee_quotes`:** `feeQuote` with its block: each case with an unusable hint gains the block it is given (a base fee, none, or a failure), and each case the patch changes records it.
+  - **`fee_combinations`:** each endpoint's quote from the patched `feeQuote`; the combined values from [B](#b-combining-directs-quotes)'s text, as before.
+  - **The failure texts:** `getFeeQuote`'s aggregate keeps its text; a world where a block read failed now ends with its last resort instead.
+
 ## Implementation steps
 
 1. **Codecs and vectors:**
    - normalization, and the `stableValue` digest with its equivalence vectors;
-   - `feeQuote`, Myotis payload classification, `blockscout-logs`' mappers and filters;
+   - `feeQuote`, with main's #749 headroom and its block (the `fee-headroom` patch), Myotis payload classification, `blockscout-logs`' mappers and filters;
    - B's combination (`fee_combinations`);
    - the Ant profile's ranking and cap parsing;
    - the broadcast refusal list and transaction hash;
@@ -1075,7 +1157,7 @@ The 25, by the test each ports from `chain-data-router.test.js` at `94b0af4e` (i
    - Colibri's `fault` bit, for a core that offers `colibri_faults`;
    - main's chain I/O pool and fragment handling;
    - the router, the fee quote and the broadcast become drivers, with main's broadcast record and reply fencing;
-   - A's check at confirmation, from `chain.fee_reference`;
+   - A's check at confirmation, from `chain.fee_reference`, with the floor in R at the pin bump to the core's floored quotes;
    - the wallet's intent records, nonce reservations and retry rule, with the *taken* search from its bracket, *Couldn't confirm* and closing by hand ([State history](#state-history));
    - delete the JS router.
 
