@@ -34,7 +34,7 @@ This design moves it into **its own supervised process, `freedom-ipfsd`**:
   - A panic inside freedom-ipfs on a request's task fails that request and retires its instance, which is torn down and replaced: the panic may have left the instance's shared state half-updated. A panic anywhere else ends the process. Either way a hook logs a fixed code, never the payload.
 - **Instances are owned and fenced.**
   - Each instance owns its tasks, swarms, blocking work and network capability, and carries an ID that is never reused.
-  - A stop, an eviction or a policy change does all of these, in order:
+  - A stop or an eviction does all of these, in order:
     1. fences new work;
     2. revokes the network capability;
     3. cancels everything;
@@ -91,7 +91,7 @@ This design moves it into **its own supervised process, `freedom-ipfsd`**:
 - **libradicle (4.4):** its own design (0008). It reuses this one's process model, streams and client.
 - **Persistent libp2p identity, content providing and a DHT server:** freedom-ipfs is a read-only client, and stays one.
 - **Mobile:** iOS and Android keep linking freedom-ipfs in process.
-- **An OS sandbox.** Process separation is a crash domain and a resource boundary, not a sandbox.
+- **An OS sandbox.** Process separation is a crash domain and a resource boundary, not a sandbox. Confining the service with the OS is [0010](0010-service-confinement.md)'s, decided by the user (D1).
 
 ## Today
 
@@ -132,11 +132,11 @@ This design moves it into **its own supervised process, `freedom-ipfsd`**:
 
 ```
 Electron main (profile P)
-  ├─spawn─▶ freedom-ipfsd serve --data-dir <ipfs-data>/freedom-ipfs --lock-dir <locks> --parent-pid <pid>
+  ├─spawn─▶ freedom-ipfsd serve --data-dir <ipfs-data>/freedom-ipfs --lock-dir <locks> --network <policy> --parent-pid <pid>
   │           stdin  ──frames──▶
   │           stdout ◀──frames──
   │           stderr ◀──JSON log lines──
-  └─spawn─▶ freedom-ipfsd serve --ephemeral --parent-pid <pid>     (only while a private window uses IPFS)
+  └─spawn─▶ freedom-ipfsd serve --ephemeral --network <policy> --parent-pid <pid>     (only while a private window uses IPFS)
 ```
 
 ### Spawn
@@ -150,6 +150,11 @@ Electron main (profile P)
 - **The environment** is cleared except for `PATH`, `HOME`/`USERPROFILE`, `LANG`, `RUST_LOG` and `SystemRoot` (`core-client.js`'s `scrubbedEnv`). That drops:
   - the proxy variables `reqwest` would otherwise read;
   - the `FREEDOM_IPFS_*` tuning variables freedom-ipfs's routing and retrieval crates read.
+- **The network policy** is an argument: `--network direct`, or `--network socks5:<ip>:<port>`. It is fixed for the process's life ([Changing the policy](#changing-the-policy)), so [0010](0010-service-confinement.md)'s confinement can apply it before `ipfs.hello`.
+  - `<ip>` is an IPv4 address, or an IPv6 address in brackets, which are the argument's syntax, not part of the address. The address is written plainly: no zone, no shorthand, no hex or octal. An IPv4-mapped IPv6 address is read as the IPv4 address it maps. It may not be unspecified, multicast or broadcast. Loopback and private addresses are allowed, since an external Tor may sit on the LAN.
+  - `<port>` is from 1 to 65535.
+  - No credentials are taken: the service makes each instance's own ([The SOCKS contract](#the-gate), *Stream isolation*).
+  - Anything else is a usage error: exit 64.
 - **Handshake:** `ipfs.hello` must complete within 10 s of spawn. Both sides enforce this, as for `core.hello`.
 - **No listening socket.** The service binds nothing. Upstream's loopback HTTP gateway is never started.
 - **Hardening:** 0001's, for both kinds of process:
@@ -158,6 +163,7 @@ Electron main (profile P)
   - Windows: Windows Error Reporting's dialog and dump collection are turned off for the process where the API allows it. This is best-effort.
 
   These are application guarantees. The OS can still page the ephemeral process's memory to swap or a hibernation file. A private window promises nothing against OS-level memory forensics.
+- **Confinement** by the OS (Landlock and seccomp, a Seatbelt profile, a job object) is [0010](0010-service-confinement.md)'s, decided by the user. Both kinds of process confine themselves after their lock and before `ipfs.hello`, and `ipfs.hello` reports what they got.
 
 ### Lifetime lock
 
@@ -197,9 +203,9 @@ Electron main (profile P)
   Until then the status is `STARTING`, and plans get the 503 of a node that isn't up, as today.
 - **Ordering:**
   - IPFS needs neither the vault nor `freedom-cored`, and starts independently of both.
-  - When the profile's IPFS proxy setting is on, main sends `ipfs.start` only once `tor-manager` reports Arti's SOCKS endpoint. Until then IPFS stays `STARTING` ([Network policy](#network-policy)).
-- **Stopping an instance:** `ipfs.stop`, which covers a private partition closing, an eviction and a [policy change](#changing-the-policy). It follows [the teardown](#instances-and-their-teardown).
-- **Stopping the process** (the nodes menu, a profile mode change, or quit):
+  - When the profile's IPFS proxy setting is on, main spawns the process only once `tor-manager` reports Arti's SOCKS endpoint, which goes in `--network`. Until then IPFS stays `STARTING` ([Network policy](#network-policy)).
+- **Stopping an instance:** `ipfs.stop`, which covers a private partition closing and an eviction. It follows [the teardown](#instances-and-their-teardown).
+- **Stopping the process** (the nodes menu, a profile mode change, a [policy change](#changing-the-policy), or quit):
   1. main sends `ipfs.shutdown` and closes stdin;
   2. the service tears down every instance;
   3. it exits 0;
@@ -217,7 +223,7 @@ Electron main (profile P)
 
 ### Crashes, hangs and restarts
 
-- **A crash** is any exit main didn't ask for, other than 64, 74 or 75. Exit 76 (`protocol`, which includes 0001's 30 s writer stall) is a crash too, as it is for the core. On a crash:
+- **A crash** is any exit main didn't ask for, other than 64, 74, 75 or 77. Exit 76 (`protocol`, which includes 0001's 30 s writer stall) is a crash too, as it is for the core. On a crash:
   - every pending head is rejected and every open body errors as truncated, with `freedom-ipfs service exited`;
   - `up` is false until a new generation has completed `ipfs.hello` and `ipfs.start`;
   - main restarts after 0.5 s, 2 s, then 10 s;
@@ -230,6 +236,7 @@ Electron main (profile P)
   - 64 (usage);
   - 74 (`storage`);
   - 75 (`lock_held`);
+  - 77 (`confinement`): [0010](0010-service-confinement.md)'s confinement found its own policy invalid. A mechanism the OS lacks doesn't stop the service: it runs, and reports the gap (D2);
   - a handshake protocol mismatch, which is a packaging bug;
   - an `ipfs.start` that fails with `storage`, for example a store that won't open, as `start()` returning `false` is today.
 
@@ -316,7 +323,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
   - **its runtime,** on which every task the instance or its libraries spawn runs;
   - **a blocking-region count,** raised and lowered around every `block_in_place`;
   - **a network capability:** the instance's handle on [the gate](#the-gate). Every socket, HTTP attempt and redirect hop asks it first, and revoking it makes every later ask fail.
-- **The teardown,** for a stop, an eviction, a policy change and shutdown alike:
+- **The teardown,** for a stop, an eviction and shutdown alike:
   1. **Fence:** the instance's ID is retired at once ([Instance IDs](#instance-ids)), and new requests for it get `stopped`.
   2. **Revoke:** the network capability is revoked, so no new connection can be made, whatever is still running.
   3. **Cancel:**
@@ -450,7 +457,9 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 { "type": "request", "id": 1, "method": "ipfs.hello",
   "params": { "protocol": 1, "shell_version": "0.9.0", "frames": ["stream"] } }
 { "type": "response", "id": 1, "result": { "protocol": 1, "service_version": "0.1.0",
-  "freedom_ipfs": { "version": "0.4.6", "git_commit": "ee6b95c…" }, "kind": "persistent" } }
+  "freedom_ipfs": { "version": "0.4.6", "git_commit": "ee6b95c…" }, "kind": "persistent",
+  "network": { "mode": "direct" },                                  // or { "mode": "socks5", "ip": "127.0.0.1", "port": 9150 }
+  "confinement": { … } } }                                          // 0010's per-property report
 
 { "type": "request", "id": 2, "method": "ipfs.start", "params": {
     "instance": "p-1",                                              // never reused within the process
@@ -459,8 +468,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
                  "delegated_routers": ["https://delegated-ipfs.dev/routing/v1", "https://cid.contact/routing/v1"],
                  "doh_endpoint": "https://cloudflare-dns.com/dns-query",
                  "dht_query_timeout_s": 3, "dht_max_providers": 32 },
-    "gateway": { "max_concurrent_requests": 8, "request_queue_timeout_ms": 15000 },
-    "network": { "mode": "direct" } } }                            // or { "mode": "socks5", "ip": "127.0.0.1", "port": 9150 }
+    "gateway": { "max_concurrent_requests": 8, "request_queue_timeout_ms": 15000 } } }
 
 { "type": "request", "id": 41, "method": "ipfs.request", "params": {
     "instance": "p-1", "method": "GET", "path": "/ipfs/bafy…/app.js",
@@ -472,8 +480,8 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 
 | Method | Params | Result | Deadline (owned by the service) |
 |---|---|---|---|
-| `ipfs.hello` | `protocol`, `shell_version`, `frames` | `protocol`, `service_version`, `freedom_ipfs` build info, `kind` (`persistent` or `ephemeral`) | 10 s after spawn |
-| `ipfs.start` | `instance`, `store`, `routing`, `gateway`, `network` | `{ instance }` | 10 s |
+| `ipfs.hello` | `protocol`, `shell_version`, `frames` | `protocol`, `service_version`, `freedom_ipfs` build info, `kind` (`persistent` or `ephemeral`), `network` (the process's policy, from `--network`), `confinement` ([0010](0010-service-confinement.md)) | 10 s after spawn |
+| `ipfs.start` | `instance`, `store`, `routing`, `gateway` | `{ instance }` | 10 s |
 | `ipfs.stop` | `instance` | `{ instance }`, once [teardown](#instances-and-their-teardown) is complete | 5 s; past it, exit 70 |
 | `ipfs.request` | `instance`, `method` (`GET` or `HEAD`), `path`, `headers`, `headers_ms` | the head: `status`, `headers`, `body` | `headers_ms`, until the head |
 | `ipfs.stats` | `instance` | [Stats](#stats) | 5 s |
@@ -486,13 +494,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
     - It sits in `routing` beside the routers because it is checked and exempted exactly as they are: a [configured target](#the-gate).
   - **The routers and the DoH endpoint** are `http` or `https` URLs, read as the gate reads a configured endpoint: WHATWG, ASCII, no userinfo, a host it classifies, and no fragment.
     - An onion among them needs `socks5`: `direct` has [no route to one](#the-onion-route).
-  - **`network`** is one of two forms:
-    - `{ "mode": "direct" }`;
-    - `{ "mode": "socks5", "ip", "port" }`.
-      - `ip` is an IPv4 or IPv6 address written plainly: no brackets, no zone, no shorthand, no hex or octal. An IPv4-mapped IPv6 address is read as the IPv4 address it maps. It may not be unspecified, multicast or broadcast. Loopback and private addresses are allowed, since an external Tor may sit on the LAN.
-      - `port` is from 1 to 65535.
-      - No credentials are taken: the service makes each instance's own ([The SOCKS contract](#the-gate), *Stream isolation*).
-      - `socks5` takes `routing.mode` `delegated` or `offline` only ([Open questions](#open-questions), 4).
+  - **The network policy** is the process's, from `--network` ([Spawn](#spawn)), and every instance runs under it. In a `socks5` process, `routing.mode` is `delegated` or `offline` only ([Open questions](#open-questions), 4).
   - The persistent process accepts one `disk` instance at a time. The ephemeral process accepts only `memory` instances of at most 32 MiB, and at most 8 of them.
   - A start is admitted only within the free [budget](#budgets). Anything else is `invalid_argument`, or `busy` when the budget isn't free.
 - **`ipfs.request`:**
@@ -513,9 +515,9 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 
 ### Instance IDs
 
-- **Never reused.** Main allocates each instance ID from a counter per process generation: `p-1`, `p-2`, … for the persistent instance, and `e-1`, `e-2`, … for private ones. A restart of the persistent instance, for example on a policy change, gets a new ID.
+- **Never reused.** Main allocates each instance ID from a counter per process generation: `p-1`, `p-2`, … for the persistent instance, and `e-1`, `e-2`, … for private ones. A restart of the persistent instance gets a new ID. A policy change starts a new generation ([Changing the policy](#changing-the-policy)).
 - **Every captured backend binds a pair:** the generation and the instance ID. `ipfsBackend()` captures it at admission, and every continuation carries it: the wait for a plan, the `request()` call, its body.
-- **Retirement is synchronous in main.** When a stop, an eviction, a partition close or a policy change begins, main marks the pair retired before sending `ipfs.stop`. A continuation that reaches a retired pair fails at once with `freedom-ipfs native node is not running`, and nothing is sent.
+- **Retirement is synchronous in main.** When a stop, an eviction or a partition close begins, main marks the pair retired before sending `ipfs.stop`. A continuation that reaches a retired pair fails at once with `freedom-ipfs native node is not running`, and nothing is sent.
 - **The service checks too:** a request naming an ID that is retired or unknown gets `stopped`. A late request from before a change can therefore never reach the instance that replaced it, in either direction.
 - **The service can retire an instance itself,** after a request panic. It fences the ID at once, so later requests get `stopped`. On `ipfs.instance_retired`, main marks the pair retired, as it does when it begins a stop. Continuations still holding it fail before sending, and leases on a private instance end as their requests do.
 
@@ -558,7 +560,8 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
   Main errors the body with `freedom-ipfs native request cancelled` for the first, and with today's `freedom-ipfs native read failed` for the others.
 - **Exit codes:**
   - 0001's: 64, 74, 75 and 76;
-  - 70 for `teardown_unproven`, and for a panic or unexpected end outside a request.
+  - 70 for `teardown_unproven`, and for a panic or unexpected end outside a request;
+  - 77 for `confinement` ([0010](0010-service-confinement.md)), before `ipfs.hello`.
 
 ### Stats
 
@@ -847,7 +850,7 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
     - nothing falls back to a direct socket;
     - a transport the proxy can't carry (QUIC, or any other non-TCP transport) is refused before any socket exists.
 - **Where the proxy comes from:**
-  - A new per-profile setting, **Route IPFS through Tor**, off by default, sends Arti's SOCKS endpoint from `tor-manager`, as an IP and port. It is a switch of its own, apart from 0008's Route Radicle through Tor; a future "everything through Tor" mode would turn both on ([Open questions](#open-questions), 3).
+  - A new per-profile setting, **Route IPFS through Tor**, off by default, passes Arti's SOCKS endpoint from `tor-manager` at spawn, as an IP and port (`--network`). It is a switch of its own, apart from 0008's Route Radicle through Tor; a future "everything through Tor" mode would turn both on ([Open questions](#open-questions), 3).
   - Today Tor in Freedom means onion access. Clearnet and the dweb protocols stay direct (`docs/features.md`), and this design keeps that default.
 
 ### The gate
@@ -1120,11 +1123,14 @@ An address under such a prefix is classified as the global unicast address it lo
 
 ### Changing the policy
 
-- **What a change does:** main retires every instance's ID, then each instance is torn down ([teardown](#instances-and-their-teardown)) and started again under a new ID with the new policy.
-  - In-flight requests fail with `stopped`.
-  - The network capability is revoked first, so nothing can connect under the old policy while the rest ends.
-- **The guarantee:** nothing admitted under the old policy outlives the change. If that can't be proven within 5 s, the process restarts.
+- **The policy is per process.** Main passes it at spawn (`--network`), and the process never changes it. So [0010](0010-service-confinement.md)'s confinement can fix the kernel's network rules before `ipfs.hello`.
+- **What a change does:** a switch between `direct` and `socks5`, or a new Arti endpoint, starts a new generation of each IPFS process:
+  - main retires each process's generation first, so every captured pair fails at once, and nothing more is sent to it;
+  - it sends `ipfs.shutdown`, and kills the process 5 s later, as at any stop. In-flight requests fail as they do when a process exits;
+  - it spawns the persistent process again with the new policy once the old one has exited, and the ephemeral one when a private window next needs it. Private instances come back cold, under new IDs.
+- **The guarantee:** nothing admitted under the old policy outlives the change, because its process has exited. No in-process teardown has to prove it.
   - This mirrors `applyOnionProxy`, which calls `closeAllConnections` after `setProxy`.
+- **Not a crash:** the respawn has no back-off, and doesn't count toward the three crashes.
 - **Arti going down** leaves the policy in place, so IPFS fails closed. This matches the PAC kept after an Arti crash.
 
 ## Upstream changes in freedom-ipfs
@@ -1270,7 +1276,7 @@ As 0006's 4.7 did, before anything moves:
 - **Instance cases:**
   - cancel inside a blocking retrieval, and during background work: no socket is opened after the stop's acknowledgement, checked at the gate and by a canary;
   - a stop whose quiescence is held back past 5 s: exit 70 and a restart;
-  - a plan delayed across a stop and start with a different policy: the old continuation fails, and nothing reaches the new instance;
+  - a plan delayed across a stop and start: the old continuation fails, and nothing reaches the new instance;
   - a background swarm task panicking: exit 70.
 - **Request panic cases,** with a panic injected through the test hooks:
   - **while the task holds the store, a cache, a Bitswap want or an in-flight entry:** the request gets `internal`, the instance's other requests get `stopped`, the teardown proves quiescence, and `ipfs.instance_retired` follows. The replacement instance serves the same CID;
@@ -1387,6 +1393,8 @@ As 0006's 4.7 did, before anything moves:
     - neither the username nor the password appears in any `Debug` output or error;
     - an injected randomness failure refuses the start, with no instance built.
   - **Onion:** `.onion` and `/onion3` targets in `direct` mode open no socket.
+  - **Policy changes:** `direct` → `socks5` → `direct`, and Arti's port P → Q. Each starts a new generation of both processes with the new `--network`; a plan delayed across the change fails, and nothing reaches the new generation; the proxy and the canary see nothing from the old one after its exit; a private partition's instance comes back cold after each change.
+  - **`--network`:** each form the argument refuses (a name, a zone, shorthand, an IPv6 address without brackets, port 0) exits 64.
 - **Live:** `ipfs:native:smoke` re-pointed at the service, with `/ipns/ipfs.tech/` and #102's fan-out of 48 concurrent requests and no `gateway_busy`.
 
 ### Parity
@@ -1510,7 +1518,7 @@ Every body already passes through main today, so the pipe adds one copy into the
 
    Then the default switches.
 7. **Private windows:** the ephemeral process, readiness per partition, the cold start in `request()`, leases, eviction and fences.
-8. **Network policy:** the setting, Arti's endpoint and its `RESOLVE` qualification, policy changes, and the gate, redirect, SOCKS and canary tests. This needs upstream item 3.
+8. **Network policy:** the setting, Arti's endpoint and its `RESOLVE` qualification, `--network` and policy changes as new generations, and the gate, redirect, SOCKS and canary tests. This needs upstream item 3.
    - `socks5` first, with the classification and the capability in `direct` too: none of them needs NAT64 discovery.
    - Then NAT64 discovery in the service, which brings the address table to `direct` ([Modes](#modes)).
 9. **Removal,** one stable release later: the add-on, the event worker and their scripts.
@@ -1545,6 +1553,7 @@ Every body already passes through main today, so the pipe adds one copy into the
 7. **Upstream timing:** will freedom-ipfs take items 1–8? Until a release carries them, does the service pin a commit on a branch?
 8. **Streams in the core:** should 4.5's protocol version 2 for `freedom-cored` adopt these four frames as they are, with an explicit global credit added?
 9. **An OS memory limit:** should each service run under `RLIMIT_AS`, or a Windows job memory limit, as a backstop for what its budget can't see?
+   - **Still open:** [0010](0010-service-confinement.md)'s job object (D4, decided) is where a Windows limit would go. Whether to set one, and `RLIMIT_AS` on Linux and macOS, aren't decided there.
 10. **If Arti can't `RESOLVE`:** should the Tor setting wait until it can, or ship with the proxy's own policy (option (b)) as an explicit deviation? This design waits (the user's decision).
     - **Moot for now:** the pinned Arti 2.7.0 qualifies (freedom-browser #771). It answers `RESOLVE` with one address, with credentials and without. The qualification runs again whenever the pin moves.
 11. **Stream isolation under Tor:** should each instance (the profile's, and each private window's) send SOCKS credentials of its own, so Arti keeps their streams on separate circuits?
