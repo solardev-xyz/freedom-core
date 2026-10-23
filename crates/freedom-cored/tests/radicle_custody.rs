@@ -511,6 +511,63 @@ fn the_home_is_its_canonical_path_and_a_retargeted_root_is_refused() {
     assert!(data.join("node-identity-journal.json").exists());
 }
 
+/// Review of #177, round 2 (M1): the home is opened once, after its gate,
+/// and everything the write does reaches it through that handle. Held at
+/// its commit, after staging, the home is renamed and a symlink to another
+/// home (whose gate its service holds) put in its place. Released, the
+/// switch lands in the home it planned and staged in, now moved; the other
+/// home is untouched.
+#[cfg(unix)]
+#[test]
+fn a_home_replaced_during_its_write_is_written_where_it_was_staged() {
+    let (root, data, locks) = dirs();
+    let home = root.path().join("home");
+    let moved = root.path().join("moved");
+    let other = root.path().join("other");
+    let mut core = unlocked(&data, &locks);
+    legacy_write(&mut core, 3, &home);
+    legacy_write(&mut core, 4, &other);
+    core.close_stdin();
+    assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
+    let _other_gate = fc_service::gate::acquire(&other, &locks, "radicle", Duration::ZERO).unwrap();
+    let before = walk_contents(&other);
+
+    let (claimed, release) = (root.path().join("claimed"), root.path().join("release"));
+    let mut core = spawn_env(
+        "serve",
+        &data,
+        &locks,
+        &[],
+        &[
+            (
+                "FREEDOM_CORED_TEST_COMMIT_MARKER",
+                claimed.to_str().unwrap(),
+            ),
+            ("FREEDOM_CORED_TEST_COMMIT_HOLD", release.to_str().unwrap()),
+        ],
+    );
+    core.hello();
+    core.send(&request(
+        2,
+        "nodes.write_identity",
+        sealed("swapped", &home, None),
+    ));
+    let until = Instant::now() + Duration::from_secs(30);
+    while !claimed.exists() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(claimed.exists(), "the write never reached its commit");
+    std::fs::rename(&home, &moved).unwrap();
+    std::os::unix::fs::symlink(&other, &home).unwrap();
+    std::fs::write(&release, b"go").unwrap();
+    let reply = core.response(2);
+    assert_eq!(reply["result"]["status"], "installed", "{reply}");
+    assert_eq!(walk_contents(&other), before);
+    keys_gone(&moved);
+    assert_eq!(marker(&moved), Some(json!({ "node_ids": [RADICLE_NID] })));
+    assert_eq!(alias(&moved), "FreedomBrowser");
+}
+
 /// The switch reads only the private key file's public part: a key whose
 /// private section is corrupt still names its identity (review of #177).
 #[test]

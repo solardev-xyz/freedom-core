@@ -2476,14 +2476,29 @@ fn job_node_write(
         }
         _ => spec,
     };
+    // Design 0001: recovery runs before any node write, and here before the
+    // plan reads anything of the node: an outstanding journal for the same
+    // root is finished first, so the plan sees what it installed. If it
+    // can't be finished, nothing is made or written.
+    match journal::recover(identity_dir, &gates) {
+        Ok(journal::Recovered::Waiting { .. }) => return Err(OpError::LockHeld),
+        Ok(_) => {}
+        Err(e) => return Err(storage(&e)),
+    }
+    // The node's root, opened once, now: a Radicle home after its gate was
+    // taken, before anything of it is read. The plan, the staging, the
+    // install and the cleanup all reach what is below it from this handle,
+    // never by its path again, so a home renamed or replaced meanwhile
+    // redirects nothing (review of #177, round 2).
+    let top = journal::write_root(spec.name(), spec.root()).map_err(|e| storage(&e))?;
     if let NodeSpec::Radicle {
-        home,
         alias,
         custody: Custody::Sealed { wipe },
+        ..
     } = spec
     {
         drop(keys);
-        let built = nodes::radicle_sealed(home, alias, *wipe).map_err(build_error)?;
+        let built = nodes::radicle_sealed(&top, alias, *wipe).map_err(build_error)?;
         let plan = journal::Plan {
             entries: built
                 .entries
@@ -2504,12 +2519,13 @@ fn job_node_write(
             identity_dir,
             op_id,
             spec.name(),
-            spec.root(),
+            &top,
             &plan,
             &gates,
             || claim(control),
         )
         .map_err(write_error)?;
+        drop(top);
         drop(home_gate);
         if outcome == journal::Outcome::Abandoned {
             return Err(OpError::Abandoned);
@@ -2518,7 +2534,7 @@ fn job_node_write(
         return Ok((outcome, serde_json::Map::new()));
     }
     let keys = keys.ok_or(OpError::Internal)?;
-    let built = nodes::build(spec, &keys, &mut OsRng).map_err(build_error)?;
+    let built = nodes::build(spec, &top, &keys, &mut OsRng).map_err(build_error)?;
     drop(keys);
     let files: Vec<journal::FileSpec<'_>> = built
         .files
@@ -2532,12 +2548,13 @@ fn job_node_write(
         identity_dir,
         op_id,
         spec.name(),
-        spec.root(),
+        &top,
         &journal::Plan::install(&files),
         &gates,
         || claim(control),
     )
     .map_err(write_error)?;
+    drop(top);
     drop(home_gate);
     if outcome == journal::Outcome::Abandoned {
         return Err(OpError::Abandoned);

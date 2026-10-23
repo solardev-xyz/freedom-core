@@ -51,7 +51,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use crate::anchor::Dir;
+use crate::anchor::{Dir, Resolve};
 use crate::fsx::{self, Done};
 
 pub const JOURNAL: &str = "node-identity-journal.json";
@@ -380,19 +380,28 @@ pub enum Recovered {
 /// An outstanding journal is recovered first; if that fails, or waits for a
 /// Radicle home's gate, nothing is written. For a Radicle operation the
 /// caller holds the home's gate throughout (`gates.held`).
+///
+/// `top` is the node's root, opened once by the caller ([`write_root`]):
+/// a Radicle home after its gate was taken, before anything of it was read.
+/// Staging, install and cleanup reach everything below it from that handle,
+/// never by its path again (review of #177, round 2).
 pub fn write(
     identity_dir: &Path,
     op_id: &str,
     node: &str,
-    root: &Path,
+    top: &Dir,
     plan: &Plan<'_>,
     gates: &Gates,
     commit: impl FnOnce() -> bool,
 ) -> Result<Outcome, WriteError> {
+    let root = top.location();
     if !valid_op_id(op_id)
         || !normalized_absolute(root)
         || root == identity_dir
         || !shapes(node, root).contains(&plan.shape())
+        // A Radicle home is written only under its gate, as its canonical
+        // path.
+        || (node == "radicle" && gates.held.as_deref() != Some(root))
     {
         return Err(WriteError::Layout);
     }
@@ -421,7 +430,7 @@ pub fn write(
     };
     put_record(identity_dir, STAGING, &intent)?;
 
-    // 1. Stage, under the root, and nothing below it reached through a
+    // 1. Stage, below the held root, and nothing below it reached through a
     // symlink.
     let mut journal = Journal {
         op_id: op_id.to_owned(),
@@ -432,10 +441,10 @@ pub fn write(
     };
     for entry in &plan.entries {
         match entry {
-            Entry::Install(file) => match stage(root, file) {
+            Entry::Install(file) => match stage(top, file) {
                 Ok(staged) => journal.files.push(staged),
                 Err(e) => {
-                    discard(identity_dir, node, root);
+                    discard(identity_dir, node, top);
                     return Err(e.into());
                 }
             },
@@ -459,15 +468,15 @@ pub fn write(
             return Ok(Outcome::PendingRecovery);
         }
         Err(fsx::WriteError::Abandoned) => {
-            discard(identity_dir, node, root);
+            discard(identity_dir, node, top);
             return Ok(Outcome::Abandoned);
         }
         Err(fsx::WriteError::Io(e)) => {
-            discard(identity_dir, node, root);
+            discard(identity_dir, node, top);
             return Err(e.into());
         }
         Err(fsx::WriteError::Check(reason)) => {
-            discard(identity_dir, node, root);
+            discard(identity_dir, node, top);
             return Err(std::io::Error::other(reason).into());
         }
     }
@@ -475,7 +484,7 @@ pub fn write(
     let _ = fsx::remove(&identity_dir.join(STAGING), || true);
 
     // 3 and 4. After the commit, a failure leaves the journal for recovery.
-    Ok(match conclude(identity_dir, &journal) {
+    Ok(match conclude(identity_dir, &journal, Some(top)) {
         Ok(OpStatus::Installed) => Outcome::Installed,
         Ok(_) => Outcome::Corrupt,
         Err(e) => {
@@ -547,13 +556,45 @@ pub fn recover(identity_dir: &Path, gates: &Gates) -> std::io::Result<Recovered>
     handle.sync_all()?;
     drop(handle);
     sync_dir(identity_dir)?;
-    let status = conclude(identity_dir, &journal)?;
+    // The root, opened once, after the gate: everything below it is reached
+    // from this handle. Gone, nothing under it exists.
+    let top = open_root(&journal.node, &journal.root)?;
+    let status = conclude(identity_dir, &journal, top.as_ref())?;
     let _ = fsx::remove(&identity_dir.join(STAGING), || true);
     Ok(Recovered::Finished {
         op_id: journal.op_id,
         node: journal.node,
         status,
     })
+}
+
+/// How a node's root is opened: a Radicle home as its gate's canonical
+/// path, through no symlink and still where that path says; Bee's data
+/// directory as main names it ([`Resolve`]).
+fn resolve(node: &str) -> Resolve {
+    if node == "radicle" {
+        Resolve::Canonical
+    } else {
+        Resolve::Follow
+    }
+}
+
+/// A journal's or an intent's root, opened once: `None` if it is gone.
+fn open_root(node: &str, root: &Path) -> std::io::Result<Option<Dir>> {
+    Dir::open_root(root, resolve(node))
+}
+
+/// A writer's root, opened once before anything under it is read: a
+/// Radicle home after its gate is taken (the gate made it), Bee's data
+/// directory made if missing.
+pub fn write_root(node: &str, root: &Path) -> std::io::Result<Dir> {
+    if !normalized_absolute(root) {
+        return Err(std::io::Error::other("a node's root that isn't absolute"));
+    }
+    if node != "radicle" {
+        ensure_dir(root)?;
+    }
+    open_root(node, root)?.ok_or_else(|| std::io::Error::other("a node's root is gone"))
 }
 
 enum HomeGate {
@@ -708,15 +749,13 @@ fn staged_path(target: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Step 1 for one file, under `root` ([`Dir`]: no symlink below it is
-/// followed, and missing directories are made). A staged file left by an
+/// Step 1 for one file, below the held root ([`Dir`]: no symlink below it
+/// is followed, and missing directories are made). A staged file left by an
 /// earlier operation that died before its commit is replaced (recovery has
 /// run, so no journal needs it).
-fn stage(root: &Path, file: &FileSpec<'_>) -> std::io::Result<JournalFile> {
-    // The root is the caller's, made if missing (a Radicle home's gate made
-    // it already); below it, the anchors.
-    ensure_dir(root)?;
-    let (dir, name) = Dir::under(root, &file.target, true)?
+fn stage(top: &Dir, file: &FileSpec<'_>) -> std::io::Result<JournalFile> {
+    let (dir, name) = top
+        .under(&file.target, true)?
         .ok_or_else(|| std::io::Error::other("a node identity directory can't be made"))?;
     let staged = staged_name(&name);
     dir.unlink(&staged)?;
@@ -738,16 +777,20 @@ fn stage(root: &Path, file: &FileSpec<'_>) -> std::io::Result<JournalFile> {
     })
 }
 
-/// Step 3: the wipe, then each entry in order, all under the journal's
-/// root and through no symlink below it ([`Dir`]). Returns whether any file
-/// could not be installed (corrupt).
-fn install(journal: &Journal) -> std::io::Result<bool> {
-    let root = &journal.root;
+/// Step 3: the wipe, then each entry in order, all below the journal's
+/// root, held open (`top`), and through no symlink below it ([`Dir`]). A
+/// root that is gone (`None`) has nothing under it: removals are done, and
+/// installs corrupt. Returns whether any file could not be installed
+/// (corrupt).
+fn install(journal: &Journal, top: Option<&Dir>) -> std::io::Result<bool> {
     let mut corrupt = false;
     let mut installed: Vec<PathBuf> = Vec::new();
-    if !journal.wipe.is_empty() {
+    let under = |target: &Path| match top {
+        Some(top) => top.under(target, false),
+        None => Ok(None),
+    };
+    if let Some(top) = top {
         // Each is a directory right under the root (the journal's shapes).
-        let top = Dir::root(root)?;
         for dir in &journal.wipe {
             let name = dir
                 .file_name()
@@ -761,7 +804,7 @@ fn install(journal: &Journal) -> std::io::Result<bool> {
         if file.remove {
             // A target already gone, or under a directory already gone, is
             // done; its directory is flushed only if something was removed.
-            if let Some((dir, name)) = Dir::under(root, &file.target, false)?
+            if let Some((dir, name)) = under(&file.target)?
                 && dir.unlink(&name)?
             {
                 dir.sync()?;
@@ -772,7 +815,7 @@ fn install(journal: &Journal) -> std::io::Result<bool> {
             // valid_journal admits no other entry.
             return Err(std::io::Error::other("an install entry without its digest"));
         };
-        let Some((dir, name)) = Dir::under(root, &file.target, false)? else {
+        let Some((dir, name)) = under(&file.target)? else {
             // Its directory is gone, its staged file with it.
             corrupt = true;
             continue;
@@ -847,8 +890,12 @@ fn flush_installed(installed: &[PathBuf]) {
 /// then update the node's health durably (marked unresolved if corrupt,
 /// cleared if installed), then record the outcome and remove the journal.
 /// Any failure keeps the journal, so recovery repeats the whole sequence.
-fn conclude(identity_dir: &Path, journal: &Journal) -> std::io::Result<OpStatus> {
-    let corrupt = install(journal)?;
+fn conclude(
+    identity_dir: &Path,
+    journal: &Journal,
+    top: Option<&Dir>,
+) -> std::io::Result<OpStatus> {
+    let corrupt = install(journal, top)?;
     mark_unresolved(identity_dir, &[journal.node.as_str()], corrupt)?;
     let status = if corrupt {
         OpStatus::Corrupt
@@ -901,11 +948,11 @@ fn read_done(identity_dir: &Path) -> std::io::Result<DoneList> {
     }
 }
 
-/// Before the commit: removes this operation's staged files, then its
-/// intent record.
-fn discard(identity_dir: &Path, node: &str, root: &Path) {
-    for target in staged_targets(node, root) {
-        if let Ok(Some((dir, name))) = Dir::under(root, &target, false) {
+/// Before the commit: removes this operation's staged files, below the held
+/// root, then its intent record.
+fn discard(identity_dir: &Path, node: &str, top: &Dir) {
+    for target in staged_targets(node, top.location()) {
+        if let Ok(Some((dir, name))) = top.under(&target, false) {
             let _ = dir.unlink(&staged_name(&name));
         }
     }
@@ -926,10 +973,14 @@ fn discard_intent(identity_dir: &Path) -> std::io::Result<Recovered> {
         && NODES.contains(&intent.node.as_str())
     {
         // The core's own staged files, never a node's: no gate is needed.
-        // Through no symlink below the root, as every node file is.
-        for target in staged_targets(&intent.node, &intent.root) {
-            if let Some((dir, name)) = Dir::under(&intent.root, &target, false)? {
-                dir.unlink(&staged_name(&name))?;
+        // Through no symlink below the root, as every node file is. A root
+        // that is gone holds none: the operation died before it made it
+        // (review of #177, round 2), or it was removed since.
+        if let Some(top) = open_root(&intent.node, &intent.root)? {
+            for target in staged_targets(&intent.node, &intent.root) {
+                if let Some((dir, name)) = top.under(&target, false)? {
+                    dir.unlink(&staged_name(&name))?;
+                }
             }
         }
     }
@@ -1062,11 +1113,16 @@ mod tests {
         files: &[FileSpec<'_>],
         commit: impl FnOnce() -> bool,
     ) -> Result<Outcome, WriteError> {
+        // As the writer does: the root opened once, then written below.
+        if !normalized_absolute(root) {
+            return Err(WriteError::Layout);
+        }
+        let top = super::write_root(node, root)?;
         super::write(
             identity,
             op_id,
             node,
-            root,
+            &top,
             &Plan::install(files),
             &gates(identity),
             commit,
@@ -1118,7 +1174,10 @@ mod tests {
             op_id: op_id.into(),
             node: "bee".into(),
             root: root.to_owned(),
-            files: files.iter().map(|f| stage(root, f).unwrap()).collect(),
+            files: {
+                let top = write_root("bee", root).unwrap();
+                files.iter().map(|f| stage(&top, f).unwrap()).collect()
+            },
             wipe: Vec::new(),
         };
         made(identity);
@@ -1379,7 +1438,7 @@ mod tests {
         )
         .unwrap();
         for file in bee_files(&root, b"k", b"c") {
-            stage(&root, &file).unwrap();
+            stage(&write_root("bee", &root).unwrap(), &file).unwrap();
         }
         assert_eq!(staged_left(&root).len(), 2);
         assert_eq!(recover(&identity).unwrap(), Recovered::Discarded);
@@ -1449,5 +1508,107 @@ mod tests {
         let done = read_done(&identity).unwrap();
         assert_eq!(done.ops.len(), MAX_DONE);
         assert_eq!(done.ops[0].op_id, "op-8");
+    }
+
+    /// Review of #177, round 2 (M3): an operation that died after its intent
+    /// and before it made its root (Bee's data directory, made at staging)
+    /// leaves an intent whose root isn't there. Recovery discards it, makes
+    /// nothing, and so never blocks the next write. A root that is there but
+    /// isn't a directory is still refused, and the intent stays.
+    #[test]
+    fn an_intent_from_before_its_root_was_made_is_discarded() {
+        for node in ["bee", "radicle"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let identity = made(&tmp.path().join("identity"));
+            let root = tmp.path().join("not-made-yet");
+            let intent = Intent {
+                op_id: "before-stage".into(),
+                node: node.into(),
+                root: root.clone(),
+            };
+            put_record(&identity, STAGING, &intent).unwrap();
+            assert_eq!(recover(&identity).unwrap(), Recovered::Discarded, "{node}");
+            assert!(!identity.join(STAGING).exists(), "{node}");
+            assert!(!root.exists(), "{node}");
+
+            std::fs::write(&root, b"not a directory").unwrap();
+            put_record(&identity, STAGING, &intent).unwrap();
+            assert!(recover(&identity).is_err(), "{node}");
+            assert!(identity.join(STAGING).exists(), "{node}");
+        }
+    }
+
+    /// Review of #177, round 2 (M1): the home is opened once, after its gate,
+    /// and held. Renamed after staging, with a symlink to another home (whose
+    /// gate its service holds) in its place, the commit's removals and
+    /// install still land in the home that was planned and staged in; the
+    /// other home is untouched.
+    #[cfg(unix)]
+    #[test]
+    fn a_committed_switch_stays_in_the_home_it_staged_in() {
+        let tmp = tempfile::tempdir().unwrap();
+        let identity = tmp.path().join("identity");
+        let locks = tmp.path().join("locks");
+        for (dir, key) in [("home", "own"), ("other-home", "other")] {
+            let keys = tmp.path().join(dir).join("keys");
+            std::fs::create_dir_all(&keys).unwrap();
+            std::fs::write(keys.join("radicle"), format!("{key} private key")).unwrap();
+            std::fs::write(keys.join("radicle.pub"), format!("{key} public key")).unwrap();
+        }
+        let zero = std::time::Duration::ZERO;
+        let gate = fc_service::gate::acquire(&tmp.path().join("home"), &locks, RADICLE_GATE, zero)
+            .unwrap();
+        let other_gate =
+            fc_service::gate::acquire(&tmp.path().join("other-home"), &locks, RADICLE_GATE, zero)
+                .unwrap();
+        let (home, other) = (gate.data_dir.clone(), other_gate.data_dir.clone());
+        let moved = home.with_file_name("moved-home");
+        let gates = Gates {
+            lock_dir: locks,
+            retry: zero,
+            held: Some(home.clone()),
+        };
+        let plan = Plan {
+            entries: vec![
+                Entry::Remove(home.join("keys/radicle")),
+                Entry::Remove(home.join("keys/radicle.pub")),
+                Entry::Install(FileSpec {
+                    target: home.join("config.json"),
+                    contents: b"{}",
+                }),
+            ],
+            wipe: Vec::new(),
+        };
+        let top = write_root("radicle", &home).unwrap();
+        let outcome = super::write(
+            &identity,
+            "root-swap",
+            "radicle",
+            &top,
+            &plan,
+            &gates,
+            || {
+                std::fs::rename(&home, &moved).unwrap();
+                std::os::unix::fs::symlink(&other, &home).unwrap();
+                true
+            },
+        )
+        .unwrap();
+        assert_eq!(outcome, Outcome::Installed);
+        assert_eq!(
+            std::fs::read(other.join("keys/radicle")).unwrap(),
+            b"other private key"
+        );
+        assert_eq!(
+            std::fs::read(other.join("keys/radicle.pub")).unwrap(),
+            b"other public key"
+        );
+        assert!(!other.join("config.json").exists());
+        assert!(!moved.join("keys/radicle").exists());
+        assert!(!moved.join("keys/radicle.pub").exists());
+        assert_eq!(std::fs::read(moved.join("config.json")).unwrap(), b"{}");
+        // And a write that finds the home replaced before it opens it is
+        // refused: the canonical home isn't where its gate is.
+        assert!(write_root("radicle", &home).is_err());
     }
 }
