@@ -17,6 +17,10 @@ repository = "https://github.com/solardev-xyz/freedom-core"
 
 [workspace]
 resolver = "3"
+# fc-nat64 (../nat64), NAT64 discovery shared by the services, is a member:
+# this lockfile, the lints' and tests' `--workspace` runs, and `cargo deny`
+# cover it.
+members = [".", "../nat64"]
 
 [features]
 # Fault injection for the integration tests (design 0007, Testing), read from
@@ -51,33 +55,18 @@ freedom-ipfs-store = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev
 # The `Stream` trait, to read a response's body as it comes; already in
 # freedom-ipfs's graph.
 futures-core = "0.3"
-# NAT64 discovery's one query and its answers (src/nat64/query.rs): DNS
-# messages, already in every platform's graph (freedom-ipfs-net's resolver,
-# libp2p-dns). It encodes only its own one-question query, and decodes the
-# answers, as deny.toml's hickory-proto ignores require.
-hickory-proto = { version = "0.25", default-features = false, features = ["std"] }
+# NAT64 discovery (0007, "Network-specific NAT64 prefixes"), shared with
+# the other services: a member of this workspace (see [workspace]).
+fc-nat64 = { path = "../nat64" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The process runtime (0007, "Inside the process"). freedom-ipfs requires
 # tokio's multi-threaded runtime, and already brings it.
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time"] }
 
-# NAT64 discovery's resolvers per OS (src/nat64/resolvers.rs), each crate
-# already in that platform's graph, so none adds a crate to the binary:
-# macOS reads the network services' DNS state from the SystemConfiguration
-# dynamic store (system-configuration) and a link-local resolver's
-# interface index (if-addrs), both if-watch's; Windows reads each adapter's
-# DNS servers (ipconfig, hickory-resolver's) and the servers DHCP gave it
-# from the registry (windows-registry, ipconfig's).
-[target.'cfg(target_os = "macos")'.dependencies]
-system-configuration = "0.7"
-if-addrs = "0.15"
-
-[target.'cfg(windows)'.dependencies]
-ipconfig = "0.3"
-windows-registry = "0.6"
-
 [dev-dependencies]
+# tests/nat64.rs's fixture resolver: the DNS messages it answers with.
+hickory-proto = { version = "0.25", default-features = false, features = ["std"] }
 # Upstream's SOCKS5 test proxy and test servers (its `test-util` feature),
 # for the `socks5` tests through the binary; the same pin as the gateway's.
 freedom-ipfs-net = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "0f8ebc38df196b277851271290089892e4d20d45", features = ["test-util"] }

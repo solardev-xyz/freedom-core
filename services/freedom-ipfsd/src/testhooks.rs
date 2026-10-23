@@ -124,7 +124,7 @@ pub fn progress_counts(
 pub fn nat64_source() -> Option<crate::nat64::Source> {
     #[cfg(feature = "testhooks")]
     if let Ok(list) = std::env::var("FREEDOM_IPFSD_TEST_NAT64_RESOLVERS") {
-        use crate::nat64::resolvers::Learned;
+        use fc_nat64::resolvers::Learned;
         let learned: Vec<Learned> = list
             .split(',')
             .map(str::trim)

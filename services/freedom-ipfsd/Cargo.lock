@@ -870,6 +870,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
+name = "fc-nat64"
+version = "0.1.0"
+dependencies = [
+ "fc-service",
+ "freedom-ipfs-net",
+ "hickory-proto",
+ "if-addrs",
+ "ipconfig",
+ "serde_json",
+ "system-configuration",
+ "windows-registry",
+]
+
+[[package]]
 name = "fc-protocol"
 version = "0.6.0"
 dependencies = [
@@ -1102,6 +1116,7 @@ dependencies = [
 name = "freedom-ipfsd"
 version = "0.2.1"
 dependencies = [
+ "fc-nat64",
  "fc-protocol",
  "fc-service",
  "freedom-ipfs-core",
@@ -1110,14 +1125,10 @@ dependencies = [
  "freedom-ipfs-store",
  "futures-core",
  "hickory-proto",
- "if-addrs",
- "ipconfig",
  "serde",
  "serde_json",
- "system-configuration",
  "tempfile",
  "tokio",
- "windows-registry",
 ]
 
 [[package]]
