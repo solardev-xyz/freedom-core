@@ -1444,6 +1444,11 @@ function scenarioDefinitions(ethers) {
     one('anchor-hash-split', base({ hosts: { 'c.rpc.example': { fork: true }, 'd.rpc.example': { fork: true } } })),
     one('anchor-finalized', base({ network: { ...QUORUM_NETWORK, quorum: { ...QUORUM_NETWORK.quorum, anchor: 'finalized' } } })),
     one('node-errors-agree', base({ calls: { resolve: { rpc_error: { code: -32000, message: 'header not found' } } } })),
+    // #656's /rate.?limit/i takes any one character between its words; the
+    // pin has no such rule, so these agree into a not-found there, and the
+    // core counts them as node failures (deviation node-failures).
+    ...[['underscore', 'rate_limit: 429'], ['tab', `rate${String.fromCharCode(9)}limit`], ['colon', 'rate:limit']].map(([form, message]) =>
+      one(`node-errors-agree-rate-limit-${form}`, base({ calls: { resolve: { rpc_error: { code: -32000, message } } } }))),
     // A verified answer lives 15 minutes; an unverified one a minute.
     { id: 'cache-boundary-verified', world: base({}), steps: [{ call: content() }, { call: content() }, { after: 899_999, call: content() }, { after: 1, call: content() }] },
     { id: 'cache-boundary-unverified', world: base({ endpoints: ENDPOINTS.slice(0, 2) }), steps: [{ call: content() }, { after: 59_999, call: content() }, { after: 1, call: content() }] },

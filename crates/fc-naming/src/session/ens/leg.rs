@@ -258,10 +258,24 @@ pub(crate) fn node_failure(node: &rpc::NodeError) -> bool {
         "no response",
         "timeout",
     ];
-    PATTERNS.iter().any(|p| lower.contains(p))
-        || lower.contains("rate limit")
-        || lower.contains("ratelimit")
-        || lower.contains("rate-limit")
+    PATTERNS.iter().any(|p| lower.contains(p)) || rate_limit(&lower)
+}
+
+/// #656's `/rate.?limit/i` on an ASCII-lowercased message: `rate`, then at
+/// most one character, then `limit`. JavaScript's `.` is one UTF-16 code
+/// unit that isn't a line terminator, so `rate_limit`, `rate\tlimit` and
+/// `rate:limit` match, and two characters, a line break or an astral
+/// character (two code units) between them don't.
+fn rate_limit(lower: &str) -> bool {
+    lower.match_indices("rate").any(|(at, _)| {
+        let rest = &lower[at + "rate".len()..];
+        rest.starts_with("limit")
+            || rest.chars().next().is_some_and(|c| {
+                c.len_utf16() == 1
+                    && !matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}')
+                    && rest[c.len_utf8()..].starts_with("limit")
+            })
+    })
 }
 
 /// A leg's outcome (`runQuorumLeg`).
