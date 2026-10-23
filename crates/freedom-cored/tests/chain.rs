@@ -236,6 +236,76 @@ fn a_quorum_read_through_main() {
     assert!(call(&mut core, 1000, "vault.status", json!({}))["result"].is_object());
 }
 
+/// `exclude_sources` (design 0005, Methods main calls): the router's
+/// `excludeSources` over the wire, on top of the profile's exclusions.
+#[test]
+fn a_read_skips_the_sources_it_excludes() {
+    let (_root, mut core) = core();
+    configure(
+        &mut core,
+        2,
+        &[snapshot(&["quorum", "direct"], &["a", "b", "c"], 5000)],
+    );
+    let mut params = read("eth_getTransactionReceipt", json!([HASH]));
+    params["exclude_sources"] = json!(["quorum"]);
+    core.send(&request(3, "chain.request", params));
+    // Only Direct is asked: its first endpoint, which answers.
+    let (reply, seen) = serve(&mut core, 3, |_| Some(rpc_result("null")));
+    assert_eq!(reply["result"]["source"], "direct", "{reply}");
+    assert_eq!(reply["result"]["verified"], false);
+    let endpoints: Vec<&str> = seen
+        .requests
+        .iter()
+        .map(|r| r["params"]["endpoint"].as_str().unwrap())
+        .collect();
+    assert_eq!(endpoints, ["a"]);
+
+    // Nothing left to ask: today's text, naming what was dropped.
+    let mut params = read("eth_blockNumber", json!([]));
+    params["exclude_sources"] = json!(["direct", "quorum"]);
+    let reply = call(&mut core, 4, "chain.request", params);
+    assert_eq!(reply["error"]["data"]["kind"], "core", "{reply}");
+    assert_eq!(
+        reply["error"]["data"]["message"],
+        "No chain source left for eth_blockNumber on chain 1: read order [quorum, direct], \
+         excluded for this request: quorum, direct"
+    );
+}
+
+#[test]
+fn exclude_sources_names_known_sources_once() {
+    let (_root, mut core) = core();
+    configure(&mut core, 2, &[snapshot(&["direct"], &["a"], 5000)]);
+    for (id, excluded) in [
+        (3, json!(["nobody"])),
+        (4, json!(["colibri", "colibri"])),
+        (5, json!(["Colibri"])),
+        (6, json!([1])),
+        (7, json!("colibri")),
+        (8, json!(null)),
+    ] {
+        let mut params = read("eth_blockNumber", json!([]));
+        params["exclude_sources"] = excluded.clone();
+        let reply = call(&mut core, id, "chain.request", params);
+        assert_eq!(
+            reply["error"],
+            json!({ "code": "invalid_argument", "message": "Invalid parameters" }),
+            "{excluded}: {reply}"
+        );
+    }
+    // Every known source, and none at all, are fine.
+    let mut params = read("eth_blockNumber", json!([]));
+    params["exclude_sources"] = json!(["myotis", "colibri", "quorum", "blockscout"]);
+    core.send(&request(9, "chain.request", params));
+    let (reply, _) = serve(&mut core, 9, |_| Some(rpc_result(r#""0x10""#)));
+    assert_eq!(reply["result"]["result"], "0x10", "{reply}");
+    let mut params = read("eth_blockNumber", json!([]));
+    params["exclude_sources"] = json!([]);
+    core.send(&request(10, "chain.request", params));
+    let (reply, _) = serve(&mut core, 10, |_| Some(rpc_result(r#""0x11""#)));
+    assert_eq!(reply["result"]["result"], "0x11", "{reply}");
+}
+
 #[test]
 fn direct_after_a_quorum_timeout() {
     let (_root, mut core) = core();
