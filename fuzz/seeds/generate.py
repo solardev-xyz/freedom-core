@@ -239,10 +239,18 @@ def naming_seeds():
     # A urls string[] that fails after reading its first URL (the second
     # offset is above 2^53 - 1): the URL counts against the bound but isn't
     # in the answer, so a bound of what the answer holds (callData's 2
-    # bytes) refuses it.
+    # bytes) refuses it, and so does one of the URL's length, which
+    # callData then passes (review of #199).
     failing = offchain_lookup(word(2) + word(64) + word(2 ** 64) + abi_bytes(url))
     write('naming_answer', 'abi-offchain-lookup-failed-urls',
           bytes([3 + 4 * 5]) + struct.pack('>H', 2) + failing)
+    write('naming_answer', 'abi-offchain-lookup-failed-urls-at-url',
+          bytes([3 + 4 * 5]) + struct.pack('>H', len(url)) + failing)
+    # A [string[]] whose first item offset is above 2^53 - 1: the field
+    # fails before any string is made, so it decodes within a bound of 0
+    # (review of #199).
+    write('naming_answer', 'abi-string-array-failed-offset',
+          bytes([3 + 4 * 4]) + struct.pack('>H', 0) + word(32) + word(1) + word(2 ** 64))
 
 
 def offchain_lookup(urls):

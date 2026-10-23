@@ -7,14 +7,16 @@
 //! besides panics, that a contenthash it reads gives a URI, and the ABI
 //! decoder's output bound against an unbounded decode of the same data.
 //! For ABI data, the two bytes after the first are the bound (big-endian,
-//! so small inputs reach it):
-//! - data whose unbounded decode returns more bytes and strings than the
-//!   bound is refused;
-//! - a decode within the bound returns what the unbounded one does;
-//! - data whose unbounded decode returns no more than the bound decodes
-//!   within it, unless a `string[]` field failed: its strings read before
-//!   the failure count against the bound, as the reference counts what it
-//!   produced (deviation `decode-budget`), but aren't in the answer.
+//! so small inputs reach it). `decode_counted` decodes without one and
+//! tallies the bytes and strings it made, apart from the bound's own
+//! count, including those of a `string[]` field that then failed, which
+//! the bound counts (deviation `decode-budget`) but the answer doesn't
+//! hold:
+//! - data whose unbounded decode fails fails within any bound;
+//! - otherwise it decodes within the bound, to the same fields, exactly
+//!   when what it made is no more than the bound, and is refused when it
+//!   is more;
+//! - what the answer holds is never more than what was made.
 
 #![no_main]
 
@@ -40,8 +42,7 @@ const SHAPES: [&[Kind]; 6] = [
     ],
 ];
 
-/// The bytes and strings `fields` hold: what the decode's output bound
-/// counts, measured on what it returned.
+/// The bytes and strings `fields` hold, measured on the answer.
 fn footprint(fields: &[Field]) -> usize {
     fields
         .iter()
@@ -79,22 +80,17 @@ fuzz_target!(|data: &[u8]| {
             let bounded = abi::decode_within(kinds, rest, limit);
             // The output bound is the only difference from an unbounded
             // decode (the read budget is the data's, either way).
-            let Ok(fields) = abi::decode_within(kinds, rest, usize::MAX) else {
+            let (unbounded, made) = abi::decode_counted(kinds, rest);
+            let Ok(fields) = unbounded else {
                 assert!(bounded.is_err());
                 return;
             };
             assert_eq!(fields.len(), kinds.len());
-            if footprint(&fields) > limit {
+            assert!(footprint(&fields) <= made);
+            if made <= limit {
+                assert_eq!(bounded, Ok(fields));
+            } else {
                 assert!(bounded.is_err());
-                return;
-            }
-            let uncounted = kinds
-                .iter()
-                .zip(&fields)
-                .any(|(&kind, field)| kind == Kind::StringArray && field.is_err());
-            match bounded {
-                Ok(within) => assert_eq!(within, fields),
-                Err(_) => assert!(uncounted),
             }
         }
     }

@@ -32,7 +32,8 @@ base64 = "0.22.1"
 fc-chain = { path = "../crates/fc-chain" }
 fc-json = { path = "../crates/fc-json" }
 fc-keys = { path = "../crates/fc-keys" }
-fc-naming = { path = "../crates/fc-naming" }
+# The naming target compares a bounded ABI decode with `decode_counted`.
+fc-naming = { path = "../crates/fc-naming", features = ["fuzzing"] }
 fc-protocol = { path = "../crates/fc-protocol" }
 fc-seal = { path = "../crates/fc-seal" }
 fc-vault = { path = "../crates/fc-vault" }
