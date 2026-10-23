@@ -20,6 +20,10 @@
 //!   (bytes), so a test can fill it.
 //! - `FREEDOM_IPFSD_TEST_STREAM_MEMORY_WAIT_MS` replaces the 10 s a
 //!   stream's next fetch waits for memory.
+//! - `FREEDOM_IPFSD_TEST_MEMORY_MARGIN_MS` replaces the 50 ms before a
+//!   head's deadline at which a request's wait for memory gives up, still at
+//!   most half way to the deadline: a test can leave its `busy` room to be
+//!   queued in time on a loaded machine.
 //! - `FREEDOM_IPFSD_TEST_HTML_PREFETCH_ASSETS` turns upstream's HTML
 //!   prefetch on (off by default, as 0007 keeps it), for that many assets,
 //!   one at a time: background work, to fill an instance's background queue.
@@ -165,6 +169,16 @@ pub fn memory_budget(default: usize) -> usize {
 pub fn stream_memory_wait(default: Duration) -> Duration {
     #[cfg(feature = "testhooks")]
     if let Some(ms) = millis("FREEDOM_IPFSD_TEST_STREAM_MEMORY_WAIT_MS") {
+        return Duration::from_millis(ms);
+    }
+    default
+}
+
+/// How long before a head's deadline a request's wait for memory gives
+/// up: `default`, unless a test replaces it.
+pub fn memory_margin(default: Duration) -> Duration {
+    #[cfg(feature = "testhooks")]
+    if let Some(ms) = millis("FREEDOM_IPFSD_TEST_MEMORY_MARGIN_MS") {
         return Duration::from_millis(ms);
     }
     default
