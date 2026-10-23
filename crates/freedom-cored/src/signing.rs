@@ -34,11 +34,15 @@ fn evm_error(error: fc_evm::Error) -> ErrorBody {
     }
 }
 
-/// Which keys a method may use (design 0002, "Key references").
+/// Which keys a method may use (design 0002, "Key references"): accounts
+/// sign transactions, messages and typed data; the Bee wallet and publisher
+/// keys sign single-owner chunks, and nothing else does. An account's
+/// 32-byte `sign.message` is exactly a chunk signature, so a chunk signature
+/// is bound to a real chunk only from a key that signs nothing else (#89).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Allowed {
     AccountsOnly,
-    AnyKey,
+    ChunkKeysOnly,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,10 +104,12 @@ fn key_ref(value: &Value, allowed: Allowed) -> Result<KeyRef, ErrorBody> {
         }
         _ => return Err(invalid("unknown key kind")),
     };
-    if allowed == Allowed::AccountsOnly && !matches!(key, KeyRef::Account(_)) {
-        return Err(invalid("this key can only sign single-owner chunks"));
+    match (allowed, key) {
+        (Allowed::AccountsOnly, KeyRef::Account(_))
+        | (Allowed::ChunkKeysOnly, KeyRef::BeeWallet | KeyRef::Publisher(_)) => Ok(key),
+        (Allowed::AccountsOnly, _) => Err(invalid("this key can only sign single-owner chunks")),
+        (Allowed::ChunkKeysOnly, _) => Err(invalid("account keys don't sign single-owner chunks")),
     }
-    Ok(key)
 }
 
 /// Derives the key now; it wipes on drop.
@@ -176,7 +182,7 @@ pub fn handle(state: &VaultState, method: &str, raw: Option<&str>) -> Result<Val
         }
         "swarm.sign_soc" => {
             let fields = object(&params, &["key", "identifier", "payload"], &["span"])?;
-            let key = key_ref(&fields["key"], Allowed::AnyKey)?;
+            let key = key_ref(&fields["key"], Allowed::ChunkKeysOnly)?;
             let identifier: [u8; 32] = parse_bytes(string(fields, "identifier")?, "identifier")
                 .map_err(evm_error)?
                 .try_into()
