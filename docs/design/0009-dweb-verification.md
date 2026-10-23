@@ -269,6 +269,11 @@ The formats Ant and Bee share, with Ant's reading where they differ, since the b
   - `/bytes` is unchanged by erasure coding.
   - **It lowers the branching:** an intermediate chunk holds at most 119, 107, 97 or 39 data references at levels 1 to 4 (Bee's table, which Ant follows), so a level-1 chunk covers less of the file ([Performance](#performance)).
 - **Depth:** the number of intermediate levels is `⌈log_b(⌈N / 4096⌉)⌉`, with `b` = 128, or the data references above under erasure coding. A 1 GiB file without erasure coding has three levels.
+- **One shape where Ant's splitter and Bee's differ.** Where a level of the tree ends with a single leftover reference, Bee's hashtrie writer carries it up to the next level unwrapped (`Sum`, Bee `pkg/file/pipeline/hashtrie/hashtrie.go`). Ant v0.5.71's level-0 splitter wraps it in an intermediate chunk of one reference (`StreamingSplitter::finish`, `ar/splitter.rs`). Its erasure-coded splitter carries the reference up, as Bee does.
+  - **So the same content has two references.** At 524,289 bytes (129 leaves), Bee's root names the first 128 leaves' chunk and the last leaf. Ant's names that chunk and a chunk of span 1 holding the last leaf's address.
+  - **How Ant reads its own shape:** the wrapper's logical length is 1, so Ant's joiner reads it as a leaf, and serves the first byte of its payload (the first byte of the last leaf's address) as the file's last byte. The bundled Ant answers content Ant uploaded the same way.
+  - **Verified mode gives Ant's answer:** the wrapper is a valid CAC whose authenticated payload begins with the byte `/bytes` streams, so it passes [the leaf check](#leaves). Bee's tree for the same content is served as its content, by Ant and by the core.
+  - The vectors hold both shapes at the sizes where they differ ([Tests first](#tests-first)).
 
 ### Manifests and feeds
 
@@ -296,7 +301,8 @@ For `bzz://<root><path>`, in Ant's resolution order (`ar/mantaray.rs:486`–`592
 2. **A feed root:**
    - main asks `GET /feeds/<owner>/<topic>` with `Swarm-Only-Root-Chunk: true`, and the core reads only `swarm-feed-index` from it: which update is latest is the node's word;
    - then `/chunks/<the update's address>`: the core checks the SOC's address, its identifier for that index, the owner the manifest names, the signature and the wrapped chunk;
-   - the update's reference (v1) or root (v2) becomes the manifest's root, and the label becomes `latest_asserted`.
+   - the update's reference (v1) or root (v2) becomes the manifest's root, and the label becomes `latest_asserted`;
+   - **when what the update names isn't a manifest,** Ant's fallback for a root that isn't a manifest (step 1) applies to the URL's reference, not to the update's. A bare request is answered with the feed manifest's own bytes, as raw bytes of that reference: `immutable`, its `ETag`, and no feed headers. A path below it is a 404. The core does the same, labelled `verified`, since those bytes are the URL's reference's own. An update that names an encrypted reference is `unverifiable` instead ([Encrypted references](#encrypted-references)): telling that it isn't a manifest would take decrypting it.
 3. **The path,** as Ant resolves it:
    - an empty path is the index document; without one, a 404;
    - the literal path;
@@ -518,7 +524,7 @@ The core builds every head from verified data, by the bundled node's rules. The 
   - **`If-None-Match`** (`*`, an exact tag, or a weak one) gives a 304 with the `ETag` and `Cache-Control`, only when there is no range.
   - **Not sent,** as `GatewayCore` sends none: `X-Ipfs-Path`, `X-Ipfs-Roots`, `Content-Disposition`. The query isn't read.
   - **Errors the core proves** (a missing name, a `..` segment, a node that isn't a file or directory) carry `GatewayCore`'s status and HTML body.
-- **Not reproduced:** headers that describe the node rather than the content, if a vector shows any, are dropped and listed with the vectors. None has been found in Ant's handler.
+- **Not reproduced:** headers that describe the node rather than the content are dropped, and the vectors list them (`meta.ant.node_headers`). They show one: Ant's router adds `server: ant-gateway/0.5.71` to every answer.
 - **What a reused Bee or a Kubo answered differently** (Bee sniffs types and sends no `Cache-Control`, Kubo writes its own listings and `X-Ipfs-*` headers) no longer shows: deviation `verified-heads`.
 
 ### Ranges and conditionals
@@ -736,14 +742,17 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 
 - **Format vectors** (`vectors/dweb-verify.json`), from the pinned nodes, not from the JavaScript reference: verification reads no user data, and the formats belong to Ant, Bee and IPFS.
   - **The generator:**
-    - it drives a pinned Ant and a pinned Kubo on loopback, seeded with the fixtures and cut off from their networks, and runs freedom-ipfs's `GatewayCore` over a memory store seeded the same way (0007's test hooks);
+    - **Ant runs in process.** The generator builds Ant's gateway router as antd builds it, configured as Freedom configures Ant. The node-loop arms beneath it, which are private to `ant-p2p`, are ported from `behaviour.rs` at the pinned commit, over a memory chunk source holding the fixtures; a missing chunk is a miss the network corroborated;
+    - **for IPFS,** freedom-ipfs's `GatewayCore` runs over a memory store seeded the same way, and a pinned Kubo runs offline for the CARs and raw blocks a trustless gateway sends;
+    - it lives in its own Cargo workspace (`vectors/dweb-verify`), which normal CI never builds. A path-filtered workflow regenerates the file and compares it byte for byte when the generator or the file changes;
     - it records every exchange, and the core's tests replay them with no node running;
     - **everything that varies is pinned:** the exact Kubo release and the other versions are in the file's `meta`; the clock is fixed, which sets IPNS validity and feed timestamps; and every random input (encryption keys and padding, obfuscation keys, IPNS keys) comes from a seed recorded with the case. The core's tests pass the same `now`.
-  - **Swarm,** recorded from Ant v0.5.71's splitter and manifest writer, and cross-checked against Bee's for the formats Bee also writes:
+  - **Swarm,** recorded from Ant v0.5.71's splitter and manifest writer, and cross-checked once against Bee's for the formats Bee also writes ([Parity](#parity)):
     - files of 0, 1, 4095, 4096, 4097, 524,288, 524,289 and 67,108,865 bytes, from a single chunk to three levels of intermediate chunks;
     - each with erasure coding at every redundancy level;
+    - **both shapes where Ant's splitter and Bee's differ** ([Files](#files)), at 524,289 and 67,108,865 bytes: Ant's tree with its one-reference wrapper, and Bee's tree as a case of its own;
     - manifests with an index document, an error document, nested paths, a path that is a prefix of another, prefixes longer than one fork can hold, Unicode names, every metadata field Ant reads, an obfuscated node, and an empty node with a zero reference size;
-    - a sequence feed with several updates, v1 and v2, and its manifest;
+    - a sequence feed with several updates, v1 and v2, and its manifest; a feed whose latest update names raw bytes; an empty feed;
     - **encrypted content only where the walk meets it:** a feed whose v1 update is 80 bytes, and a manifest node with 64-byte references below a plain root, each `unverifiable` with nothing released ([Encrypted references](#encrypted-references));
     - for each, every chunk by address, and Ant's answers to a request list (`/bzz/<ref>/<path>` with and without a query, `Range`, `If-Range`, `If-None-Match` and `HEAD`): status, headers and body.
   - **Swarm shapes Ant accepts that a simple reader wouldn't,** recorded from Ant too:
@@ -865,6 +874,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 - **Unverified mode is today's,** byte for byte: verification off, a gateway without support, an encrypted reference, a DNSLink name, and every bundled backend plan exactly as 0006 does. Two listed deviations change it:
   - strict mode, when the user turns it on, refuses the unverified plans (`strict-mode`);
   - a navigation's error answer from the core or main becomes the error page, in every mode (`navigation-error-page`).
+- **Ant's formats are Bee's, checked once, but for one shape.** Bee's own writers at a93fb7a7 reproduce the vectors' references: Bee's pipeline splitting the same content at each redundancy level, and the manifest code of Bee's upload handlers (`bzz.go`, `dirs.go`, `feed.go`). That check is a one-off Go program beside the generator, not run in CI; its result is in the vectors' `meta`. 63 of 65 references agree. The two that don't are the sizes where Ant's level-0 splitter wraps a lone reference ([Files](#files)), and Bee's references for them are the vectors' Bee-shaped cases.
 - **A verified response is the bundled node's,** not the external node's: what Ant v0.5.71 answers for `bzz:`, and what freedom-ipfs v0.4.6's `GatewayCore` answers for `ipfs:` and `ipns:`, over the same content. The vectors hold the core to it, header by header, with the exceptions listed in [Heads](#heads).
 - **Qualified: for content both accept.** Where the verifier is deliberately stricter than the pinned reader, the difference is a listed deviation with vectors of its own, kept apart from the native-generated ones ([Tests first](#tests-first)):
   - `unixfs-sizes` and `hamt-lookup`, for malformed UnixFS files and HAMT directories;
@@ -899,6 +909,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 | `soc-references` | an external node may answer a reference with a single-owner chunk, and what it serves then rests on that chunk | the core accepts one only as a feed update; elsewhere it is `unverifiable` | content reached through a SOC outside a feed doesn't load in verified mode |
 | `unixfs-sizes` | the native reader (the parity target) slices a child by its declared size | a declared size that disagrees with a raw leaf, or content that doesn't add up to `filesize`, cuts the body as malformed | only malformed files differ |
 | `hamt-lookup` | the native reader finds a HAMT entry by its name | the core follows the name's hash and the bitfield | an entry that isn't where its hash points is a 404; only malformed directories differ |
+| `ant-lone-reference` | Ant, bundled or external, serves a tree its level-0 splitter wrote with a level's lone reference wrapped, with the wrapper's first payload bytes where the last leaf's content belongs | the same answer, verified: the wrapper passes the leaf check | none: parity with the bundled Ant. Bee's tree for the same content, which carries the reference unwrapped, is served as its content |
 | `decoder-caps` | the native reader decodes any structure a block holds | at most 65,536 links per dag-pb node, and CBOR nested at most 8 levels | structure past the caps is refused as `unverifiable`. That is mostly degenerate encodings, but also rare valid content such as a directory of more than 65,536 compact identity-CID links |
 | `rsa-keys` | the native reader hashes its own re-encoding of an RSA key, so it takes a key encoded another way; ring takes a modulus of 2,041 to 2,047 bits | the record's `pubKey` must hash to the name as it arrived, in libp2p's deterministic encoding and canonical DER, and the modulus is at least 2,048 bits, as go-libp2p requires | only keys no libp2p implementation writes differ: such a record fails its check |
 | `strict-mode` | none | a profile setting, off by default, that answers every unverified external request with a 403 that says why | with it on, DNSLink names, encrypted references, IPNS names with other inlined keys, and backends that don't verify stop loading |
