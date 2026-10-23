@@ -216,6 +216,13 @@ impl Failure {
 
 /// Rules 6–8: the node's own error, without revert evidence (−32603 is
 /// rule 5, checked first).
+///
+/// No HTTP status is read from the node's message. A status is a field of
+/// its own: a non-2xx answer is rule 3 (`RpcError::Http`), and a JSON-RPC
+/// code 429 is one of #656's codes. The message is the node's free text,
+/// and digits in it can be anything: calldata or an address it echoes, a
+/// gas figure, a reason. Matched as text, "429" or "503" there would turn
+/// an honest node's answer into a provider failure and quarantine it.
 pub(crate) fn node_failure(node: &rpc::NodeError) -> bool {
     let code = node.code();
     let message = node.message();
@@ -234,7 +241,7 @@ pub(crate) fn node_failure(node: &rpc::NodeError) -> bool {
     if code.is_some_and(|c| CODES.contains(&c)) {
         return true;
     }
-    const PATTERNS: [&str; 19] = [
+    const PATTERNS: [&str; 15] = [
         "header not found",
         "missing trie node",
         "unknown block",
@@ -249,10 +256,6 @@ pub(crate) fn node_failure(node: &rpc::NodeError) -> bool {
         "request count exceeded",
         "compute units",
         "no response",
-        "502",
-        "503",
-        "504",
-        "429",
         "timeout",
     ];
     PATTERNS.iter().any(|p| lower.contains(p))

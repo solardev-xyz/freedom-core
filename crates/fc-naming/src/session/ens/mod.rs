@@ -598,6 +598,55 @@ mod tests {
     }
 
     #[test]
+    fn status_digits_in_a_node_message_are_not_provider_failures() {
+        let call = Method::Call {
+            to: [0; 20],
+            data: Vec::new(),
+            block: "latest".into(),
+        };
+        let classify =
+            |status: u16, body: &str| match rpc::answer(1, &call, status, body.as_bytes()) {
+                Err(error) => CallError::Rpc(error).provider_failure(),
+                Ok(_) => unreachable!(),
+            };
+        let node = |message: &str| {
+            format!(
+                r#"{{"id":1,"error":{{"code":-32000,"message":{}}}}}"#,
+                serde_json::Value::from(message)
+            )
+        };
+        // freedom-browser#656's rows (46b3d891), as the node's own message
+        // carries them: calldata with 429 or a 5xx inside it, a figure
+        // that contains one, and the bare digits. None is a status; rule 8.
+        for status in ["429", "502", "503", "504"] {
+            let calldata = format!("0x9061b923{}{status}0{}", "00".repeat(4), "ab".repeat(8));
+            for message in [
+                format!("invalid opcode: INVALID at pc=0, input {calldata}"),
+                format!("out of gas: gas required exceeds allowance ({status}0000)"),
+                format!("upstream answered {status}"),
+            ] {
+                assert!(!classify(200, &node(&message)), "{message}");
+            }
+            // The status itself still is one: rule 3.
+            assert!(classify(status.parse().unwrap(), &node(status)));
+        }
+        // A JSON-RPC code 429 is one of #656's codes: rule 7.
+        assert!(classify(
+            200,
+            r#"{"id":1,"error":{"code":429,"message":"slow down"}}"#
+        ));
+        // #656's patterns and the reference's own still match.
+        for message in [
+            "header not found",
+            "Too Many Requests",
+            "no response",
+            "timeout",
+        ] {
+            assert!(classify(200, &node(message)), "{message}");
+        }
+    }
+
+    #[test]
     fn caches_keep_map_order_and_evict_expired_first() {
         let mut cache = Cache::default();
         cache.set("a", JsValue::Null, 10.0, 0, usize::MAX);
