@@ -1746,25 +1746,31 @@ fn a_broadcast_answer_stays_charged_while_its_error_is_copied() {
 
 #[test]
 fn a_fee_quotes_codec_work_counts_against_the_budget() {
-    // Two answers kept (a gas price of 1,000 nulls, a 9,000-character
-    // priority fee) fit; the codec's index of the first does not.
+    // A gas price of 1,000 nulls fits as an answer; the codec's index of it
+    // does not. The gas price is read as it arrives, before the hint is
+    // asked for, so the request ends there.
     let gas = format!("[{}]", vec!["null"; 1_000].join(","));
     let priority = format!("\"{}\"", "a".repeat(9_000));
-    let quote = |bounds: Bounds| {
-        let mut world = World::new(bounds, &[chain(1, &["direct"], &["a"], ("3", "2", "5000"))]);
-        let id = world.submit(Call::FeeQuote { chain_id: 1 }, None);
-        world.answer(world.rpcs()[0].0, ok(&gas));
-        assert!(!world.replied(id));
-        world.answer(world.rpcs()[1].0, ok(&priority));
-        world.reply(id).clone()
-    };
-    let bounded = quote(Bounds {
-        request_bytes: 15_000,
+    let bounds = Bounds {
+        request_bytes: gas.len() + 1_000,
         ..Bounds::default()
-    });
-    assert_eq!(protocol(&bounded), Some(Protocol::Budget));
-    // Within the default budget the codec's answer is today's.
-    match quote(Bounds::default()).result {
+    };
+    let mut world = World::new(bounds, &[chain(1, &["direct"], &["a"], ("3", "2", "5000"))]);
+    let id = world.submit(Call::FeeQuote { chain_id: 1 }, None);
+    world.answer(world.rpcs()[0].0, ok(&gas));
+    assert_eq!(protocol(world.reply(id)), Some(Protocol::Budget));
+    assert_eq!(world.rpcs().len(), 1);
+    // Within the default budget the codec's answer is today's, once the
+    // hint's exchange has ended.
+    let mut world = World::new(
+        Bounds::default(),
+        &[chain(1, &["direct"], &["a"], ("3", "2", "5000"))],
+    );
+    let id = world.submit(Call::FeeQuote { chain_id: 1 }, None);
+    world.answer(world.rpcs()[0].0, ok(&gas));
+    assert!(!world.replied(id));
+    world.answer(world.rpcs()[1].0, ok(&priority));
+    match &world.reply(id).result {
         Err(ChainError::Thrown(error)) => assert!(
             error
                 .message
@@ -1926,4 +1932,827 @@ fn a_colibri_reply_over_the_message_cap_is_no_answer_and_no_fault() {
         ),
         (1, "eth_call", 60_000)
     );
+}
+
+// fee-combination (design 0005, B: combining Direct's quotes): the
+// collection's machine tests, `boundary-fee-combine-*`.
+
+/// A chain for B: `read` order, endpoints `rpc`, `configured` 5 s, and a
+/// prover when `prover`.
+fn fee_chain(read: &[&str], rpc: &[&str], prover: bool) -> ChainConfig {
+    ChainConfig {
+        prover: prover.then(|| Prover {
+            endpoint: "p".into(),
+            zk: true,
+        }),
+        ..chain(1, read, rpc, ("3", "2", "5000"))
+    }
+}
+
+const FEE: Call = Call::FeeQuote { chain_id: 1 };
+
+/// A legacy endpoint's answer to the hint: the node doesn't know it.
+fn no_hint() -> Answer {
+    node_error(-32601, "the method eth_maxPriorityFeePerGas does not exist")
+}
+
+fn eip1559(base_fee: &str, priority: &str, max_fee: &str, effective: &str, answered: u8) -> String {
+    format!(
+        r#"{{"type":"eip1559","baseFee":"{base_fee}","maxPriorityFeePerGas":"{priority}","maxFeePerGas":"{max_fee}","effectiveGasPrice":"{effective}","source":"direct","verified":false,"answered":{answered}}}"#
+    )
+}
+
+fn legacy(gas_price: &str, answered: u8) -> String {
+    format!(
+        r#"{{"type":"legacy","gasPrice":"{gas_price}","effectiveGasPrice":"{gas_price}","source":"direct","verified":false,"answered":{answered}}}"#
+    )
+}
+
+fn quote_json(reply: &Reply) -> String {
+    match &reply.result {
+        Ok(Success::FeeQuote(quote)) => quote.to_json(),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A verified header with `base_fee` (hex), or none.
+fn header(base_fee: Option<&str>) -> Answer {
+    let base_fee = base_fee.map_or_else(String::new, |fee| format!(r#","baseFeePerGas":"{fee}""#));
+    Answer::Colibri(ColibriReply::Result(format!(
+        r#"{{"number":"0x1312d00","timestamp":"0x6553f100","hash":"0xab"{base_fee}}}"#
+    )))
+}
+
+/// What a combined EIP-1559 quote pays per gas at `base_fee`:
+/// min(M, base fee + P).
+fn pays(quote: &str, base_fee: u128) -> u128 {
+    let value: serde_json::Value = serde_json::from_str(quote).unwrap();
+    let field = |key: &str| value[key].as_str().unwrap().parse::<u128>().unwrap();
+    match value["type"].as_str().unwrap() {
+        "eip1559" => field("maxFeePerGas").min(base_fee + field("maxPriorityFeePerGas")),
+        _ => field("gasPrice"),
+    }
+}
+
+impl World {
+    /// The io id of the latest `method` exchange with `endpoint`.
+    fn rpc_to(&self, endpoint: &str, method: &str) -> u64 {
+        self.rpcs()
+            .iter()
+            .rev()
+            .find(|(_, _, e, m)| e == endpoint && m == method)
+            .map(|(id, ..)| *id)
+            .unwrap_or_else(|| panic!("no {method} to {endpoint}"))
+    }
+
+    /// The `(endpoint, method, at)` of every exchange, in order.
+    fn asked(&self) -> Vec<(String, String, u64)> {
+        self.rpcs()
+            .into_iter()
+            .map(|(_, at, endpoint, method)| (endpoint, method, at))
+            .collect()
+    }
+
+    /// The verified header reads: `(io id, at)`.
+    fn header_reads(&self) -> Vec<(u64, u64)> {
+        self.requests
+            .iter()
+            .filter_map(|(id, at, request, _)| match request {
+                Request::Verified(VerifiedOp::Colibri { method, params, .. })
+                    if method == "eth_getBlockByNumber" =>
+                {
+                    assert_eq!(params, r#"["latest",false]"#);
+                    Some((*id, *at))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Answers `endpoint`'s gas price, then its hint (`None`: it has none).
+    fn quote_from(&mut self, endpoint: &str, gas: &str, priority: Option<&str>) {
+        self.answer(
+            self.rpc_to(endpoint, "eth_gasPrice"),
+            ok(&format!("\"{gas}\"")),
+        );
+        let hint = self.rpc_to(endpoint, "eth_maxPriorityFeePerGas");
+        self.answer(
+            hint,
+            priority.map_or_else(no_hint, |p| ok(&format!("\"{p}\""))),
+        );
+    }
+}
+
+#[test]
+fn boundary_fee_combine_three_successes() {
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b", "c", "d"], false)],
+    );
+    let id = world.submit(FEE, None);
+    // The first three start together; the fourth is never asked.
+    let started: Vec<_> = world.asked();
+    assert_eq!(
+        started,
+        ["a", "b", "c"].map(|e| (e.to_owned(), "eth_gasPrice".to_owned(), 0))
+    );
+    world.quote_from("a", "0x64", Some("0xa"));
+    world.quote_from("b", "0x78", Some("0x5"));
+    assert!(!world.replied(id));
+    world.quote_from("c", "0x6e", Some("0x14"));
+    // M: 190, 235, 200; P: 10, 5, 20.
+    assert_eq!(
+        quote_json(world.reply(id)),
+        eip1559("92", "5", "190", "97", 3)
+    );
+    assert_eq!(world.reply(id).settled, 0);
+    assert!(world.asked().iter().all(|(e, ..)| e != "d"));
+    assert!(world.cancels.is_empty());
+}
+
+#[test]
+fn boundary_fee_combine_independent_minima() {
+    for (answers, want) in [
+        // M − P odd: 10/1 with 10/2 combine to M = 18, P = 1.
+        (
+            [("0xa", "0x1"), ("0xa", "0x2")],
+            eip1559("8", "1", "18", "9", 2),
+        ),
+        // The raw-minima trap: 100/10 with 100/9 gives M = 190, not 191.
+        (
+            [("0x64", "0xa"), ("0x64", "0x9")],
+            eip1559("90", "9", "190", "99", 2),
+        ),
+    ] {
+        let mut world = World::new(
+            Bounds::default(),
+            &[fee_chain(&["direct"], &["a", "b"], false)],
+        );
+        let id = world.submit(FEE, None);
+        world.quote_from("a", answers[0].0, Some(answers[0].1));
+        world.quote_from("b", answers[1].0, Some(answers[1].1));
+        assert_eq!(quote_json(world.reply(id)), want);
+    }
+}
+
+#[test]
+fn boundary_fee_combine_all_legacy() {
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct", "colibri"], &["a", "b", "c"], true)],
+    );
+    let id = world.submit(FEE, None);
+    world.quote_from("a", "0x10", None);
+    // A hint above the gas price, and a negative one, give legacy quotes.
+    world.quote_from("b", "0xc", Some("0xd"));
+    world.quote_from("c", "0x14", Some("-1"));
+    // All legacy: the lowest gas price, without waiting for the header.
+    assert_eq!(quote_json(world.reply(id)), legacy("12", 3));
+    assert_eq!(world.header_reads().len(), 1);
+}
+
+#[test]
+fn boundary_fee_combine_mixed_with_a_verified_header() {
+    // The boundary case: an EIP-1559 100/1 (M = 199) and a legacy 1000.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct", "colibri"], &["a", "b"], true)],
+    );
+    let id = world.submit(FEE, None);
+    // The header read starts with the collection, after its first
+    // exchanges.
+    let reads = world.header_reads();
+    assert_eq!(reads.len(), 1);
+    assert_eq!(world.requests.last().map(|r| r.0), Some(reads[0].0));
+    world.quote_from("a", "0x64", Some("0x1"));
+    world.quote_from("b", "0x3e8", None);
+    // Mixed: the combination waits for the header, which arrives after the
+    // collection ended.
+    world.run(300);
+    assert!(!world.replied(id));
+    world.answer(reads[0].0, header(Some("0x7")));
+    let reply = world.reply(id);
+    assert_eq!(reply.settled, 300);
+    let quote = quote_json(reply);
+    assert_eq!(quote, eip1559("99", "1", "199", "100", 2));
+    // If the base fee falls to 1, it pays 2 per gas, as the honest one would.
+    assert_eq!(pays(&quote, 1), 2);
+    // Any base fee shows EIP-1559, zero and 256 bits included.
+    let widest = format!("0x{}", "f".repeat(64));
+    for base_fee in ["0x0", widest.as_str()] {
+        let mut world = World::new(
+            Bounds::default(),
+            &[fee_chain(&["direct", "colibri"], &["a", "b"], true)],
+        );
+        let id = world.submit(FEE, None);
+        world.quote_from("a", "0x64", Some("0x1"));
+        world.quote_from("b", "0x3e8", None);
+        world.answer(world.header_reads()[0].0, header(Some(base_fee)));
+        assert_eq!(
+            quote_json(world.reply(id)),
+            eip1559("99", "1", "199", "100", 2),
+            "{base_fee}"
+        );
+    }
+}
+
+#[test]
+fn boundary_fee_combine_mixed_without_a_verified_header() {
+    // The boundary case without a verified header: legacy G = 100, which
+    // pays 100 at a base fee of 1.
+    let malformed = [
+        // A base fee with a leading zero, an upper-case digit, a number
+        // that is no quantity, and no header at all.
+        r#"{"number":"0x10","timestamp":"0x10","baseFeePerGas":"0x07"}"#,
+        r#"{"number":"0x10","timestamp":"0x10","baseFeePerGas":"0xA"}"#,
+        r#"{"number":16,"timestamp":"0x10","baseFeePerGas":"0x7"}"#,
+        r#"{"number":"0x10","baseFeePerGas":"0x7"}"#,
+        r#"{"number":"0x10","timestamp":"0x10","baseFeePerGas":null}"#,
+        // Wider than 256 bits, and a number wider than 64.
+        r#"{"number":"0x10","timestamp":"0x10","baseFeePerGas":"0x10000000000000000000000000000000000000000000000000000000000000000"}"#,
+        r#"{"number":"0x10000000000000000","timestamp":"0x10","baseFeePerGas":"0x7"}"#,
+        "null",
+        r#"["0x7"]"#,
+    ];
+    let mut cases: Vec<(ChainConfig, Option<Answer>)> = vec![
+        // No prover: no header is read.
+        (fee_chain(&["direct", "colibri"], &["a", "b"], false), None),
+        // Colibri out of the read order.
+        (fee_chain(&["direct"], &["a", "b"], true), None),
+        // A failed header.
+        (
+            fee_chain(&["direct", "colibri"], &["a", "b"], true),
+            Some(Answer::Colibri(ColibriReply::Failure {
+                class: fc_chain::machine::ColibriClass::Error,
+                fault: false,
+            })),
+        ),
+        // `undefined`.
+        (
+            fee_chain(&["direct", "colibri"], &["a", "b"], true),
+            Some(Answer::Colibri(ColibriReply::Undefined)),
+        ),
+        // A header without a base fee: a chain without EIP-1559.
+        (
+            fee_chain(&["direct", "colibri"], &["a", "b"], true),
+            Some(header(None)),
+        ),
+    ];
+    for text in malformed {
+        cases.push((
+            fee_chain(&["direct", "colibri"], &["a", "b"], true),
+            Some(Answer::Colibri(ColibriReply::Result(text.into()))),
+        ));
+    }
+    for (config, answer) in cases {
+        let mut world = World::new(Bounds::default(), &[config]);
+        let id = world.submit(FEE, None);
+        world.quote_from("a", "0x64", Some("0x1"));
+        world.quote_from("b", "0x3e8", None);
+        match answer {
+            None => assert!(world.header_reads().is_empty()),
+            Some(answer) => {
+                assert!(!world.replied(id));
+                world.answer(world.header_reads()[0].0, answer);
+            }
+        }
+        let quote = quote_json(world.reply(id));
+        assert_eq!(quote, legacy("100", 2));
+        assert_eq!(pays(&quote, 1), 100);
+    }
+}
+
+#[test]
+fn boundary_fee_combine_mixed_waits_for_the_header_within_colibris_budget() {
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct", "colibri"], &["a", "b"], true)],
+    );
+    let id = world.submit(FEE, None);
+    world.quote_from("a", "0x64", Some("0x1"));
+    world.quote_from("b", "0x3e8", None);
+    // Colibri's budget is `configured`: at 5 s the header has failed, and
+    // the quote is legacy. The operation keeps its slot until main's reply.
+    world.run(4_999);
+    assert!(!world.replied(id));
+    world.run(5_000);
+    assert_eq!(world.reply(id).settled, 5_000);
+    assert_eq!(quote_json(world.reply(id)), legacy("100", 2));
+    assert_eq!(world.machine.state_tables().colibri_in_flight, 1);
+    let (read, _) = world.header_reads()[0];
+    assert!(!world.machine.wants(read));
+    world.machine.complete_unread(read);
+    world.collect();
+    assert_eq!(world.machine.state_tables().colibri_in_flight, 0);
+}
+
+#[test]
+fn boundary_fee_combine_header_dropped_when_not_mixed() {
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct", "colibri"], &["a", "b"], true)],
+    );
+    let id = world.submit(FEE, None);
+    world.quote_from("a", "0x64", Some("0xa"));
+    world.quote_from("b", "0x64", Some("0x9"));
+    // All EIP-1559: nothing waits for the header.
+    assert_eq!(world.reply(id).settled, 0);
+    assert_eq!(
+        quote_json(world.reply(id)),
+        eip1559("90", "9", "190", "99", 2)
+    );
+    // Its operation keeps its slot until main's reply, which is dropped.
+    assert_eq!(world.machine.state_tables().colibri_in_flight, 1);
+    let (read, _) = world.header_reads()[0];
+    world.run(200);
+    assert!(!world.machine.wants(read));
+    world.answer(read, header(Some("0x1")));
+    assert_eq!(world.machine.state_tables().colibri_in_flight, 0);
+    assert_eq!(world.replies.iter().filter(|r| r.id == id).count(), 1);
+}
+
+#[test]
+fn boundary_fee_combine_header_with_colibri_first_in_the_order() {
+    // Today's default order, Myotis not ready: Colibri's own quote fails,
+    // then Direct's collection reads the header.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(
+            &["myotis", "colibri", "direct"],
+            &["a", "b"],
+            true,
+        )],
+    );
+    let id = world.submit(FEE, None);
+    let gas = world
+        .requests
+        .iter()
+        .find_map(|(io, _, request, _)| match request {
+            Request::Verified(VerifiedOp::Colibri { method, .. }) if method == "eth_gasPrice" => {
+                Some(*io)
+            }
+            _ => None,
+        })
+        .unwrap();
+    world.answer(
+        gas,
+        Answer::Colibri(ColibriReply::Failure {
+            class: fc_chain::machine::ColibriClass::Error,
+            fault: false,
+        }),
+    );
+    assert_eq!(world.header_reads().len(), 1);
+    world.quote_from("a", "0x64", Some("0x1"));
+    world.quote_from("b", "0x3e8", None);
+    world.answer(world.header_reads()[0].0, header(Some("0x1")));
+    assert_eq!(
+        quote_json(world.reply(id)),
+        eip1559("99", "1", "199", "100", 2)
+    );
+}
+
+#[test]
+fn boundary_fee_combine_partial_failures() {
+    // One fails after another answered: no replacement, two combine.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b", "c", "d"], false)],
+    );
+    let id = world.submit(FEE, None);
+    world.quote_from("b", "0x64", Some("0xa"));
+    world.answer(
+        world.rpc_to("a", "eth_gasPrice"),
+        Answer::Rpc {
+            status: 500,
+            body: Vec::new(),
+        },
+    );
+    world.quote_from("c", "0x78", Some("0x5"));
+    assert_eq!(
+        quote_json(world.reply(id)),
+        eip1559("92", "5", "190", "97", 2)
+    );
+    assert!(world.asked().iter().all(|(e, ..)| e != "d"));
+
+    // A failure before any answer is replaced by the next endpoint.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b", "c", "d"], false)],
+    );
+    let id = world.submit(FEE, None);
+    world.run(100);
+    world.answer(
+        world.rpc_to("a", "eth_gasPrice"),
+        node_error(-32000, "a is down"),
+    );
+    assert_eq!(
+        world.asked().last(),
+        Some(&("d".to_owned(), "eth_gasPrice".to_owned(), 100))
+    );
+    world.quote_from("b", "0x64", Some("0xa"));
+    world.quote_from("c", "0x78", Some("0x5"));
+    world.quote_from("d", "0x6e", Some("0x14"));
+    assert_eq!(
+        quote_json(world.reply(id)),
+        eip1559("92", "5", "190", "97", 3)
+    );
+
+    // An unparseable hint fails its endpoint (today's codec); the others
+    // combine.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b", "c"], false)],
+    );
+    let id = world.submit(FEE, None);
+    world.quote_from("b", "0x64", Some("0xa"));
+    world.quote_from("a", "0x10", Some("-0x1"));
+    world.quote_from("c", "0x64", Some("0x9"));
+    assert_eq!(
+        quote_json(world.reply(id)),
+        eip1559("90", "9", "190", "99", 2)
+    );
+}
+
+#[test]
+fn boundary_fee_combine_all_failing_with_the_last_error() {
+    // Every endpoint is reached, as today's walk does: a, b, c at once,
+    // then d and e as failures replace them.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b", "c", "d", "e"], false)],
+    );
+    let id = world.submit(FEE, None);
+    world.answer(
+        world.rpc_to("a", "eth_gasPrice"),
+        node_error(-32000, "a down"),
+    );
+    world.answer(
+        world.rpc_to("b", "eth_gasPrice"),
+        node_error(-32000, "b down"),
+    );
+    world.run(100);
+    world.answer(
+        world.rpc_to("d", "eth_gasPrice"),
+        node_error(-32000, "d down"),
+    );
+    world.run(200);
+    // In one tick, the higher registry index's error is the last: e's,
+    // though c's arrives after it.
+    world.answer(
+        world.rpc_to("e", "eth_gasPrice"),
+        node_error(-32000, "e down"),
+    );
+    world.answer(
+        world.rpc_to("c", "eth_gasPrice"),
+        node_error(-32000, "c down"),
+    );
+    let asked: Vec<_> = world
+        .asked()
+        .into_iter()
+        .map(|(e, _, at)| (e, at))
+        .collect();
+    assert_eq!(
+        asked,
+        [("a", 0), ("b", 0), ("c", 0), ("d", 0), ("e", 0)].map(|(e, at)| (e.to_owned(), at))
+    );
+    let reply = world.reply(id);
+    assert_eq!(reply.settled, 200);
+    match &reply.result {
+        Err(ChainError::Thrown(error)) => {
+            assert_eq!(error.message.to_string_lossy(), "e down");
+            assert_eq!(error.origin, fc_chain::machine::Origin::Node);
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // With no endpoint, today's text, and no header read: the next source,
+    // Colibri, is asked for its own quote.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct", "colibri"], &[], true)],
+    );
+    let id = world.submit(FEE, None);
+    assert!(world.header_reads().is_empty());
+    let (gas, request) = match &world.requests[..] {
+        [(io, _, request, _)] => (*io, request.clone()),
+        other => panic!("{other:?}"),
+    };
+    assert!(
+        matches!(&request, Request::Verified(VerifiedOp::Colibri { method, .. }) if method == "eth_gasPrice")
+    );
+    world.answer(
+        gas,
+        Answer::Colibri(ColibriReply::Failure {
+            class: fc_chain::machine::ColibriClass::Error,
+            fault: false,
+        }),
+    );
+    assert!(world.header_reads().is_empty());
+    match &world.reply(id).result {
+        Err(ChainError::Thrown(error)) => assert_eq!(
+            error.message.to_string_lossy(),
+            fc_chain::machine::COLIBRI_FAILED
+        ),
+        other => panic!("{other:?}"),
+    }
+    let mut world = World::new(Bounds::default(), &[fee_chain(&["direct"], &[], false)]);
+    let id = world.submit(FEE, None);
+    match &world.reply(id).result {
+        Err(ChainError::Thrown(error)) => assert_eq!(
+            error.message.to_string_lossy(),
+            "All chain sources failed for fee quote (direct: No RPC endpoint configured)"
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn boundary_fee_combine_singletons() {
+    // One endpoint configured: today's quote, marked.
+    let mut world = World::new(Bounds::default(), &[fee_chain(&["direct"], &["a"], false)]);
+    let id = world.submit(FEE, None);
+    world.quote_from("a", "0x64", Some("0xa"));
+    assert_eq!(world.reply(id).settled, 0);
+    assert_eq!(
+        quote_json(world.reply(id)),
+        eip1559("90", "10", "190", "100", 1)
+    );
+
+    // One of three answering: the others are cut off at 1 s.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b", "c"], false)],
+    );
+    let id = world.submit(FEE, None);
+    world.run(200);
+    world.quote_from("b", "0x10", None);
+    world.run(1_199);
+    assert!(!world.replied(id));
+    world.run(1_200);
+    assert_eq!(world.reply(id).settled, 1_200);
+    assert_eq!(quote_json(world.reply(id)), legacy("16", 1));
+    for endpoint in ["a", "c"] {
+        let io = world.rpc_to(endpoint, "eth_gasPrice");
+        assert_eq!(world.cancelled(io), Some(1_200), "{endpoint}");
+    }
+}
+
+#[test]
+fn boundary_fee_combine_cutoff() {
+    // The first quote answers at 100: the collection ends at 1,100.
+    let start = |world: &mut World| {
+        let id = world.submit(FEE, None);
+        world.run(100);
+        world.quote_from("a", "0x64", Some("0xa"));
+        world.run(500);
+        world.quote_from("b", "0x64", Some("0x9"));
+        id
+    };
+    let chains = [fee_chain(&["direct"], &["a", "b", "c"], false)];
+
+    // A third answer after it: cancelled at the cutoff, and left out.
+    let mut world = World::new(Bounds::default(), &chains);
+    let id = start(&mut world);
+    world.run(1_100);
+    assert_eq!(world.reply(id).settled, 1_100);
+    assert_eq!(
+        quote_json(world.reply(id)),
+        eip1559("90", "9", "190", "99", 2)
+    );
+    let late = world.rpc_to("c", "eth_gasPrice");
+    assert_eq!(world.cancelled(late), Some(1_100));
+    world.run(1_101);
+    assert!(!world.answer(late, ok("\"0x1\"")));
+
+    // An endpoint whose hint is outstanding at the cutoff is left out.
+    let mut world = World::new(Bounds::default(), &chains);
+    let id = start(&mut world);
+    world.run(600);
+    world.answer(world.rpc_to("c", "eth_gasPrice"), ok("\"0x1\""));
+    world.run(1_100);
+    assert_eq!(
+        quote_json(world.reply(id)),
+        eip1559("90", "9", "190", "99", 2)
+    );
+    let hint = world.rpc_to("c", "eth_maxPriorityFeePerGas");
+    assert_eq!(world.cancelled(hint), Some(1_100));
+
+    // An answer in its tick is left out: the cutoff goes first, whichever
+    // the driver hands over first.
+    let mut world = World::new(Bounds::default(), &chains);
+    let id = start(&mut world);
+    world.run(600);
+    world.answer(world.rpc_to("c", "eth_gasPrice"), ok("\"0x1\""));
+    world.run(1_099);
+    // The clock reaches the cutoff; c's hint is delivered before the
+    // machine runs.
+    assert!(world.machine.fire_next(1_100).is_some());
+    assert_eq!(world.machine.now(), 1_100);
+    let hint = world.rpc_to("c", "eth_maxPriorityFeePerGas");
+    world.answer(hint, ok("\"0x1\""));
+    assert_eq!(world.reply(id).settled, 1_100);
+    assert_eq!(
+        quote_json(world.reply(id)),
+        eip1559("90", "9", "190", "99", 2)
+    );
+}
+
+#[test]
+fn boundary_fee_combine_races() {
+    let chains = [fee_chain(&["direct", "colibri"], &["a", "b", "c"], true)];
+    let outstanding = |world: &World| -> Vec<u64> {
+        world
+            .requests
+            .iter()
+            .filter(|(_, _, request, _)| matches!(request, Request::Rpc { .. }))
+            .map(|(io, ..)| *io)
+            .collect()
+    };
+
+    // The deadline, with exchanges outstanding: every one is cancelled.
+    let mut world = World::new(Bounds::default(), &chains);
+    let id = world.submit(FEE, Some(700));
+    world.quote_from("a", "0x64", Some("0xa"));
+    world.answer(world.rpc_to("b", "eth_gasPrice"), ok("\"0x64\""));
+    world.run(700);
+    assert_eq!(protocol(world.reply(id)), Some(Protocol::Deadline));
+    assert_eq!(world.reply(id).settled, 700);
+    let hint = world.rpc_to("b", "eth_maxPriorityFeePerGas");
+    let c = world.rpc_to("c", "eth_gasPrice");
+    assert_eq!(world.cancelled(hint), Some(700));
+    assert_eq!(world.cancelled(c), Some(700));
+    // The header's operation keeps its slot until main's reply.
+    assert_eq!(world.machine.state_tables().colibri_in_flight, 1);
+
+    // A cancel.
+    let mut world = World::new(Bounds::default(), &chains);
+    let id = world.submit(FEE, None);
+    world.quote_from("a", "0x64", Some("0xa"));
+    world.run(300);
+    assert!(world.machine.cancel(id));
+    world.collect();
+    assert_eq!(protocol(world.reply(id)), Some(Protocol::Cancelled));
+    assert_eq!(world.reply(id).settled, 300);
+    for io in outstanding(&world) {
+        if ![
+            world.rpc_to("a", "eth_gasPrice"),
+            world.rpc_to("a", "eth_maxPriorityFeePerGas"),
+        ]
+        .contains(&io)
+        {
+            assert_eq!(world.cancelled(io), Some(300));
+        }
+    }
+
+    // A configuration change.
+    let mut world = World::new(Bounds::default(), &chains);
+    let id = world.submit(FEE, None);
+    world.run(400);
+    world
+        .machine
+        .configure(&[fee_chain(&["direct", "colibri"], &["a", "b", "d"], true)]);
+    world.collect();
+    assert_eq!(protocol(world.reply(id)), Some(Protocol::Reconfigured));
+    assert_eq!(world.reply(id).settled, 400);
+    for io in outstanding(&world) {
+        assert_eq!(world.cancelled(io), Some(400));
+    }
+}
+
+// Review of #179, round 1: B's endpoints run at once, so what one keeps
+// across its hint's request is kept three times over. Each reads its gas
+// price as it arrives and keeps only the value: valid answers within the
+// answer cap can't push the request past its budget and discard a quote
+// another endpoint answered.
+#[test]
+fn boundary_fee_combine_large_answers_keep_the_budget() {
+    // Two endpoints answer ~17 MiB gas prices (leading zeros, then 100);
+    // an ordinary one answers 100/1; then the first answers an ~8 MiB hint.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b", "c"], false)],
+    );
+    let id = world.submit(FEE, None);
+    let large_gas = format!("\"{}100\"", "0".repeat(17 * 1024 * 1024));
+    let medium_priority = format!("\"{}1\"", "0".repeat(8 * 1024 * 1024));
+    for endpoint in ["a", "b"] {
+        assert!(world.answer(world.rpc_to(endpoint, "eth_gasPrice"), ok(&large_gas)));
+    }
+    world.quote_from("c", "0x64", Some("0x1"));
+    assert!(!world.replied(id));
+    assert!(world.answer(
+        world.rpc_to("a", "eth_maxPriorityFeePerGas"),
+        ok(&medium_priority),
+    ));
+    assert!(!world.replied(id));
+    assert!(world.answer(world.rpc_to("b", "eth_maxPriorityFeePerGas"), ok("\"0x1\"")));
+    // All three quoted 100/1.
+    assert_eq!(
+        quote_json(world.reply(id)),
+        r#"{"type":"eip1559","baseFee":"99","maxPriorityFeePerGas":"1","maxFeePerGas":"199","effectiveGasPrice":"100","source":"direct","verified":false,"answered":3}"#
+    );
+
+    // Three gas prices at the answer cap, then three hints as large: each
+    // is read on arrival, so the request stays within its budget.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b", "c"], false)],
+    );
+    let id = world.submit(FEE, None);
+    let result = format!("\"{}1\"", "0".repeat(17 * 1024 * 1024));
+    for endpoint in ["a", "b", "c"] {
+        assert!(world.answer(world.rpc_to(endpoint, "eth_gasPrice"), ok(&result)));
+        assert!(world.machine.held() <= Bounds::default().request_bytes);
+    }
+    assert_eq!(
+        world
+            .asked()
+            .iter()
+            .filter(|(_, method, _)| method == "eth_maxPriorityFeePerGas")
+            .count(),
+        3
+    );
+    for endpoint in ["a", "b", "c"] {
+        assert!(!world.replied(id));
+        assert!(world.answer(
+            world.rpc_to(endpoint, "eth_maxPriorityFeePerGas"),
+            ok(&result),
+        ));
+    }
+    assert_eq!(protocol(world.reply(id)), None);
+    assert!(quote_json(world.reply(id)).contains(r#""answered":3"#));
+
+    // Two large endpoints and one ordinary gas price: the request goes on.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b", "c"], false)],
+    );
+    let id = world.submit(FEE, None);
+    for endpoint in ["a", "b"] {
+        assert!(world.answer(world.rpc_to(endpoint, "eth_gasPrice"), ok(&result)));
+    }
+    assert!(world.answer(world.rpc_to("c", "eth_gasPrice"), ok("\"0x1\"")));
+    assert!(world.answer(world.rpc_to("a", "eth_maxPriorityFeePerGas"), ok(&result)));
+    assert!(!world.replied(id), "{:?}", protocol(world.reply(id)));
+}
+
+// Review of #179, round 1: an endpoint's failure, and B's other errors,
+// are kept only while no quote has answered: the reply is an error only
+// then. A gas price that fails the codec still fails its endpoint once the
+// hint's exchange has ended, with the codec's error.
+#[test]
+fn boundary_fee_combine_errors_after_the_hint() {
+    let mut world = World::new(Bounds::default(), &[fee_chain(&["direct"], &["a"], false)]);
+    let id = world.submit(FEE, None);
+    assert!(world.answer(world.rpc_to("a", "eth_gasPrice"), ok("\"0xzz\"")));
+    // The hint is still asked for.
+    assert!(!world.replied(id));
+    assert!(world.answer(world.rpc_to("a", "eth_maxPriorityFeePerGas"), ok("\"0x1\"")));
+    match &world.reply(id).result {
+        Err(ChainError::Thrown(error)) => {
+            assert_eq!(
+                error.message.to_string_lossy(),
+                "Cannot convert 0xzz to a BigInt"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+// Review of #179, round 1 (from its probes): a tick's answers count
+// before its failures. A failure in the tick a quote answered isn't
+// replaced: once one has answered, no endpoint starts.
+#[test]
+fn boundary_fee_combine_no_replacement_in_an_answers_tick() {
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b", "c", "d"], false)],
+    );
+    let id = world.submit(FEE, None);
+    assert!(world.answer(world.rpc_to("b", "eth_gasPrice"), ok("\"0x64\"")));
+    // a's failure and b's quote, handed to the machine at one instant.
+    let a = world.rpc_to("a", "eth_gasPrice");
+    let b = world.rpc_to("b", "eth_maxPriorityFeePerGas");
+    assert!(world.machine.complete(a, node_error(-32000, "a down")));
+    assert!(world.machine.complete(b, ok("\"0x1\"")));
+    world.collect();
+    // c is still running, and d is never asked.
+    assert!(!world.replied(id));
+    assert!(world.asked().iter().all(|(endpoint, ..)| endpoint != "d"));
+    world.quote_from("c", "0x64", Some("0x1"));
+    assert!(quote_json(world.reply(id)).contains(r#""answered":2"#));
+    assert!(world.asked().iter().all(|(endpoint, ..)| endpoint != "d"));
+
+    // Before any answer, a failure is still replaced in its tick.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b", "c", "d"], false)],
+    );
+    let id = world.submit(FEE, None);
+    assert!(world.answer(
+        world.rpc_to("a", "eth_gasPrice"),
+        node_error(-32000, "a down")
+    ));
+    assert!(!world.replied(id));
+    assert!(world.asked().iter().any(|(endpoint, ..)| endpoint == "d"));
 }

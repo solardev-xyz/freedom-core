@@ -638,9 +638,21 @@ struct Driver {
     /// Answers the machine cancelled before main delivered them: main
     /// aborted them, and they never reach the machine.
     withheld: usize,
+    /// Every request the machine made, for a deviation that lists them
+    /// whole ([`Expected::requests`]): its I/O id and description, a
+    /// cancel included.
+    made: Vec<(u64, String)>,
+    /// The machine's exchanges per URL so far: a scripted plan's call
+    /// index.
+    calls: BTreeMap<String, usize>,
 }
 
 impl Driver {
+    /// Whether the scenario's deviation lists the machine's requests whole.
+    fn whole(&self) -> bool {
+        self.expect.is_some_and(|e| !e.requests.is_empty())
+    }
+
     fn token(&mut self, at: u64, token: Token) {
         let id = self.next_token;
         self.next_token += 1;
@@ -880,6 +892,9 @@ impl Driver {
                     {
                         exchange.cancelled = Some((at, self.cause));
                     }
+                    if let Some((_, made)) = self.made.iter_mut().find(|(io, _)| *io == id) {
+                        made.push_str(&format!(" cancelled at {at}"));
+                    }
                 }
                 Effect::Request {
                     id,
@@ -940,6 +955,13 @@ impl Driver {
                     }
                 }
         };
+        let whole = self.whole();
+        if whole {
+            self.made.push((id, describe_request(io, at)));
+        }
+        if let Request::Rpc { endpoint, .. } = io {
+            *self.calls.entry(endpoint.clone()).or_default() += 1;
+        }
         let found = self.io.iter().position(|e| !e.used && matches(&e.entry));
         let Some(index) = found else {
             // Main's status sample threw before the operation ran.
@@ -987,6 +1009,23 @@ impl Driver {
                     return;
                 }
             }
+            // A request the reference never made, in a deviation that
+            // lists the machine's requests whole: the world's scripts
+            // answer it, as the reference's fetch stub would have.
+            if whole {
+                if let Some((answer, delay)) = self.scripted(io) {
+                    if delay == 0 {
+                        let depth = match &answer {
+                            Answer::Rpc { status, .. } if (200..=299).contains(status) => 1,
+                            _ => 0,
+                        };
+                        self.now_answer(depth, id, answer);
+                    } else {
+                        self.token(at + delay, Token::Deliver(id, answer));
+                    }
+                }
+                return;
+            }
             if self.expect.is_some() {
                 self.extra.push(describe_request(io, at));
             } else {
@@ -1000,9 +1039,10 @@ impl Driver {
         self.io[index].request = Some(id);
         let entry = self.io[index].entry.clone();
         // The reference's order: no request answers a record earlier in
-        // the ledger than one already matched.
+        // the ledger than one already matched. A deviation that lists the
+        // machine's requests whole states its own order instead.
         let seq = self.io[index].seq;
-        if let Some(last) = self.last_matched.filter(|last| seq < *last) {
+        if let Some(last) = self.last_matched.filter(|last| seq < *last && !whole) {
             self.mismatches.push(format!(
                 "out of the reference's order: {} is ledger entry {seq}, made after entry {last}",
                 describe_request(io, at)
@@ -1044,6 +1084,60 @@ impl Driver {
         } else {
             self.token(end, Token::Deliver(id, answer));
         }
+    }
+
+    /// The world's scripted answer to an exchange the reference never made
+    /// (`world.rpc`, as the generator's fetch stub reads it): the plan for
+    /// its URL, picked by the machine's call index and the request's
+    /// method, with its delay. `None` for a plan that hangs.
+    fn scripted(&self, io: &Request) -> Option<(Answer, u64)> {
+        let Request::Rpc { endpoint, body, .. } = io else {
+            panic!("only JSON-RPC exchanges are scripted: {io:?}");
+        };
+        let method = serde_json::from_str::<Json>(body).unwrap()["method"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let nth = self.calls.get(endpoint).map_or(0, |n| n - 1);
+        let plan = self.world.get("rpc").and_then(|rpc| rpc.get(endpoint));
+        let answer = pick(plan?, &method, nth)?;
+        if answer.get("hang").is_some() {
+            return None;
+        }
+        let delay = answer.get("delay").and_then(Json::as_u64).unwrap_or(0);
+        if answer.get("fail").is_some() {
+            return Some((Answer::Failed(Transport::Network), delay));
+        }
+        let status = answer.get("status").and_then(Json::as_u64).unwrap_or(200);
+        let envelope = |key: &str, value: &Json| {
+            assert!(
+                !value.is_object() && !value.is_array(),
+                "a scripted {key} the driver can't write in its key order: {value}"
+            );
+            format!(r#"{{"jsonrpc":"2.0","id":1,"{key}":{value}}}"#)
+        };
+        let body = if let Some(body) = answer.get("body") {
+            body.as_str().unwrap().to_owned()
+        } else if let Some(result) = answer.get("result") {
+            envelope("result", result)
+        } else if answer.get("noResult").is_some() {
+            r#"{"jsonrpc":"2.0","id":1}"#.to_owned()
+        } else if answer.get("status").is_some() {
+            answer
+                .get("text")
+                .and_then(Json::as_str)
+                .unwrap_or("")
+                .to_owned()
+        } else {
+            panic!("a scripted answer the driver doesn't write: {answer}");
+        };
+        Some((
+            Answer::Rpc {
+                status: u16::try_from(status).unwrap(),
+                body: body.into_bytes(),
+            },
+            delay,
+        ))
     }
 
     /// Main's reply for a Blockscout page: the last hop's answer, after the
@@ -1128,6 +1222,34 @@ impl Driver {
             after = block(&self.statuses[i].0);
         }
         (before, after)
+    }
+}
+
+/// A plan of scripted answers, as the generator's fetch stub picks from
+/// it: a list by call index (the last repeats), or `{ rules: [{ when,
+/// then }], else }` by the request's method.
+fn pick<'a>(plan: &'a Json, method: &str, nth: usize) -> Option<&'a Json> {
+    match plan {
+        Json::Array(plans) => pick(
+            plans.get(nth.min(plans.len().checked_sub(1)?))?,
+            method,
+            nth,
+        ),
+        Json::Object(object) if object.get("rules").is_some_and(Json::is_array) => {
+            for rule in object["rules"].as_array().unwrap() {
+                let when = rule["when"].as_object().unwrap();
+                let holds = when.iter().all(|(key, value)| match key.as_str() {
+                    "method" => value.as_str() == Some(method),
+                    other => panic!("a rule condition the driver doesn't read: {other}"),
+                });
+                if holds {
+                    return pick(&rule["then"], method, nth);
+                }
+            }
+            object.get("else").and_then(|plan| pick(plan, method, nth))
+        }
+        Json::Null => None,
+        answer => Some(answer),
     }
 }
 
@@ -1687,6 +1809,8 @@ fn replay(scenario: &Json, expect: Option<&'static Expected>) -> Outcome {
         cause: Cause::Start,
         last_matched: None,
         withheld: 0,
+        made: Vec::new(),
+        calls: BTreeMap::new(),
     };
     driver.apply_world();
     let mut outcome = Outcome::default();
@@ -1875,6 +1999,15 @@ fn replay(scenario: &Json, expect: Option<&'static Expected>) -> Outcome {
                 driver.extra
             ));
         }
+        if !expect.requests.is_empty() {
+            let made: Vec<&str> = driver.made.iter().map(|(_, m)| m.as_str()).collect();
+            if made != expect.requests {
+                driver.mismatches.push(format!(
+                    "{id}: requests {made:#?} instead of {:#?}",
+                    expect.requests
+                ));
+            }
+        }
         let want: Vec<String> = expect.missing.iter().map(|s| (*s).to_owned()).collect();
         if outcome.missing != want {
             driver.mismatches.push(format!(
@@ -2031,6 +2164,13 @@ struct Expected {
     /// Exchanges the deviation moves in time: `(record id, start)`. Their
     /// answers keep their delays.
     moved: &'static [(u64, u64)],
+    /// The machine's requests, whole, in the order it makes them, each
+    /// with its start and any cancel (` cancelled at <t>`): for a
+    /// deviation that changes the reference's requests and their order.
+    /// The ledger's order is then not checked. A request the reference
+    /// never made is answered from the world's scripts, which made the
+    /// records, and isn't listed in `extra`.
+    requests: &'static [&'static str],
 }
 
 const EXPECTED: Expected = Expected {
@@ -2042,6 +2182,7 @@ const EXPECTED: Expected = Expected {
     missing: &[],
     cancels: &[],
     moved: &[],
+    requests: &[],
 };
 
 // ---------------------------------------------------------------------------
@@ -2350,6 +2491,69 @@ const DEVIATIONS: &[Expected] = &[
                     r#"{"type":"eip1559","baseFee":"15","maxPriorityFeePerGas":"1","maxFeePerGas":"31","effectiveGasPrice":"16","source":"quorum","verified":false}"#,
                 ),
             ),
+        ],
+        ..EXPECTED
+    },
+    // B asks up to three endpoints at once and combines their quotes
+    // (#92). The reference asked primary alone and returned its quote;
+    // secondary, asked with it, answers `0x1` to both, as its script says,
+    // so the combined M and P are 1: base fee 0, effective gas price 1.
+    Expected {
+        id: "router-fee-quote-direct-same-endpoint",
+        deviation: "fee-combination",
+        replies: &[(
+            0,
+            0,
+            0,
+            Want::Quote(
+                r#"{"type":"eip1559","baseFee":"0","maxPriorityFeePerGas":"1","maxFeePerGas":"1","effectiveGasPrice":"1","source":"direct","verified":false,"answered":2}"#,
+            ),
+        )],
+        requests: &[
+            r#"rpc https://primary.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_gasPrice","params":[]}"#,
+            r#"rpc https://secondary.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_gasPrice","params":[]}"#,
+            r#"rpc https://primary.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_maxPriorityFeePerGas","params":[]}"#,
+            r#"rpc https://secondary.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_maxPriorityFeePerGas","params":[]}"#,
+        ],
+        ..EXPECTED
+    },
+    // b is asked at once with a, not after it: a's unparseable hint fails
+    // a, and b's legacy quote stands alone.
+    Expected {
+        id: "boundary-fee-direct-priority-unparseable",
+        deviation: "fee-combination",
+        replies: &[(
+            0,
+            0,
+            0,
+            Want::Quote(
+                r#"{"type":"legacy","gasPrice":"16","effectiveGasPrice":"16","source":"direct","verified":false,"answered":1}"#,
+            ),
+        )],
+        requests: &[
+            r#"rpc https://a.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_gasPrice","params":[]}"#,
+            r#"rpc https://b.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_gasPrice","params":[]}"#,
+            r#"rpc https://a.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_maxPriorityFeePerGas","params":[]}"#,
+            r#"rpc https://b.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_maxPriorityFeePerGas","params":[]}"#,
+        ],
+        ..EXPECTED
+    },
+    // b is asked at once with a: a fails, and b's legacy quote stands.
+    Expected {
+        id: "boundary-fee-direct-gas-price-fails-first",
+        deviation: "fee-combination",
+        replies: &[(
+            0,
+            0,
+            0,
+            Want::Quote(
+                r#"{"type":"legacy","gasPrice":"1000000000","effectiveGasPrice":"1000000000","source":"direct","verified":false,"answered":1}"#,
+            ),
+        )],
+        requests: &[
+            r#"rpc https://a.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_gasPrice","params":[]}"#,
+            r#"rpc https://b.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_gasPrice","params":[]}"#,
+            r#"rpc https://b.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_maxPriorityFeePerGas","params":[]}"#,
         ],
         ..EXPECTED
     },

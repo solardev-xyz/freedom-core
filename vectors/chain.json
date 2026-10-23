@@ -3578,6 +3578,485 @@
       }
     }
   ],
+  "fee_combinations": {
+    "deviation": "fee-combination",
+    "cases": [
+      {
+        "id": "one-eip1559",
+        "eip1559_verified": false,
+        "endpoints": [
+          {
+            "gas_price": "\"0x64\"",
+            "priority": "\"0xa\"",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"90\",\"maxPriorityFeePerGas\":\"10\",\"maxFeePerGas\":\"190\",\"effectiveGasPrice\":\"100\",\"source\":\"direct\",\"verified\":false}"
+            }
+          }
+        ],
+        "design": {
+          "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"90\",\"maxPriorityFeePerGas\":\"10\",\"maxFeePerGas\":\"190\",\"effectiveGasPrice\":\"100\",\"source\":\"direct\",\"verified\":false,\"answered\":1}"
+        }
+      },
+      {
+        "id": "one-legacy-hint-over-gas-price",
+        "eip1559_verified": true,
+        "endpoints": [
+          {
+            "gas_price": "\"0x10\"",
+            "priority": "\"0x11\"",
+            "js": {
+              "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"16\",\"effectiveGasPrice\":\"16\",\"source\":\"direct\",\"verified\":false}"
+            }
+          }
+        ],
+        "design": {
+          "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"16\",\"effectiveGasPrice\":\"16\",\"source\":\"direct\",\"verified\":false,\"answered\":1}"
+        }
+      },
+      {
+        "id": "one-legacy-no-hint",
+        "eip1559_verified": false,
+        "endpoints": [
+          {
+            "gas_price": "\"0x10\"",
+            "priority": null,
+            "js": {
+              "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"16\",\"effectiveGasPrice\":\"16\",\"source\":\"direct\",\"verified\":false}"
+            }
+          }
+        ],
+        "design": {
+          "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"16\",\"effectiveGasPrice\":\"16\",\"source\":\"direct\",\"verified\":false,\"answered\":1}"
+        }
+      },
+      {
+        "id": "three-eip1559",
+        "eip1559_verified": false,
+        "endpoints": [
+          {
+            "gas_price": "\"0x64\"",
+            "priority": "\"0xa\"",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"90\",\"maxPriorityFeePerGas\":\"10\",\"maxFeePerGas\":\"190\",\"effectiveGasPrice\":\"100\",\"source\":\"direct\",\"verified\":false}"
+            }
+          },
+          {
+            "gas_price": "\"0x78\"",
+            "priority": "\"0x5\"",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"115\",\"maxPriorityFeePerGas\":\"5\",\"maxFeePerGas\":\"235\",\"effectiveGasPrice\":\"120\",\"source\":\"direct\",\"verified\":false}"
+            }
+          },
+          {
+            "gas_price": "\"0x6e\"",
+            "priority": "\"0x14\"",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"90\",\"maxPriorityFeePerGas\":\"20\",\"maxFeePerGas\":\"200\",\"effectiveGasPrice\":\"110\",\"source\":\"direct\",\"verified\":false}"
+            }
+          }
+        ],
+        "design": {
+          "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"92\",\"maxPriorityFeePerGas\":\"5\",\"maxFeePerGas\":\"190\",\"effectiveGasPrice\":\"97\",\"source\":\"direct\",\"verified\":false,\"answered\":3}"
+        }
+      },
+      {
+        "id": "independent-minima-odd",
+        "eip1559_verified": false,
+        "endpoints": [
+          {
+            "gas_price": "\"0xa\"",
+            "priority": "\"0x1\"",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"9\",\"maxPriorityFeePerGas\":\"1\",\"maxFeePerGas\":\"19\",\"effectiveGasPrice\":\"10\",\"source\":\"direct\",\"verified\":false}"
+            }
+          },
+          {
+            "gas_price": "\"0xa\"",
+            "priority": "\"0x2\"",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"8\",\"maxPriorityFeePerGas\":\"2\",\"maxFeePerGas\":\"18\",\"effectiveGasPrice\":\"10\",\"source\":\"direct\",\"verified\":false}"
+            }
+          }
+        ],
+        "design": {
+          "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"8\",\"maxPriorityFeePerGas\":\"1\",\"maxFeePerGas\":\"18\",\"effectiveGasPrice\":\"9\",\"source\":\"direct\",\"verified\":false,\"answered\":2}"
+        }
+      },
+      {
+        "id": "raw-minima-trap",
+        "eip1559_verified": false,
+        "endpoints": [
+          {
+            "gas_price": "\"0x64\"",
+            "priority": "\"0xa\"",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"90\",\"maxPriorityFeePerGas\":\"10\",\"maxFeePerGas\":\"190\",\"effectiveGasPrice\":\"100\",\"source\":\"direct\",\"verified\":false}"
+            }
+          },
+          {
+            "gas_price": "\"0x64\"",
+            "priority": "\"0x9\"",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"91\",\"maxPriorityFeePerGas\":\"9\",\"maxFeePerGas\":\"191\",\"effectiveGasPrice\":\"100\",\"source\":\"direct\",\"verified\":false}"
+            }
+          }
+        ],
+        "design": {
+          "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"90\",\"maxPriorityFeePerGas\":\"9\",\"maxFeePerGas\":\"190\",\"effectiveGasPrice\":\"99\",\"source\":\"direct\",\"verified\":false,\"answered\":2}"
+        }
+      },
+      {
+        "id": "priority-equals-gas-price",
+        "eip1559_verified": false,
+        "endpoints": [
+          {
+            "gas_price": "\"0x64\"",
+            "priority": "\"0x64\"",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"0\",\"maxPriorityFeePerGas\":\"100\",\"maxFeePerGas\":\"100\",\"effectiveGasPrice\":\"100\",\"source\":\"direct\",\"verified\":false}"
+            }
+          },
+          {
+            "gas_price": "\"0x64\"",
+            "priority": "\"0xa\"",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"90\",\"maxPriorityFeePerGas\":\"10\",\"maxFeePerGas\":\"190\",\"effectiveGasPrice\":\"100\",\"source\":\"direct\",\"verified\":false}"
+            }
+          }
+        ],
+        "design": {
+          "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"45\",\"maxPriorityFeePerGas\":\"10\",\"maxFeePerGas\":\"100\",\"effectiveGasPrice\":\"55\",\"source\":\"direct\",\"verified\":false,\"answered\":2}"
+        }
+      },
+      {
+        "id": "priority-zero",
+        "eip1559_verified": false,
+        "endpoints": [
+          {
+            "gas_price": "\"0x64\"",
+            "priority": "\"0x0\"",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"100\",\"maxPriorityFeePerGas\":\"0\",\"maxFeePerGas\":\"200\",\"effectiveGasPrice\":\"100\",\"source\":\"direct\",\"verified\":false}"
+            }
+          },
+          {
+            "gas_price": "\"0x5a\"",
+            "priority": "\"0xa\"",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"80\",\"maxPriorityFeePerGas\":\"10\",\"maxFeePerGas\":\"170\",\"effectiveGasPrice\":\"90\",\"source\":\"direct\",\"verified\":false}"
+            }
+          }
+        ],
+        "design": {
+          "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"85\",\"maxPriorityFeePerGas\":\"0\",\"maxFeePerGas\":\"170\",\"effectiveGasPrice\":\"85\",\"source\":\"direct\",\"verified\":false,\"answered\":2}"
+        }
+      },
+      {
+        "id": "decimal-and-number-inputs",
+        "eip1559_verified": false,
+        "endpoints": [
+          {
+            "gas_price": "\"30000000000\"",
+            "priority": "\"1000000000\"",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"29000000000\",\"maxPriorityFeePerGas\":\"1000000000\",\"maxFeePerGas\":\"59000000000\",\"effectiveGasPrice\":\"30000000000\",\"source\":\"direct\",\"verified\":false}"
+            }
+          },
+          {
+            "gas_price": "31000000000",
+            "priority": "2000000000",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"29000000000\",\"maxPriorityFeePerGas\":\"2000000000\",\"maxFeePerGas\":\"60000000000\",\"effectiveGasPrice\":\"31000000000\",\"source\":\"direct\",\"verified\":false}"
+            }
+          }
+        ],
+        "design": {
+          "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"29000000000\",\"maxPriorityFeePerGas\":\"1000000000\",\"maxFeePerGas\":\"59000000000\",\"effectiveGasPrice\":\"30000000000\",\"source\":\"direct\",\"verified\":false,\"answered\":2}"
+        }
+      },
+      {
+        "id": "replay-same-endpoint",
+        "eip1559_verified": false,
+        "endpoints": [
+          {
+            "gas_price": "\"0xebd\"",
+            "priority": "\"0x1\"",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"3772\",\"maxPriorityFeePerGas\":\"1\",\"maxFeePerGas\":\"7545\",\"effectiveGasPrice\":\"3773\",\"source\":\"direct\",\"verified\":false}"
+            }
+          },
+          {
+            "gas_price": "\"0x1\"",
+            "priority": "\"0x1\"",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"0\",\"maxPriorityFeePerGas\":\"1\",\"maxFeePerGas\":\"1\",\"effectiveGasPrice\":\"1\",\"source\":\"direct\",\"verified\":false}"
+            }
+          }
+        ],
+        "design": {
+          "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"0\",\"maxPriorityFeePerGas\":\"1\",\"maxFeePerGas\":\"1\",\"effectiveGasPrice\":\"1\",\"source\":\"direct\",\"verified\":false,\"answered\":2}"
+        }
+      },
+      {
+        "id": "all-legacy",
+        "eip1559_verified": false,
+        "endpoints": [
+          {
+            "gas_price": "\"0x10\"",
+            "priority": null,
+            "js": {
+              "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"16\",\"effectiveGasPrice\":\"16\",\"source\":\"direct\",\"verified\":false}"
+            }
+          },
+          {
+            "gas_price": "\"0xc\"",
+            "priority": "\"0xd\"",
+            "js": {
+              "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"12\",\"effectiveGasPrice\":\"12\",\"source\":\"direct\",\"verified\":false}"
+            }
+          },
+          {
+            "gas_price": "\"0x14\"",
+            "priority": "\"-1\"",
+            "js": {
+              "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"20\",\"effectiveGasPrice\":\"20\",\"source\":\"direct\",\"verified\":false}"
+            }
+          }
+        ],
+        "design": {
+          "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"12\",\"effectiveGasPrice\":\"12\",\"source\":\"direct\",\"verified\":false,\"answered\":3}"
+        }
+      },
+      {
+        "id": "all-legacy-verified",
+        "eip1559_verified": true,
+        "endpoints": [
+          {
+            "gas_price": "\"0x10\"",
+            "priority": null,
+            "js": {
+              "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"16\",\"effectiveGasPrice\":\"16\",\"source\":\"direct\",\"verified\":false}"
+            }
+          },
+          {
+            "gas_price": "\"0xc\"",
+            "priority": "\"0xd\"",
+            "js": {
+              "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"12\",\"effectiveGasPrice\":\"12\",\"source\":\"direct\",\"verified\":false}"
+            }
+          },
+          {
+            "gas_price": "\"0x14\"",
+            "priority": "\"-1\"",
+            "js": {
+              "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"20\",\"effectiveGasPrice\":\"20\",\"source\":\"direct\",\"verified\":false}"
+            }
+          }
+        ],
+        "design": {
+          "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"12\",\"effectiveGasPrice\":\"12\",\"source\":\"direct\",\"verified\":false,\"answered\":3}"
+        }
+      },
+      {
+        "id": "mixed-verified-boundary",
+        "eip1559_verified": true,
+        "endpoints": [
+          {
+            "gas_price": "\"0x64\"",
+            "priority": "\"0x1\"",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"99\",\"maxPriorityFeePerGas\":\"1\",\"maxFeePerGas\":\"199\",\"effectiveGasPrice\":\"100\",\"source\":\"direct\",\"verified\":false}"
+            }
+          },
+          {
+            "gas_price": "\"0x3e8\"",
+            "priority": null,
+            "js": {
+              "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"1000\",\"effectiveGasPrice\":\"1000\",\"source\":\"direct\",\"verified\":false}"
+            }
+          }
+        ],
+        "design": {
+          "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"99\",\"maxPriorityFeePerGas\":\"1\",\"maxFeePerGas\":\"199\",\"effectiveGasPrice\":\"100\",\"source\":\"direct\",\"verified\":false,\"answered\":2}"
+        }
+      },
+      {
+        "id": "mixed-unverified-boundary",
+        "eip1559_verified": false,
+        "endpoints": [
+          {
+            "gas_price": "\"0x64\"",
+            "priority": "\"0x1\"",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"99\",\"maxPriorityFeePerGas\":\"1\",\"maxFeePerGas\":\"199\",\"effectiveGasPrice\":\"100\",\"source\":\"direct\",\"verified\":false}"
+            }
+          },
+          {
+            "gas_price": "\"0x3e8\"",
+            "priority": null,
+            "js": {
+              "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"1000\",\"effectiveGasPrice\":\"1000\",\"source\":\"direct\",\"verified\":false}"
+            }
+          }
+        ],
+        "design": {
+          "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"100\",\"effectiveGasPrice\":\"100\",\"source\":\"direct\",\"verified\":false,\"answered\":2}"
+        }
+      },
+      {
+        "id": "mixed-verified-legacy-lowest",
+        "eip1559_verified": true,
+        "endpoints": [
+          {
+            "gas_price": "\"0x64\"",
+            "priority": "\"0xa\"",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"90\",\"maxPriorityFeePerGas\":\"10\",\"maxFeePerGas\":\"190\",\"effectiveGasPrice\":\"100\",\"source\":\"direct\",\"verified\":false}"
+            }
+          },
+          {
+            "gas_price": "\"0x32\"",
+            "priority": null,
+            "js": {
+              "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"50\",\"effectiveGasPrice\":\"50\",\"source\":\"direct\",\"verified\":false}"
+            }
+          }
+        ],
+        "design": {
+          "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"20\",\"maxPriorityFeePerGas\":\"10\",\"maxFeePerGas\":\"50\",\"effectiveGasPrice\":\"30\",\"source\":\"direct\",\"verified\":false,\"answered\":2}"
+        }
+      },
+      {
+        "id": "mixed-unverified-legacy-lowest",
+        "eip1559_verified": false,
+        "endpoints": [
+          {
+            "gas_price": "\"0x64\"",
+            "priority": "\"0xa\"",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"90\",\"maxPriorityFeePerGas\":\"10\",\"maxFeePerGas\":\"190\",\"effectiveGasPrice\":\"100\",\"source\":\"direct\",\"verified\":false}"
+            }
+          },
+          {
+            "gas_price": "\"0x32\"",
+            "priority": null,
+            "js": {
+              "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"50\",\"effectiveGasPrice\":\"50\",\"source\":\"direct\",\"verified\":false}"
+            }
+          }
+        ],
+        "design": {
+          "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"50\",\"effectiveGasPrice\":\"50\",\"source\":\"direct\",\"verified\":false,\"answered\":2}"
+        }
+      },
+      {
+        "id": "three-mixed-verified",
+        "eip1559_verified": true,
+        "endpoints": [
+          {
+            "gas_price": "\"0x64\"",
+            "priority": "\"0xa\"",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"90\",\"maxPriorityFeePerGas\":\"10\",\"maxFeePerGas\":\"190\",\"effectiveGasPrice\":\"100\",\"source\":\"direct\",\"verified\":false}"
+            }
+          },
+          {
+            "gas_price": "\"0x3e8\"",
+            "priority": null,
+            "js": {
+              "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"1000\",\"effectiveGasPrice\":\"1000\",\"source\":\"direct\",\"verified\":false}"
+            }
+          },
+          {
+            "gas_price": "\"0x78\"",
+            "priority": "\"0x5\"",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"115\",\"maxPriorityFeePerGas\":\"5\",\"maxFeePerGas\":\"235\",\"effectiveGasPrice\":\"120\",\"source\":\"direct\",\"verified\":false}"
+            }
+          }
+        ],
+        "design": {
+          "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"92\",\"maxPriorityFeePerGas\":\"5\",\"maxFeePerGas\":\"190\",\"effectiveGasPrice\":\"97\",\"source\":\"direct\",\"verified\":false,\"answered\":3}"
+        }
+      },
+      {
+        "id": "three-mixed-unverified",
+        "eip1559_verified": false,
+        "endpoints": [
+          {
+            "gas_price": "\"0x64\"",
+            "priority": "\"0xa\"",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"90\",\"maxPriorityFeePerGas\":\"10\",\"maxFeePerGas\":\"190\",\"effectiveGasPrice\":\"100\",\"source\":\"direct\",\"verified\":false}"
+            }
+          },
+          {
+            "gas_price": "\"0x3e8\"",
+            "priority": null,
+            "js": {
+              "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"1000\",\"effectiveGasPrice\":\"1000\",\"source\":\"direct\",\"verified\":false}"
+            }
+          },
+          {
+            "gas_price": "\"0x96\"",
+            "priority": "\"0x200\"",
+            "js": {
+              "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"150\",\"effectiveGasPrice\":\"150\",\"source\":\"direct\",\"verified\":false}"
+            }
+          }
+        ],
+        "design": {
+          "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"100\",\"effectiveGasPrice\":\"100\",\"source\":\"direct\",\"verified\":false,\"answered\":3}"
+        }
+      },
+      {
+        "id": "width-max",
+        "eip1559_verified": false,
+        "endpoints": [
+          {
+            "gas_price": "\"0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"",
+            "priority": "\"0x1\"",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"1044388881413152506691752710716624382579964249047383780384233483283953907971557456848826811934997558340890106714439262837987573438185793607263236087851365277945956976543709998340361590134383718314428070011855946226376318839397712745672334684344586617496807908705803704071284048740118609114467977783598029006686938976881787785946905630190260940599579453432823469303026696443059025015972399867714215541693835559885291486318237914434496734087811872639496475100189041349008417061675093668333850551032972088269550769983616369411933015213796825837188091833656751221318492846368125550225998300412344784862595674492194617023806505913245610825731835380087608622102834270197698202313169017678006675195485079921636419370285375124784014907159135459982790513399611551794271106831134090584272884279791554849782954323534517065223269061394905987693002122963395687782878948440616007412945674919823050571642377154816321380631045902916136926708342856440730447899971901781465763473223850267253059899795996090799469201774624817718449867455659250178329070473119433165550807568221846571746373296884912819520317457002440926616910874148385078411929804522981857338977648103126085903001302413467189726673216491511131602920781738033436090243804708340403154190334\",\"maxPriorityFeePerGas\":\"1\",\"maxFeePerGas\":\"2088777762826305013383505421433248765159928498094767560768466966567907815943114913697653623869995116681780213428878525675975146876371587214526472175702730555891913953087419996680723180268767436628856140023711892452752637678795425491344669368689173234993615817411607408142568097480237218228935955567196058013373877953763575571893811260380521881199158906865646938606053392886118050031944799735428431083387671119770582972636475828868993468175623745278992950200378082698016834123350187336667701102065944176539101539967232738823866030427593651674376183667313502442636985692736251100451996600824689569725191348984389234047613011826491221651463670760175217244205668540395396404626338035356013350390970159843272838740570750249568029814318270919965581026799223103588542213662268181168545768559583109699565908647069034130446538122789811975386004245926791375565757896881232014825891349839646101143284754309632642761262091805832273853416685712881460895799943803562931526946447700534506119799591992181598938403549249635436899734911318500356658140946238866331101615136443693143492746593769825639040634914004881853233821748296770156823859609045963714677955296206252171806002604826934379453346432983022263205841563476066872180487609416680806308380669\",\"effectiveGasPrice\":\"1044388881413152506691752710716624382579964249047383780384233483283953907971557456848826811934997558340890106714439262837987573438185793607263236087851365277945956976543709998340361590134383718314428070011855946226376318839397712745672334684344586617496807908705803704071284048740118609114467977783598029006686938976881787785946905630190260940599579453432823469303026696443059025015972399867714215541693835559885291486318237914434496734087811872639496475100189041349008417061675093668333850551032972088269550769983616369411933015213796825837188091833656751221318492846368125550225998300412344784862595674492194617023806505913245610825731835380087608622102834270197698202313169017678006675195485079921636419370285375124784014907159135459982790513399611551794271106831134090584272884279791554849782954323534517065223269061394905987693002122963395687782878948440616007412945674919823050571642377154816321380631045902916136926708342856440730447899971901781465763473223850267253059899795996090799469201774624817718449867455659250178329070473119433165550807568221846571746373296884912819520317457002440926616910874148385078411929804522981857338977648103126085903001302413467189726673216491511131602920781738033436090243804708340403154190335\",\"source\":\"direct\",\"verified\":false}"
+            }
+          },
+          {
+            "gas_price": "\"0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"",
+            "priority": "\"0x0\"",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"1044388881413152506691752710716624382579964249047383780384233483283953907971557456848826811934997558340890106714439262837987573438185793607263236087851365277945956976543709998340361590134383718314428070011855946226376318839397712745672334684344586617496807908705803704071284048740118609114467977783598029006686938976881787785946905630190260940599579453432823469303026696443059025015972399867714215541693835559885291486318237914434496734087811872639496475100189041349008417061675093668333850551032972088269550769983616369411933015213796825837188091833656751221318492846368125550225998300412344784862595674492194617023806505913245610825731835380087608622102834270197698202313169017678006675195485079921636419370285375124784014907159135459982790513399611551794271106831134090584272884279791554849782954323534517065223269061394905987693002122963395687782878948440616007412945674919823050571642377154816321380631045902916136926708342856440730447899971901781465763473223850267253059899795996090799469201774624817718449867455659250178329070473119433165550807568221846571746373296884912819520317457002440926616910874148385078411929804522981857338977648103126085903001302413467189726673216491511131602920781738033436090243804708340403154190335\",\"maxPriorityFeePerGas\":\"0\",\"maxFeePerGas\":\"2088777762826305013383505421433248765159928498094767560768466966567907815943114913697653623869995116681780213428878525675975146876371587214526472175702730555891913953087419996680723180268767436628856140023711892452752637678795425491344669368689173234993615817411607408142568097480237218228935955567196058013373877953763575571893811260380521881199158906865646938606053392886118050031944799735428431083387671119770582972636475828868993468175623745278992950200378082698016834123350187336667701102065944176539101539967232738823866030427593651674376183667313502442636985692736251100451996600824689569725191348984389234047613011826491221651463670760175217244205668540395396404626338035356013350390970159843272838740570750249568029814318270919965581026799223103588542213662268181168545768559583109699565908647069034130446538122789811975386004245926791375565757896881232014825891349839646101143284754309632642761262091805832273853416685712881460895799943803562931526946447700534506119799591992181598938403549249635436899734911318500356658140946238866331101615136443693143492746593769825639040634914004881853233821748296770156823859609045963714677955296206252171806002604826934379453346432983022263205841563476066872180487609416680806308380670\",\"effectiveGasPrice\":\"1044388881413152506691752710716624382579964249047383780384233483283953907971557456848826811934997558340890106714439262837987573438185793607263236087851365277945956976543709998340361590134383718314428070011855946226376318839397712745672334684344586617496807908705803704071284048740118609114467977783598029006686938976881787785946905630190260940599579453432823469303026696443059025015972399867714215541693835559885291486318237914434496734087811872639496475100189041349008417061675093668333850551032972088269550769983616369411933015213796825837188091833656751221318492846368125550225998300412344784862595674492194617023806505913245610825731835380087608622102834270197698202313169017678006675195485079921636419370285375124784014907159135459982790513399611551794271106831134090584272884279791554849782954323534517065223269061394905987693002122963395687782878948440616007412945674919823050571642377154816321380631045902916136926708342856440730447899971901781465763473223850267253059899795996090799469201774624817718449867455659250178329070473119433165550807568221846571746373296884912819520317457002440926616910874148385078411929804522981857338977648103126085903001302413467189726673216491511131602920781738033436090243804708340403154190335\",\"source\":\"direct\",\"verified\":false}"
+            }
+          }
+        ],
+        "design": {
+          "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"1044388881413152506691752710716624382579964249047383780384233483283953907971557456848826811934997558340890106714439262837987573438185793607263236087851365277945956976543709998340361590134383718314428070011855946226376318839397712745672334684344586617496807908705803704071284048740118609114467977783598029006686938976881787785946905630190260940599579453432823469303026696443059025015972399867714215541693835559885291486318237914434496734087811872639496475100189041349008417061675093668333850551032972088269550769983616369411933015213796825837188091833656751221318492846368125550225998300412344784862595674492194617023806505913245610825731835380087608622102834270197698202313169017678006675195485079921636419370285375124784014907159135459982790513399611551794271106831134090584272884279791554849782954323534517065223269061394905987693002122963395687782878948440616007412945674919823050571642377154816321380631045902916136926708342856440730447899971901781465763473223850267253059899795996090799469201774624817718449867455659250178329070473119433165550807568221846571746373296884912819520317457002440926616910874148385078411929804522981857338977648103126085903001302413467189726673216491511131602920781738033436090243804708340403154190334\",\"maxPriorityFeePerGas\":\"0\",\"maxFeePerGas\":\"2088777762826305013383505421433248765159928498094767560768466966567907815943114913697653623869995116681780213428878525675975146876371587214526472175702730555891913953087419996680723180268767436628856140023711892452752637678795425491344669368689173234993615817411607408142568097480237218228935955567196058013373877953763575571893811260380521881199158906865646938606053392886118050031944799735428431083387671119770582972636475828868993468175623745278992950200378082698016834123350187336667701102065944176539101539967232738823866030427593651674376183667313502442636985692736251100451996600824689569725191348984389234047613011826491221651463670760175217244205668540395396404626338035356013350390970159843272838740570750249568029814318270919965581026799223103588542213662268181168545768559583109699565908647069034130446538122789811975386004245926791375565757896881232014825891349839646101143284754309632642761262091805832273853416685712881460895799943803562931526946447700534506119799591992181598938403549249635436899734911318500356658140946238866331101615136443693143492746593769825639040634914004881853233821748296770156823859609045963714677955296206252171806002604826934379453346432983022263205841563476066872180487609416680806308380669\",\"effectiveGasPrice\":\"1044388881413152506691752710716624382579964249047383780384233483283953907971557456848826811934997558340890106714439262837987573438185793607263236087851365277945956976543709998340361590134383718314428070011855946226376318839397712745672334684344586617496807908705803704071284048740118609114467977783598029006686938976881787785946905630190260940599579453432823469303026696443059025015972399867714215541693835559885291486318237914434496734087811872639496475100189041349008417061675093668333850551032972088269550769983616369411933015213796825837188091833656751221318492846368125550225998300412344784862595674492194617023806505913245610825731835380087608622102834270197698202313169017678006675195485079921636419370285375124784014907159135459982790513399611551794271106831134090584272884279791554849782954323534517065223269061394905987693002122963395687782878948440616007412945674919823050571642377154816321380631045902916136926708342856440730447899971901781465763473223850267253059899795996090799469201774624817718449867455659250178329070473119433165550807568221846571746373296884912819520317457002440926616910874148385078411929804522981857338977648103126085903001302413467189726673216491511131602920781738033436090243804708340403154190334\",\"source\":\"direct\",\"verified\":false,\"answered\":2}"
+        }
+      },
+      {
+        "id": "uint256-mixed-verified",
+        "eip1559_verified": true,
+        "endpoints": [
+          {
+            "gas_price": "\"0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"",
+            "priority": "\"0x8000000000000000000000000000000000000000000000000000000000000000\"",
+            "js": {
+              "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"57896044618658097711785492504343953926634992332820282019728792003956564819967\",\"maxPriorityFeePerGas\":\"57896044618658097711785492504343953926634992332820282019728792003956564819968\",\"maxFeePerGas\":\"173688133855974293135356477513031861779904976998460846059186376011869694459902\",\"effectiveGasPrice\":\"115792089237316195423570985008687907853269984665640564039457584007913129639935\",\"source\":\"direct\",\"verified\":false}"
+            }
+          },
+          {
+            "gas_price": "\"0x100000000000000000000000000000000000000000000000000\"",
+            "priority": null,
+            "js": {
+              "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"1606938044258990275541962092341162602522202993782792835301376\",\"effectiveGasPrice\":\"1606938044258990275541962092341162602522202993782792835301376\",\"source\":\"direct\",\"verified\":false}"
+            }
+          }
+        ],
+        "design": {
+          "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"0\",\"maxPriorityFeePerGas\":\"1606938044258990275541962092341162602522202993782792835301376\",\"maxFeePerGas\":\"1606938044258990275541962092341162602522202993782792835301376\",\"effectiveGasPrice\":\"1606938044258990275541962092341162602522202993782792835301376\",\"source\":\"direct\",\"verified\":false,\"answered\":2}"
+        }
+      }
+    ]
+  },
   "safe_error_message": [
     {
       "name": "Error",
