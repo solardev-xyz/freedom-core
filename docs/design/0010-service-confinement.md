@@ -42,7 +42,7 @@
 
 **Goals**
 - **No file access outside the service's own directory:** a compromised service can't read, write or change the user's other files, on every OS where an unprivileged mechanism exists: Linux and macOS, and Windows only with a restricted token or AppContainer (D4).
-- **No local IPC outside the service:** no connection to another process's local socket, on Linux and macOS.
+- **No local IPC beyond the authorized channels:** no connection to another process's local socket, and no signal to one, on Linux and macOS. The authorized channels are main's connection on stdio, inherited at spawn, and on macOS the system's resolver and configuration services that the profile must allow ([macOS](#macos)). The `ipc` property is reported, and tested, by this definition ([Reporting](#the-recommendation), step 5).
 - **No child processes,** on every OS, and **no debugging of other processes** where the OS can refuse it: Linux and macOS.
 - **No admin rights and no installer changes.** On every OS, main spawns the services exactly as 0007 and 0008 say: on macOS too, since the profile is self-applied (D3).
 - **Honest reporting:** the service reports, per property, what confinement it got and why anything is missing. Tests prove each OS's rules.
@@ -80,7 +80,7 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
 
 **Both services also use:**
 - stdin, stdout and stderr, which are inherited: a socket pair or pipes, connected to main only;
-- the lock file, opened before confinement, whose descriptor stays usable. The ephemeral IPFS process has none;
+- the lock file, opened before confinement, whose descriptor stays usable. The service registers it with `confine` ([The recommendation](#the-recommendation), step 1). The ephemeral IPFS process has none;
 - the network policy, from the spawn arguments ([below](#the-network-policy-and-the-lifecycle));
 - threads, memory, clocks and `getrandom`;
 - in `freedom-ipfsd`, one UNIX socket pair, which tokio's signal driver creates. No other local socket: glibc's resolver reaches DNS without one, and its sources that need one are refused ([Name resolution](#name-resolution-through-glibc));
@@ -237,6 +237,7 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
   - an undocumented profile language, for which Apple's own profiles are the reference;
   - Apple may change it.
   - **What the profile must allow:** name resolution through mDNSResponder, a Mach service and a UNIX socket; read access to system libraries and frameworks; for NAT64 discovery, `com.apple.SystemConfiguration.configd`, and in `direct` mode port 53 to loopback and private addresses.
+    - mDNSResponder and `configd` are the `ipc` property's authorized channels on macOS, besides main's stdio, and the profile allows them by name. If qualification finds another system service the services need, it joins this list by name, with a change to this design. The profile allows nothing else.
 - **A qualification gate:** Linux tests can't show what a profile must allow. Before a release ships, its signed build runs the contract suite confined on every supported macOS version: DNS, TLS, the file operations in the data directory, NAT64 discovery, and `socks5` mode through Arti on loopback and through a SOCKS proxy on the LAN.
 
 **`sandbox-exec(1)`, run by main:** `/usr/bin/sandbox-exec -f <profile> -D DATA_DIR=<dir> freedom-ipfsd serve …`.
@@ -306,16 +307,24 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
 
 **The first step, with the services (0007 and 0008, step 4):**
 1. **A `confine` step in `fc-service`,** run once on the main thread **while it is the process's only thread**:
-   - **Before it:**
-     - the arguments are parsed, the network policy included;
-     - every inherited descriptor above 2 is closed (`close_range` on Linux, a loop over `/dev/fd` on macOS), so no connection main's process leaked stays usable;
-     - the panic hook is installed, and the process hardened;
-     - for the persistent IPFS process and `freedom-radicled`: the lock is taken, and the data directory is created and opened. The ephemeral IPFS process takes no lock and opens no directory: its read-write grant is empty.
-     - **Nothing else:** no socket, no name lookup, and no file outside the grants. Logging writes stderr only, NAT64 discovery starts with the runtime after `confine`, and the TLS roots are built in.
+   - **Before it, in this order:**
+     1. **At entry:** the panic hook is installed, which opens nothing, and then comes the only sweep: every inherited descriptor above 2 is closed (`close_range` on Linux, a loop over `/dev/fd` on macOS), so no connection main's process leaked stays usable. Nothing is closed wholesale later: once the lock is open, a sweep would close it.
+     2. **Only the listed setup:**
+        - the process is hardened;
+        - the arguments are parsed, the network policy included;
+        - for the persistent IPFS process and `freedom-radicled`: the lock is taken, and the data directory is created and opened. The service registers the lock's descriptor, and any directory it holds open, with `confine`. The ephemeral IPFS process takes no lock and opens no directory: its read-write grant is empty, and it registers nothing.
+        - **Nothing else:** no socket, no name lookup, and no file outside the grants. Logging writes stderr only, NAT64 discovery starts with the runtime after `confine`, and the TLS roots are built in.
+     3. **`confine` checks** the threads and the whole descriptor table (below), and only then installs the rules.
    - **After it,** everything that starts a thread: logging's writer (`log::init`; lines before it are written directly), the async runtimes (built explicitly, never by `#[tokio::main]`), `conn::run`'s reader, writer, stdin and lifecycle threads, and the watchdogs. Then the handshake, and only then any untrusted input.
    - **Why:** before ABI 8, Landlock restricts only the calling thread and the threads it starts later. A thread started earlier stays unconfined, and a compromise could use it. seccomp is installed with `TSYNC`, and Landlock with its `TSYNC` from ABI 8, as backstops. The order doesn't rely on them.
    - **Checked:** `confine` counts the process's threads first (`/proc/self/task` on Linux). More than one is a bug, so the service exits 77 rather than report confinement.
-   - **Checked too: no socket crosses.** Landlock and seccomp check new opens and calls only. Nothing they do closes or revokes a descriptor opened before them, and a connected socket stays usable. So `confine` reads its descriptor table (`/proc/self/fd`). A socket above stderr, which only something before it can have opened (an NSS source, say), is a bug, and the service exits 77. The descriptors that may cross are stdio, the lock and the service's own directories.
+   - **Checked too: only the registered descriptors cross.** Landlock and seccomp check new opens and calls only. Nothing they do closes or revokes a descriptor opened before them: a connected socket, a pipe or FIFO, or a file opened outside the grants stays usable.
+     - **The check:** `confine` compares every descriptor in the process's table (`/proc/self/fd` on Linux, `/dev/fd` on macOS) with stdio and the descriptors the service registered, whatever its type. The table's own descriptor, which `confine` opens to read it, is known by its number and skipped, and nothing else is opened while it reads.
+     - **Anything else** above stderr can only come from the setup before `confine`, so it is a bug, and the service exits 77:
+       - a socket, pipe or FIFO: a channel the rules wouldn't see, such as an NSS source's cached connection;
+       - a regular file or directory: access the grants may not give;
+       - an `eventfd` or `epoll` descriptor: no channel of its own, but a sign that a runtime was built early, which the thread count misses for a runtime on the current thread.
+     - **stdio may be pipes or a socket pair:** main's connection, inherited at spawn.
 2. **Linux:**
    - No-new-privileges.
    - Landlock at the best ABI available, with every right that ABI knows handled:
@@ -343,7 +352,7 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
    - **The properties:**
      - `files`: outside the grant, no file can be read or written; outside the read-write grant, none can be truncated; and no file, granted or not, can have its mode, owner, xattrs, flags or times changed;
      - `exec`: no program runs, and no process is created;
-     - `ipc`: no local socket or signal reaches another process;
+     - `ipc`: no local IPC reaches another process beyond the authorized channels ([Goals](#goals-and-non-goals)): main's connection on stdio, and on macOS mDNSResponder and `configd`. No other local socket connects, and no signal is sent to another process. `enforced` means exactly this, and `partial` names what is left open (`gaps`);
      - `network`: in `socks5` mode, TCP reaches only the proxy's port (on macOS, at the proxy's loopback host where it is one).
    - **The statuses:** `enforced`, `partial`, `unavailable` or `blocked` (step 6), or, for `network` in `direct` mode, `none`.
    - **Derived, not assumed:** each status comes from what was installed: the ABI the kernel reports and the rights handled at it, the `landlock` crate's `RestrictionStatus`, each mitigation read back. A best-effort call that returned success is not evidence: the crate drops unsupported rights silently.
@@ -444,7 +453,11 @@ Through the binary, in CI's job for each OS:
   - **qualification under the metadata rule:** SQLite creates and checkpoints its journal and WAL, and libgit2 creates a repository, writes loose objects and packs, and writes an existing object again, all without error;
   - a resolver file replaced by a rename while the service runs: still readable through its directory's grant; in `/etc`, discovery reports `unknown`;
   - the service still passes its contract suite confined.
-- **Descriptors:** a UNIX socket connected before `confine`, as an NSS client's cached connection would be, makes it refuse (exit 77). In each service, the descriptors open at `confine` are exactly stdio, the lock and the data directory's.
+- **Descriptors,** each case stating where its descriptor comes from, since the entry sweep closes whatever is inherited:
+  - **inherited from the parent:** an extra pipe and a socket are closed by the entry sweep, and startup succeeds;
+  - **injected after the sweep, before `confine`:** a UNIX socket connected to a listener, as an NSS client's cached connection would be, a pipe, a file opened outside the grants, an `eventfd` and an `epoll` descriptor. Each makes `confine` refuse (exit 77);
+  - **allowed:** stdio as pipes, and as a socket pair, with a registered lock and directory, passes. So does the ephemeral IPFS process, which registers nothing;
+  - **in each service,** the descriptors open at `confine` are exactly stdio and the lock, and the ephemeral process's are stdio alone.
 - **Threads:** a test hook reads a canary from every kind of thread the real binary has: the main thread, the log writer, the reader, writer, stdin and lifecycle threads, a runtime worker and a blocking-pool thread. Each fails. A hook that starts a thread before `confine` makes the service exit 77.
 - **Processes:**
   - a test hook's attempt to run `/bin/sh` (`cmd.exe` on Windows) fails;
@@ -453,7 +466,7 @@ Through the binary, in CI's job for each OS:
   - **live:** each denied call that std or rustix offers safely (exec and process creation, the mode, owner, xattr and time calls, `ioctl`, the socket families) fails as the filter answers. Rule 6 allows no raw-syscall facility outside `fc-sys`, and a generic one would be unsound, so calls without a safe API aren't made live;
   - **the whole denylist:** the generated BPF, the exact programs installed, evaluated in a unit test on synthetic records for every denied call, and for native, compat (i386, AArch32) and x32 calls, whatever CI's kernel enables;
   - **the ABI guard, live:** on x86-64, `getpid` with `__X32_SYSCALL_BIT`, and through the i386 ABI (`int 0x80`), is killed, where the kernel has those ABIs. These two calls are `fc-sys`'s only test helpers, behind its `test-abis` feature.
-- **Local IPC:** a listener on a pathname socket and one on an abstract socket, outside every grant: connecting to either fails (seccomp; and from ABI 9, Landlock), while tokio's socket pair works.
+- **Local IPC,** by `ipc`'s definition: a listener on a pathname socket and one on an abstract socket, outside every grant: connecting to either fails (seccomp; and from ABI 9, Landlock). Main's connection on stdio, as a socket pair, still works, and so does tokio's socket pair inside the process. On macOS, the qualification gate shows mDNSResponder and `configd` answering, and a listener outside them refused.
 - **Network:**
   - in `socks5` mode, a TCP connection to any port but the proxy's is refused by the kernel, on Linux from ABI 4 and on macOS;
   - **a LAN proxy:** `--network socks5:<a private address>:<port>`, with a SOCKS proxy listening there: the service reaches it, and on macOS its profile has the port-only rule;
