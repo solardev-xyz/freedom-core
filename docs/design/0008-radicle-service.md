@@ -736,6 +736,11 @@ Main sees the recipient, `enc` and the ciphertext, and never the key.
 ### The switch
 
 - **The core deletes any plaintext `keys/radicle`** under the home gate, as a journaled step of `nodes.write_identity`'s Radicle form ([Identity changes](#identity-changes)). It removes `keys/radicle.pub` with it, which names an identity the node may no longer run as, and which nothing reads now ([Main's side](#mains-side)). The step writes no key, so it needs no vault.
+- **The transition: the form is selected explicitly.**
+  - That form is `nodes.write_identity` with `custody: "sealed"`.
+  - Without `custody`, the call keeps today's form, which writes the key pair: the add-on, still the default until the service ships, loads `keys/radicle`, and without it would generate a random key of its own ([Rollback](#rollback)).
+  - So main sends `custody: "sealed"` only for a home the service runs on.
+  - Today's form goes with the add-on (implementation step 10).
 - **Why:** `start_with_key` leaves an old key file in place (`lr:744` documents that), and a later `start` would bring that identity back. Every home from before this design has one: the derived key the core wrote, or the random key libradicle generated.
 - **When:** main runs it when the service refuses with `key_file_present`, then starts again, once.
 - **The old identity stays checked.** The add-on leaves no dirty marker, so nothing records whether it stopped in the middle of a write. The switch therefore adds the old identity's node ID to `node/dirty` ([the dirty marker](#reconciliation)):
@@ -743,6 +748,7 @@ Main sees the recipient, `enc` and the ciphertext, and never the key.
   - So the first start after the switch runs the full reconciliation once, and checks that identity's namespace in every repository, whatever key the start runs with. The core's derived key is the same identity, and re-signs. Any other key quarantines a namespace that doesn't verify ([Reconciliation](#reconciliation)).
   - If neither file yields a public key, the switch answers `node_identity_corrupt` and touches nothing. Only an identity change with `wipe`, which leaves nothing to check, removes such a file.
 - **The journal:** the marker and the removals are recorded before anything is removed, and the marker is installed first. Recovery repeats each step, and a file that's already gone counts as done. So a crash at any point leaves either the key file, which the next start refuses, or no key file and a marker that names the old identity.
+- **The marker's format:** `node/dirty` is JSON, `{"node_ids": [<node ID>, …]}`: each node ID in its `z6Mk…` form, sorted, each once. The switch adds to a marker already there, and never drops a name. A marker it can't read is `node_identity_corrupt`, and nothing is touched.
 - **What it ends:** on a home whose key libradicle generated, the switch ends that identity. What it published stays, signed, but no Freedom node can act as it again. A key the core derived stays the profile's identity for as long as the profile keeps that vault, since the sealed key is the same key.
 - **No fallback:**
   - The service starts the node only with `start_with_key`.
@@ -856,7 +862,7 @@ One owner holds the home gate at each step, and no step waits on a gate that its
 
 1. **Main stops the service.** The process exits, and its gate is free, since it starts no child.
 2. **The core takes the gate for the whole identity change.**
-   - `nodes.write_identity { node: "radicle", home, alias, wipe: true }`. It extends 0001's journaled multi-file write, and writes no key file: the Radicle key is never written ([Keys](#keys)). It needs no vault.
+   - `nodes.write_identity { node: "radicle", home, alias, custody: "sealed", wipe: true }`. It extends 0001's journaled multi-file write, and writes no key file: the Radicle key is never written ([Keys](#keys)). It needs no vault.
    - It stages the config, then commits the journal, which records the wipe and the removal of `keys/radicle` and `keys/radicle.pub`. It then wipes `node/`, `cobs/` and `storage/`, removes the key files, installs the config, and finishes.
    - Recovery of such a journal repeats the wipe and the removals, which are idempotent, and then the install. All of this is under the same gate.
    - The wipe moves from main into the core, so main never holds `hold-lock` while the core needs the gate.
