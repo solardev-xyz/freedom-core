@@ -916,8 +916,9 @@ One owner holds the home gate at each step, and no step waits on a gate that its
   - `proxy`;
   - `onion`;
   - `i2p` (`Drop`);
-  - `listen` (empty);
   - `externalAddresses` (empty, so the node advertises no address of its own).
+
+  The service also passes an empty `Options::listen`, a separate option, so the node opens no listener.
 
   A `config.json` with a conflicting proxy, an onion `Forward`, or an I2P route has no effect. The service never rewrites the user's `config.json`.
 
