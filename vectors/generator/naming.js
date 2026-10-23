@@ -17,9 +17,11 @@ const SILENT_LOG = { info() {}, warn() {}, error() {}, debug() {}, log() {} };
  * as `__internals`, and `stubs` (by request string) for its own requires.
  * `extra` is test-only code appended after that, in the module's scope.
  */
-function loadWithInternals(checkout, rel, internals, stubs, extra = '') {
+function loadWithInternals(checkout, rel, internals, stubs, extra = '', transform = null) {
   const filename = path.join(checkout, rel);
-  const source = fs.readFileSync(filename, 'utf8');
+  const read = fs.readFileSync(filename, 'utf8');
+  // A reference patch (chain-replay.js's PATCHES), applied in memory.
+  const source = transform ? transform(read, filename) : read;
   const exposed = `\n;module.exports.__internals = { ${internals.join(', ')} };\n${extra}`;
   const originalLoad = Module._load;
   Module._load = function load(request, parent, isMain) {

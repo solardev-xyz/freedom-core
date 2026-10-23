@@ -23,13 +23,15 @@ fn a_throwing_conversion_builds_nothing() {
     gas.push_str("\",{\"toString\":null}]");
     let mut asked = 0usize;
     let before = peak();
-    let quoted = fc_chain::fee_quote_reserving("direct", Some(&gas), None, |bytes| {
+    let quoted = fc_chain::fee_quote_values_reserving("direct", Some(&gas), None, None, |bytes| {
         asked += bytes;
         Ok::<(), ()>(())
     })
     .unwrap();
     let after = peak();
-    let error = quoted.unwrap_err();
+    let fc_chain::FeeOutcome::Error(error) = quoted else {
+        panic!("{quoted:?}");
+    };
     assert_eq!(error.name, "TypeError");
     assert_eq!(
         error.message.to_string_lossy(),

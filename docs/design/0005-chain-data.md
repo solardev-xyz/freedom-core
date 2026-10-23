@@ -1112,17 +1112,17 @@ Main's #749 (`3d9e7b33`, merged in #751) prices fee quotes with headroom ([Fee q
   - **`boundary-fee-direct-priority-unparseable`:** a fails as before. b's hint (17, above 16) is unusable, and b's block is the string `0x11`, which isn't one: b fails at its block read. Direct's last resort: `{"type":"legacy","gasPrice":"50000020","effectiveGasPrice":"50000020","source":"direct","verified":false,"answered":1}`. b is asked at once with a, its block read after its hint.
   - **`boundary-fee-direct-gas-price-fails-first`:** a fails as before. b's hint fails, and so does its block read, so Direct's last resort is ⌊1,000,000,000·125/100⌋ + the floor: `{"type":"legacy","gasPrice":"1300000000","effectiveGasPrice":"1300000000","source":"direct","verified":false,"answered":1}`.
   - **`boundary-fee-quorum-priority-disagrees`,** a fourth: the quorum's block disagrees, so the quorum leaves its last resort. The walk now reaches Direct with three endpoints, whose hints 1, 2 and 3 are usable. The patched reference quotes the first endpoint alone: M = 2,049,999,998. B combines all three: `{"type":"eip1559","baseFee":"999999997","maxPriorityFeePerGas":"50000000","maxFeePerGas":"2049999994","effectiveGasPrice":"1049999997","source":"direct","verified":false,"answered":3}`.
-- **New scenarios** port #749's tests in `chain-data-router.test.js` at `94b0af4e`, each patched:
+- **New scenarios** port #749's tests in `chain-data-router.test.js` at `94b0af4e`. Ten are patched. Two come out the same without the patch, so they are recorded unpatched, as three of #752's are: `fee-headroom-myotis-complete` (its tip is above the floor) and `fee-headroom-direct-same-endpoint` (its hint is the floor itself).
 
 | Scenario | From | Shows |
 |---|---|---|
-| `fee-headroom-myotis-complete` | 517 | one Myotis operation, a usable hint, no block |
+| `fee-headroom-myotis-complete` (unpatched) | 517 | one Myotis operation, a usable hint, no block |
 | `fee-headroom-dust-tip` | 538 | a tip of 3,901 wei floored at 0.05 gwei |
 | `fee-headroom-colibri-inconsistent` | 558 | Colibri's 1 gwei hint over its gas price, priced from Colibri's own verified block, the floor as its tip |
 | `fee-headroom-no-hint-method` | 588 | a source without `eth_maxPriorityFeePerGas`: G − base as the tip |
 | `fee-headroom-myotis-read-path` | 611 | Myotis without a hint, its block read through the read path from Colibri: `baseFeeSource` `colibri`, verified |
 | `fee-headroom-myotis-unverified-block` | 635 | the same read from Direct: `baseFeeSource` `direct`, not verified |
-| `fee-headroom-direct-same-endpoint` | 652 | Direct's components from one endpoint (`fee-combination`: both endpoints asked) |
+| `fee-headroom-direct-same-endpoint` (unpatched) | 652 | Direct's components from one endpoint (`fee-combination`: both endpoints asked) |
 | `fee-headroom-direct-block` | 674 | Direct without a hint, priced from that endpoint's block (`fee-combination`) |
 | `fee-headroom-legacy-chain` | 697 | a block without a base fee: legacy at 125% + the floor (`fee-combination`: `answered: 1`) |
 | `fee-headroom-later-type-2-wins` | 715 | Colibri's block fails; Direct's type-2 quote wins over Colibri's last resort (`fee-combination`: `answered: 1`, and B's header read, which fails as Colibri's block did) |
