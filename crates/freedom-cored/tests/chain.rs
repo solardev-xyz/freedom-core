@@ -428,7 +428,7 @@ fn a_fee_quote() {
             other => panic!("{other}"),
         })
     });
-    // Direct asks one endpoint for both.
+    // Direct asks its one endpoint for both: B's quote from one answer.
     assert!(seen.requests.iter().all(|r| r["params"]["endpoint"] == "a"));
     assert_eq!(
         reply["result"],
@@ -440,6 +440,7 @@ fn a_fee_quote() {
             "effectiveGasPrice": "1000000000",
             "source": "direct",
             "verified": false,
+            "answered": 1,
             "generation": 1,
         })
     );
