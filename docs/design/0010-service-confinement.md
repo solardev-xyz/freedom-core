@@ -309,12 +309,17 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
 1. **A `confine` step in `fc-service`,** run once on the main thread **while it is the process's only thread**:
    - **Before it, in this order:**
      1. **At entry, one re-exec if anything is inherited.** Right after the panic hook, before anything opens a descriptor, the service lists its descriptors.
-        - **If one is open above stderr** and `FREEDOM_SERVICE_REEXEC` isn't set, the service:
+        - **If one is open above stderr** and `FREEDOM_SERVICE_REEXEC` doesn't hold the process's own id, the service:
           - marks every descriptor above stderr close-on-exec: `close_range(3, ~0, CLOSE_RANGE_CLOEXEC)` from Linux 5.11, or an `fcntl(F_SETFD)` loop over `/proc/self/fd` before it;
-          - executes itself again through `/proc/self/exe`, with the same arguments and environment plus the marker. `/proc/self/exe` is the running image even if its file was replaced.
+          - executes itself again through `/proc/self/exe`, with the same arguments, `argv[0]` included, and the same environment, plus the marker set to the process's id. `/proc/self/exe` is the running image even if its file was replaced.
 
           The kernel then closes them all.
-        - **The re-executed image removes the marker** from its environment before anything else, so it goes no further.
+        - **The marker is the process's id, and nothing removes it** (`fc_service::confine::REEXEC_MARKER`):
+          - **No loop:** an exec keeps the id, so the re-executed image finds its own id and doesn't re-execute again.
+          - **Only an exact match counts:** any other value is no marker. That includes a parent service's id, so a nested service still gets its one re-exec, and anything that isn't a number.
+          - **Why it stays:** changing the process's environment is unsafe, since a thread could read it at the same moment, and checking for a single thread first doesn't prove there isn't one. So the marker stays.
+          - **A reused id fails closed:** a far descendant that inherits the marker and happens to get the same id doesn't re-execute, and `confine` refuses what it inherited (exit 77).
+        - **If a service ever spawns a child,** it drops the marker from the child's environment with `Command::env_remove`, which touches only the child's. None does today: the services start no process (0008), and seccomp refuses exec once they are confined. This is tidiness, not safety: a child has another id, so it would ignore the marker anyway.
         - **On macOS** (with the Seatbelt work): a loop over `/dev/fd`, and `execv` of `_NSGetExecutablePath`'s path.
         - **Why a re-exec:** a close can't prove that no Rust object owns the descriptor it closes. Close-on-exec closes nothing, and the exec replaces the whole image, so no owner of a closed descriptor survives. If the exec fails, close-on-exec is merely set, and every owner is still valid. The calls are `fc-sys`'s, as rule 6 says, and the exec is std's.
      2. **Only the listed setup:**
@@ -323,7 +328,7 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
         - for the persistent IPFS process and `freedom-radicled`: the lock is taken, and the data directory is created and opened. The service registers the lock's descriptor, and any directory it holds open, with `confine`. The ephemeral IPFS process takes no lock and opens no directory: its read-write grant is empty, and it registers nothing.
         - **Nothing else:** no socket, no name lookup, and no file outside the grants. Logging writes stderr only, NAT64 discovery starts with the runtime after `confine`, and the TLS roots are built in.
      3. **`confine` checks** the threads and the whole descriptor table (below), and only then installs the rules.
-   - **Refusal is the backstop.** After the re-exec, or with the marker already set, a descriptor still there is refused at `confine`: exit 77, logged by its kind.
+   - **Refusal is the backstop.** After the re-exec, or with the marker already holding the process's own id, a descriptor still there is refused at `confine`: exit 77, logged by its kind.
      - Main spawns each service with stdio alone: Node and libuv open their own descriptors close-on-exec, as Rust's `Command` does.
      - So the re-exec should seldom happen. It means the launcher leaked a descriptor into main.
    - **After it,** everything that starts a thread: logging's writer (`log::init`; lines before it are written directly), the async runtimes (built explicitly, never by `#[tokio::main]`), `conn::run`'s reader, writer, stdin and lifecycle threads, and the watchdogs. Then the handshake, and only then any untrusted input.
@@ -468,8 +473,9 @@ Through the binary, in CI's job for each OS:
   - a resolver file replaced by a rename while the service runs: still readable through its directory's grant; in `/etc`, discovery reports `unknown`;
   - the service still passes its contract suite confined.
 - **Descriptors,** each case stating where its descriptor comes from:
-  - **inherited from the parent:** an extra pipe, and an extra socket, each give exactly one re-exec, then a clean start with the marker gone. This holds through `close_range` and through the `fcntl` fallback;
-  - **the marker set with a descriptor still there:** no re-exec, and exit 77;
+  - **inherited from the parent:** an extra pipe, and an extra socket, each give exactly one re-exec, then a clean start, with the marker holding the process's own id. This holds through `close_range` and through the `fcntl` fallback. An inherited marker holding another id, or no number, counts as none and gives the same one re-exec;
+  - **the re-exec keeps every argument:** `argv[0]` and each argument, an empty one and bytes that aren't UTF-8 among them, compare byte for byte before and after it, through both ways of marking;
+  - **the marker already holding the process's own id, with a descriptor still there:** no re-exec, and exit 77;
   - **a re-exec that fails:** a descriptor the process owns still works after close-on-exec is set, and the inherited one is refused (exit 77);
   - **opened by the process's own startup, after its entry and before `confine`:** a UNIX socket connected to a listener, as an NSS client's cached connection would be, a pipe, a file opened outside the grants, an `eventfd` and an `epoll` descriptor. Each makes `confine` refuse (exit 77);
   - **hidden:** with a socket connected, an outer Landlock layer that hides `/proc/self/fd`, or `/proc/self/task`, makes `confine` refuse, and no report comes back;
@@ -547,7 +553,7 @@ Each is decided (the user, 2026-10-23), as recommended. The options weighed stay
   - the `landlock` crate (MIT or Apache-2.0) and `seccompiler` (Apache-2.0 or BSD-3-Clause), which keep their `unsafe` inside them, pinned to exact versions (today `landlock` 0.4.7 and `seccompiler` 0.5.0). Each mechanism maps to one status: Landlock's from its `RestrictionStatus` and the kernel's ABI; seccomp's from installing both filters; each Windows mitigation from its read-back;
   - or hand-written FFI.
 
-  The macOS and Windows calls need FFI either way. AGENTS.md rule 6 puts every `unsafe` of this workspace in `fc-sys`, each a single reviewed call with a `SAFETY` comment behind a safe function, as `fc-service`'s Windows calls already are (#116). `fc-service` keeps `forbid(unsafe_code)`, and calls them through `fc-sys`'s safe functions; So do Landlock's version query, the entry's close-on-exec marks, and the marker's removal (step 1). None of them closes a descriptor, so none can invalidate an owner, and the exec that drops the marked descriptors is std's. A range close isn't among them: a safe function can't prove that no Rust object owns what it closes.
+  The macOS and Windows calls need FFI either way. AGENTS.md rule 6 puts every `unsafe` of this workspace in `fc-sys`, each a single reviewed call with a `SAFETY` comment behind a safe function, as `fc-service`'s Windows calls already are (#116). `fc-service` keeps `forbid(unsafe_code)`, and calls them through `fc-sys`'s safe functions. So do Landlock's version query and the entry's close-on-exec marks (step 1). None of them closes a descriptor, so none can invalidate an owner, and the exec that drops the marked descriptors is std's. Nothing changes the process's environment: the marker is the process's id, and stays. A range close isn't among them: a safe function can't prove that no Rust object owns what it closes.
   - **Decided: the `landlock` and `seccompiler` crates, pinned to exact versions,** with `cargo deny` checking them.
 - **D7. `freedom-cored`:** confine it too, in a later design, or not.
   - **Decided: confine it too, in a later design.**
