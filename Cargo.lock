@@ -587,6 +587,7 @@ dependencies = [
  "fc-naming",
  "fc-protocol",
  "fc-seal",
+ "fc-service",
  "fc-swarm",
  "fc-sys",
  "fc-vault",

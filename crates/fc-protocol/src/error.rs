@@ -49,6 +49,9 @@ pub enum ErrorCode {
     /// A service instance is retired, unknown or stopping: main's backend
     /// fails with `freedom-ipfs native node is not running`.
     Stopped,
+    /// A node's gate is held by another process: a Radicle identity write
+    /// while the Radicle service runs (design 0008, "Identity changes").
+    LockHeld,
     // The Radicle service's start (design 0008, Errors). Each ends the
     // process after its reply.
     /// Something exists at the Radicle home's `keys/radicle`: main runs the
@@ -121,6 +124,15 @@ mod tests {
                 Some(code)
             );
         }
+    }
+
+    #[test]
+    fn lock_held_on_the_wire() {
+        // Design 0008, Identity changes: a Radicle home's gate is held.
+        assert_eq!(
+            serde_json::to_value(ErrorCode::LockHeld).ok(),
+            Some(serde_json::Value::from("lock_held"))
+        );
     }
 
     #[test]
