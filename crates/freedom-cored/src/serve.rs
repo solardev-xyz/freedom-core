@@ -270,7 +270,11 @@ pub fn run(options: &Options) -> Exit {
         pending,
     )
     .is_err()
-        || !spawn_snapshot(gate.identity_dir.clone(), events_tx.clone())
+        || !spawn_snapshot(
+            gate.identity_dir.clone(),
+            options.lock_dir.clone(),
+            events_tx.clone(),
+        )
         || !spawn_parent_watch(options.parent_pid, events_tx)
     {
         log::error("cannot start a thread", serde_json::json!({}));
@@ -295,6 +299,7 @@ pub fn run(options: &Options) -> Exit {
         last_request_id: 0,
         vault: Vault::new(
             gate.identity_dir.clone(),
+            options.lock_dir.clone(),
             fc_vault::state::DEFAULT_AUTO_LOCK_MS,
         ),
         worker,
@@ -476,12 +481,12 @@ pub fn run(options: &Options) -> Exit {
 
 /// Reads the status snapshot on its own thread. False if the thread can't be
 /// created. If the read never finishes, the hello deadline ends the process.
-fn spawn_snapshot(identity_dir: PathBuf, events: Sender<Event>) -> bool {
+fn spawn_snapshot(identity_dir: PathBuf, lock_dir: PathBuf, events: Sender<Event>) -> bool {
     std::thread::Builder::new()
         .name("snapshot".into())
         .spawn(move || {
             crate::testhooks::snapshot_delay();
-            let (snapshot, recovery) = crate::vault::startup_snapshot(&identity_dir);
+            let (snapshot, recovery) = crate::vault::startup_snapshot(&identity_dir, &lock_dir);
             let _ = events.send(Event::Snapshot(snapshot, recovery));
         })
         .is_ok()

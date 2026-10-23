@@ -199,7 +199,7 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   - Main's own methods accept only `shell`: `core.hello`, `core.shutdown`, `vault.reconcile`, `nodes.op_status`, `compat.*`, `dweb.open` and `nodes.seal_radicle_key` ([0008](0008-radicle-service.md#the-sealed-release)). A main bug that forwarded a renderer's `core.shutdown` under `chrome` would otherwise wipe the vault and, through the restart, reset the in-memory throttle.
   - No method accepts `page` yet (Phase 2).
 - **Error codes:**
-  - **Request errors:** `vault_locked`, `incorrect_password`, `throttled` (with `data.retry_after_ms`), `no_vault`, `vault_exists`, `unsupported_vault_version`, `corrupt_vault`, `invalid_mnemonic`, `invalid_argument`, `weak_password`, `storage` (with `data.kind`).
+  - **Request errors:** `vault_locked`, `incorrect_password`, `throttled` (with `data.retry_after_ms`), `no_vault`, `vault_exists`, `unsupported_vault_version`, `corrupt_vault`, `invalid_mnemonic`, `invalid_argument`, `weak_password`, `storage` (with `data.kind`), `lock_held` (a node's gate held by another process: a Radicle identity write while the Radicle service runs, [0008](0008-radicle-service.md#identity-changes)).
   - **Protocol-level:** `forbidden`, `busy`, `cancelled`, `deadline`, `internal`.
   - Main maps each code to the exact JS string per method; see [Parity contract](#parity-contract).
 - **Schema:**
@@ -331,7 +331,14 @@ This covers node identities. **Bee:** `keys/swarm.key` plus `config.yaml`. **Rad
 - **Reconciliation:** `nodes.op_status { op_id }` returns `installed`, `pending_recovery`, `not_committed` or `corrupt` from the done list and the journal. A consistent node directory alone doesn't count, because it could still hold the old identity. Main starts a node only on `installed`.
 - **Ordering with the shell:** main stops the node before calling `nodes.write_identity` and starts it only after an `installed` result or reconciliation, as it does today. Ant's own config rewrite at start (`ant-manager.js:815`) therefore always happens after the write.
 - **Bee's keystore password** still goes into `config.yaml` (K-3, Phase 5). The journal guarantees that the keystore and the password always match.
-- **Radicle, after design 0008:** the Radicle key is never written ([0008, *Keys*](0008-radicle-service.md#keys)). The Radicle form writes only the config, plus, for 0008's switch, the dirty marker that names the old identity. It removes `keys/radicle` and `keys/radicle.pub` instead: a journal entry can name a target to remove rather than a staged file. Install unlinks it, following no symlink, and flushes its directory. Recovery repeats that, and a target already gone is done. 0008's *Identity changes* adds the wipe of an identity change.
+- **Radicle, after design 0008:** the Radicle key is never written ([0008, *Keys*](0008-radicle-service.md#keys)). The form with `custody: "sealed"` writes only the config, plus, for 0008's switch, the dirty marker that names the old identity. It removes `keys/radicle` and `keys/radicle.pub` instead.
+  - **A journal entry can name a target to remove** rather than a staged file: `{ target, remove: true }`. Install unlinks it, following no symlink, and flushes its directory. A target already gone is done; a directory in its place is an error, and the journal stays.
+  - **A journal can name directories to wipe** before its entries (`wipe`): 0008's `node/`, `cobs/` and `storage/`, each removed whole without following a symlink.
+  - **The shapes are fixed:** recovery acts only on a journal that is exactly one of what a writer produces, so no record can name another file to remove or another directory to wipe. For the sealed form, those shapes are:
+    - the removals, then the config;
+    - for the switch, the marker, then the removals, then the config;
+    - with `wipe`, the wipe, then the removals and the config, with no marker.
+  - **Under the home's gate:** every Radicle write, and every recovery of a Radicle journal, holds 0008's `radicle-<sha256(home)>.lock` under main's lock directory. Startup recovery doesn't wait for it: held, the journal stays and `node_recovery` reports Radicle `pending_recovery`. `freedom-cored recover` waits 5 s, then exits 75.
 
 ## Parity contract
 
@@ -387,7 +394,7 @@ Main's proxy has to reproduce each JS handler: argument checks and defaults, the
 | `vault.export_mnemonic`, `vault.export_private_key` | see parity table | permanent, user-requested backup exports |
 | `keys.addresses` | `{ accounts?: [u32], publishers?: [u32] }` → `{ user_wallets, bee_wallet, publishers, radicle: { public_key, did, node_id } }` | public data only; needs an unlocked vault |
 | `keys.radicle_did` | `{ public_key }` → `{ did }` | public conversion; works while locked (`readRadicleDid`, `identity-manager.js:381`) |
-| `nodes.write_identity` | `{ op_id, node: "bee", data_dir, api_port, p2p_port }` or `{ op_id, node: "radicle", home, alias }` → `{ address }` or `{ did, node_id }` | [multi-file protocol](#multi-file-writes). Bee generates a fresh keystore password and writes `config.yaml` exactly as `createBeeConfig` does, with main's per-profile ports. [0008](0008-radicle-service.md#identity-changes) replaces the Radicle form: `{ op_id, node: "radicle", home, alias, wipe? }` writes no key file, removes any, needs no vault, and returns no DID |
+| `nodes.write_identity` | `{ op_id, node: "bee", data_dir, api_port, p2p_port }` or `{ op_id, node: "radicle", home, alias }` → `{ address }` or `{ did, node_id }` | [multi-file protocol](#multi-file-writes). Bee generates a fresh keystore password and writes `config.yaml` exactly as `createBeeConfig` does, with main's per-profile ports. [0008](0008-radicle-service.md#identity-changes) adds a second Radicle form, `{ op_id, node: "radicle", home, alias, custody: "sealed", wipe? }` → `{}`: it writes no key file, removes any, needs no vault, and returns no DID. **Until the add-on is removed** (0008, step 10), a call without `custody` keeps today's form, which writes the key pair the add-on loads. Both Radicle forms take the home's gate, and answer `lock_held` after 5 s while another process holds it |
 | `nodes.op_status` | `{ op_id }` → `{ status: "installed" \| "pending_recovery" \| "not_committed" \| "corrupt" }` | reconciliation after a lost reply |
 | `vault.reconcile` | see [Reconciliation](#reconciliation) | after a lost mutation reply |
 | `compat.private_key` | `{ account }` → `{ private_key }` | temporary; see Migration |

@@ -146,8 +146,22 @@ fn recover(data_dir: &std::path::Path, lock_dir: &std::path::Path) -> Exit {
         }
     };
     // Roll any interrupted node identity write forward (design 0001,
-    // "Multi-file writes"). JS-backend builds run this at startup.
-    let line = match journal::recover(data_dir) {
+    // "Multi-file writes"). JS-backend builds run this at startup. A Radicle
+    // journal waits for its home's gate, as long as 0001's retries allow;
+    // still held, the journal stays, and the exit is 75 (design 0008).
+    let gates = journal::Gates {
+        lock_dir: lock_dir.to_owned(),
+        retry: fc_service::gate::CONTENTION_RETRY,
+        held: None,
+    };
+    let line = match journal::recover(data_dir, &gates) {
+        Ok(journal::Recovered::Waiting { node, .. }) => {
+            log::error(
+                "node identity recovery waits for the node's gate",
+                serde_json::json!({ "node": node }),
+            );
+            return Exit::LockHeld;
+        }
         Ok(journal::Recovered::Finished {
             op_id,
             status: journal::OpStatus::Corrupt,

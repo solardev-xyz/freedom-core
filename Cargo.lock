@@ -526,6 +526,7 @@ dependencies = [
  "fc-keys",
  "fc-naming",
  "fc-protocol",
+ "fc-service",
  "fc-swarm",
  "fc-sys",
  "fc-vault",

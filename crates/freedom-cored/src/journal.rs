@@ -26,9 +26,22 @@
 //!
 //! **Recovery trusts nothing it reads.** A journal is acted on only if it is
 //! exactly what [`write`] produces: a supported node, a normalized absolute
-//! root, the node's exact file layout under it with sibling staged names, and
+//! root, one of the node's [`shapes`] under it with sibling staged names, and
 //! valid digests. Anything else is set aside as `….corrupt` and reported. Only
 //! regular files are hashed or installed; symlinks are never followed.
+//!
+//! **Removals and the wipe** (design 0008, "The switch" and "Identity
+//! changes"): an entry can name a target to remove instead of a staged file,
+//! and a journal can name directories to wipe before its entries. Install
+//! unlinks such a target, following no symlink, and flushes its directory;
+//! a target already gone is done. So recovery repeats them as it repeats an
+//! install.
+//!
+//! **The Radicle home's gate** (0008, "Spawn and lock"): every write and every
+//! recovery of a Radicle journal holds `radicle-<sha256(home)>.lock`, the gate
+//! the Radicle service holds for its whole life ([`Gates`]). A recovery that
+//! finds it held leaves the journal in place ([`Recovered::Waiting`]): the
+//! node stays `pending_recovery` until the service has stopped.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -86,13 +99,118 @@ struct Journal {
     node: String,
     root: PathBuf,
     files: Vec<JournalFile>,
+    /// Directories wiped before any entry (0008, "Identity changes").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    wipe: Vec<PathBuf>,
 }
 
+/// One entry: a staged file to install, with its digest, or a target to
+/// remove.
 #[derive(Debug, Serialize, Deserialize)]
 struct JournalFile {
     target: PathBuf,
-    staged: PathBuf,
-    sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    staged: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    remove: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// What an entry does to its target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Install,
+    Remove,
+}
+
+/// One shape a node's journal can take: its entries, in order, and the
+/// directories it wipes first.
+#[derive(Debug, PartialEq, Eq)]
+struct Shape {
+    entries: Vec<(PathBuf, Action)>,
+    wipe: Vec<PathBuf>,
+}
+
+/// Every shape a writer produces for `node` under `root`: the single source
+/// of truth for writers and for recovery's validation.
+///
+/// - **Bee:** its [`layout`], installed.
+/// - **Radicle, today's form:** its [`layout`], installed: the key pair and
+///   the config.
+/// - **Radicle, 0008's form** (`custody: "sealed"`), with no key file
+///   written: the removal of `keys/radicle` and `keys/radicle.pub`, then the
+///   config. **The switch** installs the dirty marker, `node/dirty`, first,
+///   naming the identity whose key file it removes. **With `wipe`,**
+///   `node/`, `cobs/` and `storage/` are wiped first, and no marker is
+///   written: nothing is left to check.
+fn shapes(node: &str, root: &Path) -> Vec<Shape> {
+    let installed = |files: Vec<PathBuf>| -> Vec<(PathBuf, Action)> {
+        files.into_iter().map(|f| (f, Action::Install)).collect()
+    };
+    match node {
+        "bee" => vec![Shape {
+            entries: installed(layout(node, root).unwrap_or_default()),
+            wipe: Vec::new(),
+        }],
+        "radicle" => {
+            let removals = [
+                (root.join("keys").join("radicle"), Action::Remove),
+                (root.join("keys").join("radicle.pub"), Action::Remove),
+            ];
+            let config = (root.join("config.json"), Action::Install);
+            let marker = (radicle_marker(root), Action::Install);
+            let sealed: Vec<_> = removals.iter().cloned().chain([config.clone()]).collect();
+            let switch: Vec<_> = [marker].into_iter().chain(sealed.iter().cloned()).collect();
+            vec![
+                Shape {
+                    entries: installed(layout(node, root).unwrap_or_default()),
+                    wipe: Vec::new(),
+                },
+                Shape {
+                    entries: sealed.clone(),
+                    wipe: Vec::new(),
+                },
+                Shape {
+                    entries: switch,
+                    wipe: Vec::new(),
+                },
+                Shape {
+                    entries: sealed,
+                    wipe: radicle_wipe(root),
+                },
+            ]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// 0008's dirty marker in a Radicle home.
+pub fn radicle_marker(root: &Path) -> PathBuf {
+    root.join("node").join("dirty")
+}
+
+/// The directories an identity change with `wipe` removes (0008).
+pub fn radicle_wipe(root: &Path) -> Vec<PathBuf> {
+    vec![root.join("node"), root.join("cobs"), root.join("storage")]
+}
+
+/// Every target any of `node`'s shapes installs: the staged files an
+/// operation that died before its commit may have left.
+fn staged_targets(node: &str, root: &Path) -> Vec<PathBuf> {
+    let mut targets: Vec<PathBuf> = Vec::new();
+    for shape in shapes(node, root) {
+        for (target, action) in shape.entries {
+            if action == Action::Install && !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+    }
+    targets
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -129,10 +247,64 @@ pub enum OpStatus {
 }
 
 /// One file of an operation. The caller owns (and wipes) the contents.
+#[derive(Clone)]
 pub struct FileSpec<'a> {
     pub target: PathBuf,
     pub contents: &'a [u8],
 }
+
+/// One entry of an operation, in the order it is applied.
+#[derive(Clone)]
+pub enum Entry<'a> {
+    Install(FileSpec<'a>),
+    Remove(PathBuf),
+}
+
+/// An operation: its entries, and the directories it wipes first. It must
+/// be one of the node's [`shapes`].
+pub struct Plan<'a> {
+    pub entries: Vec<Entry<'a>>,
+    pub wipe: Vec<PathBuf>,
+}
+
+impl<'a> Plan<'a> {
+    /// Files to install: the only form before design 0008.
+    pub fn install(files: &[FileSpec<'a>]) -> Self {
+        Plan {
+            entries: files.iter().cloned().map(Entry::Install).collect(),
+            wipe: Vec::new(),
+        }
+    }
+
+    fn shape(&self) -> Shape {
+        Shape {
+            entries: self
+                .entries
+                .iter()
+                .map(|entry| match entry {
+                    Entry::Install(file) => (file.target.clone(), Action::Install),
+                    Entry::Remove(target) => (target.clone(), Action::Remove),
+                })
+                .collect(),
+            wipe: self.wipe.clone(),
+        }
+    }
+}
+
+/// How recovery takes a Radicle home's gate (design 0008, "Identity
+/// changes"): under the lock directory main and the Radicle service share,
+/// retrying for `retry`. `held` is the canonical home whose gate the caller
+/// already holds: a write recovers a journal of its own home under its own
+/// gate.
+#[derive(Debug, Clone)]
+pub struct Gates {
+    pub lock_dir: PathBuf,
+    pub retry: std::time::Duration,
+    pub held: Option<PathBuf>,
+}
+
+/// The Radicle home gate's namespace: the Radicle service's own.
+pub const RADICLE_GATE: &str = "radicle";
 
 /// How a committed (or abandoned) write ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +331,10 @@ pub enum WriteError {
     Layout,
     /// A file is larger than [`MAX_FILE`].
     TooLarge,
+    /// An outstanding Radicle journal waits for its home's gate, which
+    /// another process holds: it can't be finished, so nothing new is
+    /// written (0008, "Identity changes").
+    LockHeld,
 }
 
 impl From<std::io::Error> for WriteError {
@@ -186,34 +362,46 @@ pub enum Recovered {
     /// A journal left behind by an operation the done list already records
     /// as finished (its removal didn't persist) was removed.
     Cleaned,
+    /// A Radicle journal was left in place: its home's gate is held, by the
+    /// Radicle service or a `hold-lock` (0008, "Identity changes").
+    Waiting {
+        op_id: String,
+        node: String,
+    },
 }
 
 /// Runs the four steps for one operation. `Err` means nothing was committed.
-/// An outstanding journal is recovered first; if that fails, nothing is
-/// written.
+/// An outstanding journal is recovered first; if that fails, or waits for a
+/// Radicle home's gate, nothing is written. For a Radicle operation the
+/// caller holds the home's gate throughout (`gates.held`).
 pub fn write(
     identity_dir: &Path,
     op_id: &str,
     node: &str,
     root: &Path,
-    files: &[FileSpec<'_>],
+    plan: &Plan<'_>,
+    gates: &Gates,
     commit: impl FnOnce() -> bool,
 ) -> Result<Outcome, WriteError> {
-    let expected = layout(node, root).ok_or(WriteError::Layout)?;
     if !valid_op_id(op_id)
         || !normalized_absolute(root)
         || root == identity_dir
-        || files.len() != expected.len()
-        || files.iter().zip(&expected).any(|(f, e)| &f.target != e)
+        || !shapes(node, root).contains(&plan.shape())
     {
         return Err(WriteError::Layout);
     }
-    if files.iter().any(|f| f.contents.len() as u64 > MAX_FILE) {
+    if plan
+        .entries
+        .iter()
+        .any(|e| matches!(e, Entry::Install(f) if f.contents.len() as u64 > MAX_FILE))
+    {
         return Err(WriteError::TooLarge);
     }
     // Design 0001: recovery runs before any node write. An unresolved
     // committed operation must never be replaced.
-    recover(identity_dir)?;
+    if let Recovered::Waiting { .. } = recover(identity_dir, gates)? {
+        return Err(WriteError::LockHeld);
+    }
     if op_seen(identity_dir, op_id)? {
         return Err(WriteError::DuplicateOpId);
     }
@@ -232,15 +420,24 @@ pub fn write(
         op_id: op_id.to_owned(),
         node: node.to_owned(),
         root: root.to_owned(),
-        files: Vec::with_capacity(files.len()),
+        files: Vec::with_capacity(plan.entries.len()),
+        wipe: plan.wipe.clone(),
     };
-    for file in files {
-        match stage(file) {
-            Ok(staged) => journal.files.push(staged),
-            Err(e) => {
-                discard(identity_dir, node, root);
-                return Err(e.into());
-            }
+    for entry in &plan.entries {
+        match entry {
+            Entry::Install(file) => match stage(file) {
+                Ok(staged) => journal.files.push(staged),
+                Err(e) => {
+                    discard(identity_dir, node, root);
+                    return Err(e.into());
+                }
+            },
+            Entry::Remove(target) => journal.files.push(JournalFile {
+                target: target.clone(),
+                staged: None,
+                sha256: None,
+                remove: true,
+            }),
         }
     }
 
@@ -285,8 +482,10 @@ pub fn write(
 }
 
 /// Finishes a leftover journal, or removes the staged files of an operation
-/// that died before its commit.
-pub fn recover(identity_dir: &Path) -> std::io::Result<Recovered> {
+/// that died before its commit. A Radicle journal is finished only under its
+/// home's gate ([`Gates`]); held, it is left in place
+/// ([`Recovered::Waiting`]).
+pub fn recover(identity_dir: &Path, gates: &Gates) -> std::io::Result<Recovered> {
     let path = identity_dir.join(JOURNAL);
     // Read, judged and later flushed through one handle, never opened again
     // by name: what is flushed is what was checked (review of #114).
@@ -320,6 +519,21 @@ pub fn recover(identity_dir: &Path) -> std::io::Result<Recovered> {
         fsx::remove(&path, || true)?;
         return Ok(Recovered::Cleaned);
     }
+    // A Radicle journal is finished only under its home's gate, which the
+    // Radicle service holds while it runs (0008).
+    let _home_gate = if journal.node == "radicle" {
+        match radicle_gate(&journal.root, gates)? {
+            HomeGate::Held => {
+                return Ok(Recovered::Waiting {
+                    op_id: journal.op_id,
+                    node: journal.node,
+                });
+            }
+            HomeGate::Taken(gate) => gate,
+        }
+    } else {
+        None
+    };
     // Durability barrier: the journal and its directory entry must persist
     // before any member is installed from it. The handle has write access:
     // Windows refuses to flush a read-only one.
@@ -333,6 +547,28 @@ pub fn recover(identity_dir: &Path) -> std::io::Result<Recovered> {
         node: journal.node,
         status,
     })
+}
+
+enum HomeGate {
+    /// Another process holds it.
+    Held,
+    /// Taken now (`Some`), or already the caller's (`None`).
+    Taken(Option<fc_service::gate::Gate>),
+}
+
+/// The gate of the Radicle home `root`, unless the caller holds it already.
+fn radicle_gate(root: &Path, gates: &Gates) -> std::io::Result<HomeGate> {
+    if let Some(held) = &gates.held
+        && std::fs::canonicalize(root).is_ok_and(|root| &root == held)
+    {
+        return Ok(HomeGate::Taken(None));
+    }
+    match fc_service::gate::acquire(root, &gates.lock_dir, RADICLE_GATE, gates.retry) {
+        Ok(gate) => Ok(HomeGate::Taken(Some(gate))),
+        Err(fc_service::gate::GateError::Held) => Ok(HomeGate::Held),
+        Err(fc_service::gate::GateError::Storage(e)) => Err(e),
+        Err(other) => Err(std::io::Error::other(other.to_string())),
+    }
 }
 
 /// The op ID and node of a valid outstanding journal, if one is there (for
@@ -399,23 +635,41 @@ fn op_seen(identity_dir: &Path, op_id: &str) -> std::io::Result<bool> {
     Ok(op_status(identity_dir, op_id)? != OpStatus::NotCommitted)
 }
 
-/// A journal exactly as [`write`] produces it.
+/// A journal exactly as [`write`] produces it: one of its node's
+/// [`shapes`], each install with its sibling staged name and a digest, each
+/// removal with neither.
 fn valid_journal(journal: &Journal, identity_dir: &Path) -> bool {
-    let Some(expected) = layout(&journal.node, &journal.root) else {
-        return false;
+    let shape = Shape {
+        entries: journal
+            .files
+            .iter()
+            .map(|file| {
+                let action = if file.remove {
+                    Action::Remove
+                } else {
+                    Action::Install
+                };
+                (file.target.clone(), action)
+            })
+            .collect(),
+        wipe: journal.wipe.clone(),
     };
     valid_op_id(&journal.op_id)
         && normalized_absolute(&journal.root)
         && journal.root != identity_dir
-        && journal.files.len() == expected.len()
-        && journal.files.iter().zip(&expected).all(|(file, target)| {
-            &file.target == target
-                && file.staged == staged_path(target)
-                && file.sha256.len() == 64
-                && file
-                    .sha256
-                    .bytes()
-                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        && shapes(&journal.node, &journal.root).contains(&shape)
+        && journal.files.iter().all(|file| {
+            if file.remove {
+                file.staged.is_none() && file.sha256.is_none()
+            } else {
+                file.staged.as_deref() == Some(staged_path(&file.target).as_path())
+                    && file.sha256.as_deref().is_some_and(|sha256| {
+                        sha256.len() == 64
+                            && sha256
+                                .bytes()
+                                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                    })
+            }
         })
 }
 
@@ -465,42 +719,67 @@ fn stage(file: &FileSpec<'_>) -> std::io::Result<JournalFile> {
     }
     Ok(JournalFile {
         target: file.target.clone(),
-        staged,
-        sha256: hex(&Sha256::digest(file.contents)),
+        staged: Some(staged),
+        sha256: Some(hex(&Sha256::digest(file.contents))),
+        remove: false,
     })
 }
 
-/// Step 3. Returns whether any file could not be installed (corrupt).
+/// Step 3: the wipe, then each entry in order. Returns whether any file
+/// could not be installed (corrupt).
 fn install(journal: &Journal) -> std::io::Result<bool> {
     let mut corrupt = false;
     let mut dirs: Vec<&Path> = Vec::new();
     let mut installed: Vec<&Path> = Vec::new();
+    for dir in &journal.wipe {
+        wipe(dir)?;
+    }
     for file in &journal.files {
-        if regular_digest(&file.target)?.as_deref() == Some(file.sha256.as_str()) {
+        let (staged, sha256) = match (&file.staged, &file.sha256) {
+            _ if file.remove => {
+                // Its directory is flushed only if something was removed:
+                // a target already gone may have no directory either.
+                if remove_target(&file.target)?
+                    && let Some(dir) = file.target.parent()
+                    && !dirs.contains(&dir)
+                {
+                    dirs.push(dir);
+                }
+                continue;
+            }
+            (Some(staged), Some(sha256)) => (staged, sha256),
+            // valid_journal admits no other entry.
+            _ => {
+                return Err(std::io::Error::other(
+                    "an install entry without its staged file",
+                ));
+            }
+        };
+        if regular_digest(&file.target)?.as_deref() == Some(sha256.as_str()) {
             // Already in place; a leftover staged copy is not needed.
-            remove_if_present(&file.staged)?;
+            remove_if_present(staged)?;
         } else if let Some((_, checked)) =
-            digest_and_handle(&file.staged)?.filter(|(digest, _)| *digest == file.sha256)
+            digest_and_handle(staged)?.filter(|(digest, _)| digest == sha256)
         {
             // The rename moves whatever the staged name holds: it must still
             // be the file just hashed (review of #114). If not, nothing is
             // renamed, and the journal stays for recovery to judge again.
-            crate::testhooks::swap("checked", &file.staged);
-            if !fsx::same_file(&checked, &file.staged)? {
+            crate::testhooks::swap("checked", staged);
+            if !fsx::same_file(&checked, staged)? {
                 return Err(std::io::Error::other(
                     "a staged node identity file changed after its check",
                 ));
             }
-            crate::testhooks::swap("renaming", &file.staged);
+            crate::testhooks::swap("renaming", staged);
             // Replaces whatever is at the target, a symlink included, without
             // following it.
-            std::fs::rename(&file.staged, &file.target)?;
+            std::fs::rename(staged, &file.target)?;
             // A file that won the race between that check and the rename is
             // never left installed: the target must be the file checked, with
             // the journaled digest. Otherwise it is removed, and the node is
             // corrupt until a fresh write.
             let ours = fsx::same_file(&checked, &file.target)?
-                && regular_digest(&file.target)?.as_deref() == Some(file.sha256.as_str());
+                && regular_digest(&file.target)?.as_deref() == Some(sha256.as_str());
             drop(checked);
             if !ours {
                 crate::log::error(
@@ -527,6 +806,49 @@ fn install(journal: &Journal) -> std::io::Result<bool> {
     }
     flush_installed(&installed);
     Ok(corrupt)
+}
+
+/// Wipes `dir` (0008, "Identity changes"): removes it and everything under
+/// it, following no symlink (a symlink in its place is removed itself), then
+/// flushes its parent. Already gone is done.
+fn wipe(dir: &Path) -> std::io::Result<()> {
+    let removed = match std::fs::symlink_metadata(dir) {
+        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(dir),
+        Ok(_) => std::fs::remove_file(dir),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    match removed {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    if let Some(parent) = dir.parent() {
+        sync_dir(parent)?;
+    }
+    Ok(())
+}
+
+/// A removal entry (0008, "The switch"): unlinks the target, following no
+/// symlink, and says whether anything was there. Already gone is done. A
+/// directory in its place is an error: the journal stays, and the node
+/// `pending_recovery`.
+fn remove_target(target: &Path) -> std::io::Result<bool> {
+    match std::fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.is_dir() => Err(std::io::Error::other(
+            "a directory where a node identity file was to be removed",
+        )),
+        Ok(_) => remove_if_present(target).map(|()| true),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Windows: flushes each installed file, which commits NTFS's journal
@@ -609,7 +931,7 @@ fn read_done(identity_dir: &Path) -> std::io::Result<DoneList> {
 /// Before the commit: removes this operation's staged files, then its
 /// intent record.
 fn discard(identity_dir: &Path, node: &str, root: &Path) {
-    for target in layout(node, root).unwrap_or_default() {
+    for target in staged_targets(node, root) {
         let _ = std::fs::remove_file(staged_path(&target));
     }
     let _ = fsx::remove(&identity_dir.join(STAGING), || true);
@@ -626,9 +948,10 @@ fn discard_intent(identity_dir: &Path) -> std::io::Result<Recovered> {
         && valid_op_id(&intent.op_id)
         && normalized_absolute(&intent.root)
         && intent.root != identity_dir
-        && let Some(targets) = layout(&intent.node, &intent.root)
+        && NODES.contains(&intent.node.as_str())
     {
-        for target in targets {
+        // The core's own staged files, never a node's: no gate is needed.
+        for target in staged_targets(&intent.node, &intent.root) {
             remove_if_present(&staged_path(&target))?;
         }
     }
@@ -746,6 +1069,41 @@ fn sync_dir(_dir: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    /// The gates a test's recovery takes: a lock directory beside the
+    /// identity directory, no waiting.
+    fn gates(identity: &Path) -> Gates {
+        Gates {
+            lock_dir: identity.parent().unwrap().join("locks"),
+            retry: std::time::Duration::ZERO,
+            held: None,
+        }
+    }
+
+    /// [`super::write`] for files to install, under [`gates`].
+    fn write(
+        identity: &Path,
+        op_id: &str,
+        node: &str,
+        root: &Path,
+        files: &[FileSpec<'_>],
+        commit: impl FnOnce() -> bool,
+    ) -> Result<Outcome, WriteError> {
+        super::write(
+            identity,
+            op_id,
+            node,
+            root,
+            &Plan::install(files),
+            &gates(identity),
+            commit,
+        )
+    }
+
+    /// [`super::recover`] under [`gates`].
+    fn recover(identity: &Path) -> std::io::Result<Recovered> {
+        super::recover(identity, &gates(identity))
+    }
+
     fn bee_files<'a>(root: &Path, key: &'a [u8], config: &'a [u8]) -> Vec<FileSpec<'a>> {
         let targets = layout("bee", root).unwrap();
         vec![
@@ -787,6 +1145,7 @@ mod tests {
             node: "bee".into(),
             root: root.to_owned(),
             files: files.iter().map(|f| stage(f).unwrap()).collect(),
+            wipe: Vec::new(),
         };
         made(identity);
         std::fs::write(
@@ -853,7 +1212,11 @@ mod tests {
         std::fs::write(root.join("config.yaml"), b"old config").unwrap();
         let journal = committed_journal(&identity, &root, "op-7", b"new key", b"new config");
         // A crash after one file was installed.
-        std::fs::rename(&journal.files[0].staged, &journal.files[0].target).unwrap();
+        std::fs::rename(
+            journal.files[0].staged.as_ref().unwrap(),
+            &journal.files[0].target,
+        )
+        .unwrap();
         assert_eq!(
             op_status(&identity, "op-7").unwrap(),
             OpStatus::PendingRecovery
@@ -903,8 +1266,16 @@ mod tests {
         let journal = committed_journal(&identity, &root, "op-1", b"k", b"c");
         // The op finished (done record), but the journal's removal didn't
         // persist; since then the node rewrote its config.
-        std::fs::rename(&journal.files[0].staged, &journal.files[0].target).unwrap();
-        std::fs::rename(&journal.files[1].staged, &journal.files[1].target).unwrap();
+        std::fs::rename(
+            journal.files[0].staged.as_ref().unwrap(),
+            &journal.files[0].target,
+        )
+        .unwrap();
+        std::fs::rename(
+            journal.files[1].staged.as_ref().unwrap(),
+            &journal.files[1].target,
+        )
+        .unwrap();
         finish(&identity, "op-1", OpStatus::Installed).unwrap();
         std::fs::write(
             identity.join(JOURNAL),
@@ -962,7 +1333,7 @@ mod tests {
         // A corrupt operation marks its node.
         let other = tmp.path().join("bee2");
         let journal = committed_journal(&identity, &other, "op-c", b"k", b"c");
-        std::fs::remove_file(&journal.files[1].staged).unwrap();
+        std::fs::remove_file(journal.files[1].staged.as_ref().unwrap()).unwrap();
         assert!(matches!(
             recover(&identity).unwrap(),
             Recovered::Finished {
@@ -1006,7 +1377,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (identity, root) = (tmp.path().join("identity"), tmp.path().join("bee"));
         let journal = committed_journal(&identity, &root, "op-9", b"k", b"c");
-        std::fs::remove_file(&journal.files[0].staged).unwrap();
+        std::fs::remove_file(journal.files[0].staged.as_ref().unwrap()).unwrap();
         assert_eq!(
             recover(&identity).unwrap(),
             Recovered::Finished {

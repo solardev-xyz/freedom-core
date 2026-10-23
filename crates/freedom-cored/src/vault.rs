@@ -64,7 +64,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::clock::Clock;
 use crate::fsx::{self, Done};
 use crate::journal;
-use crate::nodes::{self, NodeSpec};
+use crate::nodes::{self, Custody, NodeSpec};
 use crate::rng::OsRng;
 use crate::worker::Job;
 
@@ -122,6 +122,10 @@ pub enum OpError {
     Abandoned,
     /// A request the core can't act on (`invalid_argument`).
     Invalid(&'static str),
+    /// A Radicle home's gate is held (design 0008, "Identity changes").
+    LockHeld,
+    /// The switch can't name the identity whose key file it would remove.
+    IdentityCorrupt,
     Internal,
 }
 
@@ -162,6 +166,11 @@ impl OpError {
             OpError::Storage(kind) => ErrorBody::new(ErrorCode::Storage, "Storage error")
                 .with_data(serde_json::json!({ "kind": kind })),
             OpError::Invalid(message) => ErrorBody::new(ErrorCode::InvalidArgument, *message),
+            OpError::LockHeld => ErrorBody::new(ErrorCode::LockHeld, "The Radicle home is in use"),
+            OpError::IdentityCorrupt => ErrorBody::new(
+                ErrorCode::NodeIdentityCorrupt,
+                "The Radicle key file names no readable identity",
+            ),
             OpError::Abandoned | OpError::Internal => {
                 ErrorBody::new(ErrorCode::Internal, "Internal error")
             }
@@ -496,6 +505,9 @@ struct Running {
 
 pub struct Vault {
     dir: PathBuf,
+    /// The lock directory main and the service processes share: Radicle
+    /// homes' gates are there (design 0008).
+    lock_dir: PathBuf,
     file: FileSnapshot,
     state: VaultState,
     throttle: Throttle,
@@ -573,6 +585,11 @@ struct NodeWriteParams {
     p2p_port: Option<u16>,
     home: Option<String>,
     alias: Option<String>,
+    /// Design 0008's form of the Radicle write: `"sealed"`. Absent, today's
+    /// form, which the add-on needs (the transitional selector).
+    custody: Option<String>,
+    /// With `custody: "sealed"`: wipe the home's state too.
+    wipe: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -580,9 +597,22 @@ struct OpStatusParams {
     op_id: String,
 }
 
+/// Whether the write derives a key: every form but 0008's sealed Radicle
+/// form, which writes none.
+fn needs_keys(spec: &NodeSpec) -> bool {
+    !matches!(
+        spec,
+        NodeSpec::Radicle {
+            custody: Custody::Sealed { .. },
+            ..
+        }
+    )
+}
+
 fn node_spec(p: NodeWriteParams) -> Option<NodeSpec> {
     let absolute = |dir: Option<String>| dir.map(PathBuf::from).filter(|path| path.is_absolute());
     match p.node.as_str() {
+        "bee" if p.custody.is_some() || p.wipe.is_some() => None,
         "bee" => Some(NodeSpec::Bee {
             data_dir: absolute(p.data_dir)?,
             api_port: p.api_port.filter(|&port| port > 0)?,
@@ -593,9 +623,17 @@ fn node_spec(p: NodeWriteParams) -> Option<NodeSpec> {
             let alias = p
                 .alias
                 .filter(|a| (1..=64).contains(&a.len()) && !a.chars().any(char::is_control))?;
+            let custody = match (p.custody.as_deref(), p.wipe) {
+                (None, None) => Custody::KeyFile,
+                (Some("sealed"), wipe) => Custody::Sealed {
+                    wipe: wipe.unwrap_or(false),
+                },
+                _ => return None,
+            };
             Some(NodeSpec::Radicle {
                 home: absolute(p.home)?,
                 alias,
+                custody,
             })
         }
         _ => None,
@@ -670,12 +708,13 @@ fn params<'a, T: Deserialize<'a>>(raw: Option<&'a str>) -> Result<T, ErrorBody> 
 }
 
 impl Vault {
-    pub fn new(dir: PathBuf, auto_lock_ms: u64) -> Self {
+    pub fn new(dir: PathBuf, lock_dir: PathBuf, auto_lock_ms: u64) -> Self {
         Vault {
             // Replaced by the startup snapshot before core.hello is answered,
             // and no vault request is accepted before that.
             file: Err(OpError::Storage("not_ready")),
             dir,
+            lock_dir,
             state: VaultState::new(),
             throttle: Throttle::new(),
             auto_lock_ms,
@@ -1095,8 +1134,10 @@ impl Vault {
                 }
                 let op_id = p.op_id.clone();
                 let spec = node_spec(p).ok_or_else(invalid)?;
-                // Admitted against the current epoch (design 0001).
-                if !self.state.is_unlocked() {
+                // Admitted against the current epoch (design 0001). The
+                // sealed Radicle form writes no key, so needs no vault
+                // (0008, "Identity changes").
+                if needs_keys(&spec) && !self.state.is_unlocked() {
                     return Err(locked());
                 }
                 Kind::NodeWrite {
@@ -1147,7 +1188,9 @@ impl Vault {
                 self.reply_error(out, pending.id, deadline_exceeded());
                 continue;
             }
-            if let Kind::NodeWrite { keys, .. } = &mut pending.kind {
+            if let Kind::NodeWrite { keys, spec, .. } = &mut pending.kind
+                && needs_keys(spec)
+            {
                 match self.state.freedom_keys() {
                     Ok(derived) => *keys = Some(Box::new(derived)),
                     Err(_) => {
@@ -1289,12 +1332,17 @@ impl Vault {
                     JobOutput::Reconciled { result, tried }
                 }),
             ),
-            Kind::NodeWrite { op_id, spec, keys } => (
-                RunningKind::NodeWrite,
-                Box::new(move |dir, control| {
-                    JobOutput::NodeWritten(job_node_write(dir, &op_id, &spec, keys, control))
-                }),
-            ),
+            Kind::NodeWrite { op_id, spec, keys } => {
+                let lock_dir = self.lock_dir.clone();
+                (
+                    RunningKind::NodeWrite,
+                    Box::new(move |dir, control| {
+                        JobOutput::NodeWritten(job_node_write(
+                            dir, &lock_dir, &op_id, &spec, keys, control,
+                        ))
+                    }),
+                )
+            }
             Kind::OpStatus { op_id } => (
                 RunningKind::OpStatus,
                 Box::new(move |dir, control| {
@@ -1797,10 +1845,10 @@ fn hex(bytes: &[u8]) -> String {
 /// tightens an existing vault file to 0600 in place (metadata only; quick
 /// unlock's content fingerprint is unaffected), temp files a killed write
 /// left are removed, then the file is snapshot.
-pub fn startup_snapshot(dir: &Path) -> (FileSnapshot, NodeRecovery) {
+pub fn startup_snapshot(dir: &Path, lock_dir: &Path) -> (FileSnapshot, NodeRecovery) {
     // Finish an interrupted node identity write before anything else
     // (design 0001: before core.hello is answered and before any node write).
-    let recovery = startup_recovery(dir);
+    let recovery = startup_recovery(dir, lock_dir);
     match fsx::tighten(&dir.join(VAULT_FILE)) {
         Ok(true) => crate::log::info("tightened the vault file to 0600", serde_json::json!({})),
         Ok(false) => {}
@@ -1849,11 +1897,26 @@ fn remove_leftover_temps(dir: &Path) {
 /// that node stopped (design 0001: main starts a node only on `installed`).
 pub type NodeRecovery = Option<serde_json::Value>;
 
-fn startup_recovery(dir: &Path) -> NodeRecovery {
+fn startup_recovery(dir: &Path, lock_dir: &Path) -> NodeRecovery {
     // Every affected node, and whether any is pending (rather than corrupt).
     let mut affected: Vec<String> = Vec::new();
     let mut pending = None;
-    match journal::recover(dir) {
+    // A Radicle home's gate isn't waited for here: held, its journal stays,
+    // and the node is reported pending without holding up core.hello (0008).
+    let gates = journal::Gates {
+        lock_dir: lock_dir.to_owned(),
+        retry: Duration::ZERO,
+        held: None,
+    };
+    match journal::recover(dir, &gates) {
+        Ok(journal::Recovered::Waiting { op_id, node }) => {
+            crate::log::info(
+                "node identity recovery waits for the node's gate",
+                serde_json::json!({ "node": node }),
+            );
+            affected.push(node);
+            pending = Some(op_id);
+        }
         Ok(outcome) => {
             if outcome != journal::Recovered::Nothing {
                 crate::log::info(
@@ -2263,6 +2326,7 @@ fn job_reconcile(
 /// journal write; after it, the reply is `installed` or `pending_recovery`.
 fn job_node_write(
     identity_dir: &Path,
+    lock_dir: &Path,
     op_id: &str,
     spec: &NodeSpec,
     keys: Option<Box<FreedomKeys>>,
@@ -2271,12 +2335,87 @@ fn job_node_write(
     if control.abandoned() {
         return Err(OpError::Abandoned);
     }
-    let keys = keys.ok_or(OpError::Internal)?;
-    let built = nodes::build(spec, &keys, &mut OsRng).map_err(|e| match e {
+    // A Radicle write holds the home's gate for its whole length, from
+    // before it reads anything of the home (design 0008, "Identity changes"):
+    // a running Radicle service holds it, so the write answers `lock_held`
+    // after 5 s and touches nothing.
+    let home_gate = match spec {
+        NodeSpec::Radicle { home, .. } => Some(
+            fc_service::gate::acquire(
+                home,
+                lock_dir,
+                journal::RADICLE_GATE,
+                fc_service::gate::CONTENTION_RETRY,
+            )
+            .map_err(|e| match e {
+                fc_service::gate::GateError::Held => OpError::LockHeld,
+                fc_service::gate::GateError::Storage(e) => storage(&e),
+                _ => OpError::Storage("gate"),
+            })?,
+        ),
+        NodeSpec::Bee { .. } => None,
+    };
+    let gates = journal::Gates {
+        lock_dir: lock_dir.to_owned(),
+        retry: fc_service::gate::CONTENTION_RETRY,
+        held: home_gate.as_ref().map(|gate| gate.data_dir.clone()),
+    };
+    let write_error = |e: journal::WriteError| match e {
+        journal::WriteError::Io(e) => storage(&e),
+        journal::WriteError::DuplicateOpId => OpError::Invalid("op_id already used"),
+        journal::WriteError::TooLarge => OpError::Storage("too_large"),
+        journal::WriteError::Layout => OpError::Internal,
+        journal::WriteError::LockHeld => OpError::LockHeld,
+    };
+    let build_error = |e: nodes::BuildError| match e {
         nodes::BuildError::Io(e) => storage(&e),
         nodes::BuildError::Config(kind) => OpError::Storage(kind),
+        nodes::BuildError::IdentityCorrupt => OpError::IdentityCorrupt,
         nodes::BuildError::Keys | nodes::BuildError::Path => OpError::Internal,
-    })?;
+    };
+    if let NodeSpec::Radicle {
+        home,
+        alias,
+        custody: Custody::Sealed { wipe },
+    } = spec
+    {
+        drop(keys);
+        let built = nodes::radicle_sealed(home, alias, *wipe).map_err(build_error)?;
+        let plan = journal::Plan {
+            entries: built
+                .entries
+                .iter()
+                .map(|entry| match entry {
+                    nodes::SealedEntry::Install(target, contents) => {
+                        journal::Entry::Install(journal::FileSpec {
+                            target: target.clone(),
+                            contents: contents.as_slice(),
+                        })
+                    }
+                    nodes::SealedEntry::Remove(target) => journal::Entry::Remove(target.clone()),
+                })
+                .collect(),
+            wipe: built.wipe.clone(),
+        };
+        let outcome = journal::write(
+            identity_dir,
+            op_id,
+            spec.name(),
+            spec.root(),
+            &plan,
+            &gates,
+            || claim(control),
+        )
+        .map_err(write_error)?;
+        drop(home_gate);
+        if outcome == journal::Outcome::Abandoned {
+            return Err(OpError::Abandoned);
+        }
+        // No DID: the node's identity arrives sealed at each start (0008).
+        return Ok((outcome, serde_json::Map::new()));
+    }
+    let keys = keys.ok_or(OpError::Internal)?;
+    let built = nodes::build(spec, &keys, &mut OsRng).map_err(build_error)?;
     drop(keys);
     let files: Vec<journal::FileSpec<'_>> = built
         .files
@@ -2291,15 +2430,12 @@ fn job_node_write(
         op_id,
         spec.name(),
         spec.root(),
-        &files,
+        &journal::Plan::install(&files),
+        &gates,
         || claim(control),
     )
-    .map_err(|e| match e {
-        journal::WriteError::Io(e) => storage(&e),
-        journal::WriteError::DuplicateOpId => OpError::Invalid("op_id already used"),
-        journal::WriteError::TooLarge => OpError::Storage("too_large"),
-        journal::WriteError::Layout => OpError::Internal,
-    })?;
+    .map_err(write_error)?;
+    drop(home_gate);
     if outcome == journal::Outcome::Abandoned {
         return Err(OpError::Abandoned);
     }
@@ -2354,7 +2490,11 @@ mod tests {
 
     /// A vault unlocked now, with a 15-minute auto-lock.
     fn unlocked() -> Vault {
-        let mut vault = Vault::new(PathBuf::from("/nonexistent"), 15 * 60 * 1000);
+        let mut vault = Vault::new(
+            PathBuf::from("/nonexistent"),
+            PathBuf::from("/nonexistent-locks"),
+            15 * 60 * 1000,
+        );
         let prepared = Prepared::new(Mnemonic::parse(ABANDON).unwrap());
         let now = vault.now_ms();
         let ticket = vault.state.ticket();
