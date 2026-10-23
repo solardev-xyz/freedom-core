@@ -1,8 +1,85 @@
-//! Linux calls: the raw syscall `fc-service`'s confinement needs (design
-//! 0010) that neither std nor rustix offers, and the test-only calls
-//! through the other syscall ABIs.
+//! Linux calls `fc-service`'s confinement needs (design 0010) that neither
+//! std nor rustix offers safely, and the test-only calls through the other
+//! syscall ABIs.
+//!
+//! None of them closes a descriptor. A close can't prove that no Rust
+//! object owns what it closes; marking one close-on-exec invalidates no
+//! owner, and the re-exec that then drops them (`fc-service`'s
+//! `confine::clean_entry`) replaces the whole image, or fails and leaves
+//! every owner as it was.
 
+use std::ffi::OsStr;
 use std::io;
+
+/// Marks every descriptor from `low` up close-on-exec
+/// (`close_range(low, ~0, CLOSE_RANGE_CLOEXEC)`, Linux 5.11). Closes
+/// nothing: every descriptor, and every Rust object that owns one, stays
+/// valid until an exec.
+///
+/// `Err` with the OS error: `EINVAL` or `ENOSYS` before 5.11, where
+/// [`set_cloexec`] does it one descriptor at a time.
+#[allow(unsafe_code)]
+pub fn cloexec_from(low: u32) -> io::Result<()> {
+    // SAFETY: close_range takes two descriptor numbers and a flag set, and
+    // reads no memory of ours. With CLOSE_RANGE_CLOEXEC it closes nothing,
+    // only setting each descriptor's close-on-exec flag, so no owner is
+    // invalidated.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            libc::c_uint::from(low),
+            libc::c_uint::MAX,
+            libc::CLOSE_RANGE_CLOEXEC,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Marks descriptor `fd` close-on-exec (`fcntl(fd, F_SETFD, FD_CLOEXEC)`),
+/// the fallback before Linux 5.11. Closes nothing. `EBADF` if `fd` isn't
+/// open.
+#[allow(unsafe_code)]
+pub fn set_cloexec(fd: i32) -> io::Result<()> {
+    // SAFETY: fcntl with F_SETFD takes a descriptor number and an integer,
+    // reads no memory, and only sets the descriptor's flags, of which
+    // FD_CLOEXEC is the one there is: it closes nothing.
+    let result = unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Removes `key` from the process's environment, only while the process
+/// has one thread (`/proc/self/task`). `false`, and nothing removed, when
+/// it has more or the list can't be read.
+#[allow(unsafe_code)]
+pub fn remove_env_alone(key: &OsStr) -> bool {
+    let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
+        return false;
+    };
+    let mut threads = 0usize;
+    for task in tasks {
+        if task.is_err() {
+            return false;
+        }
+        threads += 1;
+    }
+    if threads != 1 {
+        return false;
+    }
+    // SAFETY: remove_var is unsafe because another thread may read or
+    // write the environment at the same time. The process has one thread,
+    // counted just above, and only this thread could start another, which
+    // it doesn't before the call returns.
+    unsafe { std::env::remove_var(key) };
+    true
+}
 
 /// `LANDLOCK_CREATE_RULESET_VERSION`: `landlock_create_ruleset`'s flag that
 /// asks for the ABI version instead of creating a ruleset.
@@ -66,6 +143,30 @@ pub fn getpid_i386() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn marking_close_on_exec_closes_nothing() {
+        use std::io::{Read, Seek, Write};
+        use std::os::fd::AsRawFd;
+        let path = std::env::temp_dir().join(format!("fc-sys-cloexec-{}", std::process::id()));
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let _ = std::fs::remove_file(&path);
+        set_cloexec(file.as_raw_fd()).unwrap();
+        // Above every descriptor this test holds, and before 5.11 refused.
+        let _ = cloexec_from(1 << 20);
+        file.write_all(b"still mine").unwrap();
+        file.rewind().unwrap();
+        let mut text = String::new();
+        file.read_to_string(&mut text).unwrap();
+        assert_eq!(text, "still mine");
+        assert!(set_cloexec(1 << 20).is_err());
+    }
 
     #[test]
     fn landlock_answers_a_version_or_why_not() {

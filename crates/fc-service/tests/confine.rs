@@ -79,7 +79,31 @@ mod linux {
     }
 
     fn child(case: &str) {
+        // At entry, as a service does: one line per image, so the parent
+        // counts the re-execs.
+        println!(
+            "START marker={}",
+            std::env::var_os(confine::REEXEC_MARKER).is_some()
+        );
         let p = paths();
+        // A file this process owns before its entry, for the failure path:
+        // the marks must leave it working.
+        let owned = (case == "reexec-fails").then(|| owned_file(&p));
+        let entry = match case {
+            // A re-exec that can't happen.
+            "reexec-fails" => confine::clean_entry_with(
+                std::path::Path::new("/nonexistent/freedom-service"),
+                false,
+            ),
+            // Marked one at a time, as before Linux 5.11.
+            "fallback" => confine::clean_entry_with(std::path::Path::new("/proc/self/exe"), true),
+            _ => confine::clean_entry(),
+        };
+        println!("ENTRY {}", entry.name());
+        println!(
+            "MARKER {}",
+            std::env::var_os(confine::REEXEC_MARKER).is_some()
+        );
         let network = match case {
             "socks5" => Network::Socks5 {
                 port: p.allowed_port,
@@ -113,11 +137,23 @@ mod linux {
             drop((injected, held));
             return;
         }
-        if case.starts_with("inherited-") {
-            // The parent's extra descriptor, inherited at spawn: nothing
-            // closes it, and `confine` refuses it.
-            let (registered, _held) = registered(&p);
+        if case == "marker-inherited" || case == "reexec-fails" {
+            // The parent's extra descriptor is left: after a re-exec (the
+            // marker), or because the re-exec failed. `confine` refuses it.
+            let (mut registered, held) = registered(&p);
+            if let Some(owned) = &owned {
+                use std::io::{Read, Seek, Write};
+                use std::os::fd::AsRawFd;
+                let mut file = owned;
+                let works = file.write_all(b"owned").is_ok() && file.rewind().is_ok() && {
+                    let mut text = String::new();
+                    file.read_to_string(&mut text).is_ok() && text == "owned"
+                };
+                check("an owned descriptor still works", works);
+                registered.push(owned.as_raw_fd());
+            }
             refused(confine::confine(&policy(&p, network, min_abi, registered)));
+            drop((held, owned));
             return;
         }
         if let Some(hidden) = case.strip_prefix("unreadable-") {
@@ -170,7 +206,7 @@ mod linux {
             confine::confine_with(&policy(&p, network, min_abi, registered), &options).unwrap();
         println!("REPORT {}", report.to_json());
         match case {
-            "files" | "abi1" | "abi2" | "abi3" => files(&p),
+            "files" | "abi1" | "abi2" | "abi3" | "fallback" => files(&p),
             // Only the report: the rules weren't all applied.
             "below-minimum" | "unavailable" | "blocked" => {}
             "processes" => processes(),
@@ -233,6 +269,17 @@ mod linux {
             ),
             other => panic!("unknown descriptor {other}"),
         }
+    }
+
+    /// A file in the data directory, opened read-write.
+    fn owned_file(p: &Paths) -> std::fs::File {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(p.data.join("owned"))
+            .unwrap()
     }
 
     /// What `confine` refused, as one line; a report is a failure.
@@ -508,9 +555,10 @@ mod linux {
         command(world, case).output().unwrap()
     }
 
-    /// The `inherited-<kind>` case, with an extra pipe or socket the child
-    /// inherits: made without close-on-exec, and closed here once it ran.
-    fn run_inheriting(world: &World, kind: &str) -> Output {
+    /// `case`, with an extra pipe or socket (`kind`) the child inherits:
+    /// made without close-on-exec, and closed here once it ran. `marker`
+    /// sets the re-exec's marker, as if this were the re-exec.
+    fn run_inheriting(world: &World, case: &str, kind: &str, marker: bool) -> Output {
         let extra: (std::os::fd::OwnedFd, std::os::fd::OwnedFd) = match kind {
             "pipe" => rustix::pipe::pipe_with(rustix::pipe::PipeFlags::empty()).unwrap(),
             _ => rustix::net::socketpair(
@@ -521,9 +569,11 @@ mod linux {
             )
             .unwrap(),
         };
-        let output = command(world, &format!("inherited-{kind}"))
-            .output()
-            .unwrap();
+        let mut command = command(world, case);
+        if marker {
+            command.env(confine::REEXEC_MARKER, "1");
+        }
+        let output = command.output().unwrap();
         drop(extra);
         output
     }
@@ -862,19 +912,50 @@ mod linux {
             format!("forced blocked: {r:?}"),
         );
 
-        // Descriptors: nothing is closed. One inherited from the parent,
-        // or opened by the process's own startup, is refused whatever its
-        // type, so the service exits 77. stdio as pipes (every case) or a
-        // socket pair, the registered lock and directory, and an ephemeral
-        // process with nothing registered all pass.
-        for kind in ["pipe", "socket"] {
-            let output = run_inheriting(&world, kind);
+        // Descriptors. Inherited from the parent: exactly one re-exec, then
+        // a clean start, with the marker gone. With the marker already set
+        // (a re-exec that left one), or a re-exec that fails: refused, and
+        // an owned descriptor still works. Opened by the startup after the
+        // entry: refused whatever its type, so the service exits 77.
+        let starts = |text: &str| -> Vec<String> {
+            text.lines()
+                .filter(|line| line.starts_with("START "))
+                .map(str::to_owned)
+                .collect()
+        };
+        for (case, kind) in [("files", "pipe"), ("files", "socket"), ("fallback", "pipe")] {
+            let output = run_inheriting(&world, case, kind, false);
+            let text = lines(&output);
             expect(
                 &mut failures,
-                lines(&output).contains(&format!("INVALID {kind}\n")),
-                format!("inherited {kind}: {}", lines(&output)),
+                starts(&text) == ["START marker=false", "START marker=true"]
+                    && text.contains("ENTRY reexeced\n")
+                    && text.contains("MARKER false\n")
+                    && text.contains("REPORT "),
+                format!("{case}, inherited {kind}: {text}"),
             );
+            failures.extend(passed(&format!("{case}, inherited {kind}"), &output));
         }
+        let output = run_inheriting(&world, "marker-inherited", "pipe", true);
+        let text = lines(&output);
+        expect(
+            &mut failures,
+            starts(&text) == ["START marker=true"]
+                && text.contains("ENTRY left\n")
+                && text.contains("MARKER false\n")
+                && text.contains("INVALID pipe\n"),
+            format!("the marker with a descriptor left: {text}"),
+        );
+        let output = run_inheriting(&world, "reexec-fails", "socket", false);
+        let text = lines(&output);
+        expect(
+            &mut failures,
+            starts(&text) == ["START marker=false"]
+                && text.contains("ENTRY left\n")
+                && text.contains("INVALID socket\n"),
+            format!("a failed re-exec: {text}"),
+        );
+        failures.extend(passed("reexec-fails", &output));
         for kind in ["socket", "pipe", "file", "eventfd", "epoll"] {
             let case = format!("inject-{kind}");
             let output = run(&world, &case);

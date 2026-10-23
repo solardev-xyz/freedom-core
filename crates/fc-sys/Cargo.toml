@@ -36,8 +36,8 @@ multiple_unsafe_ops_per_block = "deny"
 test-abis = []
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# The raw syscall std and rustix lack: Landlock's version query (design
-# 0010).
+# The raw calls std and rustix lack: Landlock's version query, and the
+# close-on-exec marks before the entry's re-exec (design 0010).
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]

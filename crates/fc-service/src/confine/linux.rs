@@ -14,7 +14,9 @@ use landlock::{
 };
 
 use super::seccomp::{self, Installed};
-use super::{Invalid, Network, Options, Policy, Report, Resolution, Status, resolver};
+use super::{
+    Entry, Invalid, Network, Options, Policy, REEXEC_MARKER, Report, Resolution, Status, resolver,
+};
 
 /// The newest Landlock ABI this build knows (the `landlock` crate's).
 const NEWEST_ABI: u32 = 9;
@@ -83,19 +85,67 @@ fn thread_count() -> Result<usize, Invalid> {
     Ok(threads)
 }
 
-/// Checks every descriptor in `/proc/self/fd` against stdio, `registered`
-/// and the listing's own descriptor, whatever its type: anything else is
-/// [`Invalid::Descriptor`], inherited or not. A table that can't be opened
-/// or read, or an entry that isn't a descriptor number, is
-/// [`Invalid::Unreadable`]: it proves nothing. The listing's descriptor is
-/// opened here and known by its number; nothing else is opened while it
-/// reads, since `readlinkat` and `statat` open nothing. What a descriptor
-/// is only names it in the error: an unregistered one is refused whether
-/// or not it can be identified.
-fn unregistered_descriptor(registered: &[i32]) -> Result<(), Invalid> {
-    use std::os::fd::{AsFd, AsRawFd};
+/// The process's entry ([`super::clean_entry`]): the one re-exec, if
+/// anything is open above stderr.
+pub(super) fn clean_entry(exe: &Path, one_at_a_time: bool) -> Entry {
+    let reexeced = std::env::var_os(REEXEC_MARKER).is_some();
+    if reexeced {
+        // So it goes no further. The process has one thread here.
+        let _ = fc_sys::linux::remove_env_alone(std::ffi::OsStr::new(REEXEC_MARKER));
+    }
+    let open = match descriptors_above_stderr() {
+        Ok(open) => open,
+        Err(_) => {
+            return Entry::Left {
+                reexeced,
+                error: None,
+            };
+        }
+    };
+    match (open.is_empty(), reexeced) {
+        (true, false) => Entry::Clean,
+        (true, true) => Entry::Reexeced,
+        (false, true) => Entry::Left {
+            reexeced,
+            error: None,
+        },
+        (false, false) => Entry::Left {
+            reexeced,
+            error: Some(reexec(exe, &open, one_at_a_time)),
+        },
+    }
+}
 
-    use rustix::fs::{AtFlags, Dir, Mode, OFlags};
+/// Marks every descriptor above stderr close-on-exec, and executes `exe`
+/// with this process's arguments and environment, plus the marker. Returns
+/// only the error of a re-exec that failed: close-on-exec is then merely
+/// set, and every descriptor and its owner as it was. `one_at_a_time`
+/// skips `close_range`, as before Linux 5.11 (a test seam).
+fn reexec(exe: &Path, open: &[i32], one_at_a_time: bool) -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+
+    if one_at_a_time || fc_sys::linux::cloexec_from(3).is_err() {
+        // Before Linux 5.11: one at a time.
+        for &fd in open {
+            let _ = fc_sys::linux::set_cloexec(fd);
+        }
+    }
+    let mut args = std::env::args_os();
+    let mut command = std::process::Command::new(exe);
+    if let Some(arg0) = args.next() {
+        command.arg0(arg0);
+    }
+    command.args(args).env(REEXEC_MARKER, "1").exec()
+}
+
+/// The descriptors above stderr, from `/proc/self/fd`, without the
+/// listing's own, which is opened here and known by its number. A table
+/// that can't be opened or read, or an entry that isn't a descriptor
+/// number, is [`Invalid::Unreadable`]: it proves nothing.
+fn descriptors_above_stderr() -> Result<Vec<i32>, Invalid> {
+    use std::os::fd::AsRawFd;
+
+    use rustix::fs::{Dir, Mode, OFlags};
 
     const WHAT: &str = "descriptor table";
     let table = rustix::fs::open(
@@ -106,7 +156,7 @@ fn unregistered_descriptor(registered: &[i32]) -> Result<(), Invalid> {
     .map_err(|_| Invalid::Unreadable(WHAT))?;
     let own = table.as_raw_fd();
     let mut dir = Dir::new(table).map_err(|_| Invalid::Unreadable(WHAT))?;
-    let mut unexpected = None;
+    let mut open = Vec::new();
     while let Some(entry) = dir.read() {
         let entry = entry.map_err(|_| Invalid::Unreadable(WHAT))?;
         let name = entry.file_name();
@@ -118,24 +168,37 @@ fn unregistered_descriptor(registered: &[i32]) -> Result<(), Invalid> {
             .ok()
             .and_then(|name| name.parse::<i32>().ok())
             .ok_or(Invalid::Unreadable(WHAT))?;
-        if fd <= 2 || fd == own || registered.contains(&fd) {
-            continue;
-        }
-        let table = dir.fd().map_err(|_| Invalid::Unreadable(WHAT))?;
-        let target = rustix::fs::readlinkat(table.as_fd(), name, Vec::new()).ok();
-        let file_type = rustix::fs::statat(table.as_fd(), name, AtFlags::empty())
-            .ok()
-            .map(|stat| rustix::fs::FileType::from_raw_mode(stat.st_mode));
-        let kind = kind_of(target.as_ref().map(|t| t.as_bytes()), file_type);
-        // The lowest, so the report doesn't depend on the listing's order.
-        if unexpected.is_none_or(|(lowest, _)| fd < lowest) {
-            unexpected = Some((fd, kind));
+        if fd > 2 && fd != own {
+            open.push(fd);
         }
     }
-    match unexpected {
-        Some((fd, kind)) => Err(Invalid::Descriptor { fd, kind }),
-        None => Ok(()),
-    }
+    open.sort_unstable();
+    Ok(open)
+}
+
+/// Checks every descriptor above stderr against `registered`, whatever its
+/// type: the lowest other one is [`Invalid::Descriptor`], opened by the
+/// setup or left after the entry's re-exec. A table that can't be read is
+/// [`Invalid::Unreadable`]. What a descriptor is only names it in the
+/// error, from `readlink` and `stat` on its `/proc/self/fd` entry, which
+/// open nothing: an unregistered one is refused whether or not it can be
+/// identified.
+fn unregistered_descriptor(registered: &[i32]) -> Result<(), Invalid> {
+    let Some(fd) = descriptors_above_stderr()?
+        .into_iter()
+        .find(|fd| !registered.contains(fd))
+    else {
+        return Ok(());
+    };
+    let path = format!("/proc/self/fd/{fd}");
+    let target = rustix::fs::readlink(path.as_str(), Vec::new()).ok();
+    let file_type = rustix::fs::stat(path.as_str())
+        .ok()
+        .map(|stat| rustix::fs::FileType::from_raw_mode(stat.st_mode));
+    Err(Invalid::Descriptor {
+        fd,
+        kind: kind_of(target.as_ref().map(|t| t.as_bytes()), file_type),
+    })
 }
 
 /// What a descriptor is, from its `/proc/self/fd` link and the type of what

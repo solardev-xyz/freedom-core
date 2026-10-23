@@ -18,20 +18,23 @@
 //!   `unavailable` (macOS and Windows follow).
 //!
 //! **The order** (0010, "The recommendation", step 1):
-//! 1. only the listed setup: the panic hook, hardening, the arguments, the
-//!    lock and the data directory. No socket, no name lookup, no file
-//!    outside the grants;
-//! 2. `confine`, which checks the threads and the whole descriptor table
+//! 1. at entry, the panic hook, then [`clean_entry`]: if anything is open
+//!    above stderr, one re-exec of the running image, with every
+//!    descriptor above stderr close-on-exec, so the kernel closes them.
+//!    Nothing is closed by a call: a close can't prove that no Rust object
+//!    owns the descriptor, and the re-exec replaces the whole image;
+//! 2. only the listed setup: hardening, the arguments, the lock and the
+//!    data directory. No socket, no name lookup, no file outside the
+//!    grants;
+//! 3. `confine`, which checks the threads and the whole descriptor table
 //!    before it installs anything. A descriptor above stderr that the
 //!    policy doesn't register ([`Policy::descriptors`]) is [`Invalid`],
-//!    whatever its type, and so is one inherited from the launcher:
-//!    nothing is closed, since a safe close can't prove that no Rust
-//!    object owns the descriptor. A table that can't be read is
-//!    [`Invalid`] too;
-//! 3. only then the runtimes and every other thread.
+//!    whatever its type: one opened by the setup, or one the re-exec left.
+//!    A table that can't be read is [`Invalid`] too;
+//! 4. only then the runtimes and every other thread.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
@@ -193,6 +196,80 @@ pub struct Options {
     /// Install, as the first seccomp filter, a program the kernel's checker
     /// rejects (an invalid opcode): the service's own rules refused.
     pub seccomp_invalid: bool,
+}
+
+/// The environment variable the entry's re-exec sets ([`clean_entry`]).
+pub const REEXEC_MARKER: &str = "FREEDOM_SERVICE_REEXEC";
+
+/// How the process's entry went ([`clean_entry`]).
+#[derive(Debug)]
+pub enum Entry {
+    /// Nothing open above stderr: no re-exec.
+    Clean,
+    /// This image is the re-exec, and nothing is left above stderr.
+    Reexeced,
+    /// Something is left above stderr, which [`confine`] refuses: after the
+    /// re-exec (`reexeced`), because the re-exec failed (`error`), or
+    /// because the descriptor table can't be read.
+    Left {
+        reexeced: bool,
+        error: Option<std::io::Error>,
+    },
+}
+
+impl Entry {
+    /// A name for the log.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Entry::Clean => "clean",
+            Entry::Reexeced => "reexeced",
+            Entry::Left { .. } => "left",
+        }
+    }
+}
+
+/// At process entry, right after the panic hook and before anything opens
+/// a descriptor (design 0010, step 1).
+///
+/// If a descriptor is open above stderr, it marks every descriptor above
+/// stderr close-on-exec (`close_range` with `CLOSE_RANGE_CLOEXEC`, or
+/// `fcntl` one at a time before Linux 5.11). It then executes the running
+/// image again (`/proc/self/exe`), with the same arguments and environment
+/// plus [`REEXEC_MARKER`], so the kernel closes them all. Returns only when
+/// there is nothing to drop, or the re-exec failed.
+///
+/// - **Once:** with the marker set, nothing is re-executed. The marker is
+///   removed from the environment first, so it goes no further.
+/// - **Sound:** nothing is closed by a call, so no Rust owner of a
+///   descriptor is invalidated. The re-exec replaces the whole image; a
+///   failed one leaves only close-on-exec set, and every owner valid.
+/// - **The backstop:** [`confine`] still refuses whatever is left.
+///
+/// Elsewhere, for now, it does nothing (macOS follows).
+pub fn clean_entry() -> Entry {
+    #[cfg(target_os = "linux")]
+    {
+        linux::clean_entry(Path::new("/proc/self/exe"), false)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Entry::Clean
+    }
+}
+
+/// [`clean_entry`], re-executing `exe`, and with `one_at_a_time` marking
+/// each descriptor as before Linux 5.11: test seams.
+#[doc(hidden)]
+pub fn clean_entry_with(exe: &Path, one_at_a_time: bool) -> Entry {
+    #[cfg(target_os = "linux")]
+    {
+        linux::clean_entry(exe, one_at_a_time)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (exe, one_at_a_time);
+        Entry::Clean
+    }
 }
 
 /// Confines the process to `policy` (design 0010).
