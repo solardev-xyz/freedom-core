@@ -1,9 +1,8 @@
 //! The machine a driver runs (design 0005): `chain.configure`,
 //! `chain.availability`, `chain.request`, `chain.fee_quote`,
 //! `chain.fee_reference`, `chain.broadcast`, `chain.html` (design 0006)
-//! and `cancel` in; `shell.*`
-//! requests, cancels and replies out. Time comes in through the executor's
-//! timers.
+//! and `cancel` in; `shell.*` requests, cancels and replies out. Time comes
+//! in through the executor's timers.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -738,9 +737,8 @@ impl Machine {
     }
 
     /// `cancel` from main: a read, a fee quote or a fee reference ends
-    /// `cancelled` at once; a
-    /// broadcast through the outcome table. False when the request has
-    /// already replied.
+    /// `cancelled` at once; a broadcast through the outcome table. False
+    /// when the request has already replied.
     pub fn cancel(&mut self, id: u64) -> bool {
         if let Some(i) = self.running.iter().position(|r| r.id == id) {
             self.end(i, Protocol::Cancelled);
