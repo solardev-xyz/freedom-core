@@ -1,6 +1,6 @@
 name: Services
 
-# The service processes (design 0007) are workspaces of their own under
+# The service processes (designs 0007 and 0008) are workspaces of their own under
 # services/, with their own lockfiles and `cargo deny` policies. This workflow
 # builds and checks them apart from the core, desktop targets only, and runs
 # only when a service or what it builds from changes, plus daily. So a
@@ -12,8 +12,11 @@ on:
     branches: [main]
     paths:
       - "services/freedom-ipfsd/**"
+      - "services/freedom-radicled/**"
       - "crates/fc-protocol/**"
       - "crates/fc-service/**"
+      # freedom-radicled opens the sealed node key with it (design 0008).
+      - "crates/fc-seal/**"
       - "Cargo.toml"
       - "rust-toolchain.toml"
       # Root tool configuration that applies under services/: Clippy and
@@ -31,8 +34,11 @@ on:
   pull_request:
     paths:
       - "services/freedom-ipfsd/**"
+      - "services/freedom-radicled/**"
       - "crates/fc-protocol/**"
       - "crates/fc-service/**"
+      # freedom-radicled opens the sealed node key with it (design 0008).
+      - "crates/fc-seal/**"
       - "Cargo.toml"
       - "rust-toolchain.toml"
       # Root tool configuration that applies under services/: Clippy and
@@ -136,3 +142,67 @@ jobs:
         run: |
           (cd services/freedom-ipfsd && cargo fetch --locked)
           python3 scripts/third-party-notices.py --binary freedom-ipfsd --check
+
+  radicled-lint:
+    name: freedom-radicled fmt + clippy
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/freedom-radicled
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: services/freedom-radicled -> target
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # The test hooks never build into a release binary (src/testhooks.rs).
+      - name: A release build with the test hooks doesn't compile
+        run: |
+          if cargo check --locked --release --features testhooks 2> testhooks-release.err; then
+            echo "a release build compiled with the testhooks feature" >&2
+            exit 1
+          fi
+          grep -F "the \`testhooks\` feature is for debug and test builds only" testhooks-release.err
+
+  radicled-test:
+    name: freedom-radicled test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: services/freedom-radicled
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: services/freedom-radicled -> target
+      # --all-features: the test hooks (`testhooks`) the binary's tests use.
+      - run: cargo test --locked --workspace --all-features
+
+  radicled-deny:
+    name: freedom-radicled cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Install cargo-deny
+        run: |
+          tarball="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL -o "$tarball" "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${tarball}"
+          echo "${CARGO_DENY_SHA256}  ${tarball}" | sha256sum --check
+          tar -xzf "$tarball" --strip-components=1 -C "$HOME/.cargo/bin" "cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl/cargo-deny"
+      - working-directory: services/freedom-radicled
+        run: cargo deny --locked check
