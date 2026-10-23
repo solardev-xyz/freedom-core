@@ -364,6 +364,70 @@ fn direct_after_a_quorum_timeout() {
 }
 
 #[test]
+fn colibri_faults_back_its_method_off_read_or_not() {
+    // Two verifier faults back Colibri off a chain's method (design 0005,
+    // Colibri: verifier faults), the second landing after its page's read
+    // moved on to Direct; another method still goes to Colibri.
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    let hello = core.hello_fragments();
+    assert!(
+        hello["result"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("colibri_faults")),
+        "{hello}"
+    );
+    let mut chain = snapshot(&["colibri", "direct"], &["a"], 500);
+    chain["prover"] = json!({ "endpoint": "p1", "zk": true });
+    configure(&mut core, 2, &[chain]);
+    let fault = json!({ "result": { "failure": "error", "fault": true } });
+    let call_read = read("eth_call", json!([{ "to": ADDRESS }, "latest"]));
+    core.send(&request(3, "chain.request", call_read.clone()));
+    let (got, seen) = serve(&mut core, 3, |request| match request["method"].as_str() {
+        Some("shell.verified") => Some(fault.clone()),
+        _ => Some(rpc_result(r#""0x1""#)),
+    });
+    assert_eq!(got["result"]["source"], "direct", "{got}");
+    assert_eq!(seen.requests[0]["method"], "shell.verified");
+    // A page's read: Colibri's operation outlives the read's budget, and
+    // its fault arrives once nobody reads it.
+    let mut page = call_read.clone();
+    page["origin"] = json!("https://app.example");
+    core.send(&request(4, "chain.request", page));
+    let mut held = None;
+    let (got, _) = serve(&mut core, 4, |request| match request["method"].as_str() {
+        Some("shell.verified") => {
+            held = Some(request.clone());
+            None
+        }
+        _ => Some(rpc_result(r#""0x1""#)),
+    });
+    assert_eq!(got["result"]["source"], "direct", "{got}");
+    reply(&mut core, &held.unwrap(), fault);
+    // Backed off: no operation, and Direct answers.
+    core.send(&request(5, "chain.request", call_read));
+    let (got, seen) = serve(&mut core, 5, |_| Some(rpc_result(r#""0x1""#)));
+    assert_eq!(got["result"]["source"], "direct", "{got}");
+    assert!(
+        seen.requests.iter().all(|r| r["method"] == "shell.rpc"),
+        "{:?}",
+        seen.requests
+    );
+    core.send(&request(
+        6,
+        "chain.request",
+        read("eth_getBalance", json!([ADDRESS, "latest"])),
+    ));
+    let (got, seen) = serve(&mut core, 6, |request| match request["method"].as_str() {
+        Some("shell.verified") => Some(json!({ "result": { "result": "0x2" } })),
+        _ => None,
+    });
+    assert_eq!(got["result"]["source"], "colibri", "{got}");
+    assert_eq!(seen.requests.len(), 1);
+}
+
+#[test]
 fn myotis_reads_through_shell_verified() {
     let (_root, mut core) = core();
     let mut chain = snapshot(&["myotis", "direct"], &["a"], 5000);

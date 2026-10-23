@@ -584,7 +584,7 @@ impl Future for Counted<'_> {
 /// head's deadline, or half way to a nearer one.
 fn memory_deadline(deadline: Instant) -> Instant {
     let left = deadline.saturating_duration_since(Instant::now());
-    deadline - MEMORY_MARGIN.min(left / 2)
+    deadline - testhooks::memory_margin(MEMORY_MARGIN).min(left / 2)
 }
 
 /// Answers `busy` before the head, its memory not had in time, if that is

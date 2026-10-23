@@ -126,7 +126,10 @@ fn a_request_that_cannot_reserve_before_its_head_waits_then_is_busy() {
     let dirs = Dirs::new();
     let missing = freedom_ipfs_core::cid_from_data(RAW, b"not stored anywhere").to_string();
     seed_provider(&dirs, std::slice::from_ref(&missing), &provider);
-    let mut ipfsd = starved(&dirs, &[]);
+    // The wait gives up 400 ms before headers_ms, not the service's 50: on a
+    // loaded machine, the work's `busy` then still comes before the
+    // deadline, after which the reply is `deadline` (#190).
+    let mut ipfsd = starved(&dirs, &[("FREEDOM_IPFSD_TEST_MEMORY_MARGIN_MS", "400")]);
     let sent = Instant::now();
     let id = ipfsd.request(
         "ipfs.request",
@@ -136,9 +139,10 @@ fn a_request_that_cannot_reserve_before_its_head_waits_then_is_busy() {
     let reply = ipfsd.reply(id);
     let waited = sent.elapsed();
     assert_eq!(reply["error"]["code"], "busy", "{reply}");
-    // It waited for memory until just before its headers_ms, and asked the
+    // It waited for memory until its margin before headers_ms (at least
+    // 600 ms after it was sent, however late its work ran), and asked the
     // provider nothing.
-    assert!(waited >= Duration::from_millis(900), "{waited:?}");
+    assert!(waited >= Duration::from_millis(600), "{waited:?}");
     assert_eq!(provider.accepted(), 0);
     let gateway = &gateway_after(&mut ipfsd, 1);
     assert_eq!(
