@@ -29,11 +29,17 @@ cargo-fuzz = true
 # The vault target seals its own inputs with the vault's cipher and KDF.
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc"] }
 base64 = "0.22.1"
+fc-chain = { path = "../crates/fc-chain" }
 fc-json = { path = "../crates/fc-json" }
 fc-keys = { path = "../crates/fc-keys" }
+# The naming target compares a bounded ABI decode with `decode_counted`.
+fc-naming = { path = "../crates/fc-naming", features = ["fuzzing"] }
 fc-protocol = { path = "../crates/fc-protocol" }
+fc-seal = { path = "../crates/fc-seal" }
 fc-vault = { path = "../crates/fc-vault" }
 libfuzzer-sys = "0.4.13"
+# The seal target's randomness: fc-seal's own trait version.
+rand_core = "0.10"
 serde_json = { version = "1", features = ["raw_value"] }
 sha2 = { version = "0.11", default-features = false }
 
@@ -70,6 +76,34 @@ bench = false
 [[bin]]
 name = "vault_open"
 path = "fuzz_targets/vault_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chain_answer"
+path = "fuzz_targets/chain_answer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "naming_answer"
+path = "fuzz_targets/naming_answer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "openssh_public"
+path = "fuzz_targets/openssh_public.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "seal_open"
+path = "fuzz_targets/seal_open.rs"
 test = false
 doc = false
 bench = false
