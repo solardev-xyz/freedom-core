@@ -475,7 +475,7 @@ For `ipfs://<cid><path>`, with `GatewayCore`'s rules:
   - **The key's size:** a modulus of 2,048 to 8,192 bits, go-libp2p's `MinRsaKeyBits` and `maxRsaKeyBits`, which rust-libp2p's ring algorithm also bounds. ring counts the minimum in whole bytes, so it also takes a modulus of 2,041 to 2,047 bits, which the core refuses with go-libp2p (deviation `rsa-keys`). The exponent is odd, from 3 to 2^33 − 1, ring's bounds.
   - **A key or signature outside these rules** fails the record's check: `verification_failed`, as a bad Ed25519 signature does.
   - **The verifier is the `rsa` crate, for verification only** ([Upstream](#upstream)). The core builds a public key from the parsed modulus and exponent and checks one signature with it; it never holds an RSA private key, so it never makes a private-key operation.
-  - **Cost:** one signature check per record, measured at 0.15 ms for a 2,048-bit key and 3.7 ms for an 8,192-bit key with the largest exponent ([Measured](#measured)). It runs on the hashing pool.
+  - **Cost:** one signature check per record, measured at 0.2–0.3 ms for a 2,048-bit key and under 3 ms for an 8,192-bit key ([Measured](#measured)). It runs on the hashing pool.
 - **DNSLink names** (`ipns://example.com`, whose root comes from DNS) and **names with another inlined key** (secp256k1, which the native node doesn't verify either) get today's fetch plan and the `unverified` label. For DNSLink this is decided ([Decisions](#decisions), 7).
   - `dweb.open` decides this from the name itself, so no node can steer a request out of verified mode.
   - **A possible later step, not planned work:** the core could resolve DNSLink itself, over DNS-over-HTTPS exchanges main performs, with two independent resolvers that must agree. The root would then come from resolvers Freedom chooses, not from the gateway.
@@ -676,16 +676,16 @@ Hashing, in release builds on the development server this design was written on 
 - **So a Swarm leaf costs 55–100 µs to check,** 127 keccak hashes of 64 bytes for the tree and one for the address. That is the bound on verified Swarm throughput: 40–74 MiB/s per hashing thread, and an estimated 80–150 MiB/s with the pool's two, if they scale.
 - **IPFS's hashing is not a bound.** The CAR's parsing and copying, and the pipe, are (unmeasured).
 
-RSA signature checks for IPNS records, in a release build on the same server at a load average of about 2 (PKCS#1 v1.5 with SHA-256, keys and signatures made by OpenSSL; the range over five runs of 200 to 2,000 checks):
+RSA signature checks for IPNS records, in release builds on the same server at a load average of 4.5 to 6 (PKCS#1 v1.5 with SHA-256, keys and signatures made by OpenSSL; the range over two sessions of five runs, each of 200 to 2,000 checks):
 
-| Key | `rsa` 0.10.0-rc.19, one thread | `rsa` 0.9.10, for comparison |
+| Key | `rsa` 0.9.10 with `u64_digit`, as pinned, one thread | `rsa` 0.10.0-rc.19, for comparison |
 |---|---|---|
-| 2,048 bits, exponent 65,537 | 0.15–0.16 ms | 0.32–0.33 ms |
-| 4,096 bits, exponent 65,537 | 0.60–0.61 ms | 1.2–1.3 ms |
-| 8,192 bits, exponent 65,537 | 2.3–2.4 ms | 4.8–5.0 ms |
-| 8,192 bits, exponent 2^33 − 1, the largest allowed | 3.6–3.7 ms | 8.4–8.7 ms |
+| 2,048 bits, exponent 65,537 | 0.19–0.31 ms | 0.15–0.16 ms |
+| 4,096 bits, exponent 65,537 | 0.69–0.83 ms | 0.60–0.66 ms |
+| 8,192 bits, exponent 65,537 | 2.7–2.8 ms | 2.4–2.5 ms |
+| 8,192 bits, exponent 2^33 − 1, the largest allowed | 2.7–2.8 ms | 3.7–4.1 ms |
 
-- **So a record costs at most about 4 ms of one hashing thread,** and a request at most 4 records (the IPNS hops): about 15 ms, whatever key sizes a hostile gateway chooses. Kubo made 2,048-bit RSA keys by default, which cost 0.15 ms.
+- **So a record costs at most about 3 ms of one hashing thread,** and a request at most 4 records (the IPNS hops): about 12 ms, whatever key sizes a hostile gateway chooses. Kubo made 2,048-bit RSA keys by default, which cost 0.2–0.3 ms.
 
 ### Estimates
 
@@ -837,16 +837,13 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
   - **`fc-ipfs` carries its own bounded decoders** ([Bounded decoding](#bounded-decoding)). The native ones (`freedom-ipfs-unixfs/src/lib.rs:42`–`85`, `1100`–`1110`) are private, and they allocate while decoding, so they couldn't run under the core's reservations even if they were public.
   - **freedom-ipfs adopts the core's reader later** (decided, [Decisions](#decisions), 11), so there is one reader, not two.
     - **What:** `fc-ipfs`'s bounded dag-pb, UnixFS and HAMT reader, with its caps and its stricter size and HAMT rules. The native node and verified mode then read files and directories the same way by construction, and deviations `unixfs-sizes`, `hamt-lookup` and `decoder-caps` describe both.
-    - **When:** a separate freedom-ipfs pull request, once the reader exists here ([Implementation steps](#implementation-steps), 8). Whether it changes what the native node answers for malformed content, and how, is that pull request's to state.
-    - **License:** freedom-ipfs is dual-licensed MIT or Apache-2.0, and this repository carries no license (0007, *Where the code lives*). So the reader needs a license freedom-ipfs can take: the user licenses that code, or it moves into freedom-ipfs and `fc-ipfs` pins it from there. That choice is the user's, before the step.
+    - **When:** freedom-ipfs pull requests of their own, into its integration branch, once the reader has merged here ([Implementation steps](#implementation-steps), 8). Whether it changes what the native node answers for malformed content, and how, is that pull request's to state.
 - **What `fc-ipfs` takes from freedom-ipfs:** `freedom-ipfs-core`'s `verify_block` and block limit, by a git dependency pinned to v0.4.6 (allowed from solardev-xyz). Not its whole-buffer CAR parser: the core reads CARs as streams. Not `freedom-ipfs-unixfs`'s resolver, which pulls blocks through a synchronous provider, and so can't suspend while main fetches.
 - **The `rsa` crate** (MIT OR Apache-2.0), for RSA-keyed IPNS names (decided, [Decisions](#decisions), 9):
-  - **For verification only.** `fc-ipfs` builds an `RsaPublicKey` from the modulus and exponent its own DER reader parsed, and checks a signature with `Pkcs1v15Sign` and SHA-256. Nothing in the core generates, loads or holds an RSA private key, so no private-key operation exists to be timed. The crate's default features (`std`, and `encoding`, which brings its own PKCS#1 and PKCS#8 parsers) are off.
-  - **Pinned exactly, at 0.10.0-rc.19,** a release candidate:
-    - it is on the core's RustCrypto generation (`crypto-bigint` 0.7, `digest` 0.11, `signature` 3, `rand_core` 0.10), so it adds two crates to what the core builds, `rsa` and `crypto-primes` (MIT OR Apache-2.0);
-    - its default size limit is libp2p's 8,192 bits;
-    - 0.9.10, the latest stable release, would add about two dozen crates, a second RustCrypto generation among them (`digest` 0.10, `der` 0.7, `num-bigint-dig`), and checks a signature at half the speed ([Measured](#measured));
-    - a release candidate's API can change before 0.10.0. The exact pin holds it, and moving to 0.10.0 is a reviewed change of its own.
+  - **For verification only.** `fc-ipfs` builds an `RsaPublicKey` from the modulus and exponent its own DER reader parsed, with `RsaPublicKey::new_with_max_size` at 8,192 bits (the crate's own default is 4,096), and checks a signature with `Pkcs1v15Sign` for SHA-256. Nothing in the core generates, loads or holds an RSA private key, so no private-key operation exists to be timed. The crate's default features (`std`, and `pem`, which brings its PEM parsers) are off; `u64_digit`, a speed option, is on.
+  - **Pinned exactly, at 0.9.10,** the latest stable release, as `freedom-radicled`'s lock has it:
+    - it brings a second RustCrypto generation into the core's graph (`digest` 0.10, `der` 0.7, `spki` 0.7, `pkcs1` 0.7, `pkcs8` 0.10, `signature` 2, `num-bigint-dig`: about two dozen crates). `fc-ipfs` hashes with the core's `sha2` 0.11 and hands the crate the digest with SHA-256's `DigestInfo` prefix, so nothing of the core's moves to the older generation;
+    - 0.10.0, on the core's generation, has only release candidates (0.10.0-rc.19, 2026-10-06), which aren't taken. The pin moves to 0.10.0 when it is stable, as a reviewed change of its own.
   - **RUSTSEC-2023-0071** (the Marvin attack: timing that leaks the private key through RSA decryption and signing) covers every release, so `cargo deny` needs a reviewed exception.
     - **No release fixes it,** checked on 2026-10-23. The advisory lists no patched version; on 2026-09-14 it recorded 0.9.10 and the 0.10 release candidates as still affected, and 0.10.0-rc.19, released on 2026-10-06, is too. The tracking issue (RustCrypto/RSA#626) and the two pull requests toward a fix (#680, implicit rejection for PKCS#1 v1.5 decryption; #702, blinding the default decryption paths) are open.
     - **Why the exception holds:** the advisory concerns operations with a private key, and the core makes none. It only checks signatures, with public keys taken from records.
@@ -904,7 +901,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
    - `fc-evm`: signature recovery, for single-owner chunks;
    - `fc-swarm`: chunk and SOC checks (the empty chunk included; SOCs only where a feed update is expected), intermediate chunks with erasure coding, logical leaf lengths from the parent, mantaray nodes and lookup (empty nodes included, and 64-byte references recognized so the walk refuses them), feed identifiers. Encrypted chunks aren't built ([Encrypted references](#encrypted-references));
    - `fc-ipfs` (new, logic): CIDs and the native node's block check; the bounded protobuf, CBOR and DER readers, with their counting first pass; a streaming CAR reader; dag-pb and UnixFS with the stricter size rules; hash-directed HAMT lookup; offsets; IPNS records, V2-only included, with Ed25519 and RSA keys;
-   - **new dependencies,** each justified in its PR (AGENTS.md rule 7): `freedom-ipfs-core` (git, pinned to v0.4.6) and the `cid`, `multihash` and `unsigned-varint` crates it brings, which `freedom-mobile-ffi` already links through freedom-ipfs; `mime_guess` 2.0.5, for `GatewayCore`'s types; `ed25519-dalek`, already on the preferred list; `rsa` 0.10.0-rc.19, pinned exactly, for verification only, with its `cargo deny` exception ([Upstream](#upstream)). MurmurHash3 and the DAG-CBOR subset an IPNS record needs are small enough to write, against vectors.
+   - **new dependencies,** each justified in its PR (AGENTS.md rule 7): `freedom-ipfs-core` (git, pinned to v0.4.6) and the `cid`, `multihash` and `unsigned-varint` crates it brings, which `freedom-mobile-ffi` already links through freedom-ipfs; `mime_guess` 2.0.5, for `GatewayCore`'s types; `ed25519-dalek`, already on the preferred list; `rsa` 0.9.10, pinned exactly, for verification only, with its `cargo deny` exception ([Upstream](#upstream)). MurmurHash3 and the DAG-CBOR subset an IPNS record needs are small enough to write, against vectors.
 3. **`fc-dweb`:** verify plans (with their `query`) and their validation; what stays a `{ fetch }` (encrypted references, DNSLink names, other inlined keys); strict mode's error plans and checks; the verifier machine, with its walks, heads, ranges (the exact-206 and whole-200 policies), conditionals and failures; the structure cache with its partition epochs, one short-lived cache per private window; the IPNS floors.
 4. **`fc-protocol`:** streams in both directions, protocol version 2 (on #72).
 5. **`freedom-cored`:** the dweb thread and hashing pool, `dweb.verify`, `shell.dweb_get`, `dweb.forget`, admission, budgets and cancel, with tests through the binary.
@@ -917,7 +914,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
    - the labels and the nodes panel;
    - then the [gates](#gates).
 7. **The default:** on for every external backend (decided, 1). Verification ships on once the gates pass; a gate that fails brings the default back to the user with its numbers.
-8. **freedom-ipfs:** a pull request of its own that adopts `fc-ipfs`'s bounded reader, once the reader exists here (decided, 11), after the user has settled its license ([Upstream](#upstream)).
+8. **freedom-ipfs:** pull requests of its own, into its integration branch, that adopt `fc-ipfs`'s bounded reader once the reader has merged here (decided, 11; [Upstream](#upstream)).
 
 ## Decisions
 
@@ -941,7 +938,7 @@ Each was decided by the user on 2026-10-23. The questions and their options stay
    - **Decided: encrypted references stay `unverified` from external nodes** ([Encrypted references](#encrypted-references)). The chunk-by-chunk path isn't built for now; it stays described in the [appendix](#appendix-the-encrypted-path-not-built). [freedom-hq/ant#233](https://github.com/freedom-hq/ant/issues/233) asks Ant for a batch raw-chunk endpoint, and the question is revisited when it lands. An encrypted reference met inside a verified walk is `unverifiable`, never a fallback.
 9. **RSA-keyed IPNS names:** add an RSA verifier, or keep them `unverified`? The `rsa` crate would be a new dependency, and `cargo deny` may need a reviewed exception for its timing advisory (RUSTSEC-2023-0071), which concerns private-key operations, not verification. Whether the current release still carries the advisory, and how many names use RSA keys, are unverified.
    - **Decided: add an RSA verifier,** so RSA-keyed names are verified like Ed25519-keyed ones ([IPNS and DNSLink](#ipns-and-dnslink)):
-     - the `rsa` crate, for verification only, pinned exactly (0.10.0-rc.19), with a reviewed `cargo deny` exception for RUSTSEC-2023-0071 ([Upstream](#upstream));
+     - the `rsa` crate, for verification only, pinned exactly at 0.9.10, the latest stable release, with a reviewed `cargo deny` exception for RUSTSEC-2023-0071 ([Upstream](#upstream));
      - libp2p's encoding (a PKIX DER key inside the record's `pubKey`), signature scheme (RSASSA-PKCS1-v1_5 with SHA-256) and key sizes (2,048 to 8,192 bits), with the sources [IPNS and DNSLink](#ipns-and-dnslink) cites;
      - **the advisory, checked on 2026-10-23:** no release fixes it. 0.9.10 is the latest stable release and 0.10.0-rc.19 the latest release candidate, and the advisory lists no patched version.
 
@@ -949,8 +946,7 @@ Each was decided by the user on 2026-10-23. The questions and their options stay
 10. **Private windows:** a structure cache per private partition (proposed), or none?
     - **Decided: each private window gets its own short-lived structure cache** ([The structure cache](#the-structure-cache)), dropped when the window closes.
 11. **Upstream:** `fc-ipfs` can't share the native decoders as they are, since they allocate before anything can be reserved. Should freedom-ipfs adopt a bounded reader shared with `fc-ipfs` (its decoders, and its stricter size and HAMT rules), so both modes read files and directories the same way by construction rather than differing on malformed content?
-    - **Decided: yes, later.** freedom-ipfs adopts the core's bounded sans-I/O block reader in a freedom-ipfs pull request of its own, after the core's reader exists, so there is one reader, not two ([Upstream](#upstream); [Implementation steps](#implementation-steps), 8).
-    - **Still open:** the license that lets freedom-ipfs take the reader, the user's to choose before that step ([Upstream](#upstream)).
+    - **Decided: yes, later.** freedom-ipfs adopts the core's bounded sans-I/O block reader in freedom-ipfs pull requests of its own, after the core's reader has merged, so there is one reader, not two ([Upstream](#upstream); [Implementation steps](#implementation-steps), 8).
 
 ## Appendix: the encrypted path (not built)
 
