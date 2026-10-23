@@ -69,7 +69,7 @@ This design moves it into **its own supervised process, `freedom-ipfsd`**:
   - freedom-ipfs has no hook for any of this today, so it needs upstream changes, [listed](#upstream-changes-in-freedom-ipfs) by file and line.
 - **The code lives in this repository, in its own Cargo workspace** (`services/freedom-ipfsd`).
   - It shares `fc-protocol` and the release workflow, but not the core's lockfile, build jobs or credentials.
-  - A new repository remains the user's call ([Where the code lives](#where-the-code-lives)).
+  - The user decided this on 2026-10-22. Moving it to a new repository later would be a new decision ([Where the code lives](#where-the-code-lives)).
 - **Tests come first.** #704's native-backend cases become one contract suite, run against the add-on before anything moves, and then against the service.
 
 ## Goals and non-goals
@@ -91,7 +91,7 @@ This design moves it into **its own supervised process, `freedom-ipfsd`**:
 - **libradicle (4.4):** its own design (0008). It reuses this one's process model, streams and client.
 - **Persistent libp2p identity, content providing and a DHT server:** freedom-ipfs is a read-only client, and stays one.
 - **Mobile:** iOS and Android keep linking freedom-ipfs in process.
-- **An OS sandbox.** Process separation is a crash domain and a resource boundary, not a sandbox. Confining the service with the OS is [0010](0010-service-confinement.md)'s proposal, which awaits the user's decisions.
+- **An OS sandbox.** Process separation is a crash domain and a resource boundary, not a sandbox. Confining the service with the OS is [0010](0010-service-confinement.md)'s, decided by the user (D1).
 
 ## Today
 
@@ -150,7 +150,11 @@ Electron main (profile P)
 - **The environment** is cleared except for `PATH`, `HOME`/`USERPROFILE`, `LANG`, `RUST_LOG` and `SystemRoot` (`core-client.js`'s `scrubbedEnv`). That drops:
   - the proxy variables `reqwest` would otherwise read;
   - the `FREEDOM_IPFS_*` tuning variables freedom-ipfs's routing and retrieval crates read.
-- **The network policy** is an argument: `--network direct`, or `--network socks5:<ip>:<port>` with an IP literal. It is fixed for the process's life ([Changing the policy](#changing-the-policy)), so [0010](0010-service-confinement.md)'s confinement can apply it before `ipfs.hello`.
+- **The network policy** is an argument: `--network direct`, or `--network socks5:<ip>:<port>`. It is fixed for the process's life ([Changing the policy](#changing-the-policy)), so [0010](0010-service-confinement.md)'s confinement can apply it before `ipfs.hello`.
+  - `<ip>` is an IPv4 address, or an IPv6 address in brackets, which are the argument's syntax, not part of the address. The address is written plainly: no zone, no shorthand, no hex or octal. An IPv4-mapped IPv6 address is read as the IPv4 address it maps. It may not be unspecified, multicast or broadcast. Loopback and private addresses are allowed, since an external Tor may sit on the LAN.
+  - `<port>` is from 1 to 65535.
+  - No credentials are taken: the service makes each instance's own ([The SOCKS contract](#the-gate), *Stream isolation*).
+  - Anything else is a usage error: exit 64.
 - **Handshake:** `ipfs.hello` must complete within 10 s of spawn. Both sides enforce this, as for `core.hello`.
 - **No listening socket.** The service binds nothing. Upstream's loopback HTTP gateway is never started.
 - **Hardening:** 0001's, for both kinds of process:
@@ -159,7 +163,7 @@ Electron main (profile P)
   - Windows: Windows Error Reporting's dialog and dump collection are turned off for the process where the API allows it. This is best-effort.
 
   These are application guarantees. The OS can still page the ephemeral process's memory to swap or a hibernation file. A private window promises nothing against OS-level memory forensics.
-- **Confinement** (Landlock and seccomp, a Seatbelt profile, a job object) is [0010](0010-service-confinement.md)'s proposal, for the user to decide.
+- **Confinement** by the OS (Landlock and seccomp, a Seatbelt profile, a job object) is [0010](0010-service-confinement.md)'s, decided by the user. Both kinds of process confine themselves after their lock and before `ipfs.hello`, and `ipfs.hello` reports what they got.
 
 ### Lifetime lock
 
@@ -177,11 +181,12 @@ Electron main (profile P)
 - **Errors:**
   - any other locking error exits 74 (`storage`);
   - so does a data or lock directory on a network filesystem, under 0001's qualification rules. SQLite's WAL mode isn't safe there in any case.
-- **`hold-lock`:** `freedom-ipfsd hold-lock --data-dir … --lock-dir …` holds the gate until its stdin closes, as the core's does. Profile delete, profile reset and `ipfs:reset` hold it while they remove the directory.
+- **`hold-lock`:** `freedom-ipfsd hold-lock --data-dir … --lock-dir …` holds the gate until its stdin closes, as the core's does. Profile delete holds it while it removes the directory. freedom-browser has no profile reset and no IPFS reset; one added later holds it too.
 - **What the lock guarantees, and what it doesn't:**
   - **It excludes only writers that take it:** the service, `hold-lock`, and the dev add-on fallback, which holds `hold-lock` for its whole lifetime ([Rollback](#rollback)).
   - **An older build** runs the add-on with no gate. Old and new builds sharing one data directory, for example through `FREEDOM_IPFS_DATA` or two profiles pointed at one directory, are unsupported.
   - **The profile lock** only excludes two owners of the same profile, as today.
+  - **Until the default switches, only development builds take it.** Only they can run the service, so only there can the service and the add-on share a directory. A packaged build keeps today's behaviour, with today's limits. The profile lock's lease is its only exclusion, and a profile delete trusts a lease that looks stale (no heartbeat for 30 s): a stalled but live profile's data, its cache included, can be removed under it, as it can today. Gating packaged builds now would refuse such a delete while the profile's IPFS node runs, but would bring [`network-fs` and `data-dir-lock`](#deviations) to add-on users before the service ships; the lease's limit is the profile lock's to fix. The switch makes the gate unconditional, for the service, profile delete and the add-on fallback alike.
 - **Why not Myotis's model** (a C supervisor, an owner record, an Electron-as-Node child):
   - Myotis needs a JavaScript host for its add-on, and its directory holds sync state whose interrupted generation must be preserved.
   - Here the binary is plain Rust. The data is a cache in SQLite's WAL mode, so a kill costs at most the last writes.
@@ -231,7 +236,7 @@ Electron main (profile P)
   - 64 (usage);
   - 74 (`storage`);
   - 75 (`lock_held`);
-  - 77 (`confinement`): [0010](0010-service-confinement.md)'s confinement found its own policy invalid, or, if D2 fails closed, a mechanism missing;
+  - 77 (`confinement`): [0010](0010-service-confinement.md)'s confinement found its own policy invalid. A mechanism the OS lacks doesn't stop the service: it runs, and reports the gap (D2);
   - a handshake protocol mismatch, which is a packaging bug;
   - an `ipfs.start` that fails with `storage`, for example a store that won't open, as `start()` returning `false` is today.
 
@@ -269,6 +274,7 @@ Electron main (profile P)
   - **Every other task the service spawns itself** (the Bitswap swarm's task, background retrieval, the instance's own tasks, the reader and writer) belongs to an instance's task set or to the process ([Instances](#instances-and-their-teardown)). The service observes each of these tasks' end. A panic, or an unexpected end, of one exits the process with 70, so it is a crash and main restarts it.
   - **Tasks the libraries spawn on an instance's runtime** (hyper's and libp2p's connection tasks) have no join handle the service holds, so their ordinary completion isn't observed. Their lifetime ends with the instance's runtime, whose shutdown is proven ([teardown](#instances-and-their-teardown)). A panic in one is still caught by the hook, and the hook exits the process with 70: any panic outside a request task is fatal, whether or not its task is tracked.
   - **A panic on any non-runtime thread** exits with 70 from the hook.
+  - **One exit at a time.** The first exit to begin reports and ends the process: a hook's, a watchdog's, or `main` returning. Any later one waits for it, so it can't cut off the first's report or change its code. The owner coming back (a panic in its report, or in a thread-local destructor as it exits) never waits on itself. While its report's timer is armed, that timer ends the process with the first code. Once the owner is already exiting, it aborts.
   - **In all:**
 
     | Where the panic is | The request | Its instance | The process |
@@ -304,7 +310,8 @@ Electron main (profile P)
 - **Logs:**
   - JSON lines on stderr, forwarded to main's log.
   - The service logs its own lifecycle and failures with codes, never a path, name or CID.
-  - Upstream's tracing feeds only the progress recorder, as the add-on's subscriber does today.
+  - In the persistent process, upstream's tracing feeds only the progress recorders, as the add-on's subscriber does today: the process installs upstream's subscriber (`init_progress_tracing`, the progress layer and nothing else) before anything of freedom-ipfs runs. Each instance records into its own recorder (`Instance::progress`): its runtime's threads and its requests' spans carry it, so nothing of one instance's reaches another's, or the process's default recorder.
+  - The ephemeral process installs no subscriber at all, so nothing is recorded, not even in memory ([Private windows](#private-windows)).
 
 ### Instances and their teardown
 
@@ -323,6 +330,8 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
      - the root token is cancelled and the task set aborted;
      - the swarms are dropped, which closes their connections;
      - in-flight heads are answered `stopped`, and open streams aborted with `stopped`.
+       - **"In flight" means not yet written.** A head that is queued but not written is in flight: it is dropped with its body, and `stopped` is the only reply, even for a complete bodiless response.
+       - **A stream is open until its `end` is written,** so a stream whose work ended and whose `end` is still queued is aborted too. Teardown doesn't wait on the writer for main to read.
   4. **Wait for quiescence:** the task set is empty and the blocking-region count is zero. Then:
      - **The instance's runtime is dropped and joined** on a dedicated teardown thread, never on the process runtime's workers. Dropping a tokio runtime waits for its workers and every blocking-pool thread to exit, including blocking jobs the libraries spawned that no counter sees. A timed shutdown (`shutdown_timeout`, `shutdown_background`) is not used, because it may return while that work is still running.
      - **The store is closed** after the join (`close`, waiting at most 2 s for a statement in progress, as upstream's `close_or_close_later` does).
@@ -449,13 +458,15 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
   "params": { "protocol": 1, "shell_version": "0.9.0", "frames": ["stream"] } }
 { "type": "response", "id": 1, "result": { "protocol": 1, "service_version": "0.1.0",
   "freedom_ipfs": { "version": "0.4.6", "git_commit": "ee6b95c…" }, "kind": "persistent",
-  "network": { "mode": "direct" } } }                              // or { "mode": "socks5", "ip": "127.0.0.1", "port": 9150 }
+  "network": { "mode": "direct" },                                  // or { "mode": "socks5", "ip": "127.0.0.1", "port": 9150 }
+  "confinement": { … } } }                                          // 0010's per-property report
 
 { "type": "request", "id": 2, "method": "ipfs.start", "params": {
     "instance": "p-1",                                              // never reused within the process
     "store":   { "kind": "disk", "max_bytes": 268435456 },        // or { "kind": "memory", "max_bytes": 33554432 }
     "routing": { "mode": "auto",
                  "delegated_routers": ["https://delegated-ipfs.dev/routing/v1", "https://cid.contact/routing/v1"],
+                 "doh_endpoint": "https://cloudflare-dns.com/dns-query",
                  "dht_query_timeout_s": 3, "dht_max_providers": 32 },
     "gateway": { "max_concurrent_requests": 8, "request_queue_timeout_ms": 15000 } } }
 
@@ -469,7 +480,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 
 | Method | Params | Result | Deadline (owned by the service) |
 |---|---|---|---|
-| `ipfs.hello` | `protocol`, `shell_version`, `frames` | `protocol`, `service_version`, `freedom_ipfs` build info, `kind` (`persistent` or `ephemeral`), `network` (the process's policy, from `--network`) | 10 s after spawn |
+| `ipfs.hello` | `protocol`, `shell_version`, `frames` | `protocol`, `service_version`, `freedom_ipfs` build info, `kind` (`persistent` or `ephemeral`), `network` (the process's policy, from `--network`), `confinement` ([0010](0010-service-confinement.md)) | 10 s after spawn |
 | `ipfs.start` | `instance`, `store`, `routing`, `gateway` | `{ instance }` | 10 s |
 | `ipfs.stop` | `instance` | `{ instance }`, once [teardown](#instances-and-their-teardown) is complete | 5 s; past it, exit 70 |
 | `ipfs.request` | `instance`, `method` (`GET` or `HEAD`), `path`, `headers`, `headers_ms` | the head: `status`, `headers`, `body` | `headers_ms`, until the head |
@@ -479,6 +490,11 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 - **`ipfs.start`:**
   - The values above are exactly today's (v0.4.6's defaults where the add-on passes 0), sent explicitly.
   - `delegated_routers` serves provider and IPNS lookups alike, as the add-on's one string does. If upstream takes separate IPNS endpoints ([freedom-ipfs#30](https://github.com/solardev-xyz/freedom-ipfs/issues/30)), `routing` gains a list for them.
+  - **`doh_endpoint`** is the DoH endpoint that DNSLink and `/dnsaddr` expansion ask. Main sends today's, Cloudflare's, explicitly.
+    - It sits in `routing` beside the routers because it is checked and exempted exactly as they are: a [configured target](#the-gate).
+  - **The routers and the DoH endpoint** are `http` or `https` URLs, read as the gate reads a configured endpoint: WHATWG, ASCII, no userinfo, a host it classifies, and no fragment.
+    - An onion among them needs `socks5`: `direct` has [no route to one](#the-onion-route).
+  - **The network policy** is the process's, from `--network` ([Spawn](#spawn)), and every instance runs under it. In a `socks5` process, `routing.mode` is `delegated` or `offline` only ([Open questions](#open-questions), 4).
   - The persistent process accepts one `disk` instance at a time. The ephemeral process accepts only `memory` instances of at most 32 MiB, and at most 8 of them.
   - A start is admitted only within the free [budget](#budgets). Anything else is `invalid_argument`, or `busy` when the budget isn't free.
 - **`ipfs.request`:**
@@ -487,6 +503,11 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
   - As main does today, it sets the request ID to the envelope ID and the top-level path to `path`.
   - `body` is false for `HEAD` and for 204, 205 and 304, which is main's rule today. Any bytes the gateway produces then are dropped.
   - A request is one JSON frame, within 0006's bounds of 64 KiB for the URL and 64 KiB for the headers.
+    - **Main checks those bounds, the service doesn't.** Main measures them in UTF-16 units and the service would see bytes, so a check here could refuse what main accepted. The 1 MiB frame bound still applies.
+    - **Within a frame, the parser refuses more distinct header names than a header map holds** (24,576 in http 1.x) as `invalid_argument`, rather than panicking (freedom-ipfs#39). Main's bound keeps a request well under that: 64 KiB of headers, at 5 or more units each, is at most 13,107.
+  - **The parser decides the method,** in any case, as the add-on does: `get` is `GET`.
+  - **`headers_ms`** is from 1 to 30,000, the [Bounds](#bounds) table's 30 s. Anything else is `invalid_argument`, as are unknown members. A refusal never quotes the input.
+  - **Refusals, in order:** `invalid_argument` for the params, then `busy` at the admission bound, then `stopped` for an instance that isn't live.
 - **No caller context.**
   - Every request is main's, for a request main has already admitted and fenced. The service has no per-caller policy.
 - **One event from the service:** `ipfs.instance_retired { instance, reason }`, where `reason` is `"panic"`. The service sends it after retiring an instance on its own ([Panics](#crashes-hangs-and-restarts)), once its teardown has proven quiescence. It is never sent for a stop that main asked for.
@@ -507,8 +528,11 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
   - The request's admission slot is released only when its work has ended, not when the reply is sent.
 - **`headers_ms`:**
   - It runs from admission, so queue time and routing count. On expiry the request's token is cancelled and the reply is `deadline`.
+  - A head that is queued, though not yet written, when `headers_ms` runs out is in time: the service's part is done.
+  - So is any reply the work gives in a head's place, checked against `headers_ms` as a head is: a memory refusal (`busy`) or a head too large for a frame (`internal`), queued after it, is `deadline`.
   - After the head there is no deadline in the service. Main's 60 s body-idle timer (0006) cancels a stalled body.
 - **Admission:** at most 512 requests per process, counting heads, open streams, and work still ending after a cancel. Beyond that the reply is `busy`.
+  - **A slot is held until both its work has ended and its terminal is written:** the reply, the stream's `end`, or its abort. That covers "only when its work has ended" and "counting open streams" together.
   - Main sends at most 512 outstanding service requests, retiring ones included ([Frames](#frames)). So `busy` here signals a fault, and the reply is from the reader's bounded refusals.
 
 ### Errors
@@ -519,8 +543,8 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 | `stopped` | the instance is retired, unknown or stopping | `freedom-ipfs native node is not running` |
 | `deadline` | no head within `headers_ms` | `freedom-ipfs native request timeout` |
 | `cancelled` | main's `cancel` | `freedom-ipfs native request aborted` before the head; `…cancelled` for a body |
-| `busy` | admission is full, or a reservation can't be had in time ([Budgets](#budgets)) | `BackendBusy`, `freedom-ipfs native node is busy`, which the executor answers 503 (new) |
-| `internal` | a panic on the request's task, which then retires its instance | `freedom-ipfs native gateway error` |
+| `busy` | admission is full, or a reservation can't be had in time ([Budgets](#budgets)), or 4 stats calls are outstanding ([Stats](#stats)) | `BackendBusy`, `freedom-ipfs native node is busy`, which the executor answers 503 (new) |
+| `internal` | a panic on the request's task, which then retires its instance; or `ipfs.start`: the instance's network can't be built (its clients, or the randomness for its SOCKS credentials), so no instance exists and none is retired | `freedom-ipfs native gateway error`; for `ipfs.start`, the manager's `Failed to start freedom-ipfs native node` |
 | `storage` | `ipfs.start`: the store won't open (`data.kind`) | the manager's `Failed to start freedom-ipfs native node` |
 | `protocol_mismatch` | `ipfs.hello` | a startup error; no restart |
 
@@ -549,9 +573,33 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
   - `last_native_error_code` and `last_native_error_message`.
 
   The service counts these itself. The event-queue fields go, with the queue: deviation `stats-fields`.
-- **`progress`:** upstream's progress snapshot. The persistent process only.
-- **`store`:** `block_count` and `total_bytes`.
-- **`budget`:** each [budget's](#budgets) use and limit.
+  - A request is started when admitted, and freed when its admission ends.
+  - It is completed when its work queues its `end`, or a head without a body.
+  - It has failed when the service gives it an error or an abort: `deadline`, `busy`, `internal` or `body_stream_error`. The last error is that failure's code and fixed message, or `gateway_busy` for such a head.
+  - It is cancelled on main's `cancel`, whenever the connection accepts one: the request isn't settled, so its admission doesn't end, until the service's cancel callback has run.
+  - `bytes_read` counts body bytes as they are queued for main, so a send cut short by a cancel counts what it queued.
+  - An outcome is counted as the work ends, a moment after its terminal is queued, and before its admission ends. `started` and `freed` are counted under the admission table's lock, so `max_active_handles` never passes what was admitted.
+- **`progress`:** the instance's progress snapshot, as `progressSnapshotJson()` gives it today: its active targets and its latest 512 events. A request's target is its envelope ID, the native request's ID as main sets it today; an event's `request_id` is the gateway's own count.
+  - **The persistent process only.** In the ephemeral process, which records nothing, it is `null`.
+  - **The reply fits one frame.** A snapshot's events are bounded by count, but neither they nor its active targets are bounded by bytes. If the reply would pass 1 MiB, it keeps as many active targets as fit, in order, then as many of the newest events as fit. `active_count` and `event_count` stay the recorder's, so a reader can tell what was cut.
+  - Main has no `clearProgress`, and neither does the service: a target closes when its request ends or its span closes.
+- **`store`:** `block_count` and `total_bytes`, or `null` if the store can't say.
+- **`network`:** the instance's mode, and, under `direct`, what [NAT64 discovery](#network-specific-nat64-prefixes) knows. It is `{ mode: "direct", nat64: { state, prefixes, failures } }` or `{ mode: "socks5", nat64: null }`.
+  - `state` is `pending`, `known`, `unknown` or `incomplete`. In `unknown` and `incomplete`, it is why IPv6 targets are refused; in `pending`, why they wait. Pending with failures is a round that has failed and hasn't ended.
+  - `prefixes` are the prefixes learned, as `address/length`.
+  - `failures` give why the last round's resolvers failed, each a fixed name: `timeout`, `rcode`, `truncated`, `malformed`, `socket`, `unaskable` or `over_limit`. They never include an address.
+- **`budget`:** each [budget's](#budgets) use and limit:
+  - `memory` (`used`);
+  - `requests` (`admitted`) and `writer` (`queued`);
+  - `block_fetches`, `http_provider_requests` and `dht_queries` (`in_flight`), and `bitswap_connections` (`in_use`, `waiting` and `denied`);
+  - the instance's `background` queue (`outstanding` and `dropped`).
+
+  Each has its `limit`. All but `background` are the process's, as the budgets are.
+
+The store's figures are SQLite queries, which can wait behind a statement in progress, so they run as a job on the process runtime's blocking pool:
+- **The 5 s deadline** runs from when the reader handles the request. The job's reply is queued only before it, checked under the connection's lock as a head is; from then on the reply is `deadline`, whichever of the job and its watcher runs first.
+- **At most 4 stats calls are outstanding in the process.** Main asks every 5 s and gives up at 20 s, so it never has more asked. A call counts from its admission until its reply has been written and flushed: the reply holds the call's place, as a head holds its charge ([Pending replies](#budgets)). A call whose job ends without that reply (aborted before it ran, fenced, or answered `deadline`) is freed when the job's closure is dropped. Never just because its job ended or its request was answered. Past the bound, the reply is `busy`. If main stops reading, the writer stall ends the connection, and what is queued goes with it.
+- **A cancel or the deadline fences the job,** which then runs no SQL, and aborts it if it hasn't started. A job that starts past its deadline runs no SQL either, and its reply is `deadline`, whether or not its watcher has run. SQL already running finishes, and its reply is checked as above.
 
 The 5 s health check calls `ipfs.stats`. `checkHealth()` stays synchronous, because `ipfsBackend()` calls it at admission. It reads a snapshot that is true while all of these hold:
 - the generation is live;
@@ -582,6 +630,10 @@ Upstream's constants are per instance, and some limit bookkeeping rather than wo
   - **its caches:** the hot cache, the gateway's small-body cache (2 MiB) and the UnixFS metadata cache (1 MiB), each built with a fixed capacity and reserved at it.
 
   An instance starts only if its fixed reservation fits.
+  - The service reserves it at admission, before the store opens, from the store's options and the gateway configuration.
+  - The hot cache's part is the store's own figure for its options (`StoreOptions::hot_cache_fixed_bytes`): what the opened cache holds, its own structures included, so a target smaller than they are is counted as upstream opens it.
+  - The caches' part is handed to upstream's builder, which reserves it again as it builds. If other work takes it in that moment, the start's job fails it with `busy`, and the ID is retired, as after any failed start.
+  - The page cap counts SQLite's default 4096-byte pages.
 - **In all:**
   - a private instance reserves 43 MiB (36 + 4 + 2 + 1), so eight reserve 344 MiB;
   - the persistent instance reserves 27 MiB (8 + 16 + 2 + 1);
@@ -602,13 +654,25 @@ Upstream's constants are per instance, and some limit bookkeeping rather than wo
   - **The put into a store:**
     - SQLite copies a block into its own pages, which the store's fixed reservation and page cap cover. The fetched buffer keeps its own dynamic reservation until its last owner drops it.
     - A write that meets the page cap fails with `SQLITE_FULL`, whether it is a block, a name or a provider record, and that entry isn't cached. A block is still served, from its transient buffer.
-  - **Pending replies:** each head reserves its encoded size until it is written.
+  - **Pending replies:** each head reserves what it holds, before it is encoded: its JSON, encoded in a buffer of exactly that size, and its frame header. The reservation lasts until the writer has written and flushed the head, or the reply that took its place, and freed its buffers. A head that doesn't fit the writer's 64 KiB buffer is written from its own buffer, never copied. If the writer fails, what is queued is freed first, every head's JSON with it, and the reservations only then; nothing more is queued.
+    - Stats replies aren't charged to the memory budget; they are bounded instead. At most 4 stats calls are outstanding, their replies counted until written ([Stats](#stats)), each encoded in a buffer of exactly its length, within one frame (1 MiB). Charging them would fail the health check under memory pressure, exactly when main most needs it.
+    - A reply's 1 MiB doesn't bound the memory its job works in. Its progress snapshot is a copy of the whole recorder, taken under the recorder's lock before it is fitted to the frame: library memory outside the budget, as the recorder itself is. What bounds it is what the recorder holds: its latest 512 events and its active targets, one per request in progress (at most the 512 admitted), each with its path.
   - **The writer's data queue:** 16 MiB, reserved at process start.
 - **When admitted work can't reserve:**
-  - **before its head,** it waits up to its remaining `headers_ms`, then answers `busy` (503);
-  - **after its head,** a stream's next block fetch waits up to 10 s, then the stream aborts with `busy`, a truncation;
+  - **before its head,** it waits up to its remaining `headers_ms`, then answers `busy` (503).
+    - The reply is `busy` when the refusal is queued before `headers_ms` ends, and `deadline` otherwise: the refusal is checked against the head's deadline under the connection's lock, as a head is. Upstream's 503 `memory_budget` is that refusal.
+    - The waits end 50 ms before `headers_ms` does (or half way, if less is left), so `busy` is the usual answer. The margin is a scheduling allowance, not a guarantee: a refusal whose work runs late is `deadline`.
+    - If upstream moves on to another source after a refusal, as delegated routing's Bitswap fallback does, its answer can come after `headers_ms`. The reply is then `deadline`.
+  - **after its head,** a stream's next block fetch waits up to 10 s, then the stream aborts with `busy`, a truncation.
+    - The 10 s start with each read of the body, and that read's fetches share them.
+    - Upstream gives a body no typed error, so the service tells a refusal by its text (`memory budget`).
   - **background work** is dropped at once.
-- **What it doesn't charge:** the disk store's file, which lives on disk, not in memory; and allocator and library overhead it can't see.
+- **What it doesn't charge:** the disk store's file, which lives on disk, not in memory; a body's chunk while the service sends it; and allocator and library overhead it can't see.
+  - A streamed file's chunks and a directory listing are copies upstream makes, not views of its blocks, so they hold no reservation. The service holds one chunk per stream while it is sent.
+  - The exception is a whole file of 64 KiB or less served from the gateway's small-body cache: its bytes stay covered by that cache's fixed reservation. A small range of a file, or a body the cache didn't take, is a copy like the rest.
+  - **A file's chunk** carries at most 64 KiB of payload, assembled from its blocks' bytes. Its buffer can be larger: it keeps the spare capacity the assembly grew into, about 96 KiB for a 64 KiB chunk built from two 48 KiB leaves. So the files' chunks come to at most 32 MiB of payload across the 512 admitted requests, and more in memory.
+  - **A directory listing** is rendered whole and sent as one chunk. Its size follows the directory's links, not the 64 KiB: a directory of 1,024 links with 100-byte names renders to about 320 KiB.
+  - Upstream's fix is chunks that are zero-copy views of their blocks (`ChargedBytes`), which keep their reservation until the last of them is dropped, and listings that are reserved as they are rendered.
 - **What a store's `max_bytes` means:** a target for block data that drives LRU eviction.
   - On disk it bounds nothing hard. Retained blocks and metadata can pass it, and the file's size follows it only loosely.
   - In memory, the hard bound is the page cap above, and `max_bytes` is the eviction target inside it. Blocks that are retained while being streamed can't be evicted, so when the cap is reached, new blocks go uncached rather than the store growing.
@@ -651,9 +715,9 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   - `release()` is idempotent, and `closeDwebSession(partition)` releases every lease the partition still holds, as a backstop.
 - **Capacity:**
   - When a private partition needs a new instance and none can be reserved, `ipfsBackend()` throws `BackendBusy`.
-  - The handler answers it before planning, as it answers `AdmissionFull`: 503 `{ code: "busy", message: "Too many private windows are loading IPFS content" }`.
+  - The handler answers it before planning, as it answers `AdmissionFull`: 503 `{ code: 503, message: "Too many private windows are loading IPFS content" }`, the shape of every error body the handler writes.
   - Node readiness stays `ref.up`.
-- **The executor:** one change. A `BackendBusy` rejection from `request()` (the service's `busy`) becomes 503 `{ code: "busy" }`, as `AdmissionFull` does. Every other rejection is the 502 it is today.
+- **The executor:** one change. A `BackendBusy` rejection from `request()` (the service's `busy`) becomes 503 `{ code: 503, message: "freedom-ipfs native node is busy" }`, as `AdmissionFull` does. Every other rejection is the 502 it is today.
 - **`request()`:**
   - **An already aborted signal** rejects at once. Nothing is sent, as today. So does a captured pair that has been retired.
   - **Otherwise** it sends `ipfs.request` with `headers_ms: headersTimeoutMs`, and registers one abort listener that sends `cancel`.
@@ -721,7 +785,7 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   - `SqliteBlockStore::in_memory`, with `temp_store = MEMORY` ([upstream](#upstream-changes-in-freedom-ipfs)), so SQLite writes no temp files;
   - no data directory and no lock;
   - logs without paths, and panic lines without payloads;
-  - no progress snapshot;
+  - no progress recorded: the process installs no tracing subscriber, so no path or CID is recorded, even in memory, and `ipfs.stats` reports `progress: null`;
   - no core dumps ([Spawn](#spawn)).
 
   The OS's swap and hibernation files are outside this guarantee.
@@ -740,7 +804,11 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   - SOCKS5, once its `socks` feature is on.
     - With `socks5://` rather than `socks5h://`, the client resolves the name with its own resolver, which can be replaced (`ClientBuilder::dns_resolver`), and hands the proxy an IP.
     - TLS SNI and `Host` still use the URL's name.
-    - **One trap:** in reqwest 0.12.28's SOCKS connector, a resolver that succeeds with no address makes the connector keep the original name and send it to the proxy unresolved (`connect.rs`, around lines 1750–1765). So an ordinary name must never resolve to an empty success ([The resolver contract](#the-resolver-contract)).
+    - **One trap:** in reqwest 0.12.28's SOCKS connector, a resolver that succeeds with no address makes the connector keep the original name and send it to the proxy unresolved (`connect.rs`, lines 1869–1885). So an ordinary name must never resolve to an empty success ([The resolver contract](#the-resolver-contract)).
+    - **A second trap:** with hyper-util 0.1.20 and older, a resolved IPv6 address reaches the proxy as a domain, `"[2001:db8::1]"`, because the bracketed host isn't parsed as an address. hyper-util 0.1.21 sends it as an IPv6 address. The network code requires hyper-util 0.1.21 or later.
+    - **IP-literal hosts:** under `socks5://` they reach the client's resolver, IPv6 bracketed. Without a proxy they never do: hyper-util's HTTP connector connects to a literal directly. So the gate checks a literal URL host itself, in the redirect loop ([hop check 4](#the-gate)), not only in the resolver.
+    - **The resolver sees a name, never its port.** An exemption by exact host and port can't be expressed there, so configured targets are reached through clients of their own ([The gate](#the-gate)).
+    - **The connector can't see the destination:** `ClientBuilder::connector_layer` receives it as an opaque type, and under `socks5h://` the resolver isn't called either. A check on an onion client's destination sits in its own send path ([The onion route](#the-onion-route)).
   - Every client must be built with an explicit proxy or with `no_proxy()`. Today none sets either (`ns:828`, `rt:1807`, `rv:11132`), so the environment decides.
   - Redirects can be left to the service: with `Policy::none()`, every 3xx comes back to the caller, which decides each hop itself.
 - **libp2p 0.56:**
@@ -759,6 +827,11 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
 ### Modes
 
 - **`direct`, the default:** today's transports, behind [the gate](#the-gate). The environment's proxy variables no longer apply (deviation `env-proxy`).
+  - **The gate comes to `direct` in two parts.**
+    - **With `socks5`, the classification and the capability:** onion targets, and multiaddrs that aren't network targets, are refused before any socket exists; the service's own loop follows redirects (`http` and `https` only, no `Referer`); and revoking the capability stops every later socket, DNS query and hop.
+    - **With NAT64 discovery, the address table.** Without discovery, every IPv6 target outside the fixed forms would be refused ([Network-specific NAT64 prefixes](#network-specific-nat64-prefixes)). So the table came to `direct` with discovery. Every untrusted address is checked against it, an IPv6 one with what discovery knows, and the deviation `address-policy` applies to both modes. Configured targets stay exempt, loopback included.
+
+    `socks5` needs no discovery, and shipped first ([Implementation steps](#implementation-steps), step 8). A `direct` instance holds discovery running while it lives: the process's state, which every `direct` instance's table reads. A process with no `direct` instance sends no discovery query.
 - **`socks5 { ip, port }`:** all of the service's traffic goes through the proxy.
   - **The endpoint is an IP literal,** so reaching the proxy needs no DNS. The service never resolves the proxy's name.
   - **Ordinary names:**
@@ -766,8 +839,10 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
     - Each answer passes [the gate](#the-gate), and the connection goes to a checked address, as an IP literal in SOCKS `CONNECT`.
     - TLS SNI and HTTP `Host` keep the name.
     - A failed lookup, an empty answer, or an answer whose every address is refused is an error ([The resolver contract](#the-resolver-contract)).
+    - `RESOLVE` answers one address and can't ask for a family, so `/dns4` and `/dns6` resolve as `/dns` does.
   - **Onion names** take a separate, explicitly authorized route, and are handed to the proxy as names ([The onion route](#the-onion-route)).
   - **HTTP:** delegated routing, DoH and HTTP providers, all through the proxy this way.
+  - **Configured endpoints too:** a router on the local machine or network is reached through the proxy, and fails there unless the proxy can reach it. Nothing is direct in this mode.
   - **Bitswap:** TCP and WebSocket through the SOCKS transport. QUIC and hickory are off.
   - **Routing:** `delegated` by default, since the light DHT dials dozens of peers per query, each through Tor.
   - **Fails closed:**
@@ -775,7 +850,7 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
     - nothing falls back to a direct socket;
     - a transport the proxy can't carry (QUIC, or any other non-TCP transport) is refused before any socket exists.
 - **Where the proxy comes from:**
-  - A new per-profile setting, **Route IPFS through Tor**, off by default, passes Arti's SOCKS endpoint from `tor-manager` at spawn, as an IP and port (`--network`).
+  - A new per-profile setting, **Route IPFS through Tor**, off by default, passes Arti's SOCKS endpoint from `tor-manager` at spawn, as an IP and port (`--network`). It is a switch of its own, apart from 0008's Route Radicle through Tor; a future "everything through Tor" mode would turn both on ([Open questions](#open-questions), 3).
   - Today Tor in Freedom means onion access. Clearnet and the dweb protocols stay direct (`docs/features.md`), and this design keeps that default.
 
 ### The gate
@@ -789,12 +864,27 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   - **onion:** the last label is `onion`, whether in a URL host or in `/dns`, `/dns4`, `/dns6` or `/dnsaddr`; and every `/onion3` (or `/onion`) multiaddr;
   - **IP literal:** a URL host, or an `/ip4` or `/ip6` component;
   - **name:** everything else.
-- **A multiaddr that is dialed** starts with `/ip4`, `/ip6`, `/dns`, `/dns4`, `/dns6`, `/dnsaddr`, `/onion3` or `/onion`. Any other first component is refused:
-  - `/ip6zone` scopes an address to one local link;
-  - `/unix` and `/memory` aren't network targets.
+- **A multiaddr that is dialed** is checked whole, against the shapes the transports support. It has exactly one host component, and it comes first:
+  - `/ip4`, `/ip6`, `/dns`, `/dns4` or `/dns6`, then `/tcp/<port>`, optionally followed by WebSocket: `/ws`, `/wss` or `/tls/ws`. `/ws` and `/wss` include their path-carrying forms, `/x-parity-ws/<path>` and `/x-parity-wss/<path>`: the path goes in the WebSocket request and doesn't change the destination;
+  - an HTTP provider: `/ip4`, `/ip6`, `/dns`, `/dns4` or `/dns6`, then an optional `/tcp/<port>`, then `/http`, `/https` or `/tls/http`. Without `/tcp`, the port is the scheme's default (80, or 443 for HTTPS), and the configured-target exemption compares that effective port;
+  - `/ip4`, `/ip6`, `/dns`, `/dns4` or `/dns6`, then `/udp/<port>/quic-v1`;
+  - `/dnsaddr/<name>`, which expansion replaces before any dial;
+  - `/onion3/<address>:<port>` (or `/onion`);
+  - each optionally ending in one `/p2p/<peer>`.
+
+  Every other sequence is refused, whatever its first component:
+  - **A second host component anywhere.** libp2p's TCP transport dials the *last* IP and port in a multiaddr, and its DNS layer resolves *every* DNS component. So `/ip4/8.8.8.8/ip4/127.0.0.1/tcp/8080` would be checked as `8.8.8.8` while it connects to loopback, and `/ip4/8.8.8.8/dns/x.onion/tcp/80` would hide an onion name. The checked target must be the one the transport dials.
+  - **`/ip6zone`, anywhere:** it scopes an address to one local link.
+  - **`/unix` and `/memory`, anywhere:** they aren't network targets.
+  - **`/ipcidr`, `/p2p-circuit`, and any component the shapes above don't name,** an extra trailing component, or a second `/p2p`.
+  - **`/sni`, for now.** Neither pinned implementation uses it to name the TLS server: libp2p-websocket recognizes TLS only when `/tls` immediately precedes `/ws`, and freedom-ipfs's HTTP conversion reads `/tls/sni/<name>/http` as plain HTTP. Accepting `/tls/sni/<name>/ws` (AutoTLS peers advertise it) or `/tls/sni/<name>/http` needs that transport and conversion work first, with tests that TLS is used and its server name is the `/sni` name.
+
+  **The same shapes apply after expansion:** every multiaddr a `/dnsaddr` answer yields is checked whole again ([check 2](#the-gate)).
 
 **The policy:**
-- **Configured targets** are the delegated routers and DoH endpoint in `ipfs.start`, and Arti's endpoint. They are exempt from the address policy, by exact host (and port), including when one is local.
+- **Configured targets** are the delegated routers and DoH endpoint in `ipfs.start` (`routing.delegated_routers` and `routing.doh_endpoint`). They are exempt from the address policy, by exact host (and port), including when one is local.
+  - An HTTP client's resolver sees a name, never its port, so configured targets are reached through clients of their own, whose resolver doesn't filter but still never answers empty. The redirect loop picks the client for each hop from its scheme, host and port: a configured host on another port, reached by a redirect, is untrusted.
+  - **Arti's endpoint is not a target.** In `socks5` mode it is the transport that every connection goes through, so the service connects to it without asking the gate. A target at its address, as a literal or as a name's answer, is untrusted like any other, so the network can't point the service at the proxy's port.
 - **Untrusted targets** are everything learned from the network:
   - provider records and their multiaddrs;
   - HTTP provider URLs built from them;
@@ -824,12 +914,19 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
    - the connection is pinned to one that passed: `connect()` in `direct` mode, a SOCKS `CONNECT` to that IP literal in `socks5` mode.
 
    A name whose answers change between checks can't move a connection, because the address that was checked is the address connected to. Each new connection resolves and checks again.
+
+   **The check wraps the transport,** not the service's dial sites, so it also covers the dials libp2p makes itself: Kademlia's own, and dials to addresses learned through identify, which runs on existing connections and dials nothing itself. In `direct` mode it sits twice: outside libp2p's DNS layer, asking the capability and classifying the target before any query starts, and below it, checking each resolved address before `connect()`.
+
+   **Candidate choice knows the transports.** Where providers' addresses are ranked and cut to two per peer, addresses the policy can't dial (QUIC in `socks5` mode, refused targets) are dropped first, so a peer never keeps only addresses that can't be used. Provider URLs are built from a multiaddr's parsed components, never by joining its text.
 4. **On every HTTP redirect hop:**
    - The service follows redirects itself: every client is built with `Policy::none()`.
    - For each hop, its own loop classifies the `Location` target, runs the gate, picks the client again (the ordinary one, or in `socks5` mode the [onion route](#the-onion-route)), and counts the hop against that client's acceptance.
    - That covers delegated routing, DoH and providers. A refused hop fails the attempt.
+   - **Schemes:** a `Location` must be `http` or `https`; any other scheme is refused. HTTPS to HTTP is followed, as reqwest's default acceptance follows it today (parity), and like every hop it sends no `Referer`.
+   - **IP-literal hosts are checked by the loop itself:** without a proxy, a literal never reaches the client's resolver.
    - **Each hop is a fresh request,** built from the operation's own fixed headers, never by copying the previous hop's. Because the service follows redirects itself, it doesn't rely on reqwest's header stripping:
-     - The service sends no credentials. A configured endpoint can't carry userinfo, `Authorization`, cookies or proxy credentials: a URL with userinfo is refused when the setting is read, and no client has a cookie store.
+     - The service sends no request credentials. A configured endpoint can't carry userinfo, `Authorization`, cookies or proxy credentials: a URL with userinfo is refused when the setting is read, and no client has a cookie store.
+       - Under `socks5` the instance's SOCKS credentials are a different thing: they go only to the proxy, in its handshake, never in a request header. Every hop carries them, the configured and onion clients' included ([The SOCKS contract](#the-gate), *Stream isolation*).
      - Even so, a hop that changes scheme, host or port drops every header scoped to an authority (`Authorization`, `Cookie`, `Proxy-Authorization`).
      - No hop sends `Referer`.
      - Methods follow reqwest's rules: 303, and 301 or 302 after a `POST`, become a `GET` without a body; 307 and 308 keep the method and body.
@@ -844,6 +941,13 @@ ipfsBackend({ partition }) → { ref: { ipfs: 'native', up }, url: null,
   The address policy is then the same promise in both modes, enforced by the service itself, for every address the service resolves and pins. Translation on the exit's own network is outside it ([What the gate can't see](#what-the-gate-cant-see)).
 - **(b), rejected:** delegate the policy to the proxy. Tor's exits refuse private destinations by default, but that is an exit operator's setting and Arti's configuration, neither of which the service can guarantee. And a SOCKS reply doesn't prove which address was connected.
 - **If the pinned Arti can't `RESOLVE`,** the setting doesn't ship until it can, unless the user accepts (b) as an explicit deviation ([Open questions](#open-questions)).
+- **Stream isolation** (the user's decision, [Open questions](#open-questions), 11): each instance sends SOCKS5 credentials of its own, so Arti keeps its streams on circuits of their own.
+  - **Who is kept apart:** the profile's instance and each private window's, from one another, and from other users of the same Arti that send no credentials.
+  - **The credentials** (RFC 1929) are made when the instance's network is built: a fixed username, and a password of 128 random bits from the operating system.
+    - They live in memory for the network's lifetime, and are never persisted or logged. Their `Debug` form is redacted, and no error carries them. They leave the process only to the proxy.
+    - **If the operating system can't supply the randomness,** `ipfs.start` fails with `internal` and a fixed message. No instance is built, and nothing falls back to a fixed password or to no authentication.
+  - **Every stream carries them:** `RESOLVE`, the libp2p transport's `CONNECT`, and the HTTP clients', the onion client's included.
+  - **No fallback:** each client offers only username/password authentication, so a proxy that won't take it fails closed rather than sharing circuits silently.
 
 #### Addresses
 
@@ -948,6 +1052,9 @@ Their embedded IPv4 address is a tunnel endpoint inside a provider's or site's n
 An IPv6-only network can translate through a network-specific prefix of its own (RFC 6052). Addresses under it look like ordinary global unicast, and, unlike the well-known prefix, it may translate to private IPv4 addresses. So in `direct` mode the service learns these prefixes as RFC 7050 describes, and fails closed for IPv6 while it doesn't know them.
 
 - **Discovery asks the access networks.** It sends one query, AAAA for `ipv4only.arpa`, to each resolver it can learn for each interface that is up, and takes the union of the answers, because only an access network's own DNS64 synthesizes for it (RFC 8880 §7.1). The service's other resolvers (hickory's, and the configured DoH endpoint) needn't see that DNS64.
+  - **At most 8 resolvers a round,** the first the OS lists, all asked at once, so a round lasts one query's sends at most.
+    - A resolver listed past the eighth isn't asked. It counts as a failure (`over_limit`), so the state is **unknown**, never **known** without it, since a prefix only it advertises would go unlearned.
+    - Hosts rarely list more.
   - **Which resolvers,** per OS. A manual DNS setting, a VPN's resolver or a local recursive resolver can stand in front of an interface's own, so the service reads the interface-learned servers where the OS keeps them, not only the effective list:
     - **Windows:** each adapter's DNS servers (`GetAdaptersAddresses`), and, where a manual setting overrides DHCP, the servers DHCP gave the interface (`DhcpNameServer` under the interface's `Tcpip` parameters);
     - **macOS:** each network service's DNS state in the SystemConfiguration dynamic store (`State:/Network/Service/<id>/DNS`), which holds what the service learned, not only `/etc/resolv.conf`'s primary resolver;
@@ -955,18 +1062,30 @@ An IPv6-only network can translate through a network-specific prefix of its own 
   - **It is a discovery-only path:** that one name and type, over plain DNS. Each of these resolvers is a configured target for that query alone, as the DoH endpoint is for DoH. Its answers are parsed, never dialed, and the path resolves nothing else.
   - **Each answer** that embeds `192.0.0.170` or `192.0.0.171` at one of RFC 6052's positions gives a prefix and its length. An answer that embeds neither teaches nothing.
   - **The result belongs to the process,** not to an instance: it describes the network, and the query carries nothing of a partition's.
+  - **It runs while a `direct` instance lives.** A `socks5` instance learns nothing, and a process with no `direct` instance sends no query.
+    - **Paused** when the last `direct` instance goes, it sends nothing, not even a refresh. Every send, a resend included, checks that a `direct` instance still holds it, so a round under way sends nothing more, and isn't published. The check and the send are one step, under the lock a lease's release takes, and the send doesn't block: once the last release has returned, no send it didn't cover can follow. The prefixes it learned are kept.
+    - **Resumed** by the next one, it is **pending** again until a round settles, since the network may have changed meanwhile.
+  - **A direct instance holds it from its admission to its fence:** a fenced instance connects to nothing, so its teardown doesn't keep discovery querying.
 - **The fixed forms** are those whose prefix is fixed: IPv4-mapped, the well-known NAT64 prefix and 6to4. Any other global IPv6 address could sit under a network-specific prefix.
+  - **A learned prefix still applies under a fixed form.** An address inside `2002::/16` or `64:ff9b::/96` that also sits under a learned prefix is judged by both readings, and each IPv4 address must pass. Only IPv4-mapped is judged as IPv4 alone, since it connects to that address directly.
 - **States:**
-  - **pending** until the first query settles. An IPv6 target outside the fixed forms waits for it, within its own deadline;
-  - **known,** once every resolver learned has answered: the union of their prefixes. NODATA or NXDOMAIN from all of them gives an empty set, which means none of them advertises a prefix (RFC 7050 §3), not that no network does. The same holds when the OS lists no resolver;
-  - **unknown,** while any resolver learned has failed (a timeout, `SERVFAIL`, a malformed answer). Another's answer doesn't settle it;
+  - **pending** until the first query settles. Every IPv6 target but an IPv4-mapped one waits for it, within its own deadline: the first answer may teach a prefix that sits under a fixed form;
+  - **known,** once every resolver learned has answered: the union of their prefixes. NODATA or NXDOMAIN from all of them gives an empty set, which means none of them advertises a prefix (RFC 7050 §3), not that no network does. An NXDOMAIN's answer records teach nothing. The same holds when the OS lists no resolver;
+  - **unknown,** while any resolver learned has failed (a timeout, `SERVFAIL`, a malformed or oversized answer), can't be asked, or wasn't asked (past the bound). Another's answer doesn't settle it.
+    - **A round's first failure ends a known state at once:** it publishes **pending**, before the other resolvers answer, and the round's end publishes **unknown**, with every prefix the round learned.
+    - Pending, not unknown, because unknown admits the fixed forms judged by the prefixes it holds, and an answer still out could teach one that covers a fixed form (a /96 inside `2002::/16`).
   - **incomplete,** when an answer holds more than 16 distinct prefixes.
 
-  In **unknown** and **incomplete**, an IPv6 target outside the fixed forms is refused, and `ipfs.stats` says why. IPv4 targets, and IPv6 targets under the fixed forms, are judged as always. A dual-stack network keeps IPv4, and an IPv6-only network whose resolver fails couldn't reach much anyway.
+  In **unknown**, an IPv6 target outside the fixed forms is refused, and `ipfs.stats` says why. IPv4 targets, and IPv6 targets under the fixed forms, are judged as always, with every prefix already learned still applied.
+
+  In **incomplete**, the prefixes past the bound weren't kept, and one of them may cover a fixed form: a learned prefix inside `2002::/16` or over `64:ff9b::/96` reads a different IPv4 address out of the same bits. So every IPv6 target is refused except an IPv4-mapped one, which connects to its IPv4 address, and `ipfs.stats` says why. IPv4 targets are judged as always.
+
+  A dual-stack network keeps IPv4, and an IPv6-only network whose resolver fails couldn't reach much anyway.
 - **Learned prefixes are kept** for the process's life, so a refresh adds prefixes and never removes one. A prefix only adds refusals, so keeping an old one, or a false one from the network's resolver, errs on the safe side. The bound of 16 counts all of them; past it, the state is **incomplete** until the process restarts.
 - **Refresh:**
-  - when the last answer's TTL expires, and at least once a minute, so a network change leaves at most about a minute when a new network's prefix is unknown;
+  - when the last answer's TTL expires, and at least once a minute, both counted from the round's start, so a network change leaves at most about a minute when a new network's prefix is unknown, and no answer is kept past its TTL. A TTL under 5 s waits 5 s, so a resolver can't set discovery querying in a loop;
   - after a failure, with backoff from 5 s to 1 min. A failed refresh keeps every known prefix: it never turns a known one back into a native address.
+- **A target is judged by the state at its check.** A lookup's check, or a candidate choice's, reads the state once, when all of its answers or candidates are in hand (after any wait for discovery), and judges every one of them against it. So no check reads a state older than the last publication before that read. An attempt that passed may still connect after a later publication: a publication neither waits for the attempts in flight nor cancels them, as it doesn't close connections already open either. Those attempts reach nothing new. Each target passed under the earlier state, and so was reachable for as long as that state stood: normally about a minute after a network change (**Refresh**, above), and longer while failed refreshes keep the state **unknown**, whose fixed-form allowance is deliberate.
 
 ###### What the gate can't see
 
@@ -975,25 +1094,26 @@ The promise is exact for addresses the service can read: an IPv4 address, or an 
 - **a prefix only an unread resolver advertises:** an interface's own resolver that the OS doesn't expose as above, hidden behind a manual setting, a VPN's resolver or a local recursive resolver that doesn't forward to the DNS64. On Linux that includes the servers systemd-resolved leaves out of its exported file (links that aren't a DNS default route, nonstandard ports) and those a network manager didn't publish;
 - **explicit address mappings** (SIIT-EAM, RFC 7757);
 - **DNS64 that maps different IPv4 ranges to different prefixes** (RFC 7050 §5.1), for example private A records under a prefix the `ipv4only.arpa` answer doesn't show. The heuristic can't find that prefix, and RFC 7050 says so;
-- **for up to a minute after a network change,** a new network's prefix;
+- **after a network change,** a new network's prefix, normally for up to a minute, and for longer while failed refreshes keep the state **unknown**;
 - **in `socks5` mode,** translation on the exit's network. Nothing is learned there: the exit makes every connection, so the local translator is never used, and the exit's is out of the service's sight. The well-known prefix rule still applies in both modes.
 
 An address under such a prefix is classified as the global unicast address it looks like. The deviation `address-policy` records this limit.
 
 #### The resolver contract
 
-- **The service's resolver** sits under every ordinary name, in both modes. That covers reqwest's `dns_resolver` and the SOCKS and TCP transports. It answers one of two things:
+- **The service's resolver** sits under every ordinary name, in both modes. That covers reqwest's `dns_resolver` and the SOCKS transport. In `direct` mode, libp2p resolves its own names with its DNS layer (hickory), and the transport check beneath it holds that layer to this contract: an answer is dialed only at an address that passed, and an empty or wholly refused answer fails the dial ([check 3](#the-gate)). It answers one of two things:
   - **one or more addresses,** every one of which passed the gate;
   - **an error.**
 - **It never answers an empty success.** A failed lookup, an empty answer, and an answer whose every address the policy refuses are all errors, and the connection attempt fails.
   - This matters because, in reqwest 0.12.28, an empty success makes the SOCKS connector send the original name to the proxy unresolved. That is the route reserved for onions.
+  - Under `socks5://` an IP-literal host reaches the resolver too, IPv6 in brackets. The resolver parses it and judges it as the literal it is, never as a name.
 - **Onion names never reach this resolver.** The gate routes them first ([below](#the-onion-route)), and the resolver answers an onion name with an error, in case one ever arrives.
 
 #### The onion route
 
 - **In `direct` mode** there is none: onions are refused before any socket exists.
 - **In `socks5` mode,** onion targets have their own explicitly authorized route, which no ordinary name can enter:
-  - **HTTP:** a second client, built with `socks5h://` to Arti's endpoint, so the proxy receives the name. It is used only for a URL whose host the gate classified as onion. Its connector checks that classification again before it sends, and refuses anything else.
+  - **HTTP:** a second client, built with `socks5h://` to Arti's endpoint, so the proxy receives the name. It is used only for a URL whose host the gate classified as onion: its send path takes that URL as a type only the classifier constructs, checks the classification again before it sends, and refuses anything else. reqwest's connector can't see the destination, so the check can't sit there.
   - **libp2p:** the SOCKS transport's onion path, taken only for `/onion3` and onion `/dns*` components.
 - **Redirects re-select the route:** the service's redirect loop picks the client per hop. An onion URL that redirects to a clearnet name moves to the ordinary client, with `RESOLVE` and the gate. A clearnet URL that redirects to an onion moves to the onion client, in `socks5` mode only.
 
@@ -1029,21 +1149,24 @@ Each is a pull request to freedom-ipfs, and none changes mobile's behavior by de
 2. **The native-request parser, public.**
    - The JSON-to-`GatewayCoreRequest` parsing (`mob:2635`–`2689`) moves to a library function, with the same accepted forms and results.
    - The service then treats each path exactly as the add-on does, with no copy to drift.
-3. **A network policy.** One `NetworkPolicy` value, threaded through the builder, that supplies:
+3. **A network policy.** One `NetworkPolicy` value, threaded through the builder, that supplies the parts below.
+   - **The builder's default is today's clients and transports** (legacy), so a host that sets no policy, as mobile and the add-on don't, keeps today's behavior, the system proxy included.
+   - **The code lives in a crate of its own,** which namesys, routing and retrieval depend on. Its SOCKS code sits behind a cargo feature, off by default, so mobile builds compile none of it.
    1. **HTTP clients:**
       - a single constructor taking `Option<reqwest::Proxy>` and each client's redirect acceptance (the hop count), built with `Policy::none()`, so the service's own loop follows redirects through the gate (hop check 4);
-      - it replaces the three `timeout_http_client` functions (`ns:828`, `rt:1807`, `rv:11132`) and calls `no_proxy()` when no proxy is given;
-      - it enables `reqwest`'s `socks` feature, and uses `socks5://` (never `socks5h://`) with the gate's resolver as the client's `dns_resolver`. That resolver resolves locally in `direct` mode and through `RESOLVE` in `socks5` mode, and follows [the resolver contract](#the-resolver-contract): addresses that pass, or an error, never an empty success;
+      - it replaces the three `timeout_http_client` functions (`ns:828`, `rt:1807`, `rv:11132`) and calls `no_proxy()` in `direct` mode;
+      - it enables `reqwest`'s `socks` feature, and uses `socks5://` (never `socks5h://`) with the gate's resolver as the client's `dns_resolver`, and requires hyper-util 0.1.21 or later ([What can be honored](#what-can-be-honored)). That resolver resolves locally in `direct` mode and through `RESOLVE` in `socks5` mode, and follows [the resolver contract](#the-resolver-contract): addresses that pass, or an error, never an empty success;
       - in `socks5` mode, a second, onion-only client for [the onion route](#the-onion-route).
-   2. **Errors instead of panics:** the three constructors `expect` today (`ns:833`, `rt:1812`, `rv:11138`). With a proxy their configuration can fail, so they must return an error.
+   2. **Errors instead of panics:** the three constructors `expect` today (`ns:833`, `rt:1812`, `rv:11138`). With a proxy their configuration can fail, so building a policy's clients returns an error. The legacy defaults keep their infallible constructors, since their configuration has no proxy.
    3. **DoH:** the endpoint and its client come from the policy, at `mob:2226` and `rv:9436`, `9484` and `9531`. DNSLink is already pluggable (`DnsTxtResolver`, `ns:53`); Bitswap's address expansion isn't. Expansion results pass through the gate (check 2).
    4. **Transports:**
       - `build_dht_swarm` (`rt:1588`), `build_bitswap_swarm` (`rv:8816`) and `cloudflare_websocket_transport` (`rv:8847`) take `quic: bool`, `dns: Hickory | None`, and `tcp: Direct | Socks5(addr)`;
       - add a SOCKS5 `Transport` over `tokio-socks` (MIT, with its `tor` feature) for `/ip4`, `/ip6`, `/dns*` and `/onion3` with `/tcp`, and for WebSocket on top of it;
       - it resolves `/dns*` names with `RESOLVE`, checks every answer, and `CONNECT`s to a checked IP literal. A failed, empty or wholly refused answer fails the dial. Only `/onion3` and onion names go to the proxy as names, on their own code path. The WebSocket layer above keeps the name for TLS;
-      - in `direct` mode, the TCP and WebSocket transports resolve names themselves and check each address before connecting (check 3).
+      - in `direct` mode, the TCP and WebSocket transports resolve names themselves and check each address before connecting (check 3);
+      - a stack composed by hand needs libp2p's TLS-or-noise selector, which libp2p doesn't export. A local copy, attributed, keeps today's `(tls, noise)` choice.
    5. **The gate:**
-      - the classification and the address policy as one function, applied where candidates are chosen (`rt:1491`–`1525`, `rt:1767`–`1805`), after expansion, and at the dial sites (`rv:7765`, `rv:7949`, `rt:1044`);
+      - the classification and the address policy as one function, applied where candidates are chosen (`rt:1491`–`1525`, `rt:1767`–`1805`), after expansion, and at the transport, which covers the dial sites (`rv:7765`, `rv:7949`, `rt:1044`) and the dials libp2p makes itself (check 3);
       - every check asks the instance's network capability, so revoking it refuses everything later.
 4. **Progress and stats outside the FFI crate.**
    - Move the progress recorder and `progress_layer` (`mob:552`–`1018`) to a library crate, with a recorder per node rather than the process-global `PROGRESS_RECORDER` (`mob:79`).
@@ -1078,12 +1201,12 @@ Each is a pull request to freedom-ipfs, and none changes mobile's behavior by de
 
 ## Where the code lives
 
-Four options. A new repository is the user's decision; this design recommends the first.
+**Decided (the user, 2026-10-22): the first option.** The other three are kept as the reasons for that choice. Moving the service later would be a new decision.
 
-1. **This repository, as `services/freedom-ipfsd`, a separate Cargo workspace** (recommended).
+1. **This repository, as `services/freedom-ipfsd`, a separate Cargo workspace** (chosen).
    - **For:**
      - `fc-protocol` by path, so one frame and stream codec;
-     - one release workflow, with static musl Linux builds, which would also close #350's GLIBC floor if the C dependencies build there ([Open questions](#open-questions));
+     - one release workflow, with Linux builds against glibc 2.17, which also closes #350's GLIBC floor ([Open questions](#open-questions));
      - `SHA256SUMS` and attestations;
      - freedom-browser's fetch-and-verify script pattern, extended to a second asset;
      - the same lints, copied into its manifest, since workspace lints don't cross workspaces.
@@ -1211,8 +1334,11 @@ As 0006's 4.7 did, before anything moves:
   - **Parent death,** the 5 s exit watchdog, and parent death while the writer is backed up.
   - **The stall:** exit 76.
 - **Network policy tests:**
-  - **A SOCKS5 test proxy** records every connection, and a canary TCP and UDP listener is advertised as a provider and a router. In `socks5` mode the canary must see nothing, and the proxy everything.
-  - **Expansion and redirects:** a `/dnsaddr` that expands to a loopback address, a name that resolves to a private address, and a configured router or provider that redirects to a private address, to an onion URL and to a different scheme. Each is refused before a socket opens.
+  - **A SOCKS5 test proxy** records every connection, and a canary TCP and UDP listener is advertised in provider records and is the target of a configured router's redirect. In `socks5` mode the canary must see nothing, and the proxy everything.
+  - **Expansion and redirects:**
+    - a `/dnsaddr` that expands to a loopback address, a name that resolves to a private address, and a configured router that redirects to a private address or to a scheme other than HTTP or HTTPS: each is refused before a socket opens;
+    - a configured router that redirects to an onion URL: refused before a socket opens in `direct` mode, and taken by [the onion route](#the-onion-route) in `socks5` mode;
+    - a provider that redirects anywhere: the redirect is returned, not followed, since the provider client's acceptance is none.
   - **Canonical forms:**
     - upper case, a trailing dot, numeric IPv4 URL hosts, and `/dns/<x>.onion`;
     - one address in every spelling: `[::ffff:a9fe:a9fe]`, `[::ffff:169.254.169.254]`, `[0:0:0:0:0:ffff:a9fe:a9fe]` and upper-case hex in a URL, and `/ip6/::ffff:169.254.169.254` in a multiaddr, all refused as `169.254.169.254`.
@@ -1231,13 +1357,17 @@ As 0006's 4.7 did, before anything moves:
     - **two interfaces:** one interface's resolver advertises a prefix and the other's answers NODATA, as with a VPN beside the physical link: the prefix is known, and an address under it with `169.254.169.254` embedded is refused;
     - **a manual DNS override:** the effective resolver answers NODATA while the interface-learned one (DHCP's on Windows, the service's state on macOS, a default-route link's in systemd-resolved's exported file) advertises a prefix: the prefix is known;
     - **one resolver failing** while another answers: the state stays unknown;
-    - **the startup race:** an IPv6 dial made while discovery is pending waits for it, and an address under the prefix that the first answer teaches is refused;
+    - **the startup race:** an IPv6 dial made while discovery is pending waits for it, and an address under the prefix that the first answer teaches is refused. That holds under a fixed form too: with `2002:808:808::/48` in the first answer, `2002:808:808:7f00:0:100::` (`8.8.8.8` as 6to4, loopback under the /48) waits, then is refused;
+    - **publication and checks:** a publication while a lookup is blocked: its answers are judged against the new state. A publication after a candidate choice has read its state: all of its candidates are judged against that one state. A lookup or choice begun after a publication: the new state. Each with a prefix added, and with a publication of incomplete;
     - **failure:** after a failed query, an IPv6 target outside the fixed forms is refused and an IPv4 one passes; after a failed refresh, every known prefix is still applied;
-    - **the bound:** an answer with 17 distinct prefixes makes the state incomplete, and `2a00:1:11::a9fe:a9fe` under the 17th is refused, not passed as global unicast;
+    - **the bound:** an answer with 17 distinct prefixes makes the state incomplete, and `2a00:1:11::a9fe:a9fe` under the 17th is refused, not passed as global unicast. With a /96 inside `2002::/16` as the 17th, `2002:808:808::7f00:1` is refused too, though its 6to4 reading is `8.8.8.8`; an IPv4-mapped address still passes or fails as its IPv4 address;
+    - **a learned prefix over a fixed form:** with `2002:808:808::/48` learned, `2002:808:808:a9fe:a9:fe00::` (169.254.169.254 under the /48, `8.8.8.8` as 6to4) is refused;
     - a refresh that drops a prefix doesn't forget it;
     - 6rd, 6over4 and 6a44 addresses with private embedded addresses (`2a00:1:c0a8:101::1`, `2a00:1::c0a8:101`) are judged as IPv6 alone, and pass;
     - a DNS64 answer `64:ff9b::7f00:1` for an ordinary name, locally and through `RESOLVE`: refused, and no connection is made;
-    - `/ip6zone/eth0/ip6/fe80::1` and `/unix/…` multiaddrs are refused.
+    - `/ip6zone/eth0/ip6/fe80::1` and `/unix/…` multiaddrs are refused;
+    - **a second host component:** `/ip4/8.8.8.8/ip4/127.0.0.1/tcp/8080`, the same with `/ipcidr/32`, `/p2p-circuit` or `/ip6zone/eth0` before the private pair, and `/ip4/8.8.8.8/dns/x.onion/tcp/80`, are refused, and a loopback canary sees no connection. For the hidden onion, no DNS or TXT query is made either;
+    - **the shapes, as a matrix:** each accepted shape with and without its `/p2p` suffix, HTTP providers with and without `/tcp` (default ports 80 and 443) and the path-carrying WebSocket forms, all accepted; an extra trailing component, a second `/p2p`, and `/tls/sni/<name>/ws` or `/http`, all refused; and a `/dnsaddr` answer that yields a refused shape, refused.
   - **Failures:** an unavailable proxy, a proxy that refuses `RESOLVE` (the attempt fails, and no name is sent in `CONNECT`), and an unsupported transport in `socks5` mode.
   - **A SOCKS fixture with `RESOLVE`:**
     - a name that looks acceptable but resolves to a loopback or private address is refused, and no `CONNECT` is sent;
@@ -1255,9 +1385,16 @@ As 0006's 4.7 did, before anything moves:
     - an HTTPS URL that redirects to HTTP sends no `Referer`;
     - a chain that moves between the ordinary and onion clients is counted against one hop budget, and fails at the limit;
     - an endpoint URL with userinfo is refused when the setting is read.
-  - **Arti qualification:** the pinned Arti answers `RESOLVE`, run in the release pipeline before the setting ships.
+  - **Arti qualification:** the pinned Arti answers `RESOLVE`, with username/password credentials as well as without, run in the release pipeline before the setting ships.
+  - **Stream isolation:**
+    - two instances send different credentials;
+    - every stream of one instance (`RESOLVE`, libp2p and HTTP `CONNECT`, onion, every redirect hop) sends the same ones;
+    - a proxy that selects only no authentication fails the dial;
+    - neither the username nor the password appears in any `Debug` output or error;
+    - an injected randomness failure refuses the start, with no instance built.
   - **Onion:** `.onion` and `/onion3` targets in `direct` mode open no socket.
   - **Policy changes:** `direct` → `socks5` → `direct`, and Arti's port P → Q. Each starts a new generation of both processes with the new `--network`; a plan delayed across the change fails, and nothing reaches the new generation; the proxy and the canary see nothing from the old one after its exit; a private partition's instance comes back cold after each change.
+  - **`--network`:** each form the argument refuses (a name, a zone, shorthand, an IPv6 address without brackets, port 0) exits 64.
 - **Live:** `ipfs:native:smoke` re-pointed at the service, with `/ipns/ipfs.tech/` and #102's fan-out of 48 concurrent requests and no `gateway_busy`.
 
 ### Parity
@@ -1320,8 +1457,9 @@ Every body already passes through main today, so the pipe adds one copy into the
 | retrieval admission, per process | 256 block fetches, 16 HTTP provider requests, 32 Bitswap connections, 4 DHT queries | work waits under its deadline |
 | background queue | 64 items per instance | new background work is dropped |
 | memory budget | persistent 192 MiB; ephemeral 448 MiB, by reservation ([Budgets](#budgets)) | new work `busy`; admitted work waits as below; evict idle private instances |
-| a reservation for admitted work | before the head: the rest of `headers_ms`; after it: 10 s per block | `busy`; a stream aborts with `busy` |
-| `ipfs.stats` | 5 s; main's watchdog at 20 s | on the watchdog, kill |
+| a reservation for admitted work | before the head: the rest of `headers_ms`; after it: 10 s per block | `busy` (`deadline` if queued after `headers_ms`); a stream aborts with `busy` |
+| `ipfs.stats` | 5 s from when the reader handles it; main's watchdog at 20 s | `deadline`; on the watchdog, kill |
+| stats calls, per process | 4 outstanding, each until its reply is written, or its job is dropped without one | `busy` |
 | abort JSON, after the stream ID | 1 KiB | protocol error |
 | persistent cache | 256 MiB of block data on disk (a target), 16 MiB hot | upstream's LRU eviction |
 | private instances | 8 per ephemeral process; a 36 MiB page cap (32 MiB block target) and 4 MiB hot each | a new partition evicts an unpinned instance, else 503 `busy`; existing partitions are unaffected |
@@ -1340,12 +1478,12 @@ Every body already passes through main today, so the pipe adds one copy into the
 | `env-proxy` | `reqwest` reads proxy variables from main's environment; libp2p ignores them | the environment is cleared, and the proxy is configuration | the HTTP half no longer follows `HTTPS_PROXY` and similar |
 | `proxy` | none | an optional SOCKS5 policy for all traffic, failing closed | new: Route IPFS through Tor |
 | `onion-targets` | no rule for them | refused before any socket in `direct`; through the proxy in `socks5` | a refusal proves nothing was sent |
-| `address-policy` | none | untrusted targets refused unless globally reachable unicast, with IPv6 forms that embed IPv4 judged by their IPv4 address; configured endpoints exempt; IPv6 outside the fixed forms refused while NAT64 discovery is unknown | providers on local networks are unreachable unless configured; translation the service can't read is [not covered](#what-the-gate-cant-see) |
+| `address-policy` | none | untrusted targets refused unless globally reachable unicast, with IPv6 forms that embed IPv4 judged by their IPv4 address; configured endpoints exempt; IPv6 outside the fixed forms refused while NAT64 discovery is unknown, and every IPv6 target but IPv4-mapped while it is incomplete | providers on local networks are unreachable unless configured; translation the service can't read is [not covered](#what-the-gate-cant-see) |
 | `redirect-gate` | redirects follow each client's policy | the same acceptance, with every hop through the gate | a redirect to a refused target fails the attempt |
 | `read-ahead` | one 64 KiB read in main, plus a two-chunk channel | a 128 KiB window per stream | about the same buffering, now bounded by credit |
 | `exit-text` | `Native event dispatcher exited with code N`, `Native gateway stopped unexpectedly` | `freedom-ipfs service exited` | in 502 bodies and logs only |
 | `stats-fields` | the event-queue fields in the diagnostics | dropped, with the queue; budget use added | the panel shows the rest |
-| `targets` | the add-on ships for darwin-arm64, linux-arm64, linux-x64 and win32-x64, and needs GLIBC ≥ 2.38 | the service builds for this repository's five targets, static on Linux | IPFS on darwin-x64 and older distributions (#350), if the musl build holds |
+| `targets` | the add-on ships for darwin-arm64, linux-arm64, linux-x64 and win32-x64, and needs GLIBC ≥ 2.38 | the service builds for the core's five platforms; on Linux, linked dynamically against glibc 2.17, Rust's own floor for these targets, below Electron's 2.25 | IPFS on darwin-x64, and on Linux wherever the browser runs (#350) |
 
 ## Implementation steps
 
@@ -1381,21 +1519,42 @@ Every body already passes through main today, so the pipe adds one copy into the
    Then the default switches.
 7. **Private windows:** the ephemeral process, readiness per partition, the cold start in `request()`, leases, eviction and fences.
 8. **Network policy:** the setting, Arti's endpoint and its `RESOLVE` qualification, `--network` and policy changes as new generations, and the gate, redirect, SOCKS and canary tests. This needs upstream item 3.
+   - `socks5` first, with the classification and the capability in `direct` too: none of them needs NAT64 discovery.
+   - Then NAT64 discovery in the service, which brings the address table to `direct` ([Modes](#modes)).
 9. **Removal,** one stable release later: the add-on, the event worker and their scripts.
 
 ## Open questions
 
 1. **Where the code lives:** a separate workspace in this repository (recommended), a member of the core's workspace, upstream, or a new repository (the user's decision).
+   - **Decided (the user, 2026-10-22): a separate workspace in this repository, `services/freedom-ipfsd`, as built.** It keeps IPFS's dependencies out of the key-holding core's lockfile and checks, while sharing `fc-protocol` and the release pipeline. Being self-contained, it can still move later.
 2. **Private windows:**
    - an in-memory instance per private partition in one process (recommended), one instance shared by all private windows, or a process per window, which would also separate address spaces?
    - are 8 instances under a 448 MiB budget the right bound?
 3. **The proxy's scope:**
    - SOCKS5 to Arti only (this design), or also a user's HTTP proxy for the HTTP half? libp2p would need another custom transport for that.
+     - **Decided (the user, 2026-10-22): SOCKS5 to Arti only.** One proxy path to build and test. A user's HTTP proxy can be added later as a decision of its own.
    - Should Route IPFS through Tor follow a future "everything through Tor" mode, and be one switch with 0008's Radicle setting?
+     - **Decided (the user, 2026-10-22): separate switches now, and a future "everything through Tor" mode turns both on.** IPFS gives up more under Tor than Radicle does (no QUIC, delegated routing only), so a user can take one without the other. An all-Tor mode, if one is added, sets both.
 4. **Routing under a proxy:** delegated only (recommended), or the light DHT through SOCKS, which costs many Tor circuits per query? And how many IPFS peers accept connections from Tor exits on their ports? That is to be measured before the setting ships.
 5. **Local providers:** the address policy refuses untrusted local targets by default. Should a user setting allow providers on the local network?
+   - **Decided (the user, 2026-10-22): no setting.** The address policy ships as designed. A local node the user sets up deliberately is reached as a configured endpoint, which is exempt. A setting can be added later as a decision of its own, if users need one.
 6. **The musl build:** do SQLite and `ring` build statically for both Linux targets in this repository's release workflow? If not, the Linux builds need a glibc floor of their own, chosen with #350 in mind.
+   - **They build, but the Linux builds link glibc 2.17 instead,** for [Cost](#cost).
+     - The dry run of #144 built both targets static, with musl's C compiler wrapper, and on x86_64 the service's whole test suite passed against the musl build.
+     - But musl's allocator (mallocng) maps and unmaps each large buffer: each 256 KiB block SQLite reads, and the gateway's copies of it. The service spent its time in page faults and `munmap`, and a cached file streamed at about 75 % of the add-on's rate locally and 54 % on the hosted linux-x64 runner, under the 80 % gate.
+     - Replacing the static binary's allocator, for C code too, was measured:
+       - mimalloc reached about 130 %, but the C source its crate bundles has secure mode fail on 64 KiB pages, and lacks two upstream hardening fixes (ca77e6d, ef3867f), so shipping it meant maintaining patched C;
+       - jemalloc reached about 127 %, but bakes the build machine's page size in.
+     - **Decision:** link glibc dynamically, no newer than 2.17, Rust's own floor for these targets (`cargo-zigbuild --target <triple>.2.17`, pinned in `release-ipfsd.yml`).
+       - A cached file streams at about 132 % of the add-on's rate locally, with a peak RSS near 84 MiB, against musl's 49 MiB.
+       - The allocator is the system's, hardened and patched with it.
+       - Electron's binary needs GLIBC 2.25 at most, so the service runs wherever the browser does; the add-on needed 2.38 (#350). Distributions on musl, which only a static build would reach, can't run Electron.
+     - `release-ipfsd.yml` checks each Linux binary: its highest `GLIBC_` symbol version, the libraries it needs (glibc's and `libgcc_s` only), and its usage exit. On x86_64, the service's whole test suite passed on CentOS 7's glibc 2.17.
 7. **Upstream timing:** will freedom-ipfs take items 1–8? Until a release carries them, does the service pin a commit on a branch?
 8. **Streams in the core:** should 4.5's protocol version 2 for `freedom-cored` adopt these four frames as they are, with an explicit global credit added?
 9. **An OS memory limit:** should each service run under `RLIMIT_AS`, or a Windows job memory limit, as a backstop for what its budget can't see?
+   - **Still open:** [0010](0010-service-confinement.md)'s job object (D4, decided) is where a Windows limit would go. Whether to set one, and `RLIMIT_AS` on Linux and macOS, aren't decided there.
 10. **If Arti can't `RESOLVE`:** should the Tor setting wait until it can, or ship with the proxy's own policy (option (b)) as an explicit deviation? This design waits (the user's decision).
+    - **Moot for now:** the pinned Arti 2.7.0 qualifies (freedom-browser #771). It answers `RESOLVE` with one address, with credentials and without. The qualification runs again whenever the pin moves.
+11. **Stream isolation under Tor:** should each instance (the profile's, and each private window's) send SOCKS credentials of its own, so Arti keeps their streams on separate circuits?
+    - **Decided (the user, 2026-10-22): yes, isolate** ([The SOCKS contract](#the-gate), *Stream isolation*). It needs `RESOLVE` with authentication, which tokio-socks doesn't offer, so the service uses a small SOCKS5 client of its own.

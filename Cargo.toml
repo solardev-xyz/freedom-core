@@ -1,9 +1,13 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# The service processes (design 0007) are workspaces of their own, with their
+# own lockfiles and `cargo deny` policies: their dependency graphs never enter
+# the core's.
+exclude = ["services"]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.99"
 publish = false

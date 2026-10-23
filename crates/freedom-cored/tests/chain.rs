@@ -236,6 +236,86 @@ fn a_quorum_read_through_main() {
     assert!(call(&mut core, 1000, "vault.status", json!({}))["result"].is_object());
 }
 
+/// `exclude_sources` (design 0005, Methods main calls): the router's
+/// `excludeSources` over the wire, on top of the profile's exclusions.
+#[test]
+fn a_read_skips_the_sources_it_excludes() {
+    // The core offers the field; main sends it to no other core.
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    let hello = core.hello_fragments();
+    assert!(
+        hello["result"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("exclude_sources")),
+        "{hello}"
+    );
+    configure(
+        &mut core,
+        2,
+        &[snapshot(&["quorum", "direct"], &["a", "b", "c"], 5000)],
+    );
+    let mut params = read("eth_getTransactionReceipt", json!([HASH]));
+    params["exclude_sources"] = json!(["quorum"]);
+    core.send(&request(3, "chain.request", params));
+    // Only Direct is asked: its first endpoint, which answers.
+    let (reply, seen) = serve(&mut core, 3, |_| Some(rpc_result("null")));
+    assert_eq!(reply["result"]["source"], "direct", "{reply}");
+    assert_eq!(reply["result"]["verified"], false);
+    let endpoints: Vec<&str> = seen
+        .requests
+        .iter()
+        .map(|r| r["params"]["endpoint"].as_str().unwrap())
+        .collect();
+    assert_eq!(endpoints, ["a"]);
+
+    // Nothing left to ask: today's text, naming what was dropped.
+    let mut params = read("eth_blockNumber", json!([]));
+    params["exclude_sources"] = json!(["direct", "quorum"]);
+    let reply = call(&mut core, 4, "chain.request", params);
+    assert_eq!(reply["error"]["data"]["kind"], "core", "{reply}");
+    assert_eq!(
+        reply["error"]["data"]["message"],
+        "No chain source left for eth_blockNumber on chain 1: read order [quorum, direct], \
+         excluded for this request: quorum, direct"
+    );
+}
+
+#[test]
+fn exclude_sources_names_known_sources_once() {
+    let (_root, mut core) = core();
+    configure(&mut core, 2, &[snapshot(&["direct"], &["a"], 5000)]);
+    for (id, excluded) in [
+        (3, json!(["nobody"])),
+        (4, json!(["colibri", "colibri"])),
+        (5, json!(["Colibri"])),
+        (6, json!([1])),
+        (7, json!("colibri")),
+        (8, json!(null)),
+    ] {
+        let mut params = read("eth_blockNumber", json!([]));
+        params["exclude_sources"] = excluded.clone();
+        let reply = call(&mut core, id, "chain.request", params);
+        assert_eq!(
+            reply["error"],
+            json!({ "code": "invalid_argument", "message": "Invalid parameters" }),
+            "{excluded}: {reply}"
+        );
+    }
+    // Every known source, and none at all, are fine.
+    let mut params = read("eth_blockNumber", json!([]));
+    params["exclude_sources"] = json!(["myotis", "colibri", "quorum", "blockscout"]);
+    core.send(&request(9, "chain.request", params));
+    let (reply, _) = serve(&mut core, 9, |_| Some(rpc_result(r#""0x10""#)));
+    assert_eq!(reply["result"]["result"], "0x10", "{reply}");
+    let mut params = read("eth_blockNumber", json!([]));
+    params["exclude_sources"] = json!([]);
+    core.send(&request(10, "chain.request", params));
+    let (reply, _) = serve(&mut core, 10, |_| Some(rpc_result(r#""0x11""#)));
+    assert_eq!(reply["result"]["result"], "0x11", "{reply}");
+}
+
 #[test]
 fn direct_after_a_quorum_timeout() {
     let (_root, mut core) = core();
@@ -281,6 +361,70 @@ fn direct_after_a_quorum_timeout() {
     members.sort_unstable();
     cancels.sort_unstable();
     assert_eq!(cancels, members);
+}
+
+#[test]
+fn colibri_faults_back_its_method_off_read_or_not() {
+    // Two verifier faults back Colibri off a chain's method (design 0005,
+    // Colibri: verifier faults), the second landing after its page's read
+    // moved on to Direct; another method still goes to Colibri.
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    let hello = core.hello_fragments();
+    assert!(
+        hello["result"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("colibri_faults")),
+        "{hello}"
+    );
+    let mut chain = snapshot(&["colibri", "direct"], &["a"], 500);
+    chain["prover"] = json!({ "endpoint": "p1", "zk": true });
+    configure(&mut core, 2, &[chain]);
+    let fault = json!({ "result": { "failure": "error", "fault": true } });
+    let call_read = read("eth_call", json!([{ "to": ADDRESS }, "latest"]));
+    core.send(&request(3, "chain.request", call_read.clone()));
+    let (got, seen) = serve(&mut core, 3, |request| match request["method"].as_str() {
+        Some("shell.verified") => Some(fault.clone()),
+        _ => Some(rpc_result(r#""0x1""#)),
+    });
+    assert_eq!(got["result"]["source"], "direct", "{got}");
+    assert_eq!(seen.requests[0]["method"], "shell.verified");
+    // A page's read: Colibri's operation outlives the read's budget, and
+    // its fault arrives once nobody reads it.
+    let mut page = call_read.clone();
+    page["origin"] = json!("https://app.example");
+    core.send(&request(4, "chain.request", page));
+    let mut held = None;
+    let (got, _) = serve(&mut core, 4, |request| match request["method"].as_str() {
+        Some("shell.verified") => {
+            held = Some(request.clone());
+            None
+        }
+        _ => Some(rpc_result(r#""0x1""#)),
+    });
+    assert_eq!(got["result"]["source"], "direct", "{got}");
+    reply(&mut core, &held.unwrap(), fault);
+    // Backed off: no operation, and Direct answers.
+    core.send(&request(5, "chain.request", call_read));
+    let (got, seen) = serve(&mut core, 5, |_| Some(rpc_result(r#""0x1""#)));
+    assert_eq!(got["result"]["source"], "direct", "{got}");
+    assert!(
+        seen.requests.iter().all(|r| r["method"] == "shell.rpc"),
+        "{:?}",
+        seen.requests
+    );
+    core.send(&request(
+        6,
+        "chain.request",
+        read("eth_getBalance", json!([ADDRESS, "latest"])),
+    ));
+    let (got, seen) = serve(&mut core, 6, |request| match request["method"].as_str() {
+        Some("shell.verified") => Some(json!({ "result": { "result": "0x2" } })),
+        _ => None,
+    });
+    assert_eq!(got["result"]["source"], "colibri", "{got}");
+    assert_eq!(seen.requests.len(), 1);
 }
 
 #[test]
@@ -348,7 +492,7 @@ fn a_fee_quote() {
             other => panic!("{other}"),
         })
     });
-    // Direct asks one endpoint for both.
+    // Direct asks its one endpoint for both: B's quote from one answer.
     assert!(seen.requests.iter().all(|r| r["params"]["endpoint"] == "a"));
     assert_eq!(
         reply["result"],
@@ -360,9 +504,152 @@ fn a_fee_quote() {
             "effectiveGasPrice": "1000000000",
             "source": "direct",
             "verified": false,
+            "answered": 1,
             "generation": 1,
         })
     );
+}
+
+/// Chain 1 with Myotis (ready), Colibri's prover and two endpoints, every
+/// source in its read order.
+fn reference_chain(core: &mut Core) {
+    let mut chain = snapshot(
+        &["myotis", "colibri", "quorum", "direct"],
+        &["a", "b"],
+        5000,
+    );
+    chain["myotis"] = json!(true);
+    chain["prover"] = json!({ "endpoint": "p1", "zk": true });
+    configure(core, 2, &[chain]);
+    call(
+        core,
+        3,
+        "chain.availability",
+        json!({ "chain_id": 1, "ready": true }),
+    );
+}
+
+#[test]
+fn a_fee_reference() {
+    let (_root, mut core) = core();
+    reference_chain(&mut core);
+    core.send(&request(
+        4,
+        "chain.fee_reference",
+        json!({ "chain_id": 1, "deadline_ms": 30_000 }),
+    ));
+    let (reply, seen) = serve(&mut core, 4, |request| {
+        let endpoint = request["params"]["endpoint"].as_str().unwrap_or("");
+        Some(
+            match (request["method"].as_str(), rpc_method(request).as_str()) {
+                (Some("shell.verified"), _) => {
+                    // Colibri's header, never a Myotis operation.
+                    assert_eq!(request["params"]["colibri"], "request", "{request}");
+                    assert_eq!(request["params"]["method"], "eth_getBlockByNumber");
+                    assert_eq!(request["params"]["params"], json!(["latest", false]));
+                    json!({ "result": { "result": {
+                    "number": "0x1312d00",
+                    "timestamp": "0x6553f100",
+                    "baseFeePerGas": "0x3b9aca00",
+                } } })
+                }
+                (_, "eth_gasPrice") if endpoint == "a" => rpc_result(r#""0x3b9aca00""#),
+                (_, "eth_gasPrice") => rpc_result(r#""0x77359400""#),
+                (_, "eth_maxPriorityFeePerGas") if endpoint == "a" => rpc_result(r#""0x5f5e100""#),
+                (_, "eth_maxPriorityFeePerGas") => rpc_result(r#""0xbebc200""#),
+                (_, other) => panic!("{other}"),
+            },
+        )
+    });
+    // B's four exchanges and the header, nothing else.
+    assert_eq!(seen.requests.len(), 5);
+    assert_eq!(
+        reply["result"],
+        json!({
+            "header": {
+                "source": "colibri",
+                "number": "20000000",
+                "timestamp": "1700000000",
+                "base_fee": "1000000000",
+            },
+            "lowest_priority": "100000000",
+            "quote": {
+                "type": "eip1559",
+                "baseFee": "900000000",
+                "maxPriorityFeePerGas": "100000000",
+                "maxFeePerGas": "1900000000",
+                "effectiveGasPrice": "1000000000",
+                "source": "direct",
+                "verified": false,
+                "answered": 2,
+            },
+            "generation": 1,
+        })
+    );
+}
+
+#[test]
+fn a_fee_reference_with_failed_parts_and_its_failures() {
+    let (_root, mut core) = core();
+    reference_chain(&mut core);
+    // Colibri fails and no endpoint answers: both parts null, no error.
+    core.send(&request(
+        4,
+        "chain.fee_reference",
+        json!({ "chain_id": 1, "deadline_ms": 30_000 }),
+    ));
+    let (nulls, _) = serve(&mut core, 4, |request| {
+        Some(match request["method"].as_str() {
+            Some("shell.verified") => json!({ "result": { "failure": "error" } }),
+            _ => failure("network"),
+        })
+    });
+    assert_eq!(
+        nulls["result"],
+        json!({ "header": null, "lowest_priority": null, "quote": null, "generation": 1 })
+    );
+    // A cancel ends it as it ends a fee quote, its exchanges cancelled.
+    core.send(&request(
+        5,
+        "chain.fee_reference",
+        json!({ "chain_id": 1, "deadline_ms": 30_000 }),
+    ));
+    let held = requests_only(&mut core, 3);
+    core.send(&json!({ "type": "cancel", "id": 5 }));
+    let mut cancels = Vec::new();
+    let mut cancelled = None;
+    while cancelled.is_none() || cancels.len() < 2 {
+        let message = core.recv();
+        match message["type"].as_str() {
+            Some("cancel") => cancels.push(message["id"].clone()),
+            Some("response") => cancelled = Some(message),
+            _ => panic!("unexpected {message}"),
+        }
+    }
+    let cancelled = cancelled.unwrap();
+    assert_eq!(cancelled["id"], 5);
+    assert_eq!(cancelled["error"]["code"], "cancelled", "{cancelled}");
+    assert_eq!(cancelled["error"]["data"], json!({ "generation": 1 }));
+    // The two exchanges; the header's operation runs on to main's reply.
+    let exchanges: Vec<Value> = held
+        .iter()
+        .filter(|r| r["method"] == "shell.rpc")
+        .map(|r| r["id"].clone())
+        .collect();
+    assert_eq!(cancels, exchanges);
+    for request in &held {
+        reply(&mut core, request, failure("cancelled"));
+    }
+    // No time left: `deadline` before any I/O, under the chain's
+    // generation.
+    let expired = call(
+        &mut core,
+        6,
+        "chain.fee_reference",
+        json!({ "chain_id": 1, "deadline_ms": 0 }),
+    );
+    assert_eq!(expired["error"]["code"], "deadline");
+    assert_eq!(expired["error"]["data"], json!({ "generation": 1 }));
 }
 
 fn broadcast(id: u64) -> Value {
@@ -441,6 +728,78 @@ fn a_broadcast_is_sent_or_rejected() {
             "outcome": "rejected",
             "generation": 1,
         })
+    );
+}
+
+#[test]
+fn a_myotis_refusal_keeps_its_code() {
+    // The core offers the form with a code; main sends it to no other core.
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    let hello = core.hello_fragments();
+    assert!(
+        hello["result"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("myotis_refusal_codes")),
+        "{hello}"
+    );
+    let mut chain = snapshot(&["direct"], &["a"], 5000);
+    chain["myotis"] = json!(true);
+    chain["broadcast_order"] = json!(["myotis", "direct"]);
+    configure(&mut core, 2, &[chain]);
+    call(
+        &mut core,
+        3,
+        "chain.availability",
+        json!({ "chain_id": 1, "ready": true }),
+    );
+    // Either refusal ends the broadcast `rejected`, Direct never asked,
+    // with the adapter's error: its message, code and marker.
+    for (id, rejected, code, marker) in [
+        (
+            4,
+            json!({ "reason": "nonce too low: next nonce 5, tx nonce 4" }),
+            -32000,
+            "rejected",
+        ),
+        (
+            5,
+            json!({
+                "reason": "invalid raw transaction: malformed type 0x2 transaction",
+                "code": -32602,
+            }),
+            -32602,
+            "invalid-params",
+        ),
+    ] {
+        core.send(&broadcast(id));
+        let (reply, seen) = serve(&mut core, id, |request| {
+            assert_eq!(request["method"], "shell.verified", "{request}");
+            Some(json!({ "result": { "rejected": rejected.clone() } }))
+        });
+        assert_eq!(seen.requests.len(), 1);
+        assert_eq!(reply["error"]["code"], "chain_error", "{reply}");
+        assert_eq!(
+            reply["error"]["data"],
+            json!({
+                "kind": "core",
+                "constructor": "Error",
+                "message": rejected["reason"],
+                "props": { "code": code, "myotisRefusal": marker },
+                "undefined_keys": [],
+                "outcome": "rejected",
+                "generation": 1,
+            })
+        );
+    }
+    // A code the closed set doesn't have is a malformed reply.
+    core.send(&broadcast(6));
+    malformed(
+        &mut core,
+        6,
+        json!({ "result": { "rejected": { "reason": "x", "code": -32000 } } }),
+        "malformed_shell_reply",
     );
 }
 

@@ -47,13 +47,105 @@ class LicenseFiles(unittest.TestCase):
         path.write_bytes(b"line one\r\nline two\r\n")
         self.assertEqual(notices.read_text("x 1.0", path), "line one\nline two")
 
+    def test_a_git_workspace_member_gets_the_checkout_roots_files(self):
+        (self.dir / ".cargo-ok").write_text("ok")
+        (self.dir / "LICENSE-MIT").write_text("MIT")
+        crate = self.dir / "crates" / "member"
+        crate.mkdir(parents=True)
+        self.assertEqual(notices.git_checkout_root(crate), self.dir)
+        files = notices.license_files("x 1.0", crate, None, self.dir)
+        self.assertEqual(files, [self.dir / "LICENSE-MIT"])
+        # A crate's own files win.
+        (crate / "LICENSE").write_text("own")
+        self.assertEqual(notices.license_files("x 1.0", crate, None, self.dir), [crate / "LICENSE"])
+
+    def test_outside_a_checkout_there_is_no_root(self):
+        self.assertIsNone(notices.git_checkout_root(self.dir))
+
+    def test_vendored_texts_stand_in_only_for_a_crate_with_none(self):
+        text = self.dir / "vendored-LICENSE"
+        text.write_text("MIT")
+        crate = self.dir / "crate"
+        crate.mkdir()
+        self.assertEqual(notices.license_files("x 1.0", crate, None, None, [text]), [text])
+        (crate / "LICENSE").write_text("own")
+        with self.assertRaisesRegex(notices.NoticeError, "ships its own license files"):
+            notices.license_files("x 1.0", crate, None, None, [text])
+
+
+class Vendored(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name)
+        (self.dir / "notices").mkdir()
+        self.saved = dict(notices.WORKSPACES)
+        notices.WORKSPACES["svc"] = self.dir
+
+    def tearDown(self):
+        notices.WORKSPACES.clear()
+        notices.WORKSPACES.update(self.saved)
+        self.tmp.cleanup()
+
+    def write(self, manifest):
+        (self.dir / "notices" / "crates.json").write_text(notices.json.dumps(manifest))
+
+    def test_no_manifest_vendors_nothing(self):
+        self.assertEqual(notices.vendored_notices("svc"), {})
+
+    def test_entries_name_their_files(self):
+        (self.dir / "notices" / "repo").mkdir()
+        (self.dir / "notices" / "repo" / "LICENSE").write_text("MIT")
+        self.write({"x 1.0": {"repository": "https://example/repo", "commit": "abc",
+                              "files": ["repo/LICENSE"]}})
+        self.assertEqual(notices.vendored_notices("svc"),
+                         {"x 1.0": [self.dir / "notices" / "repo" / "LICENSE"]})
+
+    def test_a_missing_file_or_source_fails(self):
+        self.write({"x 1.0": {"repository": "https://example/repo", "commit": "abc",
+                              "files": ["repo/LICENSE"]}})
+        with self.assertRaisesRegex(notices.NoticeError, "is missing"):
+            notices.vendored_notices("svc")
+        self.write({"x 1.0": {"files": ["repo/LICENSE"]}})
+        with self.assertRaisesRegex(notices.NoticeError, "needs a repository"):
+            notices.vendored_notices("svc")
+
+
+class Binaries(unittest.TestCase):
+    def test_every_binary_names_its_targets_and_native_code(self):
+        self.assertEqual(set(notices.TARGETS), set(notices.WORKSPACES))
+        self.assertEqual(set(notices.NATIVE), set(notices.WORKSPACES))
+
+    def test_the_service_links_glibc_on_linux_and_the_core_musl(self):
+        linux = lambda binary: [t for t in notices.TARGETS[binary] if "linux" in t]
+        self.assertEqual(linux("freedom-ipfsd"),
+                         ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"])
+        self.assertEqual(linux(notices.BINARY),
+                         ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"])
+
+
+class Arguments(unittest.TestCase):
+    def test_the_core_by_default(self):
+        self.assertEqual(notices.parse_args([]), ("freedom-cored", False))
+        self.assertEqual(notices.parse_args(["--check"]), ("freedom-cored", True))
+
+    def test_a_service(self):
+        self.assertEqual(notices.parse_args(["--binary", "freedom-ipfsd", "--check"]),
+                         ("freedom-ipfsd", True))
+        self.assertEqual(notices.output_for("freedom-ipfsd"),
+                         notices.ROOT / "services" / "freedom-ipfsd" / "THIRD-PARTY-NOTICES")
+
+    def test_refusals(self):
+        for argv in (["--binary"], ["--binary", "nope"], ["--frobnicate"]):
+            with self.assertRaises(notices.NoticeError, msg=argv):
+                notices.parse_args(argv)
+
 
 class OutputBytes(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.saved = (notices.OUTPUT, notices.generate, notices.sys.argv)
         notices.OUTPUT = pathlib.Path(self.tmp.name) / "THIRD-PARTY-NOTICES"
-        notices.generate = lambda: b"one\ntwo\n"
+        notices.generate = lambda *_: b"one\ntwo\n"
 
     def tearDown(self):
         notices.OUTPUT, notices.generate, notices.sys.argv = self.saved
@@ -73,7 +165,7 @@ class OutputBytes(unittest.TestCase):
         self.assertEqual(self.run_main("--check"), 1)
 
     def test_errors_fail_without_writing(self):
-        def broken():
+        def broken(*_):
             raise notices.NoticeError("x 1.0: no license or notice file in its source")
         notices.generate = broken
         self.assertEqual(self.run_main(), 1)
@@ -82,3 +174,69 @@ class OutputBytes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SourceOffers(unittest.TestCase):
+    def test_only_mpl_without_a_permissive_alternative_needs_one(self):
+        for expression, needed in [
+            ("MPL-2.0", True),
+            ("MPL-2.0 AND MIT", True),
+            ("(MPL-2.0 AND MIT)", True),
+            ("MIT OR MPL-2.0", False),
+            ("MPL-2.0 OR Apache-2.0", False),
+            ("MIT", False),
+            ("Apache-2.0 OR MIT", False),
+            ("", False),
+            (None, False),
+            # Review of #145: grouping and precedence, as SPDX defines them.
+            ("MPL-2.0 AND (MIT OR Apache-2.0)", True),
+            ("(MIT OR Apache-2.0) AND MPL-2.0", True),
+            ("MIT AND (MPL-2.0 OR Apache-2.0)", False),
+            ("(MPL-2.0 AND MIT) OR (MPL-2.0 AND Apache-2.0)", True),
+            ("MPL-2.0 AND (Apache-2.0 WITH LLVM-exception OR MIT)", True),
+            ("Apache-2.0 WITH LLVM-exception AND MPL-2.0", True),
+            ("Apache-2.0 WITH LLVM-exception OR MPL-2.0", False),
+            ("MIT OR MPL-2.0 AND Apache-2.0", False),
+            ("MPL-2.0 AND MIT OR MPL-2.0 AND Apache-2.0", True),
+            # Spellings: whitespace, case, "or later", Cargo's legacy `/`.
+            ("MPL-2.0\tOR\tMIT", False),
+            ("MPL-2.0+", True),
+            ("mpl-2.0", True),
+            ("MPL-2.0 and MIT", True),
+            ("MIT/MPL-2.0", False),
+            ("((MPL-2.0))", True),
+        ]:
+            self.assertEqual(notices.needs_source_offer(expression), needed, expression)
+
+    def test_an_expression_that_does_not_parse_fails(self):
+        for expression in ["MPL-2.0 AND", "(MPL-2.0", "MPL-2.0)", "AND MIT", "MPL-2.0 MIT",
+                           "MPL-2.0 WITH", "MPL-2.0 WITH (x)", "()"]:
+            with self.assertRaisesRegex(notices.NoticeError, "license expression"):
+                notices.needs_source_offer(expression)
+
+    def test_a_registry_crate_points_at_its_crates_io_archive(self):
+        package = {
+            "name": "attohttpc",
+            "version": "0.30.1",
+            "source": "registry+https://github.com/rust-lang/crates.io-index",
+            "repository": "https://github.com/sbstp/attohttpc",
+        }
+        self.assertEqual(
+            notices.source_location(package),
+            "https://static.crates.io/crates/attohttpc/attohttpc-0.30.1.crate"
+            " (repository: https://github.com/sbstp/attohttpc)",
+        )
+
+    def test_a_git_crate_points_at_its_commit(self):
+        package = {
+            "name": "x",
+            "version": "1.0.0",
+            "source": "git+https://github.com/o/x?rev=abc#abcdef0",
+        }
+        self.assertEqual(
+            notices.source_location(package), "https://github.com/o/x at commit abcdef0"
+        )
+
+    def test_an_unknown_source_fails(self):
+        with self.assertRaisesRegex(notices.NoticeError, "no known source location"):
+            notices.source_location({"name": "x", "version": "1", "source": "path+file:///x"})

@@ -1,8 +1,8 @@
 //! The machine a driver runs (design 0005): `chain.configure`,
 //! `chain.availability`, `chain.request`, `chain.fee_quote`,
-//! `chain.broadcast`, `chain.html` (design 0006) and `cancel` in; `shell.*`
-//! requests, cancels and replies out. Time comes in through the executor's
-//! timers.
+//! `chain.fee_reference`, `chain.broadcast`, `chain.html` (design 0006)
+//! and `cancel` in; `shell.*` requests, cancels and replies out. Time comes
+//! in through the executor's timers.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -18,10 +18,11 @@ use super::budget::{self, Charge};
 use super::config::{Chain, ChainConfig};
 use super::ctx::{Ctx, Req};
 use super::error::{ChainError, Protocol, Thrown};
+use super::faults::{BackedOff, FaultRecord};
 use super::html::{HtmlAnswer, html};
-use super::io::{Answer, Delivered, Ms, Request, Transport};
+use super::io::{Answer, Delivered, Ms, Request, Transport, Verdict};
 use super::logs::RangeEntry;
-use super::quote::fee_quote;
+use super::quote::{FeeReference, fee_quote, fee_reference};
 use super::read::{ReadAnswer, ReadOptions, read};
 use super::route::RouteState;
 use super::send::{BroadcastOutcome, Ended, SendState, broadcast, ended_from};
@@ -42,6 +43,9 @@ pub enum Call {
     },
     /// `chain.fee_quote`.
     FeeQuote { chain_id: u64 },
+    /// `chain.fee_reference`: the evidence for main's fee check (design
+    /// 0005, A).
+    FeeReference { chain_id: u64 },
     /// `chain.broadcast`.
     Broadcast { chain_id: u64, raw: String },
     /// `chain.html` (design 0006): the `web3:` handler's `html()` read of
@@ -60,6 +64,7 @@ impl Call {
         match self {
             Self::Read { chain_id, .. }
             | Self::FeeQuote { chain_id }
+            | Self::FeeReference { chain_id }
             | Self::Broadcast { chain_id, .. }
             | Self::Html { chain_id, .. } => *chain_id,
         }
@@ -89,7 +94,7 @@ impl Call {
                         .map(String::capacity)
                         .sum::<usize>()
             }
-            Self::FeeQuote { .. } => 0,
+            Self::FeeQuote { .. } | Self::FeeReference { .. } => 0,
             Self::Broadcast { raw, .. } => raw.capacity(),
             Self::Html {
                 contract, origin, ..
@@ -112,6 +117,8 @@ pub enum Success {
     },
     /// Today's quote.
     FeeQuote(FeeQuote),
+    /// `chain.fee_reference`'s `{ header, lowest_priority, quote }`.
+    FeeReference(FeeReference),
     /// `{ hash, source, outcome }`: `sent` or `uncertain`.
     Broadcast {
         hash: Option<String>,
@@ -167,11 +174,15 @@ pub struct StateTables {
     pub log_range: Vec<(String, RangeEntry)>,
     pub log_index_cool_until: Vec<(u64, Ms)>,
     pub log_index_pair_cool_until: Vec<(String, Ms)>,
+    /// Colibri's verifier-fault records by `"<chain> <method>"`, in
+    /// insertion order (design 0005, Colibri).
+    pub colibri_faults: Vec<(String, FaultRecord)>,
 }
 
 enum Done {
     Read(Result<ReadAnswer, Thrown>),
     Fee(Result<FeeQuote, Thrown>),
+    Reference(FeeReference),
     Broadcast(Ended),
     Html(Result<HtmlAnswer, Thrown>),
 }
@@ -241,6 +252,7 @@ fn reply_wire_bytes(result: &Result<Success, ChainError>) -> usize {
                 result.as_ref().map_or(0, String::len) + trust.as_ref().map_or(0, String::len)
             }
             Ok(Success::FeeQuote(quote)) => quote.json_len(),
+            Ok(Success::FeeReference(reference)) => reference.json_len(),
             Ok(Success::Broadcast { hash, .. }) => hash.as_ref().map_or(0, String::len),
             Ok(Success::Html { html, trust, .. }) => {
                 base64_len(html.len()) + HASH_JSON + trust.as_ref().map_or(0, String::len)
@@ -260,6 +272,7 @@ fn reply_heap_bytes(result: &Result<Success, ChainError>) -> usize {
                     + trust.as_ref().map_or(0, String::capacity)
             }
             Ok(Success::FeeQuote(quote)) => quote.heap_bytes(),
+            Ok(Success::FeeReference(reference)) => reference.heap_bytes(),
             Ok(Success::Broadcast { hash, .. }) => hash.as_ref().map_or(0, String::capacity),
             Ok(Success::Html { html, trust, .. }) => {
                 html.capacity() + trust.as_ref().map_or(0, String::capacity)
@@ -272,11 +285,12 @@ fn reply_heap_bytes(result: &Result<Success, ChainError>) -> usize {
 /// What a request receives for a reply nobody reads: a transport failure,
 /// never a proof that nothing was sent; it is never polled anyway (its
 /// request has ended, or is over its budget and ends first).
-fn unread() -> Delivered {
+fn unread(verdict: Verdict) -> Delivered {
     Delivered {
         answer: Answer::Failed(Transport::Network),
         charge: Charge::none(),
         discarded: true,
+        verdict,
     }
 }
 
@@ -503,6 +517,9 @@ impl Machine {
                 ..
             } => Task::new(async move { Done::Read(read(&req, &method, &params, &options).await) }),
             Call::FeeQuote { .. } => Task::new(async move { Done::Fee(fee_quote(&req).await) }),
+            Call::FeeReference { .. } => {
+                Task::new(async move { Done::Reference(fee_reference(&req).await) })
+            }
             Call::Html {
                 contract, origin, ..
             } => Task::new(async move { Done::Html(html(&req, &contract, origin).await) }),
@@ -701,6 +718,11 @@ impl Machine {
                 self.ctx.budget.borrow_mut().forget(id);
                 self.reply(id, Ok(Success::FeeQuote(quote)), None, generation);
             }
+            Some(Done::Reference(reference)) => {
+                drop(running);
+                self.ctx.budget.borrow_mut().forget(id);
+                self.reply(id, Ok(Success::FeeReference(reference)), None, generation);
+            }
             Some(Done::Broadcast(ended)) => {
                 drop(running);
                 self.ctx.budget.borrow_mut().forget(id);
@@ -713,9 +735,9 @@ impl Machine {
         }
     }
 
-    /// `cancel` from main: a read or fee quote ends `cancelled` at once; a
-    /// broadcast through the outcome table. False when the request has
-    /// already replied.
+    /// `cancel` from main: a read, a fee quote or a fee reference ends
+    /// `cancelled` at once; a broadcast through the outcome table. False
+    /// when the request has already replied.
     pub fn cancel(&mut self, id: u64) -> bool {
         if let Some(i) = self.running.iter().position(|r| r.id == id) {
             self.end(i, Protocol::Cancelled);
@@ -912,8 +934,9 @@ impl Machine {
         match self.reserve_reply(id, 0) {
             Ok(reservation) => self.complete_reserved(id, answer, reservation),
             Err(OverBudget) => {
+                let verdict = answer.verdict();
                 drop(answer);
-                self.complete_unread(id);
+                self.complete_unread_as(id, verdict);
                 false
             }
         }
@@ -937,13 +960,14 @@ impl Machine {
             }
             answer => answer,
         };
+        let verdict = answer.verdict();
         if self.reader_of(id).is_none() {
             // Its caller has ended: nobody will read the payload, which is
             // dropped now rather than held uncharged. Main's terminal reply
             // still completes the operation, so a verifier's slot is freed
             // at the next poll.
             drop((answer, reservation));
-            return self.ctx.rt.complete(id, unread());
+            return self.ctx.rt.complete(id, unread(verdict));
         }
         match reservation.0.settle(answer.bytes()) {
             Ok(()) => self.ctx.rt.complete(
@@ -952,6 +976,7 @@ impl Machine {
                     answer,
                     charge: reservation.0,
                     discarded: false,
+                    verdict,
                 },
             ),
             Err(()) => {
@@ -961,7 +986,7 @@ impl Machine {
                 // `budget` (a broadcast through its outcome table) before
                 // it is polled again.
                 drop((answer, reservation));
-                self.ctx.rt.complete(id, unread());
+                self.ctx.rt.complete(id, unread(verdict));
                 false
             }
         }
@@ -973,7 +998,14 @@ impl Machine {
     /// verifier's slot, and delivers nothing that could be taken for proof
     /// that nothing was sent.
     pub fn complete_unread(&mut self, id: u64) -> bool {
-        self.ctx.rt.complete(id, unread())
+        self.complete_unread_as(id, Verdict::Neither)
+    }
+
+    /// [`Machine::complete_unread`] for a reply whose shape was read: a
+    /// Colibri reply still counts for its method's fault record (design
+    /// 0005, Colibri: verifier faults), as it arrives.
+    pub fn complete_unread_as(&mut self, id: u64, verdict: Verdict) -> bool {
+        self.ctx.rt.complete(id, unread(verdict))
     }
 
     /// Schedules a driver event at `at` (see the executor).
@@ -1019,6 +1051,13 @@ impl Machine {
             log_range: state.logs.range.clone(),
             log_index_cool_until: state.logs.index_cool_until.clone(),
             log_index_pair_cool_until: state.logs.pair_cool_until.clone(),
+            colibri_faults: state.colibri_faults.table(),
         }
+    }
+
+    /// The Colibri cooldowns started since the last call, oldest first,
+    /// for the driver's log (design 0005, Colibri: verifier faults).
+    pub fn take_backed_off(&mut self) -> Vec<BackedOff> {
+        std::mem::take(&mut self.ctx.state.borrow_mut().backed_off)
     }
 }

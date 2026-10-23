@@ -284,6 +284,39 @@ pub(crate) fn no_reverse(address: &str, trust: Option<JsValue>) -> JsValue {
     obj(fields)
 }
 
+/// An address's ENS primary name, as a reverse result: the name only when
+/// it is its own ENSIP-15 normalization. A name that isn't (`vitaIik.eth`,
+/// with a capital I, renders like `vitalik.eth`) can still pass the forward
+/// check, which hashes it as written, so it is UNVERIFIED with its claim
+/// instead (deviation `reverse-normalized`, #75), and says why:
+/// `unverifiedCause: "unnormalized"`, last, as freedom-browser's resolver
+/// sets it (#756), so the wallet doesn't warn that the name fails to
+/// resolve back, which it usually doesn't. WNS and GNS claims are
+/// normalized before their forward check already.
+pub(crate) fn ens_primary_name(address: &str, name: &str, trust: JsValue) -> JsValue {
+    if crate::normalize_ens(name).is_ok_and(|normalized| normalized == name) {
+        obj(vec![
+            ("success", JsValue::Bool(true)),
+            ("address", s(address)),
+            ("name", s(name)),
+            ("system", s("ens")),
+            ("trust", trust),
+        ])
+    } else {
+        let mut fields = unverified_reverse_fields(
+            address,
+            NameSystem::Ens,
+            Some(name),
+            Some(format!(
+                "Reverse record for {address} claims a name that isn't normalized"
+            )),
+            Some(trust),
+        );
+        fields.push(("unverifiedCause", s("unnormalized")));
+        obj(fields)
+    }
+}
+
 pub(crate) fn unverified_reverse(
     address: &str,
     system: NameSystem,
@@ -291,6 +324,19 @@ pub(crate) fn unverified_reverse(
     detail: Option<String>,
     trust: Option<JsValue>,
 ) -> JsValue {
+    obj(unverified_reverse_fields(
+        address, system, claimed, detail, trust,
+    ))
+}
+
+/// `unverifiedReverseResult`'s fields, in its order.
+fn unverified_reverse_fields(
+    address: &str,
+    system: NameSystem,
+    claimed: Option<&str>,
+    detail: Option<String>,
+    trust: Option<JsValue>,
+) -> Vec<(&'static str, JsValue)> {
     let mut fields = vec![
         ("success", JsValue::Bool(false)),
         ("address", s(address)),
@@ -310,7 +356,7 @@ pub(crate) fn unverified_reverse(
     if let Some(trust) = trust {
         fields.push(("trust", trust));
     }
-    obj(fields)
+    fields
 }
 
 pub(crate) fn reverse_conflict(
@@ -370,13 +416,7 @@ pub(crate) async fn ens_reverse_with(
                 _ => (0, String::new()),
             };
             match status {
-                1 => obj(vec![
-                    ("success", JsValue::Bool(true)),
-                    ("address", s(address)),
-                    ("name", s(&detail)),
-                    ("system", s("ens")),
-                    ("trust", trust),
-                ]),
+                1 => ens_primary_name(address, &detail, trust),
                 2 => unverified_reverse(address, NameSystem::Ens, Some(&detail), None, Some(trust)),
                 3 => obj(vec![
                     ("success", JsValue::Bool(false)),
@@ -579,4 +619,45 @@ pub(crate) async fn reverse(
             "No enabled name-resolution method could reverse-resolve {address}"
         ))
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only a name that is its own normalization is shown (#75).
+    #[test]
+    fn a_primary_name_must_be_normalized() {
+        let address = "0xabababababababababababababababababababab";
+        let shown = |name: &str| {
+            let result = ens_primary_name(address, name, JsValue::Null);
+            (
+                result.get("success") == Some(&JsValue::Bool(true)),
+                result
+                    .get("reason")
+                    .and_then(JsValue::as_str)
+                    .map(str::to_owned),
+            )
+        };
+        assert_eq!(shown("vitalik.eth"), (true, None));
+        assert_eq!(shown("ünïcödé.eth"), (true, None));
+        for lookalike in [
+            "vitaIik.eth",
+            "Vitalik.eth",
+            " vitalik.eth",
+            "vitalik.eth\u{200b}",
+            "",
+        ] {
+            assert_eq!(
+                shown(lookalike),
+                (false, Some("UNVERIFIED".into())),
+                "{lookalike:?}"
+            );
+        }
+        let claimed = ens_primary_name(address, "vitaIik.eth", JsValue::Null);
+        assert_eq!(
+            claimed.get("claimedName").and_then(JsValue::as_str),
+            Some("vitaIik.eth")
+        );
+    }
 }

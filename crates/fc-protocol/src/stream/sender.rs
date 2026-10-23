@@ -113,6 +113,20 @@ pub enum Cancel {
     Late,
 }
 
+/// What [`Sender::settle`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settled {
+    /// The error is the request's one reply: nothing of it had been
+    /// written, and a queued head and body were dropped.
+    Replied,
+    /// Its stream was open: the abort purged it and is queued.
+    Aborted,
+    /// Its outcome was settled already (a reply queued or written, an abort
+    /// queued, its end written), or this side doesn't hold it: nothing
+    /// changes.
+    Already,
+}
+
 /// What a credit frame did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Credited {
@@ -513,12 +527,82 @@ impl Sender {
         Ok(())
     }
 
+    /// Settles request `id` with an outcome the service owes it (design
+    /// 0007, "Panics": a panic on its task, or its instance's teardown),
+    /// unless its outcome is settled already, deciding as the request's
+    /// protocol state calls for:
+    /// - **no head queued yet:** `json`, an error response, is its one
+    ///   reply;
+    /// - **a head queued but not written:** the head and any body queued
+    ///   behind it are dropped, as for a cancel, and `json` is its only
+    ///   reply;
+    /// - **its stream open:** `abort` purges the stream's queued data, and
+    ///   its `end` if queued, and is queued with the control frames;
+    /// - **settled already** (a reply queued or written, an abort queued,
+    ///   its `end` written), or never held: nothing changes.
+    pub fn settle(&mut self, id: u64, json: Vec<u8>, abort: &Abort) -> Result<Settled, SendError> {
+        self.usable()?;
+        if json.len() > MAX_PAYLOAD {
+            return Err(SendError::TooLarge);
+        }
+        let abort_json = abort.to_json().map_err(|_| SendError::TooLarge)?;
+        let Some(state) = self.requests.get_mut(&id) else {
+            return match self.absent(id) {
+                SendError::Gone => Ok(Settled::Already),
+                other => Err(other),
+            };
+        };
+        match state {
+            // An abort queued behind an unwritten head settled it.
+            State::Head {
+                body: Some(body), ..
+            } if body.abort.is_some() => Ok(Settled::Already),
+            State::Working | State::Head { .. } => {
+                if let State::Head {
+                    body: Some(body), ..
+                } = state
+                {
+                    self.held -= body.purge();
+                }
+                // A queued head's control entry is skipped as stale when it
+                // comes up: the state is a reply now.
+                *state = State::Reply {
+                    json,
+                    cancelled: false,
+                };
+                self.control.push_back((Control::Reply, id));
+                Ok(Settled::Replied)
+            }
+            State::Open(body) if body.abort.is_none() => {
+                self.held -= body.purge();
+                unschedule(&mut self.rotation, body, id);
+                body.abort = Some((abort.code, abort_json));
+                self.control.push_back((Control::Abort, id));
+                Ok(Settled::Aborted)
+            }
+            State::Open(_) | State::Reply { .. } => Ok(Settled::Already),
+        }
+    }
+
     // ---- the writer ------------------------------------------------------
 
     /// Appends the next frame to write to `out` and says what it was, or
     /// returns `None` when there is nothing to write. Control entries go
     /// first, then the open streams round-robin, one frame each.
     pub fn next_frame(&mut self, out: &mut Vec<u8>) -> Option<Written> {
+        let (written, json) = self.next_frame_owned(out)?;
+        if let Some(json) = json {
+            out.extend_from_slice(&json);
+        }
+        Some(written)
+    }
+
+    /// As [`Sender::next_frame`], except that a head's or a reply's JSON is
+    /// handed over rather than copied: `out` gets its frame header, and the
+    /// JSON, as it was queued, is returned to be written right after it. A
+    /// writer then holds no copy of a large message, and no buffer grown
+    /// for one.
+    pub fn next_frame_owned(&mut self, out: &mut Vec<u8>) -> Option<(Written, Option<Vec<u8>>)> {
         if self.failed.is_some() {
             return None;
         }
@@ -529,19 +613,25 @@ impl Sender {
         }
         while let Some(id) = self.rotation.pop_front() {
             if let Some(written) = self.write_stream(id, out) {
-                return Some(written);
+                return Some((written, None));
             }
         }
         None
     }
 
     /// Writes a control entry, unless a cancel has made it stale: a head
-    /// or abort dropped in favour of the `cancelled` reply.
-    fn write_control(&mut self, entry: Control, id: u64, out: &mut Vec<u8>) -> Option<Written> {
+    /// or abort dropped in favour of the `cancelled` reply. A head's or a
+    /// reply's JSON is returned after its header.
+    fn write_control(
+        &mut self,
+        entry: Control,
+        id: u64,
+        out: &mut Vec<u8>,
+    ) -> Option<(Written, Option<Vec<u8>>)> {
         let state = self.requests.remove(&id)?;
         match (entry, state) {
             (Control::Head, State::Head { json, body }) => {
-                put_json(out, &json);
+                put_json_header(out, json.len());
                 if let Some(mut body) = body {
                     if body.writable() {
                         body.scheduled = true;
@@ -549,15 +639,16 @@ impl Sender {
                     }
                     self.requests.insert(id, State::Open(body));
                 }
-                Some(Written::Head { id })
+                Some((Written::Head { id }, Some(json)))
             }
             (Control::Reply, State::Reply { json, cancelled }) => {
-                put_json(out, &json);
-                Some(if cancelled {
+                put_json_header(out, json.len());
+                let written = if cancelled {
                     Written::Cancelled { id }
                 } else {
                     Written::Reply { id }
-                })
+                };
+                Some((written, Some(json)))
             }
             (
                 Control::Abort,
@@ -568,7 +659,7 @@ impl Sender {
             ) => {
                 put_header(out, KIND_ABORT, id, json.len());
                 out.extend_from_slice(&json);
-                Some(Written::Abort { id, code })
+                Some((Written::Abort { id, code }, None))
             }
             (_, state) => {
                 self.requests.insert(id, state);
@@ -765,12 +856,12 @@ fn cancelled_reply(id: u64) -> Vec<u8> {
     .into_bytes()
 }
 
-/// Appends a JSON frame; `json` is within one frame, as queueing checked.
-fn put_json(out: &mut Vec<u8>, json: &[u8]) {
-    let len = u32::try_from(json.len().min(MAX_PAYLOAD) + 1).unwrap_or(u32::MAX);
+/// Appends a JSON frame's header, for a payload of `len` bytes: within one
+/// frame, as queueing checked.
+fn put_json_header(out: &mut Vec<u8>, len: usize) {
+    let len = u32::try_from(len.min(MAX_PAYLOAD) + 1).unwrap_or(u32::MAX);
     out.extend_from_slice(&len.to_be_bytes());
     out.push(KIND_JSON);
-    out.extend_from_slice(json);
 }
 
 #[cfg(test)]
@@ -950,6 +1041,122 @@ mod tests {
         assert_eq!(s.push(1, &[0; 5000]).unwrap(), SMALL_FRAME);
     }
 
+    /// The error a settle in these tests owes.
+    fn internal_reply(id: u64) -> Vec<u8> {
+        format!(r#"{{"type":"response","id":{id},"error":{{"code":"internal","message":"x"}}}}"#)
+            .into_bytes()
+    }
+
+    #[test]
+    fn a_settle_decides_by_what_is_written() {
+        let internal = Abort::new(AbortCode::Internal, "x");
+        let mut s = Sender::new();
+        let mut out = Vec::new();
+        // No head yet: the error is the one reply.
+        s.request(1).unwrap();
+        assert_eq!(
+            s.settle(1, internal_reply(1), &internal),
+            Ok(Settled::Replied)
+        );
+        assert_eq!(s.head(1, b"{}".to_vec(), true), Err(SendError::Answered));
+        assert_eq!(s.next_frame(&mut out), Some(Written::Reply { id: 1 }));
+        assert_eq!(out[5..], internal_reply(1));
+        assert!(!s.is_live(1));
+        assert_eq!(
+            s.settle(1, internal_reply(1), &internal),
+            Ok(Settled::Already)
+        );
+
+        // A head queued with its body behind it: both go, the error is the
+        // only reply, and the head's stale entry is skipped.
+        s.request(2).unwrap();
+        s.head(2, b"{}".to_vec(), true).unwrap();
+        assert_eq!(s.push(2, &[7; 5000]).unwrap(), 5000);
+        assert_eq!(
+            s.settle(2, internal_reply(2), &internal),
+            Ok(Settled::Replied)
+        );
+        assert_eq!((s.held(), s.held_capacity()), (0, 0));
+        assert_eq!(s.push(2, &[7]), Err(SendError::NotOpen));
+        assert_eq!(drain(&mut s), [Written::Reply { id: 2 }]);
+        assert!(!s.is_live(2));
+
+        // An open stream with data and its end queued: the abort purges both.
+        s.request(3).unwrap();
+        s.head(3, b"{}".to_vec(), true).unwrap();
+        out.clear();
+        assert_eq!(s.next_frame(&mut out), Some(Written::Head { id: 3 }));
+        assert_eq!(s.push(3, &[7; 5000]).unwrap(), 5000);
+        s.finish(3).unwrap();
+        assert_eq!(
+            s.settle(3, internal_reply(3), &internal),
+            Ok(Settled::Aborted)
+        );
+        assert_eq!(s.held(), 0);
+        assert_eq!(s.push(3, &[7]), Err(SendError::Gone));
+        assert_eq!(
+            drain(&mut s),
+            [Written::Abort {
+                id: 3,
+                code: AbortCode::Internal
+            }]
+        );
+        assert_eq!(
+            s.settle(3, internal_reply(3), &internal),
+            Ok(Settled::Already)
+        );
+
+        // Settled already: a reply queued, an abort queued, an end written,
+        // a cancel's reply. Nothing changes.
+        s.request(4).unwrap();
+        s.reply(4, b"{}".to_vec()).unwrap();
+        assert_eq!(
+            s.settle(4, internal_reply(4), &internal),
+            Ok(Settled::Already)
+        );
+        s.request(5).unwrap();
+        s.head(5, b"{}".to_vec(), true).unwrap();
+        s.abort(5, &Abort::new(AbortCode::BodyStreamError, "y"))
+            .unwrap();
+        assert_eq!(
+            s.settle(5, internal_reply(5), &internal),
+            Ok(Settled::Already)
+        );
+        s.request(6).unwrap();
+        assert_eq!(s.cancel(6), Ok(Cancel::Cancelled));
+        assert_eq!(
+            s.settle(6, internal_reply(6), &internal),
+            Ok(Settled::Already)
+        );
+        s.request(7).unwrap();
+        s.head(7, b"{}".to_vec(), true).unwrap();
+        s.finish(7).unwrap();
+        assert_eq!(
+            drain(&mut s),
+            [
+                Written::Reply { id: 4 },
+                Written::Head { id: 5 },
+                Written::Abort {
+                    id: 5,
+                    code: AbortCode::BodyStreamError
+                },
+                Written::Cancelled { id: 6 },
+                Written::Head { id: 7 },
+                Written::End { id: 7 },
+            ]
+        );
+        assert_eq!(
+            s.settle(7, internal_reply(7), &internal),
+            Ok(Settled::Already)
+        );
+        assert_eq!(
+            s.settle(8, internal_reply(8), &internal),
+            Err(SendError::Unknown)
+        );
+        assert_eq!(s.live(), 0);
+        assert!(s.control_entries() == 0 && s.rotation_entries() == 0);
+    }
+
     #[test]
     fn oversized_heads_and_aborts_are_refused() {
         let mut s = Sender::new();
@@ -961,5 +1168,51 @@ mod tests {
         s.head(1, b"{}".to_vec(), true).unwrap();
         let wordy = Abort::new(AbortCode::Internal, "x".repeat(2000));
         assert_eq!(s.abort(1, &wordy), Err(SendError::TooLarge));
+    }
+
+    /// The same frames as `next_frame`'s, byte for byte, with a head's and a
+    /// reply's JSON handed over as it was queued.
+    #[test]
+    fn owned_frames_are_next_frames_split() {
+        fn queue(s: &mut Sender) {
+            for id in 1..=4 {
+                s.request(id).unwrap();
+            }
+            s.head(1, br#"{"head":1}"#.to_vec(), true).unwrap();
+            assert_eq!(s.push(1, &[7; 100]).unwrap(), 100);
+            s.finish(1).unwrap();
+            s.reply(2, br#"{"reply":2}"#.to_vec()).unwrap();
+            s.head(3, br#"{"head":3}"#.to_vec(), true).unwrap();
+            s.abort(3, &Abort::new(AbortCode::Internal, "internal"))
+                .unwrap();
+            s.head(4, br#"{"head":4}"#.to_vec(), false).unwrap();
+            assert_eq!(s.cancel(4), Ok(Cancel::Cancelled));
+        }
+        let (mut copied, mut owned) = (Sender::new(), Sender::new());
+        queue(&mut copied);
+        queue(&mut owned);
+        let (mut expected, mut kinds) = (Vec::new(), Vec::new());
+        while let Some(written) = copied.next_frame(&mut expected) {
+            kinds.push(written);
+        }
+        let (mut frames, mut handed, mut owned_kinds) = (Vec::new(), Vec::new(), Vec::new());
+        while let Some((written, json)) = owned.next_frame_owned(&mut frames) {
+            owned_kinds.push(written);
+            if let Some(json) = json {
+                frames.extend_from_slice(&json);
+                handed.push(json);
+            }
+        }
+        assert_eq!(frames, expected);
+        assert_eq!(owned_kinds, kinds);
+        assert_eq!(
+            handed,
+            [
+                br#"{"head":1}"#.to_vec(),
+                br#"{"reply":2}"#.to_vec(),
+                br#"{"head":3}"#.to_vec(),
+                cancelled_reply(4)
+            ]
+        );
     }
 }

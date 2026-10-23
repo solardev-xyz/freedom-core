@@ -8,11 +8,21 @@
 //! after the key is gone. It runs inline, as `compat.*` does. No secret is
 //! held while untrusted input is processed, and no key byte leaves this
 //! module.
+//!
+//! Typed data comes with the view of exactly what is signed (#88), which
+//! fc-evm writes as JSON text in the pass that hashes; the reply carries it
+//! as written. `sign.typed_data` signs only the digest the caller confirmed
+//! (`expected_hash`), and both typed-data methods refuse data whose signing
+//! reply, at the largest request ID, wouldn't fit one frame.
 
-use fc_evm::{Transaction, checksum_address, parse_bytes, to_hex};
+use std::sync::OnceLock;
+
+use fc_evm::{Transaction, ViewRequest, checksum_address, parse_bytes, to_hex};
 use fc_keys::Secp256k1Key;
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_vault::state::VaultState;
+use serde::Serialize;
+use serde_json::value::RawValue;
 use serde_json::{Map, Value, json};
 
 pub const METHODS: [&str; 5] = [
@@ -34,11 +44,15 @@ fn evm_error(error: fc_evm::Error) -> ErrorBody {
     }
 }
 
-/// Which keys a method may use (design 0002, "Key references").
+/// Which keys a method may use (design 0002, "Key references"): accounts
+/// sign transactions, messages and typed data; the Bee wallet and publisher
+/// keys sign single-owner chunks, and nothing else does. An account's
+/// 32-byte `sign.message` is exactly a chunk signature, so a chunk signature
+/// is bound to a real chunk only from a key that signs nothing else (#89).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Allowed {
     AccountsOnly,
-    AnyKey,
+    ChunkKeysOnly,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,7 +75,10 @@ fn object<'a>(
         .keys()
         .find(|key| !required.contains(&key.as_str()) && !optional.contains(&key.as_str()))
     {
-        return Err(invalid(format!("unknown field {unknown}")));
+        return Err(invalid(format!(
+            "unknown field {}",
+            fc_evm::shortened(unknown)
+        )));
     }
     if let Some(missing) = required.iter().find(|key| !object.contains_key(**key)) {
         return Err(invalid(format!("missing field {missing}")));
@@ -97,10 +114,12 @@ fn key_ref(value: &Value, allowed: Allowed) -> Result<KeyRef, ErrorBody> {
         }
         _ => return Err(invalid("unknown key kind")),
     };
-    if allowed == Allowed::AccountsOnly && !matches!(key, KeyRef::Account(_)) {
-        return Err(invalid("this key can only sign single-owner chunks"));
+    match (allowed, key) {
+        (Allowed::AccountsOnly, KeyRef::Account(_))
+        | (Allowed::ChunkKeysOnly, KeyRef::BeeWallet | KeyRef::Publisher(_)) => Ok(key),
+        (Allowed::AccountsOnly, _) => Err(invalid("this key can only sign single-owner chunks")),
+        (Allowed::ChunkKeysOnly, _) => Err(invalid("account keys don't sign single-owner chunks")),
     }
-    Ok(key)
 }
 
 /// Derives the key now; it wipes on drop.
@@ -126,6 +145,77 @@ fn typed_data(value: &Value) -> Result<(&Value, &Value, &Value), ErrorBody> {
     Ok((&object["domain"], &object["types"], &object["message"]))
 }
 
+/// `sign.typed_data`'s result.
+#[derive(Serialize)]
+struct SignedView<'a> {
+    signature: String,
+    view: &'a RawValue,
+}
+
+/// `typed_data.hash`'s result.
+#[derive(Serialize)]
+struct HashedView<'a> {
+    hash: String,
+    view: &'a RawValue,
+}
+
+/// The longest view either typed-data method accepts: the signing response
+/// `{"type":"response","id":…,"result":{"signature":…,"view":…}}`, as the
+/// core writes it, with the largest ID a request may have (2^53 - 1), must
+/// fit one frame (#88, deviation `view-size`). `{ hash, view }` is 71 bytes
+/// shorter, so `typed_data.hash` refuses exactly what `sign.typed_data`
+/// would, whatever either request's ID.
+pub fn max_view_len() -> usize {
+    static LIMIT: OnceLock<usize> = OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        // The envelope around a 1-byte view: everything but the view has a
+        // fixed length.
+        signing_reply_len(&[0; 65], "0").map_or(0, |len| {
+            fc_protocol::frame::MAX_PAYLOAD.saturating_sub(len.saturating_sub(1))
+        })
+    })
+}
+
+/// The length of the signing response at the largest ID, as written.
+fn signing_reply_len(signature: &[u8; 65], view: &str) -> Option<usize> {
+    let view = RawValue::from_string(view.to_owned()).ok()?;
+    let result = SignedView {
+        signature: to_hex(signature),
+        view: &view,
+    };
+    let mut out = Vec::new();
+    fc_protocol::message::write_result(&mut out, fc_protocol::message::MAX_ID, &result).ok()?;
+    Some(out.len())
+}
+
+/// The typed-data parameters both methods share: the digest and its view.
+fn typed_data_view(fields: &Map<String, Value>) -> Result<fc_evm::TypedDataView, ErrorBody> {
+    let (domain, types, message) = typed_data(&fields["typed_data"])?;
+    let chain_id = match fields.get("chain_id") {
+        None => None,
+        Some(Value::String(text)) => Some(
+            fc_evm::parse_unsigned(text)
+                .ok_or_else(|| invalid("chain_id: expected an unsigned quantity"))?,
+        ),
+        Some(_) => return Err(invalid("chain_id: expected a quantity string")),
+    };
+    let request = ViewRequest {
+        // Any JSON value, null included: only a string can match.
+        primary_type: fields.get("primary_type"),
+        chain_id,
+        max_len: max_view_len(),
+    };
+    fc_evm::typed_data_view(domain, types, message, &request).map_err(evm_error)
+}
+
+fn view_value(view: String) -> Result<Box<RawValue>, ErrorBody> {
+    RawValue::from_string(view).map_err(|_| crate::vault::internal())
+}
+
+fn raw(result: &impl Serialize) -> Result<Box<RawValue>, ErrorBody> {
+    serde_json::value::to_raw_value(result).map_err(|_| crate::vault::internal())
+}
+
 fn string<'a>(object: &'a Map<String, Value>, field: &str) -> Result<&'a str, ErrorBody> {
     object
         .get(field)
@@ -133,15 +223,61 @@ fn string<'a>(object: &'a Map<String, Value>, field: &str) -> Result<&'a str, Er
         .ok_or_else(|| invalid(format!("{field}: expected a string")))
 }
 
-/// Handles one of [`METHODS`]; returns the JSON result.
-pub fn handle(state: &VaultState, method: &str, raw: Option<&str>) -> Result<Value, ErrorBody> {
+/// Handles one of [`METHODS`]; returns the JSON result, as written.
+pub fn handle(
+    state: &VaultState,
+    method: &str,
+    params: Option<&str>,
+) -> Result<Box<RawValue>, ErrorBody> {
     // Numbers as JSON.parse reads them: typed data must hash the integer
     // ethers signs and the approval UI shows (#87).
     let params: Value =
-        fc_evm::parse_json(raw.unwrap_or("{}")).map_err(|_| invalid("Invalid parameters"))?;
+        fc_evm::parse_json(params.unwrap_or("{}")).map_err(|_| invalid("Invalid parameters"))?;
+    match method {
+        "sign.typed_data" => {
+            let fields = object(
+                &params,
+                &["key", "typed_data", "expected_hash"],
+                &["primary_type", "chain_id"],
+            )?;
+            let key = key_ref(&fields["key"], Allowed::AccountsOnly)?;
+            let expected: [u8; 32] = parse_bytes(string(fields, "expected_hash")?, "expected_hash")
+                .map_err(evm_error)?
+                .try_into()
+                .map_err(|_| invalid("expected_hash: expected 32 bytes"))?;
+            let hashed = typed_data_view(fields)?;
+            // The digest the user confirmed, or nothing: checked before any
+            // key is derived.
+            if hashed.hash != expected {
+                return Err(invalid(
+                    "typed data hash is not the confirmed one (expected_hash)",
+                ));
+            }
+            let view = view_value(hashed.view)?;
+            let signature = sign_with(state, key, &hashed.hash)?;
+            raw(&SignedView {
+                signature: to_hex(&signature),
+                view: &view,
+            })
+        }
+        "typed_data.hash" => {
+            let fields = object(&params, &["typed_data"], &["primary_type", "chain_id"])?;
+            let hashed = typed_data_view(fields)?;
+            let view = view_value(hashed.view)?;
+            raw(&HashedView {
+                hash: to_hex(&hashed.hash),
+                view: &view,
+            })
+        }
+        _ => other(state, method, &params).and_then(|result| raw(&result)),
+    }
+}
+
+/// The methods without a view.
+fn other(state: &VaultState, method: &str, params: &Value) -> Result<Value, ErrorBody> {
     match method {
         "sign.transaction" => {
-            let fields = object(&params, &["key", "tx"], &[])?;
+            let fields = object(params, &["key", "tx"], &[])?;
             let key = key_ref(&fields["key"], Allowed::AccountsOnly)?;
             let prepared = Transaction::from_json(&fields["tx"])
                 .and_then(|tx| tx.prepare())
@@ -151,29 +287,15 @@ pub fn handle(state: &VaultState, method: &str, raw: Option<&str>) -> Result<Val
             Ok(json!({ "raw": to_hex(&signed.raw), "hash": to_hex(&signed.hash) }))
         }
         "sign.message" => {
-            let fields = object(&params, &["key", "message"], &[])?;
+            let fields = object(params, &["key", "message"], &[])?;
             let key = key_ref(&fields["key"], Allowed::AccountsOnly)?;
             let message = parse_bytes(string(fields, "message")?, "message").map_err(evm_error)?;
             let signature = sign_with(state, key, &fc_evm::eip191_digest(&message))?;
             Ok(json!({ "signature": to_hex(&signature) }))
         }
-        "sign.typed_data" => {
-            let fields = object(&params, &["key", "typed_data"], &[])?;
-            let key = key_ref(&fields["key"], Allowed::AccountsOnly)?;
-            let (domain, types, message) = typed_data(&fields["typed_data"])?;
-            let digest = fc_evm::typed_data_hash(domain, types, message).map_err(evm_error)?;
-            let signature = sign_with(state, key, &digest)?;
-            Ok(json!({ "signature": to_hex(&signature) }))
-        }
-        "typed_data.hash" => {
-            let fields = object(&params, &["typed_data"], &[])?;
-            let (domain, types, message) = typed_data(&fields["typed_data"])?;
-            let hash = fc_evm::typed_data_hash(domain, types, message).map_err(evm_error)?;
-            Ok(json!({ "hash": to_hex(&hash) }))
-        }
         "swarm.sign_soc" => {
-            let fields = object(&params, &["key", "identifier", "payload"], &["span"])?;
-            let key = key_ref(&fields["key"], Allowed::AnyKey)?;
+            let fields = object(params, &["key", "identifier", "payload"], &["span"])?;
+            let key = key_ref(&fields["key"], Allowed::ChunkKeysOnly)?;
             let identifier: [u8; 32] = parse_bytes(string(fields, "identifier")?, "identifier")
                 .map_err(evm_error)?
                 .try_into()

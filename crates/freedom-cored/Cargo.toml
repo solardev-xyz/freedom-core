@@ -7,22 +7,11 @@ rust-version.workspace = true
 publish.workspace = true
 repository.workspace = true
 
-# The workspace lints, except that `unsafe_code` is `deny` instead of
-# `forbid`: one Windows FFI call (GetDriveTypeW, storage.rs) carries a
-# reviewed `#[allow(unsafe_code)]`. Logic crates keep `forbid`.
-[lints.rust]
-unsafe_code = "deny"
-
-[lints.clippy]
-all = { level = "warn", priority = -1 }
-unwrap_used = "warn"
-expect_used = "warn"
-panic = "warn"
-todo = "warn"
-unimplemented = "warn"
-dbg_macro = "warn"
-print_stdout = "warn"
-print_stderr = "warn"
+# The workspace lints, `forbid(unsafe_code)` included: the crate that holds
+# the keys has no unsafe code. Its one OS call std lacks (GetDriveTypeW) is
+# fc-sys's.
+[lints]
+workspace = true
 
 [[bin]]
 name = "freedom-cored"
@@ -39,6 +28,8 @@ fc-evm = { path = "../fc-evm" }
 fc-keys = { path = "../fc-keys" }
 fc-naming = { path = "../fc-naming" }
 fc-protocol = { path = "../fc-protocol" }
+# The sealed release of the Radicle node key (design 0008).
+fc-seal = { path = "../fc-seal" }
 fc-swarm = { path = "../fc-swarm" }
 fc-vault = { path = "../fc-vault" }
 getrandom = "0.4"
@@ -50,10 +41,13 @@ sha2 = { version = "0.11", default-features = false, features = ["zeroize"] }
 zeroize = "1.8"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+# GetDriveTypeW, for storage qualification.
+fc-sys = { path = "../fc-sys" }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1", default-features = false, features = ["fs", "process", "std"] }
 
 [dev-dependencies]
+# The seal test checks the opened key against the Radicle public key.
+ed25519-dalek = { version = "3.0", default-features = false }
 tempfile = "3"

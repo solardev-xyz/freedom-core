@@ -18,12 +18,13 @@ use fc_chain::{
     Party, RATE_LIMIT_COOLDOWN_MS, READ_METHODS, ReceivedError, RefusalReason, SINGLE_NODE_METHODS,
     ScanStep, SourceFailure, StableDigest, TransferScan, TxHash, agreed_rpc_logs,
     ant_shrinks_log_scan_on, blockscout_transfer, broadcast_failure_text, canonical_log,
-    classify_broadcast_answer, cooldown_from, decode_answer, fee_quote, fee_quote_failure_text,
-    is_js_whitespace, is_read_method, log_index_filter, log_query_span, log_range_refusal_text,
-    log_scan_range_cap, logs_agree, myotis_answer, myotis_operation, myotis_trust,
-    no_source_left_text, normalize_params, rank_log_scan_error, request_failure_text, rpc_transfer,
-    rpc_transfer_log_well_formed, safe_error_message, source_order, source_serves_method,
-    stable_digest, stable_value, transaction_hash, transfers_json, unsupported_read_method_text,
+    classify_broadcast_answer, combine_fee_quotes, cooldown_from, decode_answer, fee_quote,
+    fee_quote_failure_text, fee_quote_values, is_js_whitespace, is_read_method, log_index_filter,
+    log_query_span, log_range_refusal_text, log_scan_range_cap, logs_agree, myotis_answer,
+    myotis_operation, myotis_trust, no_source_left_text, normalize_params, rank_log_scan_error,
+    request_failure_text, rpc_transfer, rpc_transfer_log_well_formed, safe_error_message,
+    source_order, source_serves_method, stable_digest, stable_value, transaction_hash,
+    transfers_json, unsupported_read_method_text,
 };
 use fc_json::index::{Index, IndexError, KeyOrder};
 use serde_json::Value as Json;
@@ -294,6 +295,47 @@ fn fee_quotes() {
         }
     }
     assert!(cases.len() > 50);
+}
+
+/// B's combination of Direct's quotes (deviation `fee-combination`): the
+/// design's own expected values, each endpoint's quote the reference's.
+#[test]
+fn fee_combinations() {
+    let vectors = vectors();
+    let combinations = &vectors["fee_combinations"];
+    assert_eq!(combinations["deviation"], "fee-combination");
+    let cases = combinations["cases"].as_array().unwrap();
+    for case in cases {
+        let name = id(case);
+        let values: Vec<_> = case["endpoints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|endpoint| {
+                let values = fee_quote_values(
+                    "direct",
+                    opt_str(endpoint, "gas_price"),
+                    opt_str(endpoint, "priority"),
+                )
+                .unwrap();
+                assert_eq!(
+                    values.quote("direct").to_json(),
+                    str_of(&endpoint["js"], "quote_json"),
+                    "{name}"
+                );
+                values
+            })
+            .collect();
+        let verified = case["eip1559_verified"].as_bool().unwrap();
+        let combined = combine_fee_quotes(&values, verified).unwrap();
+        assert_eq!(
+            combined.to_json(),
+            str_of(&case["design"], "quote_json"),
+            "{name}"
+        );
+        assert_eq!(combined.json_len(), combined.to_json().len(), "{name}");
+    }
+    assert!(cases.len() >= 20);
 }
 
 #[test]

@@ -1402,6 +1402,11 @@ function validationCases(requests) {
   const gatewayBase = requests.find((e) => e.id === 'ipfs-gateway');
   const redirect = requests.find((e) => e.id === 'ipfs-gateway-localhost');
   const error = requests.find((e) => e.id === 'bzz-name-not-found');
+  // Name hosts: their targets come from a lookup, so only the namespace and
+  // shape of a path can be judged. A hash host's target is the request's
+  // own (#97), so its path cases are below, with the trust label.
+  const bzzName = requests.find((e) => e.id === 'bzz-name-ok');
+  const ipfsName = requests.find((e) => e.id === 'ipfs-name-ok');
   const mutate = (id, from, change, expect, request = from.request) => {
     const plan = structuredClone(from.plan);
     change(plan);
@@ -1461,7 +1466,7 @@ function validationCases(requests) {
     ['bzz-encoded-climb-upper', `/bzz/${h}/..%2F..%2Fstamps`, 'path'],
     ['bzz-encoded-backslash-climb', `/bzz/${h}/%2E%2E%5Cstamps`, 'path'],
     ['bzz-encoded-dots-in-name', `/bzz/${h}/x%2e%2e/..%2E/y`, 'valid'],
-  ]) mutate(`path-${id}`, base, (p) => { f(p).path = path; }, expect);
+  ]) mutate(`path-${id}`, bzzName, (p) => { f(p).path = path; }, expect);
   const v1 = b32cid(CID_BYTES.dagPb);
   for (const [id, path, expect] of [
     ['ipfs-ok', `/ipfs/${v1}/a%2Fb/%5C?x`, 'valid'],
@@ -1491,8 +1496,32 @@ function validationCases(requests) {
     ['ipfs-double-encoded', `/ipfs/${v1}/%252e%252e%252fapi/v0/id`, 'valid'],
     ['ipfs-encoded-climb-in-query', `/ipfs/${v1}/x?..%2F..%2Fapi`, 'valid'],
     ['ipfs-lone-percent', `/ipfs/${v1}/a%2/%`, 'valid'],
-  ]) mutate(`path-${id}`, ipfsBase, (p) => { f(p).path = path; }, expect);
-  const ipnsBase = requests.find((e) => e.id === 'ipns-dnslink');
+  ]) mutate(`path-${id}`, ipfsName, (p) => { f(p).path = path; }, expect);
+  // Hash hosts (#97): the plan's target must be the one the request itself
+  // plans to, `/<namespace>/<canonical host><pathname><search>`, and a fetch
+  // answers no request that has no hash or name host.
+  const other64 = 'b'.repeat(64);
+  const ipfsV0 = requests.find((e) => e.id === 'ipfs-cid-v0');
+  const ipnsKey = requests.find((e) => e.id === 'ipns-key-base36');
+  const replaced = (path, from, to) => { assert.ok(path.includes(from)); return path.replace(from, to); };
+  for (const [id, from, change, expect, request] of [
+    ['tie-bzz-own', base, () => {}, 'valid'],
+    ['tie-bzz-other-reference', base, (p) => { f(p).path = replaced(f(p).path, h, other64); }, 'path'],
+    ['tie-bzz-uppercase-reference', base, (p) => { f(p).path = replaced(f(p).path, h, h.toUpperCase()); }, 'path'],
+    ['tie-bzz-other-file', base, (p) => { f(p).path = `/bzz/${h}/other`; }, 'path'],
+    ['tie-bzz-query-dropped', base, (p) => { f(p).path = f(p).path.split('?')[0]; }, 'path'],
+    ['tie-ipfs-other-cid', ipfsBase, (p) => { f(p).path = replaced(f(p).path, v1, b32cid(CID_BYTES.raw)); }, 'path'],
+    ['tie-ipfs-uncanonical-cid', ipfsV0, (p) => { f(p).path = `/ipfs/${CIDV0}/index.html`; }, 'path'],
+    ['tie-ipns-other-key', ipnsKey, (p) => { f(p).path = f(p).path.replace(/(\/ipns\/k[0-9a-z]+?)[0-9a-z](\/)/, '$1a$2'); }, 'path'],
+    ['tie-fetch-for-gateway-form', ipfsBase, () => {}, 'path', redirect.request],
+    ['tie-fetch-for-invalid-host', base, () => {}, 'path', withRequest(base, (r) => { r.url = 'bzz://not-a-reference/x'; })],
+    ['tie-name-host-any-reference', bzzName, (p) => { f(p).path = replaced(f(p).path, h, other64); }, 'valid'],
+    ['tie-dnslink-own', requests.find((e) => e.id === 'ipns-dnslink'), () => {}, 'valid'],
+    ['tie-dnslink-other-name', requests.find((e) => e.id === 'ipns-dnslink'), (p) => { f(p).path = replaced(f(p).path, 'docs.ipfs.tech', 'evil.example'); }, 'path'],
+  ]) mutate(`path-${id}`, from, change, expect, request ?? from.request);
+  // A DNSLink host is the node's to resolve: its target is the request's
+  // own too. A name the core resolves is a name host.
+  const ipnsBase = requests.find((e) => e.id === 'ipns-name-ok-ipns');
   for (const [id, path, expect] of [
     ['ipns-ok', '/ipns/docs.ipfs.tech/install', 'valid'],
     ['ipns-key', '/ipns/k51qzi5uqu5dlvj2baxnqndepeb86cbk3ng7n3i46uzyxzyqj2xjonzllnv0v8/', 'valid'],
@@ -1575,7 +1604,10 @@ function validationCases(requests) {
   mutate('trust-content-wrong', base, (p) => { f(p).trust.content = 'unverified'; }, 'trust');
   mutate('trust-content-unknown', base, (p) => { f(p).trust.content = 'verified'; }, 'trust');
   mutate('trust-name-number', base, (p) => { f(p).trust.name = 1; }, 'trust');
-  mutate('trust-name-string', base, (p) => { f(p).trust.name = 'verified'; }, 'valid');
+  mutate('trust-name-string', bzzName, (p) => { f(p).trust.name = 'verified'; }, 'valid');
+  // A hash host had no lookup: no name label (#97).
+  mutate('trust-name-string-hash-host', base, (p) => { f(p).trust.name = 'verified'; }, 'trust');
+  mutate('trust-name-string-cid-host', ipfsBase, (p) => { f(p).trust.name = 'verified'; }, 'trust');
   // Redirects.
   mutate('redirect-302', redirect, (p) => { p.redirect.status = 302; }, 'redirect');
   mutate('redirect-elsewhere', redirect, (p) => { p.redirect.location = 'https://evil.example/'; }, 'redirect');

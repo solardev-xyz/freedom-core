@@ -750,7 +750,7 @@ fn shutdown_is_honored_while_main_is_not_reading() {
     let (root, data, mut core) = imported(&[]);
     core.pause_reading();
     let mut burst = filling(3..453).concat();
-    burst.extend(frame(&request(453, "core.shutdown", json!({}))));
+    burst.extend(frame(&shell_request(453, "core.shutdown", json!({}))));
     // Stdin stays open: the exit is the shutdown's, not EOF's.
     let writer = core.send_in_background(burst);
     assert_eq!(core.exit_code(Duration::from_secs(10)), 0);
@@ -991,7 +991,11 @@ fn a_draining_backlog_does_not_starve_a_shutdown() {
     // Past the reader's credits: it reads the shutdown only as the backlog
     // drains.
     frames.extend(padded(heavy.end..heavy.end + 100));
-    frames.push(frame(&request(heavy.end + 100, "core.shutdown", json!({}))));
+    frames.push(frame(&shell_request(
+        heavy.end + 100,
+        "core.shutdown",
+        json!({}),
+    )));
     let feed = core.feed(frames);
     feed.wait_stalled(Duration::from_secs(1));
     core.resume_reading();
@@ -1279,13 +1283,20 @@ fn past_the_commit_point_the_reply_is_the_real_outcome() {
 fn a_committed_job_past_its_deadline_does_not_spin_the_loop() {
     let marker_dir = tempfile::tempdir().unwrap();
     let marker = marker_dir.path().join("claimed");
+    // The committed job holds until the test releases it, so the sample
+    // below always falls between the deadline and its end. The marker
+    // proves the claim came within the core's cutoff.
+    let release = marker_dir.path().join("release");
     let mut env = commit_hooks(&marker);
-    env[0].1 = "6000".into();
-    env.push(("FREEDOM_CORED_TEST_KDF_DEADLINE_MS", "4000".into()));
+    env[0].1 = "0".into();
+    env.push((
+        "FREEDOM_CORED_TEST_COMMIT_HOLD",
+        release.display().to_string(),
+    ));
+    env.push(("FREEDOM_CORED_TEST_KDF_DEADLINE_MS", "6000".into()));
     let (_root, data, locks) = dirs();
     let mut core = spawn_env("serve", &data, &locks, &[], &env_refs(&env));
     core.hello();
-    let sent = Instant::now();
     let create = request(
         2,
         "vault.create",
@@ -1293,25 +1304,67 @@ fn a_committed_job_past_its_deadline_does_not_spin_the_loop() {
     );
     core.send_raw(&frame(&create));
     wait_for_claim(&marker);
-    assert!(
-        sent.elapsed() < Duration::from_millis(3800),
-        "the KDF took too long for this test"
-    );
-    // Past the 4 s deadline, with the rename still stalled: measure CPU.
-    std::thread::sleep(Duration::from_millis(4200).saturating_sub(sent.elapsed()));
+    // The claim follows admission, so 6 s after seeing it the 6 s deadline
+    // has passed, however late the test runs. The rename is still held:
+    // measure CPU.
+    std::thread::sleep(Duration::from_millis(6100));
     let before = core.cpu_ticks();
     std::thread::sleep(Duration::from_millis(500));
     let spent = core.cpu_ticks() - before;
     assert!(spent < 20, "the loop spun: {spent} ticks in 0.5 s");
+    std::fs::write(&release, b"go").unwrap();
     let reply = core.response(2);
     assert!(reply["result"]["mnemonic_b64"].is_string(), "{reply}");
+}
+
+#[test]
+fn a_claim_late_in_its_deadline_is_refused_and_nothing_is_written() {
+    // With a 6 s deadline, claims end at 4 s. The job starts at 4.2 s, so
+    // it reaches its commit point within the deadline but past its claim
+    // time: it stops uncommitted, answered `deadline` (#127).
+    let marker_dir = tempfile::tempdir().unwrap();
+    let marker = marker_dir.path().join("claimed");
+    let mut env = commit_hooks(&marker);
+    env.push(("FREEDOM_CORED_TEST_KDF_DEADLINE_MS", "6000".into()));
+    env.push(("FREEDOM_CORED_TEST_JOB_DELAY_MS", "4200".into()));
+    let (_root, data, locks) = dirs();
+    let mut core = spawn_env("serve", &data, &locks, &[], &env_refs(&env));
+    core.hello();
+    let create = request(
+        2,
+        "vault.create",
+        json!({ "password_b64": b64("testpass1"), "words": 12 }),
+    );
+    core.send_raw(&frame(&create));
+    assert_eq!(core.response(2)["error"]["code"], "deadline");
+    // A vault job queued behind it starts only once the worker is done, so
+    // its reply means the refused job has cleaned up: nothing was claimed
+    // or written, and no second reply to 2 came first.
+    let verify = core.call(
+        3,
+        "vault.verify_password",
+        json!({ "password_b64": b64("testpass1") }),
+    );
+    assert_eq!(verify["id"], 3);
+    assert!(!marker.exists());
+    assert!(!data.join(VAULT).exists());
+    assert!(vault_temps(&data).is_empty());
 }
 
 #[test]
 fn shutdown_waits_for_committed_work_and_sends_its_reply() {
     let marker_dir = tempfile::tempdir().unwrap();
     let marker = marker_dir.path().join("claimed");
-    let env = commit_hooks(&marker);
+    // The committed job holds until the core begins to exit (the release
+    // file is never written), so the shutdown always finds it committed
+    // and unfinished, and it finishes well within the 2 s drain.
+    let release = marker_dir.path().join("never");
+    let mut env = commit_hooks(&marker);
+    env[0].1 = "0".into();
+    env.push((
+        "FREEDOM_CORED_TEST_COMMIT_HOLD",
+        release.display().to_string(),
+    ));
     let (_root, data, locks) = dirs();
     let mut core = spawn_env("serve", &data, &locks, &[], &env_refs(&env));
     core.hello();
@@ -1322,7 +1375,7 @@ fn shutdown_waits_for_committed_work_and_sends_its_reply() {
     );
     core.send_raw(&frame(&create));
     wait_for_claim(&marker);
-    core.send_raw(&frame(&request(3, "core.shutdown", json!({}))));
+    core.send_raw(&frame(&shell_request(3, "core.shutdown", json!({}))));
     // The shutdown is acknowledged, and the committed create still delivers
     // its phrase before the process exits.
     assert_eq!(core.response(3)["result"], json!({}));
@@ -1330,6 +1383,81 @@ fn shutdown_waits_for_committed_work_and_sends_its_reply() {
     assert!(reply["result"]["mnemonic_b64"].is_string(), "{reply}");
     assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
     assert!(data.join(VAULT).exists());
+}
+
+#[test]
+fn shutdown_stops_waiting_for_committed_work_after_two_seconds() {
+    // A commit stalled far past any drain: the core gives up after its 2 s
+    // and exits (#127). The core measures that wait itself and logs it, so
+    // the test reads the core's own clock, never its own. The stalled
+    // create never renames: the next start's recovery covers it, as it
+    // would a kill.
+    let marker_dir = tempfile::tempdir().unwrap();
+    let marker = marker_dir.path().join("claimed");
+    let mut env = commit_hooks(&marker);
+    env[0].1 = "60000".into();
+    let (_root, data, locks) = dirs();
+    let mut core = spawn_env("serve", &data, &locks, &[], &env_refs(&env));
+    core.hello();
+    let create = request(
+        2,
+        "vault.create",
+        json!({ "password_b64": b64("testpass1"), "words": 12 }),
+    );
+    core.send_raw(&frame(&create));
+    wait_for_claim(&marker);
+    core.send_raw(&frame(&shell_request(3, "core.shutdown", json!({}))));
+    assert_eq!(core.response(3)["result"], json!({}));
+    assert_eq!(core.exit_code(Duration::from_secs(30)), 0);
+    assert!(!data.join(VAULT).exists());
+    let stderr = core.stderr();
+    let gave_up: Value = stderr
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|line| line["msg"] == "a committed vault job did not finish before exit")
+        .unwrap_or_else(|| panic!("{stderr}"));
+    let waited = gave_up["waited_ms"].as_u64().unwrap();
+    assert!((2000..5000).contains(&waited), "{gave_up}");
+}
+
+#[test]
+fn a_refused_claim_is_answered_by_its_deadline_whatever_its_cleanup_takes() {
+    // Claims end at 4 s of a 6 s deadline. The job reaches its commit point
+    // at about 4.2 s and is refused, then holds before its cleanup until the
+    // test releases it. The deadline's reply comes while it holds: the loop
+    // answers by the deadline, not when the worker is done.
+    let hold_dir = tempfile::tempdir().unwrap();
+    let release = hold_dir.path().join("release");
+    let release_env = release.display().to_string();
+    let env = [
+        ("FREEDOM_CORED_TEST_KDF_DEADLINE_MS", "6000"),
+        ("FREEDOM_CORED_TEST_JOB_DELAY_MS", "4200"),
+        (
+            "FREEDOM_CORED_TEST_REFUSED_CLAIM_HOLD",
+            release_env.as_str(),
+        ),
+    ];
+    let (_root, data, locks) = dirs();
+    let mut core = spawn_env("serve", &data, &locks, &[], &env);
+    core.hello();
+    let create = request(
+        2,
+        "vault.create",
+        json!({ "password_b64": b64("testpass1"), "words": 12 }),
+    );
+    core.send_raw(&frame(&create));
+    assert_eq!(core.response(2)["error"]["code"], "deadline");
+    // Released, the worker cleans up and returns. A vault job queued
+    // behind it starts only then, so its reply comes after any second
+    // reply to 2 would have: the next response must be its own.
+    std::fs::write(&release, b"go").unwrap();
+    let verify = core.call(
+        3,
+        "vault.verify_password",
+        json!({ "password_b64": b64("testpass1") }),
+    );
+    assert_eq!(verify["id"], 3);
+    assert!(!data.join(VAULT).exists());
 }
 
 /// The vault's temp files in `data`: what a write killed before its rename
@@ -1484,4 +1612,135 @@ fn a_temp_vault_swapped_after_its_check_is_never_committed() {
         json!({ "password_b64": b64("testpass1") }),
     );
     assert!(unlocked["result"].is_object(), "{unlocked}");
+}
+
+/// #82: design 0001's parity table orders `no_vault`, then
+/// `unsupported_vault_version`, before `throttled` (verify and the exports:
+/// `no_vault`, then `throttled`). The attempt used to be reserved before
+/// the file was read, so a throttled core said `throttled` for a vault that
+/// was gone or unsupported.
+#[test]
+fn file_errors_come_before_throttled() {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    core.call(
+        2,
+        "vault.import",
+        json!({ "password_b64": b64("testpass1"), "mnemonic_b64": b64(ABANDON) }),
+    );
+    // Seven failures (waiting out the delays after the fifth and sixth):
+    // the next attempt then waits 4 s, ample for what follows.
+    let mut id = 2;
+    for _ in 0..7 {
+        loop {
+            id += 1;
+            let wrong = core.call(
+                id,
+                "vault.unlock",
+                json!({ "password_b64": b64("wrong-password") }),
+            );
+            match wrong["error"]["code"].as_str() {
+                Some("incorrect_password") => break,
+                Some("throttled") => std::thread::sleep(Duration::from_millis(
+                    wrong["error"]["data"]["retry_after_ms"].as_u64().unwrap(),
+                )),
+                _ => panic!("{wrong}"),
+            }
+        }
+    }
+    let vault = data.join(VAULT);
+    let good = std::fs::read_to_string(&vault).unwrap();
+    let password = json!({ "password_b64": b64("testpass1") });
+    let change = json!({ "password_b64": b64("testpass1"), "new_password_b64": b64("testpass2") });
+    let export_key = json!({ "password_b64": b64("testpass1"), "account": 0 });
+    let mut call = |core: &mut Core, method: &str, params: &Value| {
+        id += 1;
+        core.call(id, method, params.clone())["error"].clone()
+    };
+
+    // The file is fine: the attempt waits.
+    for method in ["vault.unlock", "vault.verify_password"] {
+        assert_eq!(call(&mut core, method, &password)["code"], "throttled");
+    }
+
+    // Gone (outside the core, as by hand).
+    std::fs::remove_file(&vault).unwrap();
+    for (method, params, message) in [
+        (
+            "vault.unlock",
+            &password,
+            "No vault found. Create one first.",
+        ),
+        (
+            "vault.change_password",
+            &change,
+            "No vault found. Create one first.",
+        ),
+        (
+            "vault.delete",
+            &password,
+            "No vault found. Create one first.",
+        ),
+        ("vault.verify_password", &password, "No vault found"),
+        ("vault.export_mnemonic", &password, "No vault found"),
+        ("vault.export_private_key", &export_key, "No vault found"),
+    ] {
+        let error = call(&mut core, method, params);
+        assert_eq!(error["code"], "no_vault", "{method}: {error}");
+        assert_eq!(error["message"], message, "{method}");
+    }
+
+    // An unsupported version: unlock, change_password and delete say so;
+    // verify and the exports check no version, as JS verifyPassword.
+    std::fs::write(&vault, good.replacen("\"version\": 1", "\"version\": 2", 1)).unwrap();
+    for method in ["vault.unlock", "vault.change_password", "vault.delete"] {
+        let params = if method == "vault.change_password" {
+            &change
+        } else {
+            &password
+        };
+        let error = call(&mut core, method, params);
+        assert_eq!(
+            error["code"], "unsupported_vault_version",
+            "{method}: {error}"
+        );
+        assert_eq!(error["message"], "Unsupported vault version: 2");
+    }
+    assert_eq!(
+        call(&mut core, "vault.verify_password", &password)["code"],
+        "throttled"
+    );
+    // The version comes first, whatever `encrypted` holds, as in JS (a later
+    // format may change it).
+    std::fs::write(&vault, r#"{"version":2,"encrypted":7}"#).unwrap();
+    for method in ["vault.unlock", "vault.change_password", "vault.delete"] {
+        let params = if method == "vault.change_password" {
+            &change
+        } else {
+            &password
+        };
+        let error = call(&mut core, method, params);
+        assert_eq!(
+            error["code"], "unsupported_vault_version",
+            "{method}: {error}"
+        );
+        assert_eq!(error["message"], "Unsupported vault version: 2");
+    }
+
+    // Not a vault at all: corrupt, whatever the password.
+    std::fs::write(&vault, "not json").unwrap();
+    for method in ["vault.unlock", "vault.verify_password"] {
+        assert_eq!(
+            call(&mut core, method, &password)["code"],
+            "corrupt_vault",
+            "{method}"
+        );
+    }
+
+    // Back: the attempt waits again, and nothing above counted against it.
+    std::fs::write(&vault, &good).unwrap();
+    let throttled = call(&mut core, "vault.unlock", &password);
+    assert_eq!(throttled["code"], "throttled", "{throttled}");
+    assert!(throttled["data"]["retry_after_ms"].as_u64().unwrap() > 0);
 }

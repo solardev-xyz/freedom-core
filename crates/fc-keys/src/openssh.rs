@@ -3,7 +3,10 @@
 //!
 //! - unencrypted (`cipher none`, `kdf none`), one key;
 //! - the 4-byte check integer appears twice, and is random in production;
-//! - padding bytes `01 02 …` up to the next multiple of 8, so 1–8 bytes;
+//! - padding bytes `01 02 …` up to the next multiple of 8, so 0–7 bytes,
+//!   as OpenSSH writes them. The reference pads an aligned section with a
+//!   full 8 bytes; OpenSSH reads that, but ssh-key (Radicle's reader)
+//!   refuses it (deviation `openssh-padding`, #77);
 //! - standard base64 wrapped at 70 characters, a trailing newline after the
 //!   END line;
 //! - public line `ssh-ed25519 <base64> <comment>\n`.
@@ -48,9 +51,10 @@ pub fn private_key_file_with_check(
     put_string(&mut private_section, &public);
     put_string(&mut private_section, keypair.as_slice());
     put_string(&mut private_section, comment.as_bytes());
-    let padding = 8 - private_section.len() % 8;
+    // None for an aligned section: ssh-key refuses a full block of it.
+    let padding = (8 - private_section.len() % 8) % 8;
     for i in 1..=padding {
-        // `padding` is 1..=8, so this never truncates.
+        // `padding` is 0..=7, so this never truncates.
         private_section.push(i as u8);
     }
 
@@ -101,4 +105,54 @@ fn put_string(out: &mut Vec<u8>, bytes: &[u8]) {
     let len = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
     out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(bytes);
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    /// The private section of a file, read as OpenSSH reads it.
+    fn private_section(file: &str) -> Vec<u8> {
+        let body: String = file
+            .lines()
+            .filter(|line| !line.starts_with("-----"))
+            .collect();
+        let blob = STANDARD.decode(body).unwrap();
+        let mut at = b"openssh-key-v1\0".len();
+        let string = |at: &mut usize| {
+            let len = u32::from_be_bytes(blob[*at..*at + 4].try_into().unwrap()) as usize;
+            *at += 4 + len;
+            blob[*at - len..*at].to_vec()
+        };
+        string(&mut at); // cipher
+        string(&mut at); // kdf
+        string(&mut at); // kdf options
+        at += 4; // one key
+        string(&mut at); // public key
+        let section = string(&mut at);
+        assert_eq!(at, blob.len());
+        section
+    }
+
+    #[test]
+    fn padding_never_fills_a_whole_block() {
+        // #77: a section already aligned (131 bytes plus a 5-byte alias)
+        // gets no padding; ssh-key refuses 8 bytes of it.
+        let seed = crate::Mnemonic::from_entropy(&[3u8; 16]).unwrap().to_seed();
+        let key = crate::freedom::derive_all(&seed).unwrap().radicle;
+        for len in 0..=24 {
+            let comment = "a".repeat(len);
+            let section = private_section(&private_key_file_with_check(&key, &comment, 7));
+            assert_eq!(section.len() % 8, 0, "{len}");
+            let unpadded = 131 + len;
+            let padding = &section[unpadded..];
+            assert!(padding.len() < 8, "{len}");
+            assert!(
+                padding.iter().zip(1u8..).all(|(byte, i)| *byte == i),
+                "{len}"
+            );
+        }
+    }
 }

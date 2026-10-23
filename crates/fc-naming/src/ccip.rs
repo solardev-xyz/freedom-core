@@ -21,10 +21,18 @@ pub enum Method {
 }
 
 /// Expands a URL template from an `OffchainLookup` and applies the gateway
-/// policy: HTTPS only, no credentials, no IP literals, a dotted host, and
-/// none of `*.localhost`, `*.local`, `*.internal`. `None` means the JS
-/// refuses the URL and moves on to the next one. (The `.onion` rule depends
-/// on the session's proxy, so main applies it.)
+/// policy: HTTPS only, no credentials, no IP literals, a dotted host with
+/// no empty label, and none of `*.localhost`, `*.local`, `*.internal`.
+/// `None` means the JS refuses the URL and moves on to the next one.
+///
+/// One trailing dot is stripped first, as the JS does. Any empty label
+/// left (`localhost..`, `node.internal..`, `a..b.example`) is refused
+/// (deviation `ccip-hosts`, #76): the JS strips only one dot, so a second
+/// one passed its suffix and dot checks.
+///
+/// Main checks the rest, which needs the network: the `.onion` rule (it
+/// depends on the session's proxy) and, at connect time, the resolved
+/// address (design 0004, CCIP-Read).
 pub fn gateway_request(
     template: &str,
     sender: &[u8; 20],
@@ -47,6 +55,7 @@ pub fn gateway_request(
         Host::Domain(domain) => domain.strip_suffix('.').unwrap_or(domain).to_lowercase(),
     };
     if !host.contains('.')
+        || host.split('.').any(str::is_empty)
         || host.ends_with(".localhost")
         || host.ends_with(".local")
         || host.ends_with(".internal")

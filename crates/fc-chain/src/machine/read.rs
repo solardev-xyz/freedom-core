@@ -143,6 +143,61 @@ fn may_truncate(source: &str) -> bool {
     matches!(source, "colibri" | "quorum" | "direct")
 }
 
+/// `TX_LOOKUP_METHODS`: Colibri proves a transaction in a block, never an
+/// absent or pending one, so these ask the sources after it first (design
+/// 0005, Colibri: transaction lookups; freedom-browser #752).
+const TX_LOOKUP_METHODS: [&str; 2] = ["eth_getTransactionReceipt", "eth_getTransactionByHash"];
+
+/// `txLookupNeedsProof`: whether a transaction lookup's answer is a mined
+/// transaction for Colibri to prove. `null` and `undefined` aren't; nor is
+/// a transaction without both a `blockNumber` and a `blockHash` other than
+/// `null` (`!= null` on the parsed value: an own member's last value, and
+/// nothing on a result that isn't an object). Any other receipt is.
+fn needs_proof(req: &Req, method: &str, result: &ResultText) -> Result<bool, Over> {
+    let Some(text) = result else {
+        return Ok(false);
+    };
+    let json = text.json();
+    if json == "null" {
+        return Ok(false);
+    }
+    if method != "eth_getTransactionByHash" {
+        return Ok(true);
+    }
+    if !json.starts_with('{') {
+        return Ok(false);
+    }
+    let Some((index, _index)) = indexed(req, json)? else {
+        return Ok(false);
+    };
+    let root = index.root();
+    let set = |key: &str| {
+        root.get(key)
+            .is_some_and(|value| value.kind() != Kind::Null)
+    };
+    Ok(set("blockNumber") && set("blockHash"))
+}
+
+/// A source's answer, labelled as `request()` returns it.
+fn answered(
+    req: &Req,
+    source: &'static str,
+    answer: SourceResult,
+    include_trust: bool,
+) -> ReadAnswer {
+    ReadAnswer {
+        result: answer.result,
+        source,
+        verified: match source {
+            "myotis" | "colibri" | "blockscout" => true,
+            // m = 1 is one endpoint's answer (deviation `singleton-quorum`).
+            "quorum" => req.chain.quorum_verifies(),
+            _ => false,
+        },
+        trust: if include_trust { answer.trust } else { None },
+    }
+}
+
 /// `request()`: tries the sources in order.
 pub(crate) async fn read(
     req: &Req,
@@ -219,10 +274,20 @@ pub(crate) async fn read(
     let mut unanswered: Vec<String> = Vec::new();
     let keeper = RefCell::new(Keeper::new(options.ranker));
     let limit = req.ctx.bounds.adaptive_routes;
-    for (i, &named) in order.order.iter().enumerate() {
+    // A transaction lookup's Colibri, once moved to the end, and the
+    // answer of a later source waiting for its proof (design 0005,
+    // Colibri: transaction lookups).
+    let tx_lookup = TX_LOOKUP_METHODS.contains(&method);
+    let mut sources = order.order.clone();
+    let mut deferred = false;
+    let mut held: Option<ReadAnswer> = None;
+    let mut i = 0;
+    while i < sources.len() {
+        let named = sources[i];
         // Every source left is one the router knows: the read order was
         // cleaned, and the only opt-in source is Blockscout.
         let Some(source) = super::config::SOURCES.iter().copied().find(|s| *s == named) else {
+            i += 1;
             continue;
         };
         let key = match (&origin, source) {
@@ -235,10 +300,25 @@ pub(crate) async fn read(
             && req.ctx.state.borrow().adaptive.unavailable(key, req.now())
         {
             failures.push((source.to_owned(), None));
+            i += 1;
+            continue;
+        }
+        if source == "colibri" && tx_lookup && !deferred && i + 1 < sources.len() {
+            // The later sources first; Colibri last, its failure in this
+            // request's report.
+            deferred = true;
+            sources.remove(i);
+            sources.push("colibri");
             continue;
         }
         let answered_by = RefCell::new(None);
-        let has_fallback = i + 1 < order.order.len();
+        // A deferred Colibri is no fallback for the sources before it; one
+        // asked to prove an answer has that answer.
+        let has_fallback = (if deferred && source != "colibri" {
+            i + 2 < sources.len()
+        } else {
+            i + 1 < sources.len()
+        }) || held.is_some();
         let deadline = source_deadline(&chain, interactive, has_fallback);
         let source_options = SourceOptions {
             include_trust: options.include_trust,
@@ -251,7 +331,7 @@ pub(crate) async fn read(
             attempted: if source == "direct" { &attempted } else { &[] },
             unanswered: if source == "direct" { &unanswered } else { &[] },
             keeper: &keeper,
-            allow_direct_fallback: source == "quorum" && order.order.get(i + 1) == Some(&"direct"),
+            allow_direct_fallback: source == "quorum" && sources.get(i + 1) == Some(&"direct"),
             deadline: Some(deadline),
             background: options.background,
             direct_timeout: options.direct_timeout_ms,
@@ -266,6 +346,11 @@ pub(crate) async fn read(
         let outcome = async {
             let answer =
                 Box::pin(request_source(req, source, method, params, &source_options)).await?;
+            // Mined: held for Colibri's proof.
+            if deferred && source != "colibri" && within!(needs_proof(req, method, &answer.result))
+            {
+                return Ok((answer, true));
+            }
             if may_truncate(source) {
                 let direct_url = answered_by.borrow().clone();
                 Box::pin(check_log_truncation(
@@ -285,30 +370,23 @@ pub(crate) async fn read(
                 ))
                 .await?;
             }
-            Ok::<SourceResult, Thrown>(answer)
+            Ok::<(SourceResult, bool), Thrown>((answer, false))
         }
         .await;
         match outcome {
-            Ok(answer) => {
+            Ok((answer, true)) => {
                 if let Some(key) = &key {
                     req.ctx.state.borrow_mut().adaptive.success(key);
                 }
-                return Ok(ReadAnswer {
-                    result: answer.result,
-                    source,
-                    verified: match source {
-                        "myotis" | "colibri" | "blockscout" => true,
-                        // m = 1 is one endpoint's answer (deviation
-                        // `singleton-quorum`).
-                        "quorum" => req.chain.quorum_verifies(),
-                        _ => false,
-                    },
-                    trust: if options.include_trust {
-                        answer.trust
-                    } else {
-                        None
-                    },
-                });
+                // Straight to Colibri, the last source.
+                held = Some(answered(req, source, answer, options.include_trust));
+                i = sources.len() - 1;
+            }
+            Ok((answer, false)) => {
+                if let Some(key) = &key {
+                    req.ctx.state.borrow_mut().adaptive.success(key);
+                }
+                return Ok(answered(req, source, answer, options.include_trust));
             }
             Err(error) => {
                 // A revert, a permanent refusal or an infeasible call is
@@ -334,7 +412,11 @@ pub(crate) async fn read(
                         limit,
                     );
                 }
-                if !error.is_unavailable() {
+                // A deferred Colibri keeps the precedence it had when it was
+                // asked first: a later source's own error goes first.
+                if !error.is_unavailable()
+                    && !(source == "colibri" && deferred && last_rpc_error.is_some())
+                {
                     last_rpc_error = Some(error.clone());
                 }
                 if source != "quorum" && source != "blockscout" {
@@ -344,12 +426,17 @@ pub(crate) async fn read(
                     return Err(error);
                 }
                 failures.push((source.to_owned(), Some(error)));
-                let reuse = fallback.is_some() && order.order.get(i + 1) == Some(&"direct");
+                let reuse = fallback.is_some() && sources.get(i + 1) == Some(&"direct");
                 if keeper.borrow().is_final() && !reuse {
                     break;
                 }
+                i += 1;
             }
         }
+    }
+    // Colibri couldn't prove the mined transaction a later source reported.
+    if let Some(held) = held {
+        return Ok(held);
     }
     if let Some(error) = keeper.borrow().error() {
         return Err(error.clone());
@@ -583,7 +670,7 @@ pub(crate) fn myotis_adapter_error(req: &Req, class: MyotisClass) -> Thrown {
 
 /// `requestColibri`: at most 8 in flight, 2 per route, each held until
 /// main's terminal reply.
-async fn colibri(
+pub(crate) async fn colibri(
     req: &Req,
     method: &str,
     params: &str,
@@ -595,10 +682,21 @@ async fn colibri(
             format!("Colibri does not support {method}").as_str(),
         ));
     }
+    let chain_id = req.chain.chain_id;
+    if req
+        .ctx
+        .state
+        .borrow()
+        .colibri_faults
+        .backed_off(chain_id, method, req.now())
+    {
+        return Err(Thrown::unavailable(
+            format!("Colibri backed off for {method} after repeated verifier faults").as_str(),
+        ));
+    }
     if req.chain.prover.is_none() {
         return Err(Thrown::unavailable("No Colibri prover configured"));
     }
-    let chain_id = req.chain.chain_id;
     let key = route_key.map_or_else(
         || colibri_key(chain_id, method, &request_target(method, params)),
         str::to_owned,
@@ -625,7 +723,14 @@ async fn colibri(
         deadline_ms: ms(budget),
     });
     req.ctx.pend(made);
-    let cell = req.ctx.hold(request, Release::Colibri(key));
+    let cell = req.ctx.hold(
+        request,
+        Release::Colibri {
+            key,
+            chain_id,
+            method: method.to_owned(),
+        },
+    );
     match race(reply(&cell), timer).await {
         Either::Left(Delivered { answer, charge, .. }) => match answer {
             // The answer's own buffer is the result: no copy.
@@ -639,7 +744,7 @@ async fn colibri(
             // capacity failure is still the revert the read rejects with, and
             // blocks the app's Colibri route as the router's
             // `recordAdaptiveFailure` does.
-            Answer::Colibri(ColibriReply::Revert { data, capacity }) if is_hex_data(&data) => {
+            Answer::Colibri(ColibriReply::Revert { data, capacity, .. }) if is_hex_data(&data) => {
                 let copies = reserve!(req.ctx, (data.len() + 2) * 2);
                 drop(charge);
                 let quoted: Rc<str> = Rc::from(format!("\"{data}\"").as_str());
@@ -649,7 +754,7 @@ async fn colibri(
                 error.capacity = capacity;
                 Err(within!(charged(error, copies)))
             }
-            Answer::Colibri(ColibriReply::Failure(class)) => {
+            Answer::Colibri(ColibriReply::Failure { class, .. }) => {
                 let mut error = Thrown::error(COLIBRI_FAILED);
                 if class == ColibriClass::Capacity {
                     error.capacity = true;

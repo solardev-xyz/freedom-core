@@ -14,7 +14,8 @@ use fc_naming::session::exec::{Io, Rt, Sleep};
 use super::bounds::Bounds;
 use super::budget::{self, Budget, Charge};
 use super::config::Chain;
-use super::io::{Delivered, Ms, Request};
+use super::faults::{BackedOff, ColibriFaults};
+use super::io::{Delivered, Ms, Request, Verdict};
 use super::logs::LogState;
 use super::route::Adaptive;
 
@@ -82,6 +83,10 @@ pub(crate) struct State {
     pub adaptive: Adaptive,
     pub myotis: BTreeMap<u64, Slots>,
     pub colibri: ColibriWork,
+    /// Colibri's verifier-fault records (design 0005, Colibri).
+    pub colibri_faults: ColibriFaults,
+    /// Cooldowns started and not yet taken by the driver, for its log.
+    pub backed_off: Vec<BackedOff>,
     pub logs: LogState,
     /// Bumped by every grant and release, so the machine polls again.
     pub progress: u64,
@@ -92,7 +97,13 @@ pub(crate) struct State {
 #[derive(Debug, Clone)]
 pub(crate) enum Release {
     Myotis(u64),
-    Colibri(String),
+    /// A Colibri slot on its route, and the operation's chain and method,
+    /// whose fault record the reply updates.
+    Colibri {
+        key: String,
+        chain_id: u64,
+        method: String,
+    },
     Nothing,
 }
 
@@ -301,8 +312,8 @@ impl Ctx {
         let mut cx = Context::from_waker(Waker::noop());
         // The first poll emits the request.
         if let Poll::Ready(delivered) = Pin::new(&mut io).poll(&mut cx) {
+            self.release(&release, delivered.verdict);
             *cell.borrow_mut() = Some(delivered);
-            self.release(&release);
             return cell;
         }
         self.held.borrow_mut().push(Held {
@@ -313,13 +324,33 @@ impl Ctx {
         cell
     }
 
-    fn release(&self, release: &Release) {
+    /// Frees what a held operation took. A Colibri reply also updates its
+    /// chain and method's fault record, as it arrives, whether or not
+    /// anyone still reads it (design 0005, Colibri: verifier faults).
+    fn release(&self, release: &Release, verdict: Verdict) {
         match release {
             Release::Myotis(chain_id) => self.release_myotis(*chain_id),
-            Release::Colibri(key) => {
+            Release::Colibri {
+                key,
+                chain_id,
+                method,
+            } => {
+                let now = self.now();
                 let mut state = self.state.borrow_mut();
                 state.progress += 1;
                 state.colibri.release(key);
+                match verdict {
+                    Verdict::Answer => state.colibri_faults.answer(*chain_id, method),
+                    Verdict::Fault => {
+                        let limit = self.bounds.colibri_fault_records;
+                        if let Some(started) =
+                            state.colibri_faults.fault(*chain_id, method, now, limit)
+                        {
+                            state.backed_off.push(started);
+                        }
+                    }
+                    Verdict::Neither => {}
+                }
             }
             Release::Nothing => {}
         }
@@ -346,7 +377,7 @@ impl Ctx {
         for (op, delivered) in finished {
             // Main's terminal reply frees the slot, even one whose payload
             // was over its request's budget and is discarded.
-            self.release(&op.release);
+            self.release(&op.release, delivered.verdict);
             // Nobody waits any more: the outcome is dropped.
             if !delivered.discarded && Rc::strong_count(&op.cell) > 1 {
                 *op.cell.borrow_mut() = Some(delivered);

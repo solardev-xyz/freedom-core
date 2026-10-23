@@ -38,9 +38,9 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use fc_chain::machine::{
     Answer, Bounds, BroadcastOutcome, Call, ChainConfig, ChainError, ColibriClass, ColibriReply,
-    Effect, Emitted, Machine, Ms, MyotisClass, MyotisReply, Origin, Prop, Protocol, Prover,
-    QuorumConfig, ReadOptions, Reply as Done, Request, Reservation, RpcEndpoint, Success,
-    Transport, VerifiedOp,
+    Effect, Emitted, Machine, Ms, MyotisClass, MyotisRejection, MyotisReply, Origin, Prop,
+    Protocol, Prover, QuorumConfig, ReadOptions, Reply as Done, Request, Reservation, RpcEndpoint,
+    SOURCES as READ_SOURCES, Success, Transport, Verdict, VerifiedOp,
 };
 use fc_chain::{JsString, MyotisOperation, READ_METHODS, SINGLE_NODE_METHODS};
 use fc_protocol::error::{ErrorBody, ErrorCode};
@@ -61,6 +61,7 @@ pub const METHODS: &[&str] = &[
     "chain.availability",
     "chain.request",
     "chain.fee_quote",
+    "chain.fee_reference",
     "chain.broadcast",
     "chain.html",
 ];
@@ -439,6 +440,18 @@ impl Chain {
         let backlog = self.backlog();
         self.machine.set_output_backlog(backlog);
         self.machine.poll();
+        // Colibri's verifier-fault cooldowns, logged as they start (design
+        // 0005, Colibri): the chain, the method and how long; no origin.
+        for started in self.machine.take_backed_off() {
+            log::warn(
+                "chain colibri backed off",
+                serde_json::json!({
+                    "chain": started.chain_id,
+                    "method": started.method,
+                    "cooldown_ms": started.cooldown_ms,
+                }),
+            );
+        }
     }
 
     /// Brings the machine to the clock's now ([`Chain::advance`]), then
@@ -561,7 +574,11 @@ impl Chain {
                 self.machine.availability(params.chain_id, params.ready);
                 self.result(id, b"{}".to_vec())
             }
-            "chain.request" | "chain.fee_quote" | "chain.broadcast" | "chain.html" => {
+            "chain.request"
+            | "chain.fee_quote"
+            | "chain.fee_reference"
+            | "chain.broadcast"
+            | "chain.html" => {
                 let Some((call, deadline_ms)) = call_params(method, params) else {
                     return self.error(id, invalid());
                 };
@@ -657,6 +674,8 @@ impl Chain {
             return Ok(());
         };
         self.by_io.remove(&io);
+        // A Colibri reply counts for its method's fault record, read or not.
+        let verdict = shape.verdict();
         // Nobody reads a reply whose request has ended: it completes
         // unread, as one past the budget does.
         let read = match held {
@@ -672,7 +691,7 @@ impl Chain {
             }
             Err(Unread::Malformed) => return Err(malformed),
             Err(Unread::Over) => {
-                self.machine.complete_unread(io);
+                self.machine.complete_unread_as(io, verdict);
             }
         }
         self.poll();
@@ -1144,7 +1163,10 @@ fn unsent(kind: Kind) -> Answer {
         Kind::Rpc | Kind::Blockscout => Answer::NotSent,
         Kind::MyotisRead => Answer::Myotis(MyotisReply::Failure(MyotisClass::Error)),
         Kind::MyotisBroadcast => Answer::Myotis(MyotisReply::NotSent),
-        Kind::Colibri => Answer::Colibri(ColibriReply::Failure(ColibriClass::Error)),
+        Kind::Colibri => Answer::Colibri(ColibriReply::Failure {
+            class: ColibriClass::Error,
+            fault: false,
+        }),
     }
 }
 
@@ -1156,7 +1178,10 @@ fn too_large(kind: Kind) -> Answer {
         Kind::Rpc | Kind::Blockscout => Answer::NotSent,
         Kind::MyotisRead => Answer::Myotis(MyotisReply::Failure(MyotisClass::TooLarge)),
         Kind::MyotisBroadcast => Answer::Myotis(MyotisReply::NotSent),
-        Kind::Colibri => Answer::Colibri(ColibriReply::Failure(ColibriClass::TooLarge)),
+        Kind::Colibri => Answer::Colibri(ColibriReply::Failure {
+            class: ColibriClass::TooLarge,
+            fault: false,
+        }),
     }
 }
 
@@ -1331,8 +1356,11 @@ fn string_close(s: &[u8], mut i: usize) -> usize {
 
 /// Past this nesting, a reply nobody reads (or whose reading crossed its
 /// budget) isn't parsed at all: its scratch would be unreserved. It is
-/// dropped unread, as it would be after the parse.
-const UNRESERVED_NESTING: usize = 512;
+/// dropped unread, as it would be after the parse. It is the 512 levels a
+/// value may nest (deviation `json-depth`), plus the reply's own object
+/// around it, so a late Colibri answer at that bound is still read as one
+/// for its method's fault record (design 0005, Colibri: verifier faults).
+const UNRESERVED_NESTING: usize = 512 + 1;
 
 /// A present member stays `Some`, even when its value is `null`.
 fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<&'de RawValue>, D::Error> {
@@ -1469,19 +1497,27 @@ enum Shape<'a> {
     },
     MyotisFailure(MyotisClass),
     Sent(&'a RawValue),
-    /// The reason, a JSON string.
-    Rejected(&'a RawValue),
+    /// The reason, a JSON string, and which of the adapter's definite
+    /// refusals it is.
+    Rejected {
+        reason: &'a RawValue,
+        kind: MyotisRejection,
+    },
     Uncertain,
     ColibriResult(&'a RawValue),
     /// `{ undefined_keys: ["result"] }`: Colibri's result was `undefined`.
     ColibriUndefined,
-    /// The data, a JSON string, and whether main also classed the error a
-    /// capacity failure.
+    /// The data, a JSON string, whether main also classed the error a
+    /// capacity failure, and whether it marked it a verifier fault.
     Revert {
         data: &'a RawValue,
         capacity: bool,
+        fault: bool,
     },
-    ColibriFailure(ColibriClass),
+    ColibriFailure {
+        class: ColibriClass,
+        fault: bool,
+    },
 }
 
 /// Why a reply was not read for good.
@@ -1503,7 +1539,37 @@ fn unless_null(raw: Option<&RawValue>) -> Option<&RawValue> {
     raw.filter(|raw| raw.get() != "null")
 }
 
+/// A Myotis broadcast's `rejected`, in place (design 0005, The rest):
+/// `{ reason }`, the adapter's `rejected` (`-32000`), or `{ reason, code:
+/// -32602 }`, its `invalid-params`. The reason is a JSON string; `code` is
+/// present only for `-32602`, written as `JSON.stringify` writes it, so
+/// anything else, `-32000` included, is malformed.
+fn rejected(raw: &RawValue) -> Option<Shape<'_>> {
+    let object = RawObject::<2>::parse(raw.get())?;
+    let reason = object.get("reason").filter(|reason| is_string(reason))?;
+    let kind = if object.are(&["reason"]) {
+        MyotisRejection::Rejected
+    } else if object.are(&["reason", "code"]) && object.get("code")?.get() == "-32602" {
+        MyotisRejection::InvalidParams
+    } else {
+        return None;
+    };
+    Some(Shape::Rejected { reason, kind })
+}
+
 impl<'a> Shape<'a> {
+    /// What it means for a Colibri operation's fault record, as the
+    /// machine's [`Answer::verdict`] has it, read or not.
+    fn verdict(&self) -> Verdict {
+        match self {
+            Self::ColibriResult(_) | Self::ColibriUndefined => Verdict::Answer,
+            Self::Revert { fault: true, .. } | Self::ColibriFailure { fault: true, .. } => {
+                Verdict::Fault
+            }
+            _ => Verdict::Neither,
+        }
+    }
+
     /// Main's `error`, as a transport failure: a code of the closed set, a
     /// string message, no other member; `None` when it is malformed.
     fn failed(text: &'a str) -> Option<Self> {
@@ -1588,7 +1654,7 @@ impl<'a> Shape<'a> {
                 } else if members.are(&["hash"]) {
                     members.get("hash").map(Shape::Sent)
                 } else if members.are(&["rejected"]) {
-                    wrapped("rejected", "reason").map(Shape::Rejected)
+                    rejected(members.get("rejected")?)
                 } else if members.are(&["uncertain"]) {
                     (members.get("uncertain")?.get() == "true").then_some(Shape::Uncertain)
                 } else {
@@ -1596,8 +1662,14 @@ impl<'a> Shape<'a> {
                 }
             }
             Kind::Colibri => {
-                if members.are(&["failure"]) {
-                    colibri_class(class()?).map(Shape::ColibriFailure)
+                // `capacity` and `fault` are sent only when `true`.
+                let flag = |name: &str| match members.get(name) {
+                    None => Some(false),
+                    Some(value) => (value.get() == "true").then_some(true),
+                };
+                if members.within("failure", &["failure", "fault"]) {
+                    let fault = flag("fault")?;
+                    colibri_class(class()?).map(|class| Shape::ColibriFailure { class, fault })
                 } else if members.are(&["result"]) {
                     members.get("result").map(Shape::ColibriResult)
                 } else if members.are(&["undefined_keys"]) {
@@ -1606,19 +1678,13 @@ impl<'a> Shape<'a> {
                         serde_json::from_str::<(&RawValue,)>(members.get("undefined_keys")?.get())
                             .ok()?;
                     (plain(key)? == "result").then_some(Shape::ColibriUndefined)
-                } else if members.are(&["revert"]) {
+                } else if members.within("revert", &["revert", "capacity", "fault"]) {
+                    let capacity = flag("capacity")?;
+                    let fault = flag("fault")?;
                     wrapped("revert", "data").map(|data| Shape::Revert {
                         data,
-                        capacity: false,
-                    })
-                } else if members.are(&["revert", "capacity"]) {
-                    // `capacity` is sent only when it is `true`.
-                    if members.get("capacity")?.get() != "true" {
-                        return None;
-                    }
-                    wrapped("revert", "data").map(|data| Shape::Revert {
-                        data,
-                        capacity: true,
+                        capacity,
+                        fault,
                     })
                 } else {
                     None
@@ -1696,11 +1762,11 @@ impl<'a> Shape<'a> {
                     reservation,
                 )
             }
-            Shape::Rejected(reason) => {
+            Shape::Rejected { reason, kind } => {
                 let reservation = reserve(reason.get().len())?;
                 let reason = decode_string(reason.get()).ok_or(Unread::Malformed)?;
                 (
-                    Answer::Myotis(MyotisReply::Rejected { reason }),
+                    Answer::Myotis(MyotisReply::Rejected { reason, kind }),
                     reservation,
                 )
             }
@@ -1713,17 +1779,26 @@ impl<'a> Shape<'a> {
                 )
             }
             Shape::ColibriUndefined => (Answer::Colibri(ColibriReply::Undefined), reserve(0)?),
-            Shape::Revert { data, capacity } => {
+            Shape::Revert {
+                data,
+                capacity,
+                fault,
+            } => {
                 let reservation = reserve(data.get().len())?;
                 let data = decode_string(data.get()).ok_or(Unread::Malformed)?;
                 (
-                    Answer::Colibri(ColibriReply::Revert { data, capacity }),
+                    Answer::Colibri(ColibriReply::Revert {
+                        data,
+                        capacity,
+                        fault,
+                    }),
                     reservation,
                 )
             }
-            Shape::ColibriFailure(class) => {
-                (Answer::Colibri(ColibriReply::Failure(class)), reserve(0)?)
-            }
+            Shape::ColibriFailure { class, fault } => (
+                Answer::Colibri(ColibriReply::Failure { class, fault }),
+                reserve(0)?,
+            ),
         })
     }
 }
@@ -1971,9 +2046,14 @@ struct RequestParams<'a> {
     origin: Option<String>,
     background: bool,
     profile: Profile,
+    /// Sources this read must not ask, on top of its profile's: the
+    /// router's `excludeSources` (design 0005, Methods main calls).
+    #[serde(default)]
+    exclude_sources: Vec<String>,
     deadline_ms: u64,
 }
 
+/// `chain.fee_quote`'s params, and `chain.fee_reference`'s.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FeeQuoteParams {
@@ -2020,6 +2100,19 @@ fn call_params(method: &str, params: &str) -> Option<(Call, Ms)> {
                 Profile::Default => ReadOptions::default(),
                 Profile::AntScan => ReadOptions::ant_scan(),
             };
+            // Only the sources the router knows, each at most once.
+            for (i, source) in p.exclude_sources.iter().enumerate() {
+                if !READ_SOURCES.contains(&source.as_str())
+                    || p.exclude_sources[..i].contains(source)
+                {
+                    return None;
+                }
+            }
+            for source in p.exclude_sources {
+                if !options.exclude_sources.contains(&source) {
+                    options.exclude_sources.push(source);
+                }
+            }
             options.include_trust |= p.include_trust;
             options.background |= p.background;
             options.origin = p.origin;
@@ -2038,6 +2131,16 @@ fn call_params(method: &str, params: &str) -> Option<(Call, Ms)> {
             let deadline_ms = valid(p.chain_id, p.deadline_ms)?;
             Some((
                 Call::FeeQuote {
+                    chain_id: p.chain_id,
+                },
+                deadline_ms,
+            ))
+        }
+        "chain.fee_reference" => {
+            let p: FeeQuoteParams = parse(params)?;
+            let deadline_ms = valid(p.chain_id, p.deadline_ms)?;
+            Some((
+                Call::FeeReference {
                     chain_id: p.chain_id,
                 },
                 deadline_ms,
@@ -2076,6 +2179,7 @@ fn call_chain(call: &Call) -> u64 {
     match call {
         Call::Read { chain_id, .. }
         | Call::FeeQuote { chain_id }
+        | Call::FeeReference { chain_id }
         | Call::Broadcast { chain_id, .. }
         | Call::Html { chain_id, .. } => *chain_id,
     }
@@ -2091,6 +2195,7 @@ fn label(call: &Call) -> &'static str {
             .copied()
             .unwrap_or("unsupported"),
         Call::FeeQuote { .. } => "fee_quote",
+        Call::FeeReference { .. } => "fee_reference",
         Call::Broadcast { .. } => "broadcast",
         Call::Html { .. } => "html",
     }
@@ -2122,7 +2227,8 @@ fn log_outcome(caller: &Caller, done: &Done) {
             };
             SOURCES.iter().find(|known| **known == named).copied()
         }
-        Err(_) => None,
+        // The evidence has two parts, neither a source of the request.
+        Ok(Success::FeeReference(_)) | Err(_) => None,
     };
     let outcome = match &done.result {
         Ok(Success::Broadcast { outcome, .. }) => outcome.as_str(),
@@ -2347,8 +2453,13 @@ fn tail(message: &mut Message<'_>, outcome: Option<BroadcastOutcome>, generation
 ///   generation }`, `result` embedded as the answer's raw JSON. A missing
 ///   `result` (JavaScript's `undefined`) is left out and named in
 ///   `undefined_keys`; main restores it first in key order.
-/// - `chain.fee_quote`: today's quote, keys in the router's order, then
-///   `generation`.
+/// - `chain.fee_quote`: today's quote, keys in the router's order (Direct's
+///   with `answered`), then `generation`.
+/// - `chain.fee_reference`: `{ header, lowest_priority, quote, generation }`
+///   (design 0005, A: The evidence), numbers as decimal strings: `header`
+///   is `{ source: "colibri", number, timestamp, base_fee }`, `base_fee`
+///   null on a chain without one; `quote` is B's combined quote. A part
+///   that failed is null.
 /// - `chain.broadcast`: `{ hash, source, outcome, generation }`.
 /// - `chain.html` (design 0006): `{ html_base64, hash, source, verified,
 ///   trust?, class, generation }`: the document's UTF-8 as base64, its
@@ -2406,6 +2517,38 @@ fn reply_message(id: u64, done: &Done) -> Message<'_> {
                 .text(r#""result":"#)
                 .owned(json)
                 .owned(format!(r#","generation":{generation}}}}}"#));
+        }
+        Ok(Success::FeeReference(reference)) => {
+            message.text(r#""result":{"header":"#);
+            match &reference.header {
+                Some(header) => {
+                    message
+                        .text(r#"{"source":"colibri","number":"#)
+                        .string(&header.number)
+                        .text(r#","timestamp":"#)
+                        .string(&header.timestamp)
+                        .text(r#","base_fee":"#);
+                    match &header.base_fee {
+                        Some(base_fee) => message.string(base_fee),
+                        None => message.text("null"),
+                    };
+                    message.text("}");
+                }
+                None => {
+                    message.text("null");
+                }
+            }
+            message.text(r#","lowest_priority":"#);
+            match &reference.lowest_priority {
+                Some(priority) => message.string(priority),
+                None => message.text("null"),
+            };
+            message.text(r#","quote":"#);
+            match &reference.quote {
+                Some(quote) => message.owned(quote.to_json()),
+                None => message.text("null"),
+            };
+            message.owned(format!(r#","generation":{generation}}}}}"#));
         }
         Ok(Success::Broadcast {
             hash,

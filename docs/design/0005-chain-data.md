@@ -3,13 +3,14 @@
 **Status:** proposed. Builds on [0001](0001-freedom-cored.md) (process, framing, deadlines), [0002](0002-signing.md) (signing) and [0004](0004-naming-sessions.md) (sessions, `shell.*` requests, verified operations, endpoint references, budgets). It is roadmap item 3.4: freedom-browser's chain-data router moves into the core.
 
 **The reference** is `src/main/networks/chain-data-router.js` at freedom-browser `fb540328`, with `blockscout-logs.js` and the Ant bridge's router options (`swarm/ant-chain-bridge.js`).
+- **One later rule** of main's is ported without moving the pin: #752's Colibri ordering for transaction lookups and its verifier-fault backoff (main `94b0af4e`; [Colibri](#colibri)). Its vectors run the pinned router with that rule patched in ([Replay](#replay)).
 - **Ground truth** will be a replay harness, `vectors/chain-replay.json`, built like 0004's: it runs the pinned router through scripted worlds and records every exchange, verifier operation, timing, result and error. Its scenario IDs are cited below where a rule depends on them.
 - **Conflicts:** where this document and a vector disagree, the vector wins and the document has a bug.
 
 ## Summary
 
 A chain read, a fee quote or a broadcast becomes a **request** in `freedom-cored`, run by a sans-I/O machine in a new crate, `fc-chain`, on its own thread (the *chain thread*). It reuses 0004's session machinery:
-- **main → core:** `chain.request`, `chain.fee_quote` and `chain.broadcast` replace the router's three entry points.
+- **main → core:** `chain.request`, `chain.fee_quote` and `chain.broadcast` replace the router's three entry points. `chain.fee_reference` is new: the evidence for main's fee check ([Plausibility](#plausibility-decided-92)).
 - **core → main:** the request asks main for each I/O it needs:
   - `shell.rpc`: one JSON-RPC exchange with an endpoint, the same executor naming uses;
   - `shell.verified`: a whole Myotis or Colibri operation through today's adapters;
@@ -50,14 +51,16 @@ All accept caller kinds `chrome` and `shell`.
 |---|---|---|---|
 | `chain.configure` | a [snapshot](#configuration) for every configured chain | `{ generations }` | the router's registry reads |
 | `chain.availability` | `{ chain_id, ready }` for each Myotis chain | `{}` | the router's live `myotis.isReady()` samples |
-| `chain.request` | `{ chain_id, method, params, include_trust, origin?, background, profile, deadline_ms }` | `{ result, source, verified, trust? }` | `request()` |
-| `chain.fee_quote` | `{ chain_id, deadline_ms }` | today's quote shape | `getFeeQuote()` |
+| `chain.request` | `{ chain_id, method, params, include_trust, origin?, background, profile, exclude_sources?, deadline_ms }` | `{ result, source, verified, trust? }` | `request()` |
+| `chain.fee_quote` | `{ chain_id, deadline_ms }` | today's quote shape; Direct's adds `answered` (deviation `fee-combination`) | `getFeeQuote()` |
+| `chain.fee_reference` | `{ chain_id, deadline_ms }` | `{ header, lowest_priority, quote, generation }` | nothing: new, the evidence for main's fee check ([A](#a-the-check-at-confirmation)) |
 | `chain.broadcast` | `{ chain_id, raw, deadline_ms }` | `{ hash, source, outcome }` | `broadcastRawTransaction()` |
 
 - **`params`** is the caller's JSON as main serializes it. The core parses it keeping JavaScript's property order, which [normalization](#normalization) depends on.
 - **`origin`** is the router's routing context: the dApp's permission key or the `web3:` page's. It makes the read *interactive*. The core keeps it only in memory, for the [adaptive bypass](#adaptive-bypass), and never logs it.
 - **`profile`** is `default` or `ant_scan`. Callers can't pass functions over the pipe, so the Ant bridge's options (`rankError`, `rangeCapOf`, the exclusions, Blockscout, the widened quorum budget) become one named profile, ported with vectors ([Logs](#logs)).
 - **`background`** is the Ant bridge's flag: never queue for Myotis.
+- **`exclude_sources`** is the router's `excludeSources`: sources this read must not ask, each one the router knows (`myotis`, `colibri`, `quorum`, `direct`, `blockscout`) and named at most once. Anything else makes the request invalid. Absent is none. It adds to the profile's own exclusions. An order it empties fails with the [no-source text](#methods-and-sources), which names the dropped sources in read order. Main's wallet uses it as the reference does (freedom-browser #749): payment history's sweep reads receipts without Colibri, and its dropped check re-reads a receipt from the one source that answered the nonce. **Negotiated:** `core.hello`'s capabilities gain `exclude_sources`, and main sends the field only to a core that offers it, since an older core refuses a request with a field it doesn't know. To an older core the read goes without it, in its profile's order, as main's reads did before.
 - **`deadline_ms`** is what is left of the caller's overall deadline when main sends the request, as naming's driver does; at most 120 s ([Deadlines](#deadlines)).
 - **Cancellation** is 0001's `cancel`, which replaces the router's `AbortSignal` ([Cancellation](#cancellation)).
 - **`isReadMethod`** stays in main: it is a constant table, mirrored with a vector.
@@ -139,8 +142,8 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
 | `{ myotis: "call_tx", chain_id, tx }` | `ethCallTx` at `latest` | likewise |
 | `{ myotis: "estimate_tx", chain_id, tx }` | `estimateGas` at `latest` | likewise |
 | `{ myotis: "fee", chain_id }` | `feeEstimate` | likewise |
-| `{ myotis: "broadcast", chain_id, raw }` | `sendRawTransaction` | `{ hash }`, `{ rejected: { reason } }`, `{ uncertain }`, `{ not_sent }` or `{ failure: class }` |
-| `{ colibri: "request", chain_id, method, params, deadline_ms }` | `requestViaColibri` | `{ result }`, `{ undefined_keys: ["result"] }`, `{ revert: { data } }`, `{ revert: { data }, capacity: true }` or `{ failure: class }` |
+| `{ myotis: "broadcast", chain_id, raw }` | `sendRawTransaction` | `{ hash }`, `{ rejected: { reason } }`, `{ rejected: { reason, code: -32602 } }`, `{ uncertain }`, `{ not_sent }` or `{ failure: class }` |
+| `{ colibri: "request", chain_id, method, params, deadline_ms }` | `requestViaColibri` | `{ result }`, `{ undefined_keys: ["result"] }`, `{ revert: { data } }`, `{ revert: { data }, capacity: true }` or `{ failure: class }`; a revert or a failure with `fault: true` beside it when it was a verifier fault |
 
 #### Myotis read outcomes
 
@@ -165,6 +168,11 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
 - **A broadcast's `{ failure: class }`:** main may also answer a broadcast with a class of the chain set, so that a failure that sent nothing keeps today's text:
   - `not_running`, `not_ready`, `queue_full` and `queue_deadline` count as **not sent**, and the core rebuilds their texts and codes as for a read, so the last error is today's (`boundary-broadcast-myotis-not-running-last-error`: `Gnosis Myotis client is not running`; `boundary-broadcast-myotis-not-sent-then-direct` falls to Direct);
   - every other class is **ambiguous**: the client may have dispatched the transaction.
+- **A broadcast's `{ rejected }`** is one of the adapter's two definite refusals. Neither sent anything, and either ends the attempt loop, as the router's `myotisRefusal` check does. The core rebuilds the adapter's error: the reason, then its code and marker.
+  - **`{ rejected: { reason } }`:** the client judged the transaction unpayable or its nonce used, on verified state (Myotis ABI 36). Code `-32000`, `myotisRefusal: "rejected"`.
+  - **`{ rejected: { reason, code: -32602 } }`:** bytes that are no transaction Myotis relays (ABI 44), never gossiped. Code `-32602`, `myotisRefusal: "invalid-params"` (`boundary-broadcast-myotis-invalid-params`).
+  - **Typed and bounded:** `code` is present only when it is `-32602`; any other value, `-32000` included, is a malformed reply. Nothing else of the adapter's error crosses. The reason is the adapter's own bounded text (`boundedReason`: trimmed, whitespace runs collapsed, at most 300 UTF-16 units).
+  - **Negotiated:** `core.hello`'s capabilities gain `myotis_refusal_codes`, and main sends `code` only to a core that offers it. To an older core it sends `{ rejected: { reason } }` for both refusals: the broadcast still ends `rejected` with nothing else asked, but with code `-32000` and `myotisRefusal: "rejected"`.
 - **Colibri's outcomes:**
   - **`{ result }`:** the verified result, as JSON.
   - **`{ undefined_keys: ["result"] }`:** the adapter resolved `undefined`, which JSON can't carry, so main sends this instead of a result. It has exactly that one member, and the array is exactly `["result"]`. The read succeeds with an own `result` of `undefined`, `source: "colibri"` and `verified: true`, as the router returns it today. Its reply omits `result` and lists it in `undefined_keys` ([Replies](#replies); `boundary-colibri-undefined-result`).
@@ -175,6 +183,10 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
     - **The revert's text** is `execution reverted`, where the router rethrows the adapter's own error with its text (deviation `adapter-error-text`).
   - **`{ failure: class }`:** everything else, from the chain set above, plus Colibri's own `capacity`. Its text isn't forwarded whether or not it had a code (deviation `adapter-error-text`): main can't tell a node's error from the SDK's own.
   - **`capacity`** is the one bit of that text the [adaptive bypass](#adaptive-bypass) needs. Main sets it where the router's `isCapacityFailure(error)` holds for the adapter's error: its own `failureKind` is `capacity`, or the pattern `/out of gas|execution (?:gas|resource) limit|exceeds? (?:the )?(?:gas|execution) limit/i` matches `safeErrorMessage(error)`, the text after hex runs of 128 digits or more are elided, whitespace runs collapse to one space and the result is cut at 500 UTF-16 units (`fc_chain::safe_error_message`). The raw message is never matched: `out  of gas` is a capacity failure, and a phrase past the 500th unit is not. As today, it blocks the app's Colibri route for the core process's life (`router-colibri-capacity-demotion`, `boundary-adaptive-capacity-survives-success`, `boundary-adaptive-route-target-case`, `boundary-adaptive-capacity-whitespace`, `boundary-adaptive-capacity-past-500-units`, `boundary-adaptive-capacity-hex-elided`, `boundary-adaptive-capacity-failure-kind`).
+  - **`fault: true`** is the one more bit the [verifier-fault backoff](#colibri) needs, beside a `failure` or a `revert` (with `capacity` too, when both hold). It is present only when it is `true`. Main sets it where main's `isColibriFault(error)` (`94b0af4e`) holds for the adapter's error:
+    - the worker host didn't mark the error `colibriBystander`, which it does for a request that failed only because another one trapped or overran on its worker;
+    - and the error's `name` is `RuntimeError`, or `/memory access out of bounds|(?:^|: )unreachable(?: executed)?$|retired after a trap|Colibri worker replaced/i` matches `String(error.message || '')`. Unlike `capacity`, the raw message is matched, not its `safeErrorMessage`.
+    - **Negotiated:** `core.hello`'s capabilities gain `colibri_faults`, and main sends `fault` only to a core that offers it. An older core has no backoff, so it gets the reply without the bit.
 - **Admission:** the router's slots stay as the core's admission rules, held until main's terminal reply. Myotis has 1 in flight and 16 waiting per chain, and background callers take only an idle slot. Colibri has 8 in flight, 2 per route. A request that ends while it waits for a Myotis slot, or after it was granted one but before its operation went out (a cancel, a configuration change, its deadline, its budget), leaves the queue or passes the slot on at once; only a dispatched operation holds it until main's reply.
 - **Physical completion:** main replies only when the adapter's promise settles, never early. Main's per-verifier bound (0004: 8 operations) is shared by naming and chain data.
 - **Reply size:** as 0004, main serializes each reply first; one over the message cap is `{ failure: "too_large" }`.
@@ -186,7 +198,7 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
   - **`undefined`:** a body without `result`, or Colibri's `{ undefined_keys: ["result"] }`, answers `undefined`, which JSON can't carry. The reply then omits `result` and lists it in `undefined_keys` (0004's mechanism). Main restores an own `result` property, first in key order, whose value is `undefined`.
   - **`source`** stays on every result, so `chain-data-activity`'s watchdog records still work.
   - **Size:** the core measures the whole serialized reply. One over the message cap fails the request with `too_large`.
-- **Every result and error** of `chain.request` and `chain.fee_quote` carries `generation`: the chain's generation it was computed under ([Generations](#generations)).
+- **Every result and error** of `chain.request`, `chain.fee_quote` and `chain.fee_reference` carries `generation`: the chain's generation it was computed under ([Generations](#generations)).
 - **Endpoint references** in `trust` (`agreed`, `dissented`, `queried`, `prover`) are substituted by main with the host, as 0004 does. One difference: the router's `endpointHost` gives `''` for a URL that doesn't parse, where naming keeps the input. Main follows the router here:
   - `''` is dropped from `agreed`, `dissented` and `queried`;
   - Colibri's `prover` keeps `''`;
@@ -219,9 +231,9 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
 
 - **Per source**, as today:
   - `configured = max(500, quorum.timeout_ms || 5000)`;
-  - an interactive read caps a source at 2 s when a later source exists;
+  - an interactive read caps a source at 2 s when a later source exists (a transaction lookup's deferred Colibri isn't one for the sources before it: [Colibri](#colibri));
   - the quorum's budget is a *verification* budget: when Direct comes next, its members run on to `configured`;
-  - Direct gives every endpoint `configured`, walking them one at a time ([Direct](#direct) on the reference's widening);
+  - Direct gives every endpoint `configured`, walking them one at a time ([Direct](#direct) on the reference's widening); a fee quote's Direct asks up to three at once ([B](#b-combining-directs-quotes));
   - the Ant profile widens the quorum budget to 30 s.
 - **Overall:** 120 s per request, or the caller's `deadline_ms` if lower (deviation `overall-deadline`).
   - **Today** a request has no overall bound: an interactive read on chain 1 can take about 39 s, and more with user settings.
@@ -245,7 +257,7 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
 
 - **A `cancel`** ends the request at once, unless its response has already begun ([Frames](#frames)): a read or a fee quote replies `cancelled` (deviation `cancel-promptly`). Its pending `shell.rpc` and `shell.blockscout` requests are cancelled, quorum members included (deviation `abandoned-exchanges`: today's caller signal doesn't reach the quorum).
   - **Today** the router throws its `AbortError` only at its next check of the signal, so a read waiting on a verifier settles only when that operation does: `cancel-read-no-fallthrough` is aborted at 10 ms and throws at 20 ms, when Myotis's read settles. The core replies at 10 ms.
-- **Verifier work** keeps its slot until main's terminal reply (parity: the router holds Myotis and Colibri slots until the operation physically settles). In `cancel-read-no-fallthrough` the Myotis slot is still held when the core replies. A terminal reply too large for its request's budget still frees the slot: its payload is dropped, and the request ends with `budget`. A terminal reply whose request has already ended is dropped as it arrives, and still frees the slot.
+- **Verifier work** keeps its slot until main's terminal reply (parity: the router holds Myotis and Colibri slots until the operation physically settles). In `cancel-read-no-fallthrough` the Myotis slot is still held when the core replies. A terminal reply too large for its request's budget still frees the slot: its payload is dropped, and the request ends with `budget`. A terminal reply whose request has already ended is dropped as it arrives, and still frees the slot. A Colibri reply also still counts for its method's [fault record](#colibri).
 - **A broadcast** that is cancelled ends as [Broadcast](#broadcast) says. Today it is an `AbortError`.
 
 ## Configuration
@@ -277,6 +289,41 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
   - **Today** each entry is a quorum member of its own. One endpoint listed twice agrees with itself and reaches m = 2 alone, and its answer is labelled `verified` (`boundary-quorum-duplicate-endpoint`: endpoints a, a, b). Under [Evidence for labels](#evidence-for-labels), such an answer could settle an intent on one node's word.
   - **Main gives one reference per (chain, URL)**, so the core merges exact repeats. It can't see that two URLs reach one node: `https://x.example` and `https://x.example/`, or two API keys at one provider. Main therefore lists each host at most once in a chain's `rpc`, keeping the first in registry order, before it assigns references. A user source that repeats a builtin's URL, which `getEndpoints` keeps today, then adds nothing.
 - **When main sends it:** at startup and from `network-ipc`'s `refreshDownstream`, where today only ENS and provider-manager caches are cleared. Controls queue ahead of later requests, as naming's do.
+
+### Endpoints serve their chain (decided, #93)
+
+**Status:** decided (the user, 2026-10-22):
+- the check runs in main, before the snapshot;
+- main re-checks every endpoint hourly;
+- main refuses to save a user source whose endpoint answers another chain.
+
+The options weighed are kept below.
+
+- **Today** nothing asks an endpoint which chain it serves. A user-added RPC that serves another chain answers balances, nonces and receipts for that chain:
+  - Direct returns them, labelled `unverified` or `user-configured`;
+  - two such endpoints agree with each other, and a quorum of them is labelled `verified`;
+  - a broadcast of a chain-bound transaction (EIP-155 legacy, or a typed one) is refused (`invalid chain id`). Every transaction the core signs is chain-bound. Raw bytes a caller passes to `chain.broadcast` need not be: an unprotected legacy transaction can be accepted by another chain's node, and the core doesn't decode a transaction's chain before sending it.
+- **Why it matters for money:** [labels](#retrying-an-intent) read from a quorum. Two endpoints of another chain agree on that chain's finalized block, the sender's nonce there and the block that used it. Where the user has used the same account on that chain, the label can read *taken* for an intent still pending on the right chain. That settles the intent and frees its record, and a new send then takes a new nonce while the old bytes can still be mined. Once an endpoint counts once in a quorum and a quorum with m = 1 isn't verified (#90, #91), one misconfigured endpoint can't do this; two can.
+- **The rule:** an endpoint takes part in reads, fee quotes and broadcasts for chain C only once `eth_chainId` from it has answered C, within the freshness of the place that checks (below). An answer that differs leaves it out; a failed check leaves it unchecked, and out, until a retry succeeds.
+- **Where the check runs:**
+
+| | Main, before the snapshot | The core, before an endpoint's first exchange |
+|---|---|---|
+| How | Main asks `eth_chainId` of each (chain, URL) through its executor; the snapshot lists only endpoints that answered C. Editing a source shows the user a mismatch at once. | The machine asks `eth_chainId` before an endpoint's first exchange in a generation. A mismatch is that endpoint's failure, with its own text. |
+| Freshness | A result holds for one (chain, URL) for the core process's life: a reconfiguration that keeps the URL doesn't repeat it. Adding or editing a source checks it again. A failed check is retried with backoff (30 s, doubling to 10 min). | A result holds for one configuration generation. |
+| Cost | Results are coalesced: the first snapshot waits a bounded time (say 3 s) for the startup checks, and later results join in at most one `chain.configure` a minute. Each snapshot that changes a chain advances its generation, which ends the chain's running requests; main sends a read or a fee quote again once. | One round trip more on each endpoint's first use per generation, inside its source's budget. |
+| Parity and tests | None of the machine changes; the replay is untouched. | Every replay scenario's first exchanges change: the driver must answer the checks itself, and memory, cancel and broadcast rules need a case for the check (a broadcast attempt whose check failed was never sent). |
+| Trust | Main is trusted for configuration already (it names the endpoints). | The core decides, as it decides the rest. |
+
+- **The decision: main, before the snapshot.** The check guards against a misconfigured endpoint, not a malicious one: a lying endpoint answers `eth_chainId` correctly and lies about the rest, which only the quorum and the verifiers bound. A configuration-time check covers the misconfiguration, keeps the machine and its replayed scenarios as they are, and tells the user at the moment they can fix the source.
+- **An hourly re-check:** main asks every (chain, URL) again once an hour.
+  - A result that hasn't changed does nothing.
+  - A changed one joins the coalesced reconfiguration above, at most one `chain.configure` a minute.
+  - This narrows the window in which a URL repointed later in the process's life (such as a load balancer) goes unnoticed to about an hour.
+- **A user source that answers another chain isn't saved.**
+  - When the user adds or edits a source, main checks it before saving. A mismatch refuses the save, with a message that the endpoint serves another chain.
+  - A check that merely fails (the endpoint is down, or times out) doesn't refuse it: the source is saved, and stays out until a retry succeeds.
+  - A builtin endpoint that answers another chain is left out, as any endpoint is.
 
 ## The router machine
 
@@ -372,6 +419,46 @@ The router keeps parsed values; the core keeps **text**.
 - **One operation per request:** `requestViaColibri` with the source's budget. Main keeps its client cache and its one rebuild-and-retry.
 - **Any error falls through,** a verified revert included. A `revert` survives as the last error, with its data, if later sources fail as unavailable; a `failure` survives as a fixed text.
 - **Trust:** the prover's host, and `ZK sync-committee proof` or `Sync-committee proof`.
+- **Transaction lookups** (freedom-browser #752; main's `TX_LOOKUP_METHODS` and `txLookupNeedsProof`). Colibri 3.0.2 proves that a transaction is in a block. It can't prove that one is absent or pending: asked for a hash its prover hasn't seen, its verifier spins for seconds and traps (#750). For `eth_getTransactionReceipt` and `eth_getTransactionByHash`:
+  - **Colibri goes last.** When the read reaches Colibri and a source still follows it in the order, Colibri moves to the end, once. The sources before it keep their place: where Myotis leads, it is still asked first (`boundary-tx-lookup-myotis-keeps-its-place`). Colibri is asked where it stands when nothing follows it: a Colibri-only order (`tx-lookup-colibri-only-order`), or one whose later sources the request or the method removed. A Colibri route the [adaptive bypass](#adaptive-bypass) has open is bypassed where it stands, as for any read, and isn't moved (`boundary-tx-lookup-bypassed-colibri-not-deferred`).
+  - **Final without proof.** Some answers from a source after Colibri are final, labelled as that source's answer, because nothing could prove them. Colibri isn't asked (`tx-lookup-unproven-*`, `boundary-tx-lookup-undefined-final`):
+    - a receipt of `null`, or `undefined` (a body without `result`);
+    - a transaction of `null` or `undefined`;
+    - a transaction without both a `blockNumber` and a `blockHash` other than `null`: a pending one.
+  - **Mined:** any other answer is held. That means a receipt that isn't `null` or `undefined`, whatever its shape, or a transaction whose `blockNumber` and `blockHash` aren't `null` or missing. The test is JavaScript's `!= null` on the parsed result: the last of duplicate members counts, and a result that isn't an object has neither member.
+    - **What follows:** the held answer counts as its source's success for the adaptive bypass. The read then goes straight to Colibri, and the sources in between aren't asked.
+    - **If Colibri answers,** its proof replaces the held answer: `source: "colibri"`, `verified: true`, Colibri's trust (`tx-lookup-mined-*-proven`).
+    - **If Colibri fails,** or is bypassed or backed off, the held answer is returned as it was, with its source, label and trust. No other source is asked again (`tx-lookup-proof-fails-keeps-answer`, `tx-lookup-backed-off-serves-answer`, `boundary-tx-lookup-myotis-keeps-its-place`).
+  - **Nothing held.** If every source after Colibri failed, Colibri is the last source left, and its answer is the read's, whatever it is (`tx-lookup-later-sources-failed`).
+  - **Budgets** ([Deadlines](#deadlines)):
+    - **Before Colibri:** a deferred Colibri is no fallback for the sources before it. A source counts as having a later source only when something other than the deferred Colibri follows it. So a page's lookup on `[colibri, quorum]` gives the quorum its configured budget, not 2 s (`tx-lookup-quorum-terminal-full-budget`).
+    - **Colibri itself:** asked to prove a held answer, it has that answer as its fallback, so a page's read caps it at 2 s. Asked with nothing held, it gets `configured`, even for a page (`tx-lookup-later-sources-failed`).
+    - **The quorum's hand-off to Direct** follows the moved order: it applies when Direct comes right after the quorum.
+  - **Errors:**
+    - **The aggregate** lists Colibri's failure last, and only the request's own exclusions read as excluded (`tx-lookup-all-sources-fail`, `tx-lookup-caller-exclusions-named`).
+    - **The last error:** a deferred Colibri keeps the precedence it had when it was asked first. Its error becomes the last error only if no later source left one (`boundary-tx-lookup-deferred-colibri-error-precedence`; `tx-lookup-later-sources-failed`'s second read throws Direct's).
+  - **Trust.** Before #752, Colibri answered first, and a null it couldn't prove fell to the RPC sources after its trap. Now a null or pending answer is the word of the first later source to answer:
+    - from the quorum, m-of-k agreement;
+    - from Direct, one endpoint's word, labelled `verified: false`. A lagging Direct endpoint can call a mined transaction unknown until it catches up, where Colibri used to prove the receipt.
+
+    A caller polling for a receipt gets it on a later poll. One that must not act on an unverified absence reads `verified`.
+- **Verifier faults** (#752; main's `colibriFaults`): a backoff per chain and method, whoever asked, interactive or not. The adaptive bypass's routes are separate.
+  - **A fault** is a terminal reply main marks `fault` ([The rest](#the-rest)): the verifier trapped, or its worker was replaced under the request.
+    - **What isn't one:** a bystander, a request that failed only because another one trapped or overran on its worker (`colibri-fault-bystander-not-counted`). Nor is any other failure, such as a transport error or the prover's own (`colibri-fault-only-faults-count`). The marks main sets are pinned too (`boundary-colibri-fault-classes`).
+  - **The record** holds the times of faults within the last 60 s, a strike count and a cooldown's end.
+    - **A fault outside a cooldown** drops the times 60 s old or older and adds its own. At 2 times, a cooldown starts, and the strike count rises and the times clear.
+    - **The cooldowns** are 60 s, then 5 min, then 15 min for the third strike and every one after (`colibri-fault-backoff-escalates`, `boundary-colibri-fault-cooldown-caps`).
+    - **A fault during a cooldown** adds nothing (`boundary-colibri-fault-during-cooldown-ignored`).
+    - **An answer** (a result, or `undefined_keys`) deletes the record, strikes included. One that arrives during a cooldown, from a request asked before it began, ends the cooldown too (`boundary-colibri-fault-answer-ends-cooldown`).
+  - **When it counts:** each Colibri reply counts when it arrives, even one whose request has already ended. So a fault that lands after its caller's deadline moved it on still counts (`colibri-fault-late-still-counts`).
+  - **Backed off:**
+    - **The effect:** while a cooldown runs, Colibri isn't asked for that method on that chain. Other methods and other chains are unaffected (`colibri-fault-backoff-escalates`).
+    - **The text:** the read fails at Colibri as unavailable, with `Colibri backed off for <method> after repeated verifier faults`. It is never the last error.
+    - **The order of checks:** this one comes after `Colibri does not support <method>` and before the prover and admission checks, so it takes no slot.
+    - **The end:** the cooldown is over once the clock reaches its end.
+  - **Lifetime:** the core process's, as the adaptive table's; a configuration change keeps it. It holds at most 1,024 records and evicts the oldest (deviation `memory-budgets`; the reference's is unbounded). Its times are on the monotonic clock (deviation `monotonic-time`).
+  - **Logging:** when a cooldown starts, the core logs it at `warn` with the chain, the method and the cooldown, as main does, and never an origin.
+  - **`too_large`:** a result over main's message cap ([The rest](#the-rest), Reply size) is neither an answer nor a fault: main can't send the result, and the core can't tell it from an oversized revert. The reference has no such cap, so its record is cleared there.
 
 ### Adaptive bypass
 
@@ -470,7 +557,7 @@ A node's error proves only that *these* bytes weren't admitted by *that* node *n
   - **Matching:** case-sensitive, on `String(error.message)`.
 
   `already known` is never a refusal, in any client's wording, because it says the bytes exist. Anything unmatched is ambiguous, geth's minimum-tip refusal (`transaction gas price below minimum`) among them. Under the wallet's rule a classification decides only what is shown ([Retrying an intent](#retrying-an-intent)).
-- **Myotis `rejected`** counts as a refusal; its reasons include a used nonce.
+- **Myotis `rejected`** counts as a refusal; its reasons include a used nonce, and bytes Myotis doesn't relay ([The rest](#the-rest)).
 - **Order doesn't matter.** A refusal after an attempt that may have been sent (an ambiguous one) stops the attempt loop, as Myotis's final verdict does today, but it can't erase that attempt: the outcome table looks at every attempt (`boundary-broadcast-refusal-after-ambiguous`).
 - **A refusal with nothing possibly sent** doesn't stop the loop: re-sending continues as today, since another node may admit the bytes (`boundary-broadcast-resends-until-accepted`: `nonce too low` from a, `insufficient funds` from b, accepted by c).
 
@@ -486,7 +573,7 @@ A node's error proves only that *these* bytes weren't admitted by *that* node *n
 - **Every terminal path** goes through this table: the overall deadline, a `cancel`, a configuration change, a budget exhaustion and core shutdown. An outstanding attempt counts as ambiguous once it is possibly sent, so the outcome is then `uncertain`, never `deadline` or `cancelled`.
 - **Only `rejected` and `not sent` are failures.** Neither moves the intent to a new nonce; nothing does ([Retrying an intent](#retrying-an-intent)).
 - **Reconciliation:** before reporting `uncertain`, the core asks once whether the network knows the hash, within the reconciliation room ([Deadlines](#deadlines)).
-  - **The lookup** is `eth_getTransactionByHash(hash)`, run as a non-interactive read through the read order.
+  - **The lookup** is `eth_getTransactionByHash(hash)`, run as a non-interactive read through the read order. It is a transaction lookup, so where Colibri is in the order, the sources after it answer first, and a pending match is final without a proof ([Colibri](#colibri)).
   - **A match** is a result object whose `hash` equals the transaction's. A match makes the outcome `sent`.
   - **Anything else** leaves the outcome `uncertain`: `null`, an error, a mismatched or malformed object, or no time left. A lookup never produces `rejected`.
 - **Myotis:** `rejected` and `uncertain` end the attempt loop, as today, and `not_sent` falls to the next broadcaster. What the loop ended with is then classified like any other attempt.
@@ -505,7 +592,7 @@ Main's wallet chooses nonces for the sends it controls (0002). The guarantee cov
   - **Paid:** one of the intent's own transactions is included in a block of the finalized chain, with status 1.
   - **Failed:** one is included there with status 0. It consumed N and executed nothing.
   - **Taken:** another transaction of the sender, in a block of the finalized chain, has nonce N. It may be a payment of this very intent signed elsewhere, so the payment may or may not have happened.
-  - **Held:** anything else. A chain without a finalized block keeps its intents held, as does evidence deeper than the bound in rule 2.
+  - **Held:** anything else. A chain without a finalized block keeps its intents held, as does evidence deeper than the bound in rule 2. A held intent whose label can't be read for a day is shown as *Couldn't confirm* ([State history](#state-history)).
 - **Failed and taken go back to the user.** The wallet explains what it knows and offers no retry. A new payment is the user's own act from the send screen: a new intent, with its own nonce and its own confirmation.
 - <a id="evidence-for-labels"></a>**Evidence for labels.** Every read comes from a verified source: Myotis, Colibri, or a quorum of at least two agreeing endpoints. A quorum with m = 1 counts as Direct. Without such a source, an intent stays held.
   - **The core's labels carry this rule** (deviations `singleton-quorum` and `endpoint-dedup`): a quorum's reply is `verified`, with trust `level: "verified"`, only when m > 1, and its agreeing members are distinct endpoint references. A wallet that checks `level`, `achieved` and `m ≥ 2` therefore never counts one node's answer twice, nor a singleton quorum. Two references can still be one node behind two URLs; main's [configuration](#configuration) lists each host once for that reason.
@@ -525,10 +612,70 @@ Main's wallet chooses nonces for the sends it controls (0002). The guarantee cov
     4. **Well-formed evidence.** Only an explicit `null` receipt means absence. Receipts and blocks must be well formed, with 32-byte hashes, and a block's number must be the height that was asked for. An undefined or malformed answer leaves the intent held.
     5. **Settlement against what was read.** A settlement is conditional on the intent's hashes (or revision) that the label was read for. That condition is checked in line with the record's other writes. If a replacement was committed meanwhile, even one still being written, nothing is settled, and the intent is read again.
   - **What a provider can do.** A dishonest provider, or a pair of them agreeing, can delay a label: withholding evidence keeps an intent held. Forging one takes every member of an agreeing pair lying.
+  - <a id="state-history"></a>**State history** (decided, #94). Rule 1 and rule 3's search read the sender's nonce at a block's hash, which a node can answer only while it serves that block's state.
+    - **Status:** decided (the user, 2026-10-22):
+      - the search starts from a bracket, and uses Colibri's proven reads where Colibri covers them;
+      - no block scan, and no state-serving or archive endpoint required beyond Colibri;
+      - evidence out of reach leaves the intent held, shown as *Couldn't confirm* with its hashes and a block-explorer link;
+      - the 8192-block bound stays;
+      - the user may close an intent by hand only when the verified nonce at a finalized block is past N, under the locking of automatic settlement, with a durable retirement record and text that says closing proves nothing about the payment.
+
+      The options weighed are kept below, as the decision's rationale.
+    - **What nodes serve:** a node answers state queries for a window W of recent blocks. W depends on the client and its configuration: geth keeps the state of the last 128 blocks by default, and some clients and configurations keep a longer queryable history or all of it. Myotis reads only at `latest`, so these reads come from Colibri, where it proves them, or from a quorum, both of whose agreeing members must serve them.
+    - **Rule 1** fits a default window, with little room: F is about two epochs (64 to 96 blocks) behind the head on Ethereum, more while finality is delayed.
+    - **Rule 3's search** reads the nonce at blocks as deep as the one that used N. The state is a need of that search, not of the evidence: the evidence is the sender's nonce-N transaction in a block of the verified chain. When the probed blocks fall outside every source's reach, the search fails and the intent stays held. That fails safe, but *taken* may then never be reached on public endpoints, and the intent's record, bytes and floor stay.
+    - **The search,** as decided:
+      1. **From the bracket.** The bracket is the last finalized block at which the sender's nonce was still below N: a verified read there, by its hash, gave a transaction count of at most N. It is kept (number and hash) with the intent's record.
+         - **When it is taken:** on the tracker's first pass after the record is committed, and again on each pass while N is still unused at F, so it moves up.
+         - **The search** for the block that used N runs above the bracket, up to F, over rule 2's verified headers.
+         - **Its reach:** the deepest probe lies below the head by F's lag plus the blocks between the bracket and F, and must stay within W. At the tracker's 10-minute interval a bracket is about 50 blocks on Ethereum and 120 on Gnosis, which with F's lag already reaches past a 128-block window. So while it holds a broadcast intent with no terminal label, the tracker runs at its fast interval.
+         - **It fails** when observations stop for long enough: the browser closed, a pass missed or failed, the system suspended, finality delayed.
+      2. **Colibri, where it proves the reads.** The search's reads go through `chain.request` with trust, as every label's reads do, and the read order asks Colibri before the quorum. Where Colibri proves a read (the sender's nonce at a block hash, or a block with its transactions), its answer is evidence from as deep as its prover reaches, beyond the endpoints' W. Where it doesn't, the read falls to the quorum, within W. Which reads Colibri proves, and how deep, is [open question 2](#open-questions).
+      3. **No block scan.** The search reads one block with its transactions per intent: the one its probes located (rule 3). It never reads a range of blocks to look for the transaction.
+      4. **No new endpoint requirement.** Nothing beyond Colibri has to serve historical state: no archive endpoint, and no endpoint chosen for its window. The quorum's endpoints answer what their window allows.
+      5. **Couldn't confirm.** An intent whose evidence is out of reach stays held: its record, bytes and nonce floor stay, and later passes keep searching, so a source that reaches the evidence still settles it.
+         - **When it is shown:** after a day of passes that couldn't read a label (a constant to tune): the verified nonce at F couldn't be read, or it is past N and the block that used N couldn't be found or verified within reach and rule 2's bound.
+         - **What it shows:** the intent's nonce, its hashes, and a block-explorer link for each.
+         - **Not an unmined intent:** one whose verified nonce at F is N or below isn't *Couldn't confirm*. It is offered sending again, or a replacement, as before.
+      6. **The bound stays.** Evidence deeper than 8192 blocks below F stays out of reach (rule 2), whatever the source: neither Colibri nor an archive node changes that.
+    - **The bracket is verified** like any header: both blocks are finalized, so the earlier one is an ancestor of F, which rule 2's walk checks. A bracket that doesn't verify is dropped, and the search falls back to the window. It is not secret.
+    - **Closing by hand** (decided: offered). The wallet offers it on an intent shown as *Couldn't confirm*, only under the condition designed for it, which keeps the evidence rules that make forgetting safe:
+      - **The condition:** the account's verified nonce at a finalized block F is past N (rule 1: from a verified source, by F's hash). N is then used on the finalized chain, so none of the intent's signed versions can be mined. Otherwise the offer isn't shown.
+      - **The locking:** the same as automatic settlement's, rule 5's fencing: under the account's reservation lock, and conditional on the revision the user saw. A replacement committed meanwhile, even one still being written, closes nothing, and the intent is read again.
+      - **The retirement record:** closing writes a durable retirement record (atomically, with fsync) that keeps the intent's hashes and says it was closed by hand, so a recovery can't revive it. The bytes are forgotten, as at any settlement.
+      - **The text** says plainly that closing proves nothing about whether the payment was made: one of the intent's own transactions, or a copy signed elsewhere, may have paid. For example: "We couldn't confirm whether this payment went through. It can no longer be sent. Check the explorer to see what happened."
+    - **Options weighed.** They combine, and the decision takes bracketing first, Colibri, and staying held:
+      - **State-serving members** (adopted for Colibri only): Colibri, where it proves these reads, or agreeing endpoints whose W reaches the probed blocks. Few reads, but most public endpoints don't qualify, and the user or the registry would have to pick ones that do. The decision requires no state-serving or archive endpoint beyond Colibri.
+      - **Bracketing** (adopted, first): it costs nothing more, and works while an observation is recent enough (above).
+      - **Block scan** (rejected): read the verified blocks between the bracket, or F − 8192, and F with their transactions, and look for the sender's nonce-N transaction. Nodes serve block bodies without historical state, and each block would be checked against the verified header chain (rule 2). But it costs up to 8192 blocks with transactions per scan, from every agreeing member, which on Ethereum is gigabytes for the whole window. One scan would serve every held intent of the chain, bounded per pass, resumable and cancellable. The user rejected downloading gigabytes.
+      - **Stay held** (adopted, as *Couldn't confirm*): the record, its bytes and the nonce floor stay, and the wallet says it couldn't confirm.
+    - **Tests,** required of the implementing PR (freedom-browser, step 5), against a scripted chain and a fake clock:
+      - **Bracketing:**
+        - the first pass after the record is committed takes the bracket (number and hash) where the verified count at F is at most N, and later passes move it up while N is unused;
+        - once N is used, the search runs above the bracket and labels the intent paid, failed or taken from probes within W;
+        - a bracket that doesn't verify (its hash isn't the verified header's at its height, or it isn't an ancestor of F) is dropped, and the search falls back to the window;
+        - probes beyond W (the endpoints' missing-state errors) leave the intent held;
+        - the tracker runs at its fast interval while a broadcast intent has no terminal label, and returns to its normal one after.
+      - **Colibri:**
+        - with a prover, and Colibri proving the reads, the search reaches a block beyond the endpoints' W and labels the intent;
+        - with no prover, Colibri out of the read order, Colibri failing, or a read Colibri doesn't prove, the read falls to the quorum, within W;
+        - a Direct answer, or a quorum with m = 1, never counts as evidence.
+      - **No block scan:** the search requests at most one block with its transactions per intent, the one its probes located.
+      - **The bound:** evidence at F − 8192 settles the intent; at F − 8193 it stays held.
+      - **Couldn't confirm:**
+        - with the verified nonce at F past N and the block that used N out of reach, the intent shows *Couldn't confirm*, with its nonce, its hashes and an explorer link for each, after a day of failed passes, and not before;
+        - likewise when the verified nonce at F can't be read for a day; then closing by hand isn't offered;
+        - an intent whose verified nonce at F is N or below is never *Couldn't confirm*, and is offered sending again and a replacement;
+        - its record, bytes and floor stay, and a later pass that reaches the evidence labels and settles it.
+      - **Closing by hand:**
+        - offered only when the verified nonce at F is past N: not when it is N or below, not when it came from Direct or a quorum with m = 1, and not when it couldn't be read;
+        - it takes the account's reservation lock, and a replacement committed meanwhile, one still being written included, closes nothing;
+        - its retirement record is durable: with a crash at each step and a restart, the intent is either still held or retired with its hashes, never revived;
+        - its confirmation shows the text that closing proves nothing about the payment, pinned in the test.
 - **Records.** Each intent has a durable record in main, separate from the display history, which can be cleared: `{ intent_id, chain_id, sender, nonce, hashes }`. Every hash in it was signed at that one nonce: main decodes each signed transaction before committing it and refuses one whose nonce, chain, sender or hash differs.
   - **What else it holds:** each hash's signed bytes, and the intent's unsigned fields and origin. Then "send again" needs neither the vault nor a device after a restart, and a replacement at N reuses the confirmed content. They are written with the record (mode 0600), never logged, and deleted when the intent settles.
   - **Committed first:** the record, with each new hash, is committed (written atomically, with fsync) before those bytes are handed to a broadcaster.
-  - **Kept** until the intent is paid, failed or taken at finality, and never removed by clearing the history.
+  - **Kept** until the intent is paid, failed or taken at finality, or closed by hand ([State history](#state-history)), and never removed by clearing the history.
   - **Handoffs are recorded too.** Before main hands an intent's bytes to a broadcaster, it commits a handoff line naming that broadcast, and later its outcome. A handoff with no recorded outcome (a lost reply, a crash, the core dying) stays possibly sent for good: no later result can clear it.
   - **Void, the one exception:** the user may void an intent only when all of these hold.
     - **Every handoff closed `not_sent`:** every handoff of every one of its hashes has a recorded outcome of `not_sent` (main's `not_sent`, Myotis's `{ not_sent }`, or an attempt the core never sent).
@@ -554,9 +701,9 @@ The core can die mid-broadcast: an exit, the watchdog, a protocol error. Main th
 
 ## Fee quotes
 
-`chain.fee_quote` follows `getFeeQuote` exactly. It walks the read order with no capabilities, exclusions, bypass or Myotis slots.
+`chain.fee_quote` follows `getFeeQuote` exactly, except in Direct's step, which B changes (deviation `fee-combination`, [B](#b-combining-directs-quotes)). It walks the read order with no capabilities, exclusions, bypass or Myotis slots.
 - **Myotis** answers both components in one operation.
-- **Direct** asks one endpoint for both.
+- **Direct** asks an endpoint for both. Today it walks them one at a time, and the first quote that answers wins; with B, it asks up to three at once and combines their quotes.
 - **Other sources** make two requests.
 - **The quote:**
   - legacy when there's no priority fee, or when it is negative or above the gas price;
@@ -565,6 +712,152 @@ The core can die mid-broadcast: an exit, the watchdog, a protocol error. Main th
   - decimal strings, `verified` for myotis, colibri and quorum; a quorum's only when its m is more than 1 (deviation `singleton-quorum`).
 
 Vectors pin the downgrade boundaries. Whether a derived base fee and a "verified" Myotis fee are right is a product question, not a parity one.
+
+### Plausibility (decided, #92)
+
+**Status:** decided (the user, 2026-10-22):
+- **A,** the cap at confirmation, with a threshold relative to the current network fee, not a fixed amount or the value sent;
+- **B,** widened from two endpoints to several, keeping the tightest constraints.
+
+C isn't adopted as a cap on quotes, and D isn't adopted.
+
+**Tightened in #109's review** (2026-10-22):
+- where a verified header shows the chain takes EIP-1559, mixed quotes combine as EIP-1559;
+- a reference that is one endpoint's quote never permits auto-approval.
+
+The options weighed are kept below. [B](#b-combining-directs-quotes) and [A](#a-the-check-at-confirmation) specify what was adopted.
+
+- **Today** the only checks are a gas price above 0, a priority fee at most the gas price, and the 4096-bit width. Nodes rarely agree exactly on `eth_gasPrice`, so the quorum usually misses and Direct quotes, from one endpoint (`router-fee-quote-direct-same-endpoint`).
+- **What one endpoint can do:** answer both values with 1e18 wei. The quote becomes EIP-1559 with base fee 0 and a priority fee of 1e18 wei per gas, about 21,000 ETH for a plain transfer, all of it a tip. A node refuses a transaction the sender can't cover, so the real risk is a smaller inflation: ten or fifty times the going rate, which the user pays in full and may not notice.
+- **What the wallet shows:** the send screen and a dApp's transaction show an estimated fee, the gas limit times the quote's effective gas price. Nothing says the quote came from one endpoint, or that it is far above the chain's recent fees.
+- **Provenance isn't plausibility.** A quote's `verified` names its source (Myotis, Colibri or a quorum), not a check of its value. An honest source can be far off during a spike, and fees can reach a transaction without any quote: a dApp supplies them, or a replacement raises them.
+- **Options:**
+
+| Option | Bounds it | Cost |
+|---|---|---|
+| **A. A cap in the send path (main):** before every signature of a transaction, the confirmation shows the most it can cost (gas limit × max fee per gas, or × gas price) and asks again above a threshold | every transaction the wallet signs, whatever its fees' source: a quote (verified or not), fees a dApp supplied, a replacement. A send above the threshold is never auto-approved | a threshold per chain (absolute, or relative to the value sent): product |
+| **B. Two endpoints, the tighter constraints (core):** Direct asks a second endpoint where one exists, and combines the two quotes' constraints (below) | if one of the two is honest and answers, and both quotes are of one type, the transaction never pays more per gas than the honest quote's would at the same base fee, and a dishonest one can only underquote, which delays the payment (it can be replaced at the same nonce). With mixed types only the gas price is bounded, unless a verified header shows EIP-1559 ([B](#b-combining-directs-quotes)) | a second exchange per quote; a deviation from `requestDirectFeeQuote`'s single endpoint; a new replay scenario and a changed one |
+| **C. A reference (core):** cap the priority fee by `eth_feeHistory` percentiles and the max fee by the latest block's `baseFeePerGas` | only with a verified, independent reference (below); otherwise a consistency check | several reads per quote; `latest` reads that disagree across nodes; a deviation |
+| **D. A configured ceiling (main → core):** the snapshot carries a per-chain maximum fee per gas, and a quote above it fails | quotes only: not fees a caller supplies, nor the gas limit | a number per chain, which a custom chain has no good default for |
+
+- **C's reference.** It bounds a quote only if it is verified and independent of the quote: read from Myotis, from Colibri where it proves those reads, or from a quorum of at least two distinct endpoints, and never from Direct, which may be the quoting endpoint itself. Quorums on `latest` often miss, and a chain without EIP-1559 has no base fee: then C either fails the quote or leaves it to A. Read from the quoting endpoint, C is only a consistency check, which catches a broken node, not a dishonest one.
+- **The decision: A owns the problem, and B hardens the core's quotes.** A is the last step before a signature, and covers every transaction, not just quotes. Neither proves a fee honest: B narrows what endpoints can do to a Direct quote, and A's ratio is a confirmation heuristic.
+
+#### B: combining Direct's quotes
+
+Deviation `fee-combination`. A fee quote's Direct step (today's `requestDirectFeeQuote`) asks several endpoints and combines their quotes. Myotis, Colibri and the quorum quote as today.
+- **Collection:**
+  - **Endpoints:** the chain's `rpc` endpoints in registry order, the quorum's included, as today's Direct quote.
+  - **Three at once:** it starts the first three. Each asks `eth_gasPrice`, then, once that has answered, `eth_maxPriorityFeePerGas`, each exchange within `configured`. Each endpoint's quote comes from today's codec:
+    - a failed, missing, negative or too-high priority hint gives a legacy quote;
+    - a failed gas price, a non-positive one or an unparseable priority hint fails that endpoint.
+    - **Memory:** the gas price is read as it arrives, and only its value, or the codec's error, is kept while the hint is asked for. Three raw answers, each up to the answer cap, are never kept across those exchanges, so large valid answers can't take the request over its budget and discard a quote that answered. An unreadable gas price still fails its endpoint once the hint's exchange has ended, with the same requests and error as today's codec.
+  - **Replacement:** until a quote has answered, an endpoint that fails is replaced by the next one not yet asked, so every endpoint can still be reached, as today's walk does. Once one has answered, no endpoint starts. A tick's answers count before its failures: a failure in the tick a quote answered isn't replaced. An error is kept only while no quote has answered.
+  - **Cutoff:** collection ends when no started endpoint is still running, or 1 s after the first quote answered, whichever is first. Outstanding exchanges are then cancelled, and an endpoint still waiting for either answer hasn't answered. The cutoff goes first in its tick: an answer in that tick is left out, as for a deadline.
+  - **A header, for mixed quotes:** where the chain has a prover and its read order includes `colibri`, the collection also starts the verified header read that [A](#a-the-check-at-confirmation)'s evidence uses.
+    - **When it is used:** only if the answers are mixed. The combination then waits for it, within Colibri's budget.
+    - **Otherwise** nothing waits for it, and its outcome is dropped when it arrives (verifier operations hold their slot until main's reply).
+    - **Its age doesn't matter here:** a base fee in a verified header shows the chain takes EIP-1559 transactions.
+  - **No quote:** with every endpoint failed, Direct fails with the last error to arrive (in one tick, the higher registry index's). With no endpoint it is today's `No RPC endpoint configured`, and no header is read.
+  - **Deadline, cancel and reconfiguration** work as for any fee quote ([Deadlines](#deadlines), [Cancellation](#cancellation), [Generations](#generations)): the request ends, and every outstanding exchange is cancelled.
+- **Combination.** Each answered quote is read as two constraints: a max fee per gas M and a priority fee P. An EIP-1559 quote gives its `maxFeePerGas` (2·G − P) and its P; a legacy quote's gas price G gives M = P = G. Under EIP-1559 a transaction pays min(M, base fee + P) per gas.
+  - **Not the raw minima:** today's quote derives M = 2·G − P, so the lower G with the lower P can raise M. G = 100, P = 10 gives M = 190; a second answer of G = 100, P = 9 makes the minima give M = 191.
+  - **All EIP-1559:** EIP-1559, with the lowest M and the lowest P (which is never above that M).
+  - **All legacy:** legacy, at the lowest gas price.
+  - **Mixed** (an endpoint gave no valid priority hint), **where EIP-1559 is verified,** that is, the header read has a base fee: EIP-1559, under the all-EIP-1559 rule, a legacy quote counting as M = P = G. So the lowest M and the lowest P.
+  - **Mixed, otherwise** (no prover, Colibri out of the read order, a failed or malformed header, or one without a base fee): legacy, at the lowest gas price of all the quotes, an EIP-1559 quote's being its `effectiveGasPrice`. A missing hint alone doesn't show that the chain takes EIP-1559 transactions.
+  - **One answer:** that quote, unchanged.
+- **What it guarantees,** when an honest endpoint answers before the cutoff:
+  - **All EIP-1559, all legacy, or mixed where EIP-1559 is verified:** at every base fee, the transaction pays per gas at most what the honest quote's own transaction would, and can cost at most what that one could. Inflating the fee takes every answering endpoint. A dishonest or broken one can only underquote, which delays the payment; it can be replaced at the same nonce.
+  - **The boundary case:** an honest EIP-1559 quote G = 100, P = 1 (M = 199) and another endpoint's legacy G = 1000. Where EIP-1559 is verified, they combine to EIP-1559 with M = 199 and P = 1. If the base fee falls to 1 before inclusion, the transaction pays 2 per gas, as the honest one would.
+  - **Mixed, otherwise:** the gas price is at most the honest endpoint's, so the transaction can cost at most what the honest quote's could. But a legacy transaction pays its whole gas price at any base fee, where an honest EIP-1559 one pays less as the base fee falls. Any endpoint can force legacy by withholding its priority hint.
+    - **In the boundary case** without a verified header, the quotes combine to legacy G = 100, which pays 100 per gas at a base fee of 1.
+    - A doesn't flag this: at confirmation the gas price is the network's current one.
+  - **One answer:** no bound. The quote is that endpoint's, as today, and A judges it.
+- **The reply** keeps today's shape and key order, with one key added after `verified`: **`answered`**, the number of endpoints whose quotes were combined (1 to 3). `answered: 1` is the single-source marker. `source` stays `direct`, and `verified` stays `false` however many agree. Other sources' quotes keep today's shape exactly, without `answered`.
+  - **Legacy:** `gasPrice` and `effectiveGasPrice` are the combined gas price.
+  - **EIP-1559:** `maxFeePerGas` is M and `maxPriorityFeePerGas` is P, exactly, since they are what is signed. `baseFee` is ⌊(M − P)/2⌋ and `effectiveGasPrice` is `baseFee` + P: estimates for display, never above any answering endpoint's gas price.
+  - **Today's relation `maxFeePerGas = 2·baseFee + maxPriorityFeePerGas`** can't survive independent minima. G/P answers 10/1 and 10/2 combine to M = 18, P = 1, where (M − P)/2 would be 8.5 wei. The quote reads `baseFee` 8 and `effectiveGasPrice` 9, so 2·`baseFee` + P is M or one less. With one answer, M − P is even, and every field is today's.
+- **Tests,** required of the implementing PR ([Replay](#replay) lists the scenarios it changes):
+  - **The combination:** codec vectors, `fee_combinations` in `vectors/chain.json`. The reference has no counterpart, so their expected values come from this text.
+  - **The collection:** machine tests, named `boundary-fee-combine-*`:
+    - three successes;
+    - independent M and P minima, M − P odd included (10/1 with 10/2), and the raw-minima trap (100/10 with 100/9 gives M = 190, not 191);
+    - all legacy;
+    - mixed with a verified header (the boundary case pays 2), and mixed without one (it pays 100): no prover, Colibri out of the read order, a failed or malformed header, a header without a base fee;
+    - mixed, with the header arriving after the collection ends; and a header read whose outcome is dropped when the answers aren't mixed;
+    - partial failures: one fails and two combine; a failure replaced before any answer, and not in the tick a quote answered; an unparseable priority hint on one endpoint; an unreadable gas price failing its endpoint after the hint;
+    - memory: gas prices and hints near the answer cap on several endpoints at once, within the request's budget;
+    - all failing, with the last error;
+    - singletons: one endpoint configured, and one of three answering;
+    - the cutoff: a third answer after it is cancelled and left out, an endpoint whose priority exchange is outstanding at it is left out, and an answer in its tick;
+    - races: the deadline, a `cancel` and a configuration change while exchanges are outstanding.
+
+#### A: the check at confirmation
+
+A runs in main, at the confirmation before every transaction signature: a send the user starts, a dApp's, a replacement, a Ledger signature. Broadcasting the same signed bytes again signs nothing, so A doesn't run for it.
+- **What it shows:** the most the transaction can cost, its gas limit × max fee per gas (× gas price, if legacy).
+- **The threshold is relative to the current network fee.** A fixed amount per chain can't follow congestion pricing, and a ratio to the value sent means nothing for the many transactions that send no native value.
+- **The check:** the confirmation asks again when the transaction's max fee per gas (its gas price, if legacy) is above about 3·R, R being the reference below. It names the ratio ("20× today's network fee"), and such a send is never auto-approved. The multiple is tuned against measured fee spikes before release.
+- **Whatever set the fee:** a quote from any source, a dApp's fields or a replacement. The transaction is judged against the same R, which never comes from the transaction itself.
+- **The evidence** comes from **`chain.fee_reference`** `{ chain_id, deadline_ms }`, a new core request. It doesn't depend on how the transaction got its fees, or whether any quote was made.
+  - **Its rules:** a fee quote's, for admission, deadline, cancel, generation, reply fencing and budget.
+  - **Its two parts** run at once.
+  - **Only Colibri supplies the verified base fee today.** A Myotis head operation is a follow-up, and needs Myotis support (below).
+  - **A verified header:** where the chain has a prover and its read order includes `colibri`, Colibri's `request` operation for `eth_getBlockByNumber` with `["latest", false]`, a method Colibri proves (its light client polls it for the head).
+    - **The header** is the result's `number`, `timestamp` and `baseFeePerGas`, which must be quantities. A failed, malformed or `undefined` answer gives no header. A header without `baseFeePerGas` (a chain without EIP-1559) has no base fee.
+    - **Myotis** has no operation that returns a header ([Verified operations](#verified-operations)). Its `fee` estimate is a gas price and a priority fee. The base fee a quote derives from them (gas price − priority), Myotis's or any source's, is never taken for a header's.
+    - **A later Myotis source:** an operation returning Myotis's verified head (number, timestamp, base fee) would make Myotis a second source of headers. It needs Myotis support, and is a follow-up.
+  - **B's quotes:** B's collection, run for the reference itself, where the chain's read order includes `quorum` or `direct`, the sources that reach those endpoints. It runs even when an earlier source (Myotis, Colibri, the quorum) quoted the transaction, and it never asks those sources. Its mixed rule uses this request's own header read.
+  - **The reply:** `{ header, lowest_priority, quote, generation }`, numbers as decimal strings:
+    - `header`: `{ source: "colibri", number, timestamp, base_fee }`, with `base_fee` null on a chain without one; or null;
+    - `lowest_priority`: the lowest priority fee among B's EIP-1559 quotes, or null when none gave a valid hint;
+    - `quote`: B's combined quote, with `answered`; or null when no endpoint answered.
+  - **Failures:** a part that fails is null. The request fails only as a fee quote can (`deadline`, `cancelled`, `busy`, `budget`, or `reconfigured` after main's one resend), and main then has no reference.
+- **The reference R,** per gas, computed by main from the reply:
+  1. **Verified:** the header has a base fee B and is fresh, its `timestamp` within 60 s of main's clock either way. R = 2·B + `lowest_priority`, or 2·B when that is null (all of B's quotes legacy on an EIP-1559 chain, or none answered).
+  2. **Combined quote:** otherwise, the combined-quote fallback, when B's combined quote is at most 60 s old. R is its `maxFeePerGas`, or its `gasPrice` if legacy. It applies with no prover, Colibri out of the read order or failing, a malformed or stale header, or a chain without EIP-1559.
+     - **The quote's age** counts from the moment main sent the `chain.fee_reference` that returned it, not from the reply's arrival. The quote was made after that moment, so its true age is never more.
+     - **Everything after counts:** the time the request spent waiting for its header, the transport, and any time main holds the reply.
+     - **A slow header part** can therefore deliver a quote that is already too old. If B finishes at 0.1 s and the header fails at 60 s, the quote is past 60 s by the time the reply is used, and this branch doesn't apply.
+  3. **None:** otherwise, or when R is 0.
+  - **No reference:** the confirmation shows the most the transaction can cost, says it couldn't be compared, and the send isn't auto-approved.
+  - **One endpoint's reference:** when R is a combined quote with `answered: 1`, it is that endpoint's word, and a Direct quote from it has a ratio of 1 against it. The confirmation still compares and shows the ratio, and a send above the threshold is still asked again. But no send judged against it is auto-approved: A can't judge it reliably. On a chain with one RPC endpoint and no verified header, no send is auto-approved.
+  - **A spike before signing:** the check uses evidence at most 60 s old at the moment of approval, by the user or automatically. A header's age comes from its `timestamp`, a quote's from its request's start. Older evidence is gathered again before the signature, and the user is asked again if the new R puts the send above the threshold.
+    - **Reused evidence**, for a later approval or for another transaction's confirmation, keeps those ages.
+    - **Evidence gathered again** has a new request start.
+    - **A rising base fee** raises R with it.
+    - **During a spike** 2·B is headroom, not a forecast. A transaction quoted after the evidence was gathered can be asked about though it would pay little. The multiple and the 60 s are tuned together.
+  - **A wrong clock** makes every header stale; R then falls back to the combined quote.
+- **What A detects:**
+  - **Verified:** a max fee above about 3·R, whoever set it: an inflated base-fee part, a dApp's fee, a replacement's.
+    - **Its priority part** comes from B's quotes. A tip that every answering endpoint inflates moves R with it, and isn't detected ([Open questions](#open-questions) 10).
+    - **An endpoint that underquotes** can lower R. That costs a question, never a payment.
+  - **Combined quote:** R comes from the same endpoints, combined the same way, as a Direct quote. A quote they all inflate has a ratio near 1, so this fallback can't detect inflation of that quote.
+    - **What it still detects:** fees set elsewhere far above the endpoints' quotes, a dApp's, a replacement's or another source's.
+    - **With one answering endpoint,** R is that endpoint's word, so nothing judged against it is auto-approved (above).
+  - **Mixed types without a verified header:** B's legacy excess is below the honest gas price, so it stays within the threshold whichever R applies. Where a header is verified, B combines mixed quotes as EIP-1559, and there is no such excess.
+  - **Not a proof:** the ratio is a confirmation heuristic, not proof that a fee is honest.
+- **Tests,** required of the implementing PRs:
+  - **The core's machine tests for `chain.fee_reference`:**
+    - header and quotes;
+    - an earlier source's success: a read order that starts with Myotis still gets Colibri's header and B's quotes, with no Myotis `fee`;
+    - no prover; Colibri out of the read order; no `quorum` or `direct` in it;
+    - Colibri failing or malformed; a header without `baseFeePerGas`;
+    - the deadline, a `cancel` and a configuration change.
+  - **Main's tests for A** (freedom-browser, step 5):
+    - fees from a Myotis, Colibri, quorum and Direct quote, a dApp's EIP-1559 and legacy fields, and a replacement, each judged against the same R;
+    - the threshold, at and just above 3·R;
+    - all-legacy quotes on an EIP-1559 chain (R = 2·B), and a legacy chain (the combined quote);
+    - a quote's derived `baseFee` never used as the header's: a Myotis quote with Colibri down takes the combined quote, or no reference;
+    - unavailable and stale header evidence (61 s old, 61 s ahead), with and without B's quote;
+    - no reference: the most shown, "couldn't compare", never auto-approved; R of 0 likewise;
+    - one endpoint's reference (`answered: 1`): the ratio shown, a send above the threshold asked again, and a send below it still not auto-approved;
+    - a base-fee spike before signing: evidence 61 s old gathered again, and the user asked again only when the send is newly above;
+    - the quote's age from its request's start:
+      - fast quotes with a header that fails, or comes back stale, at 60 s, and an approval 61 s after the request started: no combined-quote reference, though the reply is 1 s old;
+      - the same with evidence reused for a later approval and for another transaction;
+    - the mixed-type boundary case without a verified header, shown not flagged.
 
 ## Errors and text
 
@@ -652,8 +945,9 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 | `myotis-readiness` | `isReady()` sampled live | the last `chain.availability` | |
 | `memory-budgets` | unbounded | per request and in total | `budget`, `busy` |
 | `broadcast-outcome` | the last error wins; lost replies look like failures | attempt classes, exact refusals, `sent` / `uncertain` / `rejected` / `not_sent`, reconciliation, main's record | a lost reply is `uncertain`, not a failure |
-| `nonce-retry` | a retry re-signs at the `pending` count, possibly a new nonce; history is written after broadcast and can be cleared | durable intent records committed before broadcast; an intent keeps its nonce for good, with retries only as the same bytes or a replacement at that nonce; labels (paid, failed, taken, held) read from verified evidence tied to one finalized block by hash, which authorize no retry; reservations under a per-account lock | the wallet never pays one intent twice; failed and taken intents go back to the user, who may start a new payment |
+| `nonce-retry` | a retry re-signs at the `pending` count, possibly a new nonce; history is written after broadcast and can be cleared | durable intent records committed before broadcast; an intent keeps its nonce for good, with retries only as the same bytes or a replacement at that nonce; labels (paid, failed, taken, held) read from verified evidence tied to one finalized block by hash, which authorize no retry; *taken* searched from a verified bracket and Colibri's proven reads, never by a block scan; an intent whose label is out of reach shown as *Couldn't confirm*, and closed by hand only when the verified nonce at F is past N; reservations under a per-account lock | the wallet never pays one intent twice; failed and taken intents go back to the user, who may start a new payment; an intent closed by hand is retired durably, its payment unconfirmed |
 | `monotonic-time` | cooldowns on `Date.now()` | the monotonic clock | |
+| `fee-combination` | a fee quote's Direct step walks the endpoints one at a time, and the first quote that answers wins | up to three endpoints at once, a failure replaced until one answers, a 1 s cutoff after the first answer; their quotes combined by normalized constraints, mixed ones as EIP-1559 where a Colibri header read alongside shows a base fee; the reply marked with `answered` ([B](#b-combining-directs-quotes)) | different requests, starts and cancels, and a Colibri operation where the chain has a prover and `colibri` in its read order; with one type of quote, or mixed ones where EIP-1559 is verified, the transaction pays no more than an honest answering endpoint's would; a combined quote's `baseFee` and `effectiveGasPrice` are rounded estimates |
 
 ## Replay
 
@@ -685,29 +979,86 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
   - nesting at 512 and 513 levels (`boundary-json-depth-512`, and `boundary-json-depth-513` for deviation `json-depth`);
   - canonical-equivalence pairs through the quorum: duplicate keys, number spellings, `__proto__`, lone surrogates (`boundary-agreement-*`);
   - `isCapacityFailure` on Colibri's errors: collapsed whitespace, a phrase past 500 units, elided hex and an error's own `failureKind` (`boundary-adaptive-capacity-*`).
-- **The harness** (`vectors/generator/chain-replay.js`) has 305 scenarios, each with a stable ID and a `from` field citing its source test or this document.
+- **The harness** (`vectors/generator/chain-replay.js`) has 331 scenarios, each with a stable ID and a `from` field citing its source test or this document: 306 from the pinned router, and 25 for main's #752 ([Main's #752](#mains-752)).
   - **Values as text:** every value the reference produced or was given is recorded as JSON text, and `undefined` as a field of its own. No value can pass for an encoding, and every value `JSON.parse` makes survives: lone surrogates, any depth, `-0` and infinities.
   - **Large texts:** a text over 64 KiB is stored in its field's repeat form, a repeat unit plus a SHA-256, which keeps the 8 MiB `html()` answers small.
   - **Settle times:** ported scenarios carry the settle times their tests assert, and generation fails if a fixture drifts from them.
-- **The machine replays all 305** (`crates/fc-chain/tests/replay.rs`). A driver plays main from the records: it starts each call when the reference did, and answers each request with the answer its record got, at the time it got it, delivering answers due in one tick in the reference's microtask order (a failed fetch or a non-2xx status settles before a body is read; equal delays settle in registration order). It compares exactly:
+- **The machine replays all 331** (`crates/fc-chain/tests/replay.rs`). A driver plays main from the records: it starts each call when the reference did, and answers each request with the answer its record got, at the time it got it, delivering answers due in one tick in the reference's microtask order (a failed fetch or a non-2xx status settles before a body is read; equal delays settle in registration order). It compares exactly:
   - **every request the core owns** (`shell.rpc`'s endpoint and body with its `id` normalized, a verifier operation and its params, a Blockscout page) with its start, matched to a record of the same call, and **in the reference's order**: no request answers a ledger entry earlier than one already matched. No allowance for unordered concurrency is needed; the order holds across every call of every step. Main's own I/O (Blockscout's hops and DNS lookups, Myotis status samples) feeds the replies main sends instead;
-  - **every cancel:** an exchange the reference aborted at T is cancelled at T, and no other is cancelled, except in two permitted races, each counted: a quorum member cancelled when a sibling launched in the same tick answered the same call in the tick both settled (127; the reference's abort came after the member's answer), and a Blockscout page cancelled by the scan's deadline in the tick its own fetch failed with `no answer within` (4). Main never delivers an answer to an exchange the machine cancelled first: it aborted it;
+  - **every cancel:** an exchange the reference aborted at T is cancelled at T, and no other is cancelled, except in two permitted races, each counted: a quorum member cancelled when a sibling launched in the same tick answered the same call in the tick both settled (128; the reference's abort came after the member's answer), and a Blockscout page cancelled by the scan's deadline in the tick its own fetch failed with `no answer within` (4). Main never delivers an answer to an exchange the machine cancelled first: it aborted it;
   - **every result and error,** with its settle time: key order, constructor, `name`, message, own properties, `-0` and UTF-16 strings;
-  - **the state tables** after each step. Route keys whose target lists several addresses are compared with that list digested ([Adaptive bypass](#adaptive-bypass)).
-  - **20 scenarios show a deviation's difference,** each listed in the test with the whole reply, the requests and the state it must show instead, and every field the deviation doesn't change still compared: `broadcast-outcome` (13: today's error, or a success with another hash, becomes `uncertain`, reporting keccak256 of the raw bytes, with each reconciliation lookup made listed with its endpoint and its whole body or params, the hash included), `config-change` (`boundary-registry-change-mid-request`: the three members asked again at 1,000 listed whole, and the one exchange the change moves, Direct's, given its new start), `order-validation` (`boundary-order-duplicates-and-unknown`), `endpoint-dedup` (`boundary-quorum-duplicate-endpoint`: a asked once, its second exchange never made, and the quorum's miss handed to Direct), `singleton-quorum` (`boundary-quorum-singleton-not-verified`: the same requests, two reads and a fee quote labelled as Direct would), `json-depth` (`boundary-json-depth-513`), `cancel-promptly` (`cancel-read-no-fallthrough`) and `adapter-error-text` (`boundary-colibri-revert-capacity`: the revert reads `execution reverted`, its route blocked as today).
+  - **the state tables** after each step. Route keys whose target lists several addresses are compared with that list digested ([Adaptive bypass](#adaptive-bypass)). A patched scenario's tables add `colibri_faults`: `["<chain> <method>", { faults, strikes, coolUntil }]` per record, in the reference's insertion order.
+  - **24 scenarios show a deviation's difference,** each listed in the test with the whole reply, the requests and the state it must show instead, and every field the deviation doesn't change still compared: `broadcast-outcome` (13: today's error, or a success with another hash, becomes `uncertain`, reporting keccak256 of the raw bytes, with each reconciliation lookup made listed with its endpoint and its whole body or params, the hash included), `config-change` (`boundary-registry-change-mid-request`: the three members asked again at 1,000 listed whole, and the one exchange the change moves, Direct's, given its new start), `order-validation` (`boundary-order-duplicates-and-unknown`), `endpoint-dedup` (`boundary-quorum-duplicate-endpoint`: a asked once, its second exchange never made, and the quorum's miss handed to Direct), `singleton-quorum` (`boundary-quorum-singleton-not-verified`: the same requests, two reads and a fee quote labelled as Direct would), `json-depth` (`boundary-json-depth-513`), `cancel-promptly` (`cancel-read-no-fallthrough`) and `adapter-error-text` (`boundary-colibri-revert-capacity`: the revert reads `execution reverted`, its route blocked as today; `tx-lookup-all-sources-fail`: Colibri's own error reads `Colibri request failed`, as main's has since #681).
+  - **`fee-combination`** ([B](#b-combining-directs-quotes)) changes three more.
+    - **What each lists:** its whole requests, with their starts and cancels, and its whole reply.
+    - **What is compared:** each reply's values and key order, `answered` last.
+    - **The inputs stay:** the endpoints' scripted answers are unchanged.
+
+    The three:
+    - **`router-fee-quote-direct-same-endpoint`:**
+      - both endpoints asked at 0;
+      - the inputs: primary answers G = 3773, P = 1 (M = 7545), and secondary answers `0x1` to both (G = 1, P = 1, M = 1);
+      - B's reply: `{"type":"eip1559","baseFee":"0","maxPriorityFeePerGas":"1","maxFeePerGas":"1","effectiveGasPrice":"1","source":"direct","verified":false,"answered":2}`;
+      - today's is primary's alone: `baseFee` 3772, `maxFeePerGas` 7545, `effectiveGasPrice` 3773.
+    - **`boundary-fee-direct-priority-unparseable`:** b asked at once with a, not after it. a fails, and b's legacy quote stands: `{"type":"legacy","gasPrice":"16","effectiveGasPrice":"16","source":"direct","verified":false,"answered":1}`.
+    - **`boundary-fee-direct-gas-price-fails-first`:** b asked at once with a. a fails, and b's legacy quote stands: `{"type":"legacy","gasPrice":"1000000000","effectiveGasPrice":"1000000000","source":"direct","verified":false,"answered":1}`.
+
+    The other fee-quote scenarios don't reach Direct with more than one endpoint, and stay as they are. None of the three has `colibri` in its read order, so B's header read adds nothing to them.
   - **None is skipped.**
-- **Not replayed:** the machine's own tests cover the second and third (`crates/fc-chain/tests/machine.rs` and its unit tests); the first and fourth are main's (step 5):
+- **Not replayed:** the machine's own tests cover the second, third, fifth and sixth (`crates/fc-chain/tests/machine.rs` and its unit tests); the first and fourth are main's (step 5):
   - a read's reply overtaken by a configuration change after it was made: that is main's reply fencing ([Generations](#generations)), and the reference has no seam for it;
   - the adaptive table's 1,024-route eviction;
   - a Myotis slot granted in the same turn as its waiter's deadline;
-  - Blockscout's opaque redirect, which Node's `fetch` can't produce.
+  - Blockscout's opaque redirect, which Node's `fetch` can't produce;
+  - B's collection beyond the three scenarios above (`boundary-fee-combine-*`, [B](#b-combining-directs-quotes));
+  - `chain.fee_reference`, which the reference doesn't have ([A](#a-the-check-at-confirmation)).
 - **Deviation vectors** patch the reference in memory where a deviation has no natural trigger, as 0004's do. Broadcast's classes, outcomes and main's record are deviations, specified by their own vectors.
+
+#### Main's #752
+
+The pin stays at `fb540328`. Moving it to main's `94b0af4e` would also bring #749's fee quotes and #681's Colibri texts, which change other scenarios. So #752's rule is a **reference patch** instead: `tx-lookups` in the generator's `PATCHES`.
+- **What it is:** main's router code for the rule, applied in memory to the pinned router. Each edit's text must occur exactly once. Two parts of main's code aren't the rule and stay out:
+  - #681's replacement of Colibri's error text for callers, which the core's fixed texts already cover (deviation `adapter-error-text`);
+  - the backoff's log line, which the harness's logger drops.
+- **What a patched scenario records:** its patches (`patches: ["tx-lookups"]`), and the unpatched reference's results (`unpatched`). Generation fails unless the patch changes the scenario's results, its state tables or its I/O.
+- **Unpatched ones:** three of the 25 come out the same without the patch, so they are recorded unpatched: `tx-lookup-colibri-only-order`, `tx-lookup-excluded-source-left-out` and `colibri-fault-bystander-not-counted`.
+- **The 306 records don't change.** With the patch applied to every one of them, each record is byte for byte the same: none of their reads is a transaction lookup with Colibri in its order, and none of their Colibri errors is a fault.
+- **Two listed deviations change.** The core's broadcast reconciliation is a transaction lookup the reference never makes, so its rule changes the difference two `broadcast-outcome` scenarios list (`crates/fc-chain/tests/replay.rs`), not their records. In `router-myotis-broadcast-in-band-failure` and `router-myotis-broadcast-uncertain`, the read order is `[myotis, colibri, direct]`. The lookup now goes to Direct, `rpc https://rpc.example at 0` with `eth_getTransactionByHash`, instead of to Colibri. The driver's `null` is final there, and the outcome stays `uncertain`.
+- **Main's side in the replay:** the driver sets `fault` from each recorded Colibri error by main's rule ([The rest](#the-rest)).
+
+The 25, by the test each ports from `chain-data-router.test.js` at `94b0af4e` (its line), or this document:
+
+| Scenario | From | Shows |
+|---|---|---|
+| `tx-lookup-unproven-receipt-null`, `tx-lookup-unproven-tx-null`, `tx-lookup-unproven-tx-pending` | 1785 | Direct's null, or pending, transaction is final; Colibri isn't asked |
+| `tx-lookup-mined-receipt-proven`, `tx-lookup-mined-tx-proven` | 1797 | a mined answer goes on to Colibri, whose proof and trust replace it |
+| `tx-lookup-proof-fails-keeps-answer` | 1807 | a trap returns Direct's held answer; Direct isn't asked again |
+| `tx-lookup-later-sources-failed` | 1816 | with Direct failed, Colibri answers last with `configured` for a page; then a trap leaves Direct's error |
+| `tx-lookup-all-sources-fail` | 1836 | the aggregate lists Myotis, the quorum, Direct, then Colibri, with nothing excluded; then Colibri's own error, in the core's fixed text (deviation `adapter-error-text`) |
+| `tx-lookup-caller-exclusions-named` | 1862 | only the request's exclusion reads as excluded |
+| `tx-lookup-backed-off-serves-answer` | 1877 | two traps back Colibri off; the third lookup returns Direct's answer with no Colibri operation |
+| `tx-lookup-colibri-only-order` (unpatched) | 1890 | nothing follows Colibri: it is asked in place |
+| `tx-lookup-quorum-terminal-full-budget` | 1903 | a page's lookup on `[colibri, quorum]`: the quorum keeps 5 s and answers at 3 s |
+| `tx-lookup-excluded-source-left-out` (unpatched) | 1924 | Direct excluded: the quorum, short of endpoints, fails before any exchange, and Colibri, asked last, answers |
+| `colibri-fault-backoff-escalates` | 1938 | 60 s, then 5 min, to the millisecond; `eth_getBalance` and chain 100 unaffected |
+| `colibri-fault-only-faults-count` | 1971 | transport errors aren't faults; an answer clears; faults 60 s apart never meet |
+| `colibri-fault-bystander-not-counted` (unpatched) | 1995 | three bystanders, one of them a retired runtime's refusal: no backoff |
+| `colibri-fault-late-still-counts` | 2019 | two faults land 1 ms after their page's budget and still start the backoff |
+| `boundary-colibri-fault-cooldown-caps` | this document | the third and fourth cooldowns are both 15 min |
+| `boundary-colibri-fault-during-cooldown-ignored` | this document | of three concurrent faults, the one inside the cooldown adds nothing |
+| `boundary-colibri-fault-answer-ends-cooldown` | this document | a page's read answered after its budget, by then inside the cooldown, deletes the record; the next read asks Colibri |
+| `boundary-colibri-fault-classes` | this document | `RuntimeError` by name, `: unreachable` at the end, `unreachable executed`, a retired runtime and an upper-case trap are faults; `host unreachable: retry` and `unreachable code` aren't |
+| `boundary-tx-lookup-undefined-final` | this document | a body without `result` is final |
+| `boundary-tx-lookup-myotis-keeps-its-place` | this document | Myotis first, then the quorum's held answer, which a failed proof returns with its trust |
+| `boundary-tx-lookup-bypassed-colibri-not-deferred` | this document | a proof's timeout opens the page's Colibri route; the next lookup bypasses it in place and returns Direct's answer at once |
+| `boundary-tx-lookup-deferred-colibri-error-precedence` | this document | Direct's node error, not Colibri's revert, is the last error |
 
 ## Implementation steps
 
 1. **Codecs and vectors:**
    - normalization, and the `stableValue` digest with its equivalence vectors;
    - `feeQuote`, Myotis payload classification, `blockscout-logs`' mappers and filters;
+   - B's combination (`fee_combinations`);
    - the Ant profile's ranking and cap parsing;
    - the broadcast refusal list and transaction hash;
    - byte parity from the pinned JS.
@@ -717,12 +1068,15 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
    - fragmented responses and bulk credit in `fc-protocol` and the transport;
    - the chain thread and the `chain.*` methods;
    - `shell.rpc`'s new parameters and `not_sent`;
-   - the new verified operations.
+   - the new verified operations;
+   - `colibri_faults` in `core.hello`, and Colibri's `fault` bit.
 5. **freedom-browser:**
    - the executors;
+   - Colibri's `fault` bit, for a core that offers `colibri_faults`;
    - main's chain I/O pool and fragment handling;
    - the router, the fee quote and the broadcast become drivers, with main's broadcast record and reply fencing;
-   - the wallet's intent records, nonce reservations and retry rule;
+   - A's check at confirmation, from `chain.fee_reference`;
+   - the wallet's intent records, nonce reservations and retry rule, with the *taken* search from its bracket, *Couldn't confirm* and closing by hand ([State history](#state-history));
    - delete the JS router.
 
 [0002](0002-signing.md)'s non-goal on fee estimation and broadcasting is amended there: fee quotes, reads and broadcast routing move into the core with step 5, while nonces and gas limits stay in main.
@@ -730,9 +1084,13 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
 ## Open questions
 
 1. **Revert agreement.** Today reverts never agree in a quorum, so a dApp loses the revert data unless Myotis or Colibri gave it. Should identical error objects (code and data) count as agreement?
-2. **Colibri's coverage.** Which methods does Colibri's `VerifiedOnly` client actually prove (`eth_gasPrice`, `eth_feeHistory`, `eth_blockNumber`, `pending` reads)? Today any Colibri success is labelled verified.
+2. **Colibri's coverage.** Which methods does Colibri's `VerifiedOnly` client actually prove (`eth_gasPrice`, `eth_feeHistory`, `eth_blockNumber`, `pending` reads)? Today any Colibri success is labelled verified. [State history](#state-history) depends on it too: whether Colibri proves the sender's nonce at a block hash (EIP-1898) and a block with its transactions, and how far back.
 3. **Gnosis' Direct after a failed quorum** has nothing to ask without API keys. Intended?
 4. **Myotis' head-of-line wait.** Methods Myotis doesn't serve take a slot before being refused. Checking the method first is a pure improvement, but observable in timing.
-5. **The wallet's texts and UI** (step 5): how to show "sent, unconfirmed", unresolved and "taken" intents, and how to offer the same bytes again or a replacement at the same nonce.
+5. **The wallet's texts and UI** (step 5): how to show "sent, unconfirmed", unresolved and "taken" intents, and how to offer the same bytes again or a replacement at the same nonce. [State history](#state-history) decides one part (#94): *Couldn't confirm*, and closing such an intent by hand, with its text.
 6. **HTTP statuses on broadcast.** A 401, 403 or 429 is ambiguous here, although a gateway usually answers it before forwarding. Is a misconfigured key showing `uncertain` acceptable, or should these be refusals?
 7. **Pinning and trust** (roadmap 3.1): whether a quorum of unpinned `latest` reads may be called `verified`.
+8. **Endpoints' chain** (#93): **decided** (the user, 2026-10-22): in main, re-checked hourly, and a mismatched user source isn't saved. See [Endpoints serve their chain](#endpoints-serve-their-chain-decided-93).
+9. **Fee plausibility** (#92): **decided** (the user, 2026-10-22): A, with a threshold relative to the current network fee, and B across several endpoints; tightened in #109's review: mixed quotes combine as EIP-1559 where a verified header shows it, and one endpoint's reference permits no auto-approval. See [Plausibility](#plausibility-decided-92).
+10. **An independent tip reference.** In A's verified case, R's priority part comes from B's quotes. The tips paid in Colibri's verified latest block, read with its transactions, would bound it independently. That read is heavier and close to C, which isn't adopted; this is open, not proposed.
+11. **'Taken' evidence** (#94): **decided** (the user, 2026-10-22): the search starts from a bracket, with Colibri's proven reads where Colibri covers them; no block scan, and no state-serving or archive endpoint beyond Colibri; out of reach, an intent stays held and is shown as *Couldn't confirm*; the 8192-block bound stays; closing by hand only when the verified nonce at F is past N, with text that says it proves nothing about the payment. See [State history](#state-history).

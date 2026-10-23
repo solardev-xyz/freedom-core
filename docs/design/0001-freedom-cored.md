@@ -65,6 +65,11 @@ Stage 1 trusts Electron main: it holds the pipe, fills in the caller context, an
 **Deliberate exceptions to "no raw secret leaves the core"** (AGENTS.md rule 3 is amended to match):
 - **Permanent:** the user-requested backup exports (`vault.export_mnemonic`, `vault.export_private_key`), and the mnemonic shown during onboarding.
 - **Temporary:** the `compat.*` signing exports, removed in Phase 2.
+- **Node identities:**
+  - **Bee's wallet, until Phase 5:** the keystore file `nodes.write_identity` writes ([Multi-file writes](#multi-file-writes)), in the JS reference's format, with the permissions in the table above (mode `0600` on Unix). Its password is in `config.yaml` beside it. As in JS today, that stores a secret next to the thing it protects, an exception to AGENTS.md rule 4 until Phase 5 (K-3);
+  - **the Radicle node key,** which [0008](0008-radicle-service.md#keys) releases only to the Radicle service, sealed to a key the service makes at each start, while the vault is unlocked. 0008's switch removes the key file that Phase 1 writes.
+
+  No other node key is released. Once released to its node, a key stays there across a vault lock, for the rest of a start and while the node runs, so these keys are not the derived-key caches a lock wipes.
 
 ## Process model
 
@@ -109,7 +114,7 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
 
   A known network type means exit 74 with `storage { kind: "network_filesystem" }`. The guarantee is exclusion between cores on local storage.
 - **One gate for every core-format writer.** The same `freedom-cored` binary provides two more subcommands, both of which take the gate under the same rules:
-  - **`hold-lock --data-dir … --lock-dir …`** prints `locked`, then holds the gate until its stdin closes. Profile delete and reset (`profile-catalog.js`) and data migrations hold it for the whole destructive operation. The gate lives outside the directory being removed, so no core can start until the operation releases it.
+  - **`hold-lock --data-dir … --lock-dir …`** prints `locked`, then holds the gate until its stdin closes. Profile delete (`profile-catalog.js`) and data migrations hold it for the whole destructive operation. freedom-browser has no profile reset; one added later holds it too. The gate lives outside the directory being removed, so no core can start until the operation releases it.
   - **`recover --data-dir … --lock-dir …`** takes the gate, rolls forward any node-identity journal (see [Multi-file writes](#multi-file-writes)), prints `recovered` (or `corrupt` with details), then exits.
 - **The JS vault writer** (a step-1 dev build without the `FREEDOM_CORE=1` opt-in, or a hotfix that reverts to the JS vault) can't hold an OS lock itself, because Node has no `flock`. So:
   - **It runs `recover` at startup,** before it starts any node or writes any identity file. A journal that a core left behind is therefore always completed first. Such builds keep shipping the binary for this purpose.
@@ -122,7 +127,7 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   2. The core revokes the vault epoch (see [Concurrency](#concurrency-epochs-and-revocation)) and finishes or abandons in-flight work according to its commit state.
   3. It exits 0.
 
-  After 3 s, main kills the core. Killing is safe because every write follows [Writes and durability](#writes-and-durability).
+  After 3 s, main kills the core. Killing is safe because every write follows [Writes and durability](#writes-and-durability). The core's own exit fits inside that: work past its commit point gets 2 s to finish. The writer then gets up to 2 s more to flush, which only a main that isn't reading uses up.
 - **Parent death:**
   - The core's I/O task, which is independent of vault work, exits on stdin EOF. EOF in the middle of a frame counts as EOF.
   - **Unix backstop:** main passes its PID as `--parent-pid`. At start the core exits if `getppid()` differs, which means main has already died. On Linux it then sets `PR_SET_PDEATHSIG` and re-checks `getppid()` to close the race. After that it polls `getppid()` every 2 s.
@@ -156,7 +161,7 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   - **Requests that waited go one at a time** once there is room, each as if it had just arrived: after the loop's timers, and with whatever main sends meanwhile handled between them. An auto-lock that comes due while they drain therefore locks before the next one, and a `vault.touch` among them can't postpone a lock already due. A cancel or `core.shutdown` sent meanwhile is handled within one request's time, not behind the whole backlog.
   - **Memory stays bounded:** what waits is the frames the reader holds, and for each vault request admitted before the wait (one running, 32 queued) its reply and at most one event.
   - **The core exits only on a stall.** If its frames wait while the writer writes nothing for **30 s**, main has stopped reading: the core logs "main is not reading replies" and exits 76 (`protocol`). Writer progress is any frame written, whoever made it: the 30 s count from the later of the writer's last write and the moment the frames began to wait.
-    - **Why 30 s:** it is far above a healthy main's pauses, which last milliseconds to seconds, and waiting costs nothing meanwhile. It is also the longest deadline the core gives a request (the KDF methods'), which puts it between main's [hang watchdogs](#deadlines-cancellation-and-commit): 20 s for a 5 s method, 45 s for a KDF method. So the core never gives up on main sooner than main gives up on a short request, and a main that can no longer run its timers keeps it waiting no longer than main would wait for a KDF reply.
+    - **Why 30 s:** it is far above a healthy main's pauses, which last milliseconds to seconds, and waiting costs nothing meanwhile. It also sits between main's [hang watchdogs](#deadlines-cancellation-and-commit): 15 s for an immediate method, 45 s for a vault method. So the core never gives up on main sooner than main gives up on an immediate request, and a main that can no longer run its timers keeps it waiting no longer than main would wait for a vault reply. A session's longer deadline (120 s) bounds its work, not the writer, which the 30 s alone judge.
     - **Why not exit at once,** as the core first did: a burst of requests, then a fraction of a second without reading (about 256 small replies), killed the core and locked the vault.
   - **Main must keep reading** whatever the state of its own writes, as 0005 requires of both sides ("consumers never block on the writer"). Otherwise each side's writer could wait on the other.
 - **Protocol errors** are an unknown kind, an oversized frame, invalid JSON, a response that has both or neither of `result` and `error`, or an unsolicited or duplicate response. They mean a bug in main or the core: the receiver logs it and closes the connection.
@@ -189,14 +194,17 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   - `"shell"`: main-internal work with no IPC event behind it, such as the x402 client and background jobs.
   - `{ "page": { origin, top_origin, frame, navigation } }`: web content. This is reserved for Phase 2, which also defines how a page's approval binds to a key and an operation.
 
-  Each method declares the caller kinds it accepts, and the core answers anything else with `forbidden`. All Phase 1 methods accept `chrome` and `shell`.
+  Each method declares the caller kinds it accepts, in `fc-protocol`'s method table, and the core checks every request against it once, before dispatching anything (#101). A method the table doesn't list is `unknown_method`; a caller it doesn't list for the method gets `forbidden`. Nothing is allowed by default.
+  - Most methods accept `chrome` and `shell`.
+  - Main's own methods accept only `shell`: `core.hello`, `core.shutdown`, `vault.reconcile`, `nodes.op_status`, `compat.*`, `dweb.open` and `nodes.seal_radicle_key` ([0008](0008-radicle-service.md#the-sealed-release)). A main bug that forwarded a renderer's `core.shutdown` under `chrome` would otherwise wipe the vault and, through the restart, reset the in-memory throttle.
+  - No method accepts `page` yet (Phase 2).
 - **Error codes:**
   - **Request errors:** `vault_locked`, `incorrect_password`, `throttled` (with `data.retry_after_ms`), `no_vault`, `vault_exists`, `unsupported_vault_version`, `corrupt_vault`, `invalid_mnemonic`, `invalid_argument`, `weak_password`, `storage` (with `data.kind`).
   - **Protocol-level:** `forbidden`, `busy`, `cancelled`, `deadline`, `internal`.
   - Main maps each code to the exact JS string per method; see [Parity contract](#parity-contract).
 - **Schema:**
-  - `fc-protocol` defines params, results, errors and the method table (name, caller kinds, mutation or read-only, default deadline).
-  - CI regenerates `protocol/schema.json` and fails on any difference from the committed file.
+  - `fc-protocol` defines the method table (name, caller kinds, whether it writes identity data, default deadline), errors, and message types; params and results are typed where each method is handled.
+  - `protocol/schema.json` is rendered from the table and committed. A test fails on any difference, so CI catches a stale file.
   - freedom-browser's contract test checks its proxy table against that file.
 
 ### Concurrency, epochs and revocation
@@ -228,16 +236,20 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
 ### Deadlines, cancellation and commit
 
 - **Deadlines:**
-  - A deadline is a total budget on a monotonic clock, starting when the core admits the request (queue time included). Defaults: 30 s for KDF methods, 5 s for everything else.
-  - **The core enforces deadlines and always replies.** Main doesn't settle requests on its own timer. It runs only a hang watchdog: core deadline + 15 s. If the watchdog fires, main treats the core as hung, kills it, restarts it and [reconciles](#reconciliation).
+  - A deadline is a total budget on a monotonic clock, starting when the core admits the request (queue time included). Each method has one of three classes, in the method table (`fc_protocol::methods`, and `protocol/schema.json` generated from it):
+    - **immediate:** answered at once, on the loop or its thread, with no deadline;
+    - **vault:** 30 s, for every request on the vault queue, KDF methods included;
+    - **session:** 120 s, for naming, chain and `dweb.open` sessions, or the caller's shorter `deadline_ms` where the method takes one (0004, 0005).
+  - **The core enforces deadlines and always replies.** Main doesn't settle requests on its own timer. It runs only a hang watchdog on every request: core deadline + 15 s, or 15 s for an immediate method. If the watchdog fires, main treats the core as hung, kills it, restarts it and [reconciles](#reconciliation). The process's own lifecycle has its own bounds instead: main waits 10 s for `core.hello`'s reply, and gives `core.shutdown` 3 s before it kills the process.
 - **Before the commit point,** a deadline or `cancel` stops the operation and returns `deadline` or `cancelled`. Throttle attempts are reserved before a KDF starts, so concurrent guesses can't all slip past the check.
 - **The commit point** is the worker's atomic claim immediately before the vault rename or unlink, or before the journal write of a multi-file operation. The loop and the worker race on one atomic: either the loop abandons the job first (cancel, deadline or revocation), and the job writes nothing, or the worker claims the commit first, and from then on cancel, deadline and revocation no longer apply.
+  - **A claim comes in the first two thirds of the deadline,** 20 s of the vault class's 30 s. A later claim stops the job uncommitted, answered `deadline`. So what follows a claim has at least 10 s, plus the watchdog's 15 s, before main gives up on the core (#127). That work is a rename and a directory flush, or a node write's journal and its fsyncs.
 - **After the commit point,** the reply is the real outcome of the rename or unlink, even past the deadline:
   - **If it happened,** the reply is success. A later failure, such as a directory `fsync` error, doesn't turn into an error reply. It is reported as success with `durable: false`, and logged.
   - **If the rename or unlink itself failed,** nothing changed, and the reply is that error.
 
   So every error reply means "not committed", and only a missing reply needs reconciliation.
-- **Shutdown** revokes everything before its commit point. Work past its commit point finishes and sends its reply before the process exits, within a bounded wait. Main's hang watchdog and reconciliation cover anything slower.
+- **Shutdown** revokes everything before its commit point. Work past its commit point finishes and sends its reply before the process exits, within 2 s, inside main's 3 s grace. Work slower than that is cut off at exit, as a kill would cut it off; the next start's recovery and main's reconciliation cover it.
 - **Read-only operations** can be cancelled at any time.
 
 ### Reconciliation
@@ -288,7 +300,7 @@ A reply can still go missing (core crash, hang watchdog), so every mutation can 
   - The renamed file is opened again by name to be flushed, and std exposes no file identity there, so the identity checks below are Unix-only.
 - **Existing files:** at adoption, the core tightens existing secret files to `0600` in place with `fchmod`, which doesn't change the content. It first checks, on the open handle, that each is a regular file the current user owns; a symlink is never followed.
   - **The vault** is tightened at every start, before the snapshot.
-  - **Node files** are the files of each node's journal layout (Bee's keystore and config, Radicle's keys and config). They are tightened under the roots main gives in `core.hello`'s `node_roots`, on a thread of their own, so slow storage can't hold up the handshake (#85).
+  - **Node files** are the files of each node's journal layout (Bee's keystore and config; Radicle's config, and its key files until 0008's [switch](0008-radicle-service.md#the-switch) removes them). They are tightened under the roots main gives in `core.hello`'s `node_roots`, on a thread of their own, so slow storage can't hold up the handshake (#85).
   - **Until main sends `node_roots`,** node files that JS wrote keep their mode until the next `nodes.write_identity`.
 - **Delete:** unlink, then `fsync` the directory before replying. A delete commits at the unlink.
 - **Leftover temp files** (#81). A process killed between steps 1 and 4 leaves its temp file behind, for the vault an encrypted copy of the mnemonic. The core removes the temp files of its own atomic writes in the identity directory (the vault and the node journal's records) at startup, under the gate, before any job runs. `vault.delete` also removes the vault's, once its unlink has committed.
@@ -297,7 +309,7 @@ A reply can still go missing (core crash, hang watchdog), so every mutation can 
 
 ### Multi-file writes
 
-This covers node identities. **Bee:** `keys/swarm.key` plus `config.yaml`. **Radicle:** private key, public key and config. Node directories can be outside the profile, so the journal lives in the identity directory, where startup recovery always finds it.
+This covers node identities. **Bee:** `keys/swarm.key` plus `config.yaml`. **Radicle:** private key, public key and config, until design 0008 (below). Node directories can be outside the profile, so the journal lives in the identity directory, where startup recovery always finds it.
 
 1. **Stage.** For each target, write `<target>.freedom-new` (exclusive create, `0600`, fsync) and compute its SHA-256.
 2. **Commit.** Write `<identityDir>/node-identity-journal.json` atomically and durably. It holds `{ op_id, node, files: [{ target, staged, sha256 }] }`, with absolute paths.
@@ -319,6 +331,7 @@ This covers node identities. **Bee:** `keys/swarm.key` plus `config.yaml`. **Rad
 - **Reconciliation:** `nodes.op_status { op_id }` returns `installed`, `pending_recovery`, `not_committed` or `corrupt` from the done list and the journal. A consistent node directory alone doesn't count, because it could still hold the old identity. Main starts a node only on `installed`.
 - **Ordering with the shell:** main stops the node before calling `nodes.write_identity` and starts it only after an `installed` result or reconciliation, as it does today. Ant's own config rewrite at start (`ant-manager.js:815`) therefore always happens after the write.
 - **Bee's keystore password** still goes into `config.yaml` (K-3, Phase 5). The journal guarantees that the keystore and the password always match.
+- **Radicle, after design 0008:** the Radicle key is never written ([0008, *Keys*](0008-radicle-service.md#keys)). The Radicle form writes only the config, plus, for 0008's switch, the dirty marker that names the old identity. It removes `keys/radicle` and `keys/radicle.pub` instead: a journal entry can name a target to remove rather than a staged file. Install unlinks it, following no symlink, and flushes its directory. Recovery repeats that, and a target already gone is done. 0008's *Identity changes* adds the wipe of an identity change.
 
 ## Parity contract
 
@@ -352,6 +365,7 @@ Main's proxy has to reproduce each JS handler: argument checks and defaults, the
   - The first 5 failures are free. After that, each attempt has to wait 2^(n−5) s since the last failure, capped at 5 min, and gets `throttled` with `retry_after_ms`.
   - A success resets the counter.
   - An attempt is reserved before its KDF starts. A cancelled or revoked attempt still counts if its KDF ran.
+  - **While the throttle refuses** (#82), a password check still reads the file, but without the password. A missing vault, an unsupported version (unlock, change_password and delete only) or a file that no password could open is reported before `throttled`, in the table's order. Only an attempt that would run the KDF gets `throttled`. `vault.reconcile` is the exception: it answers `throttled` at once, since an honest one never meets the throttle ([Reconciliation](#reconciliation)). As in JS, the version is read before anything else in the envelope, so a later format reports its version whatever its `encrypted` holds.
   - The counter lives in memory. Renderer input can't crash the core, so only main can reset it, and main is trusted.
 - **Vault reading accepts both KDF settings:** `keyMetadata` with any iteration count, and a missing `keyMetadata`, which means the legacy 10,000 iterations.
 - **Vault writing reproduces the JS envelope** (`{ version: 1, encrypted, createdAt }`, 2-space JSON, no trailing newline) with 900,000 iterations. `vectors/fixtures/vaults.json` is the reference in both directions.
@@ -373,8 +387,9 @@ Main's proxy has to reproduce each JS handler: argument checks and defaults, the
 | `vault.export_mnemonic`, `vault.export_private_key` | see parity table | permanent, user-requested backup exports |
 | `keys.addresses` | `{ accounts?: [u32], publishers?: [u32] }` → `{ user_wallets, bee_wallet, publishers, radicle: { public_key, did, node_id } }` | public data only; needs an unlocked vault |
 | `keys.radicle_did` | `{ public_key }` → `{ did }` | public conversion; works while locked (`readRadicleDid`, `identity-manager.js:381`) |
-| `nodes.write_identity` | `{ op_id, node: "bee", data_dir, api_port, p2p_port }` or `{ op_id, node: "radicle", home, alias }` → `{ address }` or `{ did, node_id }` | [multi-file protocol](#multi-file-writes). Bee generates a fresh keystore password and writes `config.yaml` exactly as `createBeeConfig` does, with main's per-profile ports |
+| `nodes.write_identity` | `{ op_id, node: "bee", data_dir, api_port, p2p_port }` or `{ op_id, node: "radicle", home, alias }` → `{ address }` or `{ did, node_id }` | [multi-file protocol](#multi-file-writes). Bee generates a fresh keystore password and writes `config.yaml` exactly as `createBeeConfig` does, with main's per-profile ports. [0008](0008-radicle-service.md#identity-changes) replaces the Radicle form: `{ op_id, node: "radicle", home, alias, wipe? }` writes no key file, removes any, needs no vault, and returns no DID |
 | `nodes.op_status` | `{ op_id }` → `{ status: "installed" \| "pending_recovery" \| "not_committed" \| "corrupt" }` | reconciliation after a lost reply |
+| `nodes.seal_radicle_key` | `{ recipient }` → `{ enc, ciphertext }`, base64 | main only; [0008](0008-radicle-service.md#the-sealed-release): the Radicle node key, sealed (HPKE) to the key the Radicle service made for one start. `no_vault` only when no vault file exists, `vault_locked`, `invalid_argument`. Implemented in `fc-seal` with the `hpke` crate |
 | `vault.reconcile` | see [Reconciliation](#reconciliation) | after a lost mutation reply |
 | `compat.private_key` | `{ account }` → `{ private_key }` | temporary; see Migration |
 | `compat.bee_wallet_key` | → `{ private_key }` | temporary |
@@ -401,6 +416,7 @@ Main's proxy has to reproduce each JS handler: argument checks and defaults, the
   - **Out-of-range input** gets the JS error string locally and never reaches the core.
   - **The 256 KiB limit** is a deliberate transport limit. JS has no ceiling, but no UI or generated password comes near it. A test keeps a vault with a 1,025-byte password unlockable.
 - **Defense in depth:** the core applies the same rules and answers `invalid_argument`. A malformed field is never a protocol error, so renderer input can't crash the core.
+- **Error replies stay small** (#86). An error message quotes at most 64 characters of any input string, an identifier included, and at most 8 names of a list. Quoted whole, a field of combining marks or quotes grows several times over, first in Rust's `{:?}` escapes and then in JSON's, and an error reply past one frame ended the core. As a backstop, a vault-loop error reply that still wouldn't fit a frame keeps its code but gets a fixed message and no data.
 - **Renderer access:** `core.hello`, `core.shutdown`, `cancel`, `vault.reconcile`, `nodes.op_status` and `compat.*` aren't reachable from any renderer channel. Only main-internal code calls them.
 
 ## Migration in freedom-browser
@@ -418,7 +434,7 @@ New code goes in `src/main/core/`:
 | `identity-manager.js` create, import, unlock, lock, status, change-password, delete, generate, validate | JS vault plus `derivedKeys` | `vault.*`, `keys.*` |
 | `identity-manager.js:263` publisher key; `swarm-provider-ipc.js:1046`, `feed-store.js:549` | `getPublisherKey` | `compat.publisher_key` for signing; `keys.addresses` for owner lookups |
 | `swarm-provider-ipc.js:1035`, `feed-store.js:534` (Bee identity) | `getDerivedKeys().beeWallet` | `compat.bee_wallet_key` for signing; `keys.addresses` for owner lookups |
-| `swarm-provider-ipc.js:1050` (`ethereum-wallet` identity), `identity-manager.js:281` | `getUserWalletKey` | `compat.private_key`. JS keeps the "existing mnemonic wallet record required" guard |
+| `swarm-provider-ipc.js:1050` (`ethereum-wallet` identity), `identity-manager.js:281` | `getUserWalletKey` | `compat.private_key`. JS keeps the "existing mnemonic wallet record required" guard. Phase 2 removes the mode instead of moving it ([0002](0002-signing.md), *Accounts as feed owners*) |
 | `wallet/vault-access.js` → `signers.js`, `x402/client.js`, `wallet-ipc.js`, Safe executor | `exportPrivateKey(walletIndex)` | `compat.private_key`. JS keeps the hardware-range and record-type guards at the adapter entry; Ledger, remote and Safe never touch the core |
 | `identity-manager.js:554`, `:630`, `:671` node injection | `injection.js` with `derivedKeys` | `nodes.write_identity` (Bee, Radicle). IPFS stays ephemeral, as today |
 | `identity-manager.js:719`, `:751` Radicle DID for status | full key derivation | `keys.addresses` / `keys.radicle_did` |
@@ -440,10 +456,10 @@ New code goes in `src/main/core/`:
 
 **Phase 2 removes `compat.*`:**
 - A core signer backend replaces the vault backend in `wallet/signers.js`.
-- `fc-swarm` takes over SOC and feed signing for all three identity modes.
+- `fc-swarm` takes over SOC and feed signing for the Bee wallet and publisher identities. Main removes the `ethereum-wallet` mode, and the core refuses account keys for SOCs ([0002](0002-signing.md), *Accounts as feed owners*).
 - Removal order:
   1. `compat.bee_wallet_key` and `compat.publisher_key` go once Swarm signing has moved.
-  2. `compat.private_key` goes only after **both** EVM signing and Swarm's `ethereum-wallet` mode have moved.
+  2. `compat.private_key` goes only after **both** EVM signing has moved and main has removed Swarm's `ethereum-wallet` mode.
 - Each removal PR includes a check that no call sites are left.
 
 ### Rollback
@@ -465,7 +481,7 @@ The password crosses the pipe, which is no worse than today, where it is used in
 
 | Crate | Kind | Contents |
 |---|---|---|
-| `fc-keys` | logic | BIP-39 (`@scure/bip39` rules), BIP-32 on `k256` (every intermediate secret zeroized), SLIP-10 Ed25519, the path registry. Encoders: EIP-55, Web3 keystore v3 (scrypt; password NFKC, as ethers does), OpenSSH v1 with an injectable check integer, did:key. The IPFS encoder is kept for the vectors only. |
+| `fc-keys` | logic | BIP-39 (`@scure/bip39` rules), BIP-32 on `k256` (every intermediate secret zeroized), SLIP-10 Ed25519, the path registry. Encoders: EIP-55, Web3 keystore v3 (scrypt; password NFKC, as ethers does), OpenSSH v1 with an injectable check integer, did:key. One deviation (`openssh-padding`, #77): the reference pads an OpenSSH private section that is already aligned with a full 8 bytes. OpenSSH's reader accepts that, but ssh-key, which Radicle reads keys with, refuses it, so a Radicle alias whose length is 5 mod 8 gave a key radicle-node can't load. The core pads it with none, as OpenSSH's writer does. The IPFS encoder is kept for the vectors only. |
 | `fc-vault` | logic | The passworder v6 format (PBKDF2-SHA-256, iterations from `keyMetadata` or the legacy 10,000; AES-256-GCM, 16-byte IV, 32-byte salt), the vault envelope, the lock state machine with epochs, the throttle policy. Everything is a pure function of (state, event, now), returning the bytes to write. |
 | `fc-protocol` | logic | Message types, error codes, the method table, a sans-I/O frame codec, schema generation, base64/hex secret field types decoding into `Zeroizing`. |
 | `freedom-cored` | binary | Stdio transport and writer, control path, vault task, KDF pool, timers, durable writes, the node journal, the lifetime lock with storage qualification, logging, process hardening, and the `hold-lock` subcommand. |
@@ -491,7 +507,8 @@ The password crosses the pipe, which is no worse than today, where it is used in
   - **macOS:** `RLIMIT_CORE=0` plus the hardened runtime.
   - Both go through `rustix`'s safe wrappers.
 - **What isn't guaranteed:** the core can't wipe copies in main. Passwords and mnemonics pass through JS strings, and `compat` keys through ethers objects. Phase 1 stops main from keeping them resident, and Phase 2 removes the key copies.
-- **`mlock` is deferred.** If added, it lives in `freedom-cored` only, under a documented exception to the `unsafe_code` lint.
+- **No `unsafe` in the core** (#103). `freedom-cored` inherits the workspace's `forbid(unsafe_code)`, which no `#[allow]` can lift. The OS calls std lacks are in `fc-sys`, the workspace's only crate with `unsafe` code (AGENTS.md rule 6): each is one reviewed FFI call behind a safe function, today Windows' `GetDriveTypeW` for storage qualification.
+- **`mlock` is deferred.** If added, it goes into `fc-sys` too.
 
 ## Packaging and release
 

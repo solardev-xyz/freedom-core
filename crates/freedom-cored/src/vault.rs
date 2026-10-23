@@ -10,7 +10,10 @@
 //! - **Throttle:** an attempt is reserved when its job starts and settled
 //!   with the real outcome when the KDF actually ends, even if the request
 //!   was already answered. Every job that checks a password reserves one,
-//!   `vault.reconcile` included unless it reconciles a delete (#78).
+//!   `vault.reconcile` included unless it reconciles a delete (#78). While
+//!   the throttle refuses, the job still checks the file, with no password:
+//!   a missing, unsupported or corrupt vault is reported before `throttled`,
+//!   as design 0001's parity table orders them (#82).
 //! - **Commit point:** each job shares a [`JobControl`] with the loop. The
 //!   commit point is the worker's atomic claim immediately before the rename
 //!   or unlink. Until then the loop can abandon the job and answer at once
@@ -24,7 +27,10 @@
 //!   admitted before a lock acknowledgement runs after it. Unlock also
 //!   installs only with a ticket taken at its start.
 //! - **Deadlines** (30 s from admission) are enforced by the loop's wakeup,
-//!   for queued and running work alike, independently of the worker.
+//!   for queued and running work alike, independently of the worker. A job
+//!   may claim its commit point only in the first two thirds of its
+//!   deadline. A later claim stops it uncommitted, answered `deadline`, so
+//!   what follows a claim has at least 10 s plus main's 15 s margin (#127).
 //! - **The auto-lock counts sleep** ([`Clock`], #80): a vault left unlocked
 //!   locks on waking once its time has passed, however long the machine
 //!   slept. While unlocked, the loop wakes at least every
@@ -46,14 +52,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use fc_keys::freedom::{self, FreedomKeys};
 use fc_keys::{Mnemonic, WordCount, multiformats};
 use fc_protocol::error::{ErrorBody, ErrorCode};
-use fc_protocol::message::{self, CallerKind};
+use fc_protocol::message;
 use fc_protocol::secret::{SecretBytes, SecretResponse};
 use fc_vault::format::{self, SealParams};
 use fc_vault::state::{LockReason, Locked, Prepared, Ticket, VaultState};
 use fc_vault::throttle::{Attempt, Outcome, Throttle};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::clock::Clock;
 use crate::fsx::{self, Done};
@@ -92,6 +98,14 @@ const MSG_DECRYPTED_INVALID: &str = "Decrypted data is not a valid mnemonic";
 pub enum Out {
     /// A JSON payload to frame and send (a response or an event).
     Send(Zeroizing<Vec<u8>>),
+    /// The reply to request `id`, valid only under the vault's `epoch`
+    /// (design 0008, "The sealed release"): checked again when it is handed
+    /// to the writer, and sent as `vault_locked` if that epoch has ended.
+    SendUnder {
+        payload: Zeroizing<Vec<u8>>,
+        id: u64,
+        epoch: u64,
+    },
     /// A job for the worker, with its ID.
     Job(u64, Job),
 }
@@ -226,6 +240,9 @@ pub enum JobOutput {
     NodeWritten(Result<(journal::Outcome, serde_json::Map<String, serde_json::Value>), OpError>),
     /// nodes.op_status.
     OpStatus(Result<journal::OpStatus, OpError>),
+    /// A password check the throttle refused: what the file says, before
+    /// `throttled` (#82).
+    Prechecked(Result<(), OpError>),
 }
 
 /// What `vault.reconcile` found for a committed create or import.
@@ -260,7 +277,8 @@ impl JobOutput {
             JobOutput::Unlocked(_)
             | JobOutput::Reconciled { .. }
             | JobOutput::NodeWritten(_)
-            | JobOutput::OpStatus(_) => None,
+            | JobOutput::OpStatus(_)
+            | JobOutput::Prechecked(_) => None,
         }
     }
 }
@@ -317,6 +335,35 @@ enum Kind {
 }
 
 impl Kind {
+    /// What a password check the throttle refuses still checks, without the
+    /// password, before it answers `throttled` (design 0001's parity table,
+    /// #82): `Some(true)` for the file's existence, structure and version
+    /// (unlock, change_password, delete), `Some(false)` for existence and
+    /// structure (verify and the exports, which check no version, as JS
+    /// `verifyPassword`). `None`: `throttled` at once (reconcile among
+    /// them: an honest one never meets the throttle, #78).
+    fn precheck(&self) -> Option<bool> {
+        match self {
+            Kind::Unlock { .. } | Kind::ChangePassword { .. } | Kind::Delete { .. } => Some(true),
+            Kind::Verify { .. } | Kind::ExportMnemonic { .. } | Kind::ExportPrivateKey { .. } => {
+                Some(false)
+            }
+            Kind::Create { .. }
+            | Kind::Import { .. }
+            | Kind::Reconcile { .. }
+            | Kind::NodeWrite { .. }
+            | Kind::OpStatus { .. } => None,
+        }
+    }
+
+    /// verify and the exports say "No vault found".
+    fn short_no_vault(&self) -> bool {
+        matches!(
+            self,
+            Kind::Verify { .. } | Kind::ExportMnemonic { .. } | Kind::ExportPrivateKey { .. }
+        )
+    }
+
     /// Whether the job checks a password, and so reserves a throttle attempt
     /// first.
     ///
@@ -350,33 +397,54 @@ struct Pending {
 }
 
 /// Shared by the loop and the worker for one job: who wins the race between
-/// abandoning it and committing it.
-pub struct JobControl(AtomicU8);
+/// abandoning it and committing it, and until when it may commit.
+pub struct JobControl {
+    state: AtomicU8,
+    /// The last moment the worker may claim the commit point: two thirds
+    /// into the job's deadline. What follows a claim (a rename and a
+    /// directory flush, or a node write's fsyncs) then has the last third
+    /// and main's watchdog margin, 25 s by default, however late it came
+    /// (#127).
+    claim_by: Instant,
+}
 
 const JOB_RUNNING: u8 = 0;
 const JOB_ABANDONED: u8 = 1;
 const JOB_COMMITTED: u8 = 2;
 
 impl JobControl {
-    fn new() -> Arc<Self> {
-        Arc::new(JobControl(AtomicU8::new(JOB_RUNNING)))
+    fn new(claim_by: Instant) -> Arc<Self> {
+        Arc::new(JobControl {
+            state: AtomicU8::new(JOB_RUNNING),
+            claim_by,
+        })
     }
 
-    /// Loop: stops the job unless it already committed. True if stopped.
+    /// Stops the job unless it already committed. True if it is stopped:
+    /// by this call, or already by the worker, past its claim time. So the
+    /// loop answers a job the worker stopped as it would one it stopped,
+    /// without waiting for the worker's cleanup to finish.
     fn abandon(&self) -> bool {
-        self.0
-            .compare_exchange(
-                JOB_RUNNING,
-                JOB_ABANDONED,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
+        match self.state.compare_exchange(
+            JOB_RUNNING,
+            JOB_ABANDONED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => true,
+            Err(state) => state == JOB_ABANDONED,
+        }
     }
 
-    /// Worker: claims the commit point. False if the job was abandoned.
+    /// Worker: claims the commit point. False if the job was abandoned, or
+    /// if it is past its claim time: it then stops as if abandoned, and the
+    /// loop answers `deadline`.
     fn commit(&self) -> bool {
-        self.0
+        if Instant::now() >= self.claim_by {
+            self.abandon();
+            return false;
+        }
+        self.state
             .compare_exchange(
                 JOB_RUNNING,
                 JOB_COMMITTED,
@@ -389,12 +457,12 @@ impl JobControl {
     /// Whether the worker claimed the commit point (deadlines and revocation
     /// no longer apply).
     fn committed(&self) -> bool {
-        self.0.load(Ordering::Acquire) == JOB_COMMITTED
+        self.state.load(Ordering::Acquire) == JOB_COMMITTED
     }
 
     /// Worker: whether to stop early (skip the KDF).
     fn abandoned(&self) -> bool {
-        self.0.load(Ordering::Acquire) == JOB_ABANDONED
+        self.state.load(Ordering::Acquire) == JOB_ABANDONED
     }
 }
 
@@ -408,9 +476,17 @@ enum RunningKind {
     ExportPrivateKey(u32),
     Create,
     Import,
-    Reconcile { install: bool },
+    Reconcile {
+        install: bool,
+    },
     NodeWrite,
     OpStatus,
+    /// A password check the throttle refused, checking the file first.
+    /// `ready_at`: when the throttle allows the next attempt (clock ms).
+    Precheck {
+        short: bool,
+        ready_at: u64,
+    },
 }
 
 struct Running {
@@ -568,6 +644,11 @@ struct PublicKeyParams {
     public_key: String,
 }
 
+#[derive(Deserialize)]
+struct RecipientParams {
+    recipient: String,
+}
+
 #[derive(Serialize)]
 struct Status {
     exists: bool,
@@ -624,6 +705,11 @@ impl Vault {
         self.file = file;
     }
 
+    /// The vault's epoch: `None` while locked.
+    pub fn epoch(&self) -> Option<u64> {
+        self.state.epoch().map(|epoch| epoch.get())
+    }
+
     pub fn set_auto_lock_ms(&mut self, auto_lock_ms: u64) {
         self.auto_lock_ms = auto_lock_ms;
     }
@@ -650,6 +736,7 @@ impl Vault {
                 | "vault.reconcile"
                 | "nodes.write_identity"
                 | "nodes.op_status"
+                | "nodes.seal_radicle_key"
                 | "keys.generate_mnemonic"
                 | "keys.validate_mnemonic"
                 | "keys.addresses"
@@ -661,27 +748,11 @@ impl Vault {
     }
 
     /// Handles a request. Inline methods reply at once; KDF methods are
-    /// queued and reply when their job finishes.
-    pub fn request(
-        &mut self,
-        id: u64,
-        method: &str,
-        raw: Option<&str>,
-        caller: CallerKind,
-    ) -> Vec<Out> {
+    /// queued and reply when their job finishes. The caller was checked
+    /// against fc-protocol's method table before this (#101): `compat.*`,
+    /// `vault.reconcile` and `nodes.op_status` are main's own.
+    pub fn request(&mut self, id: u64, method: &str, raw: Option<&str>) -> Vec<Out> {
         let mut out = Vec::new();
-        // compat.* and vault.reconcile are main-internal (design 0001).
-        let internal_only = method.starts_with("compat.")
-            || method == "vault.reconcile"
-            || method == "nodes.op_status";
-        if internal_only && caller != CallerKind::Shell {
-            self.reply_error(
-                &mut out,
-                id,
-                ErrorBody::new(ErrorCode::Forbidden, "main-internal only"),
-            );
-            return out;
-        }
         let result = match method {
             "vault.status" => self.status(id),
             "vault.lock" => {
@@ -700,6 +771,13 @@ impl Vault {
                 Ok(json_result(id, &serde_json::json!({ "valid": valid })))
             }),
             "keys.addresses" => self.addresses(id, raw),
+            "nodes.seal_radicle_key" => {
+                match self.seal_radicle_key(id, raw) {
+                    Ok((payload, epoch)) => out.push(Out::SendUnder { payload, id, epoch }),
+                    Err(error) => self.reply_error(&mut out, id, error),
+                }
+                return out;
+            }
             "keys.radicle_did" => {
                 params::<PublicKeyParams>(raw).and_then(|p| radicle_did(id, &p.public_key))
             }
@@ -942,6 +1020,67 @@ impl Vault {
         ))
     }
 
+    /// `nodes.seal_radicle_key` (design 0008, "The sealed release"): the
+    /// Radicle node key at `m/44'/73404'/0'/0'/0'`, sealed to the service's
+    /// key for this start, `recipient`. Only the 32-byte Ed25519 secret seed
+    /// is sealed: never a chain code, the seed, or another key, and no
+    /// parameter selects another.
+    ///
+    /// - **No vault** is `no_vault`, the one answer that leads main to a
+    ///   throwaway key, so it is given only when the vault file is absent.
+    ///   A locked vault is `vault_locked`; a file that can't be read is its
+    ///   own error.
+    /// - **The recipient is checked first,** whole: 32 bytes of base64, and
+    ///   not a low-order point (whose shared secret is all zero). So a
+    ///   broken recipient is `invalid_argument` whatever the vault's state,
+    ///   and never reads as `no_vault`.
+    /// - **The epoch:** the reply carries the epoch it was sealed under
+    ///   ([`Out::SendUnder`]). It is checked again when the loop hands it to
+    ///   the writer, which is 0008's boundary for the start: if a lock,
+    ///   manual or automatic, came while it waited for room, it goes as
+    ///   `vault_locked` instead, in its place.
+    /// - The derived key is wiped once sealed. The method's name is logged,
+    ///   never the recipient or the ciphertext.
+    fn seal_radicle_key(
+        &mut self,
+        id: u64,
+        raw: Option<&str>,
+    ) -> Result<(Zeroizing<Vec<u8>>, u64), ErrorBody> {
+        use base64::Engine as _;
+        let p = params::<RecipientParams>(raw)?;
+        let invalid = || ErrorBody::new(ErrorCode::InvalidArgument, "Invalid recipient");
+        let recipient: [u8; fc_seal::PUBLIC_KEY_LEN] = base64::engine::general_purpose::STANDARD
+            .decode(p.recipient.as_bytes())
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(invalid)?;
+        if !fc_seal::valid_recipient(&recipient) {
+            return Err(invalid());
+        }
+        if self.file.as_ref().map_err(|e| e.body(false))?.is_none() {
+            return Err(ErrorBody::new(ErrorCode::NoVault, MSG_NO_VAULT));
+        }
+        let epoch = self.epoch().ok_or_else(locked)?;
+        let keys = self.state.freedom_keys().map_err(locked_or_internal)?;
+        let key = keys.radicle.to_secret_bytes();
+        drop(keys);
+        let sealed = fc_seal::seal(&recipient, &key, &mut OsRng).map_err(|e| match e {
+            fc_seal::SealError::InvalidRecipient => invalid(),
+            fc_seal::SealError::Rng => internal(),
+        })?;
+        drop(key);
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let payload = json_result(
+            id,
+            &serde_json::json!({
+                "enc": b64(&sealed.enc),
+                "ciphertext": b64(&sealed.ciphertext),
+            }),
+        )
+        .ok_or_else(internal)?;
+        Ok((payload, epoch))
+    }
+
     /// Validates a KDF request's parameters and pre-checks, then queues it.
     fn enqueue(&mut self, id: u64, method: &str, raw: Option<&str>) -> Result<(), ErrorBody> {
         let kind = match method {
@@ -1104,32 +1243,45 @@ impl Vault {
                     }
                 }
             }
+            let now = self.now_ms();
+            let mut precheck = None;
             let attempt = if pending.kind.throttled() {
-                match self.throttle.reserve(self.now_ms()) {
+                match self.throttle.reserve(now) {
                     Ok(attempt) => Some(attempt),
-                    Err(throttled) => {
-                        let seconds = throttled.retry_after_ms.div_ceil(1000);
-                        self.reply_error(
-                            out,
-                            pending.id,
-                            ErrorBody::new(
-                                ErrorCode::Throttled,
-                                format!("Too many attempts. Try again in {seconds} seconds."),
-                            )
-                            .with_data(
-                                serde_json::json!({ "retry_after_ms": throttled.retry_after_ms }),
-                            ),
-                        );
-                        continue;
-                    }
+                    Err(throttled) => match pending.kind.precheck() {
+                        // The file first, with no password (design 0001's
+                        // parity table): its errors come before `throttled`.
+                        Some(version) => {
+                            precheck = Some((
+                                RunningKind::Precheck {
+                                    short: pending.kind.short_no_vault(),
+                                    ready_at: now.saturating_add(throttled.retry_after_ms),
+                                },
+                                version,
+                            ));
+                            None
+                        }
+                        None => {
+                            self.reply_error(
+                                out,
+                                pending.id,
+                                throttled_error(throttled.retry_after_ms),
+                            );
+                            continue;
+                        }
+                    },
                 }
             } else {
                 None
             };
             let job_id = self.next_job;
             self.next_job += 1;
-            let control = JobControl::new();
-            let (kind, job) = self.job_for(pending.kind, Arc::clone(&control));
+            let control = JobControl::new(pending.deadline - self.kdf_deadline / 3);
+            let (kind, job) = match precheck {
+                // The request's secrets are dropped (wiped) here, unused.
+                Some((kind, version)) => (kind, self.precheck_job(version, Arc::clone(&control))),
+                None => self.job_for(pending.kind, Arc::clone(&control)),
+            };
             self.running = Some(Running {
                 job: job_id,
                 request: pending.id,
@@ -1142,6 +1294,13 @@ impl Vault {
             });
             out.push(Out::Job(job_id, job));
         }
+    }
+
+    /// The job of a password check the throttle refused: it reads the file,
+    /// and holds no password.
+    fn precheck_job(&self, version: bool, control: Arc<JobControl>) -> Job {
+        let dir = self.dir.clone();
+        Box::new(move || Finished(JobOutput::Prechecked(job_precheck(&dir, version, &control))))
     }
 
     fn job_for(&self, kind: Kind, control: Arc<JobControl>) -> (RunningKind, Job) {
@@ -1254,6 +1413,12 @@ impl Vault {
         let request = running.request;
         // A result after the deadline is abandoned, unless it committed.
         if !running.answered && Instant::now() >= running.deadline && running.control.abandon() {
+            running.answered = true;
+            self.reply_error(&mut out, request, deadline_exceeded());
+        }
+        // The worker stopped itself, past its claim time: the deadline's
+        // answer, a little early. (The loop answers whenever it abandons.)
+        if !running.answered && running.control.abandoned() {
             running.answered = true;
             self.reply_error(&mut out, request, deadline_exceeded());
         }
@@ -1384,6 +1549,14 @@ impl Vault {
                 let reply = result
                     .map(|status| json_result(request, &serde_json::json!({ "status": status })))
                     .map_err(|e| e.body(false));
+                (Outcome::NotTried, reply)
+            }
+            (RunningKind::Precheck { short, ready_at }, JobOutput::Prechecked(result)) => {
+                let reply = match result {
+                    Err(error) => Err(error.body(*short)),
+                    // The file is fine: the attempt itself has to wait.
+                    Ok(()) => Err(throttled_error(ready_at.saturating_sub(now).max(1))),
+                };
                 (Outcome::NotTried, reply)
             }
             (RunningKind::Reconcile { install }, JobOutput::Reconciled { result, tried }) => {
@@ -1547,9 +1720,10 @@ fn throttle_outcome(output: &JobOutput) -> Outcome {
             result.as_ref().map(|_| ())
         }
         JobOutput::Reconciled { tried, .. } => return *tried,
-        JobOutput::Written { .. } | JobOutput::NodeWritten(_) | JobOutput::OpStatus(_) => {
-            return Outcome::NotTried;
-        }
+        JobOutput::Written { .. }
+        | JobOutput::NodeWritten(_)
+        | JobOutput::OpStatus(_)
+        | JobOutput::Prechecked(_) => return Outcome::NotTried,
     };
     match result {
         Ok(_) => Outcome::Success,
@@ -1557,6 +1731,16 @@ fn throttle_outcome(output: &JobOutput) -> Outcome {
         Err(OpError::Weak) => Outcome::Success,
         Err(error) => error.throttle_outcome(),
     }
+}
+
+/// `throttled`, with the wait (design 0001, Throttling).
+fn throttled_error(retry_after_ms: u64) -> ErrorBody {
+    let seconds = retry_after_ms.div_ceil(1000);
+    ErrorBody::new(
+        ErrorCode::Throttled,
+        format!("Too many attempts. Try again in {seconds} seconds."),
+    )
+    .with_data(serde_json::json!({ "retry_after_ms": retry_after_ms }))
 }
 
 fn cancelled() -> ErrorBody {
@@ -1567,7 +1751,7 @@ fn deadline_exceeded() -> ErrorBody {
     ErrorBody::new(ErrorCode::Deadline, "Deadline exceeded")
 }
 
-fn locked() -> ErrorBody {
+pub(crate) fn locked() -> ErrorBody {
     ErrorBody::new(ErrorCode::VaultLocked, MSG_LOCKED)
 }
 
@@ -1650,9 +1834,17 @@ fn private_key_result(id: u64, key: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>,
         .map_err(|_| internal())
 }
 
+/// An error reply. One that wouldn't fit a frame, say a message quoting
+/// input past fc-evm's bounds, would end the core when framed (#86): its code
+/// stays, its message becomes a fixed one, and its data goes.
 fn error_payload(id: u64, error: &ErrorBody) -> Zeroizing<Vec<u8>> {
     let mut payload = Zeroizing::new(Vec::with_capacity(256));
-    let _ = message::write_error(&mut *payload, id, error);
+    let written = message::write_error(&mut *payload, id, error);
+    if written.is_err() || payload.len() > fc_protocol::frame::MAX_PAYLOAD {
+        payload.zeroize();
+        let fixed = ErrorBody::new(error.code, "Error too large to report");
+        let _ = message::write_error(&mut *payload, id, &fixed);
+    }
     payload
 }
 
@@ -1882,12 +2074,26 @@ fn job_verify(dir: &Path, password: &SecretBytes, control: &JobControl) -> Resul
     format::verify_password(&contents, password.as_bytes()).map_err(OpError::from_vault)
 }
 
+/// A password check the throttle refused (#82): what the file says without
+/// the password, in design 0001's order (`no_vault`, then
+/// `unsupported_vault_version` if `version`, or a corrupt file). `Ok`: the
+/// answer is `throttled`.
+fn job_precheck(dir: &Path, version: bool, control: &JobControl) -> Result<(), OpError> {
+    if control.abandoned() {
+        return Err(OpError::Abandoned);
+    }
+    let contents = read_vault(dir)?.ok_or(OpError::NoVault)?;
+    format::check_structure(&contents, version).map_err(OpError::from_vault)
+}
+
 /// The worker's commit claim, right before the rename or unlink. After it,
 /// the job can no longer be abandoned.
 fn claim(control: &JobControl) -> bool {
     let claimed = control.commit();
     if claimed {
         crate::testhooks::commit_delay();
+    } else {
+        crate::testhooks::refused_claim_hold();
     }
     claimed
 }
@@ -2206,6 +2412,31 @@ fn written(result: Result<(NewVault, Commit), OpError>) -> JobOutput {
 mod tests {
     use super::*;
 
+    /// #86: an error reply too large for a frame ended the core (exit 70)
+    /// once framed. It is replaced by its code with a fixed message.
+    #[test]
+    fn an_error_too_large_for_a_frame_still_frames() {
+        let huge = ErrorBody::new(
+            ErrorCode::InvalidArgument,
+            "\"".repeat(fc_protocol::frame::MAX_PAYLOAD),
+        )
+        .with_data(serde_json::json!({ "kind": "x" }));
+        let payload = error_payload(7, &huge);
+        assert!(crate::transport::frame(&payload).is_some());
+        let reply: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(
+            reply,
+            serde_json::json!({
+                "type": "response", "id": 7,
+                "error": { "code": "invalid_argument", "message": "Error too large to report" },
+            })
+        );
+        // Others are unchanged.
+        let small = ErrorBody::new(ErrorCode::InvalidArgument, "Invalid parameters");
+        let reply: serde_json::Value = serde_json::from_slice(&error_payload(8, &small)).unwrap();
+        assert_eq!(reply["error"]["message"], "Invalid parameters");
+    }
+
     const ABANDON: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
     /// A vault unlocked now, with a 15-minute auto-lock.
@@ -2241,6 +2472,95 @@ mod tests {
         vault.clock.sleep(Duration::from_secs(3 * 24 * 60 * 60));
         assert!(locked_auto(&vault.tick()));
         assert!(!vault.state.is_unlocked());
+    }
+
+    /// The one payload a request answered with.
+    fn sent(outs: Vec<Out>) -> Vec<u8> {
+        match outs.as_slice() {
+            [Out::Send(payload)] => payload.to_vec(),
+            _ => panic!("expected one reply"),
+        }
+    }
+
+    /// Typed data for the size bound: `count` zeros (each `"0"` in the view)
+    /// and a string of `len` bytes.
+    fn sized_typed_data(count: usize, len: usize) -> serde_json::Value {
+        serde_json::json!({
+            "domain": {},
+            "types": { "M": [{ "name": "v", "type": "uint8[]" }, { "name": "s", "type": "string" }] },
+            "message": { "v": vec![0; count], "s": "x".repeat(len) },
+        })
+    }
+
+    /// #88, test 3: the length both typed-data methods measure is the
+    /// signing response's, written at ID 2^53 - 1, across the vectors and
+    /// at the boundary, where that response fills the frame exactly.
+    #[test]
+    fn the_view_bound_is_the_signing_reply_at_the_largest_id() {
+        use fc_protocol::frame::MAX_PAYLOAD;
+        use fc_protocol::message::MAX_ID;
+        let mut vault = unlocked();
+        let overhead = MAX_PAYLOAD - crate::signing::max_view_len();
+        let view_of = |data: &serde_json::Value| {
+            let request = fc_evm::ViewRequest {
+                primary_type: None,
+                chain_id: None,
+                max_len: usize::MAX,
+            };
+            fc_evm::typed_data_view(&data["domain"], &data["types"], &data["message"], &request)
+                .unwrap()
+        };
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vectors/signing.json");
+        let vectors: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let mut checked = 0;
+        for case in vectors["typedData"].as_array().unwrap() {
+            if case["keyId"] != "account-0" || case["result"].get("payload").is_none() {
+                continue;
+            }
+            let data = &case["typed_data"];
+            let hashed = view_of(data);
+            let params = serde_json::json!({
+                "key": { "kind": "account", "index": 0 },
+                "typed_data": data,
+                "expected_hash": case["result"]["hash"],
+            })
+            .to_string();
+            let payload = sent(vault.request(MAX_ID, "sign.typed_data", Some(&params)));
+            assert_eq!(
+                payload.len(),
+                overhead + hashed.view.len(),
+                "{}",
+                case["id"]
+            );
+            let reply: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            assert_eq!(reply["result"]["signature"], case["result"]["signature"]);
+            checked += 1;
+        }
+        assert!(checked >= 60, "{checked}");
+        // At the boundary: a view of exactly the bound's length makes a
+        // signing response that fills the frame; one byte more is refused.
+        let probe = view_of(&sized_typed_data(90_000, 0)).view.len();
+        let exact = crate::signing::max_view_len() - probe;
+        for (len, fits) in [(exact, true), (exact + 1, false)] {
+            let data = sized_typed_data(90_000, len);
+            let hash =
+                fc_evm::typed_data_hash(&data["domain"], &data["types"], &data["message"]).unwrap();
+            let params = serde_json::json!({
+                "key": { "kind": "account", "index": 0 },
+                "typed_data": data,
+                "expected_hash": fc_evm::to_hex(&hash),
+            })
+            .to_string();
+            let payload = sent(vault.request(MAX_ID, "sign.typed_data", Some(&params)));
+            let reply: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            if fits {
+                assert_eq!(payload.len(), MAX_PAYLOAD);
+                assert!(reply["result"]["signature"].is_string());
+            } else {
+                assert_eq!(reply["error"]["code"], "invalid_argument", "{reply}");
+            }
+        }
     }
 
     /// #80: while unlocked, the loop never waits longer than SUSPEND_CHECK,

@@ -73,7 +73,37 @@ const BOUNDS = {
   callersPerSession: 64,
   deadlineMs: 120_000,
   retiredEndpoints: 64,
+  answerChargeBytes: 1024 * 1024,
 };
+
+/**
+ * The values and keys of a JSON text, as fc-json's counting pass counts
+ * them (one each, duplicates included); a text that isn't JSON counts one
+ * per two of its `bytes`. The harness's bodies come from JSON.stringify,
+ * so they have no duplicate keys.
+ */
+function __jsonValues(text, bytes) {
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return Math.ceil(bytes / 2);
+  }
+  let count = 0;
+  const stack = [value];
+  while (stack.length > 0) {
+    const item = stack.pop();
+    count += 1;
+    if (Array.isArray(item)) stack.push(...item);
+    else if (item !== null && typeof item === 'object') {
+      for (const [, member] of Object.entries(item)) {
+        count += 1;
+        stack.push(member);
+      }
+    }
+  }
+  return count;
+}
 
 // The core's frame check (deviation `request-size`): a request's payload
 // strings, serialized, plus 4 KiB for its envelope, within the frame.
@@ -224,6 +254,16 @@ const PARSE_RFC3339 = `function __parseRfc3339(text) {
 // `append` adds helpers at the module's end, where function declarations
 // still hoist); `harness` patches main's side, played by this harness.
 const PATCHES = {
+  'name-length': () => ({
+    text: 'An ENS, WNS or GNS name over 1,024 bytes (UTF-8), trimmed or normalized, is refused with "name exceeds 1024 bytes" before any I/O, on the ASCII path too.',
+    source: {
+      'ens-resolver.js': {
+        edits: [['function fastNormalize(trimmed) {\n  const lowered = trimmed.toLowerCase();\n  if (PURE_ASCII_HOST.test(lowered)) return lowered;\n  return ens_normalize(trimmed);\n}',
+          "function fastNormalize(trimmed) {\n  if (Buffer.byteLength(trimmed) > 1024) throw new Error('name exceeds 1024 bytes');\n  const lowered = trimmed.toLowerCase();\n  if (PURE_ASCII_HOST.test(lowered)) return lowered;\n  const normalized = ens_normalize(trimmed);\n  if (Buffer.byteLength(normalized) > 1024) throw new Error('name exceeds 1024 bytes');\n  return normalized;\n}"]],
+        append: [],
+      },
+    },
+  }),
   'ccip-urls': (b) => ({
     text: `A quorum leg's CCIP-Read round tries the first ${b.ccipUrls} gateway URLs.`,
     source: {
@@ -243,6 +283,22 @@ const PATCHES = {
           ['contentHash: innerBytes,', `contentHash: __shortenHex(innerBytes, ${b.replyHex}),`],
         ],
         append: ['function __shortenHex(hex, max) {\n  return typeof hex === \'string\' && hex.length > max ? hex.slice(0, max / 2) + hex.slice(hex.length - max / 2) : hex;\n}'],
+      },
+    },
+  }),
+  'reverse-normalized': () => ({
+    text: 'An ENS primary name that is not its own ENSIP-15 normalization is not shown as the address\'s name: the reverse result is UNVERIFIED with the claimed name and `unverifiedCause: "unnormalized"` (freedom-browser #756), on the quorum, Colibri and Myotis paths alike.',
+    source: {
+      'ens-resolver.js': {
+        edits: [
+          ["  if (decoded.status === REVERSE_OUTCOME.name) {\n    return {",
+            "  if (decoded.status === REVERSE_OUTCOME.name) {\n    if (!__isNormalizedName(decoded.detail)) {\n      return { ...unverifiedReverseResult(normalizedAddress, NAME_SYSTEMS.ens, decoded.detail, `Reverse record for ${normalizedAddress} claims a name that isn't normalized`, outcome.trust), unverifiedCause: 'unnormalized' };\n    }\n    return {"],
+          ["  if (!name) return { ...noReverseResult(normalizedAddress), trust };\n  return { success: true, address: normalizedAddress, name, system: 'ens', trust };",
+            "  if (!name) return { ...noReverseResult(normalizedAddress), trust };\n  if (!__isNormalizedName(name)) {\n    return { ...unverifiedReverseResult(normalizedAddress, NAME_SYSTEMS.ens, name, `Reverse record for ${normalizedAddress} claims a name that isn't normalized`, trust), unverifiedCause: 'unnormalized' };\n  }\n  return { success: true, address: normalizedAddress, name, system: 'ens', trust };"],
+          ["  if (ensRec.status === 'ok' && ensRec.name) {\n    return {",
+            "  if (ensRec.status === 'ok' && ensRec.name) {\n    if (!__isNormalizedName(ensRec.name)) {\n      return { ...unverifiedReverseResult(normalizedAddress, NAME_SYSTEMS.ens, ensRec.name, `Reverse record for ${normalizedAddress} claims a name that isn't normalized`, ensTrust), unverifiedCause: 'unnormalized' };\n    }\n    return {"],
+        ],
+        append: ["function __isNormalizedName(name) {\n  if (typeof name !== 'string' || Buffer.byteLength(name) > 1024) return false;\n  try {\n    return ens_normalize(name) === name;\n  } catch {\n    return false;\n  }\n}"],
       },
     },
   }),
@@ -373,7 +429,7 @@ function __admit(session) {
     },
   }),
   'memory-budgets': (b) => ({
-    text: `A session is charged for its name's copies (8 per byte of its in-flight key) as it starts, its requests (endpoint and body) as it makes them, and its answers as they arrive, at 32 per byte (their parsed JSON at worst); one an answer takes past ${b.sessionBytes} bytes ends at once: its callers get "budget", the answer is dropped, its outstanding I/O is cancelled and it makes no more. The patch holds for one step with one content lookup on JSON-RPC alone, without redirects or 429s, ended by an answer crossing (enforced); the core's replies and aliasing decodes are its own tests.`,
+    text: `A session is charged for its name's copies (8 per byte of its in-flight key) as it starts, its requests (endpoint and body) as it makes them, and its answers as they arrive, at what their parsed JSON can hold: twice their bytes, 88 per JSON value or key and 80 per escaped surrogate. An anchor answer (eth_blockNumber, eth_getBlockByNumber) is charged only until it is read, which is at once. One an answer takes past ${b.sessionBytes} bytes ends at once: its callers get "budget", the answer is dropped, its outstanding I/O is cancelled and it makes no more. The patch holds for one step with one content lookup on JSON-RPC alone, without redirects or 429s, ended by an answer crossing (enforced); the core's replies, aliasing decodes and its refusal of one answer over ${b.answerChargeBytes} bytes are its own tests.`,
     harness: ['memory-budgets'],
   }),
   'overall-deadline': (b) => ({
@@ -782,11 +838,17 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
           // The core charges one exchange's final answer: a hop or a retry
           // isn't a modelled one.
           if (redirect || answer.status === 429) violations.push('memory-budgets: the patch models no redirects or 429s');
-          charged += Buffer.byteLength(answer.body) * 32;
+          const bytes = Buffer.byteLength(answer.body);
+          const surrogates = (answer.body.match(/\\u[dD][89a-fA-F]/g) || []).length;
+          const charge = 2 * bytes + 88 * __jsonValues(answer.body, bytes) + 80 * surrogates;
+          if (charge > bounds.answerChargeBytes) violations.push('memory-budgets: an answer over the per-answer allowance is the core\'s own test');
+          charged += charge;
           if (charged > bounds.sessionBytes) {
             endStep(entries[0].step, new Error('budget'), entries);
             return;
           }
+          // An anchor answer's charge goes as it is read, at once.
+          if (batch.every((r) => r.method === 'eth_blockNumber' || r.method === 'eth_getBlockByNumber')) charged -= charge;
         }
         // Deviation `response-caps`: main delivers the body, and the core
         // refuses it as a transport failure.
@@ -1452,6 +1514,11 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
   const coder = ethers.AbiCoder.defaultAbiCoder();
   const revert = (data) => ({ rpc_error: { code: 3, message: 'execution reverted', data } });
   const ADDRESS = { data: coder.encode(['bytes', 'address'], [coder.encode(['address'], ['0x' + 'ab'.repeat(20)]), '0x' + '22'.repeat(20)]) };
+  // A primary name that isn't normalized: a capital I where vitalik.eth
+  // has an l (#75).
+  const lookalike = { data: coder.encode(['string', 'address', 'address'], ['vitaIik.eth', '0x' + '22'.repeat(20), '0x' + '33'.repeat(20)]) };
+  const reverse = { fn: 'resolveEnsReverse', args: ['0x' + 'ab'.repeat(20)] };
+  const via = (methods) => ({ ...QUORUM_NETWORK, verification: { order: methods, preferVerified: false } });
   const offchain = (urls, callData = '0x0102', extraData = '0x09') => revert('0x556f1830' + coder.encode(
     ['address', 'string[]', 'bytes', 'bytes4', 'bytes'], [UR, urls, callData, '0xdeadbeef', extraData]).slice(2));
   // An OffchainLookup whose URL array points every entry at one string,
@@ -1466,7 +1533,16 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
     const head = UR.slice(2).toLowerCase().padStart(64, '0') + word(160) + word(at) + 'deadbeef'.padEnd(64, '0') + word(at + callData.length / 2);
     return revert('0x556f1830' + head + urls + callData + bytes('0x09'));
   };
+  // Sixteen labels of 63 bytes or less: 1,024 bytes with .eth, and one
+  // byte more.
+  const nameOf = (last) => [...Array(15).fill('a'.repeat(63)), 'a'.repeat(last)].join('.') + '.eth';
   return [
+    // An ASCII name one byte over 1,024 is refused before any I/O, like a
+    // non-ASCII one; a name of exactly 1,024 bytes resolves.
+    deviation('name-length', base({}), [
+      { call: content(nameOf(61)) },
+      { after: 1000, call: content(nameOf(60)) },
+    ]),
     // Three gateway URLs and a bound of two: the reference reaches the
     // working third gateway, the core gives up after two.
     deviation('ccip-urls', base({
@@ -1726,15 +1802,33 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
       ]),
     },
     // The session's charge: its name (152), its requests, and its answers at
-    // 32 per byte: 6,664 before the block answers at 40 ms (423 bytes, so
-    // 13,536 each), so the second of them crosses 25,000. The session ends
-    // there: the other two block requests are cancelled.
-    deviation('memory-budgets', base({ bounds: { sessionBytes: 25000 } })),
+    // twice their bytes and 88 per JSON value or key, an anchor answer only
+    // until it is read. The first block answer at 40 ms (423 bytes) crosses
+    // 4,000. The session ends there: the other block requests are
+    // cancelled.
+    deviation('memory-budgets', base({ bounds: { sessionBytes: 4000 } })),
     // Every endpoint answers after a second; the session ends at 300 ms.
     deviation('overall-deadline', base({
       bounds: { deadlineMs: 300 },
       hosts: Object.fromEntries(ENDPOINTS.map((url) => [new URL(url).host, { delay: 1000 }])),
     })),
+    // The forward check passed for the name as written, but it isn't its
+    // own normalization: shown as UNVERIFIED with its claim, on each path.
+    deviation('reverse-normalized', base({ calls: { reverse: lookalike } }), [{ call: reverse }]),
+    {
+      ...deviation('reverse-normalized', base({
+        network: via(['colibri']),
+        colibri: { prover: 'https://prover.example', calls: { reverse: lookalike } },
+      }), [{ call: reverse }]),
+      id: 'deviation-reverse-normalized-colibri',
+    },
+    {
+      ...deviation('reverse-normalized', base({
+        network: via(['myotis']),
+        myotis: { enabled: true, ready: true, block: 23_456_789, calls: { reverse: lookalike } },
+      }), [{ call: reverse }]),
+      id: 'deviation-reverse-normalized-myotis',
+    },
   ];
 }
 

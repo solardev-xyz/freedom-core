@@ -55,6 +55,7 @@ use std::time::{Duration, Instant};
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::frame::{Frame, KIND_JSON};
 use fc_protocol::message::{self, CallerKind, Context, Message, MessageError};
+use fc_protocol::methods::{self, Admission};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use zeroize::Zeroizing;
@@ -71,9 +72,11 @@ use crate::{testhooks, testmethods};
 /// How long the writer may take to flush on exit.
 const EXIT_DRAIN: Duration = Duration::from_secs(2);
 /// How long exiting waits for a vault job past its commit point to finish
-/// and reply. A commit is a rename or unlink plus a directory flush; main's
-/// hang watchdog and reconciliation cover anything slower.
-const COMMIT_DRAIN: Duration = Duration::from_secs(5);
+/// and reply: inside main's 3 s shutdown grace, so the core exits on its
+/// own (#127). A commit is a rename or unlink plus a directory flush, or a
+/// node write's few fsyncs; the next start's recovery covers anything
+/// slower, as it would a kill.
+const COMMIT_DRAIN: Duration = Duration::from_secs(2);
 /// How long the loop's frames may wait with the writer writing nothing
 /// before the core decides main has stopped reading, and exits (design
 /// 0001, Transport and framing):
@@ -129,9 +132,11 @@ pub enum Event {
 
 /// The methods `core.hello`'s capabilities name: every method this build
 /// implements but the `chain.*` methods (design 0006's `chain.html`
-/// included), which design 0005 doesn't add to them (it adds `fragments`
-/// only). Only these names, the chain methods, and in debug builds the test
-/// methods', are ever logged; anything else is logged as `<unknown>`.
+/// included), which design 0005 doesn't add to them (it adds features
+/// only). Every method, these and the chain methods, is a row of
+/// fc-protocol's method table, which says who may call it (#101); a test
+/// keeps the two in step. Only the table's names, and in debug builds the
+/// test methods', are ever logged; anything else is logged as `<unknown>`.
 const CAPABILITIES: &[&str] = &[
     "core.hello",
     "core.shutdown",
@@ -149,6 +154,7 @@ const CAPABILITIES: &[&str] = &[
     "vault.reconcile",
     "nodes.write_identity",
     "nodes.op_status",
+    "nodes.seal_radicle_key",
     "keys.generate_mnemonic",
     "keys.validate_mnemonic",
     "keys.addresses",
@@ -172,11 +178,25 @@ const CAPABILITIES: &[&str] = &[
     "dweb.open",
 ];
 
-/// The transport features in `core.hello`'s capabilities, after the
-/// methods: `fragments`, fragmented responses with bulk credit (design
-/// 0005, Frames). The core always offers them; it sends them only to a main
-/// whose hello offered `frames: ["fragment"]`.
-const FEATURES: &[&str] = &["fragments"];
+/// The features in `core.hello`'s capabilities, after the methods (design
+/// 0005):
+/// - `fragments`: fragmented responses with bulk credit (Frames). The core
+///   always offers them; it sends them only to a main whose hello offered
+///   `frames: ["fragment"]`.
+/// - `myotis_refusal_codes`: the core reads a Myotis broadcast's `{
+///   rejected: { reason, code: -32602 } }` (The rest). Main sends that form
+///   only to a core that offers it.
+/// - `exclude_sources`: the core reads `chain.request`'s `exclude_sources`
+///   (Methods main calls). Main sends it only to a core that offers it.
+/// - `colibri_faults`: the core reads Colibri's `fault: true` beside a
+///   failure or a revert, for its verifier-fault backoff (Colibri). Main
+///   sends it only to a core that offers it.
+const FEATURES: &[&str] = &[
+    "fragments",
+    "myotis_refusal_codes",
+    "exclude_sources",
+    "colibri_faults",
+];
 
 pub fn run(options: &Options) -> Exit {
     hardening::harden();
@@ -404,7 +424,8 @@ pub fn run(options: &Options) -> Exit {
                 }
             }
             Ok(Event::Room) => {
-                if let Flow::Exit(exit) = core.outbox.pump(Instant::now()) {
+                let epoch = core.vault.epoch();
+                if let Flow::Exit(exit) = core.outbox.pump(Instant::now(), epoch) {
                     break exit;
                 }
             }
@@ -428,15 +449,13 @@ pub fn run(options: &Options) -> Exit {
     // what's queued, but never wait on a peer that stopped reading: exiting
     // releases the gate. Requests still waiting their turn are dropped with
     // the loop: none of them ran.
+    crate::testhooks::exiting();
     let outs = core.vault.shutdown();
     let _ = core.dispatch(outs);
-    let until = Instant::now() + COMMIT_DRAIN;
+    let draining = Instant::now();
+    let until = draining + COMMIT_DRAIN;
     while core.vault.committing() {
         let Some(left) = until.checked_duration_since(Instant::now()) else {
-            log::error(
-                "a committed vault job did not finish before exit",
-                serde_json::json!({}),
-            );
             break;
         };
         match events.recv_timeout(left) {
@@ -448,9 +467,17 @@ pub fn run(options: &Options) -> Exit {
             Err(_) => break,
         }
     }
+    // However the wait ended: past the drain, or the wait itself timing out.
+    if core.vault.committing() {
+        log::error(
+            "a committed vault job did not finish before exit",
+            serde_json::json!({ "waited_ms": draining.elapsed().as_millis() }),
+        );
+    }
     // What waits for room goes past the allowance: the drain below bounds it
     // by time instead.
-    core.outbox.drain();
+    let epoch = core.vault.epoch();
+    core.outbox.drain(epoch);
     // The writer ends once the producers' queues close; the transport's own
     // frames (main's credit) stop here.
     link.detach();
@@ -623,14 +650,37 @@ fn span(payload: &[u8], text: &RawValue) -> Range<usize> {
 
 /// A method name that is safe to log: known names only.
 fn loggable(method: &str) -> &'static str {
+    if let Some(row) = methods::method(method) {
+        return row.name;
+    }
     #[cfg(debug_assertions)]
-    let known = CAPABILITIES
-        .iter()
-        .chain(chain::METHODS)
-        .chain(testmethods::METHODS);
-    #[cfg(not(debug_assertions))]
-    let known = CAPABILITIES.iter().chain(chain::METHODS);
-    known.copied().find(|m| *m == method).unwrap_or("<unknown>")
+    if let Some(name) = testmethods::METHODS.iter().find(|m| **m == method) {
+        return name;
+    }
+    "<unknown>"
+}
+
+/// Whether `caller` may call `method` (#101): fc-protocol's method table,
+/// checked once for every request before anything is dispatched, and in
+/// debug builds the test methods, when their hook enables them. `Err` is
+/// the refusal: a method the table doesn't list is unknown; one it lists,
+/// but not for this caller, is forbidden.
+fn admitted(method: &str, caller: CallerKind, test_methods: bool) -> Result<(), ErrorBody> {
+    match methods::admit(method, caller) {
+        Admission::Allowed(_) => Ok(()),
+        Admission::Forbidden => Err(ErrorBody::new(
+            ErrorCode::Forbidden,
+            "not callable by this caller",
+        )),
+        Admission::Unknown => {
+            #[cfg(debug_assertions)]
+            if test_methods && testmethods::handles(method) && caller != CallerKind::Page {
+                return Ok(());
+            }
+            let _ = test_methods;
+            Err(ErrorBody::new(ErrorCode::UnknownMethod, "Unknown method"))
+        }
+    }
 }
 
 /// A fixed category for a malformed message; the parser's own text can quote
@@ -681,7 +731,19 @@ impl Ahead {
         }
         match Message::decode(&frame.payload) {
             // Refused in its turn: web content can't lock or shut down.
-            Ok(Message::Request { id, context, .. }) if context.caller == CallerKind::Page => {
+            // Refused in its turn: a caller the method table doesn't allow
+            // for it (web content, or the browser UI for `core.shutdown`)
+            // can't shut down or lock ahead of the requests that wait.
+            Ok(Message::Request {
+                id,
+                method,
+                context,
+                ..
+            }) if !matches!(
+                methods::admit(&method, context.caller),
+                Admission::Allowed(_)
+            ) =>
+            {
                 Ahead::Request(id)
             }
             Ok(Message::Request { id, method, .. }) => match &*method {
@@ -990,11 +1052,12 @@ impl Core {
         context: &Context,
     ) -> Flow {
         let started = Instant::now();
-        if context.caller == CallerKind::Page {
-            return self.error(
-                id,
-                ErrorBody::new(ErrorCode::Forbidden, "not callable from web content"),
-            );
+        #[cfg(debug_assertions)]
+        let test_methods = self.test.is_some();
+        #[cfg(not(debug_assertions))]
+        let test_methods = false;
+        if let Err(refusal) = admitted(method, context.caller, test_methods) {
+            return self.error(id, refusal);
         }
         let flow = match method {
             "core.hello" => self.hello(id, params),
@@ -1007,13 +1070,8 @@ impl Core {
                 }
             }
             method if Vault::handles(method) => {
-                let outs = self.vault.request(id, method, params, context.caller);
+                let outs = self.vault.request(id, method, params);
                 self.dispatch(outs)
-            }
-            // `dweb.open` is main's own (design 0006).
-            method if naming::shell_only(method) && context.caller != CallerKind::Shell => {
-                let forbidden = ErrorBody::new(ErrorCode::Forbidden, "main-internal only");
-                self.error(id, forbidden)
             }
             method if naming::handles(method) => {
                 let params = match params.map(|p| RawValue::from_string(p.to_owned())) {
@@ -1142,6 +1200,7 @@ impl Core {
         for out in outs {
             let flow = match out {
                 Out::Send(payload) => self.send(&payload),
+                Out::SendUnder { payload, id, epoch } => self.send_under(&payload, id, epoch),
                 Out::Job(id, job) => {
                     if self.worker.submit(id, job) {
                         Flow::Continue
@@ -1180,7 +1239,57 @@ impl Core {
         let Some(frame) = transport::frame(payload) else {
             return Flow::Exit(Exit::Internal);
         };
-        self.outbox.send(frame, Instant::now())
+        self.outbox.send(frame, Instant::now(), self.vault.epoch())
+    }
+
+    /// Queues the reply to request `id`, valid only under the vault's
+    /// `epoch` (design 0008, "The sealed release": the epoch is checked at
+    /// the handoff to the writer). If that epoch has ended by the time it
+    /// would go, it goes as `vault_locked` instead, in its place.
+    fn send_under(&mut self, payload: &[u8], id: u64, epoch: u64) -> Flow {
+        let Some(frame) = transport::frame(payload) else {
+            return Flow::Exit(Exit::Internal);
+        };
+        let waiting = Waiting {
+            frame,
+            under: Some(Under { id, epoch }),
+        };
+        if crate::testhooks::hold_reply(id) {
+            return self.outbox.hold(waiting, Instant::now());
+        }
+        self.outbox
+            .push(waiting, Instant::now(), self.vault.epoch())
+    }
+}
+
+/// A frame waiting for the writer.
+struct Waiting {
+    frame: Zeroizing<Vec<u8>>,
+    under: Option<Under>,
+}
+
+/// The epoch a reply is valid under: the sealed release's (design 0008).
+#[derive(Clone, Copy)]
+struct Under {
+    id: u64,
+    epoch: u64,
+}
+
+impl Waiting {
+    /// What goes to the writer now, under the vault's epoch `now`: the
+    /// frame, or, for a reply whose epoch has ended (a lock, manual or
+    /// automatic, since its admission), `vault_locked` in its place. The
+    /// replaced frame is wiped. `None` if the error can't be framed.
+    fn current(self, now: Option<u64>) -> Option<Zeroizing<Vec<u8>>> {
+        match self.under {
+            Some(under) if now != Some(under.epoch) => {
+                drop(self.frame);
+                let mut payload = Zeroizing::new(Vec::with_capacity(128));
+                message::write_error(&mut *payload, under.id, &crate::vault::locked()).ok()?;
+                transport::frame(&payload)
+            }
+            _ => Some(self.frame),
+        }
     }
 }
 
@@ -1192,7 +1301,7 @@ struct Outbox {
     out: Sender<transport::Out>,
     allowance: Arc<Allowance>,
     link: Arc<Link>,
-    waiting: VecDeque<Zeroizing<Vec<u8>>>,
+    waiting: VecDeque<Waiting>,
     /// Since when frames have waited.
     since: Option<Instant>,
     /// [`STALL`], or a test's.
@@ -1217,25 +1326,58 @@ impl Outbox {
     }
 
     /// Queues `frame` behind the frames that wait, and hands the writer
-    /// what fits.
-    fn send(&mut self, frame: Zeroizing<Vec<u8>>, now: Instant) -> Flow {
-        self.waiting.push_back(frame);
-        self.pump(now)
+    /// what fits. `epoch` is the vault's now.
+    fn send(&mut self, frame: Zeroizing<Vec<u8>>, now: Instant, epoch: Option<u64>) -> Flow {
+        self.push(Waiting { frame, under: None }, now, epoch)
+    }
+
+    fn push(&mut self, waiting: Waiting, now: Instant, epoch: Option<u64>) -> Flow {
+        self.waiting.push_back(waiting);
+        self.pump(now, epoch)
+    }
+
+    /// A test's: queues `waiting` without handing anything over, as if the
+    /// allowance had no room.
+    fn hold(&mut self, waiting: Waiting, now: Instant) -> Flow {
+        self.waiting.push_back(waiting);
+        if self.since.is_none() {
+            self.since = Some(now);
+        }
+        Flow::Continue
     }
 
     /// Hands waiting frames to the writer, in order, while the allowance
     /// has room. A refusal arms the allowance's wake-up ([`Event::Room`]).
-    fn pump(&mut self, now: Instant) -> Flow {
-        while let Some(frame) = self.waiting.front() {
-            let Some(hold) = self.allowance.take(frame.len()) else {
+    /// Each frame is judged at its handoff, under the vault's epoch now
+    /// (`epoch`): a reply valid only under an epoch that has ended goes as
+    /// `vault_locked` ([`Waiting::current`]).
+    fn pump(&mut self, now: Instant, epoch: Option<u64>) -> Flow {
+        while let Some(front) = self.waiting.front_mut() {
+            if front.under.is_some_and(|under| epoch != Some(under.epoch)) {
+                let stale = std::mem::replace(
+                    front,
+                    Waiting {
+                        frame: Zeroizing::new(Vec::new()),
+                        under: None,
+                    },
+                );
+                let Some(frame) = stale.current(epoch) else {
+                    return Flow::Exit(Exit::Internal);
+                };
+                front.frame = frame;
+            }
+            let Some(hold) = self.allowance.take(front.frame.len()) else {
                 break;
             };
-            let Some(frame) = self.waiting.pop_front() else {
+            let Some(waiting) = self.waiting.pop_front() else {
                 break;
             };
             if self
                 .out
-                .send(transport::Out::Frame { frame, hold })
+                .send(transport::Out::Frame {
+                    frame: waiting.frame,
+                    hold,
+                })
                 .is_err()
             {
                 return Flow::Exit(Exit::Protocol);
@@ -1285,9 +1427,13 @@ impl Outbox {
     }
 
     /// Hands every waiting frame to the writer, past the allowance: on
-    /// exit, where the writer's drain is bounded by time instead.
-    fn drain(&mut self) {
-        for frame in self.waiting.drain(..) {
+    /// exit, where the writer's drain is bounded by time instead. Each is
+    /// judged under the vault's epoch then, as [`Outbox::pump`] judges it.
+    fn drain(&mut self, epoch: Option<u64>) {
+        for waiting in self.waiting.drain(..) {
+            let Some(frame) = waiting.current(epoch) else {
+                continue;
+            };
             let hold = self.allowance.force(frame.len());
             let _ = self.out.send(transport::Out::Frame { frame, hold });
         }
@@ -1344,7 +1490,7 @@ mod tests {
         let (mut outbox, queue, link, woken) = outbox(2);
         let now = Instant::now();
         for id in 1..=5 {
-            assert!(matches!(outbox.send(reply(id), now), Flow::Continue));
+            assert!(matches!(outbox.send(reply(id), now, None), Flow::Continue));
         }
         // Two went to the writer; three wait here.
         assert_eq!(outbox.waiting.len(), 3);
@@ -1352,7 +1498,7 @@ mod tests {
         let mut written = Vec::new();
         while outbox.is_waiting() || written.len() < 5 {
             written.push(write_one(&queue, &link, now));
-            assert!(matches!(outbox.pump(now), Flow::Continue));
+            assert!(matches!(outbox.pump(now, None), Flow::Continue));
         }
         assert_eq!(written, [1, 2, 3, 4, 5]);
         assert_eq!(*woken.lock().unwrap(), 3);
@@ -1367,7 +1513,10 @@ mod tests {
         let (mut outbox, queue, link, _) = outbox(1);
         let start = Instant::now();
         for id in 1..=3 {
-            assert!(matches!(outbox.send(reply(id), start), Flow::Continue));
+            assert!(matches!(
+                outbox.send(reply(id), start, None),
+                Flow::Continue
+            ));
         }
         assert_eq!(outbox.deadline(), Some(start + STALL));
         let short = STALL - Duration::from_millis(1);
@@ -1376,7 +1525,7 @@ mod tests {
         // the next frame goes, and the bound counts from that write.
         let read = start + Duration::from_secs(20);
         assert_eq!(write_one(&queue, &link, read), 1);
-        assert!(matches!(outbox.pump(read), Flow::Continue));
+        assert!(matches!(outbox.pump(read, None), Flow::Continue));
         assert!(outbox.is_waiting());
         assert_eq!(outbox.deadline(), Some(read + STALL));
         // Then it reads only other producers' frames (naming's, chain's),
@@ -1395,14 +1544,104 @@ mod tests {
         assert_eq!(exit.code(), 76);
     }
 
+    /// The next frame queued for the writer, whole, after the writer wrote
+    /// it.
+    fn take_one(queue: &Receiver<transport::Out>, link: &Link, at: Instant) -> serde_json::Value {
+        let Ok(transport::Out::Frame { frame, hold }) = queue.try_recv() else {
+            panic!("nothing for the writer");
+        };
+        link.wrote(at);
+        drop(hold);
+        serde_json::from_slice(&frame[5..]).unwrap()
+    }
+
+    fn sealed(id: u64, epoch: u64) -> Waiting {
+        Waiting {
+            frame: reply(id),
+            under: Some(Under { id, epoch }),
+        }
+    }
+
+    /// Design 0008, "The sealed release": a reply valid only under an epoch
+    /// is judged when it is handed to the writer, not when it was made. In
+    /// its place in the queue, it goes as it is under that epoch, and as
+    /// `vault_locked` once a lock ended it, a later unlock included; the
+    /// frames around it are untouched (review of #175).
+    #[test]
+    fn a_reply_under_an_epoch_is_judged_at_its_handoff() {
+        let now = Instant::now();
+        for (at_handoff, sealed_goes) in [(Some(7), true), (None, false), (Some(8), false)] {
+            // Room for one frame: 1 goes, the seal (2) and 3 wait.
+            let (mut outbox, queue, link, _) = outbox(1);
+            assert!(matches!(
+                outbox.send(reply(1), now, Some(7)),
+                Flow::Continue
+            ));
+            assert!(matches!(
+                outbox.push(sealed(2, 7), now, Some(7)),
+                Flow::Continue
+            ));
+            assert!(matches!(
+                outbox.send(reply(3), now, Some(7)),
+                Flow::Continue
+            ));
+            assert_eq!(outbox.waiting.len(), 2);
+            // The epoch the handoffs happen under: unchanged, locked, or a
+            // new one after an unlock.
+            let mut written = vec![take_one(&queue, &link, now)];
+            while written.len() < 3 {
+                assert!(matches!(outbox.pump(now, at_handoff), Flow::Continue));
+                written.push(take_one(&queue, &link, now));
+            }
+            let ids: Vec<u64> = written.iter().map(|m| m["id"].as_u64().unwrap()).collect();
+            assert_eq!(ids, [1, 2, 3], "{at_handoff:?}");
+            if sealed_goes {
+                assert_eq!(
+                    written[1]["result"],
+                    serde_json::json!({}),
+                    "{at_handoff:?}"
+                );
+            } else {
+                assert_eq!(
+                    written[1]["error"]["code"], "vault_locked",
+                    "{at_handoff:?}"
+                );
+                assert!(written[1].get("result").is_none());
+            }
+            assert_eq!(written[2]["result"], serde_json::json!({}));
+        }
+    }
+
+    /// On exit, what waits is judged the same way before it goes.
+    #[test]
+    fn exiting_judges_a_waiting_reply_under_its_epoch() {
+        // Room for one, taken: the seal waits.
+        let (mut outbox, queue, link, _) = outbox(1);
+        let now = Instant::now();
+        assert!(matches!(
+            outbox.send(reply(1), now, Some(7)),
+            Flow::Continue
+        ));
+        assert!(matches!(
+            outbox.push(sealed(2, 7), now, Some(7)),
+            Flow::Continue
+        ));
+        assert!(outbox.is_waiting());
+        outbox.drain(None);
+        assert_eq!(take_one(&queue, &link, now)["id"], 1);
+        let message = take_one(&queue, &link, now);
+        assert_eq!(message["id"], 2);
+        assert_eq!(message["error"]["code"], "vault_locked");
+    }
+
     #[test]
     fn exiting_hands_the_writer_what_waits() {
         let (mut outbox, queue, _link, _) = outbox(1);
         let now = Instant::now();
         for id in 1..=3 {
-            assert!(matches!(outbox.send(reply(id), now), Flow::Continue));
+            assert!(matches!(outbox.send(reply(id), now, None), Flow::Continue));
         }
-        outbox.drain();
+        outbox.drain(None);
         assert!(!outbox.is_waiting());
         assert_eq!(outbox.deadline(), None);
         let ids: Vec<u64> = std::iter::from_fn(|| match queue.try_recv() {
@@ -1414,6 +1653,26 @@ mod tests {
         })
         .collect();
         assert_eq!(ids, [1, 2, 3]);
+    }
+
+    /// #101: every method served is a row of fc-protocol's method table,
+    /// and every row is served: the capabilities, then the chain methods.
+    #[test]
+    fn every_method_has_a_row_and_every_row_a_handler() {
+        let rows: Vec<&str> = methods::METHODS.iter().map(|m| m.name).collect();
+        let served: Vec<&str> = CAPABILITIES.iter().chain(chain::METHODS).copied().collect();
+        assert_eq!(rows, served);
+        for name in rows {
+            assert!(
+                matches!(name, "core.hello" | "core.shutdown")
+                    || Vault::handles(name)
+                    || naming::handles(name)
+                    || chain::handles(name),
+                "{name}"
+            );
+            assert_eq!(loggable(name), name);
+        }
+        assert_eq!(loggable("compat.root_key"), "<unknown>");
     }
 
     #[test]
@@ -1432,6 +1691,11 @@ mod tests {
         assert!(matches!(
             ahead(request(7, "core.shutdown", "shell")),
             Ahead::Shutdown
+        ));
+        // #101: main's own; from the browser UI it waits, to be refused.
+        assert!(matches!(
+            ahead(request(7, "core.shutdown", "chrome")),
+            Ahead::Request(7)
         ));
         assert!(matches!(
             ahead(request(7, "vault.lock", "chrome")),

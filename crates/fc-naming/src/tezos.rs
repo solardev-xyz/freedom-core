@@ -91,10 +91,10 @@ fn index<'a>(value: &'a JsValue, key: &str) -> Option<Cow<'a, JsValue>> {
         JsValue::String(s) => {
             // A string indexes by UTF-16 unit; only "0" and "1" are used here.
             let i: usize = key.parse().ok()?;
-            let unit = *s.encode_utf16().collect::<Vec<_>>().get(i)?;
-            Some(Cow::Owned(JsValue::String(String::from_utf16_lossy(&[
-                unit,
-            ]))))
+            let unit = s.units().nth(i)?;
+            Some(Cow::Owned(JsValue::String(jsjson::JsString::from_units(
+                &[unit],
+            ))))
         }
         _ => None,
     }
@@ -196,10 +196,10 @@ pub fn storage_type_from_script(
 /// `mapEntries`: a Micheline map's `Elt`s whose key has a `string`, as
 /// key → `bytes`. Only string keys can ever be looked up, so only those are
 /// kept; a later duplicate wins, as in a JS `Map`.
-pub fn map_entries(value: &JsValue) -> Vec<(String, Option<&JsValue>)> {
-    let mut out: Vec<(String, Option<&JsValue>)> = Vec::new();
+pub fn map_entries(value: &JsValue) -> Vec<(jsjson::JsString, Option<&JsValue>)> {
+    let mut out: Vec<(jsjson::JsString, Option<&JsValue>)> = Vec::new();
     // Indexed, so a map of many records stays linear.
-    let mut positions: std::collections::BTreeMap<String, usize> =
+    let mut positions: std::collections::BTreeMap<jsjson::JsString, usize> =
         std::collections::BTreeMap::new();
     for entry in value.as_array().unwrap_or(&[]) {
         if entry.get("prim").and_then(JsValue::as_str) != Some("Elt") {
@@ -485,7 +485,7 @@ mod tests {
             Err(MetadataError::Json(_))
         ));
         // A big integer loses precision, as in JavaScript.
-        let big = JsValue::String(hex::encode("9007199254740993"));
+        let big = JsValue::string(hex::encode("9007199254740993"));
         assert_eq!(
             decode_json_bytes(Some(&big)).unwrap(),
             JsValue::Number(9007199254740992.0)
@@ -507,7 +507,7 @@ mod tests {
 
     #[test]
     fn published_uris() {
-        let s = |text: &str| JsValue::String(text.into());
+        let s = |text: &str| JsValue::string(text);
         assert_eq!(
             parse_published_uri(&s("https://Example.org/a"), true),
             Published::Web {

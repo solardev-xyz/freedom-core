@@ -37,6 +37,9 @@ pub struct Bounds {
     pub adaptive_routes: usize,
     /// Retired endpoints whose log-range state is kept (`state-retention`).
     pub retired_endpoints: usize,
+    /// Colibri's verifier-fault records kept; past it the oldest is
+    /// evicted (`memory-budgets`).
+    pub colibri_fault_records: usize,
 }
 
 impl Default for Bounds {
@@ -55,6 +58,7 @@ impl Default for Bounds {
             endpoints: 64,
             adaptive_routes: 1024,
             retired_endpoints: 64,
+            colibri_fault_records: 1024,
         }
     }
 }
