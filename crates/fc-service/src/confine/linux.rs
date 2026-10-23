@@ -29,15 +29,13 @@ enum Landlock {
 }
 
 pub(super) fn confine(policy: &Policy, options: &Options) -> Result<Report, Invalid> {
-    let threads = thread_count();
+    let threads = thread_count()?;
     if threads != 1 {
         return Err(Invalid::Threads(threads));
     }
-    // Landlock and seccomp check new opens and calls only: a socket opened
-    // before them stays usable, so none may cross.
-    if let Some(fd) = socket_above_stderr() {
-        return Err(Invalid::Socket(fd));
-    }
+    // Landlock and seccomp check new opens and calls only: a descriptor
+    // opened before them stays usable, so only the registered ones cross.
+    unregistered_descriptor(&policy.descriptors)?;
     // Read from nsswitch.conf; no lookup is made before the rules, so no
     // NSS source can connect (and keep) a socket across them.
     let resolution =
@@ -48,7 +46,10 @@ pub(super) fn confine(policy: &Policy, options: &Options) -> Result<Report, Inva
     let seccomp = match seccomp::target() {
         None => Installed::Unavailable("no seccomp filter for this architecture".into()),
         Some(arch) => {
-            let programs = seccomp::programs(policy.network, arch).map_err(Invalid::Rules)?;
+            let mut programs = seccomp::programs(policy.network, arch).map_err(Invalid::Rules)?;
+            if options.seccomp_invalid {
+                programs.insert(0, seccomp::invalid_program());
+            }
             seccomp::install(&programs, options.seccomp_errno).map_err(Invalid::Rules)?
         }
     };
@@ -62,25 +63,102 @@ pub(super) fn confine(policy: &Policy, options: &Options) -> Result<Report, Inva
     Ok(report)
 }
 
-/// The process's threads, from `/proc/self/task`; 0 if it can't be read,
-/// which is never one.
-fn thread_count() -> usize {
-    std::fs::read_dir("/proc/self/task").map_or(0, |dir| dir.count())
+/// The process's threads, from `/proc/self/task`. A list that can't be
+/// read, or an entry that can't, is [`Invalid`]: it proves nothing.
+fn thread_count() -> Result<usize, Invalid> {
+    const WHAT: &str = "thread list";
+    let mut threads = 0;
+    for entry in std::fs::read_dir("/proc/self/task").map_err(|_| Invalid::Unreadable(WHAT))? {
+        let entry = entry.map_err(|_| Invalid::Unreadable(WHAT))?;
+        if entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+            .is_none()
+        {
+            return Err(Invalid::Unreadable(WHAT));
+        }
+        threads += 1;
+    }
+    Ok(threads)
 }
 
-/// A socket descriptor above stderr, from `/proc/self/fd`: only something
-/// before `confine` can have opened it. stdio may be a socket pair main
-/// made. The directory listing's own descriptor is a directory, never a
-/// socket.
-fn socket_above_stderr() -> Option<i32> {
-    let dir = std::fs::read_dir("/proc/self/fd").ok()?;
-    dir.filter_map(Result::ok)
-        .filter_map(|entry| {
-            let fd: i32 = entry.file_name().to_str()?.parse().ok()?;
-            let target = std::fs::read_link(entry.path()).ok()?;
-            (fd > 2 && target.to_str()?.starts_with("socket:")).then_some(fd)
-        })
-        .min()
+/// Checks every descriptor in `/proc/self/fd` against stdio, `registered`
+/// and the listing's own descriptor, whatever its type: anything else is
+/// [`Invalid::Descriptor`], inherited or not. A table that can't be opened
+/// or read, or an entry that isn't a descriptor number, is
+/// [`Invalid::Unreadable`]: it proves nothing. The listing's descriptor is
+/// opened here and known by its number; nothing else is opened while it
+/// reads, since `readlinkat` and `statat` open nothing. What a descriptor
+/// is only names it in the error: an unregistered one is refused whether
+/// or not it can be identified.
+fn unregistered_descriptor(registered: &[i32]) -> Result<(), Invalid> {
+    use std::os::fd::{AsFd, AsRawFd};
+
+    use rustix::fs::{AtFlags, Dir, Mode, OFlags};
+
+    const WHAT: &str = "descriptor table";
+    let table = rustix::fs::open(
+        "/proc/self/fd",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| Invalid::Unreadable(WHAT))?;
+    let own = table.as_raw_fd();
+    let mut dir = Dir::new(table).map_err(|_| Invalid::Unreadable(WHAT))?;
+    let mut unexpected = None;
+    while let Some(entry) = dir.read() {
+        let entry = entry.map_err(|_| Invalid::Unreadable(WHAT))?;
+        let name = entry.file_name();
+        if name.to_bytes() == b"." || name.to_bytes() == b".." {
+            continue;
+        }
+        let fd = name
+            .to_str()
+            .ok()
+            .and_then(|name| name.parse::<i32>().ok())
+            .ok_or(Invalid::Unreadable(WHAT))?;
+        if fd <= 2 || fd == own || registered.contains(&fd) {
+            continue;
+        }
+        let table = dir.fd().map_err(|_| Invalid::Unreadable(WHAT))?;
+        let target = rustix::fs::readlinkat(table.as_fd(), name, Vec::new()).ok();
+        let file_type = rustix::fs::statat(table.as_fd(), name, AtFlags::empty())
+            .ok()
+            .map(|stat| rustix::fs::FileType::from_raw_mode(stat.st_mode));
+        let kind = kind_of(target.as_ref().map(|t| t.as_bytes()), file_type);
+        // The lowest, so the report doesn't depend on the listing's order.
+        if unexpected.is_none_or(|(lowest, _)| fd < lowest) {
+            unexpected = Some((fd, kind));
+        }
+    }
+    match unexpected {
+        Some((fd, kind)) => Err(Invalid::Descriptor { fd, kind }),
+        None => Ok(()),
+    }
+}
+
+/// What a descriptor is, from its `/proc/self/fd` link and the type of what
+/// it refers to: never its path.
+fn kind_of(target: Option<&[u8]>, file_type: Option<rustix::fs::FileType>) -> &'static str {
+    use rustix::fs::FileType;
+
+    match target {
+        Some(t) if t.starts_with(b"socket:") => return "socket",
+        Some(t) if t.starts_with(b"pipe:") => return "pipe",
+        Some(b"anon_inode:[eventfd]") => return "eventfd",
+        Some(b"anon_inode:[eventpoll]") => return "epoll",
+        Some(t) if t.starts_with(b"anon_inode:") => return "anon_inode",
+        _ => {}
+    }
+    match file_type {
+        Some(FileType::Socket) => "socket",
+        Some(FileType::Fifo) => "pipe",
+        Some(FileType::Directory) => "directory",
+        Some(FileType::RegularFile) => "file",
+        Some(FileType::CharacterDevice | FileType::BlockDevice) => "device",
+        Some(FileType::Symlink | FileType::Unknown) | None => "other",
+    }
 }
 
 /// Applies Landlock at the kernel's ABI (capped by `options`), or says why
@@ -377,6 +455,33 @@ mod tests {
             min_abi: 1,
             network,
             system_resolver: false,
+            descriptors: Vec::new(),
+        }
+    }
+
+    /// A descriptor is named by what it is, never by its path.
+    #[test]
+    fn descriptor_kinds() {
+        use rustix::fs::FileType;
+        let path: &[u8] = b"/home/user/secret";
+        for (target, file_type, kind) in [
+            (Some(&b"socket:[4242]"[..]), None, "socket"),
+            (Some(b"pipe:[4242]"), Some(FileType::Fifo), "pipe"),
+            (Some(b"anon_inode:[eventfd]"), None, "eventfd"),
+            (Some(b"anon_inode:[eventpoll]"), None, "epoll"),
+            (Some(b"anon_inode:[timerfd]"), None, "anon_inode"),
+            (Some(path), Some(FileType::RegularFile), "file"),
+            (Some(path), Some(FileType::Directory), "directory"),
+            (Some(path), Some(FileType::Fifo), "pipe"),
+            (Some(path), Some(FileType::Socket), "socket"),
+            (
+                Some(b"/dev/null"),
+                Some(FileType::CharacterDevice),
+                "device",
+            ),
+            (None, None, "other"),
+        ] {
+            assert_eq!(kind_of(target, file_type), kind, "{target:?}");
         }
     }
 

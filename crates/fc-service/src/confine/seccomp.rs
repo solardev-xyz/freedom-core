@@ -218,7 +218,6 @@ fn compile(
 fn x32_guard() -> BpfProgram {
     const BPF_LD_W_ABS: u16 = 0x20; // BPF_LD | BPF_W | BPF_ABS
     const BPF_JSET_K: u16 = 0x45; // BPF_JMP | BPF_JSET | BPF_K
-    const BPF_RET_K: u16 = 0x06; // BPF_RET | BPF_K
     // `seccomp_data.nr` is at offset 0.
     vec![
         sock_filter {
@@ -267,21 +266,30 @@ pub(super) enum Installed {
     Blocked(String),
 }
 
-/// Installs `programs`, each with `TSYNC`. A failure before the first is
-/// the OS's; one after it is an installation stopped halfway.
+/// Installs `programs`, each with `TSYNC`.
+///
+/// - **A failure at the first** is asked again, with a filter that allows
+///   everything ([`probe`]). If the kernel takes that one, it takes filters,
+///   so the service's own first program was refused: `Err`, an invalid
+///   policy. If it refuses the probe too, the probe's errno says why:
+///   [`classify`].
+/// - **A failure at a later one** is an installation stopped halfway:
+///   `Err`.
+///
+/// `forced_errno`, a test seam, fails the first program and the probe.
 pub(super) fn install(
     programs: &[BpfProgram],
     forced_errno: Option<i32>,
 ) -> Result<Installed, String> {
+    let apply = |program: &BpfProgram| match forced_errno {
+        Some(errno) => Err(std::io::Error::from_raw_os_error(errno)),
+        None => seccompiler::apply_filter_all_threads(program).map_err(|e| match e {
+            seccompiler::Error::Seccomp(e) | seccompiler::Error::Prctl(e) => e,
+            other => std::io::Error::other(other.to_string()),
+        }),
+    };
     for (i, program) in programs.iter().enumerate() {
-        let result = match forced_errno {
-            Some(errno) => Err(std::io::Error::from_raw_os_error(errno)),
-            None => seccompiler::apply_filter_all_threads(program).map_err(|e| match e {
-                seccompiler::Error::Seccomp(e) | seccompiler::Error::Prctl(e) => e,
-                other => std::io::Error::other(other.to_string()),
-            }),
-        };
-        if let Err(e) = result {
+        if let Err(e) = apply(program) {
             if i > 0 {
                 return Err(format!(
                     "seccomp filter {} of {} failed: {e}",
@@ -289,28 +297,50 @@ pub(super) fn install(
                     programs.len()
                 ));
             }
-            return Ok(classify(&e));
+            return match apply(&probe()) {
+                Ok(()) => Err(format!("the kernel refused the first seccomp filter: {e}")),
+                Err(probe) => Ok(classify(&probe)),
+            };
         }
     }
     Ok(Installed::All)
 }
 
-/// The first filter's failure: `EINVAL` on a kernel built without seccomp
-/// filters is unavailable; anything else (`EACCES`, `EPERM`, a container's
-/// own filter) is something outside refusing it.
+/// `BPF_RET | BPF_K`.
+const BPF_RET_K: u16 = 0x06;
+
+/// A filter that allows every call: whether the kernel takes a filter at
+/// all.
+fn probe() -> BpfProgram {
+    vec![sock_filter {
+        code: BPF_RET_K,
+        jt: 0,
+        jf: 0,
+        k: libc::SECCOMP_RET_ALLOW,
+    }]
+}
+
+/// A program the kernel's checker rejects: an opcode classic BPF doesn't
+/// have. A test seam ([`super::Options::seccomp_invalid`]).
+pub(super) fn invalid_program() -> BpfProgram {
+    vec![sock_filter {
+        code: 0xffff,
+        jt: 0,
+        jf: 0,
+        k: 0,
+    }]
+}
+
+/// Why the kernel refused even the probe: `EINVAL` (no seccomp filters,
+/// or no `TSYNC`) and `ENOSYS` (no `seccomp` call) are the kernel's lack;
+/// anything else (`EPERM` or `EACCES` from an outer filter or policy,
+/// `ENOMEM` from an outer sandbox's filters) is something outside refusing.
 fn classify(error: &std::io::Error) -> Installed {
-    let has_seccomp = std::fs::read_to_string("/proc/self/status")
-        .map(|status| {
-            status
-                .lines()
-                .any(|line| line.starts_with("Seccomp_filters:"))
-        })
-        .unwrap_or(false);
     match error.raw_os_error() {
-        Some(libc::EINVAL) if !has_seccomp => {
-            Installed::Unavailable("the kernel has no seccomp filters".into())
+        Some(libc::EINVAL | libc::ENOSYS) => {
+            Installed::Unavailable(format!("the kernel takes no seccomp filter: {error}"))
         }
-        _ => Installed::Blocked(format!("installing the seccomp filter failed: {error}")),
+        _ => Installed::Blocked(format!("installing a seccomp filter failed: {error}")),
     }
 }
 
@@ -467,6 +497,161 @@ mod tests {
                 verdict(&programs, &call(nr, [0; 6])),
                 libc::SECCOMP_RET_ALLOW,
                 "nr {nr}"
+            );
+        }
+    }
+
+    /// The calls 0010 denies with `EPERM`, by name and by number from the
+    /// kernel's own tables (`arch/x86/entry/syscalls/syscall_64.tbl`,
+    /// `include/uapi/asm-generic/unistd.h`), written out here and not taken
+    /// from [`denied`] or libc: dropping a rule there fails this test.
+    /// Process clones, `clone3`, sockets and `ioctl` have tests of their
+    /// own.
+    #[cfg(target_arch = "x86_64")]
+    const REQUIRED: &[(&str, i64)] = &[
+        ("fork", 57),
+        ("vfork", 58),
+        ("execve", 59),
+        ("truncate", 76),
+        ("chmod", 90),
+        ("fchmod", 91),
+        ("chown", 92),
+        ("fchown", 93),
+        ("lchown", 94),
+        ("ptrace", 101),
+        ("utime", 132),
+        ("personality", 135),
+        ("pivot_root", 155),
+        ("mount", 165),
+        ("umount2", 166),
+        ("swapon", 167),
+        ("swapoff", 168),
+        ("reboot", 169),
+        ("init_module", 175),
+        ("delete_module", 176),
+        ("setxattr", 188),
+        ("lsetxattr", 189),
+        ("fsetxattr", 190),
+        ("removexattr", 197),
+        ("lremovexattr", 198),
+        ("fremovexattr", 199),
+        ("utimes", 235),
+        ("kexec_load", 246),
+        ("add_key", 248),
+        ("request_key", 249),
+        ("keyctl", 250),
+        ("fchownat", 260),
+        ("futimesat", 261),
+        ("fchmodat", 268),
+        ("unshare", 272),
+        ("utimensat", 280),
+        ("perf_event_open", 298),
+        ("setns", 308),
+        ("process_vm_readv", 310),
+        ("process_vm_writev", 311),
+        ("finit_module", 313),
+        ("kexec_file_load", 320),
+        ("bpf", 321),
+        ("execveat", 322),
+        ("userfaultfd", 323),
+        ("io_uring_setup", 425),
+        ("io_uring_enter", 426),
+        ("io_uring_register", 427),
+        ("pidfd_getfd", 438),
+        ("fchmodat2", 452),
+        ("setxattrat", 463),
+        ("removexattrat", 466),
+        ("file_setattr", 469),
+    ];
+
+    /// [`REQUIRED`] on AArch64, whose table never had the legacy calls.
+    #[cfg(target_arch = "aarch64")]
+    const REQUIRED: &[(&str, i64)] = &[
+        ("setxattr", 5),
+        ("lsetxattr", 6),
+        ("fsetxattr", 7),
+        ("removexattr", 14),
+        ("lremovexattr", 15),
+        ("fremovexattr", 16),
+        ("umount2", 39),
+        ("mount", 40),
+        ("pivot_root", 41),
+        ("truncate", 45),
+        ("fchmod", 52),
+        ("fchmodat", 53),
+        ("fchownat", 54),
+        ("fchown", 55),
+        ("utimensat", 88),
+        ("personality", 92),
+        ("unshare", 97),
+        ("kexec_load", 104),
+        ("init_module", 105),
+        ("delete_module", 106),
+        ("ptrace", 117),
+        ("reboot", 142),
+        ("add_key", 217),
+        ("request_key", 218),
+        ("keyctl", 219),
+        ("execve", 221),
+        ("swapon", 224),
+        ("swapoff", 225),
+        ("perf_event_open", 241),
+        ("setns", 268),
+        ("process_vm_readv", 270),
+        ("process_vm_writev", 271),
+        ("finit_module", 273),
+        ("bpf", 280),
+        ("execveat", 281),
+        ("userfaultfd", 282),
+        ("kexec_file_load", 294),
+        ("io_uring_setup", 425),
+        ("io_uring_enter", 426),
+        ("io_uring_register", 427),
+        ("pidfd_getfd", 438),
+        ("fchmodat2", 452),
+        ("setxattrat", 463),
+        ("removexattrat", 466),
+        ("file_setattr", 469),
+    ];
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn the_required_calls_answer_eperm_and_nothing_else_is_denied() {
+        let (arch, _, _) = native();
+        for network in [Network::Direct, Network::Offline] {
+            let programs = programs(network, arch).unwrap();
+            for (name, nr) in REQUIRED {
+                assert_eq!(
+                    errno(verdict(&programs, &call(*nr, [0; 6]))),
+                    Some(libc::EPERM),
+                    "{name} ({nr})"
+                );
+            }
+        }
+        // And the other way: a rule outside the list is added to it on
+        // purpose.
+        for nr in denied() {
+            assert!(
+                REQUIRED.iter().any(|(_, required)| *required == nr),
+                "nr {nr} is denied but not in REQUIRED"
+            );
+        }
+    }
+
+    /// The probe's errno: the kernel's lack, or something outside.
+    #[test]
+    fn a_refused_probe_is_unavailable_or_blocked() {
+        let classified = |errno| classify(&std::io::Error::from_raw_os_error(errno));
+        for errno in [libc::EINVAL, libc::ENOSYS] {
+            assert!(
+                matches!(classified(errno), Installed::Unavailable(_)),
+                "{errno}"
+            );
+        }
+        for errno in [libc::EPERM, libc::EACCES, libc::ENOMEM] {
+            assert!(
+                matches!(classified(errno), Installed::Blocked(_)),
+                "{errno}"
             );
         }
     }

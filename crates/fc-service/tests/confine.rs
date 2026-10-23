@@ -104,26 +104,70 @@ mod linux {
             }
             _ => {}
         }
-        if case == "socket-first" {
-            // An NSS client's cached connection, made before the rules.
+        if let Some(kind) = case.strip_prefix("inject-") {
+            // Opened by the process's own startup, before `confine`, as an
+            // early mistake in the setup would be: refused.
+            let injected = inject(kind, &p);
+            let (registered, held) = registered(&p);
+            refused(confine::confine(&policy(&p, network, min_abi, registered)));
+            drop((injected, held));
+            return;
+        }
+        if case.starts_with("inherited-") {
+            // The parent's extra descriptor, inherited at spawn: nothing
+            // closes it, and `confine` refuses it.
+            let (registered, _held) = registered(&p);
+            refused(confine::confine(&policy(&p, network, min_abi, registered)));
+            return;
+        }
+        if let Some(hidden) = case.strip_prefix("unreadable-") {
+            // An outer Landlock layer hides the list `confine` must read,
+            // with a socket connected before it, as an NSS source's would
+            // be: no list, no report.
             let stream = UnixStream::connect(&p.socket).unwrap();
-            let result = confine::confine(&policy(&p, network, min_abi));
-            println!(
-                "INVALID {}",
-                matches!(result, Err(confine::Invalid::Socket(_)))
-            );
+            let (registered, _held) = registered(&p);
+            hide(hidden);
+            refused(confine::confine(&policy(&p, network, min_abi, registered)));
             drop(stream);
             return;
         }
+        if case == "invalid-bpf" {
+            // The service's own first filter refused by a kernel that takes
+            // filters: an invalid policy, not an outside refusal.
+            options.seccomp_invalid = true;
+            let (registered, _held) = registered(&p);
+            refused(confine::confine_with(
+                &policy(&p, network, min_abi, registered),
+                &options,
+            ));
+            return;
+        }
+        if case == "ephemeral" {
+            // No lock and no data directory: nothing registered, nothing
+            // writable.
+            let mut ephemeral = policy(&p, network, min_abi, Vec::new());
+            ephemeral.read_write.clear();
+            let report = confine::confine(&ephemeral).unwrap();
+            println!("REPORT {}", report.to_json());
+            check(
+                "ephemeral writes nothing",
+                std::fs::write(p.data.join("ephemeral"), b"x").is_err(),
+            );
+            return;
+        }
+        // The lock and a directory, opened before `confine` and registered,
+        // as a service's are: they cross.
+        let (registered, _held) = registered(&p);
         if case == "thread-first" {
             let handle =
                 std::thread::spawn(|| std::thread::sleep(std::time::Duration::from_millis(500)));
-            let result = confine::confine(&policy(&p, network, min_abi));
+            let result = confine::confine(&policy(&p, network, min_abi, registered));
             println!("INVALID {}", result.is_err());
             let _ = handle.join();
             return;
         }
-        let report = confine::confine_with(&policy(&p, network, min_abi), &options).unwrap();
+        let report =
+            confine::confine_with(&policy(&p, network, min_abi, registered), &options).unwrap();
         println!("REPORT {}", report.to_json());
         match case {
             "files" | "abi1" | "abi2" | "abi3" => files(&p),
@@ -134,6 +178,7 @@ mod linux {
             "socks5" | "direct" | "offline" => tcp(&p),
             "threads" => threads(&p),
             "resolver" => resolver(),
+            "stdio-socket" => stdio_socket(),
             #[cfg(target_arch = "x86_64")]
             "x32" => {
                 println!("CALLING");
@@ -158,7 +203,85 @@ mod linux {
         1
     }
 
-    fn policy(p: &Paths, network: Network, min_abi: u32) -> Policy {
+    /// A lock file and the data directory, opened and held as a service
+    /// holds its lock: their numbers, and the files.
+    fn registered(p: &Paths) -> (Vec<i32>, Vec<std::fs::File>) {
+        use std::os::fd::AsRawFd;
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(p.data.join("lock"))
+            .unwrap();
+        let dir = std::fs::File::open(&p.data).unwrap();
+        (vec![lock.as_raw_fd(), dir.as_raw_fd()], vec![lock, dir])
+    }
+
+    /// A descriptor of `kind`, opened by the process itself before `confine`.
+    fn inject(kind: &str, p: &Paths) -> Box<dyn std::any::Any> {
+        match kind {
+            // An NSS client's cached connection.
+            "socket" => Box::new(UnixStream::connect(&p.socket).unwrap()),
+            "pipe" => Box::new(std::io::pipe().unwrap()),
+            // A file outside the grants, opened before them.
+            "file" => Box::new(std::fs::File::open(p.outside.join("canary")).unwrap()),
+            "eventfd" => {
+                Box::new(rustix::event::eventfd(0, rustix::event::EventfdFlags::CLOEXEC).unwrap())
+            }
+            "epoll" => Box::new(
+                rustix::event::epoll::create(rustix::event::epoll::CreateFlags::CLOEXEC).unwrap(),
+            ),
+            other => panic!("unknown descriptor {other}"),
+        }
+    }
+
+    /// What `confine` refused, as one line; a report is a failure.
+    fn refused(result: Result<Report, confine::Invalid>) {
+        match result {
+            Err(confine::Invalid::Descriptor { kind, .. }) => println!("INVALID {kind}"),
+            Err(confine::Invalid::Unreadable(what)) => println!("INVALID unreadable {what}"),
+            Err(confine::Invalid::Rules(_)) => println!("INVALID rules"),
+            Err(other) => println!("INVALID other: {other}"),
+            Ok(report) => println!("REPORT {}", report.to_json()),
+        }
+    }
+
+    /// An outer Landlock layer that handles listing directories and allows
+    /// it only beneath `/proc/self/task` (`fd`), or nowhere (`task`).
+    fn hide(hidden: &str) {
+        use landlock::{AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr};
+        let mut ruleset = Ruleset::default()
+            .handle_access(AccessFs::ReadDir)
+            .unwrap()
+            .create()
+            .unwrap();
+        if hidden == "fd" {
+            ruleset = ruleset
+                .add_rule(PathBeneath::new(
+                    PathFd::new("/proc/self/task").unwrap(),
+                    AccessFs::ReadDir,
+                ))
+                .unwrap();
+        }
+        ruleset.restrict_self().unwrap();
+    }
+
+    /// stdin is a socket pair's end, as main's connection may be: it
+    /// crosses, and still carries both ways once confined.
+    fn stdio_socket() {
+        use std::io::BufRead;
+        use std::os::fd::AsFd;
+        let mut line = String::new();
+        let read = std::io::stdin().lock().read_line(&mut line).is_ok() && line == "ping\n";
+        check("stdio socket reads", read);
+        let stdin = std::io::stdin();
+        check(
+            "stdio socket writes",
+            rustix::io::write(stdin.as_fd(), b"pong\n").is_ok(),
+        );
+    }
+
+    fn policy(p: &Paths, network: Network, min_abi: u32, descriptors: Vec<i32>) -> Policy {
         Policy {
             read_write: vec![p.data.clone()],
             read_only: vec![p.read_only.clone()],
@@ -168,6 +291,7 @@ mod linux {
             // No lookup comes before confinement: the first needs the
             // read grants alone.
             system_resolver: true,
+            descriptors,
         }
     }
 
@@ -381,6 +505,49 @@ mod linux {
     }
 
     fn run(world: &World, case: &str) -> Output {
+        command(world, case).output().unwrap()
+    }
+
+    /// The `inherited-<kind>` case, with an extra pipe or socket the child
+    /// inherits: made without close-on-exec, and closed here once it ran.
+    fn run_inheriting(world: &World, kind: &str) -> Output {
+        let extra: (std::os::fd::OwnedFd, std::os::fd::OwnedFd) = match kind {
+            "pipe" => rustix::pipe::pipe_with(rustix::pipe::PipeFlags::empty()).unwrap(),
+            _ => rustix::net::socketpair(
+                rustix::net::AddressFamily::UNIX,
+                rustix::net::SocketType::STREAM,
+                rustix::net::SocketFlags::empty(),
+                None,
+            )
+            .unwrap(),
+        };
+        let output = command(world, &format!("inherited-{kind}"))
+            .output()
+            .unwrap();
+        drop(extra);
+        output
+    }
+
+    /// The `stdio-socket` case, its stdin a socket pair's end: what it
+    /// wrote back.
+    fn run_on_socket(world: &World) -> (Output, String) {
+        use std::io::Read;
+        let (mut ours, theirs) = UnixStream::pair().unwrap();
+        ours.write_all(b"ping\n").unwrap();
+        let output = command(world, "stdio-socket")
+            .stdin(std::process::Stdio::from(std::os::fd::OwnedFd::from(
+                theirs,
+            )))
+            .output()
+            .unwrap();
+        ours.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut answer = [0u8; 5];
+        let n = ours.read(&mut answer).unwrap_or(0);
+        (output, String::from_utf8_lossy(&answer[..n]).into_owned())
+    }
+
+    fn command(world: &World, case: &str) -> Command {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
             .env(CASE, case)
@@ -400,7 +567,7 @@ mod linux {
         if let Some(name) = dns_name() {
             command.env("FC_DNS_NAME", name);
         }
-        command.output().unwrap()
+        command
     }
 
     /// A name the unconfined parent can resolve through DNS, if any: the
@@ -660,13 +827,59 @@ mod linux {
             format!("forced blocked: {r:?}"),
         );
 
-        // A socket connected before confine (as an NSS source's would be):
-        // refused, so the service exits 77.
-        let output = run(&world, "socket-first");
+        // Descriptors: nothing is closed. One inherited from the parent,
+        // or opened by the process's own startup, is refused whatever its
+        // type, so the service exits 77. stdio as pipes (every case) or a
+        // socket pair, the registered lock and directory, and an ephemeral
+        // process with nothing registered all pass.
+        for kind in ["pipe", "socket"] {
+            let output = run_inheriting(&world, kind);
+            expect(
+                &mut failures,
+                lines(&output).contains(&format!("INVALID {kind}\n")),
+                format!("inherited {kind}: {}", lines(&output)),
+            );
+        }
+        for kind in ["socket", "pipe", "file", "eventfd", "epoll"] {
+            let case = format!("inject-{kind}");
+            let output = run(&world, &case);
+            expect(
+                &mut failures,
+                lines(&output).contains(&format!("INVALID {kind}\n")),
+                format!("{case}: {}", lines(&output)),
+            );
+        }
+        let (output, answer) = run_on_socket(&world);
+        failures.extend(passed("stdio-socket", &output));
         expect(
             &mut failures,
-            lines(&output).contains("INVALID true"),
-            format!("socket first: {}", lines(&output)),
+            answer == "pong\n",
+            format!("stdio socket answer: {answer:?}"),
+        );
+        failures.extend(passed("ephemeral", &run(&world, "ephemeral")));
+
+        // A list `confine` can't read proves nothing: refused, no report.
+        for (case, what) in [
+            ("unreadable-fd", "descriptor table"),
+            ("unreadable-task", "thread list"),
+        ] {
+            let output = run(&world, case);
+            let text = lines(&output);
+            expect(
+                &mut failures,
+                text.contains(&format!("INVALID unreadable {what}\n")) && !text.contains("REPORT"),
+                format!("{case}: {text}"),
+            );
+        }
+
+        // The service's own first filter refused: an invalid policy, never
+        // `blocked`, so the service exits 77.
+        let output = run(&world, "invalid-bpf");
+        let text = lines(&output);
+        expect(
+            &mut failures,
+            text.contains("INVALID rules\n") && !text.contains("REPORT"),
+            format!("invalid first filter: {text}"),
         );
 
         // A thread before confine: refused, so the service exits 77.

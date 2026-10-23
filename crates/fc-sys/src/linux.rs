@@ -1,37 +1,12 @@
-//! Linux calls: the raw syscalls `fc-service`'s confinement needs (design
-//! 0010) that neither std nor rustix offers.
+//! Linux calls: the raw syscall `fc-service`'s confinement needs (design
+//! 0010) that neither std nor rustix offers, and the test-only calls
+//! through the other syscall ABIs.
 
 use std::io;
 
 /// `LANDLOCK_CREATE_RULESET_VERSION`: `landlock_create_ruleset`'s flag that
 /// asks for the ABI version instead of creating a ruleset.
 const LANDLOCK_CREATE_RULESET_VERSION: libc::c_uint = 1;
-
-/// Closes every descriptor from `low` up (`close_range(low, ~0, 0)`, Linux
-/// 5.9). Descriptors this process has opened are its own business: the
-/// caller runs it before it opens any above `low`, so only inherited ones
-/// close.
-///
-/// `Err` with the OS error, `ENOSYS` on a kernel without the call.
-#[allow(unsafe_code)]
-pub fn close_from(low: u32) -> io::Result<()> {
-    // SAFETY: close_range takes two descriptor numbers and a flag set, and
-    // reads no memory of ours. It closes descriptors no Rust object here
-    // owns: the caller runs it before anything above `low` is opened.
-    let result = unsafe {
-        libc::syscall(
-            libc::SYS_close_range,
-            libc::c_uint::from(low),
-            libc::c_uint::MAX,
-            0 as libc::c_uint,
-        )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
 
 /// The running kernel's Landlock ABI version
 /// (`landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)`).
@@ -98,11 +73,5 @@ mod tests {
             Ok(version) => assert!(version >= 1),
             Err(errno) => assert!(errno > 0),
         }
-    }
-
-    #[test]
-    fn closing_from_a_high_descriptor_closes_nothing_of_ours() {
-        // Nothing this test owns sits above 2^20.
-        assert!(close_from(1 << 20).is_ok() || cfg!(not(target_os = "linux")));
     }
 }

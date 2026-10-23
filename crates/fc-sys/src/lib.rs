@@ -12,8 +12,7 @@
 //! - [`windows::drive_type`]: storage qualification in `freedom-cored` and
 //!   `fc-service` (design 0001, "Lifetime lock");
 //! - [`windows::quiet_error_reporting`]: `fc-service`'s process hardening;
-//! - [`linux::close_from`] and [`linux::landlock_abi`]: `fc-service`'s
-//!   confinement (design 0010).
+//! - [`linux::landlock_abi`]: `fc-service`'s confinement (design 0010).
 //!
 //! On every other platform the crate is empty.
 

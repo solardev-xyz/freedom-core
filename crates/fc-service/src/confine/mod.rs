@@ -7,8 +7,9 @@
 //! [`Report`], one status per property, derived from what was installed.
 //! A mechanism the OS lacks, or that something outside refuses, is
 //! reported and the service runs (D2). Only an invalid policy, a second
-//! thread, or an installation stopped halfway is an [`Invalid`], which the
-//! service answers with exit 77 (`confinement`).
+//! thread, a descriptor the policy doesn't register, or an installation
+//! stopped halfway is an [`Invalid`], which the service answers with exit
+//! 77 (`confinement`).
 //!
 //! - **Linux:** Landlock at the kernel's ABI, with every right that ABI
 //!   knows handled, and a seccomp denylist behind an ABI guard
@@ -16,9 +17,18 @@
 //! - **Elsewhere,** for now: nothing is applied, and every property is
 //!   `unavailable` (macOS and Windows follow).
 //!
-//! Before it, the service calls [`close_inherited`], and opens nothing but
-//! its lock and its own directories: no socket and no name lookup. A socket
-//! above stderr at `confine` is [`Invalid`].
+//! **The order** (0010, "The recommendation", step 1):
+//! 1. only the listed setup: the panic hook, hardening, the arguments, the
+//!    lock and the data directory. No socket, no name lookup, no file
+//!    outside the grants;
+//! 2. `confine`, which checks the threads and the whole descriptor table
+//!    before it installs anything. A descriptor above stderr that the
+//!    policy doesn't register ([`Policy::descriptors`]) is [`Invalid`],
+//!    whatever its type, and so is one inherited from the launcher:
+//!    nothing is closed, since a safe close can't prove that no Rust
+//!    object owns the descriptor. A table that can't be read is
+//!    [`Invalid`] too;
+//! 3. only then the runtimes and every other thread.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -56,6 +66,12 @@ pub struct Policy {
     /// made before the rules: glibc loads its sources at the first one
     /// after, from the read grants.
     pub system_resolver: bool,
+    /// The descriptors above stderr the service opened before `confine`
+    /// and keeps: the lock ([`crate::gate::Gate::descriptors`]), and any
+    /// directory it holds open. Every other descriptor above stderr is
+    /// [`Invalid::Descriptor`], whatever its type. Empty for the ephemeral
+    /// IPFS process. Unix descriptor numbers; unused on Windows.
+    pub descriptors: Vec<i32>,
 }
 
 /// The network policy, fixed for the process's life (0007's `--network`).
@@ -100,9 +116,18 @@ pub enum Resolution {
 pub struct Report {
     /// `landlock-<abi>+seccomp`, `landlock-<abi>`, `seccomp` or `none`.
     pub mechanism: String,
+    /// Outside the grant, no file is read or written; outside the
+    /// read-write grant, none is truncated; and no file's mode, owner,
+    /// xattrs, flags or times change.
     pub files: Status,
+    /// No program runs, and no process is created.
     pub exec: Status,
+    /// No local IPC reaches another process beyond the authorized
+    /// channels: main's connection on stdio (and on macOS, mDNSResponder
+    /// and `configd`). No other local socket connects, and no signal is
+    /// sent to another process.
     pub ipc: Status,
+    /// In `socks5` mode, TCP reaches only the proxy's port.
     pub network: Status,
     /// What a `partial` property leaves open.
     pub gaps: Vec<&'static str>,
@@ -128,9 +153,14 @@ pub enum Invalid {
     /// More than one thread before the rules: a thread started earlier
     /// would stay unconfined.
     Threads(usize),
-    /// A socket open above stderr before the rules: Landlock and seccomp
-    /// revoke nothing opened before them, so it would stay usable.
-    Socket(i32),
+    /// A descriptor above stderr that the policy doesn't register, open
+    /// before the rules: Landlock and seccomp revoke nothing opened before
+    /// them, so it would stay usable. `kind` says what it is (`socket`,
+    /// `pipe`, `file`, `directory`, `eventfd`, `epoll`, …), never its path.
+    Descriptor { fd: i32, kind: &'static str },
+    /// The thread list or the descriptor table couldn't be read, or held
+    /// an entry that isn't a number, so it couldn't be checked.
+    Unreadable(&'static str),
     /// The mechanism refused the service's own rules, or stopped halfway.
     Rules(String),
 }
@@ -139,7 +169,11 @@ impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Invalid::Threads(n) => write!(f, "{n} threads before confinement"),
-            Invalid::Socket(fd) => write!(f, "socket descriptor {fd} open before confinement"),
+            Invalid::Descriptor { fd, kind } => write!(
+                f,
+                "descriptor {fd} ({kind}) open before confinement, and not registered"
+            ),
+            Invalid::Unreadable(what) => write!(f, "the {what} can't be read before confinement"),
             Invalid::Rules(why) => f.write_str(why),
         }
     }
@@ -156,6 +190,9 @@ pub struct Options {
     pub landlock_errno: Option<i32>,
     /// Pretend installing the seccomp filters failed with this errno.
     pub seccomp_errno: Option<i32>,
+    /// Install, as the first seccomp filter, a program the kernel's checker
+    /// rejects (an invalid opcode): the service's own rules refused.
+    pub seccomp_invalid: bool,
 }
 
 /// Confines the process to `policy` (design 0010).
@@ -193,22 +230,6 @@ fn unconfined(why: &str) -> Report {
         gaps: Vec::new(),
         reasons,
         resolution: None,
-    }
-}
-
-/// Closes every inherited descriptor above stderr, so no connection main's
-/// process leaked stays usable (design 0010, "The recommendation"). Called
-/// first, before the service opens anything of its own. `Err` on a kernel
-/// without `close_range` (Linux 5.9): the descriptors stay, and the caller
-/// logs it.
-pub fn close_inherited() -> std::io::Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        fc_sys::linux::close_from(3)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        Ok(())
     }
 }
 

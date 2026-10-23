@@ -24,8 +24,8 @@ sha2 = { version = "0.11", default-features = false }
 rustix = { version = "1.1", default-features = false, features = ["fs", "process", "std", "thread"] }
 
 # Confinement (design 0010): Landlock and seccomp, pinned exactly (D6), and
-# libc for the syscall numbers and constants the filters name; close_range
-# and Landlock's version query are fc-sys's.
+# libc for the syscall numbers and constants the filters name; Landlock's
+# version query is fc-sys's.
 [target.'cfg(target_os = "linux")'.dependencies]
 fc-sys = { path = "../fc-sys" }
 landlock = "=0.4.7"
@@ -43,6 +43,9 @@ tempfile = "3"
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # The confinement tests' calls through the other syscall ABIs.
 fc-sys = { path = "../fc-sys", features = ["test-abis"] }
+# The confinement tests' descriptors: inherited pipes and socket pairs,
+# and an eventfd and an epoll descriptor to inject.
+rustix = { version = "1.1", default-features = false, features = ["event", "net", "pipe", "std"] }
 
 # The confinement tests run each case in a child of their own: a process
 # confines itself once, and the default harness's threads would refuse it.
