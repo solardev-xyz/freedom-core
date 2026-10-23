@@ -564,7 +564,11 @@ The password crosses the pipe, which is no worse than today, where it is used in
     - `json_parse`, fc-json;
     - `protocol_frames`: the frame codec, fragment reassembly and stream frames;
     - `protocol_message`: the message decoder and secret fields;
-    - `vault_open`: the vault file.
+    - `vault_open`: the vault file;
+    - `openssh_public`: fc-keys' OpenSSH readers, the streaming `PublicKeyReader` over a private key file and `public_key_of_line`, read back against the writers;
+    - `seal_open`: fc-seal's `open` over a relayed seal, and `seal` to any recipient;
+    - `chain_answer`: fc-chain's reading of an RPC endpoint's answer, from the HTTP status and body;
+    - `naming_answer`: fc-naming's reading of a contenthash record, a CCIP-Read gateway's response and ABI data.
 - **Cross-implementation,** in CI on every change: vaults and Bee keystores written by Rust must decrypt in the pinned JS, and OpenSSH files must parse.
 - **`freedom-cored` integration tests,** run against the real binary:
   - **Protocol:** the handshake and its timeout, every method, every error code in parity-table order, a protocol error per malformed frame, oversized fields rejected with `invalid_argument`.

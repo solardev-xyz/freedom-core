@@ -113,7 +113,73 @@ def vault_seeds():
     write('vault_open', 'plaintext-escapes', bytes([1]) + escaped.encode())
 
 
+def openssh_seeds():
+    # The JS vector's files (vectors/fixtures/radicle-openssh.json).
+    fixtures = os.path.join(ROOT, '..', '..', 'vectors', 'fixtures', 'radicle-openssh.json')
+    with open(fixtures) as f:
+        identity = json.load(f)['fixtures'][0]['identity']
+    private = identity['privateKeyFile'].encode()
+    public = identity['publicKeyFile'].encode()
+    # Top bit clear: a file or a line, fed 1, 7 or 64 bytes at a time.
+    write('openssh_public', 'file-bytewise', bytes([0]) + private)
+    write('openssh_public', 'file-7-byte-pieces', bytes([6]) + private)
+    write('openssh_public', 'file-64-byte-pieces', bytes([63]) + private)
+    write('openssh_public', 'line', bytes([5]) + public)
+    # Top bit set: key 1, a check integer, and a comment to write.
+    write('openssh_public', 'written', bytes([0x80 | 3, 1]) + bytes.fromhex('d3890d10') + b'FreedomBrowser')
+
+
+def seal_seeds():
+    # Even: a recipient's seed, then a relayed enc and ciphertext, cut at 32.
+    write('seal_open', 'relayed', bytes([64]) + bytes(range(32)) + bytes(range(32, 112)))
+    # Odd: a recipient's public key, a key, a seed.
+    write('seal_open', 'sealed', bytes([1]) + bytes(range(1, 97)))
+    # A low-order point as the recipient: seal must refuse it.
+    write('seal_open', 'low-order', bytes([1]) + bytes(32) + bytes(range(64)))
+
+
+def chain_seeds():
+    ok = struct.pack('>H', 200)
+    write('chain_answer', 'result', ok + b'{"jsonrpc":"2.0","id":1,"result":"0x10"}')
+    write('chain_answer', 'node-error', ok + b'{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"nonce too low","data":"0x"}}')
+    write('chain_answer', 'invalid-utf8', ok + b'{"result":"' + bytes([0xff, 0xfe]) + b'"}')
+    write('chain_answer', 'status', struct.pack('>H', 503) + b'busy')
+
+
+def word(n):
+    return n.to_bytes(32, 'big')
+
+
+def abi_bytes(data):
+    return word(len(data)) + data + bytes(-len(data) % 32)
+
+
+def naming_seeds():
+    digest = hashlib.sha256(b'freedom').digest()
+    write('naming_answer', 'contenthash-ipfs', bytes([0]) + bytes([0xe3, 0x01, 0x01, 0x70, 0x12, 0x20]) + digest)
+    write('naming_answer', 'contenthash-swarm', bytes([0]) + bytes([0xe4, 0x01, 0x01, 0xfa, 0x01, 0x1b, 0x20]) + digest)
+    write('naming_answer', 'cid', bytes([1]) + bytes([0x01, 0x70, 0x12, 0x20]) + digest)
+    write('naming_answer', 'gateway', bytes([2]) + b'{"data":"0x' + digest.hex().encode() + b'"}')
+    # Mode 3 + 4 * shape: ABI data for [bytes] and for OffchainLookup.
+    write('naming_answer', 'abi-bytes', bytes([3]) + word(32) + abi_bytes(digest))
+    sender = bytes(12) + bytes(range(20))
+    urls = word(1) + word(32) + abi_bytes(b'https://gateway.example/{sender}/{data}.json')
+    call = abi_bytes(b'\x12\x34')
+    extra = abi_bytes(b'')
+    head_len = 5 * 32
+    urls_at = head_len
+    call_at = urls_at + len(urls)
+    extra_at = call_at + len(call)
+    lookup = (word(int.from_bytes(sender, 'big')) + word(urls_at) + word(call_at)
+              + bytes([0xde, 0xad, 0xbe, 0xef]) + bytes(28) + word(extra_at) + urls + call + extra)
+    write('naming_answer', 'abi-offchain-lookup', bytes([3 + 4 * 5]) + lookup)
+
+
 if __name__ == '__main__':
     json_seeds()
     protocol_seeds()
     vault_seeds()
+    openssh_seeds()
+    seal_seeds()
+    chain_seeds()
+    naming_seeds()

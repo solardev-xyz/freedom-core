@@ -101,7 +101,9 @@ jobs:
   fuzz:
     # cargo-fuzz targets for the parsers that take untrusted bytes (design
     # 0001, Testing): fc-json, fc-protocol's frames, fragments, stream
-    # frames, messages and secret fields, and the vault file. Each target
+    # frames, messages and secret fields, the vault file, fc-keys' OpenSSH
+    # readers, fc-seal's open and seal, fc-chain's reading of an RPC answer
+    # and fc-naming's of a resolver's or gateway's. Each target
     # runs for a fixed time: a minute on pushes and PRs, five on the daily
     # run. A crash fails the job and uploads the input that caused it.
     name: fuzz (nightly, time-boxed)
