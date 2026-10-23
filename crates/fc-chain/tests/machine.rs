@@ -1976,6 +1976,19 @@ fn quote_json(reply: &Reply) -> String {
     }
 }
 
+/// `n` gwei as a hex quantity, the way nodes write fees.
+fn g(n: u64) -> String {
+    format!("0x{:x}", u128::from(n) * 1_000_000_000)
+}
+
+/// `n` gwei and a fraction (`tenths` of a gwei more), in decimal wei.
+fn wei(n: u64, tenths: u64) -> String {
+    (u128::from(n) * 1_000_000_000 + u128::from(tenths) * 100_000_000).to_string()
+}
+
+/// A block without a base fee: an endpoint's quote from it is legacy.
+const NO_BASE_FEE: &str = r#"{"number":"0x10"}"#;
+
 /// A verified header with `base_fee` (hex), or none.
 fn header(base_fee: Option<&str>) -> Answer {
     let base_fee = base_fee.map_or_else(String::new, |fee| format!(r#","baseFeePerGas":"{fee}""#));
@@ -2031,6 +2044,8 @@ impl World {
     }
 
     /// Answers `endpoint`'s gas price, then its hint (`None`: it has none).
+    /// A hint that can't price a quote has the endpoint ask for its block:
+    /// it is answered without a base fee, so the quote is legacy.
     fn quote_from(&mut self, endpoint: &str, gas: &str, priority: Option<&str>) {
         self.answer(
             self.rpc_to(endpoint, "eth_gasPrice"),
@@ -2040,6 +2055,33 @@ impl World {
         self.answer(
             hint,
             priority.map_or_else(no_hint, |p| ok(&format!("\"{p}\""))),
+        );
+        if let Some(block) = self.rpc_to_opt(endpoint, "eth_getBlockByNumber") {
+            self.answer(block, ok(NO_BASE_FEE));
+        }
+    }
+
+    /// The io id of the latest `method` exchange with `endpoint`, if any.
+    fn rpc_to_opt(&self, endpoint: &str, method: &str) -> Option<u64> {
+        self.rpcs()
+            .iter()
+            .rev()
+            .find(|(_, _, e, m)| e == endpoint && m == method)
+            .map(|(id, ..)| *id)
+    }
+
+    /// Answers `endpoint`'s gas price, its missing hint, and then its block
+    /// with `block` (or a failed read).
+    fn quote_with_block(&mut self, endpoint: &str, gas: &str, block: Option<&str>) {
+        self.answer(
+            self.rpc_to(endpoint, "eth_gasPrice"),
+            ok(&format!("\"{gas}\"")),
+        );
+        self.answer(self.rpc_to(endpoint, "eth_maxPriorityFeePerGas"), no_hint());
+        let read = self.rpc_to(endpoint, "eth_getBlockByNumber");
+        self.answer(
+            read,
+            block.map_or_else(|| node_error(-32000, "block unavailable"), ok),
         );
     }
 }
@@ -2057,14 +2099,14 @@ fn boundary_fee_combine_three_successes() {
         started,
         ["a", "b", "c"].map(|e| (e.to_owned(), "eth_gasPrice".to_owned(), 0))
     );
-    world.quote_from("a", "0x64", Some("0xa"));
-    world.quote_from("b", "0x78", Some("0x5"));
+    world.quote_from("a", &g(100), Some(&g(10)));
+    world.quote_from("b", &g(120), Some(&g(5)));
     assert!(!world.replied(id));
-    world.quote_from("c", "0x6e", Some("0x14"));
-    // M: 190, 235, 200; P: 10, 5, 20.
+    world.quote_from("c", &g(110), Some(&g(20)));
+    // M: 190, 235, 200 gwei; P: 10, 5, 20.
     assert_eq!(
         quote_json(world.reply(id)),
-        eip1559("92", "5", "190", "97", 3)
+        eip1559(&wei(92, 5), &wei(5, 0), &wei(190, 0), &wei(97, 5), 3)
     );
     assert_eq!(world.reply(id).settled, 0);
     assert!(world.asked().iter().all(|(e, ..)| e != "d"));
@@ -2074,15 +2116,24 @@ fn boundary_fee_combine_three_successes() {
 #[test]
 fn boundary_fee_combine_independent_minima() {
     for (answers, want) in [
-        // M − P odd: 10/1 with 10/2 combine to M = 18, P = 1.
+        // M − P odd: hints of 60,000,001 and 60,000,000 wei at 1 gwei.
         (
-            [("0xa", "0x1"), ("0xa", "0x2")],
-            eip1559("8", "1", "18", "9", 2),
+            [
+                (g(1), "0x3938701".to_owned()),
+                (g(1), "0x3938700".to_owned()),
+            ],
+            eip1559("939999999", "60000000", "1939999999", "999999999", 2),
         ),
-        // The raw-minima trap: 100/10 with 100/9 gives M = 190, not 191.
+        // The raw-minima trap: 100/10 with 100/9 gwei gives M = 190, not
+        // 191.
         (
-            [("0x64", "0xa"), ("0x64", "0x9")],
-            eip1559("90", "9", "190", "99", 2),
+            [(g(100), g(10)), (g(100), g(9))],
+            eip1559(&wei(90, 5), &wei(9, 0), &wei(190, 0), &wei(99, 5), 2),
+        ),
+        // Tips under the floor: both 0.05 gwei.
+        (
+            [(g(1), "0x3e8".to_owned()), (g(2), "0x0".to_owned())],
+            eip1559("999999000", "50000000", "2049998000", "1049999000", 2),
         ),
     ] {
         let mut world = World::new(
@@ -2090,8 +2141,8 @@ fn boundary_fee_combine_independent_minima() {
             &[fee_chain(&["direct"], &["a", "b"], false)],
         );
         let id = world.submit(FEE, None);
-        world.quote_from("a", answers[0].0, Some(answers[0].1));
-        world.quote_from("b", answers[1].0, Some(answers[1].1));
+        world.quote_from("a", &answers[0].0, Some(&answers[0].1));
+        world.quote_from("b", &answers[1].0, Some(&answers[1].1));
         assert_eq!(quote_json(world.reply(id)), want);
     }
 }
@@ -2103,18 +2154,33 @@ fn boundary_fee_combine_all_legacy() {
         &[fee_chain(&["direct", "colibri"], &["a", "b", "c"], true)],
     );
     let id = world.submit(FEE, None);
-    world.quote_from("a", "0x10", None);
-    // A hint above the gas price, and a negative one, give legacy quotes.
-    world.quote_from("b", "0xc", Some("0xd"));
-    world.quote_from("c", "0x14", Some("-1"));
-    // All legacy: the lowest gas price, without waiting for the header.
-    assert_eq!(quote_json(world.reply(id)), legacy("12", 3));
+    world.quote_from("a", &g(16), None);
+    // A hint above the gas price, and a negative one, are priced from the
+    // endpoints' blocks, which have no base fee: legacy quotes.
+    world.quote_from("b", &g(12), Some(&g(13)));
+    world.quote_from("c", &g(20), Some("-1"));
+    // All legacy: the lowest signed gas price, 12 gwei with the headroom,
+    // without waiting for the header.
+    assert_eq!(quote_json(world.reply(id)), legacy("15050000000", 3));
     assert_eq!(world.header_reads().len(), 1);
+}
+
+/// The boundary case combined as EIP-1559: an EIP-1559 100/1 gwei (M =
+/// 199) and a legacy 1000 gwei (signed 1250.05).
+fn boundary_eip1559() -> String {
+    eip1559(&wei(99, 0), &wei(1, 0), &wei(199, 0), &wei(100, 0), 2)
+}
+
+/// The boundary case combined as legacy: the headroom of the lowest raw
+/// gas price, 100 gwei.
+fn boundary_legacy() -> String {
+    legacy("125050000000", 2)
 }
 
 #[test]
 fn boundary_fee_combine_mixed_with_a_verified_header() {
-    // The boundary case: an EIP-1559 100/1 (M = 199) and a legacy 1000.
+    // The boundary case: an EIP-1559 100/1 gwei (M = 199) and a legacy
+    // 1000 gwei.
     let mut world = World::new(
         Bounds::default(),
         &[fee_chain(&["direct", "colibri"], &["a", "b"], true)],
@@ -2125,8 +2191,8 @@ fn boundary_fee_combine_mixed_with_a_verified_header() {
     let reads = world.header_reads();
     assert_eq!(reads.len(), 1);
     assert_eq!(world.requests.last().map(|r| r.0), Some(reads[0].0));
-    world.quote_from("a", "0x64", Some("0x1"));
-    world.quote_from("b", "0x3e8", None);
+    world.quote_from("a", &g(100), Some(&g(1)));
+    world.quote_from("b", &g(1000), None);
     // Mixed: the combination waits for the header, which arrives after the
     // collection ended.
     world.run(300);
@@ -2135,9 +2201,10 @@ fn boundary_fee_combine_mixed_with_a_verified_header() {
     let reply = world.reply(id);
     assert_eq!(reply.settled, 300);
     let quote = quote_json(reply);
-    assert_eq!(quote, eip1559("99", "1", "199", "100", 2));
-    // If the base fee falls to 1, it pays 2 per gas, as the honest one would.
-    assert_eq!(pays(&quote, 1), 2);
+    assert_eq!(quote, boundary_eip1559());
+    // If the base fee falls to 1 gwei, it pays 2 per gas, as the honest one
+    // would.
+    assert_eq!(pays(&quote, 1_000_000_000), 2_000_000_000);
     // Any base fee shows EIP-1559, zero and 256 bits included.
     let widest = format!("0x{}", "f".repeat(64));
     for base_fee in ["0x0", widest.as_str()] {
@@ -2146,12 +2213,12 @@ fn boundary_fee_combine_mixed_with_a_verified_header() {
             &[fee_chain(&["direct", "colibri"], &["a", "b"], true)],
         );
         let id = world.submit(FEE, None);
-        world.quote_from("a", "0x64", Some("0x1"));
-        world.quote_from("b", "0x3e8", None);
+        world.quote_from("a", &g(100), Some(&g(1)));
+        world.quote_from("b", &g(1000), None);
         world.answer(world.header_reads()[0].0, header(Some(base_fee)));
         assert_eq!(
             quote_json(world.reply(id)),
-            eip1559("99", "1", "199", "100", 2),
+            boundary_eip1559(),
             "{base_fee}"
         );
     }
@@ -2159,8 +2226,8 @@ fn boundary_fee_combine_mixed_with_a_verified_header() {
 
 #[test]
 fn boundary_fee_combine_mixed_without_a_verified_header() {
-    // The boundary case without a verified header: legacy G = 100, which
-    // pays 100 at a base fee of 1.
+    // The boundary case without a verified header: legacy at the headroom
+    // of G = 100 gwei, which pays 125.05 at a base fee of 1.
     let malformed = [
         // A base fee with a leading zero, an upper-case digit, a number
         // that is no quantity, and no header at all.
@@ -2208,8 +2275,8 @@ fn boundary_fee_combine_mixed_without_a_verified_header() {
     for (config, answer) in cases {
         let mut world = World::new(Bounds::default(), &[config]);
         let id = world.submit(FEE, None);
-        world.quote_from("a", "0x64", Some("0x1"));
-        world.quote_from("b", "0x3e8", None);
+        world.quote_from("a", &g(100), Some(&g(1)));
+        world.quote_from("b", &g(1000), None);
         match answer {
             None => assert!(world.header_reads().is_empty()),
             Some(answer) => {
@@ -2218,8 +2285,8 @@ fn boundary_fee_combine_mixed_without_a_verified_header() {
             }
         }
         let quote = quote_json(world.reply(id));
-        assert_eq!(quote, legacy("100", 2));
-        assert_eq!(pays(&quote, 1), 100);
+        assert_eq!(quote, boundary_legacy());
+        assert_eq!(pays(&quote, 1_000_000_000), 125_050_000_000);
     }
 }
 
@@ -2230,21 +2297,26 @@ fn boundary_fee_combine_mixed_waits_for_the_header_within_colibris_budget() {
         &[fee_chain(&["direct", "colibri"], &["a", "b"], true)],
     );
     let id = world.submit(FEE, None);
-    world.quote_from("a", "0x64", Some("0x1"));
-    world.quote_from("b", "0x3e8", None);
+    world.quote_from("a", &g(100), Some(&g(1)));
+    world.quote_from("b", &g(1000), None);
     // Colibri's budget is `configured`: at 5 s the header has failed, and
     // the quote is legacy. The operation keeps its slot until main's reply.
     world.run(4_999);
     assert!(!world.replied(id));
     world.run(5_000);
     assert_eq!(world.reply(id).settled, 5_000);
-    assert_eq!(quote_json(world.reply(id)), legacy("100", 2));
+    assert_eq!(quote_json(world.reply(id)), boundary_legacy());
     assert_eq!(world.machine.state_tables().colibri_in_flight, 1);
     let (read, _) = world.header_reads()[0];
     assert!(!world.machine.wants(read));
     world.machine.complete_unread(read);
     world.collect();
     assert_eq!(world.machine.state_tables().colibri_in_flight, 0);
+}
+
+/// 100/10 with 100/9 gwei: M = 190, P = 9.
+fn trap() -> String {
+    eip1559(&wei(90, 5), &wei(9, 0), &wei(190, 0), &wei(99, 5), 2)
 }
 
 #[test]
@@ -2254,14 +2326,11 @@ fn boundary_fee_combine_header_dropped_when_not_mixed() {
         &[fee_chain(&["direct", "colibri"], &["a", "b"], true)],
     );
     let id = world.submit(FEE, None);
-    world.quote_from("a", "0x64", Some("0xa"));
-    world.quote_from("b", "0x64", Some("0x9"));
+    world.quote_from("a", &g(100), Some(&g(10)));
+    world.quote_from("b", &g(100), Some(&g(9)));
     // All EIP-1559: nothing waits for the header.
     assert_eq!(world.reply(id).settled, 0);
-    assert_eq!(
-        quote_json(world.reply(id)),
-        eip1559("90", "9", "190", "99", 2)
-    );
+    assert_eq!(quote_json(world.reply(id)), trap());
     // Its operation keeps its slot until main's reply, which is dropped.
     assert_eq!(world.machine.state_tables().colibri_in_flight, 1);
     let (read, _) = world.header_reads()[0];
@@ -2303,13 +2372,10 @@ fn boundary_fee_combine_header_with_colibri_first_in_the_order() {
         }),
     );
     assert_eq!(world.header_reads().len(), 1);
-    world.quote_from("a", "0x64", Some("0x1"));
-    world.quote_from("b", "0x3e8", None);
+    world.quote_from("a", &g(100), Some(&g(1)));
+    world.quote_from("b", &g(1000), None);
     world.answer(world.header_reads()[0].0, header(Some("0x1")));
-    assert_eq!(
-        quote_json(world.reply(id)),
-        eip1559("99", "1", "199", "100", 2)
-    );
+    assert_eq!(quote_json(world.reply(id)), boundary_eip1559());
 }
 
 #[test]
@@ -2320,7 +2386,7 @@ fn boundary_fee_combine_partial_failures() {
         &[fee_chain(&["direct"], &["a", "b", "c", "d"], false)],
     );
     let id = world.submit(FEE, None);
-    world.quote_from("b", "0x64", Some("0xa"));
+    world.quote_from("b", &g(100), Some(&g(10)));
     world.answer(
         world.rpc_to("a", "eth_gasPrice"),
         Answer::Rpc {
@@ -2328,10 +2394,10 @@ fn boundary_fee_combine_partial_failures() {
             body: Vec::new(),
         },
     );
-    world.quote_from("c", "0x78", Some("0x5"));
+    world.quote_from("c", &g(120), Some(&g(5)));
     assert_eq!(
         quote_json(world.reply(id)),
-        eip1559("92", "5", "190", "97", 2)
+        eip1559(&wei(92, 5), &wei(5, 0), &wei(190, 0), &wei(97, 5), 2)
     );
     assert!(world.asked().iter().all(|(e, ..)| e != "d"));
 
@@ -2350,12 +2416,12 @@ fn boundary_fee_combine_partial_failures() {
         world.asked().last(),
         Some(&("d".to_owned(), "eth_gasPrice".to_owned(), 100))
     );
-    world.quote_from("b", "0x64", Some("0xa"));
-    world.quote_from("c", "0x78", Some("0x5"));
-    world.quote_from("d", "0x6e", Some("0x14"));
+    world.quote_from("b", &g(100), Some(&g(10)));
+    world.quote_from("c", &g(120), Some(&g(5)));
+    world.quote_from("d", &g(110), Some(&g(20)));
     assert_eq!(
         quote_json(world.reply(id)),
-        eip1559("92", "5", "190", "97", 3)
+        eip1559(&wei(92, 5), &wei(5, 0), &wei(190, 0), &wei(97, 5), 3)
     );
 
     // An unparseable hint fails its endpoint (today's codec); the others
@@ -2365,13 +2431,10 @@ fn boundary_fee_combine_partial_failures() {
         &[fee_chain(&["direct"], &["a", "b", "c"], false)],
     );
     let id = world.submit(FEE, None);
-    world.quote_from("b", "0x64", Some("0xa"));
+    world.quote_from("b", &g(100), Some(&g(10)));
     world.quote_from("a", "0x10", Some("-0x1"));
-    world.quote_from("c", "0x64", Some("0x9"));
-    assert_eq!(
-        quote_json(world.reply(id)),
-        eip1559("90", "9", "190", "99", 2)
-    );
+    world.quote_from("c", &g(100), Some(&g(9)));
+    assert_eq!(quote_json(world.reply(id)), trap());
 }
 
 #[test]
@@ -2472,11 +2535,11 @@ fn boundary_fee_combine_singletons() {
     // One endpoint configured: today's quote, marked.
     let mut world = World::new(Bounds::default(), &[fee_chain(&["direct"], &["a"], false)]);
     let id = world.submit(FEE, None);
-    world.quote_from("a", "0x64", Some("0xa"));
+    world.quote_from("a", &g(100), Some(&g(10)));
     assert_eq!(world.reply(id).settled, 0);
     assert_eq!(
         quote_json(world.reply(id)),
-        eip1559("90", "10", "190", "100", 1)
+        eip1559(&wei(90, 0), &wei(10, 0), &wei(190, 0), &wei(100, 0), 1)
     );
 
     // One of three answering: the others are cut off at 1 s.
@@ -2486,12 +2549,12 @@ fn boundary_fee_combine_singletons() {
     );
     let id = world.submit(FEE, None);
     world.run(200);
-    world.quote_from("b", "0x10", None);
+    world.quote_from("b", &g(16), None);
     world.run(1_199);
     assert!(!world.replied(id));
     world.run(1_200);
     assert_eq!(world.reply(id).settled, 1_200);
-    assert_eq!(quote_json(world.reply(id)), legacy("16", 1));
+    assert_eq!(quote_json(world.reply(id)), legacy("20050000000", 1));
     for endpoint in ["a", "c"] {
         let io = world.rpc_to(endpoint, "eth_gasPrice");
         assert_eq!(world.cancelled(io), Some(1_200), "{endpoint}");
@@ -2504,9 +2567,9 @@ fn boundary_fee_combine_cutoff() {
     let start = |world: &mut World| {
         let id = world.submit(FEE, None);
         world.run(100);
-        world.quote_from("a", "0x64", Some("0xa"));
+        world.quote_from("a", &g(100), Some(&g(10)));
         world.run(500);
-        world.quote_from("b", "0x64", Some("0x9"));
+        world.quote_from("b", &g(100), Some(&g(9)));
         id
     };
     let chains = [fee_chain(&["direct"], &["a", "b", "c"], false)];
@@ -2516,10 +2579,7 @@ fn boundary_fee_combine_cutoff() {
     let id = start(&mut world);
     world.run(1_100);
     assert_eq!(world.reply(id).settled, 1_100);
-    assert_eq!(
-        quote_json(world.reply(id)),
-        eip1559("90", "9", "190", "99", 2)
-    );
+    assert_eq!(quote_json(world.reply(id)), trap());
     let late = world.rpc_to("c", "eth_gasPrice");
     assert_eq!(world.cancelled(late), Some(1_100));
     world.run(1_101);
@@ -2531,10 +2591,7 @@ fn boundary_fee_combine_cutoff() {
     world.run(600);
     world.answer(world.rpc_to("c", "eth_gasPrice"), ok("\"0x1\""));
     world.run(1_100);
-    assert_eq!(
-        quote_json(world.reply(id)),
-        eip1559("90", "9", "190", "99", 2)
-    );
+    assert_eq!(quote_json(world.reply(id)), trap());
     let hint = world.rpc_to("c", "eth_maxPriorityFeePerGas");
     assert_eq!(world.cancelled(hint), Some(1_100));
 
@@ -2552,10 +2609,7 @@ fn boundary_fee_combine_cutoff() {
     let hint = world.rpc_to("c", "eth_maxPriorityFeePerGas");
     world.answer(hint, ok("\"0x1\""));
     assert_eq!(world.reply(id).settled, 1_100);
-    assert_eq!(
-        quote_json(world.reply(id)),
-        eip1559("90", "9", "190", "99", 2)
-    );
+    assert_eq!(quote_json(world.reply(id)), trap());
 }
 
 #[test]
@@ -2674,9 +2728,9 @@ fn fee_reference_header_and_quotes() {
     );
     let reads = world.header_reads();
     assert_eq!(reads, [(reads[0].0, 0)]);
-    world.quote_from("a", "0x64", Some("0xa"));
-    world.quote_from("b", "0x3e8", None);
-    world.quote_from("c", "0x78", Some("0x5"));
+    world.quote_from("a", &g(100), Some(&g(10)));
+    world.quote_from("b", &g(1000), None);
+    world.quote_from("c", &g(120), Some(&g(5)));
     // B is done; the reply waits for the header.
     world.run(250);
     assert!(!world.replied(id));
@@ -2686,11 +2740,17 @@ fn fee_reference_header_and_quotes() {
     assert_eq!(reply.generation, 1);
     let reference = evidence(reply);
     assert_eq!(reference.header, Some(verified_header(Some("7"))));
-    assert_eq!(reference.lowest_priority.as_deref(), Some("5"));
+    assert_eq!(reference.lowest_priority, Some(wei(5, 0)));
     // Mixed, and this request's header has a base fee: EIP-1559.
     assert_eq!(
         reference.quote.as_ref().map(FeeQuote::to_json),
-        Some(eip1559("92", "5", "190", "97", 3))
+        Some(eip1559(
+            &wei(92, 5),
+            &wei(5, 0),
+            &wei(190, 0),
+            &wei(97, 5),
+            3
+        ))
     );
     // Colibri gave only the header; nobody asked Colibri for a quote.
     assert_eq!(colibri_quotes(&world), 0);
@@ -2711,15 +2771,15 @@ fn fee_reference_runs_past_an_earlier_sources_success() {
     );
     world.machine.availability(1, true);
     let id = world.submit(REFERENCE, None);
-    world.quote_from("a", "0x64", Some("0xa"));
-    world.quote_from("b", "0x64", Some("0x9"));
+    world.quote_from("a", &g(100), Some(&g(10)));
+    world.quote_from("b", &g(100), Some(&g(9)));
     world.answer(world.header_reads()[0].0, header(Some("0x1")));
     let reference = evidence(world.reply(id));
     assert_eq!(reference.header, Some(verified_header(Some("1"))));
-    assert_eq!(reference.lowest_priority.as_deref(), Some("9"));
+    assert_eq!(reference.lowest_priority, Some(wei(9, 0)));
     assert_eq!(
         reference.quote.as_ref().map(FeeQuote::to_json),
-        Some(eip1559("90", "9", "190", "99", 2))
+        Some(trap())
     );
     assert!(no_myotis_operation(&world));
     assert_eq!(colibri_quotes(&world), 0);
@@ -2739,15 +2799,15 @@ fn fee_reference_without_a_header() {
         let mut world = World::new(Bounds::default(), &[config]);
         let id = world.submit(REFERENCE, None);
         assert!(world.header_reads().is_empty());
-        world.quote_from("a", "0x64", Some("0x1"));
-        world.quote_from("b", "0x3e8", None);
+        world.quote_from("a", &g(100), Some(&g(1)));
+        world.quote_from("b", &g(1000), None);
         let reference = evidence(world.reply(id));
         assert_eq!(reference.header, None);
-        assert_eq!(reference.lowest_priority.as_deref(), Some("1"));
+        assert_eq!(reference.lowest_priority, Some(wei(1, 0)));
         // Mixed without a verified header: legacy.
         assert_eq!(
             reference.quote.as_ref().map(FeeQuote::to_json),
-            Some(legacy("100", 2))
+            Some(boundary_legacy())
         );
         assert_eq!(world.reply(id).settled, 0);
     }
@@ -2795,14 +2855,14 @@ fn fee_reference_when_colibri_fails_or_is_malformed() {
             &[fee_chain(&["colibri", "direct"], &["a", "b"], true)],
         );
         let id = world.submit(REFERENCE, None);
-        world.quote_from("a", "0x64", Some("0x1"));
-        world.quote_from("b", "0x3e8", None);
+        world.quote_from("a", &g(100), Some(&g(1)));
+        world.quote_from("b", &g(1000), None);
         world.answer(world.header_reads()[0].0, answer.clone());
         let reference = evidence(world.reply(id));
         assert_eq!(reference.header, None, "{answer:?}");
         assert_eq!(
             reference.quote.as_ref().map(FeeQuote::to_json),
-            Some(legacy("100", 2)),
+            Some(boundary_legacy()),
             "{answer:?}"
         );
     }
@@ -2813,7 +2873,7 @@ fn fee_reference_when_colibri_fails_or_is_malformed() {
         &[fee_chain(&["colibri", "direct"], &["a"], true)],
     );
     let id = world.submit(REFERENCE, None);
-    world.quote_from("a", "0x64", Some("0x1"));
+    world.quote_from("a", &g(100), Some(&g(1)));
     world.run(4_999);
     assert!(!world.replied(id));
     world.run(5_000);
@@ -2821,7 +2881,13 @@ fn fee_reference_when_colibri_fails_or_is_malformed() {
     assert_eq!(reference.header, None);
     assert_eq!(
         reference.quote.as_ref().map(FeeQuote::to_json),
-        Some(eip1559("99", "1", "199", "100", 1))
+        Some(eip1559(
+            &wei(99, 0),
+            &wei(1, 0),
+            &wei(199, 0),
+            &wei(100, 0),
+            1
+        ))
     );
 
     // A header without `baseFeePerGas`: a chain without EIP-1559. Mixed
@@ -2831,14 +2897,14 @@ fn fee_reference_when_colibri_fails_or_is_malformed() {
         &[fee_chain(&["colibri", "direct"], &["a", "b"], true)],
     );
     let id = world.submit(REFERENCE, None);
-    world.quote_from("a", "0x64", Some("0x1"));
-    world.quote_from("b", "0x3e8", None);
+    world.quote_from("a", &g(100), Some(&g(1)));
+    world.quote_from("b", &g(1000), None);
     world.answer(world.header_reads()[0].0, header(None));
     let reference = evidence(world.reply(id));
     assert_eq!(reference.header, Some(verified_header(None)));
     assert_eq!(
         reference.quote.as_ref().map(FeeQuote::to_json),
-        Some(legacy("100", 2))
+        Some(boundary_legacy())
     );
 }
 
@@ -2887,13 +2953,29 @@ fn fee_reference_when_no_endpoint_answers() {
         &[fee_chain(&["direct"], &["a", "b"], false)],
     );
     let id = world.submit(REFERENCE, None);
-    world.quote_from("a", "0x10", None);
-    world.quote_from("b", "0xc", Some("0xd"));
+    world.quote_from("a", &g(16), None);
+    world.quote_from("b", &g(12), Some(&g(13)));
     let reference = evidence(world.reply(id));
     assert_eq!(reference.lowest_priority, None);
     assert_eq!(
         reference.quote.as_ref().map(FeeQuote::to_json),
-        Some(legacy("12", 2))
+        Some(legacy("15050000000", 2))
+    );
+
+    // Every answering endpoint failing at its block: Direct's last resort
+    // is the reference's quote, with no priority fee.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b"], false)],
+    );
+    let id = world.submit(REFERENCE, None);
+    world.quote_with_block("a", &g(40), None);
+    world.quote_with_block("b", &g(30), None);
+    let reference = evidence(world.reply(id));
+    assert_eq!(reference.lowest_priority, None);
+    assert_eq!(
+        reference.quote.as_ref().map(FeeQuote::to_json),
+        Some(legacy("37550000000", 2))
     );
 }
 
@@ -2906,8 +2988,8 @@ fn fee_reference_races() {
     // with `deadline`; the header's operation keeps its slot.
     let mut world = World::new(Bounds::default(), &chains);
     let id = world.submit(REFERENCE, Some(800));
-    world.quote_from("a", "0x64", Some("0xa"));
-    world.quote_from("b", "0x64", Some("0x9"));
+    world.quote_from("a", &g(100), Some(&g(10)));
+    world.quote_from("b", &g(100), Some(&g(9)));
     world.quote_from("c", "0x64", Some("0x8"));
     world.run(800);
     assert_eq!(protocol(world.reply(id)), Some(Protocol::Deadline));
@@ -2995,7 +3077,8 @@ fn fee_reference_large_answers_keep_the_budget() {
     assert!(world.answer(world.rpc_to("b", "eth_maxPriorityFeePerGas"), ok("\"0x1\"")));
     match &world.reply(id).result {
         Ok(Success::FeeReference(reference)) => {
-            assert_eq!(reference.lowest_priority.as_deref(), Some("1"));
+            // Its tip of 1 wei, floored.
+            assert_eq!(reference.lowest_priority.as_deref(), Some("50000000"));
             assert!(
                 reference
                     .quote
@@ -3066,10 +3149,10 @@ fn boundary_fee_combine_large_answers_keep_the_budget() {
     ));
     assert!(!world.replied(id));
     assert!(world.answer(world.rpc_to("b", "eth_maxPriorityFeePerGas"), ok("\"0x1\"")));
-    // All three quoted 100/1.
+    // All three quoted 100/1, the tip floored at 0.05 gwei.
     assert_eq!(
         quote_json(world.reply(id)),
-        r#"{"type":"eip1559","baseFee":"99","maxPriorityFeePerGas":"1","maxFeePerGas":"199","effectiveGasPrice":"100","source":"direct","verified":false,"answered":3}"#
+        r#"{"type":"eip1559","baseFee":"99","maxPriorityFeePerGas":"50000000","maxFeePerGas":"50000198","effectiveGasPrice":"50000099","source":"direct","verified":false,"answered":3}"#
     );
 
     // Three gas prices at the answer cap, then three hints as large: each
@@ -3175,4 +3258,314 @@ fn boundary_fee_combine_no_replacement_in_an_answers_tick() {
     ));
     assert!(!world.replied(id));
     assert!(world.asked().iter().any(|(endpoint, ..)| endpoint == "d"));
+}
+
+// Main's #749 (design 0005, Fee quotes, and B as amended for it): the
+// headroom and the source's block, through the machine.
+
+impl World {
+    /// The io id of the latest Colibri operation for `method`.
+    fn colibri_op(&self, method: &str) -> u64 {
+        self.requests
+            .iter()
+            .rev()
+            .find_map(|(io, _, request, _)| match request {
+                Request::Verified(VerifiedOp::Colibri { method: m, .. }) if m == method => {
+                    Some(*io)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no Colibri {method}"))
+    }
+}
+
+fn colibri_result(json: &str) -> Answer {
+    Answer::Colibri(ColibriReply::Result(json.into()))
+}
+
+fn colibri_failure() -> Answer {
+    Answer::Colibri(ColibriReply::Failure {
+        class: fc_chain::machine::ColibriClass::Error,
+        fault: false,
+    })
+}
+
+/// A block with this base fee.
+fn base_fee_block(base_fee: &str) -> String {
+    format!(r#"{{"number":"0x10","baseFeePerGas":"{base_fee}"}}"#)
+}
+
+#[test]
+fn boundary_fee_combine_blocks() {
+    // A hint priced from the endpoint's own block, beside a usable one:
+    // all EIP-1559. The block read is the endpoint's third exchange.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b"], false)],
+    );
+    let id = world.submit(FEE, None);
+    world.quote_from("a", &g(100), Some(&g(10)));
+    world.quote_with_block("b", &g(100), Some(&base_fee_block(&g(80))));
+    assert_eq!(
+        quote_json(world.reply(id)),
+        eip1559(&wei(85, 0), &wei(10, 0), &wei(180, 0), &wei(95, 0), 2)
+    );
+    let asked: Vec<String> = world
+        .asked()
+        .into_iter()
+        .filter(|(endpoint, ..)| endpoint == "b")
+        .map(|(_, method, _)| method)
+        .collect();
+    assert_eq!(
+        asked,
+        [
+            "eth_gasPrice",
+            "eth_maxPriorityFeePerGas",
+            "eth_getBlockByNumber"
+        ]
+    );
+    let block = world.rpc_to("b", "eth_getBlockByNumber");
+    let body = world
+        .requests
+        .iter()
+        .find_map(|(io, _, request, _)| match request {
+            Request::Rpc { body, .. } if *io == block => Some(body.clone()),
+            _ => None,
+        });
+    assert!(body.is_some_and(|body| body.contains(r#""params":["latest",false]"#)));
+
+    // A block read that fails: the endpoint is replaced, as any failure
+    // before an answer, and its quote is left out.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b", "c", "d"], false)],
+    );
+    let id = world.submit(FEE, None);
+    world.run(100);
+    world.quote_with_block("a", &g(50), None);
+    assert_eq!(
+        world.asked().last(),
+        Some(&("d".to_owned(), "eth_gasPrice".to_owned(), 100))
+    );
+    world.quote_from("b", &g(100), Some(&g(10)));
+    world.quote_from("c", &g(120), Some(&g(5)));
+    world.quote_from("d", &g(110), Some(&g(20)));
+    assert_eq!(
+        quote_json(world.reply(id)),
+        eip1559(&wei(92, 5), &wei(5, 0), &wei(190, 0), &wei(97, 5), 3)
+    );
+
+    // Every answering endpoint failing at its block: Direct's last resort,
+    // the headroom of their lowest gas price, `answered` counting them.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b"], false)],
+    );
+    let id = world.submit(FEE, None);
+    world.quote_with_block("a", &g(40), None);
+    world.quote_with_block("b", &g(30), None);
+    assert_eq!(quote_json(world.reply(id)), legacy("37550000000", 2));
+
+    // A block that isn't one, or a base fee that can't be read, fails the
+    // read too; one without a base fee is a legacy quote.
+    for (block, want) in [
+        ("null", legacy("50000125", 1)),
+        (r#""0x11""#, legacy("50000125", 1)),
+        (r#"{"baseFeePerGas":"xyz"}"#, legacy("50000125", 1)),
+        (r#"{"baseFeePerGas":"-1"}"#, legacy("50000125", 1)),
+        (r#"{"baseFeePerGas":null}"#, legacy("50000125", 1)),
+        ("[]", legacy("50000125", 1)),
+        (
+            r#"{"baseFeePerGas":"0x50"}"#,
+            eip1559("80", "50000000", "50000160", "50000080", 1),
+        ),
+    ] {
+        let mut world = World::new(Bounds::default(), &[fee_chain(&["direct"], &["a"], false)]);
+        let id = world.submit(FEE, None);
+        world.quote_with_block("a", "0x64", Some(block));
+        assert_eq!(quote_json(world.reply(id)), want, "{block}");
+    }
+}
+
+#[test]
+fn fee_quote_last_resorts_through_the_walk() {
+    // A later source's quote wins over Direct's last resort.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct", "colibri"], &["a"], true)],
+    );
+    let id = world.submit(FEE, None);
+    world.quote_with_block("a", &g(40), None);
+    world.answer(
+        world.colibri_op("eth_gasPrice"),
+        colibri_result(&format!("\"{}\"", g(3))),
+    );
+    world.answer(
+        world.colibri_op("eth_maxPriorityFeePerGas"),
+        colibri_result(&format!("\"{}\"", g(1))),
+    );
+    assert_eq!(
+        quote_json(world.reply(id)),
+        r#"{"type":"eip1559","baseFee":"2000000000","maxPriorityFeePerGas":"1000000000","maxFeePerGas":"5000000000","effectiveGasPrice":"3000000000","source":"colibri","verified":true}"#
+    );
+
+    // An earlier source's last resort is kept first: Colibri's block read
+    // fails, then Direct's endpoint fails at its own.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["colibri", "direct"], &["a"], true)],
+    );
+    let id = world.submit(FEE, None);
+    world.answer(
+        world.colibri_op("eth_gasPrice"),
+        colibri_result(&format!("\"{}\"", g(4))),
+    );
+    world.answer(
+        world.colibri_op("eth_maxPriorityFeePerGas"),
+        colibri_failure(),
+    );
+    world.answer(world.colibri_op("eth_getBlockByNumber"), colibri_failure());
+    assert!(!world.replied(id));
+    world.quote_with_block("a", &g(40), None);
+    assert_eq!(
+        quote_json(world.reply(id)),
+        r#"{"type":"legacy","gasPrice":"5050000000","effectiveGasPrice":"5050000000","source":"colibri","verified":true}"#
+    );
+
+    // The last resort wins over a later source's node error.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct", "colibri"], &["a"], true)],
+    );
+    let id = world.submit(FEE, None);
+    world.quote_with_block("a", &g(4), None);
+    world.answer(
+        world.colibri_op("eth_gasPrice"),
+        Answer::Colibri(ColibriReply::Revert {
+            data: "0x".into(),
+            capacity: false,
+            fault: false,
+        }),
+    );
+    assert_eq!(quote_json(world.reply(id)), legacy("5050000000", 1));
+}
+
+#[test]
+fn boundary_fee_combine_block_reads_and_the_cutoff() {
+    // An endpoint whose block read is outstanding at the cutoff is left
+    // out, and its read cancelled.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b"], false)],
+    );
+    let id = world.submit(FEE, None);
+    world.run(100);
+    world.quote_from("a", &g(100), Some(&g(10)));
+    world.run(200);
+    world.answer(
+        world.rpc_to("b", "eth_gasPrice"),
+        ok(&format!("\"{}\"", g(90))),
+    );
+    world.answer(world.rpc_to("b", "eth_maxPriorityFeePerGas"), no_hint());
+    let block = world.rpc_to("b", "eth_getBlockByNumber");
+    world.run(1_100);
+    assert_eq!(world.reply(id).settled, 1_100);
+    assert_eq!(
+        quote_json(world.reply(id)),
+        eip1559(&wei(90, 0), &wei(10, 0), &wei(190, 0), &wei(100, 0), 1)
+    );
+    assert_eq!(world.cancelled(block), Some(1_100));
+
+    // The block read has its own `configured`: past it, the read has failed,
+    // and the endpoint leaves its last resort.
+    let mut world = World::new(Bounds::default(), &[fee_chain(&["direct"], &["a"], false)]);
+    let id = world.submit(FEE, None);
+    world.run(300);
+    world.answer(
+        world.rpc_to("a", "eth_gasPrice"),
+        ok(&format!("\"{}\"", g(4))),
+    );
+    world.answer(world.rpc_to("a", "eth_maxPriorityFeePerGas"), no_hint());
+    let (block, at) = world
+        .rpcs()
+        .iter()
+        .find(|(_, _, endpoint, method)| endpoint == "a" && method == "eth_getBlockByNumber")
+        .map(|(io, at, ..)| (*io, *at))
+        .unwrap();
+    assert_eq!(at, 300);
+    world.run(5_299);
+    assert!(!world.replied(id));
+    world.run(5_300);
+    assert_eq!(world.reply(id).settled, 5_300);
+    assert_eq!(quote_json(world.reply(id)), legacy("5050000000", 1));
+    assert_eq!(world.cancelled(block), Some(5_300));
+}
+
+#[test]
+fn fee_quote_myotis_block_through_the_read_path() {
+    // Myotis without a hint: its block is a read through the read path,
+    // here Colibri's: the quote names it, and is as verified as it.
+    for (order, verified) in [
+        (&["myotis", "colibri"][..], true),
+        (&["myotis", "direct"][..], false),
+    ] {
+        let mut world = World::new(Bounds::default(), &[fee_chain(order, &["a"], true)]);
+        world.machine.availability(1, true);
+        let id = world.submit(FEE, None);
+        let fee = world.requests[0].0;
+        world.answer(
+            fee,
+            Answer::Myotis(MyotisReply::Read {
+                payload: r#"{"gas_price_wei":"3000000000"}"#.into(),
+                block_before: None,
+                block_after: None,
+            }),
+        );
+        let block = base_fee_block(&g(2));
+        if verified {
+            world.answer(
+                world.colibri_op("eth_getBlockByNumber"),
+                colibri_result(&block),
+            );
+        } else {
+            world.answer(world.rpc_to("a", "eth_getBlockByNumber"), ok(&block));
+        }
+        let source = if verified { "colibri" } else { "direct" };
+        assert_eq!(
+            quote_json(world.reply(id)),
+            format!(
+                r#"{{"type":"eip1559","baseFee":"2000000000","maxPriorityFeePerGas":"1000000000","maxFeePerGas":"5000000000","effectiveGasPrice":"3000000000","source":"myotis","verified":{verified},"baseFeeSource":"{source}"}}"#
+            )
+        );
+    }
+
+    // A read that fails: Myotis's last resort, verified, without a block
+    // source.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["myotis", "direct"], &["a"], true)],
+    );
+    world.machine.availability(1, true);
+    let id = world.submit(FEE, None);
+    world.answer(
+        world.requests[0].0,
+        Answer::Myotis(MyotisReply::Read {
+            payload: r#"{"gas_price_wei":"100"}"#.into(),
+            block_before: None,
+            block_after: None,
+        }),
+    );
+    world.answer(
+        world.rpc_to("a", "eth_getBlockByNumber"),
+        node_error(-32601, "block unavailable"),
+    );
+    // Direct's own quote fails too; the last resort wins over its error.
+    world.answer(
+        world.rpc_to("a", "eth_gasPrice"),
+        node_error(-32000, "down"),
+    );
+    assert_eq!(
+        quote_json(world.reply(id)),
+        r#"{"type":"legacy","gasPrice":"50000125","effectiveGasPrice":"50000125","source":"myotis","verified":true}"#
+    );
 }

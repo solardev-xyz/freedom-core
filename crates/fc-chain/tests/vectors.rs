@@ -8,8 +8,8 @@
 use fc_chain::{
     ANT_EXCLUDE_SOURCES, ANT_INCLUDE_SOURCES, ANT_LOG_SCAN_SHRINK_NEEDLES, AnswerError,
     AttemptClass, BLOCKSCOUT, BLOCKSCOUT_MAX_PAGES, BlockscoutError, ERC20_TRANSFER_TOPIC,
-    ErrorRank, JSON_PARSE_FAILURE, JsString, LOG_INDEX_ABORT_COOLDOWN_MS, LOG_INDEX_CHAIN_ID,
-    LOG_INDEX_DISAGREEMENT_COOLDOWN_MS, LOG_INDEX_PAIR_MALFORMED_COOLDOWN_MS,
+    ErrorRank, FeeBlock, FeeOutcome, JSON_PARSE_FAILURE, JsString, LOG_INDEX_ABORT_COOLDOWN_MS,
+    LOG_INDEX_CHAIN_ID, LOG_INDEX_DISAGREEMENT_COOLDOWN_MS, LOG_INDEX_PAIR_MALFORMED_COOLDOWN_MS,
     LOG_INDEX_TAIL_BLOCKS, LOG_INDEX_TOKEN, LOG_RANGE_CAP_TTL_MS, LOG_RANGE_REFUSAL_CODE,
     LOG_SCAN_COOLDOWN_MS, LOG_SCAN_QUORUM_ROUNDS, LOG_SCAN_QUORUM_TIMEOUT_MS,
     LOG_TRUNCATION_MIN_SPAN, LOG_TRUNCATION_TAIL_BLOCKS, LogIndexFilter, MAX_COOLDOWN_MS,
@@ -18,13 +18,13 @@ use fc_chain::{
     Party, RATE_LIMIT_COOLDOWN_MS, READ_METHODS, ReceivedError, RefusalReason, SINGLE_NODE_METHODS,
     ScanStep, SourceFailure, StableDigest, TransferScan, TxHash, agreed_rpc_logs,
     ant_shrinks_log_scan_on, blockscout_transfer, broadcast_failure_text, canonical_log,
-    classify_broadcast_answer, combine_fee_quotes, cooldown_from, decode_answer, fee_quote,
-    fee_quote_failure_text, fee_quote_values, is_js_whitespace, is_read_method, log_index_filter,
-    log_query_span, log_range_refusal_text, log_scan_range_cap, logs_agree, myotis_answer,
-    myotis_operation, myotis_trust, no_source_left_text, normalize_params, rank_log_scan_error,
-    request_failure_text, rpc_transfer, rpc_transfer_log_well_formed, safe_error_message,
-    source_order, source_serves_method, stable_digest, stable_value, transaction_hash,
-    transfers_json, unsupported_read_method_text,
+    classify_broadcast_answer, combine_fee_quotes, combine_last_resorts, cooldown_from,
+    decode_answer, fee_quote, fee_quote_failure_text, fee_quote_values, is_js_whitespace,
+    is_read_method, log_index_filter, log_query_span, log_range_refusal_text, log_scan_range_cap,
+    logs_agree, myotis_answer, myotis_operation, myotis_trust, no_source_left_text,
+    normalize_params, rank_log_scan_error, request_failure_text, rpc_transfer,
+    rpc_transfer_log_well_formed, safe_error_message, source_order, source_serves_method,
+    stable_digest, stable_value, transaction_hash, transfers_json, unsupported_read_method_text,
 };
 use fc_json::index::{Index, IndexError, KeyOrder};
 use serde_json::Value as Json;
@@ -256,6 +256,66 @@ fn answers() {
     assert!(cases.len() > 90);
 }
 
+/// A case's block, as `getBlock` gave it: its result's JSON text, or a
+/// failed read.
+fn block_of(case: &Json) -> Option<FeeBlock<'_>> {
+    let block = case.get("block")?;
+    Some(if block.get("fails").is_some() {
+        FeeBlock::Failed
+    } else {
+        FeeBlock::Result(block["json"].as_str())
+    })
+}
+
+/// The codec's outcome, against the reference's: its quote, or the last
+/// resort its failed block left, or its error. `block_read` says whether the
+/// reference read the block.
+fn check_fee_outcome(name: &str, source: &str, case: &Json, js: &Json) {
+    let gas = opt_str(case, "gas_price");
+    let priority = opt_str(case, "priority");
+    let block = block_of(case);
+    // The codec asks for a block exactly when the reference read one.
+    let asked = matches!(
+        fee_quote(source, gas, priority, None),
+        FeeOutcome::NeedsBlock
+    );
+    assert_eq!(asked, block.is_some(), "{name}: block read");
+    match fee_quote(source, gas, priority, block) {
+        FeeOutcome::Quote(quote) => {
+            assert_eq!(
+                Some(quote.to_json().as_str()),
+                opt_str(js, "quote_json"),
+                "{name}"
+            );
+            assert_eq!(quote.json_len(), quote.to_json().len(), "{name}");
+        }
+        FeeOutcome::LastResort(last) => {
+            assert_eq!(
+                Some(last.quote(source).to_json().as_str()),
+                opt_str(js, "last_resort_json"),
+                "{name}"
+            );
+            // A block failure throws SourceUnavailableError, whose text the
+            // core never builds: it never reaches a reply.
+            assert_eq!(
+                str_of(&js["error"], "name"),
+                "SourceUnavailableError",
+                "{name}"
+            );
+        }
+        FeeOutcome::Error(error) => {
+            assert_eq!(error.name, str_of(&js["error"], "name"), "{name}");
+            assert_eq!(
+                error.message.to_json(),
+                str_of(&js["error"], "message_json"),
+                "{name}"
+            );
+            assert!(js.get("last_resort_json").is_none(), "{name}");
+        }
+        FeeOutcome::NeedsBlock => panic!("{name}: a block was given"),
+    }
+}
+
 #[test]
 fn fee_quotes() {
     let vectors = vectors();
@@ -263,71 +323,81 @@ fn fee_quotes() {
     for case in cases {
         let name = id(case);
         let source = str_of(case, "source");
-        let quote = fee_quote(
-            source,
-            opt_str(case, "gas_price"),
-            opt_str(case, "priority"),
-        );
         let js = &case["js"];
         match deviation(case) {
             Some("bigint-width") => {
+                // The reference quotes it; the core refuses the gas price,
+                // or the block's base fee (its last resort).
                 assert!(js.get("quote_json").is_some(), "{name}");
-                let error = quote.unwrap_err();
-                assert_eq!(error.name, "Error");
-                assert_eq!(
-                    error.message.to_string_lossy(),
-                    format!("{source} returned a gas price wider than {MAX_DECIMAL_BITS} bits")
-                );
-            }
-            None => match opt_str(js, "quote_json") {
-                Some(expected) => assert_eq!(quote.unwrap().to_json(), expected, "{name}"),
-                None => {
-                    let error = quote.unwrap_err();
-                    assert_eq!(error.name, str_of(&js["error"], "name"), "{name}");
-                    assert_eq!(
-                        error.message.to_json(),
-                        str_of(&js["error"], "message_json"),
-                        "{name}"
-                    );
+                match fee_quote(
+                    source,
+                    opt_str(case, "gas_price"),
+                    opt_str(case, "priority"),
+                    block_of(case),
+                ) {
+                    FeeOutcome::Error(error) => {
+                        assert_eq!(error.name, "Error");
+                        assert_eq!(
+                            error.message.to_string_lossy(),
+                            format!(
+                                "{source} returned a gas price wider than {MAX_DECIMAL_BITS} bits"
+                            )
+                        );
+                    }
+                    FeeOutcome::LastResort(_) => assert!(case.get("block").is_some(), "{name}"),
+                    other => panic!("{name}: {other:?}"),
                 }
-            },
+            }
+            None => check_fee_outcome(&name, source, case, js),
             Some(other) => panic!("unknown deviation {other}"),
         }
+        // A case main's #749 changes records the pinned router's outcome.
+        if case.get("patches").is_some() {
+            assert_eq!(
+                case["patches"],
+                serde_json::json!(["fee-headroom"]),
+                "{name}"
+            );
+            assert!(case.get("unpatched").is_some(), "{name}");
+        }
     }
-    assert!(cases.len() > 50);
+    assert!(cases.len() > 80);
 }
 
-/// B's combination of Direct's quotes (deviation `fee-combination`): the
-/// design's own expected values, each endpoint's quote the reference's.
+/// B's combination of Direct's quotes (deviation `fee-combination`, with
+/// main's #749 headroom): the design's own expected values, each
+/// endpoint's quote the patched reference's.
 #[test]
 fn fee_combinations() {
     let vectors = vectors();
     let combinations = &vectors["fee_combinations"];
     assert_eq!(combinations["deviation"], "fee-combination");
+    assert_eq!(combinations["patches"], serde_json::json!(["fee-headroom"]));
     let cases = combinations["cases"].as_array().unwrap();
     for case in cases {
         let name = id(case);
-        let values: Vec<_> = case["endpoints"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|endpoint| {
-                let values = fee_quote_values(
-                    "direct",
-                    opt_str(endpoint, "gas_price"),
-                    opt_str(endpoint, "priority"),
-                )
-                .unwrap();
-                assert_eq!(
-                    values.quote("direct").to_json(),
-                    str_of(&endpoint["js"], "quote_json"),
-                    "{name}"
-                );
-                values
-            })
-            .collect();
+        let mut values = Vec::new();
+        let mut last_resorts = Vec::new();
+        for endpoint in case["endpoints"].as_array().unwrap() {
+            check_fee_outcome(&name, "direct", endpoint, &endpoint["js"]);
+            match fee_quote_values(
+                "direct",
+                opt_str(endpoint, "gas_price"),
+                opt_str(endpoint, "priority"),
+                block_of(endpoint),
+            ) {
+                FeeOutcome::Quote(quote) => values.push(quote),
+                FeeOutcome::LastResort(last) => last_resorts.push(last),
+                other => panic!("{name}: {other:?}"),
+            }
+        }
         let verified = case["eip1559_verified"].as_bool().unwrap();
-        let combined = combine_fee_quotes(&values, verified).unwrap();
+        let combined = if case["last_resort"] == true {
+            assert!(values.is_empty(), "{name}");
+            combine_last_resorts(&last_resorts).unwrap()
+        } else {
+            combine_fee_quotes(&values, verified).unwrap()
+        };
         assert_eq!(
             combined.to_json(),
             str_of(&case["design"], "quote_json"),
@@ -335,7 +405,7 @@ fn fee_combinations() {
         );
         assert_eq!(combined.json_len(), combined.to_json().len(), "{name}");
     }
-    assert!(cases.len() >= 20);
+    assert!(cases.len() >= 24);
 }
 
 #[test]

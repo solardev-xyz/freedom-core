@@ -6,10 +6,11 @@
 //! - An RPC answer as `requestRpcUrl` reads it: [`decode_answer`].
 //! - Agreement between answers, as SHA-256 of `stableValue`:
 //!   [`stable_digest`].
-//! - `feeQuote`: [`fee_quote`], and [`fee_quote_reserving`] for a caller that
-//!   reserves its allocations first; B's combination of Direct's quotes,
-//!   the design's own (deviation `fee-combination`):
-//!   [`combine_fee_quotes`] of [`fee_quote_values`].
+//! - `feeQuote` with main's #749 headroom: [`fee_quote`], given the
+//!   source's block when its hint can't price a quote; B's combination of
+//!   Direct's quotes, the design's own (deviation `fee-combination`):
+//!   [`combine_fee_quotes`] of [`fee_quote_values`], and
+//!   [`combine_last_resorts`] when every answer failed at its block.
 //! - `safeErrorMessage` and the router's failure texts:
 //!   [`safe_error_message`], [`request_failure_text`],
 //!   [`no_source_left_text`], [`unsupported_read_method_text`].
@@ -71,7 +72,8 @@ pub use blockscout::{
 };
 pub use broadcast::{AttemptClass, RefusalReason, broadcast_refusal, classify_broadcast_answer};
 pub use fee::{
-    FeeQuote, QuoteValues, combine_fee_quotes, fee_quote, fee_quote_reserving, fee_quote_values,
+    FeeBlock, FeeOutcome, FeeQuote, LastResort, MIN_PRIORITY_FEE_WEI, QuoteValues,
+    combine_fee_quotes, combine_last_resorts, fee_quote, fee_quote_values,
     fee_quote_values_reserving, lowest_priority,
 };
 pub use js::{JsError, JsString, is_js_whitespace};

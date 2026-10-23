@@ -225,6 +225,16 @@ const BLOCKSCOUT_PAGES = `
 // the core's fixed texts already do: deviation adapter-error-text), and the
 // backoff's log line, which the stubbed logger drops. Its state table is
 // read through `__colibriFaults`.
+//
+// `fee-headroom` is main's #749 (94b0af4e, from 3d9e7b33): every type-2
+// tip floored at 0.05 gwei and signed at 2·base + tip; a priority hint that
+// is missing or can't form a type-2 quote priced from the source's own
+// latest block (Myotis's through the read path, named as baseFeeSource);
+// legacy only for a block without a base fee, at 125% + the floor; and a
+// source whose block read fails leaves that legacy quote as the walk's last
+// resort. Its edits are main's feeQuote with its helpers,
+// requestDirectFeeQuote and getFeeQuote, whole, but for #749's two new
+// log lines, which the stubbed logger drops.
 const PATCHES = {
   'tx-lookups': {
     edits: [
@@ -363,6 +373,339 @@ function txLookupNeedsProof(method, result) {
 }
 
 module.exports.__colibriFaults = () => [...colibriFaults].map(([key, value]) => [key, { faults: [...value.faults], strikes: value.strikes, coolUntil: value.coolUntil }]);`],
+  },  'fee-headroom': {
+    edits: [
+      [`function feeQuote(source, gasPriceValue, priorityValue = null) {
+  const gasPrice = BigInt(gasPriceValue);
+  if (gasPrice <= 0n) throw new Error(\`\${source} returned a non-positive gas price\`);
+
+  const metadata = {
+    source,
+    verified: source === 'myotis' || source === 'colibri' || source === 'quorum',
+  };
+  if (priorityValue == null) {
+    return {
+      type: 'legacy',
+      gasPrice: gasPrice.toString(),
+      effectiveGasPrice: gasPrice.toString(),
+      ...metadata,
+    };
+  }
+
+  const priority = BigInt(priorityValue);
+  // A provider can implement both methods yet return fee hints that cannot
+  // form a valid type-2 transaction. Keep the usable gas price from that same
+  // source and fall back to a legacy transaction instead of combining it with
+  // another provider's priority fee.
+  if (priority < 0n || priority > gasPrice) {
+    log.verbose(
+      \`[chain-data] \${source} returned an inconsistent fee quote \` +
+        \`(gasPrice=\${gasPrice}, priorityFee=\${priority}); using legacy fees\`
+    );
+    return {
+      type: 'legacy',
+      gasPrice: gasPrice.toString(),
+      effectiveGasPrice: gasPrice.toString(),
+      ...metadata,
+    };
+  }
+
+  const baseFee = gasPrice - priority;
+  return {
+    type: 'eip1559',
+    baseFee: baseFee.toString(),
+    maxPriorityFeePerGas: priority.toString(),
+    // The base fee can rise 12.5% per block between quoting and inclusion, so
+    // the signed cap needs headroom the quoted gas price does not have. Two
+    // full blocks of growth is the market preset the wallet has always used.
+    maxFeePerGas: (baseFee * 2n + priority).toString(),
+    effectiveGasPrice: gasPrice.toString(),
+    ...metadata,
+  };
+}
+`,
+        `// The smallest tip a quote signs with. A tip of a few thousand wei is no
+// reason for a builder to include a transaction, and a quote whose fee cap
+// sits on the base fee is dropped as soon as the base fee rises (#749).
+// 0.05 gwei is far below what a congested mainnet asks and still a real tip.
+const MIN_PRIORITY_FEE_WEI = 50_000_000n;
+// A legacy gasPrice is paid in full, so it gets a smaller margin than the 2x
+// base-fee cap of a type-2 quote: 25% covers two blocks of maximum EIP-1559
+// base-fee growth (1.125^2), or a market move on a chain without one.
+const LEGACY_GAS_PRICE_HEADROOM_PERCENT = 125n;
+
+function maxBigInt(a, b) {
+  return a > b ? a : b;
+}
+
+// The block's base fee, or null when the block has none (a chain without
+// EIP-1559). Anything else is an invalid answer, not a missing feature.
+function blockBaseFee(block) {
+  if (!block || typeof block !== 'object') {
+    throw new SourceUnavailableError('latest block is missing');
+  }
+  if (block.baseFeePerGas == null) return null;
+  const baseFee = BigInt(block.baseFeePerGas);
+  if (baseFee < 0n) throw new SourceUnavailableError('latest block has a negative base fee');
+  return baseFee;
+}
+
+function eip1559Quote(baseFee, priority, metadata) {
+  const tip = maxBigInt(priority, MIN_PRIORITY_FEE_WEI);
+  return {
+    type: 'eip1559',
+    baseFee: baseFee.toString(),
+    maxPriorityFeePerGas: tip.toString(),
+    // The base fee can rise 12.5% per block between quoting and inclusion, so
+    // the signed cap needs headroom the quoted gas price does not have. Two
+    // full blocks of growth is the market preset the wallet has always used.
+    maxFeePerGas: (baseFee * 2n + tip).toString(),
+    effectiveGasPrice: (baseFee + tip).toString(),
+    ...metadata,
+  };
+}
+
+function legacyQuote(gasPrice, metadata) {
+  const signed = gasPrice * LEGACY_GAS_PRICE_HEADROOM_PERCENT / 100n + MIN_PRIORITY_FEE_WEI;
+  return {
+    type: 'legacy',
+    gasPrice: signed.toString(),
+    // A legacy transaction pays its whole gasPrice, headroom included.
+    effectiveGasPrice: signed.toString(),
+    ...metadata,
+  };
+}
+
+// Builds a fee quote from one source's answers. \`getBlock\` is asked for that
+// source's latest block only when the priority-fee hint is missing or cannot
+// form a valid type-2 transaction: the block's base fee then prices a type-2
+// quote itself, and only a block without one (a chain without EIP-1559) makes
+// the quote legacy. A legacy quote always carries headroom; signing the raw
+// eth_gasPrice put the fee cap on the base fee, and the transaction was
+// dropped the moment the base fee rose (#749).
+async function feeQuote(source, gasPriceValue, priorityValue = null, getBlock = null) {
+  const gasPrice = BigInt(gasPriceValue);
+  if (gasPrice <= 0n) throw new Error(\`\${source} returned a non-positive gas price\`);
+
+  const metadata = {
+    source,
+    verified: source === 'myotis' || source === 'colibri' || source === 'quorum',
+  };
+
+  const priority = priorityValue == null ? null : BigInt(priorityValue);
+  // A provider can implement both methods yet return fee hints that cannot
+  // form a valid type-2 transaction (Colibri's verified priority fee is
+  // 1 gwei while mainnet's gas price is a fraction of that). Never combine
+  // the hint with another provider's gas price. The block that prices an
+  // unusable hint comes from \`getBlock\`: the same source for Colibri and
+  // Direct, but the router's other sources for Myotis, which serves no
+  // blocks (see getFeeQuote).
+  if (priority != null && priority >= 0n && priority <= gasPrice) {
+    return eip1559Quote(gasPrice - priority, priority, metadata);
+  }
+  if (!getBlock) throw new SourceUnavailableError(\`\${source} has no priority fee and no block to price from\`);
+
+  let baseFee;
+  try {
+    baseFee = blockBaseFee(await getBlock());
+  } catch (err) {
+    // Whether the chain has a base fee is unknown, so this is not a quote to
+    // prefer over another source's. The caller keeps it as the last resort.
+    const fallback = new SourceUnavailableError(
+      \`\${source} has no usable priority fee and its latest block failed: \${err.message}\`
+    );
+    fallback.legacyFallback = legacyQuote(gasPrice, metadata);
+    throw fallback;
+  }
+  if (baseFee == null) return legacyQuote(gasPrice, metadata);
+  // The source's own gas price minus the base fee is its tip suggestion.
+  const suggested = gasPrice > baseFee ? gasPrice - baseFee : 0n;
+  return eip1559Quote(baseFee, suggested, metadata);
+}
+`],
+      [`async function requestDirectFeeQuote(chainId) {
+  const network = registry.getNetwork(chainId) || {};
+  const timeoutMs = Math.max(500, Number(network.quorum?.timeoutMs) || 5000);
+  const urls = registry.getEndpoints(chainId, 'rpc');
+  if (!urls.length) throw new SourceUnavailableError('No RPC endpoint configured');
+  let lastError;
+  for (const url of urls) {
+    try {
+      const gasPrice = await requestRpcUrl(url, 'eth_gasPrice', [], timeoutMs);
+      let priority = null;
+      try {
+        // Deliberately use the same URL as eth_gasPrice. Falling through the
+        // endpoint list independently is what produced mixed, invalid quotes.
+        priority = await requestRpcUrl(url, 'eth_maxPriorityFeePerGas', [], timeoutMs);
+      } catch {
+        // Legacy transactions remain valid when this endpoint does not expose
+        // an EIP-1559 priority-fee hint.
+      }
+      return feeQuote('direct', gasPrice, priority);
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError || new SourceUnavailableError('All RPC endpoints failed');
+}
+`,
+        `async function requestDirectFeeQuote(chainId) {
+  const network = registry.getNetwork(chainId) || {};
+  const timeoutMs = Math.max(500, Number(network.quorum?.timeoutMs) || 5000);
+  const urls = registry.getEndpoints(chainId, 'rpc');
+  if (!urls.length) throw new SourceUnavailableError('No RPC endpoint configured');
+  let lastError;
+  let legacyFallback = null;
+  for (const url of urls) {
+    try {
+      const gasPrice = await requestRpcUrl(url, 'eth_gasPrice', [], timeoutMs);
+      let priority = null;
+      try {
+        // Deliberately use the same URL as eth_gasPrice. Falling through the
+        // endpoint list independently is what produced mixed, invalid quotes.
+        priority = await requestRpcUrl(url, 'eth_maxPriorityFeePerGas', [], timeoutMs);
+      } catch {
+        // Legacy transactions remain valid when this endpoint does not expose
+        // an EIP-1559 priority-fee hint.
+      }
+      return await feeQuote('direct', gasPrice, priority, () =>
+        requestRpcUrl(url, 'eth_getBlockByNumber', ['latest', false], timeoutMs)
+      );
+    } catch (err) {
+      lastError = err;
+      legacyFallback ||= err.legacyFallback || null;
+    }
+  }
+  if (legacyFallback && lastError) lastError.legacyFallback ||= legacyFallback;
+  throw lastError || new SourceUnavailableError('All RPC endpoints failed');
+}
+`],
+      [`async function getFeeQuote(chainId) {
+  const network = registry.getNetwork(chainId);
+  if (!network) throw new Error(\`Unsupported chain ID: \${chainId}\`);
+  const order = network.access?.readOrder ||
+    (myotis.NETWORKS?.has(Number(chainId)) === true
+      ? DEFAULT_READ_ORDER
+      : DEFAULT_NON_MYOTIS_READ_ORDER);
+  const failures = [];
+  let lastRpcError = null;
+
+  for (const source of order) {
+    try {
+      if (source === 'myotis') {
+        if (!myotis.isReady(chainId)) throw new SourceUnavailableError('Myotis is not ready');
+        const result = await myotis.feeEstimate(chainId);
+        const gasPrice = nativeResult(result, 'gasPriceWei', 'gasPrice');
+        const priority = optionalNativeResult(
+          result,
+          'maxPriorityFeePerGasWei',
+          'maxPriorityFeePerGas'
+        );
+        return feeQuote(source, gasPrice, priority);
+      }
+
+      if (source === 'direct') return await requestDirectFeeQuote(chainId);
+
+      const gasPrice = await requestSource(source, chainId, 'eth_gasPrice', []);
+      let priority = null;
+      try {
+        priority = await requestSource(source, chainId, 'eth_maxPriorityFeePerGas', []);
+      } catch {
+        // Preserve source coherence by using this source's gas price as a
+        // legacy quote rather than asking the next source for half a quote.
+      }
+      return feeQuote(source, gasPrice, priority);
+    } catch (err) {
+      failures.push(\`\${source}: \${err.message}\`);
+      // Keep a real node error (with its JSON-RPC code/data) so the caller
+      // sees it rather than a stringified aggregate — same as request().
+      if (!(err instanceof SourceUnavailableError)) lastRpcError = err;
+      log.verbose(\`[chain-data] \${chainId} fee quote via \${source} failed: \${err.message}\`);
+    }
+  }
+
+  if (lastRpcError) throw lastRpcError;
+  throw new Error(\`All chain sources failed for fee quote (\${failures.join('; ')})\`);
+}
+`,
+        `async function getFeeQuote(chainId) {
+  const network = registry.getNetwork(chainId);
+  if (!network) throw new Error(\`Unsupported chain ID: \${chainId}\`);
+  const order = network.access?.readOrder ||
+    (myotis.NETWORKS?.has(Number(chainId)) === true
+      ? DEFAULT_READ_ORDER
+      : DEFAULT_NON_MYOTIS_READ_ORDER);
+  const failures = [];
+  let lastRpcError = null;
+  let legacyFallback = null;
+
+  for (const source of order) {
+    try {
+      if (source === 'myotis') {
+        if (!myotis.isReady(chainId)) throw new SourceUnavailableError('Myotis is not ready');
+        const result = await myotis.feeEstimate(chainId);
+        const gasPrice = nativeResult(result, 'gasPriceWei', 'gasPrice');
+        const priority = optionalNativeResult(
+          result,
+          'maxPriorityFeePerGasWei',
+          'maxPriorityFeePerGas'
+        );
+        // Myotis serves no blocks, so this is the one source whose quote can
+        // mix providers: Myotis's gas price with a base fee read through the
+        // router's other sources (Colibri, quorum, Direct). That is safe to
+        // sign: maxFeePerGas = 2 * baseFee + tip covers the base fee doubling,
+        // so a block a little behind or ahead of Myotis's head still prices a
+        // transaction that can be included; only the tip derives from Myotis.
+        // A complete Myotis quote (priority within gas price) uses no block.
+        // When one is used, the quote names the source that read it and is
+        // only as verified as that read.
+        let blockRead = null;
+        const quote = await feeQuote(source, gasPrice, priority, async () => {
+          blockRead = await request(chainId, 'eth_getBlockByNumber', ['latest', false]);
+          return blockRead.result;
+        });
+        if (!blockRead) return quote;
+        return {
+          ...quote,
+          baseFeeSource: blockRead.source,
+          verified: quote.verified && blockRead.verified === true,
+        };
+      }
+
+      if (source === 'direct') return await requestDirectFeeQuote(chainId);
+
+      const gasPrice = await requestSource(source, chainId, 'eth_gasPrice', []);
+      let priority = null;
+      try {
+        priority = await requestSource(source, chainId, 'eth_maxPriorityFeePerGas', []);
+      } catch {
+        // Preserve source coherence: this source's own latest block prices
+        // the quote rather than the next source's half of one.
+      }
+      return await feeQuote(source, gasPrice, priority, () =>
+        requestSource(source, chainId, 'eth_getBlockByNumber', ['latest', false])
+      );
+    } catch (err) {
+      // A source whose block could not be read leaves a headroomed legacy
+      // quote; it is used only if no source can price a type-2 one.
+      legacyFallback ||= err.legacyFallback || null;
+      failures.push(\`\${source}: \${err.message}\`);
+      // Keep a real node error (with its JSON-RPC code/data) so the caller
+      // sees it rather than a stringified aggregate — same as request().
+      if (!(err instanceof SourceUnavailableError)) lastRpcError = err;
+      log.verbose(\`[chain-data] \${chainId} fee quote via \${source} failed: \${err.message}\`);
+    }
+  }
+
+  if (legacyFallback) {
+    return legacyFallback;
+  }
+  if (lastRpcError) throw lastRpcError;
+  throw new Error(\`All chain sources failed for fee quote (\${failures.join('; ')})\`);
+}
+`],
+    ],
+    append: [],
   },
 };
 
@@ -1305,8 +1648,12 @@ function routerScenarios(tx) {
       send(100, tx.gnosis.raw)),
     scenario('router-fee-quote-myotis', T(470), routerWorld({ myotis: myotisOn(100, { fee: { payload: { gasPriceWei: '100', maxPriorityFeePerGasWei: '2' } } }) }),
       fee(100)),
-    scenario('router-fee-quote-inconsistent', T(491), routerWorld({ myotis: myotisOn(100, { fee: { payload: { gasPriceWei: '3727', maxPriorityFeePerGasWei: '1000000000' } } }) }),
-      fee(100)),
+    scenario('router-fee-quote-inconsistent', T(491), routerWorld({
+      myotis: myotisOn(100, { fee: { payload: { gasPriceWei: '3727', maxPriorityFeePerGasWei: '1000000000' } } }),
+      // With main's #749 (patched, FEE_HEADROOM_PATCHED), the hint over the
+      // gas price is priced from a block through the read path: Colibri's.
+      colibri: ok({ number: '0x10', baseFeePerGas: '0xe00' }),
+    }), fee(100)),
     scenario('router-fee-quote-direct-same-endpoint', T(506), routerWorld({
       network: { access: { readOrder: ['direct'] }, quorum: { timeoutMs: 1000 } },
       endpoints: [url('primary'), url('secondary')],
@@ -2090,16 +2437,21 @@ function boundaryScenarios(ethers, tx) {
       ...w(1, net(['quorum', 'direct']), ABC),
       rpc: { [A]: revert, [B]: revert, [C]: ok('0x01', 20) },
     }, req(1, 'eth_call', [{ to: '0xabc', data: '0x12345678' }, 'latest'], { include_trust: true })),
-    // Fee quotes and their downgrades.
+    // Fee quotes and their downgrades. With main's #749 (patched,
+    // FEE_HEADROOM_PATCHED), an unusable hint is priced from a block read
+    // through the read path, here Direct's: one with a base fee, one
+    // without, and a failed read, whose last resort wins over Direct's
+    // node error.
     ...[
       ['priority-equals-gas-price', { gasPriceWei: '100', maxPriorityFeePerGasWei: '100' }],
       ['priority-zero', { gasPriceWei: '100', maxPriorityFeePerGasWei: '0' }],
-      ['priority-over-gas-price', { gasPriceWei: '100', maxPriorityFeePerGasWei: '101' }],
-      ['priority-negative', { gasPriceWei: '100', maxPriorityFeePerGasWei: '-1' }],
-      ['no-priority', { gasPrice: '100' }],
-    ].map(([label, payload]) => scenario(`boundary-fee-myotis-${label}`, `${D_}: Fee quotes`, {
+      ['priority-over-gas-price', { gasPriceWei: '100', maxPriorityFeePerGasWei: '101' }, ok({ number: '0x10', baseFeePerGas: '0x50' })],
+      ['priority-negative', { gasPriceWei: '100', maxPriorityFeePerGasWei: '-1' }, ok({ number: '0x10' })],
+      ['no-priority', { gasPrice: '100' }, { rules: [{ when: { method: 'eth_getBlockByNumber' }, then: rpcError(-32601, 'block unavailable') }], else: rpcError(-32000, 'down') }],
+    ].map(([label, payload, block]) => scenario(`boundary-fee-myotis-${label}`, `${D_}: Fee quotes`, {
       ...w(1, net(['myotis', 'direct']), [RPC]),
       myotis: myotisOn(1, { fee: { payload } }),
+      ...(block ? { rpc: { [RPC]: block } } : {}),
     }, fee(1))),
     scenario('boundary-fee-myotis-non-positive-gas-price', `${D_}: Fee quotes`, {
       ...w(1, net(['myotis', 'colibri', 'direct']), [RPC]),
@@ -2635,9 +2987,148 @@ function txLookupScenarios() {
   ];
 }
 
+/**
+ * Main's #749 (freedom-browser 94b0af4e): chain-data-router.test.js's 'fee
+ * quotes', run on the pinned router with the `fee-headroom` patch
+ * (PATCHES). Each one's world is the test's.
+ */
+function feeHeadroomScenarios() {
+  const M = (line) => `chain-data-router.test.js@94b0af4e:${line}`;
+  const GWEI = 1_000_000_000n;
+  const MIN_TIP = 50_000_000n;
+  const hex = (value) => `0x${BigInt(value).toString(16)}`;
+  const only = (source) => ({ access: { readOrder: [source] }, quorum: { k: 3, m: 2, timeoutMs: 1000 } });
+  const order = (readOrder) => ({ access: { readOrder }, quorum: { k: 3, m: 2, timeoutMs: 1000 } });
+  const byMethod = (answers, otherwise) => ({
+    rules: Object.entries(answers).map(([method, then]) => ({ when: { method }, then })),
+    ...(otherwise === undefined ? {} : { else: otherwise }),
+  });
+  // The test's Colibri and fetch mocks throw a plain Error, or answer a
+  // JSON-RPC error with code -32601.
+  const thrown = (message, extra = {}) => ({ error: { message, ...extra } });
+  const missing = (message) => rpcError(-32601, message);
+  const NO_HINT = 'the method eth_maxPriorityFeePerGas does not exist';
+  const primary = url('primary');
+  const secondary = url('secondary');
+  const patched = (s) => ({ ...s, patches: ['fee-headroom'] });
+  return [
+    // A complete Myotis quote whose tip is above the floor: the pinned
+    // router already quotes it as main does, so it is kept unpatched.
+    scenario('fee-headroom-myotis-complete', M(517), routerWorld({
+      myotis: myotisOn(100, { fee: { payload: { gasPriceWei: (20n * GWEI).toString(), maxPriorityFeePerGasWei: (2n * GWEI).toString() } } }),
+    }), fee(100)),
+    patched(scenario('fee-headroom-dust-tip', M(538), routerWorld({
+      myotis: myotisOn(100, { fee: { payload: { gasPriceWei: '137168303', maxPriorityFeePerGasWei: '3901' } } }),
+    }), fee(100))),
+    patched(scenario('fee-headroom-colibri-inconsistent', M(558), routerWorld({
+      network: only('colibri'),
+      colibri: byMethod({
+        eth_gasPrice: ok(hex(120_664_785n)),
+        eth_maxPriorityFeePerGas: ok(hex(GWEI)),
+        eth_getBlockByNumber: ok({ number: '0x1903a1b', baseFeePerGas: hex(125_664_220n) }),
+      }),
+    }), fee(1))),
+    patched(scenario('fee-headroom-no-hint-method', M(588), routerWorld({
+      network: only('colibri'),
+      colibri: byMethod({
+        eth_gasPrice: ok(hex(12n * GWEI)),
+        eth_maxPriorityFeePerGas: thrown('Method not supported', { code: 4200 }),
+        eth_getBlockByNumber: ok({ baseFeePerGas: hex(10n * GWEI) }),
+      }),
+    }), fee(1))),
+    patched(scenario('fee-headroom-myotis-read-path', M(611), routerWorld({
+      network: order(['myotis', 'colibri']),
+      myotis: myotisOn(1, { fee: { payload: { gasPriceWei: (3n * GWEI).toString() } } }),
+      colibri: byMethod({ eth_getBlockByNumber: ok({ baseFeePerGas: hex(2n * GWEI) }) }),
+    }), fee(1))),
+    patched(scenario('fee-headroom-myotis-unverified-block', M(635), routerWorld({
+      network: order(['myotis', 'direct']),
+      endpoints: [primary],
+      myotis: myotisOn(1, { fee: { payload: { gasPriceWei: (3n * GWEI).toString() } } }),
+      rpc: { [primary]: byMethod({ eth_getBlockByNumber: ok({ baseFeePerGas: hex(2n * GWEI) }) }) },
+    }), fee(1))),
+    // A hint at the floor itself: the pinned router already quotes it as
+    // main does, so it is kept unpatched.
+    scenario('fee-headroom-direct-same-endpoint', M(652), routerWorld({
+      network: only('direct'),
+      endpoints: [primary, secondary],
+      rpc: Object.fromEntries([primary, secondary].map((endpoint) => [endpoint, byMethod({
+        eth_gasPrice: ok(hex(3773n * 100_000n)),
+        eth_maxPriorityFeePerGas: ok(hex(MIN_TIP)),
+      })])),
+    }), fee(100)),
+    patched(scenario('fee-headroom-direct-block', M(674), routerWorld({
+      network: only('direct'),
+      endpoints: [primary, secondary],
+      rpc: Object.fromEntries([primary, secondary].map((endpoint) => [endpoint, byMethod({
+        eth_gasPrice: ok(hex(5n * GWEI)),
+        eth_maxPriorityFeePerGas: missing(NO_HINT),
+        eth_getBlockByNumber: ok({ baseFeePerGas: hex(4n * GWEI) }),
+      })])),
+    }), fee(1))),
+    patched(scenario('fee-headroom-legacy-chain', M(697), routerWorld({
+      network: only('direct'),
+      rpc: { [RPC]: byMethod({
+        eth_gasPrice: ok(hex(8n * GWEI)),
+        eth_maxPriorityFeePerGas: missing(NO_HINT),
+        // pre-London: no baseFeePerGas
+        eth_getBlockByNumber: ok({ number: '0x10' }),
+      }) },
+    }), fee(1))),
+    patched(scenario('fee-headroom-later-type-2-wins', M(715), routerWorld({
+      network: order(['colibri', 'direct']),
+      colibri: byMethod({
+        eth_getBlockByNumber: thrown('proof failed'),
+        eth_gasPrice: ok(hex(GWEI)),
+        eth_maxPriorityFeePerGas: ok(hex(2n * GWEI)),
+      }),
+      rpc: { [RPC]: byMethod({ eth_gasPrice: ok(hex(3n * GWEI)), eth_maxPriorityFeePerGas: ok(hex(GWEI)) }) },
+    }), fee(1))),
+    patched(scenario('fee-headroom-last-resort', M(736), routerWorld({
+      network: only('colibri'),
+      colibri: byMethod({
+        eth_getBlockByNumber: thrown('proof failed'),
+        eth_maxPriorityFeePerGas: thrown('proof failed'),
+      }, ok(hex(4n * GWEI))),
+    }), fee(1))),
+    patched(scenario('fee-headroom-direct-last-resort', M(753), routerWorld({
+      network: only('direct'),
+      endpoints: [primary, secondary],
+      rpc: {
+        [primary]: byMethod({
+          eth_gasPrice: ok(hex(4n * GWEI)),
+          eth_maxPriorityFeePerGas: missing(NO_HINT),
+          eth_getBlockByNumber: missing('block unavailable'),
+        }),
+        [secondary]: byMethod({ eth_gasPrice: missing('down') }),
+      },
+    }), fee(1))),
+  ];
+}
+
+// Main's #749 (`fee-headroom`): the fee-quote scenarios of the pinned
+// router it changes, run patched. The other two fee-quote scenarios
+// (boundary-fee-all-sources-unavailable and boundary-unsupported-requests)
+// come out the same and stay unpatched.
+const FEE_HEADROOM_PATCHED = [
+  'router-fee-quote-myotis',
+  'router-fee-quote-inconsistent',
+  'router-fee-quote-direct-same-endpoint',
+  'boundary-fee-myotis-priority-equals-gas-price',
+  'boundary-fee-myotis-priority-zero',
+  'boundary-fee-myotis-priority-over-gas-price',
+  'boundary-fee-myotis-priority-negative',
+  'boundary-fee-myotis-no-priority',
+  'boundary-fee-myotis-non-positive-gas-price',
+  'boundary-fee-quorum-priority-disagrees',
+  'boundary-fee-direct-priority-unparseable',
+  'boundary-fee-direct-gas-price-fails-first',
+  'boundary-quorum-singleton-not-verified',
+];
+
 function scenarioDefinitions(ethers, privateKey) {
   const tx = signedTransactions(ethers, privateKey);
-  const scenarios = [
+  const pinned = [
     ...routerScenarios(tx),
     ...cancellationScenarios(tx),
     ...antScanScenarios(),
@@ -2645,7 +3136,16 @@ function scenarioDefinitions(ethers, privateKey) {
     ...bridgeRouterScenarios(),
     ...blockscoutScenarios(),
     ...boundaryScenarios(ethers, tx),
+  ];
+  for (const id of FEE_HEADROOM_PATCHED) {
+    if (!pinned.some((s) => s.id === id)) throw new Error(`fee-headroom: no scenario ${id}`);
+  }
+  const scenarios = [
+    ...pinned.map((s) => (FEE_HEADROOM_PATCHED.includes(s.id)
+      ? { ...s, patches: [...(s.patches ?? []), 'fee-headroom'] }
+      : s)),
     ...txLookupScenarios(),
+    ...feeHeadroomScenarios(),
   ];
   const ids = new Set();
   for (const { id } of scenarios) {
@@ -2693,5 +3193,6 @@ async function buildChainReplay(checkout, ethers, privateKey, meta) {
 
 module.exports = {
   buildChainReplay, runScenario, scenarioDefinitions, loadFakeTimers, signedTransactions,
+  routerPatch, patchedSource,
   jsonText, jsonField, entriesOf, recordError, recordValue, textField, plain, repeatOf, EPOCH,
 };
