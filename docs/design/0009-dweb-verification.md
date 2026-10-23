@@ -10,7 +10,7 @@
   - `swarm/permission-manifests.js`, which reads manifests through the `bzz:` handler.
 - **Ant** v0.5.71 (`910452d`, freedom-hq/ant), the release freedom-browser pins on `integration/rust-core` (`485819a9`). `ac`, `ar` and `ag` below are the `src/` directories of `ant-crypto`, `ant-retrieval` and `ant-gateway`.
 - **Bee** at `a93fb7a7` (v2.8.2-rc1 and four commits), for the formats Ant reads and writes.
-- **freedom-ipfs** v0.4.6 (`ee6b95c`), the native node 0007 moves into `freedom-ipfsd`: `freedom-ipfs-core`, `freedom-ipfs-unixfs` and `freedom-ipfs-gateway` (`GatewayCore`).
+- **freedom-ipfs** v0.4.6 (`ee6b95c`), the native node 0007 moves into `freedom-ipfsd`: `freedom-ipfs-core`, `freedom-ipfs-unixfs` and `freedom-ipfs-gateway` (`GatewayCore`). The vectors record `GatewayCore` at `e7dcc6f`, the commit `freedom-ipfsd` pins: v0.4.6 with 0007's upstream changes, the native node Freedom ships.
 - **IPFS specifications,** as published on 2026-10-13: the Trustless Gateway, CAR v1, UnixFS and IPNS Record specifications.
 - **libp2p,** for RSA-keyed IPNS names: the peer-ID specification (libp2p/specs `peer-ids/peer-ids.md`, at `d2106f43`); go-libp2p v0.51.0 (`core/crypto/rsa_common.go` and `rsa_go.go`); and what freedom-ipfs v0.4.6 locks, `libp2p-identity` 0.2.13 (`src/rsa.rs`, `src/keypair.rs`, `src/peer_id.rs`) with ring 0.17.14.
 
@@ -452,7 +452,10 @@ The 2 MiB block limit bounds a block's bytes, not what decoding it allocates: a 
 
 For `ipfs://<cid><path>`, with `GatewayCore`'s rules:
 
-1. **The path:** segments decoded and checked as `GatewayCore` decodes and checks them (a `.` or `..` segment is a 400), then resolved from the root, one directory or HAMT at a time.
+1. **The path** is decoded once, then resolved from the root, one directory or HAMT at a time:
+   - it is split on `/` first, then each segment is percent-decoded exactly once, as Kubo and HTTP gateways decode it. Nothing is decoded twice;
+   - a segment that decodes to `.` or `..`, or to anything containing `/`, `\` or NUL, is a 400, with `GatewayCore`'s body for a refused path. So is a segment that isn't valid UTF-8 once decoded;
+   - **where `GatewayCore` differs** (deviation `ipfs-path-decoding`): `freedom-ipfsd` hands the plan's path, percent-encoded as an HTTP client sends it, to freedom-ipfs's native-request parser, which doesn't decode it. So on the native node a name with a space or a non-ASCII character isn't found, where the same name unencoded is. The vectors record both. Verified mode decodes, as above, until the parser decodes the same way; a pin bump of `freedom-ipfsd` then closes the deviation.
 2. **A missing name in a verified directory** is a proven 404. A gateway that follows boxo sends the CAR up to the parent and stops; the core sees the parent and the name's absence. A 404 status from the gateway, without the parent, is the gateway's word.
 3. **A directory:**
    - its `index.html`, when it has one, served as a file whose type comes from the name `index.html`;
@@ -743,7 +746,8 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 - **Format vectors** (`vectors/dweb-verify.json`), from the pinned nodes, not from the JavaScript reference: verification reads no user data, and the formats belong to Ant, Bee and IPFS.
   - **The generator:**
     - **Ant runs in process.** The generator builds Ant's gateway router as antd builds it, configured as Freedom configures Ant. The node-loop arms beneath it, which are private to `ant-p2p`, are ported from `behaviour.rs` at the pinned commit, over a memory chunk source holding the fixtures; a missing chunk is a miss the network corroborated;
-    - **for IPFS,** freedom-ipfs's `GatewayCore` runs over a memory store seeded the same way, and a pinned Kubo runs offline for the CARs and raw blocks a trustless gateway sends;
+    - **for IPFS,** Kubo v0.43.1, offline in a repository of its own, writes the fixtures (`ipfs add`, with the flags each case records) and serves the CARs and raw blocks a trustless gateway sends. freedom-ipfs's `GatewayCore`, at the commit `freedom-ipfsd` pins, answers over a memory provider holding the same blocks, each request through the native-request parser as `freedom-ipfsd` makes it;
+    - **IPNS records are the generator's own.** Kubo's `name publish` reads the wall clock, so the generator signs each record itself, with a key from a seed and a validity far from any day it runs (2099, or 2000 for the expired one). freedom-ipfs's verdict on each is recorded;
     - it lives in its own Cargo workspace (`vectors/dweb-verify`), which normal CI never builds. A path-filtered workflow regenerates the file and compares it byte for byte when the generator or the file changes;
     - it records every exchange, and the core's tests replay them with no node running;
     - **everything that varies is pinned:** the exact Kubo release and the other versions are in the file's `meta`; the clock is fixed, which sets IPNS validity and feed timestamps; and every random input (encryption keys and padding, obfuscation keys, IPNS keys) comes from a seed recorded with the case. The core's tests pass the same `now`.
@@ -761,14 +765,15 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 - **IPFS: two kinds of expectation, kept apart.**
   - **Native-generated:** recorded from Kubo, for the gateway's CARs and raw blocks, and from `GatewayCore`, for the answers, over the same blocks. The core must reproduce `GatewayCore`'s answers exactly. They cover:
     - files of 0, 1, 262,143, 262,144, 262,145 and 10 MiB, as CIDv0 with dag-pb leaves and CIDv1 with raw leaves, balanced and trickle;
-    - directories with and without `index.html`, a HAMT-sharded directory, Unicode names, an identity CID;
+    - directories with and without `index.html`, a HAMT-sharded directory, Unicode names, an identity CID; each name with a space or a non-ASCII character requested both percent-encoded and unencoded ([The IPFS walk](#the-ipfs-walk));
+    - a file whose leaves repeat, for Kubo's answers with and without `dups`; and Kubo's answers for a block and a name it doesn't hold;
     - for each request shape, the CAR Kubo sends (path, `dag-scope=entity`, `entity-bytes`) and the raw blocks;
     - IPNS records: V2-only and with legacy fields, with unknown fields and unknown signed keys, expired, for another key, without `signatureV2`, and with a legacy value that differs from the signed one;
     - **RSA-keyed IPNS records,** with seeded keys: 2,048 and 4,096 bits with the exponent 65,537, as Kubo makes them, and the bounds, 2,048 and 8,192 bits with the exponents 3 and 2^33 − 1; and a name whose record names another RSA-keyed name.
   - **The verifier's own,** marked `deviation` in the file as 0006's are, where the design deliberately differs from the pinned native reader:
     - `unixfs-sizes`: a file whose declared child size disagrees with its raw leaf, and one whose content doesn't add up to `filesize`. The native reader slices by the declared size; the core cuts the body as malformed at that point;
     - `hamt-lookup`: an entry that isn't where its hash and the bitfield point. The native reader finds it by name; the core answers 404;
-    - `rsa-keys`: an RSA key encoded otherwise than libp2p's deterministic form (an unknown protobuf field, the fields out of order, a long-form DER length), which the native reader re-encodes and accepts, and a modulus of 2,041 bits, which ring accepts. The core refuses each as a failed check.
+    - `rsa-keys`: an RSA key's protobuf encoded otherwise than libp2p's deterministic form (an unknown field, the fields out of order), which the native reader re-encodes and accepts, and a modulus of 2,041 bits, which ring accepts. The core refuses each as a failed check. A long-form DER length both refuse.
 - **Plan vectors,** which `validate_plan` and main's `plan-validation.js` both pass: `{ verify }` plans and their refusals, and what stays a `{ fetch }`: a 128-hex reference, a DNSLink name, an IPNS name with an inlined secp256k1 key. Each again with `strict`, as its 403 and message, and a `{ fetch }` plan against a strict backend refused at `trust`.
 - **Adversarial vectors,** the design's own: each takes an honest exchange and changes one thing, and states the outcome.
   - **Swarm:**
@@ -875,7 +880,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
   - strict mode, when the user turns it on, refuses the unverified plans (`strict-mode`);
   - a navigation's error answer from the core or main becomes the error page, in every mode (`navigation-error-page`).
 - **Ant's formats are Bee's, checked once, but for one shape.** Bee's own writers at a93fb7a7 reproduce the vectors' references: Bee's pipeline splitting the same content at each redundancy level, and the manifest code of Bee's upload handlers (`bzz.go`, `dirs.go`, `feed.go`). That check is a one-off Go program beside the generator, not run in CI; its result is in the vectors' `meta`. 63 of 65 references agree. The two that don't are the sizes where Ant's level-0 splitter wraps a lone reference ([Files](#files)), and Bee's references for them are the vectors' Bee-shaped cases.
-- **A verified response is the bundled node's,** not the external node's: what Ant v0.5.71 answers for `bzz:`, and what freedom-ipfs v0.4.6's `GatewayCore` answers for `ipfs:` and `ipns:`, over the same content. The vectors hold the core to it, header by header, with the exceptions listed in [Heads](#heads).
+- **A verified response is the bundled node's,** not the external node's: what Ant v0.5.71 answers for `bzz:`, and what freedom-ipfs's `GatewayCore` answers for `ipfs:` and `ipns:` at the commit `freedom-ipfsd` pins, over the same content. The vectors hold the core to it, header by header, with the exceptions listed in [Heads](#heads).
 - **Qualified: for content both accept.** Where the verifier is deliberately stricter than the pinned reader, the difference is a listed deviation with vectors of its own, kept apart from the native-generated ones ([Tests first](#tests-first)):
   - `unixfs-sizes` and `hamt-lookup`, for malformed UnixFS files and HAMT directories;
   - `soc-references`, for single-owner chunks off the feed path;
@@ -886,6 +891,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 
   Within the supported formats and the stated limits, these never apply to well-formed content. Content that is valid but outside them stays `unverifiable`: a SOC off the feed path, an encrypted reference inside a walk, structure past a decoder or manifest cap. It isn't reported as malformed.
   - **Once freedom-ipfs adopts the core's reader** ([Upstream](#upstream)), `unixfs-sizes`, `hamt-lookup` and `decoder-caps` describe the native node too, and stop setting the two modes apart.
+  - **One difference the other way:** verified mode decodes a percent-encoded path, which the native node's request parser doesn't (`ipfs-path-decoding`, [The IPFS walk](#the-ipfs-walk)). Names the native node misses load in verified mode.
   - **Why the bundled node, not the external one:** the external node's headers are the assertions being replaced, and it may be a different implementation (a reused Bee, a Kubo, a public gateway). One rule per scheme, whatever the backend, is also what a user switching modes expects.
 - **The same as today, per piece:** the request headers Swarm needs, the retry table and its delays, the header deadline, the body idle bound, the transport and its proxy and onion rules, the Ant guard, fetch admission, the dial failure statuses, and the security response operations.
 
@@ -908,6 +914,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 | `ipns-floor` | the gateway resolves an IPNS name as it likes | a record below the highest sequence verified in the session is refused while that one is valid | a gateway that rolls a name back within a session gets a 502 |
 | `soc-references` | an external node may answer a reference with a single-owner chunk, and what it serves then rests on that chunk | the core accepts one only as a feed update; elsewhere it is `unverifiable` | content reached through a SOC outside a feed doesn't load in verified mode |
 | `unixfs-sizes` | the native reader (the parity target) slices a child by its declared size | a declared size that disagrees with a raw leaf, or content that doesn't add up to `filesize`, cuts the body as malformed | only malformed files differ |
+| `ipfs-path-decoding` | the native node takes a percent-encoded path undecoded, so a name with a space or a non-ASCII character isn't found | each segment decoded once; one that decodes to `.`, `..`, or to anything holding `/`, `\` or NUL, or to invalid UTF-8, is a 400 | such names load in verified mode; closes when freedom-ipfs's native-request parser decodes the same way and `freedom-ipfsd`'s pin moves to it |
 | `hamt-lookup` | the native reader finds a HAMT entry by its name | the core follows the name's hash and the bitfield | an entry that isn't where its hash points is a 404; only malformed directories differ |
 | `ant-lone-reference` | Ant, bundled or external, serves a tree its level-0 splitter wrote with a level's lone reference wrapped, with the wrapper's first payload bytes where the last leaf's content belongs | the same answer, verified: the wrapper passes the leaf check | none: parity with the bundled Ant. Bee's tree for the same content, which carries the reference unwrapped, is served as its content |
 | `decoder-caps` | the native reader decodes any structure a block holds | at most 65,536 links per dag-pb node, and CBOR nested at most 8 levels | structure past the caps is refused as `unverifiable`. That is mostly degenerate encodings, but also rare valid content such as a directory of more than 65,536 compact identity-CID links |

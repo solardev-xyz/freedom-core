@@ -1,7 +1,7 @@
 name: dweb-verify vectors
 
-# vectors/dweb-verify.json (design 0009) is recorded from the pinned Ant (and,
-# later, Kubo and freedom-ipfs) by its own generator workspace,
+# vectors/dweb-verify.json (design 0009) is recorded from the pinned Ant, Kubo
+# and freedom-ipfs by its own generator workspace,
 # vectors/dweb-verify. Normal CI reads the committed JSON and never builds the
 # generator: its graph (libp2p, SQLite, axum) is large and ships nowhere.
 # This workflow builds it and regenerates the file, failing unless the result
@@ -33,6 +33,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # The Kubo release the vectors pin (meta.kubo), checked against the
+  # release's own SHA-512.
+  KUBO_VERSION: "0.43.1"
+  KUBO_SHA512: "ff53b2428794fc8cca39505d28c15b4cceaef4b90a09284f291f611fcdc8c06399690575fc89cbd4d85ef71f3652581296c6f2e710386f887c8edf36b6e89d71"
 
 jobs:
   check:
@@ -49,6 +53,12 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: vectors/dweb-verify -> target
+      - name: Install Kubo
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/kubo.tgz" "https://github.com/ipfs/kubo/releases/download/v${KUBO_VERSION}/kubo_v${KUBO_VERSION}_linux-amd64.tar.gz"
+          echo "${KUBO_SHA512}  $RUNNER_TEMP/kubo.tgz" | sha512sum -c -
+          tar -xzf "$RUNNER_TEMP/kubo.tgz" -C "$RUNNER_TEMP"
+          echo "KUBO_BIN=$RUNNER_TEMP/kubo/ipfs" >> "$GITHUB_ENV"
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --release --all-targets -- -D warnings
       - name: Regenerate and compare
