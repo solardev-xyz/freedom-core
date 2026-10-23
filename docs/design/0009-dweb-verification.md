@@ -347,11 +347,17 @@ Ant's `/bytes` supports a single range on 64-hex references (206 with `Content-R
 
 - **What it holds:** verified chunks that are structure, never data: manifest node chunks and intermediate chunks. Not leaves, and never SOCs, whose content at an address can change.
 - **What an entry is:** the chunk's wire bytes as checked against its address.
-- **Key and bound:** `(partition, address)`; 8 MiB across partitions, least recently used out first.
-- **Private partitions** (decided, [Decisions](#decisions), 10): each private window's partition has its own short-lived cache.
+- **One cache per partition,** keyed by address, each with its own least-recently-used order and its own allowance. No partition's entries count against another's or evict them:
+  - the profile's (the default session's): 8 MiB, about 2,000 chunks;
+  - each private window's: 2 MiB, about 500 chunks, which holds a site's upper manifest nodes and a long video's root and upper intermediates;
+  - at most 8 private windows have a cache at once, as 0007's ephemeral process holds at most 8 private instances: 16 MiB;
+  - so 24 MiB in all, within the dweb thread's 128 MiB ([Bounds](#bounds)).
+
+  A private window that opens while 8 others hold caches gets none until one closes: its requests fetch every chunk, and no other window's entries are touched. Whether it got a cache tells it only that eight other private windows hold caches, not what they load.
+- **Private partitions** (decided, [Decisions](#decisions), 10): each private window's partition has its own short-lived cache, as above.
   - Its entries live only while the window does: main sends `dweb.forget` when the partition closes, and they go with the partition's IPNS floors.
   - Nothing is written to disk.
-  - A private window never reads the profile's entries or another window's, so it can't time another session's loads.
+  - A private window never reads the profile's entries or another window's, and its loads can't evict theirs, nor theirs its own. So it can't time another session's loads through the cache.
 - **Late results:** `dweb.forget` advances the partition's epoch. A cache insert or a floor update carries the epoch its request started under, and one from an older epoch is dropped, so a piece reply or hashing result that arrives after the forget leaves nothing behind.
 - **Why:** a site's subresources share the upper manifest nodes, and a video's seeks share the file's root and upper intermediates. With the cache, a later request costs one or two chunks before its stream.
 
@@ -622,13 +628,16 @@ The core builds every head from verified data, by the bundled node's rules. The 
 
 **Decided: a failed navigation gets an error page in plain words, not the JSON body** ([Decisions](#decisions), 4).
 
-- **Which answers:** a GET navigation whose answer is a `{ code, message }` body written by the core or by main:
+- **Which answers:** a GET request that looks like a navigation (below), whose answer is a `{ code, message }` body written by the core or by main:
   - the failures above, before the head;
   - strict mode's refusals;
   - error plans and main's local failures (0006), in every mode.
 
   A node's own answer, which unverified mode passes as it is, and the bundled node's bodies the core reproduces in verified mode (Ant's 404 JSON, `GatewayCore`'s HTML errors), are unchanged: parity covers them as content.
-- **How main tells a navigation:** by the rule `small_text` reads, a first `Accept` token of exactly `text/html`. A `protocol.handle` request carries no other sign of a document load, since custom schemes get no `Sec-Fetch-Dest`. Subresources, `fetch` calls and the in-process callers (`permission-manifests.js`, `http-fetch.js`, downloads) keep the JSON body, which they read.
+- **How main tells a navigation: it can't exactly, so it uses a navigation-like heuristic,** the rule `small_text` reads: a first `Accept` token of exactly `text/html`.
+  - **Why no exact signal:** a `protocol.handle` request carries none. Tested with Electron 44.7.0 (Chromium 152.0.7977.130) and Freedom's scheme privileges (`standard`, `secure`, `supportFetchAPI`, `corsEnabled`, `stream`, `allowServiceWorkers`), the handler sees no `Sec-Fetch-*` header at all, and `Request.destination` is `""` and `mode` is `"cors"` for a navigation, a frame, an image and a `fetch` alike. Chromium adds Fetch Metadata in its network service's loader (`SetFetchMetadataHeaders`, called from `services/network/url_loader.cc`), which a request Electron answers through `protocol.handle` doesn't pass through.
+  - **So it is navigation-like, not exact:** every navigation and frame sends Chromium's navigation `Accept`, whose first token is `text/html`, and gets the page. So does a `fetch` or a subresource that sends `Accept: text/html` first, as a page can. Every other request (an image, a script, a `fetch` with the default `*/*`) keeps the JSON body, and so does `permission-manifests.js`, which sends no `Accept`.
+  - The page and the JSON carry the same status, so a caller that reads only the status is unaffected either way.
 - **The page:**
   - the same status, and a fixed template in plain words: what failed, whose node, and what the user can do, with the URL and a "Try again" link;
   - no script, under `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'`, and `Cache-Control: no-store`;
@@ -642,7 +651,7 @@ The core builds every head from verified data, by the bundled node's rules. The 
 
 - **`plan-validation.js`:** the `{ verify }` variant, and strict mode's checks, with `fc-dweb`'s vectors.
 - **`dweb-handler.js`:** a `{ verify }` plan takes a fetch admission slot, then calls `dweb.verify` through the core client. The head becomes a `Response` after the response operations; its body reads the stream's ring through the body idle wrapper (`idleBoundBody`), whose `onEnd` releases the slot.
-  - **The error page:** a navigation's `{ code, message }` answer becomes the [error page](#the-error-page) wherever the handler or the executor would write `jsonErrorResponse`.
+  - **The error page:** a navigation-like request's `{ code, message }` answer becomes the [error page](#the-error-page) wherever the handler or the executor would write `jsonErrorResponse`.
 - **A verified head is not a gateway response.** `strip_decoded_encoding` exists because the transport has already decoded a gateway's body, so its `Content-Length` and `Content-Encoding` are wrong. A head from the core describes exactly the bytes the core will send. So main picks the operations by the head's source, not by the backend:
   - a core head gets the plan's operations and `strip_page_state`, and never `strip_decoded_encoding`, so its `Content-Length` stays;
   - `small_text` runs for an IPFS GET navigation, as on the native node's answers, which needs that `Content-Length`.
@@ -781,7 +790,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
   - ranges at every leaf and block boundary; `HEAD`; `If-None-Match`; `If-Range` ignored as the bundled nodes ignore it;
   - **truncation:** a failure, a cancel and a core restart after part of a verified block was released, and while verified output is queued. The page gets a prefix of verified bytes, possibly inside the block, then the error;
   - **IPNS floors:** eviction at 1,024 names, and concurrent requests verifying records of different sequences;
-  - **the structure cache, per partition:** a private partition never reads the profile's entries or another partition's, and `dweb.forget` leaves none of its own;
+  - **the structure cache, per partition:** a private partition never reads the profile's entries or another partition's; filling one partition's allowance evicts only its own entries; a ninth private partition gets no cache, and its requests fetch every chunk; `dweb.forget` leaves none of the partition's own;
   - **late results after `dweb.forget`:** a piece reply, a hashing result and a floor update for the forgotten partition leave no entry behind.
 - **Stream tests** (`fc-protocol`, and through the binary): both directions on one connection, the global bound, data beyond credit, late credit, and a `vault.lock` behind 128 full incoming windows, acknowledged on time.
 - **freedom-browser:**
@@ -794,7 +803,8 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
   - a core restart mid-body truncates; a private partition's cache and floors are dropped on close; the probes (raw and CAR, raw only, neither); the labels;
   - **the default:** a new external backend verifies, a loopback one included, until the user turns it off;
   - **strict mode:** off by default; with it on, each refused shape gets its 403 and message, verified and `latest_asserted` content still loads, and the bundled nodes are untouched;
-  - **the error page:** a navigation whose answer is an error of the core's or main's gets the page, with the same status, in every mode; a subresource, a `fetch` and `permission-manifests.js` get the JSON body; a node's own error answer and a truncation after the head are unchanged.
+  - **the error page:** a request whose first `Accept` token is `text/html` (a navigation, a frame, and a `fetch` sending that `Accept`) gets the page for an error of the core's or main's, with the same status, in every mode; an image, a `fetch` with the default `Accept` and `permission-manifests.js` get the JSON body; a node's own error answer and a truncation after the head are unchanged;
+  - **no exact signal:** a test that pins what the handler receives (no `Sec-Fetch-*` header, `destination` `""`, `mode` `"cors"`), so a later Electron that adds them is noticed and the rule can move to them.
 - **Live:** the `e2e-ant` job gains an external-mode run with verification on, and a Kubo gateway job does the same for IPFS.
 
 ## Bounds
@@ -813,7 +823,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 | the dweb writer | 8 MiB of unwritten data | the machines wait for credit |
 | memory, per request | 8 MiB, reserved before allocation: its windows, leaves and blocks in flight, the walk's parsed nodes | fewer pieces in flight; a walk that can't fit at all is `unverifiable` |
 | memory, the dweb thread | 128 MiB in all, the structure cache included | new requests `busy` (503); admitted work waits up to 10 s, then ends `busy`: 503 before the head, a truncation after |
-| the structure cache | 8 MiB, keyed by partition; a private window's entries only until it closes | least recently used first; `dweb.forget` |
+| the structure cache | one per partition, each its own LRU: the profile's 8 MiB; each private window's 2 MiB, for at most 8 private windows at once (16 MiB); 24 MiB in all | least recently used first, within the partition only; a private window past the eighth has none until one closes; `dweb.forget` drops a partition's |
 | an IPFS block | 2 MiB (freedom-ipfs's limit) | `verification_failed` |
 | a Swarm manifest node | 1 MiB (Ant: 32 MiB) | `unverifiable` |
 | Swarm walk | 8 levels of intermediate chunks (Bee's cap); 64 manifest nodes per lookup; one feed per walk | `unverifiable` |
@@ -881,7 +891,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 | `core-data-path` | a core restart fails only new plans | it also truncates verified bodies | |
 | `verify-head-deadline` | no bound before the head beyond each attempt's (Ant) or none (the gateway) | 360 s to the head | a walk that can't finish in six minutes gets 504 |
 | `gateway-probe` | `bafkqaaa` | then a raw and a CAR probe of it, when verification is on | a gateway without raw blocks serves unverified, and the nodes panel says so |
-| `structure-cache` | the core holds no content | up to 8 MiB of verified Swarm structure, per partition | |
+| `structure-cache` | the core holds no content | verified Swarm structure in a cache per partition, each with its own LRU: 8 MiB for the profile, 2 MiB for each of at most 8 private windows, 24 MiB in all | no partition's loads evict another's entries; a ninth private window loads uncached |
 | `multi-range` | Ant answers several ranges with `multipart/byteranges` | 200 with the whole body | only clients that ask for several ranges see it |
 | `manifest-node-cap` | Ant loads a manifest node of up to 32 MiB | 1 MiB | a manifest with a larger node is `unverifiable` |
 | `encrypted-in-walk` | an external node serves the encrypted reference a manifest node or a feed update names | a verified walk that meets one is `unverifiable`; a 128-hex reference in the URL keeps today's fetch, `unverified` | content with encrypted parts below a plain root or a feed doesn't load in verified mode |
@@ -892,7 +902,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 | `decoder-caps` | the native reader decodes any structure a block holds | at most 65,536 links per dag-pb node, and CBOR nested at most 8 levels | structure past the caps is refused as `unverifiable`. That is mostly degenerate encodings, but also rare valid content such as a directory of more than 65,536 compact identity-CID links |
 | `rsa-keys` | the native reader hashes its own re-encoding of an RSA key, so it takes a key encoded another way; ring takes a modulus of 2,041 to 2,047 bits | the record's `pubKey` must hash to the name as it arrived, in libp2p's deterministic encoding and canonical DER, and the modulus is at least 2,048 bits, as go-libp2p requires | only keys no libp2p implementation writes differ: such a record fails its check |
 | `strict-mode` | none | a profile setting, off by default, that answers every unverified external request with a 403 that says why | with it on, DNSLink names, encrypted references, IPNS names with other inlined keys, and backends that don't verify stop loading |
-| `navigation-error-page` | a failed navigation shows the `{ code, message }` JSON the core or main wrote | an HTML error page in plain words, with the same status | subresources and in-process callers keep the JSON; a node's own answers, and the bundled node's bodies the core reproduces, are unchanged |
+| `navigation-error-page` | a failed navigation shows the `{ code, message }` JSON the core or main wrote | an HTML error page in plain words, with the same status, for a request whose first `Accept` token is `text/html` | every navigation and frame gets the page, and so does a `fetch` or subresource sending that `Accept`; any other request, and `permission-manifests.js`, keeps the JSON; a node's own answers, and the bundled node's bodies the core reproduces, are unchanged |
 
 ## Implementation steps
 
@@ -944,7 +954,7 @@ Each was decided by the user on 2026-10-23. The questions and their options stay
 
      How many names use RSA keys remains unmeasured; RSA was IPNS's key type before Ed25519 (the IPNS record specification, *Key Types*).
 10. **Private windows:** a structure cache per private partition (proposed), or none?
-    - **Decided: each private window gets its own short-lived structure cache** ([The structure cache](#the-structure-cache)), dropped when the window closes.
+    - **Decided: each private window gets its own short-lived structure cache** ([The structure cache](#the-structure-cache)), with its own allowance and eviction, dropped when the window closes.
 11. **Upstream:** `fc-ipfs` can't share the native decoders as they are, since they allocate before anything can be reserved. Should freedom-ipfs adopt a bounded reader shared with `fc-ipfs` (its decoders, and its stricter size and HAMT rules), so both modes read files and directories the same way by construction rather than differing on malformed content?
     - **Decided: yes, later.** freedom-ipfs adopts the core's bounded sans-I/O block reader in freedom-ipfs pull requests of its own, after the core's reader has merged, so there is one reader, not two ([Upstream](#upstream); [Implementation steps](#implementation-steps), 8).
 
