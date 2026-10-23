@@ -20,6 +20,9 @@
 //!   it, so what is unwritten stays cancellable; the handshake within its
 //!   deadline, `<service>.shutdown`, parent death, the writer-stall exit,
 //!   a closing phase for the teardown, and the exit watchdog.
+//! - [`confine`]: OS confinement (design 0010), applied once on the main
+//!   thread while it is the only one: Landlock and seccomp on Linux, with
+//!   one status per property for `hello`.
 //! - [`watchdog`]: plain threads that end the process unless disarmed in
 //!   time: the exit watchdog after EOF, and a teardown's 5 s bound
 //!   (`teardown_unproven`, exit 70).
@@ -35,6 +38,7 @@
 
 #![cfg(not(any(target_os = "ios", target_os = "android")))]
 
+pub mod confine;
 pub mod conn;
 pub mod exit;
 pub mod gate;

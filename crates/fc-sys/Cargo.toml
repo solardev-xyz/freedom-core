@@ -29,6 +29,17 @@ print_stderr = "warn"
 undocumented_unsafe_blocks = "deny"
 multiple_unsafe_ops_per_block = "deny"
 
+[features]
+# Test-only calls through the other syscall ABIs a 64-bit Linux process can
+# reach (design 0010, Tests: seccomp's ABI guard). Each makes `getpid`, so
+# none touches memory or descriptors.
+test-abis = []
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The raw syscalls std and rustix lack: close_range and Landlock's version
+# query (design 0010).
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Storage_FileSystem",

@@ -24,6 +24,9 @@ pub enum Exit {
     /// A protocol violation, the handshake's deadline, or the writer stall:
     /// a crash, restarted.
     Protocol,
+    /// Confinement refused its own policy, found a second thread, or
+    /// stopped halfway (design 0010): don't restart.
+    Confinement,
 }
 
 impl Exit {
@@ -35,6 +38,7 @@ impl Exit {
             Exit::Storage => 74,
             Exit::LockHeld => 75,
             Exit::Protocol => 76,
+            Exit::Confinement => 77,
         }
     }
 }
@@ -49,6 +53,7 @@ impl Exit {
             Exit::Storage,
             Exit::LockHeld,
             Exit::Protocol,
+            Exit::Confinement,
         ]
         .into_iter()
         .find(|exit| exit.code() == code)
