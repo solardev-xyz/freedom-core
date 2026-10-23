@@ -1,6 +1,15 @@
 # 0010: OS confinement for the service processes
 
-**Status:** proposed; the decisions are the user's. It answers #96, for the service processes of [0007](0007-ipfs-service.md) (`freedom-ipfsd`) and [0008](0008-radicle-service.md) (`freedom-radicled`), on [0001](0001-freedom-cored.md)'s process model and hardening and `fc-service`'s shared skeleton. **Every choice marked D1–D7 is the user's. This design recommends; it decides nothing.** The [Decisions](#decisions-for-the-user) section lists them.
+**Status:** decided (the user, 2026-10-23): every recommendation, D1–D7. It answers #96, for the service processes of [0007](0007-ipfs-service.md) (`freedom-ipfsd`) and [0008](0008-radicle-service.md) (`freedom-radicled`), on [0001](0001-freedom-cored.md)'s process model and hardening and `fc-service`'s shared skeleton.
+- **D1:** confinement is adopted.
+- **D2:** a service runs without a mechanism the OS lacks, and reports it, per property.
+- **D3:** macOS gets a self-applied Seatbelt profile, through FFI.
+- **D4:** Windows gets the job object and the mitigation policies now. A restricted token with a relaunch follows once a spike qualifies it, and AppContainer only if that fails.
+- **D5:** the Radicle import runs in a one-shot import process, which reconciles the home first and reads only the checked repository roots.
+- **D6:** the `landlock` and `seccompiler` crates, pinned exactly.
+- **D7:** `freedom-cored` is confined too, in a later design.
+
+[Decisions](#decisions) records each, and the options weighed are kept throughout as the decisions' rationale.
 
 ## Summary
 
@@ -16,10 +25,10 @@
   - other profiles and the rest of the user's files;
   - local services that act for the user, such as the session bus and the systemd user manager, which can start processes.
 - **Why now:** each service needs only its own data directory, its pipes, the network and a few system files. The skeleton they share is being built now.
-- **The recommendation:** each service confines itself once at startup, after it has taken its lock, and before it starts a second thread or reads any untrusted input:
+- **The decision** (D1): each service confines itself once at startup, after it has taken its lock, and before it starts a second thread or reads any untrusted input:
   - **Linux:** Landlock for files, and for TCP ports where the kernel has them, plus a seccomp filter that refuses process creation, local sockets, the file calls Landlock doesn't check, and other syscalls the service never makes;
   - **macOS:** a Seatbelt profile with the same paths;
-  - **Windows:** a job object that allows no child process, plus process mitigation policies. Confining file reads needs a relaunch under a restricted token, or AppContainer: a later step (D4).
+  - **Windows:** a job object that allows no child process, plus process mitigation policies. Confining file reads needs a relaunch under a restricted token, the next step once a spike qualifies it, or AppContainer if that fails (D4).
 - **The network policy becomes fixed per process:** main passes it at spawn, and a change starts a new process. 0007 and 0008 change to match ([The network policy and the lifecycle](#the-network-policy-and-the-lifecycle)).
 - **What it protects,** on Linux and macOS: the node secrets of other components, the user's other files, and the user's local services, from a compromised service. On Windows the first step only refuses child processes (D4).
 - **What it can't protect:**
@@ -27,7 +36,7 @@
   - on Linux, other files' metadata: names, sizes, modes and times stay readable;
   - the network beyond the in-process [address gate](0007-ipfs-service.md#the-gate);
   - the kernel.
-- **The Radicle import,** which reads a path the user picks at runtime, needs its own answer (D5).
+- **The Radicle import,** which reads a path the user picks at runtime, runs in a one-shot import process of its own (D5).
 
 ## Goals and non-goals
 
@@ -35,12 +44,12 @@
 - **No file access outside the service's own directory:** a compromised service can't read, write or change the user's other files, on every OS where an unprivileged mechanism exists: Linux and macOS, and Windows only with a restricted token or AppContainer (D4).
 - **No local IPC outside the service:** no connection to another process's local socket, on Linux and macOS.
 - **No child processes,** on every OS, and **no debugging of other processes** where the OS can refuse it: Linux and macOS.
-- **No admin rights and no installer changes.** On Linux and Windows, main spawns the services exactly as 0007 and 0008 say. On macOS, that depends on D3.
+- **No admin rights and no installer changes.** On every OS, main spawns the services exactly as 0007 and 0008 say: on macOS too, since the profile is self-applied (D3).
 - **Honest reporting:** the service reports, per property, what confinement it got and why anything is missing. Tests prove each OS's rules.
-- **A chosen failure behavior** when the OS lacks a mechanism (D2).
+- **A chosen failure behavior** when the OS lacks a mechanism: run, and report the gap (D2).
 
 **Non-goals**
-- **Confining `freedom-cored`.** It must read the vault and write node identities. A later design could confine it to those directories (D7).
+- **Confining `freedom-cored`.** It must read the vault and write node identities. A later design confines it to those directories (D7).
 - **Confining Bee, Ant, Arti, Myotis, or Electron's own processes.**
 - **Enforcing the address policy in the kernel.** That is only partly possible: ports on Linux, loopback only on macOS. 0007's gate stays the enforcement point.
 - **Defending against kernel exploits, root or admin.**
@@ -51,7 +60,7 @@
 |---|---|---|---|
 | the vault file (ciphertext) | the identity directory | readable: offline guessing against PBKDF2 | not readable |
 | the Bee keystore and the password in `config.yaml` (0001, K-3) | the Bee data directory | readable: the Bee wallet and its funds | not readable |
-| the Radicle key, `<home>/keys/radicle` | the Radicle home | readable by `freedom-ipfsd`; held by `freedom-radicled` by design | not readable by `freedom-ipfsd`; `freedom-radicled` [keeps it](#the-radicle-home-and-key-custody) |
+| the Radicle key | no file at rest: the core releases it sealed to `freedom-radicled` at each start (0008) | held in `freedom-radicled`'s memory, by design | the same: `freedom-radicled` [keeps it](#the-radicle-home-and-key-custody) |
 | other profiles, the browser's data, the user's files | anywhere | readable and writable | neither. On Linux, their metadata stays readable ([Linux](#linux)) |
 | start-up items and shell profiles | the user's home | writable: persistence | not writable |
 | local services: the session bus, the systemd user manager, agent sockets | the user's runtime directory | reachable: they act for the user, and some start processes | not reachable |
@@ -168,6 +177,11 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
 - **No network without help:** a network namespace can't reach the network without a privileged helper or a user-space network stack.
 - **Landlock and seccomp already restrict** the operations that matter. What namespaces would add is the private view: metadata outside, and the other processes, would be invisible.
 
+**bubblewrap (`bwrap`)**, which builds those namespaces from outside and then runs the program, is what Freedom's AI agent feature uses (an unmerged branch). It isn't chosen for the services:
+- it is an external binary, which Freedom would have to bundle or require;
+- it relies on unprivileged user namespaces, which Ubuntu 24.04 and later restrict through AppArmor (above);
+- a service confines itself in process, at the marked point: after its lock, and before untrusted input ([The recommendation](#the-recommendation)). bubblewrap would apply its view before the service starts, from a launcher main spawns instead.
+
 **AppArmor or SELinux profiles** need root to install, and fit only distribution packages. They are an option for a `.deb` or `.rpm` later.
 
 **Always:**
@@ -187,7 +201,7 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
   - metadata: mode, owner, xattr, flag and time changes are write operations of their own (`file-write-mode`, `file-write-flags` and the like), which a read-only rule doesn't grant, and the profile grants `file-ioctl` nowhere outside the read-write grant;
   - network access. A rule can allow only loopback with a port (`(remote ip "localhost:9150")`), which fits `socks5` mode.
 - **Its cost:**
-  - FFI, so `unsafe`, in one reviewed place (D6);
+  - FFI, so `unsafe`, in `fc-sys` (AGENTS.md rule 6; D6);
   - an undocumented profile language, for which Apple's own profiles are the reference;
   - Apple may change it.
   - **What the profile must allow:** name resolution through mDNSResponder, a Mach service and a UNIX socket; read access to system libraries and frameworks; for NAT64 discovery, `com.apple.SystemConfiguration.configd`, and in `direct` mode port 53 to loopback and private addresses.
@@ -278,8 +292,8 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
      - From ABI 6: both scopes. From ABI 9: `resolve_unix`, with no rule.
      - **Minimum ABIs:** `freedom-ipfsd` uses ABI 1 and up. `freedom-radicled` needs ABI 2: below it, it applies no Landlock rules and reports `files` as `unavailable`, with the reason.
    - The seccomp denylist above, answering `EPERM` (`ENOSYS` for `clone3`), behind the ABI guard.
-3. **macOS:** a Seatbelt profile with the same paths and rules, by D3's mechanism. Recommended: self-applied, so all three OSes work the same way. It passes the qualification gate before each release.
-4. **Windows:** the job object and the mitigation policies, self-applied, each detected on its own. File confinement waits for D4.
+3. **macOS:** a Seatbelt profile with the same paths and rules, self-applied through FFI (D3), so all three OSes work the same way. It passes the qualification gate before each release.
+4. **Windows:** the job object and the mitigation policies, self-applied, each detected on its own. File confinement follows with a restricted token, once its spike qualifies (D4).
 5. **Reporting:** `ipfs.hello` and `rad.hello` gain `confinement`, one status per property:
 
    ```jsonc
@@ -300,12 +314,12 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
    - **Derived, not assumed:** each status comes from what was installed: the ABI the kernel reports and the rights handled at it, the `landlock` crate's `RestrictionStatus`, each mitigation read back. A best-effort call that returned success is not evidence: the crate drops unsupported rights silently.
 
    Main logs it, and shows it in the nodes panel's diagnostics.
-6. **Failure,** with D2's answer. The outcomes are kept apart:
+6. **Failure,** as D2 decided: a missing mechanism doesn't stop the service. The outcomes are kept apart:
 
    | Outcome | When | Reported | Then |
    |---|---|---|---|
    | partial | the kernel lacks some rights: Landlock before ABI 4 has no TCP rules, before ABI 6 no signal scope | `partial`, with the gaps | runs |
-   | unavailable | the OS lacks the mechanism: Landlock disabled, an ABI below the service's minimum, a mitigation an older Windows doesn't know | `unavailable`, with the reason | D2: runs (recommended), or exits 77 |
+   | unavailable | the OS lacks the mechanism: Landlock disabled, an ABI below the service's minimum, a mitigation an older Windows doesn't know | `unavailable`, with the reason | runs (D2) |
    | externally blocked | something outside refuses a mechanism that exists: a container's seccomp filter answering `EPERM` to the Landlock calls, or an outer sandbox that used Landlock's 16 layers | `blocked`, with the reason | as unavailable |
    | invalid policy | the mechanism refuses the service's own rules; a second thread before `confine`; an installation stopped halfway | never | exit 77 (`confinement`), which main doesn't restart |
 
@@ -315,10 +329,10 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
    - **The rule:** main refuses a grant that is, contains, or lies inside a protected root. The service's own directory is the grant, never a protected root.
    - **Compared as canonical paths,** under 0001's rules: symlinks resolved, and case folded on case-insensitive volumes. So an override such as `FREEDOM_IPFS_DATA` can't widen the grant over the secrets.
 
-**Later, each its own decision:**
-- a seccomp allowlist, once the release builds' syscalls are measured;
-- a restricted token, or AppContainer, on Windows (D4);
-- confining `freedom-cored` to its own directories (D7).
+**Later:**
+- a seccomp allowlist, once the release builds' syscalls are measured, as a decision of its own;
+- on Windows, a restricted token with a relaunch, once a spike qualifies DNS, Winsock, NAT64 discovery and the desktop; AppContainer only if that fails (D4);
+- confining `freedom-cored` to its own directories, in a later design (D7).
 
 ## The network policy and the lifecycle
 
@@ -335,19 +349,19 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
 
 - **Confinement can't protect a service's own secrets.** `freedom-radicled` holds the Radicle key in memory while the node runs (0008, *Keys*), in every custody mode. What confinement adds:
   - it keeps the vault and the Bee keys from `freedom-radicled`;
-  - it keeps the Radicle key from `freedom-ipfsd`.
-- **The custody modes:**
-  - **The key file** (0008's option 1): the key also sits in `freedom-radicled`'s home, inside its own grant.
-  - **The sealed host key** (option 2): no key file is at rest, but the service still holds the key.
-- **So this design neither changes nor depends on the custody decision.** That decision is 0008's open questions 2 and 3, with the AGENTS.md rules it involves (#98), and it stays the user's. Confinement narrows what a `freedom-radicled` compromise adds beyond the Radicle identity.
+  - it keeps `freedom-ipfsd` from the Radicle home. The Radicle key itself has no file at rest (below), and 0001's `PR_SET_DUMPABLE=0` already keeps a same-user process from reading `freedom-radicled`'s memory.
+- **The custody is 0008's, decided** (the user, 2026-10-22; 0008's open questions 2 and 3): the sealed host key. No key file is at rest, and the core releases the key sealed to the service at each start (`rad.identity`), but the service still holds it.
+- **So this design neither changes nor depends on the custody decision.** Confinement narrows what a `freedom-radicled` compromise adds beyond the Radicle identity.
 - **Unconfined processes:** the Bee keystore password beside the keystore (0001, K-3) stays readable by every unconfined same-user process. Confinement only removes the two services from that set.
 
 ## The Radicle import (D5)
 
-`rad.import_repo` reads a working copy at a path the user picks at runtime (0008, *Writes*). Landlock and Seatbelt rules are fixed once applied, and can only be narrowed. A working copy's git data may also lie outside the path the user picked. The options:
+`rad.import_repo` reads a working copy at a path the user picks at runtime (0008, *Writes*). Landlock and Seatbelt rules are fixed once applied, and can only be narrowed. A working copy's git data may also lie outside the path the user picked.
 
-1. **A one-shot import process** (recommended):
-   - Main stops the service and runs `freedom-radicled import --home … --lock-dir … --source <path>`. The process takes the home gate, confines itself, and answers three of 0008's methods, in order: `rad.hello`, `rad.reconcile`, then `rad.import_repo`, whose `path` must be the `--source`. It exits after the import. Then main starts the service again.
+**Decided (the user, 2026-10-23): the one-shot import process** (option 1). The others are kept below as the decision's rationale.
+
+1. **A one-shot import process** (decided):
+   - Main stops the service and runs `freedom-radicled import --home … --lock-dir … --source <path>`. The process takes the home gate, confines itself, and answers four of 0008's methods, in order: `rad.hello`, `rad.identity`, `rad.reconcile`, then `rad.import_repo`, whose `path` must be the `--source`. It exits after the import. Then main starts the service again.
    - **The repository's roots** are found before confinement, from the source's own files, without libgit2:
      - the source;
      - its git directory: `.git`, or the directory a `gitdir:` file names;
@@ -365,12 +379,12 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
      - **Why repair rather than refuse a dirty home:** the procedure is this binary's own, and resumable. A refusal would make main start the service to repair, stop it, and try again, and that stop can be unclean too.
    - **The bounds:** `rad.reconcile` keeps 0008's 300 s, with main's watchdog at 315 s. `rad.import_repo` then has its own 300 s from admission, under the process's watchdog (exit 70), with main's at 315 s. So the node is down for at most about ten minutes. Without the marker, reconciliation only removes temporary clones and ref lock files.
    - **0008's contracts hold:**
-     - **Key custody:** the import, and any re-signing during reconciliation, use the node key in the custody mode the user chose: the key file inside the home, or the sealed key `rad.start` would get. The process never generates one, and with none it answers `no_identity`.
+     - **Key custody:** the import, and any re-signing during reconciliation, use the node key the core releases sealed, through `rad.identity`, as at a start (0008, *Keys*). So, on a profile with a vault, an import waits for an unlock as a start does. A profile without one has no import: main refuses it with `needs_vault`, and the process never makes a throwaway key.
      - **The dirty marker:** as in a service's run. Reconciliation writes it before changing anything, and it stays while the process runs. It is removed at the exit only when no write is uncertain: after a proven import, or a refusal before the mutation. Any other end leaves it, and the service's next start reconciles again.
      - **Outcomes:** a failure before the mutation starts is definitive (`invalid_argument`, `unsupported_layout`). After it, only a success is proven. An error, a crash, a kill or the deadline is `outcome_unknown`.
      - **Upstream:** libradicle's import runs on storage, without a running node. The node announces the repository with its inventory at its next start.
-   - **What 0008 gains, if this is chosen:**
-     - the `import` subcommand, with its three methods and the admission rule above;
+   - **What 0008 gains** (made in this PR, to its *Writes*, methods and bounds):
+     - the `import` subcommand, with its four methods and the admission rule above;
      - `rad.import_repo` leaves the service's write queue, and with it the need to hold the node exclusively;
      - main's `importRepo` stops the service, runs the import process, and starts the service again. It still refuses private partitions.
    - **Cost:** the node is down for the import, and for any repair before it. Imports are rare and user-started.
@@ -412,13 +426,13 @@ Through the binary, in CI's job for each OS:
   - `hello` reports the mechanism and each property's status;
   - where CI's kernel offers Landlock, the test requires the ABI it offers, so a silent downgrade fails CI.
 - **D2:**
-  - a forced unavailable mechanism gives `unavailable` with its reason, and a working service (best effort), or exit 77 (fail closed);
+  - a forced unavailable mechanism gives `unavailable` with its reason, and a working service;
   - a forced `EPERM` from the setup calls gives `blocked`;
   - a forced invalid rule gives exit 77, and main doesn't restart the service.
 - **Main:**
   - the default directories pass: `<userData>/ipfs-data/freedom-ipfs`, and the Radicle homes `<appRoot>/R/<slot>` and `<userData>/radicle-data`;
   - a grant equal to, inside, or containing the identity directory, the lock directory or another component's directory is refused, through overrides (`FREEDOM_IPFS_DATA`, `FREEDOM_RADICLE_DATA`), a symlink alias and, on macOS and Windows, a case alias.
-- **D5,** for the chosen import route:
+- **D5,** the import process:
   - a working copy outside the home; a linked worktree; a separate git directory; alternates; a symlink out of the source;
   - a source that contains a protected root: refused;
   - the helper opens no socket, and a canary listener sees nothing;
@@ -432,26 +446,37 @@ Through the binary, in CI's job for each OS:
 
   all under the release policies, with the denial and fallback cases on the oldest supported kernels and both architectures. One recent kernel doesn't exercise the missing-right cases.
 
-## Decisions for the user
+## Decisions
+
+Each is decided (the user, 2026-10-23), as recommended. The options weighed stay with each, as the decision's rationale.
 
 - **D1. Adopt confinement** for the service processes, as above, or keep 0007's and 0008's non-goal for now.
+  - **Decided: adopt.** 0007's and 0008's non-goal now points here.
 - **D2. When the OS lacks a mechanism, or something outside blocks it:**
-  - run without it and report it, per property (recommended);
+  - run without it and report it, per property;
   - or refuse to start unless `files` and `exec` are `enforced`.
 
   Either way, partial confinement runs and is reported, and an invalid policy exits 77. `freedom-radicled` below ABI 2 counts as `files` unavailable.
+  - **Decided: run, and report it, per property.** A service runs on a kernel without Landlock, or behind a container's seccomp filter, and `hello` says what it lacks. Only an invalid policy exits 77.
 - **D3. macOS:**
-  - a self-applied Seatbelt profile through FFI (recommended);
+  - a self-applied Seatbelt profile through FFI;
   - `sandbox-exec` run by main;
   - or nothing until App Sandbox can work.
+  - **Decided: a self-applied Seatbelt profile, through FFI** in `fc-sys`. Main's spawn doesn't change, and the service knows its own confinement.
 - **D4. Windows:**
-  - the job object and mitigation policies now; then a restricted token with a relaunch, once a spike qualifies DNS, Winsock, NAT64 discovery and the desktop; AppContainer only if that fails (recommended);
+  - the job object and mitigation policies now; then a restricted token with a relaunch, once a spike qualifies DNS, Winsock, NAT64 discovery and the desktop; AppContainer only if that fails;
   - or a restricted token now, with the relaunch, ACLs on the data directories and a desktop;
   - or AppContainer now, with a launcher, ACLs on the data directories and a loopback exemption for Arti.
-- **D5. The Radicle import:** a one-shot import process that reconciles the home first and reads only the checked repository roots (recommended), a read-only home grant, staging by main, or handle passing.
+  - **Decided: the job object and mitigation policies now, then the restricted token after its spike, and AppContainer only if that fails.**
+- **D5. The Radicle import:** a one-shot import process that reconciles the home first and reads only the checked repository roots, a read-only home grant, staging by main, or handle passing.
+  - **Decided: the one-shot import process** ([The Radicle import](#the-radicle-import-d5)). 0008 changes to match in this PR.
 - **D6. Code:**
   - the `landlock` crate (MIT or Apache-2.0) and `seccompiler` (Apache-2.0 or BSD-3-Clause), which keep their `unsafe` inside them, pinned to exact versions (today `landlock` 0.4.7 and `seccompiler` 0.5.0). Each mechanism maps to one status: Landlock's from its `RestrictionStatus` and the kernel's ABI; seccomp's from installing both filters; each Windows mitigation from its read-back;
-  - or hand-written FFI. The macOS and Windows calls need FFI either way. `fc-service` makes its few Windows calls today under a reviewed `#[allow(unsafe_code)]` (#103), and #116 proposes `fc-sys` as the one home for such calls, `close_range` included. Either way, AGENTS.md rule 6 governs where the `unsafe` may live.
-- **D7. `freedom-cored`:** confine it too, in a later design, or not.
+  - or hand-written FFI.
 
-Not decided here, and still the user's: Radicle key custody and the AGENTS.md rules around it (0008's open questions 2 and 3, #98).
+  The macOS and Windows calls need FFI either way. AGENTS.md rule 6 puts every `unsafe` of this workspace in `fc-sys`, each a single reviewed call with a `SAFETY` comment behind a safe function, as `fc-service`'s Windows calls already are (#116). `fc-service` keeps `forbid(unsafe_code)`, and calls them through `fc-sys`'s safe functions; `close_range` and the thread count go there too.
+  - **Decided: the `landlock` and `seccompiler` crates, pinned to exact versions,** with `cargo deny` checking them.
+- **D7. `freedom-cored`:** confine it too, in a later design, or not.
+  - **Decided: confine it too, in a later design.**
+
+Radicle key custody, with the AGENTS.md rules around it, is 0008's, decided there (open questions 2 and 3, #98).
