@@ -51,7 +51,7 @@
 **Non-goals**
 - **Confining `freedom-cored`.** It must read the vault and write node identities. A later design confines it to those directories (D7).
 - **Confining Bee, Ant, Arti, Myotis, or Electron's own processes.**
-- **Enforcing the address policy in the kernel.** That is only partly possible: ports on Linux, loopback only on macOS. 0007's gate stays the enforcement point.
+- **Enforcing the address policy in the kernel.** That is only partly possible: ports on Linux, and on macOS a port on loopback or on any host. 0007's gate stays the enforcement point.
 - **Defending against kernel exploits, root or admin.**
 
 ## What a compromised service reaches
@@ -74,16 +74,16 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
 
 | | Read and write | Read only | Network |
 |---|---|---|---|
-| `freedom-ipfsd`, persistent | its data directory: the SQLite file, its `-wal` and `-shm`, its journal | name resolution files (`/etc/resolv.conf`, `/etc/hosts` and `/run/systemd/resolve/resolv.conf` on Linux, with what they link to); TLS roots, if the TLS stack reads them from disk | `direct`: outbound TCP and UDP (QUIC), including port 53 to resolvers on loopback and private addresses. `socks5`: TCP to Arti's loopback port only |
+| `freedom-ipfsd`, persistent | its data directory: the SQLite file, its `-wal` and `-shm`, its journal | on Linux, glibc's resolver configuration and the C library's own directory ([Name resolution](#name-resolution-through-glibc)), with `/run/systemd/resolve/resolv.conf` and what the files link to. No TLS roots: the TLS stack has them built in (`webpki-roots`) | `direct`: outbound TCP and UDP (QUIC), including port 53 to resolvers on loopback and private addresses. `socks5`: TCP to the proxy's endpoint only, the IP literal and port of `--network`, on loopback or the LAN (0007) |
 | `freedom-ipfsd`, ephemeral | nothing | the same | the same |
-| `freedom-radicled` | its Radicle home, and the empty `HOME` directory it owns (0008), with renames and links across their directories | the same | `direct`: outbound TCP, and port 53 as above. `socks5`: TCP to Arti's port only |
+| `freedom-radicled` | its Radicle home, and the empty `HOME` directory it owns (0008), with renames and links across their directories | the same | `direct`: outbound TCP, and port 53 as above. `socks5`: TCP to the proxy's endpoint only |
 
 **Both services also use:**
 - stdin, stdout and stderr, which are inherited: a socket pair or pipes, connected to main only;
 - the lock file, opened before confinement, whose descriptor stays usable. The ephemeral IPFS process has none;
 - the network policy, from the spawn arguments ([below](#the-network-policy-and-the-lifecycle));
 - threads, memory, clocks and `getrandom`;
-- in `freedom-ipfsd`, one UNIX socket pair, which tokio's signal driver creates. No other local socket: release builds resolve names without one ([Linux](#linux));
+- in `freedom-ipfsd`, one UNIX socket pair, which tokio's signal driver creates. No other local socket: glibc's resolver reaches DNS without one, and its sources that need one are refused ([Name resolution](#name-resolution-through-glibc));
 - on Linux, `/proc/self` and the cgroup files the standard library reads for the CPU count.
 
 **No other writable place:** SQLite's temporary files stay in memory (`temp_store = MEMORY`, which 0007 already sets for memory stores) or in the data directory.
@@ -139,7 +139,7 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
 
 **seccomp-bpf** is a syscall filter the process installs on itself, also after no-new-privileges. It can't be lifted, and children inherit it. It sees the syscall number and its integer arguments, never a path behind a pointer. There are two styles:
 - **An allowlist** of exactly the syscalls the service makes. It is the strongest, but fragile:
-  - tokio, libp2p, SQLite, libgit2, heartwood and the C library (musl in release builds, glibc in dev builds) each choose their syscalls;
+  - tokio, libp2p, SQLite, libgit2, heartwood and the C library (glibc, from 2.17: 0007's release builds link it dynamically) each choose their syscalls;
   - a dependency update or a new kernel path (`clone3`, `rseq`, `statx`) then kills the process in the field, or fails a call somewhere unexpected;
   - it needs a list per architecture.
 - **A denylist** of syscalls a service never makes, answered with an error rather than a kill:
@@ -158,8 +158,8 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
       - libgit2 1.9.6, in heartwood's bare-repository workflow, makes two path calls and no descriptor ones (shared-mode repositories would add more). Its `chmod` probe at repository creation then records `core.filemode = false`, which a bare repository ignores. Its `utimes`, which "freshens" an object that already exists, makes it write the object again. It sets object files' modes when it creates them;
       - std and tokio make them only when asked (`set_permissions`, `set_times`, `fs::copy`). fc-service asks only while it prepares the gate and the data directory (`gate.rs`), before `confine`; after it, neither it, freedom-ipfs v0.4.6 nor heartwood `c208df3` asks. `freedom-cored` does, but isn't confined (D7).
   - **local sockets:** `socket` for any family but `AF_INET` and `AF_INET6`, and `socketpair` for anything but stream sockets. No UNIX socket (pathname or abstract), netlink or packet socket can be opened, so no local service is reachable.
-    - **Who needs one:** tokio's signal driver, a stream pair. heartwood's control socket would, and 0008 turns it off upstream. Release builds resolve names without a local socket: static musl reads `/etc/resolv.conf` and `/etc/hosts` and asks the DNS server itself, and `freedom-ipfsd` has its own resolver.
-    - glibc dev builds lose the NSS sources that need a socket (nscd, systemd-resolved's varlink, mDNS), and fall back to DNS.
+    - **Who needs one:** tokio's signal driver, a stream pair. heartwood's control socket would, and 0008 turns it off upstream.
+    - **Name resolution needs none:** glibc's `dns` source reads `/etc/resolv.conf` and asks the DNS server over UDP and TCP. Its sources that need a local socket are refused, and glibc moves on to the next ([Name resolution](#name-resolution-through-glibc)). `freedom-ipfsd`'s own resolver needs none either.
   - kernel surface the service never uses: `bpf`, `perf_event_open`, `userfaultfd`, the `io_uring` calls, `keyctl`, `add_key`, `request_key`, module loading, `kexec`, `mount`, `umount2`, `pivot_root`, `unshare`, `setns`, `personality`, `swapon`, `reboot`.
 - **The ABI guard,** before any rule:
   - a call through another architecture's ABI (i386 on x86-64, AArch32 on AArch64) is killed;
@@ -168,6 +168,36 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
   `seccompiler` 0.5.0 checks the architecture, and kills a mismatch, but not the x32 bit. A second filter of a few hand-built instructions adds that check. seccomp runs every filter installed, and the strictest answer wins.
 - **Newer syscalls:** a denylist misses calls newer than itself (`fchmodat2` arrived in 6.6, `setxattrat` in 6.13). CI checks the list against the newest kernel's syscall table.
 - **Its cost:** `seccompiler` (Apache-2.0 or BSD-3-Clause, a pure-Rust BPF compiler from the rust-vmm project), or a hand-written filter (D6). The syscall numbers differ per architecture: x86-64 and AArch64 here.
+
+#### Name resolution through glibc
+
+0007's Linux release builds link glibc dynamically, built against 2.17 and running on it and every newer glibc, so they resolve host names as the host's glibc does. That is every name `freedom-radicled` resolves in `direct` mode (0008), and any `getaddrinfo` `freedom-ipfsd` makes; its own resolver reads `/etc/resolv.conf` itself. In `socks5` mode neither resolves through glibc: names go to the proxy.
+
+- **How glibc resolves:**
+  - It follows the `hosts` line of `/etc/nsswitch.conf`, one source at a time.
+  - Before 2.34, the `files` and `dns` sources are libraries of their own (`libnss_files.so.2`, `libnss_dns.so.2`, with `libresolv.so.2`), loaded lazily at the first lookup that reaches each source. From 2.34 they are part of libc. Other sources are always libraries (`libnss_resolve`, `libnss_mdns4_minimal`, `libnss_myhostname`).
+  - At each lookup it reads `/etc/nsswitch.conf`, `/etc/resolv.conf`, `/etc/hosts`, `/etc/host.conf` and `/etc/gai.conf`, where they exist. To load a source, the loader reads `/etc/ld.so.cache`.
+- **The read-only grant,** on Linux:
+  - those configuration files;
+  - `/etc/ld.so.cache`;
+  - the directory of the running C library, taken from `/proc/self/maps` (`/lib/x86_64-linux-gnu`, say), where glibc keeps its NSS modules and `libresolv`;
+  - each file's real location after its symlinks, as for the resolver files ([The recommendation](#the-recommendation)).
+
+  Loading a library needs only the read right: Landlock's execute right covers `execve`, not mapping a library that is open for reading. Nothing in the C library's directory is secret: it is the system's own code.
+- **A warm-up before `confine`:** in `direct` mode, the service resolves `localhost` once (`getaddrinfo`) before it confines itself. So glibc has read its configuration and loaded the sources a local answer reaches while every file is still readable, and a broken resolver shows up before untrusted input. Sources a lookup reaches later load from the granted directory.
+- **Sources that need a local socket are refused:**
+  - **Which:** `resolve` (systemd-resolved's varlink socket), `mdns` and `mdns4_minimal` (avahi), nscd's cache, and `sss`.
+  - **What happens:** seccomp refuses the socket. The source answers that it is unavailable, and glibc goes on to the next source, as its default action for an unavailable source says.
+  - **With systemd-resolved,** the `dns` source then asks its stub at `127.0.0.53` over port 53, which `direct` mode allows. Common configurations work this way: Ubuntu's `files mdns4_minimal [NOTFOUND=return] dns`, and Fedora's `files myhostname resolve [!UNAVAIL=return] dns`.
+- **Unsupported:**
+  - **The configurations:** a `hosts` line with no `dns` source after the refused ones, or one that returns on an unavailable source.
+  - **What happens:** while confined, names outside `/etc/hosts` don't resolve.
+  - **The report:** the service reads `/etc/nsswitch.conf` before `confine`, and `confinement` gives `"resolution": "system"`, or `"files_only"` with its reason, so main can show why. It doesn't confine less for it.
+- **Qualified on the release runtime,** not only CI's (Tests, *Before shipping*):
+  - the release binaries;
+  - the oldest glibc the browser runs on (Electron's floor is 2.25; Ubuntu 18.04's 2.27, say), one from before 2.34, and a current one;
+  - in each, a fresh first lookup after confinement, with nothing but the warm-up before it;
+  - with systemd-resolved's `resolve` source and avahi's `mdns4_minimal` in `nsswitch.conf`, and without them.
 
 **Namespaces** (an unprivileged user namespace, then mount, PID, IPC and network namespaces, as `bubblewrap` builds them) would give a private view of the filesystem and of processes. They aren't recommended:
 - **Availability varies:**
@@ -199,13 +229,13 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
   - `process-exec` and `process-fork`;
   - Mach service lookups, and connections to UNIX sockets;
   - metadata: mode, owner, xattr, flag and time changes are write operations of their own (`file-write-mode`, `file-write-flags` and the like), which a read-only rule doesn't grant, and the profile grants `file-ioctl` nowhere outside the read-write grant;
-  - network access. A rule can allow only loopback with a port (`(remote ip "localhost:9150")`), which fits `socks5` mode.
+  - network access, by host and port. The host is `localhost` or `*`: the profile compiler refuses an address literal. So a loopback proxy gets `(remote ip "localhost:9150")`, and a LAN proxy, such as `--network socks5:192.168.1.10:9150`, gets `(remote ip "*:9150")`: port-only, as on Linux. The qualification gate checks both forms on each supported version.
 - **Its cost:**
   - FFI, so `unsafe`, in `fc-sys` (AGENTS.md rule 6; D6);
   - an undocumented profile language, for which Apple's own profiles are the reference;
   - Apple may change it.
   - **What the profile must allow:** name resolution through mDNSResponder, a Mach service and a UNIX socket; read access to system libraries and frameworks; for NAT64 discovery, `com.apple.SystemConfiguration.configd`, and in `direct` mode port 53 to loopback and private addresses.
-- **A qualification gate:** Linux tests can't show what a profile must allow. Before a release ships, its signed build runs the contract suite confined on every supported macOS version: DNS, TLS, the file operations in the data directory, NAT64 discovery, and `socks5` mode through Arti.
+- **A qualification gate:** Linux tests can't show what a profile must allow. Before a release ships, its signed build runs the contract suite confined on every supported macOS version: DNS, TLS, the file operations in the data directory, NAT64 discovery, and `socks5` mode through Arti on loopback and through a SOCKS proxy on the LAN.
 
 **`sandbox-exec(1)`, run by main:** `/usr/bin/sandbox-exec -f <profile> -D DATA_DIR=<dir> freedom-ipfsd serve …`.
 - **How it works:** it applies the same profile, then execs the service. The PID and the pipes stay main's child's.
@@ -263,7 +293,7 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
 |---|---|---|---|---|---|---|---|---|---|
 | Linux: Landlock | confined | confined, except metadata | no exec of any file | abstract (ABI 6) and pathname (ABI 9) sockets | — | TCP ports (ABI 4), UDP ports (ABI 10) | no | small | none |
 | Linux: seccomp denylist | — | metadata changes and `truncate` refused | refused | no local sockets | reduced | — | no | small | none |
-| macOS: Seatbelt | confined | confined | refused | confined | reduced | loopback-only possible | no | FFI, or `sandbox-exec` | D3 |
+| macOS: Seatbelt | confined | confined | refused | confined | reduced | by port, on loopback or any host | no | FFI, or `sandbox-exec` | D3 |
 | Windows: job and mitigations | — | — | refused | — | — | — | no | small FFI | none |
 | Windows: restricted token | confined, by ACLs | confined, by ACLs | with the job | by ACLs | — | — | no | relaunch, ACLs, a desktop | none, or a launcher |
 | Windows: AppContainer | confined | confined | with the job | confined | — | loopback needs an exemption | for loopback | launcher and ACLs | yes |
@@ -286,9 +316,9 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
    - No-new-privileges.
    - Landlock at the best ABI available, with every right that ABI knows handled:
      - read and write on the data directory, with no execute and no special files (sockets, FIFOs, devices); `refer` on it for `freedom-radicled`; nothing at all for the ephemeral IPFS process;
-     - read only on the resolver and TLS files, `/proc/self` and the cgroup files. For a resolver file, the grant names the directory that holds it after its symlinks are followed (`/run/systemd/resolve/` with systemd-resolved), so a replaced file stays readable. A file that sits in `/etc` itself is granted alone. Once replaced, it is unreadable until the next process: NAT64 discovery then reports `unknown` and fails closed, as 0007 says for a failed resolver, and lookups may use stale or default servers;
+     - read only on glibc's resolver configuration and the C library's directory ([Name resolution](#name-resolution-through-glibc)), `/proc/self` and the cgroup files, after the `direct`-mode warm-up. For a resolver file, the grant names the directory that holds it after its symlinks are followed (`/run/systemd/resolve/` with systemd-resolved), so a replaced file stays readable. A file that sits in `/etc` itself is granted alone. Once replaced, it is unreadable until the next process: NAT64 discovery then reports `unknown` and fails closed, as 0007 says for a failed resolver, and lookups may use stale or default servers;
      - no execute right anywhere.
-     - From ABI 4: TCP `connect` to any port in `direct` mode, and only Arti's port in `socks5` mode; no TCP `bind`.
+     - From ABI 4: TCP `connect` to any port in `direct` mode, and only the proxy's port in `socks5` mode, on any address, since Landlock's rules name ports only; no TCP `bind`.
      - From ABI 6: both scopes. From ABI 9: `resolve_unix`, with no rule.
      - **Minimum ABIs:** `freedom-ipfsd` uses ABI 1 and up. `freedom-radicled` needs ABI 2: below it, it applies no Landlock rules and reports `files` as `unavailable`, with the reason.
    - The seccomp denylist above, answering `EPERM` (`ENOSYS` for `clone3`), behind the ABI guard.
@@ -301,7 +331,8 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
      "mechanism": "landlock-4+seccomp",   // or "seatbelt", "job", "none"
      "files": "enforced", "exec": "enforced", "ipc": "partial", "network": "enforced",
      "gaps": ["signals"],                 // what "partial" leaves open
-     "reasons": {}                        // per property: why it is "unavailable" or "blocked"
+     "reasons": {},                       // per property: why it is "unavailable" or "blocked"
+     "resolution": "system"               // Linux, `direct` mode: or "files_only", with its reason
    }
    ```
 
@@ -309,7 +340,7 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
      - `files`: outside the grant, no file can be read or written; outside the read-write grant, none can be truncated; and no file, granted or not, can have its mode, owner, xattrs, flags or times changed;
      - `exec`: no program runs, and no process is created;
      - `ipc`: no local socket or signal reaches another process;
-     - `network`: in `socks5` mode, TCP reaches only Arti's port.
+     - `network`: in `socks5` mode, TCP reaches only the proxy's port (on macOS, at the proxy's loopback host where it is one).
    - **The statuses:** `enforced`, `partial`, `unavailable` or `blocked` (step 6), or, for `network` in `direct` mode, `none`.
    - **Derived, not assumed:** each status comes from what was installed: the ABI the kernel reports and the rights handled at it, the `landlock` crate's `RestrictionStatus`, each mitigation read back. A best-effort call that returned success is not evidence: the crate drops unsupported rights silently.
 
@@ -419,7 +450,12 @@ Through the binary, in CI's job for each OS:
   - **the generated BPF,** evaluated in a unit test on synthetic records for native, compat (i386, AArch32) and x32 calls, whatever CI's kernel enables.
 - **Local IPC:** a listener on a pathname socket and one on an abstract socket, outside every grant: connecting to either fails (seccomp; and from ABI 9, Landlock), while tokio's socket pair works.
 - **Network:**
-  - in `socks5` mode, a TCP connection to any port but Arti's is refused by the kernel, on Linux from ABI 4 and on macOS;
+  - in `socks5` mode, a TCP connection to any port but the proxy's is refused by the kernel, on Linux from ABI 4 and on macOS;
+  - **a LAN proxy:** `--network socks5:<a private address>:<port>`, with a SOCKS proxy listening there: the service reaches it, and on macOS its profile has the port-only rule;
+  - **name resolution, on Linux** (`freedom-radicled`, and `freedom-ipfsd`'s `getaddrinfo` if it makes any):
+    - a fresh first lookup after confinement resolves a name in `/etc/hosts` and one through DNS, with nothing before it but the warm-up;
+    - with `resolve` before `dns` in a fixture `nsswitch.conf`, the lookup falls back to `dns`;
+    - with no `dns` source, `confinement` reports `files_only`;
   - **policy changes:** `direct` → `socks5` → `direct`, and Arti's port P → Q. Each runs in a new generation with the new `--network`; the old generation's process has exited; and a private instance, recreated after each change, gets the new rules;
   - **NAT64 discovery:** a fake resolver on a loopback address, listed in a fixture resolver file, sees one AAAA query for `ipv4only.arpa` per refresh. From `freedom-ipfsd` it sees no other DNS. `freedom-radicled`'s ordinary lookups use the system resolver in `direct` mode (0008), so for it the check is that discovery sends nothing else.
 - **Reporting:**
@@ -439,6 +475,7 @@ Through the binary, in CI's job for each OS:
   - a kill and a timeout during the import, then a restart: the marker stays, the service reconciles, and the reply is `outcome_unknown`;
   - **an unclean stop before admission:** a write and a fetch unfinished at the stop's 5 s exit, leaving the marker and a ref lock file. The import process repairs them before it admits the import. A `rad.import_repo` sent before `rad.reconcile` has replied gets `stopped` and changes nothing. A reconciliation that reaches its deadline imports nothing.
 - **Windows:** the job is assigned inside libuv's job, and each mitigation reads back as set.
+- **Before shipping, on the release runtime** (each release's checklist): the release binaries, confined, on the oldest glibc the browser runs on, one from before 2.34 and a current one, each with a fresh first lookup after confinement; with and without `resolve` and `mdns4_minimal` in `nsswitch.conf`; and `socks5` mode through a LAN proxy, on Linux and macOS.
 - **Before shipping, measured:**
   - cold start to `hello`;
   - IPFS over direct TCP and QUIC, `socks5` reconnects to Arti, and SQLite;
