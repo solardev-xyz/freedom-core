@@ -44,7 +44,7 @@ mod text;
 mod trust;
 
 pub use bounds::Bounds;
-pub use config::{ChainConfig, Prover, QuorumConfig, RpcEndpoint};
+pub use config::{ChainConfig, Prover, QuorumConfig, RpcEndpoint, SOURCES};
 pub use error::{ChainError, ErrorClass, Origin, Prop, Protocol, Thrown};
 pub use exchange::{BUSY, FETCH_FAILED, NOT_SENT, TOO_LARGE};
 pub use faults::{BackedOff, FaultRecord};

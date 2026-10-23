@@ -40,7 +40,7 @@ use fc_chain::machine::{
     Answer, Bounds, BroadcastOutcome, Call, ChainConfig, ChainError, ColibriClass, ColibriReply,
     Effect, Emitted, Machine, Ms, MyotisClass, MyotisRejection, MyotisReply, Origin, Prop,
     Protocol, Prover, QuorumConfig, ReadOptions, Reply as Done, Request, Reservation, RpcEndpoint,
-    Success, Transport, Verdict, VerifiedOp,
+    SOURCES as READ_SOURCES, Success, Transport, Verdict, VerifiedOp,
 };
 use fc_chain::{JsString, MyotisOperation, READ_METHODS, SINGLE_NODE_METHODS};
 use fc_protocol::error::{ErrorBody, ErrorCode};
@@ -2038,6 +2038,10 @@ struct RequestParams<'a> {
     origin: Option<String>,
     background: bool,
     profile: Profile,
+    /// Sources this read must not ask, on top of its profile's: the
+    /// router's `excludeSources` (design 0005, Methods main calls).
+    #[serde(default)]
+    exclude_sources: Vec<String>,
     deadline_ms: u64,
 }
 
@@ -2087,6 +2091,19 @@ fn call_params(method: &str, params: &str) -> Option<(Call, Ms)> {
                 Profile::Default => ReadOptions::default(),
                 Profile::AntScan => ReadOptions::ant_scan(),
             };
+            // Only the sources the router knows, each at most once.
+            for (i, source) in p.exclude_sources.iter().enumerate() {
+                if !READ_SOURCES.contains(&source.as_str())
+                    || p.exclude_sources[..i].contains(source)
+                {
+                    return None;
+                }
+            }
+            for source in p.exclude_sources {
+                if !options.exclude_sources.contains(&source) {
+                    options.exclude_sources.push(source);
+                }
+            }
             options.include_trust |= p.include_trust;
             options.background |= p.background;
             options.origin = p.origin;

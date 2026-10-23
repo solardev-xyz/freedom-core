@@ -288,7 +288,10 @@ pub(crate) fn no_reverse(address: &str, trust: Option<JsValue>) -> JsValue {
 /// it is its own ENSIP-15 normalization. A name that isn't (`vitaIik.eth`,
 /// with a capital I, renders like `vitalik.eth`) can still pass the forward
 /// check, which hashes it as written, so it is UNVERIFIED with its claim
-/// instead (deviation `reverse-normalized`, #75). WNS and GNS claims are
+/// instead (deviation `reverse-normalized`, #75), and says why:
+/// `unverifiedCause: "unnormalized"`, last, as freedom-browser's resolver
+/// sets it (#756), so the wallet doesn't warn that the name fails to
+/// resolve back, which it usually doesn't. WNS and GNS claims are
 /// normalized before their forward check already.
 pub(crate) fn ens_primary_name(address: &str, name: &str, trust: JsValue) -> JsValue {
     if crate::normalize_ens(name).is_ok_and(|normalized| normalized == name) {
@@ -300,7 +303,7 @@ pub(crate) fn ens_primary_name(address: &str, name: &str, trust: JsValue) -> JsV
             ("trust", trust),
         ])
     } else {
-        unverified_reverse(
+        let mut fields = unverified_reverse_fields(
             address,
             NameSystem::Ens,
             Some(name),
@@ -308,7 +311,9 @@ pub(crate) fn ens_primary_name(address: &str, name: &str, trust: JsValue) -> JsV
                 "Reverse record for {address} claims a name that isn't normalized"
             )),
             Some(trust),
-        )
+        );
+        fields.push(("unverifiedCause", s("unnormalized")));
+        obj(fields)
     }
 }
 
@@ -319,6 +324,19 @@ pub(crate) fn unverified_reverse(
     detail: Option<String>,
     trust: Option<JsValue>,
 ) -> JsValue {
+    obj(unverified_reverse_fields(
+        address, system, claimed, detail, trust,
+    ))
+}
+
+/// `unverifiedReverseResult`'s fields, in its order.
+fn unverified_reverse_fields(
+    address: &str,
+    system: NameSystem,
+    claimed: Option<&str>,
+    detail: Option<String>,
+    trust: Option<JsValue>,
+) -> Vec<(&'static str, JsValue)> {
     let mut fields = vec![
         ("success", JsValue::Bool(false)),
         ("address", s(address)),
@@ -338,7 +356,7 @@ pub(crate) fn unverified_reverse(
     if let Some(trust) = trust {
         fields.push(("trust", trust));
     }
-    obj(fields)
+    fields
 }
 
 pub(crate) fn reverse_conflict(

@@ -186,10 +186,17 @@ const CAPABILITIES: &[&str] = &[
 /// - `myotis_refusal_codes`: the core reads a Myotis broadcast's `{
 ///   rejected: { reason, code: -32602 } }` (The rest). Main sends that form
 ///   only to a core that offers it.
+/// - `exclude_sources`: the core reads `chain.request`'s `exclude_sources`
+///   (Methods main calls). Main sends it only to a core that offers it.
 /// - `colibri_faults`: the core reads Colibri's `fault: true` beside a
 ///   failure or a revert, for its verifier-fault backoff (Colibri). Main
 ///   sends it only to a core that offers it.
-const FEATURES: &[&str] = &["fragments", "myotis_refusal_codes", "colibri_faults"];
+const FEATURES: &[&str] = &[
+    "fragments",
+    "myotis_refusal_codes",
+    "exclude_sources",
+    "colibri_faults",
+];
 
 pub fn run(options: &Options) -> Exit {
     hardening::harden();

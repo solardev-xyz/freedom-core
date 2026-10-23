@@ -57,8 +57,8 @@ pub struct ChainConfig {
 }
 
 /// The sources the router knows. Anything else is dropped from an order
-/// (deviation `order-validation`).
-pub(crate) const SOURCES: [&str; 5] = ["myotis", "colibri", "quorum", "direct", "blockscout"];
+/// (deviation `order-validation`), and a request can't exclude it.
+pub const SOURCES: [&str; 5] = ["myotis", "colibri", "quorum", "direct", "blockscout"];
 
 /// A chain as the machine runs it.
 #[derive(Debug, Clone, PartialEq)]
