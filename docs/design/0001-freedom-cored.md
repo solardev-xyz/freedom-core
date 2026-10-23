@@ -339,6 +339,12 @@ This covers node identities. **Bee:** `keys/swarm.key` plus `config.yaml`. **Rad
     - for the switch, the marker, then the removals, then the config;
     - with `wipe`, the wipe, then the removals and the config, with no marker.
   - **Under the home's gate:** every Radicle write, and every recovery of a Radicle journal, holds 0008's `radicle-<sha256(home)>.lock` under main's lock directory. Startup recovery doesn't wait for it: held, the journal stays and `node_recovery` reports Radicle `pending_recovery`. `freedom-cored recover` waits 5 s, then exits 75.
+  - **Its canonical path:** a Radicle write builds its plan and its journal under the gate's canonical path, never the path main named. Recovery acts on a Radicle journal only if the gate's canonical path is exactly the journal's root; a root retargeted since (to a symlink, say) is refused, and the journal stays.
+- **Through no symlink below the root** (every node, review of #177): each journal operation reaches its file through directories opened from the node's root without following a symlink. That covers staging, install, removals, the wipe, and the reads of the switch.
+  - **On Unix,** the operation itself is relative to that directory's handle (`openat`, `renameat`, `unlinkat`, `fstatat` with `O_NOFOLLOW`), so a directory swapped for a symlink after it was opened can't redirect it.
+  - **On Windows,** each directory is checked to be one and not a reparse point, then used by path. A same-user process swapping it in between is outside the guarantee there, as above.
+  - So a symlinked `keys` or `node` fails the write or the recovery, and touches nothing outside the root.
+- **Exactly a writer's record:** the journal and its entries refuse members no writer writes, so a record with one is set aside, as any other non-writer shape is.
 
 ## Parity contract
 

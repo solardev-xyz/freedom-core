@@ -31,6 +31,7 @@ use fc_keys::keystore::{self, KeystoreParams};
 use fc_keys::{multiformats, openssh};
 use rand_core::TryCryptoRng;
 
+use crate::anchor::{Dir, Kind};
 use crate::journal;
 use serde_json::{Map, Value};
 use zeroize::Zeroizing;
@@ -226,24 +227,29 @@ struct Marker {
     node_ids: Vec<String>,
 }
 
-/// Builds the sealed form of the Radicle write for `home`. Called with the
-/// home's gate held: what it reads can't change before the commit.
+/// Builds the sealed form of the Radicle write for `home`, the gate's
+/// canonical path. Called with the home's gate held: what it reads can't
+/// change before the commit. Everything below the home is reached through
+/// no symlink ([`crate::anchor::Dir`]): a symlinked `keys` or `node` is an
+/// error, and nothing is touched (review of #177).
 pub fn radicle_sealed(home: &Path, alias: &str, wipe: bool) -> Result<SealedPlan, BuildError> {
     let existing = read_config(&home.join("config.json"))?;
     let config = radicle_config(existing.as_deref(), alias);
     let key_file = home.join("keys").join("radicle");
-    let key_present = match std::fs::symlink_metadata(&key_file) {
-        Ok(_) => true,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-        Err(e) => return Err(BuildError::Io(e)),
+    let key_present = match Dir::under(home, &key_file, false).map_err(BuildError::Io)? {
+        Some((dir, name)) => dir.kind(&name).map_err(BuildError::Io)? != Kind::Missing,
+        None => false,
     };
+    // `node/` must be a real directory too, or not there: the marker goes in
+    // it, and a wipe removes it.
+    Dir::under(home, &journal::radicle_marker(home), false).map_err(BuildError::Io)?;
     let mut entries = Vec::with_capacity(4);
     // The switch: the identity whose key file goes stays checked (0008).
     // With `wipe`, nothing is left to check.
     if key_present && !wipe {
         let node_id = old_node_id(home)?.ok_or(BuildError::IdentityCorrupt)?;
         let marker = journal::radicle_marker(home);
-        let mut node_ids = match read_marker(&marker)? {
+        let mut node_ids = match read_marker(home, &marker)? {
             Some(marker) => marker.node_ids,
             None => Vec::new(),
         };
@@ -271,53 +277,75 @@ pub fn radicle_sealed(home: &Path, alias: &str, wipe: bool) -> Result<SealedPlan
 }
 
 /// The node ID of the identity whose key file is in `home`: from the key
-/// file's public part (OpenSSH carries it in the clear), or from
-/// `keys/radicle.pub`. The secret part is never read into a key. `None`
+/// file's public part (OpenSSH carries it in the clear), streamed and
+/// decoded only up to the public key ([`openssh::PublicKeyReader`]); or else
+/// from `keys/radicle.pub`. The private section is never decoded. `None`
 /// when neither yields one.
 fn old_node_id(home: &Path) -> Result<Option<String>, BuildError> {
     let keys = home.join("keys");
-    let public = match read_public(&keys.join("radicle"), openssh::public_key_of_private_file)? {
+    let public = match private_file_public(home, &keys.join("radicle"))? {
         Some(public) => Some(public),
-        None => read_public(&keys.join("radicle.pub"), openssh::public_key_of_line)?,
+        None => public_line(home, &keys.join("radicle.pub"))?,
     };
     Ok(public.map(|public| multiformats::radicle_node_id(&public)))
 }
 
-/// The public key `parse` finds in `path`: a regular file of at most
-/// [`journal::MAX_FILE`] of UTF-8, opened through no symlink. A private key
-/// file is read into a wiped buffer sized up front, and parsed where it is:
-/// no copy of it is made. `None` if it isn't such a file, or names no key.
-fn read_public(
-    path: &Path,
-    parse: fn(&str) -> Option<[u8; 32]>,
-) -> Result<Option<[u8; 32]>, BuildError> {
-    use std::io::Read as _;
-    let file = match crate::fsx::open_regular(path, false).map_err(BuildError::Io)? {
-        crate::fsx::Regular::File(file) => file,
-        crate::fsx::Regular::Missing | crate::fsx::Regular::Other => return Ok(None),
+/// The file `path` under `home`, opened for reading through no symlink
+/// below the home, if it is a regular file.
+fn open_under(home: &Path, path: &Path) -> Result<Option<std::fs::File>, BuildError> {
+    let Some((dir, name)) = Dir::under(home, path, false).map_err(BuildError::Io)? else {
+        return Ok(None);
     };
-    let len = file.metadata().map_err(BuildError::Io)?.len();
-    if len > journal::MAX_FILE {
-        return Ok(None);
+    match dir.open_regular(&name, false).map_err(BuildError::Io)? {
+        crate::fsx::Regular::File(file) => Ok(Some(file)),
+        crate::fsx::Regular::Missing | crate::fsx::Regular::Other => Ok(None),
     }
-    let mut bytes = Zeroizing::new(Vec::with_capacity(
-        usize::try_from(len).unwrap_or(0).saturating_add(1),
-    ));
-    (&file)
-        .take(journal::MAX_FILE + 1)
-        .read_to_end(&mut bytes)
-        .map_err(BuildError::Io)?;
-    if bytes.len() as u64 > journal::MAX_FILE {
+}
+
+/// A private key file's public key, read 64 bytes at a time into a wiped
+/// buffer and fed to the streaming reader, which stops at the public key.
+fn private_file_public(home: &Path, path: &Path) -> Result<Option<[u8; 32]>, BuildError> {
+    use std::io::Read as _;
+    let Some(file) = open_under(home, path)? else {
         return Ok(None);
+    };
+    let mut reader = openssh::PublicKeyReader::new();
+    let mut chunk = Zeroizing::new([0u8; 64]);
+    let mut source = (&file).take(journal::MAX_FILE);
+    loop {
+        let read = source.read(chunk.as_mut_slice()).map_err(BuildError::Io)?;
+        if read == 0 {
+            return Ok(reader.finish());
+        }
+        if let Some(found) = reader.feed(&chunk[..read]) {
+            return Ok(found);
+        }
     }
-    Ok(std::str::from_utf8(&bytes).ok().and_then(parse))
+}
+
+/// A public key line's key: public data, read whole (at most
+/// [`journal::MAX_FILE`]).
+fn public_line(home: &Path, path: &Path) -> Result<Option<[u8; 32]>, BuildError> {
+    let Some(file) = open_under(home, path)? else {
+        return Ok(None);
+    };
+    let Some(bytes) = crate::fsx::read_at_most(&file, journal::MAX_FILE).map_err(BuildError::Io)?
+    else {
+        return Ok(None);
+    };
+    Ok(std::str::from_utf8(&bytes)
+        .ok()
+        .and_then(openssh::public_key_of_line))
 }
 
 /// The marker as it is, if there is one. One the core can't read, or that
 /// isn't a regular file, is `IdentityCorrupt`: the switch can't add to what
 /// it can't read, and never drops a name.
-fn read_marker(path: &Path) -> Result<Option<Marker>, BuildError> {
-    match crate::fsx::open_regular(path, false).map_err(BuildError::Io)? {
+fn read_marker(home: &Path, path: &Path) -> Result<Option<Marker>, BuildError> {
+    let Some((dir, name)) = Dir::under(home, path, false).map_err(BuildError::Io)? else {
+        return Ok(None);
+    };
+    match dir.open_regular(&name, false).map_err(BuildError::Io)? {
         crate::fsx::Regular::Missing => Ok(None),
         crate::fsx::Regular::Other => Err(BuildError::IdentityCorrupt),
         crate::fsx::Regular::File(file) => {

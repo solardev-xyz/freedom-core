@@ -43,7 +43,7 @@
 //! finds it held leaves the journal in place ([`Recovered::Waiting`]): the
 //! node stays `pending_recovery` until the service has stopped.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
@@ -51,6 +51,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+use crate::anchor::Dir;
 use crate::fsx::{self, Done};
 
 pub const JOURNAL: &str = "node-identity-journal.json";
@@ -93,7 +94,10 @@ pub fn valid_op_id(op_id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
+/// A journal as a writer produces it: a member it doesn't write makes the
+/// record no writer's, so recovery sets it aside (review of #177).
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Journal {
     op_id: String,
     node: String,
@@ -107,6 +111,7 @@ struct Journal {
 /// One entry: a staged file to install, with its digest, or a target to
 /// remove.
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JournalFile {
     target: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -214,6 +219,7 @@ fn staged_targets(node: &str, root: &Path) -> Vec<PathBuf> {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Intent {
     op_id: String,
     node: String,
@@ -415,7 +421,8 @@ pub fn write(
     };
     put_record(identity_dir, STAGING, &intent)?;
 
-    // 1. Stage.
+    // 1. Stage, under the root, and nothing below it reached through a
+    // symlink.
     let mut journal = Journal {
         op_id: op_id.to_owned(),
         node: node.to_owned(),
@@ -425,7 +432,7 @@ pub fn write(
     };
     for entry in &plan.entries {
         match entry {
-            Entry::Install(file) => match stage(file) {
+            Entry::Install(file) => match stage(root, file) {
                 Ok(staged) => journal.files.push(staged),
                 Err(e) => {
                     discard(identity_dir, node, root);
@@ -557,14 +564,18 @@ enum HomeGate {
 }
 
 /// The gate of the Radicle home `root`, unless the caller holds it already.
+/// A Radicle journal's root is the gate's canonical path when it was
+/// written: a root that no longer is (retargeted to a symlink since, or
+/// renamed) is refused, and the journal stays (review of #177).
 fn radicle_gate(root: &Path, gates: &Gates) -> std::io::Result<HomeGate> {
-    if let Some(held) = &gates.held
-        && std::fs::canonicalize(root).is_ok_and(|root| &root == held)
-    {
+    if gates.held.as_deref() == Some(root) {
         return Ok(HomeGate::Taken(None));
     }
     match fc_service::gate::acquire(root, &gates.lock_dir, RADICLE_GATE, gates.retry) {
-        Ok(gate) => Ok(HomeGate::Taken(Some(gate))),
+        Ok(gate) if gate.data_dir == root => Ok(HomeGate::Taken(Some(gate))),
+        Ok(_) => Err(std::io::Error::other(
+            "a Radicle home that isn't its journal's canonical root",
+        )),
         Err(fc_service::gate::GateError::Held) => Ok(HomeGate::Held),
         Err(fc_service::gate::GateError::Storage(e)) => Err(e),
         Err(other) => Err(std::io::Error::other(other.to_string())),
@@ -684,109 +695,121 @@ pub fn normalized_absolute(path: &Path) -> bool {
         })
 }
 
+/// The staged file's name beside its target's.
+fn staged_name(name: &std::ffi::OsStr) -> std::ffi::OsString {
+    let mut staged = name.to_owned();
+    staged.push(STAGED_SUFFIX);
+    staged
+}
+
 fn staged_path(target: &Path) -> PathBuf {
     let mut name = target.as_os_str().to_owned();
     name.push(STAGED_SUFFIX);
     PathBuf::from(name)
 }
 
-/// Step 1 for one file. A staged file left by an earlier operation that died
-/// before its commit is replaced (recovery has run, so no journal needs it).
-fn stage(file: &FileSpec<'_>) -> std::io::Result<JournalFile> {
-    let dir = file
-        .target
-        .parent()
-        .ok_or_else(|| std::io::Error::other("target has no parent directory"))?;
-    ensure_dir(dir)?;
-    let staged = staged_path(&file.target);
-    remove_if_present(&staged)?;
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
+/// Step 1 for one file, under `root` ([`Dir`]: no symlink below it is
+/// followed, and missing directories are made). A staged file left by an
+/// earlier operation that died before its commit is replaced (recovery has
+/// run, so no journal needs it).
+fn stage(root: &Path, file: &FileSpec<'_>) -> std::io::Result<JournalFile> {
+    // The root is the caller's, made if missing (a Radicle home's gate made
+    // it already); below it, the anchors.
+    ensure_dir(root)?;
+    let (dir, name) = Dir::under(root, &file.target, true)?
+        .ok_or_else(|| std::io::Error::other("a node identity directory can't be made"))?;
+    let staged = staged_name(&name);
+    dir.unlink(&staged)?;
     let result = (|| {
-        let mut out = options.open(&staged)?;
+        let mut out = dir.create_new(&staged)?;
         out.write_all(file.contents)?;
         out.sync_all()?;
-        sync_dir(dir)
+        dir.sync()
     })();
     if let Err(e) = result {
-        let _ = std::fs::remove_file(&staged);
+        let _ = dir.unlink(&staged);
         return Err(e);
     }
     Ok(JournalFile {
         target: file.target.clone(),
-        staged: Some(staged),
+        staged: Some(staged_path(&file.target)),
         sha256: Some(hex(&Sha256::digest(file.contents))),
         remove: false,
     })
 }
 
-/// Step 3: the wipe, then each entry in order. Returns whether any file
+/// Step 3: the wipe, then each entry in order, all under the journal's
+/// root and through no symlink below it ([`Dir`]). Returns whether any file
 /// could not be installed (corrupt).
 fn install(journal: &Journal) -> std::io::Result<bool> {
+    let root = &journal.root;
     let mut corrupt = false;
-    let mut dirs: Vec<&Path> = Vec::new();
-    let mut installed: Vec<&Path> = Vec::new();
-    for dir in &journal.wipe {
-        wipe(dir)?;
+    let mut installed: Vec<PathBuf> = Vec::new();
+    if !journal.wipe.is_empty() {
+        // Each is a directory right under the root (the journal's shapes).
+        let top = Dir::root(root)?;
+        for dir in &journal.wipe {
+            let name = dir
+                .file_name()
+                .ok_or_else(|| std::io::Error::other("a wipe that names no directory"))?;
+            if top.remove_tree(name)? {
+                top.sync()?;
+            }
+        }
     }
     for file in &journal.files {
-        let (staged, sha256) = match (&file.staged, &file.sha256) {
-            _ if file.remove => {
-                // Its directory is flushed only if something was removed:
-                // a target already gone may have no directory either.
-                if remove_target(&file.target)?
-                    && let Some(dir) = file.target.parent()
-                    && !dirs.contains(&dir)
-                {
-                    dirs.push(dir);
-                }
-                continue;
+        if file.remove {
+            // A target already gone, or under a directory already gone, is
+            // done; its directory is flushed only if something was removed.
+            if let Some((dir, name)) = Dir::under(root, &file.target, false)?
+                && dir.unlink(&name)?
+            {
+                dir.sync()?;
             }
-            (Some(staged), Some(sha256)) => (staged, sha256),
+            continue;
+        }
+        let Some(sha256) = &file.sha256 else {
             // valid_journal admits no other entry.
-            _ => {
-                return Err(std::io::Error::other(
-                    "an install entry without its staged file",
-                ));
-            }
+            return Err(std::io::Error::other("an install entry without its digest"));
         };
-        if regular_digest(&file.target)?.as_deref() == Some(sha256.as_str()) {
+        let Some((dir, name)) = Dir::under(root, &file.target, false)? else {
+            // Its directory is gone, its staged file with it.
+            corrupt = true;
+            continue;
+        };
+        let staged = staged_name(&name);
+        if digest_at(&dir, &name)?.as_deref() == Some(sha256.as_str()) {
             // Already in place; a leftover staged copy is not needed.
-            remove_if_present(staged)?;
+            dir.unlink(&staged)?;
         } else if let Some((_, checked)) =
-            digest_and_handle(staged)?.filter(|(digest, _)| digest == sha256)
+            digest_and_handle_at(&dir, &staged)?.filter(|(digest, _)| digest == sha256)
         {
             // The rename moves whatever the staged name holds: it must still
             // be the file just hashed (review of #114). If not, nothing is
             // renamed, and the journal stays for recovery to judge again.
-            crate::testhooks::swap("checked", staged);
-            if !fsx::same_file(&checked, staged)? {
+            crate::testhooks::swap("checked", &dir.path(&staged));
+            if !dir.same_file(&checked, &staged)? {
                 return Err(std::io::Error::other(
                     "a staged node identity file changed after its check",
                 ));
             }
-            crate::testhooks::swap("renaming", staged);
+            crate::testhooks::swap("renaming", &dir.path(&staged));
             // Replaces whatever is at the target, a symlink included, without
             // following it.
-            std::fs::rename(staged, &file.target)?;
+            dir.rename(&staged, &name)?;
             // A file that won the race between that check and the rename is
             // never left installed: the target must be the file checked, with
             // the journaled digest. Otherwise it is removed, and the node is
             // corrupt until a fresh write.
-            let ours = fsx::same_file(&checked, &file.target)?
-                && regular_digest(&file.target)?.as_deref() == Some(sha256.as_str());
+            let ours = dir.same_file(&checked, &name)?
+                && digest_at(&dir, &name)?.as_deref() == Some(sha256.as_str());
             drop(checked);
             if !ours {
                 crate::log::error(
                     "a node identity file was swapped during its install",
                     serde_json::json!({}),
                 );
-                remove_if_present(&file.target)?;
+                dir.unlink(&name)?;
                 corrupt = true;
                 continue;
             }
@@ -794,68 +817,18 @@ fn install(journal: &Journal) -> std::io::Result<bool> {
             corrupt = true;
             continue;
         }
-        installed.push(&file.target);
-        if let Some(dir) = file.target.parent()
-            && !dirs.contains(&dir)
-        {
-            dirs.push(dir);
-        }
-    }
-    for dir in dirs {
-        sync_dir(dir)?;
+        dir.sync()?;
+        installed.push(dir.path(&name));
     }
     flush_installed(&installed);
     Ok(corrupt)
-}
-
-/// Wipes `dir` (0008, "Identity changes"): removes it and everything under
-/// it, following no symlink (a symlink in its place is removed itself), then
-/// flushes its parent. Already gone is done.
-fn wipe(dir: &Path) -> std::io::Result<()> {
-    let removed = match std::fs::symlink_metadata(dir) {
-        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(dir),
-        Ok(_) => std::fs::remove_file(dir),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e),
-    };
-    match removed {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
-    if let Some(parent) = dir.parent() {
-        sync_dir(parent)?;
-    }
-    Ok(())
-}
-
-/// A removal entry (0008, "The switch"): unlinks the target, following no
-/// symlink, and says whether anything was there. Already gone is done. A
-/// directory in its place is an error: the journal stays, and the node
-/// `pending_recovery`.
-fn remove_target(target: &Path) -> std::io::Result<bool> {
-    match std::fs::symlink_metadata(target) {
-        Ok(metadata) if metadata.is_dir() => Err(std::io::Error::other(
-            "a directory where a node identity file was to be removed",
-        )),
-        Ok(_) => remove_if_present(target).map(|()| true),
-        Err(e)
-            if matches!(
-                e.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-            ) =>
-        {
-            Ok(false)
-        }
-        Err(e) => Err(e),
-    }
 }
 
 /// Windows: flushes each installed file, which commits NTFS's journal
 /// through its rename (`fsx::sync_rename`; #85). Durability under power
 /// loss is best effort there (design 0001), so a failure is logged, never
 /// turned into `pending_recovery`. Unix flushed the directories instead.
-fn flush_installed(installed: &[&Path]) {
+fn flush_installed(installed: &[PathBuf]) {
     #[cfg(windows)]
     for target in installed {
         let parent = target.parent().unwrap_or(target);
@@ -932,7 +905,9 @@ fn read_done(identity_dir: &Path) -> std::io::Result<DoneList> {
 /// intent record.
 fn discard(identity_dir: &Path, node: &str, root: &Path) {
     for target in staged_targets(node, root) {
-        let _ = std::fs::remove_file(staged_path(&target));
+        if let Ok(Some((dir, name))) = Dir::under(root, &target, false) {
+            let _ = dir.unlink(&staged_name(&name));
+        }
     }
     let _ = fsx::remove(&identity_dir.join(STAGING), || true);
 }
@@ -951,8 +926,11 @@ fn discard_intent(identity_dir: &Path) -> std::io::Result<Recovered> {
         && NODES.contains(&intent.node.as_str())
     {
         // The core's own staged files, never a node's: no gate is needed.
+        // Through no symlink below the root, as every node file is.
         for target in staged_targets(&intent.node, &intent.root) {
-            remove_if_present(&staged_path(&target))?;
+            if let Some((dir, name)) = Dir::under(&intent.root, &target, false)? {
+                dir.unlink(&staged_name(&name))?;
+            }
         }
     }
     fsx::remove(&path, || true)?;
@@ -987,16 +965,20 @@ fn read_journal(path: &Path) -> std::io::Result<Option<(Vec<u8>, File)>> {
     }
 }
 
-/// The SHA-256 of a regular file of at most [`MAX_FILE`] (never through a
-/// symlink, judged on the open handle), hashed through a wiped buffer: node
-/// files hold private keys and passwords. `None` for anything else.
-fn regular_digest(path: &Path) -> std::io::Result<Option<String>> {
-    Ok(digest_and_handle(path)?.map(|(digest, _)| digest))
+/// The SHA-256 of the regular file `name` in `dir` (of at most
+/// [`MAX_FILE`], through no symlink, judged on the open handle), hashed
+/// through a wiped buffer: node files hold private keys and passwords.
+/// `None` for anything else.
+fn digest_at(dir: &Dir, name: &std::ffi::OsStr) -> std::io::Result<Option<String>> {
+    Ok(digest_and_handle_at(dir, name)?.map(|(digest, _)| digest))
 }
 
-/// [`regular_digest`], with the handle the digest was taken through.
-fn digest_and_handle(path: &Path) -> std::io::Result<Option<(String, File)>> {
-    let file = match fsx::open_regular(path, false)? {
+/// [`digest_at`], with the handle the digest was taken through.
+fn digest_and_handle_at(
+    dir: &Dir,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<Option<(String, File)>> {
+    let file = match dir.open_regular(name, false)? {
         fsx::Regular::File(file) => file,
         fsx::Regular::Missing | fsx::Regular::Other => return Ok(None),
     };
@@ -1020,14 +1002,6 @@ fn digest_and_handle(path: &Path) -> std::io::Result<Option<(String, File)>> {
         hex(&hasher.finalize())
     };
     Ok(Some((digest, file)))
-}
-
-fn remove_if_present(path: &Path) -> std::io::Result<()> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
 }
 
 /// Creates `dir` and any missing ancestors, then persists each new entry in
@@ -1144,7 +1118,7 @@ mod tests {
             op_id: op_id.into(),
             node: "bee".into(),
             root: root.to_owned(),
-            files: files.iter().map(|f| stage(f).unwrap()).collect(),
+            files: files.iter().map(|f| stage(root, f).unwrap()).collect(),
             wipe: Vec::new(),
         };
         made(identity);
@@ -1405,7 +1379,7 @@ mod tests {
         )
         .unwrap();
         for file in bee_files(&root, b"k", b"c") {
-            stage(&file).unwrap();
+            stage(&root, &file).unwrap();
         }
         assert_eq!(staged_left(&root).len(), 2);
         assert_eq!(recover(&identity).unwrap(), Recovered::Discarded);

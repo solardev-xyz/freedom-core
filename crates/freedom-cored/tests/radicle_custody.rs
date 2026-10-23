@@ -253,6 +253,9 @@ fn a_held_gate_refuses_the_write_and_touches_nothing() {
 /// committed, 1: the marker installed, 2: the private key file removed).
 fn interrupted_switch(identity: &Path, home: &Path, op_id: &str, stage: u8) {
     std::fs::create_dir_all(identity).unwrap();
+    // A writer's journal names the gate's canonical home (on macOS, /var
+    // is a symlink to /private/var).
+    let home = &std::fs::canonicalize(home).unwrap();
     let marker = format!(r#"{{"node_ids":["{RADICLE_NID}"]}}"#);
     let config = "{\n  \"node\": {\n    \"alias\": \"FreedomBrowser\"\n  }\n}";
     let staged = |target: &Path, contents: &str| -> Value {
@@ -419,6 +422,143 @@ fn removals_and_wipes_a_writer_never_produces_are_set_aside() {
         assert_eq!(recover.exit_code(Duration::from_secs(5)), 0);
         assert_eq!(std::fs::read(&precious).unwrap(), b"keep", "case {i}");
         assert!(root.path().exists());
+        let _ = std::fs::remove_file(data.join("node-identity-journal.json.corrupt"));
+    }
+}
+
+/// A home's `keys` symlinked to another home's: the write is refused, and
+/// neither home's files change (review of #177).
+#[cfg(unix)]
+#[test]
+fn a_symlinked_keys_directory_cannot_reach_outside_the_home() {
+    let (root, data, locks) = dirs();
+    let mut core = unlocked(&data, &locks);
+    let other = root.path().join("other-home");
+    legacy_write(&mut core, 3, &other);
+    let home = root.path().join("radicle");
+    std::fs::create_dir_all(&home).unwrap();
+    std::os::unix::fs::symlink(other.join("keys"), home.join("keys")).unwrap();
+    let before = (walk_contents(&other), walk_contents(&home));
+    let reply = core.call(4, "nodes.write_identity", sealed("keys-link", &home, None));
+    assert!(reply["error"].is_object(), "{reply}");
+    assert_eq!((walk_contents(&other), walk_contents(&home)), before);
+    assert!(other.join("keys/radicle").exists());
+    assert!(other.join("keys/radicle.pub").exists());
+}
+
+/// A home's `node` symlinked out: no marker is written there (review of
+/// #177).
+#[cfg(unix)]
+#[test]
+fn a_symlinked_node_directory_cannot_write_outside_the_home() {
+    let (root, data, locks) = dirs();
+    let mut core = unlocked(&data, &locks);
+    let home = root.path().join("radicle");
+    legacy_write(&mut core, 3, &home);
+    let outside = root.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, home.join("node")).unwrap();
+    let before = walk_contents(&home);
+    for (id, wipe) in [(4, None), (5, Some(true))] {
+        let reply = core.call(
+            id,
+            "nodes.write_identity",
+            sealed(&format!("node-{id}"), &home, wipe),
+        );
+        assert!(reply["error"].is_object(), "{reply}");
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+        assert_eq!(walk_contents(&home), before);
+    }
+}
+
+/// The write works under the gate's canonical home: a home named through a
+/// symlink is switched where it really is, and its journal names that
+/// path. A journal whose root has since become a symlink elsewhere is never
+/// acted on (review of #177).
+#[cfg(unix)]
+#[test]
+fn the_home_is_its_canonical_path_and_a_retargeted_root_is_refused() {
+    let (root, data, locks) = dirs();
+    let mut core = unlocked(&data, &locks);
+    let real = root.path().join("real-home");
+    legacy_write(&mut core, 3, &real);
+    let alias = root.path().join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let reply = core.call(4, "nodes.write_identity", sealed("via-alias", &alias, None));
+    assert_eq!(reply["result"]["status"], "installed", "{reply}");
+    keys_gone(&real);
+    assert_eq!(marker(&real), Some(json!({ "node_ids": [RADICLE_NID] })));
+
+    // A switch interrupted after its commit, then its home replaced by a
+    // symlink to another home: recovery leaves both alone.
+    let home = root.path().join("radicle");
+    let victim = root.path().join("victim");
+    legacy_write(&mut core, 10, &home);
+    legacy_write(&mut core, 11, &victim);
+    core.close_stdin();
+    assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
+    interrupted_switch(&data, &home, "retargeted", 0);
+    std::fs::rename(&home, root.path().join("moved-away")).unwrap();
+    std::os::unix::fs::symlink(&victim, &home).unwrap();
+    let before = walk_contents(&victim);
+    let mut core = spawn("serve", &data, &locks, &[]);
+    let hello = core.hello();
+    assert_eq!(
+        hello["result"]["node_recovery"]["status"], "pending_recovery",
+        "{hello}"
+    );
+    assert_eq!(walk_contents(&victim), before);
+    assert!(data.join("node-identity-journal.json").exists());
+}
+
+/// The switch reads only the private key file's public part: a key whose
+/// private section is corrupt still names its identity (review of #177).
+#[test]
+fn the_switch_needs_only_the_private_files_public_prefix() {
+    let (root, data, locks) = dirs();
+    let mut core = unlocked(&data, &locks);
+    let home = root.path().join("radicle");
+    legacy_write(&mut core, 3, &home);
+    std::fs::remove_file(home.join("keys/radicle.pub")).unwrap();
+    let key = std::fs::read_to_string(home.join("keys/radicle")).unwrap();
+    let lines: Vec<&str> = key.lines().collect();
+    let last_body = lines[lines.len() - 2];
+    let corrupt = key.replace(last_body, &"!".repeat(last_body.len()));
+    std::fs::write(home.join("keys/radicle"), corrupt).unwrap();
+    let reply = core.call(4, "nodes.write_identity", sealed("prefix", &home, None));
+    assert_eq!(reply["result"]["status"], "installed", "{reply}");
+    keys_gone(&home);
+    assert_eq!(marker(&home), Some(json!({ "node_ids": [RADICLE_NID] })));
+}
+
+/// A journal with a member no writer writes, at the top or in an entry, is
+/// set aside, never acted on (review of #177).
+#[test]
+fn a_journal_with_unknown_members_is_not_a_writer_shape() {
+    let (root, data, locks) = dirs();
+    let mut writer = unlocked(&data, &locks);
+    let homes: Vec<PathBuf> = (0..2)
+        .map(|i| root.path().join(format!("radicle-{i}")))
+        .collect();
+    for (i, home) in homes.iter().enumerate() {
+        legacy_write(&mut writer, 10 + i as u64, home);
+    }
+    writer.close_stdin();
+    assert_eq!(writer.exit_code(Duration::from_secs(5)), 0);
+    for (i, home) in homes.iter().enumerate() {
+        interrupted_switch(&data, home, &format!("extra-{i}"), 0);
+        let path = data.join("node-identity-journal.json");
+        let mut journal: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        if i == 0 {
+            journal["unexpected"] = true.into();
+        } else {
+            journal["files"][1]["unexpected"] = true.into();
+        }
+        std::fs::write(&path, journal.to_string()).unwrap();
+        let mut recover = spawn("recover", &data, &locks, &[]);
+        assert_eq!(recover.line(), "corrupt -", "case {i}");
+        assert_eq!(recover.exit_code(Duration::from_secs(5)), 0);
+        assert!(home.join("keys/radicle").exists(), "case {i}");
         let _ = std::fs::remove_file(data.join("node-identity-journal.json.corrupt"));
     }
 }

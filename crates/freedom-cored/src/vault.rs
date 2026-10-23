@@ -2373,6 +2373,22 @@ fn job_node_write(
         nodes::BuildError::IdentityCorrupt => OpError::IdentityCorrupt,
         nodes::BuildError::Keys | nodes::BuildError::Path => OpError::Internal,
     };
+    // A Radicle write works under the gate's canonical home, never the path
+    // main named: the plan and the journal's root are both that path, so a
+    // symlink retargeted after the gate was taken redirects nothing (review
+    // of #177).
+    let canonical;
+    let spec = match (spec, &home_gate) {
+        (NodeSpec::Radicle { alias, custody, .. }, Some(gate)) => {
+            canonical = NodeSpec::Radicle {
+                home: gate.data_dir.clone(),
+                alias: alias.clone(),
+                custody: *custody,
+            };
+            &canonical
+        }
+        _ => spec,
+    };
     if let NodeSpec::Radicle {
         home,
         alias,
