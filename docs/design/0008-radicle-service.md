@@ -977,8 +977,8 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
    - Move them to a library module that writes into any `io::Write`, so the add-on, UniFFI and the service emit the same bytes, and the service can bound the writer.
    - `readme_at` joins them.
 5. **The blob header:**
-   - `Embedded::blob_header(rid, revision, path) -> { oid, size }`, using `Odb::read_header` before any load;
-   - `Embedded::read_blob_at_capped(rid, revision, path, limit)` takes the size cap, and reads the header before any load. The service uses it;
+   - `Embedded::blob_header(rid, revision, path) -> { oid, size }`, using `Odb::read_header`, without loading the blob's content;
+   - `Embedded::read_blob_at_capped(rid, revision, path, limit)` takes the size cap, and checks it from the header before loading the blob's content. The service uses it;
    - `read_blob_at` (`lr:1263`) keeps its signature and stays uncapped, so the bindings don't change.
 6. **Bounded, cancellable walks:**
    - `repo_stats` (`lr:1311`), `list_files` (`lr:1118`), `commits` (`lr:1161`), `commit` with its diff (`lr:1179`), `issues`, `patches` (`lr:1040`–`1085`) and `list_repos` (`lr:852`) take a `CancelToken` and a byte budget;
