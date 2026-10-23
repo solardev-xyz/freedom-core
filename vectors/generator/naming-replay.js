@@ -287,16 +287,16 @@ const PATCHES = {
     },
   }),
   'reverse-normalized': () => ({
-    text: 'An ENS primary name that is not its own ENSIP-15 normalization is not shown as the address\'s name: the reverse result is UNVERIFIED with the claimed name, on the quorum, Colibri and Myotis paths alike.',
+    text: 'An ENS primary name that is not its own ENSIP-15 normalization is not shown as the address\'s name: the reverse result is UNVERIFIED with the claimed name and `unverifiedCause: "unnormalized"` (freedom-browser #756), on the quorum, Colibri and Myotis paths alike.',
     source: {
       'ens-resolver.js': {
         edits: [
           ["  if (decoded.status === REVERSE_OUTCOME.name) {\n    return {",
-            "  if (decoded.status === REVERSE_OUTCOME.name) {\n    if (!__isNormalizedName(decoded.detail)) {\n      return unverifiedReverseResult(normalizedAddress, NAME_SYSTEMS.ens, decoded.detail, `Reverse record for ${normalizedAddress} claims a name that isn't normalized`, outcome.trust);\n    }\n    return {"],
+            "  if (decoded.status === REVERSE_OUTCOME.name) {\n    if (!__isNormalizedName(decoded.detail)) {\n      return { ...unverifiedReverseResult(normalizedAddress, NAME_SYSTEMS.ens, decoded.detail, `Reverse record for ${normalizedAddress} claims a name that isn't normalized`, outcome.trust), unverifiedCause: 'unnormalized' };\n    }\n    return {"],
           ["  if (!name) return { ...noReverseResult(normalizedAddress), trust };\n  return { success: true, address: normalizedAddress, name, system: 'ens', trust };",
-            "  if (!name) return { ...noReverseResult(normalizedAddress), trust };\n  if (!__isNormalizedName(name)) {\n    return unverifiedReverseResult(normalizedAddress, NAME_SYSTEMS.ens, name, `Reverse record for ${normalizedAddress} claims a name that isn't normalized`, trust);\n  }\n  return { success: true, address: normalizedAddress, name, system: 'ens', trust };"],
+            "  if (!name) return { ...noReverseResult(normalizedAddress), trust };\n  if (!__isNormalizedName(name)) {\n    return { ...unverifiedReverseResult(normalizedAddress, NAME_SYSTEMS.ens, name, `Reverse record for ${normalizedAddress} claims a name that isn't normalized`, trust), unverifiedCause: 'unnormalized' };\n  }\n  return { success: true, address: normalizedAddress, name, system: 'ens', trust };"],
           ["  if (ensRec.status === 'ok' && ensRec.name) {\n    return {",
-            "  if (ensRec.status === 'ok' && ensRec.name) {\n    if (!__isNormalizedName(ensRec.name)) {\n      return unverifiedReverseResult(normalizedAddress, NAME_SYSTEMS.ens, ensRec.name, `Reverse record for ${normalizedAddress} claims a name that isn't normalized`, ensTrust);\n    }\n    return {"],
+            "  if (ensRec.status === 'ok' && ensRec.name) {\n    if (!__isNormalizedName(ensRec.name)) {\n      return { ...unverifiedReverseResult(normalizedAddress, NAME_SYSTEMS.ens, ensRec.name, `Reverse record for ${normalizedAddress} claims a name that isn't normalized`, ensTrust), unverifiedCause: 'unnormalized' };\n    }\n    return {"],
         ],
         append: ["function __isNormalizedName(name) {\n  if (typeof name !== 'string' || Buffer.byteLength(name) > 1024) return false;\n  try {\n    return ens_normalize(name) === name;\n  } catch {\n    return false;\n  }\n}"],
       },
