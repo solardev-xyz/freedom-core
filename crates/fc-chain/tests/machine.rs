@@ -2870,3 +2870,35 @@ fn fee_reference_work_counts_against_the_budget() {
     );
     assert_eq!(protocol(world.reply(id)), Some(Protocol::Budget));
 }
+
+#[test]
+fn fee_reference_measures_its_whole_reply() {
+    // 181-m1: an endpoint's quote of 1,024 hex digits is accepted (B's codec
+    // takes 4096 bits), and its 1,234-digit priority fee, in
+    // `lowest_priority` and in the quote, counts toward the message cap.
+    let wide = format!("\"0x{}\"", "f".repeat(1_024));
+    let reply = |message_bytes: usize| {
+        let mut world = World::new(
+            Bounds {
+                message_bytes,
+                ..Bounds::default()
+            },
+            &[fee_chain(&["direct"], &["a"], false)],
+        );
+        let id = world.submit(REFERENCE, None);
+        world.answer(world.rpc_to("a", "eth_gasPrice"), ok(&wide));
+        world.answer(world.rpc_to("a", "eth_maxPriorityFeePerGas"), ok(&wide));
+        world.reply(id).clone()
+    };
+    let reference = match reply(Bounds::default().message_bytes).result {
+        Ok(Success::FeeReference(reference)) => reference,
+        other => panic!("{other:?}"),
+    };
+    let priority = reference.lowest_priority.as_deref().unwrap();
+    assert_eq!(priority.len(), 1_234);
+    // Over 5,000 bytes in all: past a 5,000-byte cap it is too large.
+    assert!(reference.json_len() > 5_000);
+    assert_eq!(protocol(&reply(5_000)), Some(Protocol::TooLarge));
+    // Within one of its exact length plus the envelope, it is sent.
+    assert!(reply(reference.json_len() + 256).result.is_ok());
+}

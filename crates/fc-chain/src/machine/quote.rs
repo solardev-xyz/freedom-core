@@ -335,6 +335,24 @@ pub struct FeeReference {
 }
 
 impl FeeReference {
+    /// The length of its reply's JSON, `{"header":…,"lowest_priority":…,
+    /// "quote":…}`, measured without writing it. Its numbers are decimal
+    /// strings, which need no escaping, of any width the codecs accept (a
+    /// priority fee of 4096 bits has 1,234 digits).
+    pub fn json_len(&self) -> usize {
+        let string = |text: &str| text.len() + 2;
+        let header = self.header.as_ref().map_or(4, |header| {
+            r#"{"source":"colibri","number":,"timestamp":,"base_fee":}"#.len()
+                + string(&header.number)
+                + string(&header.timestamp)
+                + header.base_fee.as_deref().map_or(4, string)
+        });
+        r#"{"header":,"lowest_priority":,"quote":}"#.len()
+            + header
+            + self.lowest_priority.as_deref().map_or(4, string)
+            + self.quote.as_ref().map_or(4, FeeQuote::json_len)
+    }
+
     /// What its texts hold on the heap.
     pub(crate) fn heap_bytes(&self) -> usize {
         self.header.as_ref().map_or(0, |header| {

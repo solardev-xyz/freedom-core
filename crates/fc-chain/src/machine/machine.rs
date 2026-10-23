@@ -234,10 +234,6 @@ const ENVELOPE: usize = 256;
 /// A document's hash in a reply: `"0x"` and 64 digits, quoted.
 const HASH_JSON: usize = 68;
 
-/// A fee reference's reply besides its quote: its keys, and a header's and
-/// a priority fee's decimals (at most 78 digits each).
-const REFERENCE_JSON: usize = 512;
-
 /// A document's bytes in a reply, as base64.
 fn base64_len(bytes: usize) -> usize {
     bytes.div_ceil(3).saturating_mul(4)
@@ -252,9 +248,7 @@ fn reply_wire_bytes(result: &Result<Success, ChainError>) -> usize {
                 result.as_ref().map_or(0, String::len) + trust.as_ref().map_or(0, String::len)
             }
             Ok(Success::FeeQuote(quote)) => quote.json_len(),
-            Ok(Success::FeeReference(reference)) => {
-                REFERENCE_JSON + reference.quote.as_ref().map_or(0, FeeQuote::json_len)
-            }
+            Ok(Success::FeeReference(reference)) => reference.json_len(),
             Ok(Success::Broadcast { hash, .. }) => hash.as_ref().map_or(0, String::len),
             Ok(Success::Html { html, trust, .. }) => {
                 base64_len(html.len()) + HASH_JSON + trust.as_ref().map_or(0, String::len)

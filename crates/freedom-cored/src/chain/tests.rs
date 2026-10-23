@@ -1001,6 +1001,47 @@ fn a_fee_reference_replies_in_its_form() {
         assert_eq!(message.len(), message.write().len());
         assert_eq!(String::from_utf8(message.write().to_vec()).unwrap(), text);
     }
+    // The machine measures the result as written, whatever its width
+    // (181-m1): here a 1,234-digit priority fee and a 78-digit base fee.
+    let wide = "9".repeat(1_234);
+    let quote = fc_chain::fee_quote_values(
+        "direct",
+        Some(&format!("\"0x{}\"", "f".repeat(1_024))),
+        Some("\"0x1\""),
+    )
+    .ok()
+    .and_then(|values| fc_chain::combine_fee_quotes(&[values], false));
+    for reference in [
+        FeeReference {
+            header: Some(fc_chain::machine::Header {
+                number: "18446744073709551615".into(),
+                timestamp: "1700000000".into(),
+                base_fee: Some("9".repeat(78)),
+            }),
+            lowest_priority: Some(wide.clone()),
+            quote,
+        },
+        FeeReference {
+            header: None,
+            lowest_priority: None,
+            quote: None,
+        },
+    ] {
+        let json_len = reference.json_len();
+        let done = Done {
+            id: 1,
+            result: Ok(Success::FeeReference(reference)),
+            outcome: None,
+            settled: 0,
+            generation: 4,
+        };
+        let text = String::from_utf8(reply_message(5, &done).write().to_vec()).unwrap();
+        let result = text
+            .strip_prefix(r#"{"type":"response","id":5,"result":"#)
+            .and_then(|rest| rest.strip_suffix(r#","generation":4}}"#))
+            .unwrap();
+        assert_eq!(result.len() + 1, json_len, "{text}");
+    }
 }
 
 fn raw(text: &str) -> Result<Box<RawValue>, ErrorBody> {
