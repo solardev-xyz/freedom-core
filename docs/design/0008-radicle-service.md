@@ -35,7 +35,7 @@ This design moves it into **its own supervised process, `freedom-radicled`**. It
 
   The difference: **one node per process, the process is the only teardown, and the process starts no child.**
   - heartwood's threads can't be cancelled from outside, so stopping the node, changing its policy, or recovering from a failed start all end the process.
-  - The import that spawns `git push` today becomes an in-process libgit2 fetch. So when the process has exited, every writer it had is gone, and a restart is always a new generation.
+  - The import that spawns `git push` today becomes a libgit2 fetch in a one-shot import process, which starts no child either ([0010](0010-service-confinement.md), D5). So when a process has exited, every writer it had is gone, and a restart is always a new generation.
 - **The state isn't a cache.** The Radicle home holds:
   - the user's signed issues and comments;
   - the seeding policies.
@@ -90,7 +90,7 @@ This design moves it into **its own supervised process, `freedom-radicled`**. It
 - **New Radicle features:** no patch creation and no repository creation beyond today's `importRepo`.
 - **Mobile:** iOS keeps linking libradicle through UniFFI.
 - **Content verification (4.5):** not here. heartwood verifies refs against signed sigrefs itself.
-- **An OS sandbox.** Process separation is a crash domain and a resource boundary, not a sandbox.
+- **An OS sandbox.** Process separation is a crash domain and a resource boundary, not a sandbox. Confining the service with the OS is [0010](0010-service-confinement.md)'s, decided by the user (D1).
 
 ## Today
 
@@ -139,7 +139,7 @@ This design moves it into **its own supervised process, `freedom-radicled`**. It
 ## Process model
 
 ```
-Electron main (profile P) ──spawn──▶ freedom-radicled serve --home <rad home> --lock-dir <locks> --parent-pid <pid>
+Electron main (profile P) ──spawn──▶ freedom-radicled serve --home <rad home> --lock-dir <locks> --network <policy> --parent-pid <pid>
      stdin  ──frames──▶
      stdout ◀──frames──
      stderr ◀──JSON log lines──
@@ -152,7 +152,7 @@ Electron main (profile P) ──spawn──▶ freedom-radicled serve --home <ra
   - The binary comes from `<resources>/freedom-radicled/`. `FREEDOM_RADICLED_PATH` is honored only when `!app.isPackaged`.
 - **No child processes:**
   - The service is built with libradicle's `no-spawn` feature, explicitly, so serving fetches runs in process and `git gc` is skipped.
-  - The import becomes an in-process libgit2 fetch ([Writes](#writes)).
+  - The import becomes a libgit2 fetch, in a one-shot import process of its own ([Writes](#writes); [0010](0010-service-confinement.md), D5).
   - The service never starts a process. So its exit ends every writer it had, and its lock, which is close-on-exec, is held by nothing else.
 - **The environment** is cleared, as 0007's is. That drops:
   - `RAD_SOCKET`, `RAD_KEYGEN_SEED`, `RAD_PASSPHRASE`, `RAD_RNG_SEED`, `RAD_LOCAL_TIME`, `GIT_COMMITTER_DATE`, `SSH_AUTH_SOCK` and systemd's `LISTEN_*` variables, all of which heartwood reads;
@@ -161,6 +161,7 @@ Electron main (profile P) ──spawn──▶ freedom-radicled serve --home <ra
   `HOME` points at an empty directory the service owns. With libgit2's configuration search paths emptied ([upstream](#upstream-changes)), no global or system git configuration applies.
 
   The service checks it before anything else, since a process that could have threads can't safely change its environment: it refuses to start (64) with any `RAD_*`, `GIT_*`, `SSH_AUTH_SOCK`, `LISTEN_*` or `XDG_CONFIG_HOME` set, or without `HOME` as an absolute directory.
+- **The network policy** is an argument, `--network`, in 0007's forms ([0007](0007-ipfs-service.md#spawn)). It is fixed for the process's life ([Modes](#modes)), so [0010](0010-service-confinement.md)'s confinement can apply it before `rad.hello`.
 - **Handshake:** `rad.hello` within 10 s, as 0001. Its reply carries the X25519 public key the service made for this start ([The sealed release](#the-sealed-release)).
 - **The lock:** `<lock-dir>/radicle-<sha256(canonical home)>.lock`, under 0001's rules, which also cover the canonical path, the stable lock directory, network filesystems and bind mounts.
   - Contention retries for 5 s, then exits 75. Other errors and network filesystems exit 74.
@@ -178,6 +179,7 @@ Electron main (profile P) ──spawn──▶ freedom-radicled serve --home <ra
 - **Process hardening** is 0001's, because the process holds a key:
   - Linux: `PR_SET_DUMPABLE=0`;
   - macOS: no core files, plus the hardened runtime from signing.
+- **Confinement** by the OS is [0010](0010-service-confinement.md)'s, decided by the user. The service confines itself after its lock and before `rad.hello`, and `rad.hello` reports what it got.
 
 ### Start, stop and reconciliation
 
@@ -186,7 +188,7 @@ Electron main (profile P) ──spawn──▶ freedom-radicled serve --home <ra
   2. `rad.hello`;
   3. **`rad.identity`:** the node key arrives, sealed by the core, or, on a profile without a vault, the service makes a throwaway key ([Keys](#keys)). On a profile with a vault, a start while the vault is locked waits in main, before the spawn ([When the node can start](#when-the-node-can-start));
   4. **`rad.reconcile`,** a phase of its own, with its own deadline ([Reconciliation](#reconciliation)). Its reply is the boundary main can see: the home is consistent;
-  5. `rad.start`, which runs `Embedded::start_with_key` with today's options, the [network policy](#network-policy) and the key from `rad.identity`, and returns `{ did, nid, alias }`;
+  5. `rad.start`, which runs `Embedded::start_with_key` with today's options, the [network policy](#network-policy) from `--network` and the key from `rad.identity`, and returns `{ did, nid, alias }`;
   6. `RUNNING`;
   7. main runs today's background `rad.connect_seeds` and default-repository `rad.clone`.
 
@@ -382,7 +384,7 @@ heartwood fetches, updates the COB cache, announces and serves on its own. So re
 
   So no panic payload, which can contain a path or a RID, reaches a log.
 - **A restart is a new generation.**
-  - The node and its policy are re-read from the home, after reconciliation. Its key arrives again through `rad.identity`: sealed anew, so on a profile with a vault a restart waits for an unlock ([When the node can start](#when-the-node-can-start)), or a new throwaway key.
+  - The node and its stored seeding policies are re-read from the home, after reconciliation. The network policy isn't stored there: it comes only from main, at spawn (`--network`), before `rad.hello`. Its key arrives again through `rad.identity`: sealed anew, so on a profile with a vault a restart waits for an unlock ([When the node can start](#when-the-node-can-start)), or a new throwaway key.
   - Requests captured by main before the restart fail with the old generation, as 0007's do.
   - There is no in-process restart, so instance epochs aren't needed.
   - There are no partition instances either, so 0007's lease and per-partition readiness don't apply: readiness is the node's ([Main's side](#mains-side)).
@@ -417,12 +419,12 @@ The rules this design relies on, as 0007 specifies them:
 
 | Method | Params | Result | Pool and deadline |
 |---|---|---|---|
-| `rad.hello` | `protocol`, `shell_version`, `frames` | `protocol`, `service_version`, `libradicle` build info, `recipient` (the service's X25519 public key for this start, base64) | 10 s after spawn |
+| `rad.hello` | `protocol`, `shell_version`, `frames` | `protocol`, `service_version`, `libradicle` build info, `recipient` (the service's X25519 public key for this start, base64), `network` (the process's policy), `confinement` ([0010](0010-service-confinement.md)) | 10 s after spawn |
 | `rad.identity` | `sealed: { enc, ciphertext }` from the core's `nodes.seal_radicle_key`, or `ephemeral: true` on a profile without a vault | `{ did, nid, ephemeral }` | inline; within 30 s of `rad.hello`'s reply; once per process; on failure, the process exits ([Keys](#the-sealed-release)) |
 | `rad.reconcile` | none | `{ was_dirty, repaired, quarantined: { count, first } }`: counts per step, and up to 16 quarantine entries | 300 s ([the bound](#reconciliation)); on failure or deadline, the process exits |
 | `rad.quarantine_list` | `page` | `{ entries, next_page }`: up to 64 entries `{ rid, qid, kind, step, unit, since }` per page | read pool; 60 s |
 | `rad.remove_repo` | `rid`, `qid` | `{ removed }`, or `not_quarantined` when no record with that `qid` exists ([the escape](#the-escape)) | write queue; 60 s |
-| `rad.start` | `alias`, `network` | `did`, `nid`, `alias`; the node runs as the key from `rad.identity` | 30 s; on failure, the process exits |
+| `rad.start` | `alias` | `did`, `nid`, `alias`; the node runs as the key from `rad.identity` | 30 s; on failure, the process exits |
 | `rad.stats` | none | `connected_peers`, `node_alive`, the repair unit in progress and its elapsed time, `quarantined_count`, pool and budget use | inline; 5 s |
 | `rad.shutdown` | none | none: the process exits | main kills after 10 s |
 | `rad.read` | `op`, `args` | head `{ content_type: "application/json", bytes }`, then the JSON as a body stream | read pool; 60 s to the head |
@@ -431,7 +433,7 @@ The rules this design relies on, as 0007 specifies them:
 | `rad.clone` | `rid`, `timeout_ms`, `progress` | `{ ok }` or `{ cancelled }`; `rad.progress` events | network pool; `timeout_ms` + 30 s |
 | `rad.unseed` | `rid` | `{ unseeded }` | write queue; 60 s |
 | `rad.write` | `op` (`create_issue`, `comment_issue`, `edit_issue_state`, `comment_patch`), `args` | today's JSON | write queue; 60 s |
-| `rad.import_repo` | `path`, `name`, `description`, `default_branch` | `{ rid }` | write queue; 300 s |
+| `rad.import_repo` | `path`, `name`, `description`, `default_branch` | `{ rid }` | the import process only, once `rad.reconcile` has succeeded ([Writes](#writes)); 300 s |
 
 - **`rad.read`'s `op`** is one of the ops below, in three classes. Each body is JSON, and its class says whose bytes it reproduces ([Parity](#parity)).
   - **Pass-through:** the exact JSON text the v0.8.0 add-on returns for that export, with today's arguments:
@@ -466,7 +468,7 @@ The rules this design relies on, as 0007 specifies them:
   - A read still queued at its deadline is removed before work starts, and answered `deadline`. A running read past it is cancelled, and answered `deadline` if its head hasn't been written.
   - **After the head there is no service deadline.** A stalled or paused body is main's to judge: 0006's pull-driven idle timer cancels a body that leaves a pull unanswered for 60 s, and a paused reader is never timed out. The service ends a stream early only with `abort`: `cancelled`, `stopped`, `internal` or `too_large`.
 - **Network operations:** `timeout_ms` + 30 s. A network operation past it gets `deadline`, but keeps its slot until libradicle returns.
-- **Writes:** 60 s (300 s for import), with the outcome rules in [Writes](#writes).
+- **Writes:** 60 s, and 300 s for the import in its own process, with the outcome rules in [Writes](#writes).
 - **Main's watchdogs** are each deadline + 15 s, as 0001.
 
 ### Errors
@@ -495,7 +497,8 @@ The rules this design relies on, as 0007 specifies them:
 Exit codes:
 - 0001's: 64, 74, 75 and 76;
 - 70 for `node_down`, or a panic outside a request;
-- 0 after a start step the service answered with an error (`rad.identity`, `rad.reconcile`, `rad.start`): main has read the error, and doesn't restart.
+- 0 after a start step the service answered with an error (`rad.identity`, `rad.reconcile`, `rad.start`): main has read the error, and doesn't restart;
+- 77 for `confinement` ([0010](0010-service-confinement.md)), before `rad.hello`. As in 0007, it is an error, not a crash: main doesn't restart it.
 
 ### Progress
 
@@ -517,7 +520,7 @@ All bounds are process-wide. The service hosts one node.
 
 - **The read pool:** 4 threads, with **320 queued requests**: main's dweb admission of 256, plus 64 for other callers ([Main's side](#mains-side)). Beyond that, `busy`.
   - Reads run concurrently, under a shared lock on the node; there is no process-wide mutex.
-  - Three methods take `&mut self` and take that lock exclusively: `seeders` (`lr:1143`), `unseed_repo` (`lr:847`) and `import_repo` (`lr:1012`). `seeders` is a short query on the read pool; the other two are on the write queue.
+  - Three methods take `&mut self` and take that lock exclusively: `seeders` (`lr:1143`), `unseed_repo` (`lr:847`) and `import_repo` (`lr:1012`). `seeders` is a short query on the read pool, and `unseed_repo` is on the write queue. `import_repo` runs only in the import process, which has no running node ([Writes](#writes)).
 - **The network pool:** 8 threads for `connect_seeds` and `clone`, with 16 queued.
 - **The write queue:** one writer, with 16 queued.
 - **The output budget: 256 MiB,** enforced by reservation, as 0007's budget is. Every byte a read holds is reserved before it is allocated, and released when it is freed.
@@ -576,7 +579,7 @@ All bounds are process-wide. The service hosts one node.
 ### Writes
 
 - **Serialized:**
-  - COB writes, `unseed` and `import_repo` go one at a time through the write queue. `unseed_repo` and `import_repo` also need the node exclusively.
+  - COB writes and `unseed` go one at a time through the write queue. `unseed_repo` also needs the node exclusively. The import runs in a process of its own (below).
   - The executing write keeps the writer slot until its libradicle call has actually returned, even after its reply.
 - **The mutation-start boundary:** a write *starts* when the writer thread calls into libradicle's mutation.
   - **Before it, failure is definitive:**
@@ -604,11 +607,12 @@ All bounds are process-wide. The service hosts one node.
   - The [repository gate](#the-repository-gate) is set to `repairing` for the whole repair. Until publication, that repository's COB ops answer `stopped` (503), its fetches are deferred, and writes to it wait behind it.
   - A unit that fails with an error quarantines the repository at once. A unit that hangs ends the process, and the next start retries the unit or quarantines. The marker stays set, so the next start checks the repository again.
   - This mirrors 0005's uncertain broadcasts.
-- **Import, in process:**
-  - `rad.import_repo` creates the repository in storage and fetches the working copy's default branch into the node's namespace with libgit2's local transport, then signs the refs ([upstream](#upstream-changes)).
+- **Import, in a one-shot process** ([0010](0010-service-confinement.md)'s D5, decided by the user):
+  - **The process:** main stops the service and runs `freedom-radicled import --home … --lock-dir … --source <path>`. It takes the home's gate, confines itself to the repository's checked roots, and answers `rad.hello`, `rad.identity`, `rad.reconcile` and `rad.import_repo`, in that order. It exits after the import, and main starts the service again. [0010](0010-service-confinement.md) gives its roots, grant, admission rule and bounds.
+  - `rad.import_repo` creates the repository in storage and fetches the working copy's default branch into the node's namespace with libgit2's local transport, then signs the refs ([upstream](#upstream-changes)). It runs on storage, without a running node; the node announces the repository with its inventory at its next start.
   - libgit2 runs no hooks, uses no helpers, and reads no configuration that could send it to the network: it has no global or system configuration ([Spawn](#spawn-and-lock)), and its source is a local path.
   - The working copy is read, never written: it gets no `rad` remote (deviation `import-in-process`).
-  - A stop, kill or policy change during an import ends the process, and with it the import. Reconciliation at the next start handles the partial repository, and the reply is `outcome_unknown`.
+  - A kill or the deadline during an import ends the process, and with it the import. Reconciliation at the service's next start handles the partial repository, and the reply is `outcome_unknown`.
 
 ## The blob API
 
@@ -937,7 +941,7 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
   - nothing falls back to a direct socket;
   - if the pinned Arti can't `RESOLVE`, the setting waits, as 0007 decides.
 - **The setting:** a per-profile **Route Radicle through Tor**, off by default, using `tor-manager`'s endpoint. It is a switch of its own, apart from 0007's IPFS setting; a future "everything through Tor" mode would turn both on ([Open questions](#open-questions), 9).
-- **Changing the policy restarts the process.** Nothing of the old policy survives its process, since there is no child. On a profile with a vault, the new process starts only while the vault is unlocked ([When the node can start](#when-the-node-can-start)).
+- **Changing the policy restarts the process.** Main passes the policy at spawn (`--network`), and a change spawns a new process with the new one, so [0010](0010-service-confinement.md)'s confinement can fix it before `rad.hello`. Nothing of the old policy survives its process, since there is no child. On a profile with a vault, the new process starts only while the vault is unlocked ([When the node can start](#when-the-node-can-start)).
 
 ### The address policy
 
@@ -1105,9 +1109,9 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
   - queued writes that are cancelled or expired never run;
   - the writer slot stays held until the call returns.
 - **Import:**
-  - a stop and a kill during an import, then a restart: reconciliation handles the partial repository, and no process outlives the service;
-  - a policy change during an import;
-  - an import whose working copy has hooks and a `url.*.insteadOf` configuration: none of it runs or applies.
+  - a kill and the deadline during an import, then the service's start: reconciliation handles the partial repository, and the import process leaves no process behind;
+  - an import whose working copy has hooks and a `url.*.insteadOf` configuration: none of it runs or applies;
+  - the import process's own cases, its roots, its confinement and its admission after `rad.reconcile`, as [0010](0010-service-confinement.md)'s Tests list them.
 - **The dirty marker:**
   - a failure injected after a COB ref and before its sigrefs, then an ordinary `rad.shutdown` and a restart: the marker stays, and the restart repairs;
   - a shutdown while a timed-out writer is still running: the marker stays;
@@ -1205,7 +1209,7 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
 | `cancelClone` | a token found by RID | `cancel` of that clone's request; the same timing |
 | start-up network | `connectSeeds(15000)`, then the default-repository clone | the same |
 | alias | `config.json` `node.alias` | the same file, rewritten under `hold-lock` |
-| import | `git push` from the working copy, which gains a `rad` remote | an in-process fetch; the working copy is untouched |
+| import | `git push` from the working copy, which gains a `rad` remote | a libgit2 fetch in the import process; the working copy is untouched |
 
 ### Gates
 
@@ -1241,7 +1245,8 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 | child processes | none | — |
 | read pool | 4 threads, 320 queued; 60 s to the head, queue and reservation waits included | `busy`; `deadline` |
 | network pool | 8 threads, 16 queued; `timeout_ms` + 30 s | `busy`; `deadline`, with the slot held until libradicle returns |
-| write queue | 1 at a time, 16 queued; 60 s (300 s for import); the slot held until the call returns | `busy`; `outcome_unknown` once started |
+| write queue | 1 at a time, 16 queued; 60 s; the slot held until the call returns | `busy`; `outcome_unknown` once started |
+| the import process | one import; `rad.reconcile`'s 300 s, then 300 s from the import's admission ([0010](0010-service-confinement.md)) | the process exits; `outcome_unknown` once started |
 | output budget | 256 MiB by reservation; a blob ≤ 64 MiB (128 MiB reserved while loading); a JSON read ≤ 64 MiB with ≤ 32 MiB of JSON | the read waits within its deadline; `too_large` per read |
 | progress events | per clone, ≤ 10 unwritten of ≤ 4 KiB encoded, plus the terminal; failures past 8 are summarized | the summary grows its count, not its size; reasons are cut |
 | streams | 0007's: a 128 KiB window, 64 KiB frames, one 128 KiB ring per stream in main | the service waits for credit |
@@ -1295,7 +1300,7 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
    - the pools, the output budget and bounded JSON construction;
    - `rad.read` and `rad.blob`, with ranges;
    - network operations with bounded progress and cancel;
-   - the write queue with the mutation-start boundary, and the in-process import;
+   - the write queue with the mutation-start boundary, and the import process ([0010](0010-service-confinement.md), D5);
    - `rad.stats`;
    - the X25519 recipient, `rad.identity` with HPKE, the key-file check and the throwaway key, and `needs_vault` for writes under a throwaway key;
    - the test hooks and the Rust tests.
@@ -1336,4 +1341,5 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 9. **One Tor switch:** should Route Radicle through Tor and 0007's Route IPFS through Tor be one setting?
    - **Decided (the user, 2026-10-22): separate switches now, and a future "everything through Tor" mode turns both on.** The two protocols pay different costs under Tor, so a user can take one without the other.
 10. **heartwood's memory:** should the service run under an OS-level limit (`RLIMIT_AS`, or a Windows job memory limit), given that heartwood's own buffers aren't bounded by the service?
+    - **Still open:** [0010](0010-service-confinement.md)'s job object (D4, decided) is where a Windows limit would go. Whether to set one, and `RLIMIT_AS` on Linux and macOS, aren't decided there.
 11. **Private windows:** is read-only the right rule for private partitions, or should an explicit, user-initiated seed be allowed there?
