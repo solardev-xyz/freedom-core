@@ -208,6 +208,40 @@ impl BigInt {
         Self::new(false, limbs)
     }
 
+    /// `self · factor` for a non-negative value.
+    pub(crate) fn times(&self, factor: u64) -> Self {
+        let mut limbs = Vec::with_capacity(self.limbs.len() + 1);
+        let mut carry = 0u128;
+        for limb in &self.limbs {
+            let product = u128::from(*limb) * u128::from(factor) + carry;
+            limbs.push(product as u64);
+            carry = product >> 64;
+        }
+        limbs.push(carry as u64);
+        Self::new(false, limbs)
+    }
+
+    /// `⌊self / divisor⌋` for a non-negative value and a divisor above 0.
+    pub(crate) fn divided(&self, divisor: u64) -> Self {
+        let mut limbs = self.limbs.clone();
+        let mut remainder = 0u128;
+        for limb in limbs.iter_mut().rev() {
+            let value = (remainder << 64) | u128::from(*limb);
+            *limb = (value / u128::from(divisor)) as u64;
+            remainder = value % u128::from(divisor);
+        }
+        Self::new(false, limbs)
+    }
+
+    /// The greater of two values.
+    pub(crate) fn max<'a>(&'a self, other: &'a Self) -> &'a Self {
+        if other.compare(self) == Ordering::Greater {
+            other
+        } else {
+            self
+        }
+    }
+
     /// The lesser of two values.
     pub(crate) fn min<'a>(&'a self, other: &'a Self) -> &'a Self {
         if other.compare(self) == Ordering::Less {
