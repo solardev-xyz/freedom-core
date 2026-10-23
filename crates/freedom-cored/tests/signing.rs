@@ -57,6 +57,9 @@ fn every_vector_case_over_the_wire() {
     let (_root, mut core) = unlocked();
     let mut id = 100;
     let mut checked = 0;
+    let mut refused_account_socs = 0;
+    let mut chunk_key_socs = 0;
+    let mut binary_32 = 0;
     for (section, method) in [
         ("transactions", "sign.transaction"),
         ("messages", "sign.message"),
@@ -83,6 +86,17 @@ fn every_vector_case_over_the_wire() {
             let reply = core.call(id, method, params);
             let label = case["id"].as_str().unwrap();
             checked += 1;
+            // bee-js signs a chunk with an account key, and the vector
+            // records that; the core refuses it (#89), and signs nothing.
+            if section == "socs" && key["kind"] == "account" {
+                assert_eq!(
+                    reply["error"]["code"], "invalid_argument",
+                    "{label}: {reply}"
+                );
+                assert!(reply.get("result").is_none(), "{label}: {reply}");
+                refused_account_socs += 1;
+                continue;
+            }
             if must_fail(case) {
                 assert_eq!(
                     reply["error"]["code"], "invalid_argument",
@@ -96,7 +110,14 @@ fn every_vector_case_over_the_wire() {
                     assert_eq!(result["raw"], expected["raw"], "{label}");
                     assert_eq!(result["hash"], expected["hash"], "{label}");
                 }
-                "messages" => assert_eq!(result["signature"], expected["signature"], "{label}"),
+                "messages" => {
+                    assert_eq!(result["signature"], expected["signature"], "{label}");
+                    // A 32-byte message signs as before (#89): the warning
+                    // is main's.
+                    if label.starts_with("binary-32/") {
+                        binary_32 += 1;
+                    }
+                }
                 "typedData" => {
                     assert_eq!(result["signature"], expected["signature"], "{label}");
                     id += 1;
@@ -117,11 +138,17 @@ fn every_vector_case_over_the_wire() {
                     ] {
                         assert_eq!(result[wire], expected[vector], "{label} {wire}");
                     }
+                    chunk_key_socs += 1;
                 }
             }
         }
     }
     assert!(checked > 150, "only {checked} cases");
+    // Two account keys of the abandon mnemonic, and the Bee wallet and one
+    // publisher, over eight chunk cases each.
+    assert_eq!(refused_account_socs, 16);
+    assert_eq!(chunk_key_socs, 16);
+    assert_eq!(binary_32, 2);
     // Typed data as JSON text, sent in the frame as written (#87): the core
     // reads each number as JSON.parse does, whatever its spelling.
     for case in vectors["typedDataText"].as_array().unwrap() {
@@ -195,26 +222,83 @@ fn bee_and_publisher_keys_sign_only_chunks() {
     }
 }
 
+/// #89: an account key never signs a chunk, at either end of the index
+/// range and whether the vault is locked or not: the refusal comes before
+/// any key is derived. The Bee wallet and publisher keys still sign.
+#[test]
+fn account_keys_never_sign_chunks() {
+    let (_root, mut core) = unlocked();
+    let identifier = format!("0x{}", "00".repeat(32));
+    let mut id = 10;
+    for locked in [false, true] {
+        if locked {
+            id += 1;
+            assert!(core.call(id, "vault.lock", json!({}))["result"].is_object());
+        }
+        for index in [0u64, 2_147_483_647] {
+            let key = json!({ "kind": "account", "index": index });
+            for params in [
+                json!({ "key": key, "identifier": identifier, "payload": "0x01" }),
+                json!({ "key": key, "identifier": identifier, "payload": "0x01", "span": "0" }),
+            ] {
+                id += 1;
+                let reply = core.call(id, "swarm.sign_soc", params);
+                assert_eq!(
+                    reply["error"]["code"], "invalid_argument",
+                    "locked {locked}, index {index}: {reply}"
+                );
+                assert!(reply.get("result").is_none(), "{reply}");
+            }
+        }
+        for key in [
+            json!({ "kind": "bee_wallet" }),
+            json!({ "kind": "publisher", "origin_index": 0 }),
+            json!({ "kind": "publisher", "origin_index": 2_147_483_647u64 }),
+        ] {
+            id += 1;
+            let reply = core.call(
+                id,
+                "swarm.sign_soc",
+                json!({ "key": key, "identifier": identifier, "payload": "0x01" }),
+            );
+            if locked {
+                assert_eq!(reply["error"]["code"], "vault_locked", "{key}: {reply}");
+            } else {
+                assert!(reply["result"]["signature"].is_string(), "{key}: {reply}");
+            }
+        }
+    }
+}
+
 #[test]
 fn locked_vault_and_malformed_requests() {
     let (_root, mut core) = unlocked();
     assert!(core.call(3, "vault.lock", json!({}))["result"].is_object());
     let account = json!({ "kind": "account", "index": 0 });
+    // Chunks are signed by publisher and Bee wallet keys only (#89), so a
+    // malformed chunk request names one, and fails for its malformation.
+    let publisher = json!({ "kind": "publisher", "origin_index": 0 });
     let reply = core.call(
         4,
         "sign.message",
         json!({ "key": account, "message": "0x01" }),
     );
     assert_eq!(reply["error"]["code"], "vault_locked", "{reply}");
+    let reply = core.call(
+        5,
+        "swarm.sign_soc",
+        json!({ "key": publisher, "identifier": format!("0x{}", "00".repeat(32)), "payload": "0x01" }),
+    );
+    assert_eq!(reply["error"]["code"], "vault_locked", "{reply}");
     // The public hash works while locked.
     let typed = json!({ "domain": { "name": "x" }, "types": { "M": [{ "name": "v", "type": "uint8" }] }, "message": { "v": 1 } });
-    let hash = core.call(5, "typed_data.hash", json!({ "typed_data": typed }));
+    let hash = core.call(6, "typed_data.hash", json!({ "typed_data": typed }));
     assert!(
         hash["result"]["hash"].as_str().unwrap().starts_with("0x"),
         "{hash}"
     );
     // Malformed requests fail before the lock is even considered.
-    let mut id = 6;
+    let mut id = 7;
     for (method, params) in [
         ("sign.message", json!({ "key": account, "message": "0xzz" })),
         (
@@ -235,15 +319,15 @@ fn locked_vault_and_malformed_requests() {
         ),
         (
             "swarm.sign_soc",
-            json!({ "key": account, "identifier": "0x01", "payload": "0x01" }),
+            json!({ "key": publisher, "identifier": "0x01", "payload": "0x01" }),
         ),
         (
             "swarm.sign_soc",
-            json!({ "key": account, "identifier": format!("0x{}", "00".repeat(32)), "payload": "0x" }),
+            json!({ "key": publisher, "identifier": format!("0x{}", "00".repeat(32)), "payload": "0x" }),
         ),
         (
             "swarm.sign_soc",
-            json!({ "key": account, "identifier": format!("0x{}", "00".repeat(32)), "payload": "0x01", "span": 1 }),
+            json!({ "key": publisher, "identifier": format!("0x{}", "00".repeat(32)), "payload": "0x01", "span": 1 }),
         ),
     ] {
         id += 1;
