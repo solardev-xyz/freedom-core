@@ -301,7 +301,7 @@ Crates:
 - tinystr 0.8.3: Unicode-3.0
 - tinyvec 1.11.0: Zlib OR Apache-2.0 OR MIT
 - tinyvec_macros 0.1.1: MIT OR Apache-2.0 OR Zlib
-- tokio 1.52.1: MIT
+- tokio 1.54.1: MIT
 - tokio-rustls 0.26.4: MIT OR Apache-2.0
 - tokio-util 0.7.18: MIT
 - tower 0.5.3: MIT
@@ -13790,7 +13790,7 @@ freely, subject to the following restrictions:
 3. This notice may not be removed or altered from any source distribution.
 
 ========================================================================
-Used by: tokio 1.52.1 (LICENSE), tokio-util 0.7.18 (LICENSE)
+Used by: tokio 1.54.1 (LICENSE), tokio-util 0.7.18 (LICENSE)
 ------------------------------------------------------------------------
 MIT License
 
