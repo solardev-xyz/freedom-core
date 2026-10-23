@@ -231,6 +231,103 @@ fn a_bad_recipient_is_invalid_argument() {
     }
 }
 
+/// A low-order recipient is `invalid_argument` in every vault state: it is
+/// checked before the vault is, so a broken recipient never reads as
+/// `no_vault` (review of #175).
+#[test]
+fn a_low_order_recipient_is_invalid_in_every_vault_state() {
+    let low_order = b64(&[0u8; 32]);
+    let (_root, data, locks) = dirs();
+    let mut absent = spawn("serve", &data, &locks, &[]);
+    absent.hello();
+    let reply = absent.call_shell(2, "nodes.seal_radicle_key", seal_request(&low_order));
+    assert_eq!(
+        reply["error"]["code"], "invalid_argument",
+        "no vault: {reply}"
+    );
+
+    let (_root, mut core) = imported();
+    let reply = core.call_shell(3, "nodes.seal_radicle_key", seal_request(&low_order));
+    assert_eq!(
+        reply["error"]["code"], "invalid_argument",
+        "unlocked: {reply}"
+    );
+    assert_eq!(core.call(4, "vault.lock", json!({}))["result"], json!({}));
+    let reply = core.call_shell(5, "nodes.seal_radicle_key", seal_request(&low_order));
+    assert_eq!(
+        reply["error"]["code"], "invalid_argument",
+        "locked: {reply}"
+    );
+}
+
+/// The epoch is checked at the handoff to the writer (design 0008): a seal
+/// that waits in the loop's outbox (held by a test hook, as if the writer
+/// had no room) while a lock comes goes as `vault_locked`, in its place,
+/// with nothing of it sent (review of #175).
+#[test]
+fn a_lock_before_the_handoff_revokes_a_waiting_seal() {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn_env(
+        "serve",
+        &data,
+        &locks,
+        &[],
+        &[("FREEDOM_CORED_TEST_HOLD_REPLY", "3")],
+    );
+    core.hello();
+    let imported = core.call(
+        2,
+        "vault.import",
+        json!({ "password_b64": b64(b"testpass1"), "mnemonic_b64": b64(ABANDON.as_bytes()) }),
+    );
+    assert!(imported["result"].is_object(), "{imported}");
+    assert_eq!(core.event()["event"], "vault.unlocked");
+    let service = recipient(1);
+    let mut burst = frame(&shell_request(
+        3,
+        "nodes.seal_radicle_key",
+        seal_request(&b64(&service.public_key())),
+    ));
+    burst.extend(frame(&request(4, "vault.lock", json!({}))));
+    core.send_raw(&burst);
+    let seal = core.until_response(3);
+    assert_eq!(seal["error"]["code"], "vault_locked", "{seal}");
+    assert!(seal.get("result").is_none());
+    assert_eq!(core.until_response(4)["result"], json!({}));
+}
+
+/// The same with the auto-lock: it comes due while the seal waits.
+#[test]
+fn an_auto_lock_before_the_handoff_revokes_a_waiting_seal() {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn_env(
+        "serve",
+        &data,
+        &locks,
+        &[],
+        &[("FREEDOM_CORED_TEST_HOLD_REPLY", "3")],
+    );
+    core.hello_with(1_000);
+    let imported = core.call(
+        2,
+        "vault.import",
+        json!({ "password_b64": b64(b"testpass1"), "mnemonic_b64": b64(ABANDON.as_bytes()) }),
+    );
+    assert!(imported["result"].is_object(), "{imported}");
+    assert_eq!(core.event()["event"], "vault.unlocked");
+    let service = recipient(1);
+    core.send_raw(&frame(&shell_request(
+        3,
+        "nodes.seal_radicle_key",
+        seal_request(&b64(&service.public_key())),
+    )));
+    let seal = core.until_response(3);
+    assert_eq!(seal["error"]["code"], "vault_locked", "{seal}");
+    let locked = core.event();
+    assert_eq!(locked["event"], "vault.locked", "{locked}");
+    assert_eq!(locked["data"]["reason"], "auto", "{locked}");
+}
+
 /// The log names the method, never the recipient or the sealed key.
 #[test]
 fn nothing_but_the_method_reaches_the_log() {
