@@ -1,6 +1,19 @@
 //! The real binary over its pipes, as main speaks to it. Every read has a
 //! timeout and every child is killed and reaped on drop, so a regression
 //! fails a test instead of hanging the suite.
+//!
+//! - **One spawn at a time** ([`spawning`]). Tests run on threads of one
+//!   process, and on macOS std makes a child's pipes with `pipe()` and only
+//!   then marks them close-on-exec. A child spawned from another thread in
+//!   between inherits them: holding the write end of another child's stdin,
+//!   it keeps that child from ever seeing EOF, so the child doesn't exit
+//!   when its test closes stdin (issue #171). Linux makes pipes with
+//!   `pipe2(O_CLOEXEC)`, and Windows holds a lock of its own around
+//!   `CreateProcess`, so only macOS needs this, but every spawn takes it.
+//! - **A lifecycle timeout says why** ([`Ipfsd::lifecycle_failure`]): a read
+//!   that finds stdout closed or gets nothing in time, and an exit that
+//!   doesn't come, fail with the process's exit status (or that it was still
+//!   running, and was killed) and the end of its stderr.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, dead_code)]
 
@@ -8,7 +21,7 @@ use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -18,6 +31,16 @@ use serde_json::{Value, json};
 pub const BIN: &str = env!("CARGO_BIN_EXE_freedom-ipfsd");
 /// A hang guard, never a timing assertion.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(60);
+/// The most of a failed process's stderr a lifecycle failure shows.
+const STDERR_TAIL: usize = 80;
+
+/// Held across every spawn of this test process (see the module's doc).
+static SPAWN: Mutex<()> = Mutex::new(());
+
+/// The spawn lock: hold it across `Command::spawn` (never across a wait).
+pub fn spawning() -> std::sync::MutexGuard<'static, ()> {
+    SPAWN.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 /// How long a process gets to exit when it should.
 pub const EXIT_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -48,7 +71,9 @@ pub struct Ipfsd {
     frames: Receiver<Value>,
     /// Messages read while waiting for another.
     pending: VecDeque<Value>,
-    stderr: Option<std::thread::JoinHandle<String>>,
+    stderr: Option<std::thread::JoinHandle<()>>,
+    /// stderr as read so far: a lifecycle failure shows its end.
+    stderr_read: Arc<Mutex<String>>,
     next_id: u64,
     /// Whether stdout's reader is paused: main not reading.
     paused: Arc<(Mutex<bool>, Condvar)>,
@@ -99,14 +124,16 @@ impl Ipfsd {
     /// resolver (known, with no prefix), unless `env` names the test's own:
     /// no test queries the host's.
     pub fn spawn(mut command: Command, env: &[(&str, &str)]) -> Ipfsd {
-        let mut child = command
+        command
             .env("FREEDOM_IPFSD_TEST_NAT64_RESOLVERS", "")
             .envs(env.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::piped());
+        let mut child = {
+            let _spawning = spawning();
+            command.spawn().unwrap()
+        };
         let stdin = child.stdin.take();
         let mut stdout = child.stdout.take().unwrap();
         let mut stderr = child.stderr.take().unwrap();
@@ -142,10 +169,19 @@ impl Ipfsd {
                 }
             }
         });
+        let stderr_read = Arc::new(Mutex::new(String::new()));
+        let read = stderr_read.clone();
         let stderr = std::thread::spawn(move || {
-            let mut all = String::new();
-            let _ = stderr.read_to_string(&mut all);
-            all
+            let mut chunk = [0u8; 4096];
+            loop {
+                match stderr.read(&mut chunk) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => read
+                        .lock()
+                        .unwrap()
+                        .push_str(&String::from_utf8_lossy(&chunk[..n])),
+                }
+            }
         });
         Ipfsd {
             child,
@@ -153,6 +189,7 @@ impl Ipfsd {
             frames,
             pending: VecDeque::new(),
             stderr: Some(stderr),
+            stderr_read,
             next_id: 1,
             paused,
         }
@@ -188,6 +225,7 @@ impl Ipfsd {
 
     /// The next stream frame of stream `id`; other messages wait for
     /// [`Ipfsd::recv`].
+    #[track_caller]
     pub fn stream(&mut self, id: u64) -> Value {
         if let Some(at) = self.pending.iter().position(|m| m["stream_id"] == id) {
             return self.pending.remove(at).unwrap();
@@ -195,7 +233,7 @@ impl Ipfsd {
         loop {
             let message = match self.frames.recv_timeout(READ_TIMEOUT) {
                 Ok(message) => message,
-                Err(e) => panic!("no frame of stream {id} from freedom-ipfsd: {e}"),
+                Err(e) => self.lifecycle_failure(&format!("no frame of stream {id}: {e}")),
             };
             if message["stream_id"] == id {
                 return message;
@@ -227,6 +265,7 @@ impl Ipfsd {
 
     /// Stream `id`'s body to its terminal, returning each byte read as
     /// credit as main's consumer would: the bytes, and the terminal frame.
+    #[track_caller]
     pub fn body(&mut self, id: u64) -> (Vec<u8>, Value) {
         let mut bytes = Vec::new();
         loop {
@@ -244,6 +283,7 @@ impl Ipfsd {
 
     /// The next event named `name`; other messages wait for
     /// [`Ipfsd::recv`].
+    #[track_caller]
     pub fn event(&mut self, name: &str) -> Value {
         if let Some(at) = self.pending.iter().position(|m| m["event"] == name) {
             return self.pending.remove(at).unwrap();
@@ -251,7 +291,7 @@ impl Ipfsd {
         loop {
             let message = match self.frames.recv_timeout(READ_TIMEOUT) {
                 Ok(message) => message,
-                Err(e) => panic!("no {name} from freedom-ipfsd: {e}"),
+                Err(e) => self.lifecycle_failure(&format!("no {name}: {e}")),
             };
             if message["event"] == name {
                 return message;
@@ -261,17 +301,19 @@ impl Ipfsd {
     }
 
     /// The next message, in the order the service wrote them.
+    #[track_caller]
     pub fn recv(&mut self) -> Value {
         if let Some(message) = self.pending.pop_front() {
             return message;
         }
         match self.frames.recv_timeout(READ_TIMEOUT) {
             Ok(message) => message,
-            Err(e) => panic!("no message from freedom-ipfsd: {e}"),
+            Err(e) => self.lifecycle_failure(&format!("no message: {e}")),
         }
     }
 
     /// The reply to request `id`; other messages wait for [`Ipfsd::recv`].
+    #[track_caller]
     pub fn reply(&mut self, id: u64) -> Value {
         if let Some(at) = self.pending.iter().position(|m| m["id"] == id) {
             return self.pending.remove(at).unwrap();
@@ -279,7 +321,7 @@ impl Ipfsd {
         loop {
             let message = match self.frames.recv_timeout(READ_TIMEOUT) {
                 Ok(message) => message,
-                Err(e) => panic!("no reply to {id} from freedom-ipfsd: {e}"),
+                Err(e) => self.lifecycle_failure(&format!("no reply to {id}: {e}")),
             };
             if message["id"] == id {
                 return message;
@@ -289,12 +331,14 @@ impl Ipfsd {
     }
 
     /// Sends a request and returns its reply.
+    #[track_caller]
     pub fn call(&mut self, method: &str, params: Value) -> Value {
         let id = self.request(method, params);
         self.reply(id)
     }
 
     /// The handshake, with ID 1 unless requests went first.
+    #[track_caller]
     pub fn hello(&mut self) -> Value {
         let reply = self.call(
             "ipfs.hello",
@@ -304,10 +348,12 @@ impl Ipfsd {
         reply
     }
 
+    #[track_caller]
     pub fn start(&mut self, params: Value) -> Value {
         self.call("ipfs.start", params)
     }
 
+    #[track_caller]
     pub fn stop(&mut self, instance: &str) -> Value {
         self.call("ipfs.stop", json!({ "instance": instance }))
     }
@@ -343,15 +389,49 @@ impl Ipfsd {
         self.pending.drain(..).collect()
     }
 
-    /// The exit code, once it exits within `timeout`; `None` past it, or
-    /// for an exit by signal.
+    /// The exit code, once it exits within `timeout`; `None` for an exit by
+    /// signal. Past `timeout`, a lifecycle failure.
+    #[track_caller]
     pub fn exit_code(&mut self, timeout: Duration) -> Option<i32> {
-        wait(&mut self.child, timeout)
+        match wait(&mut self.child, timeout) {
+            Some(status) => status.code(),
+            None => self.lifecycle_failure(&format!("no exit within {timeout:?}")),
+        }
     }
 
     /// stderr, once the process has exited.
     pub fn stderr(&mut self) -> String {
-        self.stderr.take().unwrap().join().unwrap()
+        if let Some(reader) = self.stderr.take() {
+            reader.join().unwrap();
+        }
+        self.stderr_read.lock().unwrap().clone()
+    }
+
+    /// Fails the test for a lifecycle timeout, saying why: the process's
+    /// exit status, or that it was still running (it is killed), and the
+    /// end of its stderr. A closed stdout means the process is exiting, so
+    /// its status is waited for first, briefly.
+    #[track_caller]
+    pub fn lifecycle_failure(&mut self, what: &str) -> ! {
+        let status = match wait(&mut self.child, Duration::from_secs(5)) {
+            Some(status) => format!("exited ({status})"),
+            None => {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                "was still running, and was killed".to_owned()
+            }
+        };
+        // What is left in the pipe, if no other process holds it open.
+        if let Some(reader) = self.stderr.take() {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !reader.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        let stderr = self.stderr_read.lock().unwrap().clone();
+        let lines: Vec<&str> = stderr.lines().collect();
+        let tail = lines[lines.len().saturating_sub(STDERR_TAIL)..].join("\n");
+        panic!("{what}: freedom-ipfsd {status}; the end of its stderr:\n{tail}");
     }
 
     /// Threads of this process named `name`.
@@ -382,7 +462,8 @@ impl Drop for HoldLock {
 
 impl HoldLock {
     pub fn spawn(dirs: &Dirs) -> HoldLock {
-        let mut child = Command::new(BIN)
+        let mut command = Command::new(BIN);
+        command
             .arg("hold-lock")
             .arg("--data-dir")
             .arg(&dirs.data)
@@ -390,9 +471,11 @@ impl HoldLock {
             .arg(&dirs.locks)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::null());
+        let mut child = {
+            let _spawning = spawning();
+            command.spawn().unwrap()
+        };
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().unwrap();
         let (tx, lines) = mpsc::channel();
@@ -419,16 +502,19 @@ impl HoldLock {
         self.stdin.take();
     }
 
+    /// The exit code, once it exits within `timeout`; `None` past it, or
+    /// for an exit by signal.
     pub fn exit_code(&mut self, timeout: Duration) -> Option<i32> {
-        wait(&mut self.child, timeout)
+        wait(&mut self.child, timeout).and_then(|status| status.code())
     }
 }
 
-fn wait(child: &mut Child, timeout: Duration) -> Option<i32> {
+/// The child's exit status, once it exits within `timeout`.
+fn wait(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(status) = child.try_wait().unwrap() {
-            return status.code();
+            return Some(status);
         }
         if Instant::now() >= deadline {
             return None;
@@ -644,16 +730,20 @@ pub fn get(instance: &str, path: &str) -> Value {
         "headers_ms": 30000 })
 }
 
-/// A command run to its end with no stdin, and its exit code.
+/// A command run to its end with no stdin, and its exit code. Spawned
+/// under the spawn lock, and waited for outside it.
 pub fn status<S: AsRef<OsStr>>(args: &[S]) -> Option<i32> {
-    Command::new(BIN)
+    let mut command = Command::new(BIN);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .unwrap()
-        .code()
+        .stderr(Stdio::null());
+    let mut child = {
+        let _spawning = spawning();
+        command.spawn().unwrap()
+    };
+    child.wait().unwrap().code()
 }
 
 /// Each instance whose teardown began, in `stderr`'s order, with whether

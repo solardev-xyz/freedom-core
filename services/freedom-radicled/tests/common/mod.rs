@@ -6,6 +6,12 @@
 //! Each process gets the environment main gives it (0008, "Spawn and
 //! lock"): cleared, with `HOME` at a directory of its own (and, on Windows,
 //! `SystemRoot`, which the OS's own libraries need).
+//!
+//! **One spawn at a time** ([`spawning`]): on macOS std makes a child's
+//! pipes with `pipe()` and only then marks them close-on-exec, so a child
+//! spawned from another test's thread in between inherits them, and holding
+//! the write end of another child's stdin keeps that child from seeing EOF
+//! (issue #171; freedom-ipfsd's harness has the details).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, dead_code)]
 
@@ -23,6 +29,14 @@ pub const BIN: &str = env!("CARGO_BIN_EXE_freedom-radicled");
 pub const READ_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a process gets to exit when it should.
 pub const EXIT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Held across every spawn of this test process (see the module's doc).
+static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The spawn lock: hold it across `Command::spawn` (never across a wait).
+pub fn spawning() -> std::sync::MutexGuard<'static, ()> {
+    SPAWN.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// A Radicle home, a lock directory and the service's own `HOME`, removed
 /// on drop.
@@ -95,12 +109,14 @@ impl Radicled {
     }
 
     pub fn spawn(mut command: Command) -> Radicled {
-        let mut child = command
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::piped());
+        let mut child = {
+            let _spawning = spawning();
+            command.spawn().unwrap()
+        };
         let stdin = child.stdin.take();
         let mut stdout = child.stdout.take().unwrap();
         let mut stderr = child.stderr.take().unwrap();
@@ -232,12 +248,14 @@ impl HoldLock {
             .arg("--lock-dir")
             .arg(&dirs.locks);
         environment(&mut command, dirs, &[]);
-        let mut child = command
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::null());
+        let mut child = {
+            let _spawning = spawning();
+            command.spawn().unwrap()
+        };
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().unwrap();
         let (tx, lines) = mpsc::channel();
