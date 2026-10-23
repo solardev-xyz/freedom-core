@@ -19,3 +19,6 @@ zeroize = "1.8"
 
 [dev-dependencies]
 hex = "0.4"
+# Generated round trips (design 0001, Testing). Without its default
+# features: no forking runner, no timeouts, no tempfile.
+proptest = { version = "1.12", default-features = false, features = ["std"] }
