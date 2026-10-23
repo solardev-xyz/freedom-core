@@ -1351,8 +1351,11 @@ fn string_close(s: &[u8], mut i: usize) -> usize {
 
 /// Past this nesting, a reply nobody reads (or whose reading crossed its
 /// budget) isn't parsed at all: its scratch would be unreserved. It is
-/// dropped unread, as it would be after the parse.
-const UNRESERVED_NESTING: usize = 512;
+/// dropped unread, as it would be after the parse. It is the 512 levels a
+/// value may nest (deviation `json-depth`), plus the reply's own object
+/// around it, so a late Colibri answer at that bound is still read as one
+/// for its method's fault record (design 0005, Colibri: verifier faults).
+const UNRESERVED_NESTING: usize = 512 + 1;
 
 /// A present member stays `Some`, even when its value is `null`.
 fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<&'de RawValue>, D::Error> {
