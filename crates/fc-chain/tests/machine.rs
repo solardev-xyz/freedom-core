@@ -867,9 +867,10 @@ fn the_adaptive_table_evicts_its_oldest_route() {
         // Colibri hits its execution limit: the route is blocked.
         world.answer(
             op,
-            Answer::Colibri(ColibriReply::Failure(
-                fc_chain::machine::ColibriClass::Capacity,
-            )),
+            Answer::Colibri(ColibriReply::Failure {
+                class: fc_chain::machine::ColibriClass::Capacity,
+                fault: false,
+            }),
         );
         let rpc = world.rpcs()[i].0;
         world.answer(rpc, ok("\"0x1\""));
@@ -1193,6 +1194,7 @@ fn colibri_reverts_and_failures_carry_no_adapter_text() {
         Answer::Colibri(ColibriReply::Revert {
             data: "0x08c379a0".into(),
             capacity: false,
+            fault: false,
         }),
     );
     match &world.reply(id).result {
@@ -1316,6 +1318,7 @@ fn a_kept_colibri_revert_is_charged_while_it_lives() {
         Answer::Colibri(ColibriReply::Revert {
             data,
             capacity: false,
+            fault: false,
         }),
     );
     assert!(!world.replied(id));
@@ -1836,5 +1839,91 @@ fn an_oversized_hash_answer_stays_ambiguous() {
     assert_eq!(
         outcome(world.reply(id)),
         (BroadcastOutcome::Uncertain, Some("direct"))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Transaction lookups and Colibri's verifier faults (design 0005, Colibri;
+// freedom-browser #752). The replay holds main's cases; these pin the
+// edges of the mined test and of the fault record.
+
+/// Whether Direct's answer to `eth_getTransactionByHash` goes on to
+/// Colibri for its proof.
+fn sent_for_proof(result: &str) -> bool {
+    let mut world = World::new(Bounds::default(), &[colibri_chain(&["colibri", "direct"])]);
+    let id = world.submit(read(1, "eth_getTransactionByHash", r#"["0x01"]"#), None);
+    let (io, ..) = world.rpcs()[0].clone();
+    world.answer(io, ok(result));
+    let proof = world
+        .requests
+        .iter()
+        .any(|(_, _, request, _)| matches!(request, Request::Verified(_)));
+    assert_eq!(world.replied(id), !proof, "{result}");
+    proof
+}
+
+#[test]
+fn a_transaction_is_mined_when_its_last_block_members_are_set() {
+    assert!(sent_for_proof(r#"{"blockNumber":"0x1","blockHash":"0x2"}"#));
+    // The last of duplicate members counts, as JSON.parse keeps it.
+    assert!(sent_for_proof(
+        r#"{"blockNumber":null,"blockHash":"0x2","blockNumber":"0x1"}"#
+    ));
+    assert!(!sent_for_proof(
+        r#"{"blockNumber":"0x1","blockHash":"0x2","blockNumber":null}"#
+    ));
+    // `!= null`: any other value is set, `false` and `0` included.
+    assert!(sent_for_proof(r#"{"blockNumber":0,"blockHash":false}"#));
+    for result in [
+        "null",
+        r#"{"blockNumber":"0x1"}"#,
+        r#"{"blockNumber":"0x1","blockHash":null}"#,
+        r#""0x1""#,
+        r#"["0x1","0x2"]"#,
+        "7",
+    ] {
+        assert!(!sent_for_proof(result), "{result}");
+    }
+}
+
+#[test]
+fn a_colibri_reply_over_the_message_cap_is_no_answer_and_no_fault() {
+    let mut world = World::new(Bounds::default(), &[colibri_chain(&["colibri", "direct"])]);
+    let fault = || {
+        Answer::Colibri(ColibriReply::Failure {
+            class: fc_chain::machine::ColibriClass::Error,
+            fault: true,
+        })
+    };
+    let too_large = Answer::Colibri(ColibriReply::Failure {
+        class: fc_chain::machine::ColibriClass::TooLarge,
+        fault: false,
+    });
+    for answer in [fault(), too_large] {
+        world.submit(read(1, "eth_call", CALL), None);
+        let (op, ..) = world.requests.last().cloned().unwrap();
+        world.answer(op, answer);
+        let (io, ..) = world.rpcs().last().cloned().unwrap();
+        world.answer(io, ok(r#""0x1""#));
+    }
+    // One fault, kept: `too_large` neither counted nor cleared it.
+    let faults = world.machine.state_tables().colibri_faults;
+    assert_eq!(faults.len(), 1);
+    assert_eq!(faults[0].0, "1 eth_call");
+    assert_eq!(faults[0].1.faults.len(), 1);
+    assert!(world.machine.take_backed_off().is_empty());
+    // A second fault starts the cooldown, which the driver logs.
+    world.submit(read(1, "eth_call", CALL), None);
+    let (op, ..) = world.requests.last().cloned().unwrap();
+    world.answer(op, fault());
+    let started = world.machine.take_backed_off();
+    assert_eq!(started.len(), 1);
+    assert_eq!(
+        (
+            started[0].chain_id,
+            started[0].method.as_str(),
+            started[0].cooldown_ms
+        ),
+        (1, "eth_call", 60_000)
     );
 }

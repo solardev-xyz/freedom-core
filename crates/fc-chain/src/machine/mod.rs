@@ -29,6 +29,7 @@ mod config;
 mod ctx;
 mod error;
 mod exchange;
+mod faults;
 mod html;
 mod io;
 mod logs;
@@ -46,12 +47,13 @@ pub use bounds::Bounds;
 pub use config::{ChainConfig, Prover, QuorumConfig, RpcEndpoint};
 pub use error::{ChainError, ErrorClass, Origin, Prop, Protocol, Thrown};
 pub use exchange::{BUSY, FETCH_FAILED, NOT_SENT, TOO_LARGE};
+pub use faults::{BackedOff, FaultRecord};
 pub use fc_dweb::Class as HtmlClass;
 pub use fc_naming::session::exec::{Effect, Fired};
 pub use html::HTML_TOO_LARGE_CODE;
 pub use io::{
     Answer, ColibriClass, ColibriReply, Endpoint, Ms, MyotisClass, MyotisRejection, MyotisReply,
-    Request, Transport, VerifiedOp,
+    Request, Transport, Verdict, VerifiedOp,
 };
 pub use logs::{CapReader, RangeEntry, Ranker};
 pub use machine::{Call, Emitted, Machine, OverBudget, Reply, Reservation, StateTables, Success};

@@ -174,12 +174,27 @@ pub enum ColibriReply {
     /// A revert the prover verified: code 3 and its hex data. `capacity`
     /// when the adapter's error is also a capacity failure: the read
     /// rejects with the revert, and the app's Colibri route is blocked as
-    /// for any capacity failure.
+    /// for any capacity failure. `fault` as for a failure.
     Revert {
         data: String,
         capacity: bool,
+        fault: bool,
     },
-    Failure(ColibriClass),
+    /// Any other failure, by class. `fault` when main marked it a verifier
+    /// fault (main's `isColibriFault`), which counts toward the backoff of
+    /// its chain and method (design 0005, Colibri).
+    Failure { class: ColibriClass, fault: bool },
+}
+
+/// What a terminal reply means for a Colibri operation's fault record
+/// (design 0005, Colibri: verifier faults): an answer deletes it, a fault
+/// counts, anything else leaves it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Verdict {
+    #[default]
+    Neither,
+    Answer,
+    Fault,
 }
 
 /// Main's terminal reply to a `shell.*` request.
@@ -241,8 +256,23 @@ impl Answer {
                 ColibriReply::Result(text) | ColibriReply::Revert { data: text, .. } => {
                     text.capacity()
                 }
-                ColibriReply::Undefined | ColibriReply::Failure(_) => 0,
+                ColibriReply::Undefined | ColibriReply::Failure { .. } => 0,
             },
+        }
+    }
+
+    /// What it means for a Colibri operation's fault record: a result
+    /// (`undefined` included) is an answer; a revert or a failure main
+    /// marked `fault` is a fault. `too_large` is neither: main couldn't
+    /// send the result, and can't have it told from an oversized revert.
+    pub fn verdict(&self) -> Verdict {
+        match self {
+            Self::Colibri(ColibriReply::Result(_) | ColibriReply::Undefined) => Verdict::Answer,
+            Self::Colibri(
+                ColibriReply::Revert { fault: true, .. }
+                | ColibriReply::Failure { fault: true, .. },
+            ) => Verdict::Fault,
+            _ => Verdict::Neither,
         }
     }
 }
@@ -257,6 +287,9 @@ pub struct Delivered {
     /// request's budget: it completes the operation (freeing a verifier's
     /// slot) and is dropped.
     pub(crate) discarded: bool,
+    /// What it means for a Colibri operation's fault record, kept when the
+    /// payload is dropped: a reply counts when it arrives, read or not.
+    pub(crate) verdict: Verdict,
 }
 
 impl Request {

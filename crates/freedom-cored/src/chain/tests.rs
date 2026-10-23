@@ -826,6 +826,60 @@ fn raw(text: &str) -> Result<Box<RawValue>, ErrorBody> {
 }
 
 #[test]
+fn colibri_answers_carry_a_fault_beside_a_failure_or_a_revert() {
+    // Main's `fault: true` (design 0005, The rest): beside a failure or a
+    // revert, with `capacity` too, members in any order; only ever `true`.
+    let colibri = |text: &str| answer(Kind::Colibri, raw(text));
+    let failure = |class| {
+        Some(Answer::Colibri(ColibriReply::Failure {
+            class,
+            fault: true,
+        }))
+    };
+    assert_eq!(
+        colibri(r#"{"failure":"error","fault":true}"#),
+        failure(ColibriClass::Error)
+    );
+    assert_eq!(
+        colibri(r#"{"fault":true,"failure":"capacity"}"#),
+        failure(ColibriClass::Capacity)
+    );
+    let revert = |capacity| {
+        Some(Answer::Colibri(ColibriReply::Revert {
+            data: "0x12".into(),
+            capacity,
+            fault: true,
+        }))
+    };
+    assert_eq!(
+        colibri(r#"{"revert":{"data":"0x12"},"fault":true}"#),
+        revert(false)
+    );
+    for text in [
+        r#"{"revert":{"data":"0x12"},"capacity":true,"fault":true}"#,
+        r#"{"fault":true,"revert":{"data":"0x12"},"capacity":true}"#,
+        r#"{"capacity":true,"fault":true,"revert":{"data":"0x12"}}"#,
+    ] {
+        assert_eq!(colibri(text), revert(true), "{text}");
+    }
+    for text in [
+        r#"{"failure":"error","fault":false}"#,
+        r#"{"failure":"error","fault":null}"#,
+        r#"{"failure":"error","fault":"true"}"#,
+        r#"{"failure":"error","fault":1}"#,
+        r#"{"revert":{"data":"0x12"},"fault":false}"#,
+        r#"{"revert":{"data":"0x12","fault":true}}"#,
+        r#"{"revert":{"data":"0x12"},"capacity":false,"fault":true}"#,
+        r#"{"failure":"error","capacity":true,"fault":true}"#,
+        r#"{"fault":true}"#,
+        r#"{"result":"0x1","fault":true}"#,
+        r#"{"undefined_keys":["result"],"fault":true}"#,
+    ] {
+        assert_eq!(colibri(text), None, "{text}");
+    }
+}
+
+#[test]
 fn colibri_answers_carry_a_revert_with_capacity_and_an_undefined_result() {
     // A verified revert that is also a capacity failure, and a result of
     // `undefined` (design 0005, Verified operations): each in exactly one
@@ -835,6 +889,7 @@ fn colibri_answers_carry_a_revert_with_capacity_and_an_undefined_result() {
         Some(Answer::Colibri(ColibriReply::Revert {
             data: "0x12".into(),
             capacity,
+            fault: false,
         }))
     };
     assert_eq!(
@@ -1091,6 +1146,7 @@ fn mains_answers_take_one_closed_shape() {
         Some(Answer::Colibri(ColibriReply::Revert {
             data: "0x12".into(),
             capacity: false,
+            fault: false,
         }))
     );
     for (class, expected) in [
@@ -1102,7 +1158,10 @@ fn mains_answers_take_one_closed_shape() {
     ] {
         assert_eq!(
             colibri(&format!(r#"{{"failure":"{class}"}}"#)),
-            Some(Answer::Colibri(ColibriReply::Failure(expected)))
+            Some(Answer::Colibri(ColibriReply::Failure {
+                class: expected,
+                fault: false
+            }))
         );
     }
     // Text where a class goes, two shapes at once, members of another

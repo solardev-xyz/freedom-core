@@ -40,7 +40,7 @@ use fc_chain::machine::{
     Answer, Bounds, BroadcastOutcome, Call, ChainConfig, ChainError, ColibriClass, ColibriReply,
     Effect, Emitted, Machine, Ms, MyotisClass, MyotisRejection, MyotisReply, Origin, Prop,
     Protocol, Prover, QuorumConfig, ReadOptions, Reply as Done, Request, Reservation, RpcEndpoint,
-    Success, Transport, VerifiedOp,
+    Success, Transport, Verdict, VerifiedOp,
 };
 use fc_chain::{JsString, MyotisOperation, READ_METHODS, SINGLE_NODE_METHODS};
 use fc_protocol::error::{ErrorBody, ErrorCode};
@@ -439,6 +439,18 @@ impl Chain {
         let backlog = self.backlog();
         self.machine.set_output_backlog(backlog);
         self.machine.poll();
+        // Colibri's verifier-fault cooldowns, logged as they start (design
+        // 0005, Colibri): the chain, the method and how long; no origin.
+        for started in self.machine.take_backed_off() {
+            log::warn(
+                "chain colibri backed off",
+                serde_json::json!({
+                    "chain": started.chain_id,
+                    "method": started.method,
+                    "cooldown_ms": started.cooldown_ms,
+                }),
+            );
+        }
     }
 
     /// Brings the machine to the clock's now ([`Chain::advance`]), then
@@ -657,6 +669,8 @@ impl Chain {
             return Ok(());
         };
         self.by_io.remove(&io);
+        // A Colibri reply counts for its method's fault record, read or not.
+        let verdict = shape.verdict();
         // Nobody reads a reply whose request has ended: it completes
         // unread, as one past the budget does.
         let read = match held {
@@ -672,7 +686,7 @@ impl Chain {
             }
             Err(Unread::Malformed) => return Err(malformed),
             Err(Unread::Over) => {
-                self.machine.complete_unread(io);
+                self.machine.complete_unread_as(io, verdict);
             }
         }
         self.poll();
@@ -1144,7 +1158,10 @@ fn unsent(kind: Kind) -> Answer {
         Kind::Rpc | Kind::Blockscout => Answer::NotSent,
         Kind::MyotisRead => Answer::Myotis(MyotisReply::Failure(MyotisClass::Error)),
         Kind::MyotisBroadcast => Answer::Myotis(MyotisReply::NotSent),
-        Kind::Colibri => Answer::Colibri(ColibriReply::Failure(ColibriClass::Error)),
+        Kind::Colibri => Answer::Colibri(ColibriReply::Failure {
+            class: ColibriClass::Error,
+            fault: false,
+        }),
     }
 }
 
@@ -1156,7 +1173,10 @@ fn too_large(kind: Kind) -> Answer {
         Kind::Rpc | Kind::Blockscout => Answer::NotSent,
         Kind::MyotisRead => Answer::Myotis(MyotisReply::Failure(MyotisClass::TooLarge)),
         Kind::MyotisBroadcast => Answer::Myotis(MyotisReply::NotSent),
-        Kind::Colibri => Answer::Colibri(ColibriReply::Failure(ColibriClass::TooLarge)),
+        Kind::Colibri => Answer::Colibri(ColibriReply::Failure {
+            class: ColibriClass::TooLarge,
+            fault: false,
+        }),
     }
 }
 
@@ -1479,13 +1499,17 @@ enum Shape<'a> {
     ColibriResult(&'a RawValue),
     /// `{ undefined_keys: ["result"] }`: Colibri's result was `undefined`.
     ColibriUndefined,
-    /// The data, a JSON string, and whether main also classed the error a
-    /// capacity failure.
+    /// The data, a JSON string, whether main also classed the error a
+    /// capacity failure, and whether it marked it a verifier fault.
     Revert {
         data: &'a RawValue,
         capacity: bool,
+        fault: bool,
     },
-    ColibriFailure(ColibriClass),
+    ColibriFailure {
+        class: ColibriClass,
+        fault: bool,
+    },
 }
 
 /// Why a reply was not read for good.
@@ -1526,6 +1550,18 @@ fn rejected(raw: &RawValue) -> Option<Shape<'_>> {
 }
 
 impl<'a> Shape<'a> {
+    /// What it means for a Colibri operation's fault record, as the
+    /// machine's [`Answer::verdict`] has it, read or not.
+    fn verdict(&self) -> Verdict {
+        match self {
+            Self::ColibriResult(_) | Self::ColibriUndefined => Verdict::Answer,
+            Self::Revert { fault: true, .. } | Self::ColibriFailure { fault: true, .. } => {
+                Verdict::Fault
+            }
+            _ => Verdict::Neither,
+        }
+    }
+
     /// Main's `error`, as a transport failure: a code of the closed set, a
     /// string message, no other member; `None` when it is malformed.
     fn failed(text: &'a str) -> Option<Self> {
@@ -1618,8 +1654,14 @@ impl<'a> Shape<'a> {
                 }
             }
             Kind::Colibri => {
-                if members.are(&["failure"]) {
-                    colibri_class(class()?).map(Shape::ColibriFailure)
+                // `capacity` and `fault` are sent only when `true`.
+                let flag = |name: &str| match members.get(name) {
+                    None => Some(false),
+                    Some(value) => (value.get() == "true").then_some(true),
+                };
+                if members.within("failure", &["failure", "fault"]) {
+                    let fault = flag("fault")?;
+                    colibri_class(class()?).map(|class| Shape::ColibriFailure { class, fault })
                 } else if members.are(&["result"]) {
                     members.get("result").map(Shape::ColibriResult)
                 } else if members.are(&["undefined_keys"]) {
@@ -1628,19 +1670,13 @@ impl<'a> Shape<'a> {
                         serde_json::from_str::<(&RawValue,)>(members.get("undefined_keys")?.get())
                             .ok()?;
                     (plain(key)? == "result").then_some(Shape::ColibriUndefined)
-                } else if members.are(&["revert"]) {
+                } else if members.within("revert", &["revert", "capacity", "fault"]) {
+                    let capacity = flag("capacity")?;
+                    let fault = flag("fault")?;
                     wrapped("revert", "data").map(|data| Shape::Revert {
                         data,
-                        capacity: false,
-                    })
-                } else if members.are(&["revert", "capacity"]) {
-                    // `capacity` is sent only when it is `true`.
-                    if members.get("capacity")?.get() != "true" {
-                        return None;
-                    }
-                    wrapped("revert", "data").map(|data| Shape::Revert {
-                        data,
-                        capacity: true,
+                        capacity,
+                        fault,
                     })
                 } else {
                     None
@@ -1735,17 +1771,26 @@ impl<'a> Shape<'a> {
                 )
             }
             Shape::ColibriUndefined => (Answer::Colibri(ColibriReply::Undefined), reserve(0)?),
-            Shape::Revert { data, capacity } => {
+            Shape::Revert {
+                data,
+                capacity,
+                fault,
+            } => {
                 let reservation = reserve(data.get().len())?;
                 let data = decode_string(data.get()).ok_or(Unread::Malformed)?;
                 (
-                    Answer::Colibri(ColibriReply::Revert { data, capacity }),
+                    Answer::Colibri(ColibriReply::Revert {
+                        data,
+                        capacity,
+                        fault,
+                    }),
                     reservation,
                 )
             }
-            Shape::ColibriFailure(class) => {
-                (Answer::Colibri(ColibriReply::Failure(class)), reserve(0)?)
-            }
+            Shape::ColibriFailure { class, fault } => (
+                Answer::Colibri(ColibriReply::Failure { class, fault }),
+                reserve(0)?,
+            ),
         })
     }
 }
