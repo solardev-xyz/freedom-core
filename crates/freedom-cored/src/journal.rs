@@ -541,7 +541,7 @@ pub fn recover(identity_dir: &Path, gates: &Gates) -> std::io::Result<Recovered>
     // A Radicle journal is finished only under its home's gate, which the
     // Radicle service holds while it runs (0008).
     let _home_gate = if journal.node == "radicle" {
-        match radicle_gate(&journal.root, gates)? {
+        match radicle_gate(&journal.root, gates, true)? {
             HomeGate::Held => {
                 return Ok(Recovered::Waiting {
                     op_id: journal.op_id,
@@ -623,11 +623,16 @@ enum HomeGate {
 /// A Radicle journal's root is the gate's canonical path when it was
 /// written: a root that no longer is (retargeted to a symlink since, or
 /// renamed) is refused, and the journal stays (review of #177).
-fn radicle_gate(root: &Path, gates: &Gates) -> std::io::Result<HomeGate> {
+fn radicle_gate(root: &Path, gates: &Gates, create: bool) -> std::io::Result<HomeGate> {
     if gates.held.as_deref() == Some(root) {
         return Ok(HomeGate::Taken(None));
     }
-    match fc_service::gate::acquire(root, &gates.lock_dir, RADICLE_GATE, gates.retry) {
+    let acquired = if create {
+        fc_service::gate::acquire(root, &gates.lock_dir, RADICLE_GATE, gates.retry)
+    } else {
+        fc_service::gate::acquire_existing(root, &gates.lock_dir, RADICLE_GATE, gates.retry)
+    };
+    match acquired {
         Ok(gate) if gate.data_dir == root => Ok(HomeGate::Taken(Some(gate))),
         Ok(_) => Err(std::io::Error::other(
             "a Radicle home that isn't its journal's canonical root",
@@ -997,28 +1002,48 @@ fn discard_intent(identity_dir: &Path, gates: &Gates) -> std::io::Result<Recover
         // its intent goes without the gate, which would make the home, and
         // without looking under the root, which another writer may be making
         // meanwhile.
-        let present = match std::fs::symlink_metadata(&intent.root) {
-            Ok(_) => true,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        //
+        // A home that is there is gated without being made, and must be the
+        // directory seen (review of #177, round 5): if it is gone or another
+        // directory by the time the gate is taken, the intent stays and the
+        // recovery fails (`pending_recovery`), so nothing is made and the
+        // moved home's staged files aren't forgotten.
+        let seen = match std::fs::symlink_metadata(&intent.root) {
+            Ok(metadata) => Some(DirIdentity::of(&metadata)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e),
         };
-        if present {
+        #[cfg(test)]
+        tests::INTENT_SEEN.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().as_mut() {
+                hook(&intent.root, seen.is_some());
+            }
+        });
+        if let Some(seen) = seen {
+            let changed = || {
+                std::io::Error::other("a Radicle home that changed while its intent was cleaned up")
+            };
             let mut identity = None;
             let _home_gate = if intent.node == "radicle" {
-                match radicle_gate(&intent.root, gates)? {
-                    HomeGate::Held => {
+                match radicle_gate(&intent.root, gates, false) {
+                    Ok(HomeGate::Held) => {
                         return Ok(Recovered::Waiting {
                             op_id: intent.op_id,
                             node: intent.node,
                         });
                     }
-                    HomeGate::Taken(gate) => {
+                    Ok(HomeGate::Taken(gate)) => {
                         identity = match &gate {
                             Some(gate) => gate.identity,
                             None => gates.held_identity,
                         };
+                        if seen.is_some() && identity.is_some() && identity != seen {
+                            return Err(changed());
+                        }
                         gate
                     }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(changed()),
+                    Err(e) => return Err(e),
                 }
             } else {
                 None
@@ -1141,6 +1166,15 @@ fn sync_dir(_dir: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What runs between the intent cleanup's look at its home and the gate.
+    type Seen = Option<Box<dyn FnMut(&Path, bool)>>;
+
+    std::thread_local! {
+        /// Runs between the intent cleanup's look at its home (whether it is
+        /// there) and the gate, so a test can move the home in between.
+        pub(super) static INTENT_SEEN: std::cell::RefCell<Seen> = std::cell::RefCell::new(None);
+    }
 
     /// The gates a test's recovery takes: a lock directory beside the
     /// identity directory, no waiting.
@@ -1772,5 +1806,104 @@ mod tests {
             Recovered::Discarded
         );
         assert!(!first.join(STAGING).exists());
+    }
+
+    /// Review of #177, round 5: a home moved away between the intent
+    /// cleanup's look at it and the gate isn't made again at its path, and
+    /// its intent isn't dropped (its staged files are in the moved home):
+    /// the recovery fails, closed. The same when another owner holds the
+    /// gate of the home it moves.
+    #[cfg(unix)]
+    #[test]
+    fn a_home_moved_before_its_cleanup_gate_is_neither_made_nor_forgotten() {
+        for held_by_another in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let base = std::fs::canonicalize(tmp.path()).unwrap();
+            let (home, moved) = (base.join("home"), base.join("moved"));
+            let identity = made(&base.join("identity"));
+            let locks = base.join("locks");
+            std::fs::create_dir(&home).unwrap();
+            std::fs::write(home.join("config.json.freedom-new"), b"staged").unwrap();
+            let intent = Intent {
+                op_id: "earlier".into(),
+                node: "radicle".into(),
+                root: home.clone(),
+            };
+            put_record(&identity, STAGING, &intent).unwrap();
+            let owner = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let (held, other_locks, to) = (owner.clone(), locks.clone(), moved.clone());
+            INTENT_SEEN.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move |root, present| {
+                    assert!(present);
+                    if held_by_another {
+                        *held.borrow_mut() = Some(
+                            fc_service::gate::acquire(
+                                root,
+                                &other_locks,
+                                RADICLE_GATE,
+                                std::time::Duration::ZERO,
+                            )
+                            .unwrap(),
+                        );
+                    }
+                    std::fs::rename(root, &to).unwrap();
+                }));
+            });
+            let gates = Gates {
+                lock_dir: locks,
+                retry: std::time::Duration::ZERO,
+                held: None,
+                held_identity: None,
+            };
+            let recovered = super::recover(&identity, &gates);
+            INTENT_SEEN.with(|hook| *hook.borrow_mut() = None);
+            assert!(
+                !matches!(recovered, Ok(Recovered::Discarded)),
+                "{held_by_another}: {recovered:?}"
+            );
+            assert!(!home.exists(), "{held_by_another}: the home was made again");
+            assert!(identity.join(STAGING).exists(), "{held_by_another}");
+            assert!(moved.join("config.json.freedom-new").exists());
+        }
+    }
+
+    /// Review of #177, round 5: a home replaced by another directory between
+    /// the cleanup's look and the gate is refused: nothing of the other
+    /// directory is removed, and the intent stays.
+    #[cfg(unix)]
+    #[test]
+    fn a_home_replaced_before_its_cleanup_gate_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let (home, other) = (base.join("home"), base.join("other"));
+        let identity = made(&base.join("identity"));
+        for dir in [&home, &other] {
+            std::fs::create_dir(dir).unwrap();
+            std::fs::write(dir.join("config.json.freedom-new"), b"staged").unwrap();
+        }
+        let intent = Intent {
+            op_id: "earlier".into(),
+            node: "radicle".into(),
+            root: home.clone(),
+        };
+        put_record(&identity, STAGING, &intent).unwrap();
+        let (from, away) = (other.clone(), base.join("away"));
+        INTENT_SEEN.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |root, _| {
+                std::fs::rename(root, &away).unwrap();
+                std::fs::rename(&from, root).unwrap();
+            }));
+        });
+        let gates = Gates {
+            lock_dir: base.join("locks"),
+            retry: std::time::Duration::ZERO,
+            held: None,
+            held_identity: None,
+        };
+        let recovered = super::recover(&identity, &gates);
+        INTENT_SEEN.with(|hook| *hook.borrow_mut() = None);
+        assert!(recovered.is_err(), "{recovered:?}");
+        assert!(home.join("config.json.freedom-new").exists());
+        assert!(identity.join(STAGING).exists());
     }
 }

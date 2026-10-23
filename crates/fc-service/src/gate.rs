@@ -111,14 +111,41 @@ impl DirIdentity {
 }
 
 /// Qualifies storage, then takes `namespace`'s gate for `data_dir`,
-/// retrying on contention for up to `retry` (0001: 5 s).
+/// retrying on contention for up to `retry` (0001: 5 s). `data_dir` (and the
+/// lock directory) are made if missing.
 pub fn acquire(
     data_dir: &Path,
     lock_dir: &Path,
     namespace: &str,
     retry: Duration,
 ) -> Result<Gate, GateError> {
-    create_private_dir(data_dir).map_err(GateError::Storage)?;
+    acquire_as(data_dir, lock_dir, namespace, retry, true)
+}
+
+/// [`acquire`], for a `data_dir` that must already exist: it is never made.
+/// One that is missing is `GateError::Storage` (`NotFound`), before any
+/// lock is taken. A caller that saw the directory, and must act on that one
+/// directory or on nothing, compares the gate's [`Gate::identity`] with
+/// what it saw (freedom-cored's intent cleanup, design 0001).
+pub fn acquire_existing(
+    data_dir: &Path,
+    lock_dir: &Path,
+    namespace: &str,
+    retry: Duration,
+) -> Result<Gate, GateError> {
+    acquire_as(data_dir, lock_dir, namespace, retry, false)
+}
+
+fn acquire_as(
+    data_dir: &Path,
+    lock_dir: &Path,
+    namespace: &str,
+    retry: Duration,
+    create: bool,
+) -> Result<Gate, GateError> {
+    if create {
+        create_private_dir(data_dir).map_err(GateError::Storage)?;
+    }
     create_private_dir(lock_dir).map_err(GateError::Storage)?;
     let canonical_data = std::fs::canonicalize(data_dir).map_err(GateError::Storage)?;
     let canonical_locks = std::fs::canonicalize(lock_dir).map_err(GateError::Storage)?;
@@ -360,6 +387,33 @@ mod tests {
         // until it execs. Released means acquirable within the retry, here
         // and in every other test that reacquires after a release.
         assert!(acquire(&data, &locks, "ipfs", CONTENTION_RETRY).is_ok());
+    }
+
+    /// `acquire_existing` never makes the data directory: a missing one is
+    /// `NotFound`, and nothing is made; an existing one is gated as by
+    /// `acquire`, which still makes a missing one.
+    #[test]
+    fn acquire_existing_never_makes_the_data_directory() {
+        let (_root, data, locks) = dirs();
+        match acquire_existing(&data, &locks, "radicle", Duration::ZERO) {
+            Err(GateError::Storage(e)) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound),
+            other => panic!("{other:?}"),
+        }
+        assert!(!data.exists());
+        let made = acquire(&data, &locks, "radicle", Duration::ZERO).unwrap();
+        assert!(data.is_dir());
+        assert!(matches!(
+            acquire_existing(&data, &locks, "radicle", Duration::ZERO),
+            Err(GateError::Held)
+        ));
+        drop(made);
+        let gate = acquire_existing(&data, &locks, "radicle", CONTENTION_RETRY).unwrap();
+        assert_eq!(gate.data_dir, std::fs::canonicalize(&data).unwrap());
+        #[cfg(unix)]
+        assert_eq!(
+            gate.identity,
+            DirIdentity::of(&std::fs::metadata(&data).unwrap())
+        );
     }
 
     #[test]
