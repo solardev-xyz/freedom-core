@@ -656,7 +656,42 @@ mod linux {
         fc_sys::linux::landlock_abi().ok().map(|abi| abi.min(9))
     }
 
+    /// The descriptors above stderr this process holds, from its start:
+    /// what its children would inherit.
+    fn inherited_descriptors() -> Vec<String> {
+        use std::os::fd::AsRawFd;
+        let table = rustix::fs::open(
+            "/proc/self/fd",
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .unwrap();
+        let own = table.as_raw_fd();
+        let mut dir = rustix::fs::Dir::new(table).unwrap();
+        let mut held = Vec::new();
+        while let Some(entry) = dir.read() {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            if name.parse::<i32>().is_ok_and(|fd| fd > 2 && fd != own) {
+                held.push(name);
+            }
+        }
+        held
+    }
+
     fn parent() {
+        // Main spawns a service with stdio alone, and `confine` refuses
+        // anything else: so must this test be run, or every case fails.
+        let held = inherited_descriptors();
+        if !held.is_empty() {
+            eprintln!(
+                "confine: this process inherited descriptors {held:?} beyond stdio, which \
+                 every child would inherit and refuse; run it with stdio alone: \
+                 python3 scripts/stdio-only.py cargo test …"
+            );
+            std::process::exit(1);
+        }
         let world = world();
         let canary = world.outside.join("canary");
         let before = std::fs::metadata(&canary).unwrap();
