@@ -77,6 +77,10 @@ struct Budget<'a> {
     root_offset: Cell<usize>,
     output: Cell<usize>,
     output_limit: usize,
+    /// The bytes and strings the decode made, tallied where each is made
+    /// and apart from `output`: what `decode_counted` reports, so a budget
+    /// that loses count of what it charged shows in a fuzz run.
+    made: Cell<usize>,
 }
 
 struct Reader<'a> {
@@ -218,6 +222,11 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
+    fn made(&self, length: usize) {
+        let made = self.budget.made.get().saturating_add(length);
+        self.budget.made.set(made);
+    }
+
     fn decode(&mut self, kind: Kind) -> Result<Value, Fail> {
         Ok(match kind {
             Kind::Address => {
@@ -239,6 +248,7 @@ impl<'a> Reader<'a> {
             Kind::Bytes => {
                 let bytes = self.read_dynamic_bytes()?;
                 self.charge(bytes.len())?;
+                self.made(bytes.len());
                 Value::Bytes(bytes.to_vec())
             }
             // Validated borrowed, charged, then allocated: an over-budget
@@ -250,6 +260,7 @@ impl<'a> Reader<'a> {
                 let text = std::str::from_utf8(self.read_dynamic_bytes()?)
                     .map_err(|_| FieldError::InvalidUtf8)?;
                 self.charge(text.len())?;
+                self.made(text.len());
                 Value::String(text.to_owned())
             }
             Kind::StringArray => {
@@ -341,6 +352,25 @@ pub fn decode_explained_within(
     data: &[u8],
     output_limit: usize,
 ) -> Result<Vec<Field>, String> {
+    decode_tallied(kinds, data, output_limit).0
+}
+
+/// [`decode`] without an output limit, and the bytes and strings it made
+/// on the way, those of a `string[]` field that then failed included: what
+/// a limit counts. Data decodes within a limit exactly when this is no
+/// more than it, to the same fields. For the fuzz targets only.
+#[cfg(feature = "fuzzing")]
+pub fn decode_counted(kinds: &[Kind], data: &[u8]) -> (Result<Vec<Field>, DecodeError>, usize) {
+    let (fields, made) = decode_tallied(kinds, data, usize::MAX);
+    (fields.map_err(|_| DecodeError), made)
+}
+
+/// The one decode: its fields, and the bytes and strings it made.
+fn decode_tallied(
+    kinds: &[Kind],
+    data: &[u8],
+    output_limit: usize,
+) -> (Result<Vec<Field>, String>, usize) {
     let budget = Budget {
         read: Cell::new(0),
         limit: data.len().saturating_mul(MAX_INFLATION),
@@ -348,6 +378,7 @@ pub fn decode_explained_within(
         root_offset: Cell::new(0),
         output: Cell::new(0),
         output_limit,
+        made: Cell::new(0),
     };
     let mut reader = Reader {
         data,
@@ -355,11 +386,12 @@ pub fn decode_explained_within(
         budget: &budget,
         root: true,
     };
-    reader.unpack(kinds).map_err(|fail| match fail {
+    let fields = reader.unpack(kinds).map_err(|fail| match fail {
         Fail::Overrun(message) | Fail::Overflow(message) => message,
         // Field errors are caught inside the tuple.
         Fail::Field(_) => String::new(),
-    })
+    });
+    (fields, budget.made.get())
 }
 
 /// Head-and-tail encoding of dynamic `bytes`/`string` and static words, for
