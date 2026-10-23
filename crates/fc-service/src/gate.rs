@@ -84,6 +84,23 @@ pub struct Gate {
     pub identity: Option<DirIdentity>,
 }
 
+impl Gate {
+    /// The descriptors the gate holds open, which cross `confine`
+    /// ([`crate::confine::Policy::descriptors`]): the lock's, on Unix.
+    /// Empty elsewhere.
+    pub fn descriptors(&self) -> Vec<i32> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            vec![self._file.as_raw_fd()]
+        }
+        #[cfg(not(unix))]
+        {
+            Vec::new()
+        }
+    }
+}
+
 /// A directory's identity: its device and inode (Unix).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirIdentity {
