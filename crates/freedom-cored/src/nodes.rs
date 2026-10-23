@@ -13,6 +13,16 @@
 //!
 //! Stopping the node and wiping its stale state stay in main, before the
 //! call (design 0001, "Ordering with the shell").
+//!
+//! **Radicle with `custody: "sealed"`** (design 0008, "The switch" and
+//! "Identity changes"; the transitional selector, until the add-on goes):
+//! no key file is written. The node key is released sealed to the Radicle
+//! service at each start instead (`nodes.seal_radicle_key`). The write
+//! removes `keys/radicle` and `keys/radicle.pub`, installs `config.json`,
+//! and, when it removes a key file, first adds that identity's node ID to
+//! the dirty marker, `node/dirty`. With `wipe`, it wipes `node/`, `cobs/`
+//! and `storage/` first, as main did before. It needs no vault, and returns
+//! no DID.
 
 use std::path::{Path, PathBuf};
 
@@ -21,6 +31,7 @@ use fc_keys::keystore::{self, KeystoreParams};
 use fc_keys::{multiformats, openssh};
 use rand_core::TryCryptoRng;
 
+use crate::anchor::{Dir, Kind};
 use crate::journal;
 use serde_json::{Map, Value};
 use zeroize::Zeroizing;
@@ -36,7 +47,18 @@ pub enum NodeSpec {
     Radicle {
         home: PathBuf,
         alias: String,
+        custody: Custody,
     },
+}
+
+/// Which form of the Radicle write (design 0008, "The switch").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Custody {
+    /// Today's: the key pair is written, for the add-on.
+    KeyFile,
+    /// 0008's: no key file; any is removed. With `wipe`, the home's state
+    /// goes too.
+    Sealed { wipe: bool },
 }
 
 impl NodeSpec {
@@ -76,10 +98,18 @@ pub enum BuildError {
     /// Radicle's existing config isn't a regular file of at most
     /// [`journal::MAX_FILE`] (judged on the open handle).
     Config(&'static str),
+    /// The switch can't name the identity it would remove: neither key
+    /// file holds a readable public key, or the dirty marker can't be read
+    /// (0008: `node_identity_corrupt`, and nothing is touched).
+    IdentityCorrupt,
 }
 
+/// The node's files. `top` is its root, opened once by the writer
+/// ([`journal::write_root`]): what is read of it (Radicle's config) is read
+/// through that handle, as the journal stages and installs through it.
 pub fn build<R: TryCryptoRng + ?Sized>(
     spec: &NodeSpec,
+    top: &Dir,
     keys: &FreedomKeys,
     rng: &mut R,
 ) -> Result<NodeFiles, BuildError> {
@@ -89,7 +119,7 @@ pub fn build<R: TryCryptoRng + ?Sized>(
             api_port,
             p2p_port,
         } => bee(keys, data_dir, *api_port, *p2p_port, rng),
-        NodeSpec::Radicle { home, alias } => radicle(keys, home, alias, rng),
+        NodeSpec::Radicle { alias, .. } => radicle(keys, top, alias, rng),
     }
 }
 
@@ -147,15 +177,16 @@ fn bee<R: TryCryptoRng + ?Sized>(
 
 fn radicle<R: TryCryptoRng + ?Sized>(
     keys: &FreedomKeys,
-    home: &Path,
+    top: &Dir,
     alias: &str,
     rng: &mut R,
 ) -> Result<NodeFiles, BuildError> {
+    let home = top.location();
     let public_key = keys.radicle.public_key();
     let private =
         openssh::private_key_file(&keys.radicle, alias, rng).map_err(|_| BuildError::Keys)?;
     let public_line = openssh::public_key_line(&public_key, alias);
-    let existing = read_config(&home.join("config.json"))?;
+    let existing = read_config(top)?;
     let config = radicle_config(existing.as_deref(), alias);
     let mut public = Map::new();
     public.insert(
@@ -178,6 +209,163 @@ fn radicle<R: TryCryptoRng + ?Sized>(
         )?,
         public,
     })
+}
+
+/// One entry of a Radicle write with `custody: "sealed"`.
+pub enum SealedEntry {
+    Install(PathBuf, Zeroizing<Vec<u8>>),
+    Remove(PathBuf),
+}
+
+/// What a Radicle write with `custody: "sealed"` does, in order, and what it
+/// wipes first: one of the journal's Radicle shapes.
+pub struct SealedPlan {
+    pub entries: Vec<SealedEntry>,
+    pub wipe: Vec<PathBuf>,
+}
+
+/// 0008's dirty marker: `node/dirty`, `{"node_ids":[…]}`, the node IDs of
+/// every identity that may have left a partial mutation, sorted, each once.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Marker {
+    node_ids: Vec<String>,
+}
+
+/// Builds the sealed form of the Radicle write for the home `top`: the
+/// gate's canonical path, opened once after the gate was taken
+/// ([`journal::write_root`]). Called with the home's gate held: what it
+/// reads can't change before the commit. Everything below the home is
+/// reached from that handle, through no symlink ([`crate::anchor::Dir`]): a
+/// symlinked `keys` or `node` is an error, and nothing is touched (review of
+/// #177).
+pub fn radicle_sealed(top: &Dir, alias: &str, wipe: bool) -> Result<SealedPlan, BuildError> {
+    let home = top.location();
+    let existing = read_config(top)?;
+    let config = radicle_config(existing.as_deref(), alias);
+    let key_file = home.join("keys").join("radicle");
+    let key_present = match top.under(&key_file, false).map_err(BuildError::Io)? {
+        Some((dir, name)) => dir.kind(&name).map_err(BuildError::Io)? != Kind::Missing,
+        None => false,
+    };
+    // `node/` must be a real directory too, or not there: the marker goes in
+    // it, and a wipe removes it.
+    top.under(&journal::radicle_marker(home), false)
+        .map_err(BuildError::Io)?;
+    let mut entries = Vec::with_capacity(4);
+    // The switch: the identity whose key file goes stays checked (0008).
+    // With `wipe`, nothing is left to check.
+    if key_present && !wipe {
+        let node_id = old_node_id(top)?.ok_or(BuildError::IdentityCorrupt)?;
+        let marker = journal::radicle_marker(home);
+        let mut node_ids = match read_marker(top, &marker)? {
+            Some(marker) => marker.node_ids,
+            None => Vec::new(),
+        };
+        node_ids.push(node_id);
+        node_ids.sort();
+        node_ids.dedup();
+        let encoded =
+            serde_json::to_vec(&Marker { node_ids }).map_err(|_| BuildError::IdentityCorrupt)?;
+        entries.push(SealedEntry::Install(marker, Zeroizing::new(encoded)));
+    }
+    entries.push(SealedEntry::Remove(key_file));
+    entries.push(SealedEntry::Remove(home.join("keys").join("radicle.pub")));
+    entries.push(SealedEntry::Install(
+        home.join("config.json"),
+        Zeroizing::new(config.into_bytes()),
+    ));
+    Ok(SealedPlan {
+        entries,
+        wipe: if wipe {
+            journal::radicle_wipe(home)
+        } else {
+            Vec::new()
+        },
+    })
+}
+
+/// The node ID of the identity whose key file is in `home`: from the key
+/// file's public part (OpenSSH carries it in the clear), streamed and
+/// decoded only up to the public key ([`openssh::PublicKeyReader`]); or else
+/// from `keys/radicle.pub`. The private section is never decoded. `None`
+/// when neither yields one.
+fn old_node_id(top: &Dir) -> Result<Option<String>, BuildError> {
+    let keys = top.location().join("keys");
+    let public = match private_file_public(top, &keys.join("radicle"))? {
+        Some(public) => Some(public),
+        None => public_line(top, &keys.join("radicle.pub"))?,
+    };
+    Ok(public.map(|public| multiformats::radicle_node_id(&public)))
+}
+
+/// The file `path` under the home `top`, opened for reading from its handle
+/// through no symlink below it, if it is a regular file.
+fn open_under(top: &Dir, path: &Path) -> Result<Option<std::fs::File>, BuildError> {
+    let Some((dir, name)) = top.under(path, false).map_err(BuildError::Io)? else {
+        return Ok(None);
+    };
+    match dir.open_regular(&name, false).map_err(BuildError::Io)? {
+        crate::fsx::Regular::File(file) => Ok(Some(file)),
+        crate::fsx::Regular::Missing | crate::fsx::Regular::Other => Ok(None),
+    }
+}
+
+/// A private key file's public key, read 64 bytes at a time into a wiped
+/// buffer and fed to the streaming reader, which stops at the public key.
+fn private_file_public(top: &Dir, path: &Path) -> Result<Option<[u8; 32]>, BuildError> {
+    use std::io::Read as _;
+    let Some(file) = open_under(top, path)? else {
+        return Ok(None);
+    };
+    let mut reader = openssh::PublicKeyReader::new();
+    let mut chunk = Zeroizing::new([0u8; 64]);
+    let mut source = (&file).take(journal::MAX_FILE);
+    loop {
+        let read = source.read(chunk.as_mut_slice()).map_err(BuildError::Io)?;
+        if read == 0 {
+            return Ok(reader.finish());
+        }
+        if let Some(found) = reader.feed(&chunk[..read]) {
+            return Ok(found);
+        }
+    }
+}
+
+/// A public key line's key: public data, read whole (at most
+/// [`journal::MAX_FILE`]).
+fn public_line(top: &Dir, path: &Path) -> Result<Option<[u8; 32]>, BuildError> {
+    let Some(file) = open_under(top, path)? else {
+        return Ok(None);
+    };
+    let Some(bytes) = crate::fsx::read_at_most(&file, journal::MAX_FILE).map_err(BuildError::Io)?
+    else {
+        return Ok(None);
+    };
+    Ok(std::str::from_utf8(&bytes)
+        .ok()
+        .and_then(openssh::public_key_of_line))
+}
+
+/// The marker as it is, if there is one. One the core can't read, or that
+/// isn't a regular file, is `IdentityCorrupt`: the switch can't add to what
+/// it can't read, and never drops a name.
+fn read_marker(top: &Dir, path: &Path) -> Result<Option<Marker>, BuildError> {
+    let Some((dir, name)) = top.under(path, false).map_err(BuildError::Io)? else {
+        return Ok(None);
+    };
+    match dir.open_regular(&name, false).map_err(BuildError::Io)? {
+        crate::fsx::Regular::Missing => Ok(None),
+        crate::fsx::Regular::Other => Err(BuildError::IdentityCorrupt),
+        crate::fsx::Regular::File(file) => {
+            let bytes = crate::fsx::read_at_most(&file, journal::MAX_FILE)
+                .map_err(BuildError::Io)?
+                .ok_or(BuildError::IdentityCorrupt)?;
+            serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|_| BuildError::IdentityCorrupt)
+        }
+    }
 }
 
 /// Pairs contents with the node's layout (same order as `journal::layout`).
@@ -218,13 +406,15 @@ pub fn tighten_existing(node: &str, root: &Path) -> usize {
     changed
 }
 
-/// Radicle's existing config: `None` if absent. It must be a regular file
-/// (symlinks followed, as JS's readFileSync does) of bounded size, judged on
-/// the open handle, so a FIFO can't block the worker, even one swapped in
-/// after a check (#83). Invalid UTF-8 reads as unparseable, which starts
-/// over as `{}` like the JS catch.
-fn read_config(path: &Path) -> Result<Option<String>, BuildError> {
-    let file = match crate::fsx::open_regular(path, true).map_err(BuildError::Io)? {
+/// Radicle's existing config, `config.json` in the home `top`, read
+/// through its handle: `None` if absent. It must be a regular file (a
+/// symlink at it followed, as JS's readFileSync does) of bounded size,
+/// judged on the open handle, so a FIFO can't block the worker, even one
+/// swapped in after a check (#83). Invalid UTF-8 reads as unparseable, which
+/// starts over as `{}` like the JS catch.
+fn read_config(top: &Dir) -> Result<Option<String>, BuildError> {
+    let name = std::ffi::OsStr::new("config.json");
+    let file = match top.open_following(name).map_err(BuildError::Io)? {
         crate::fsx::Regular::Missing => return Ok(None),
         crate::fsx::Regular::Other => return Err(BuildError::Config("not_regular")),
         crate::fsx::Regular::File(file) => file,

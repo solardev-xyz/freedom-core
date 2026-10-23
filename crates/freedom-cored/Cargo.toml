@@ -30,6 +30,9 @@ fc-naming = { path = "../fc-naming" }
 fc-protocol = { path = "../fc-protocol" }
 # The sealed release of the Radicle node key (design 0008).
 fc-seal = { path = "../fc-seal" }
+# The Radicle home's gate, the Radicle service's own (design 0008, "Spawn
+# and lock"), which every Radicle identity write and recovery takes.
+fc-service = { path = "../fc-service" }
 fc-swarm = { path = "../fc-swarm" }
 fc-vault = { path = "../fc-vault" }
 getrandom = "0.4"
