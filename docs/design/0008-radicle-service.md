@@ -898,17 +898,18 @@ One owner holds the home gate at each step, and no step waits on a gate that its
 
 - **The service's `radicle-node` features,** exactly:
   - `tor` (onion addresses);
-  - `socket2` (TCP keepalive).
+  - `socket2` (TCP keepalive);
+  - `i2p`, so that I2P addresses decode. Without it, an I2P address in a gossip message is a decode error (`hw/radicle-protocol/src/wire/message.rs:371`–`384`), and the peer that relayed it is disconnected for misbehaviour (`hw/radicle-node/src/wire.rs:801`–`810`).
 - **Left out:**
-  - `i2p`;
   - `systemd`, whose socket activation reads and removes `LISTEN_*` at bind (`hw/radicle-node/src/runtime.rs:314`–`349`);
   - `backtrace`;
   - `structured-logger`, since the service logs through its own hook.
 
-  The address families are therefore IPv4, IPv6, DNS names and onion. I2P addresses can't be dialled, and the address book's I2P entries are refused before any socket.
+  The address families dialled are therefore IPv4, IPv6, DNS names and onion. I2P addresses are decoded but never dialled: `node.i2p` is `Drop`, which refuses the dial before any socket.
 - **Every routing field is set in memory,** whatever `config.json` says:
   - `proxy`;
   - `onion`;
+  - `i2p` (`Drop`);
   - `listen` (empty);
   - `externalAddresses` (empty, so the node advertises no address of its own).
 
@@ -965,7 +966,7 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
 **libradicle** (v0.8.0):
 1. **Policy in `Options`** (`lr:41`):
    - add `proxy: Option<SocketAddr>`, `onion: AddressConfig`, `control_socket: bool`, a resolver hook and an address policy;
-   - `run` (`lr:757`–`793`) applies them to `profile.config.node` before `Runtime::init`, overriding every routing field and `externalAddresses`;
+   - `run` (`lr:757`–`793`) applies them to `profile.config.node` before `Runtime::init`, overriding every routing field (`i2p` with `Drop`) and `externalAddresses`;
    - nothing is written to `config.json`.
 2. **Node health:** `Embedded::node_alive()`, from the node thread's `JoinHandle::is_finished` (`lr:684`, `lr:781`).
 3. **No key generation at start: no change needed** since the custody decision ([Keys](#keys)).
@@ -982,7 +983,7 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
    - `repo_stats` (`lr:1311`), `list_files` (`lr:1118`), `commits` (`lr:1161`), `commit` with its diff (`lr:1179`), `issues`, `patches` (`lr:1040`–`1085`) and `list_repos` (`lr:852`) take a `CancelToken` and a byte budget;
    - each charges every item as it is built, and stops with `TooLarge` when the next doesn't fit.
 7. **A bounded shutdown:** `shutdown` (`lr:1343`) takes a timeout. The service exits after 5 s anyway.
-8. **Features:** depend on `radicle-node` with `default-features = false` and exactly `tor` and `socket2` ([Features](#features-and-address-families)). Keep `no-spawn` on.
+8. **Features:** depend on `radicle-node` with `default-features = false` and exactly `tor`, `socket2` and `i2p` ([Features](#features-and-address-families)). Keep `no-spawn` on.
 9. **An in-process import:**
    - `import_repo` (`lr:1012`) creates the repository in storage, fetches the working copy's branch into the node's namespace with libgit2's local transport, and signs the refs;
    - it replaces `rad::init`'s `git push` (`hw/radicle/src/rad.rs:107`–`120`);
@@ -1177,7 +1178,7 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
     - an empty answer, and an answer whose every address is refused. In both, no `CONNECT` carries the name;
   - `.onion` refused in `direct`;
   - a test peer announcing loopback and private addresses, and the IPv6 forms that embed them (0007's embedded-IPv4 cases), none of which is dialled;
-  - I2P addresses, which are refused;
+  - I2P addresses, which decode, and are never dialled;
   - a `config.json` with a conflicting proxy, an onion `Forward` and an I2P route, which change nothing;
   - in `direct` mode, one lookup per connection, connected to the checked address.
 - **Live:** the packaged `nodes.spec.js` Radicle leg, re-pointed at the service.
@@ -1268,7 +1269,7 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 | `env` | the add-on inherits main's environment | cleared; `HOME` an empty directory; no git configuration | `RAD_*`, `SSH_AUTH_SOCK` and git configuration no longer apply |
 | `proxy` | none | an optional SOCKS5 policy, names resolved through the proxy and checked, failing closed | new: Route Radicle through Tor |
 | `address-policy` | none | untrusted targets refused unless globally reachable unicast, with IPv6 forms that embed IPv4 judged by their IPv4 address (0007) | configured local seeds still work |
-| `address-families` | as `config.json` and the default features allow | IPv4, IPv6, DNS and onion; no I2P; every routing field set in memory | a conflicting `config.json` can't change routing |
+| `address-families` | as `config.json` and the default features allow | IPv4, IPv6, DNS and onion dialled; I2P decoded, never dialled; every routing field set in memory | a conflicting `config.json` can't change routing |
 | `health` | none | `rad.stats` every 5 s | a dead node is noticed and restarted |
 
 ## Implementation steps
