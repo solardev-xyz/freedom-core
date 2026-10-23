@@ -66,6 +66,8 @@ impl Grant {
             network: network.confinement(),
             system_resolver: true,
             descriptors,
+            // No NAT64 discovery here yet, so no interface lookups.
+            interface_index: false,
         }
     }
 }

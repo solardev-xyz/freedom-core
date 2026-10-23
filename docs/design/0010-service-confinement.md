@@ -91,6 +91,9 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
 **NAT64 prefix discovery** ([0007](0007-ipfs-service.md#network-specific-nat64-prefixes), which 0008 shares) runs in `direct` mode, at startup and at least once a minute after. So its accesses last for the process's life:
 - one AAAA query for `ipv4only.arpa`, over plain DNS on port 53, to each resolver the interfaces learned, which is often on loopback (`127.0.0.53`) or a private address (a LAN router);
 - the files that list them, on Linux. Network changes replace these files, so the grant must survive a replacement ([The recommendation](#the-recommendation));
+- on Linux, a link-local resolver's interface index, for a named zone such as `fe80::1%eth0`:
+  - **How:** the kernel's `SIOCGIFINDEX` on a datagram socket, the one `ioctl` `freedom-ipfsd`'s policy adds to the allowlist. It reads one index, changes nothing, and finds an interface that appears after the process starts.
+  - **Not through sysfs:** `/sys/class/net/<name>/ifindex` resolves into `/sys/devices`, far more than a grant should cover, so none is given;
 - on macOS, SystemConfiguration's dynamic store (`State:/Network/Service/<id>/DNS`), a Mach lookup of `com.apple.SystemConfiguration.configd`;
 - on Windows, `GetAdaptersAddresses`, and the registry value `DhcpNameServer` under each interface's `Tcpip` parameters.
 
@@ -150,7 +153,7 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
     - mode and owner: `chmod`, `fchmod`, `fchmodat`, `fchmodat2`, `chown`, `fchown`, `lchown`, `fchownat`;
     - xattrs: `setxattr`, `lsetxattr`, `fsetxattr`, `setxattrat`, and the matching `removexattr` calls;
     - times and attributes: `utime`, `utimes`, `futimesat`, `utimensat`, `file_setattr`;
-    - **`ioctl`, by an allowlist** of the commands the services make, compared on the command's low 32 bits, as the kernel reads it: `FIONBIO`, `FIOCLEX`, `FIONCLEX`, `FIONREAD`, and the terminal queries `TCGETS` and `TIOCGWINSZ` (`isatty`). Every other command answers `ENOTTY`, as an unknown one would. A denylist can't be complete: besides the inode-flag commands (`FS_IOC_SETFLAGS`, `FS_IOC_FSSETXATTR`), `FS_IOC_ENABLE_VERITY` takes a read-only descriptor and makes a file permanently read-only, `FS_IOC_SET_ENCRYPTION_POLICY` sets an empty directory's policy, and ext4's `SETVERSION` changes the inode generation, and filesystems add more. Landlock's ioctl right (ABI 5) covers devices only.
+    - **`ioctl`, by an allowlist** of the commands the services make, compared on the command's low 32 bits, as the kernel reads it: `FIONBIO`, `FIOCLEX`, `FIONCLEX`, `FIONREAD`, and the terminal queries `TCGETS` and `TIOCGWINSZ` (`isatty`). For `freedom-ipfsd` alone it adds `SIOCGIFINDEX`, an interface's index by its name, for NAT64 discovery's named zones ([What each service needs](#what-each-service-needs)). Every other command answers `ENOTTY`, as an unknown one would. A denylist can't be complete: besides the inode-flag commands (`FS_IOC_SETFLAGS`, `FS_IOC_FSSETXATTR`), `FS_IOC_ENABLE_VERITY` takes a read-only descriptor and makes a file permanently read-only, `FS_IOC_SET_ENCRYPTION_POLICY` sets an empty directory's policy, and ext4's `SETVERSION` changes the inode generation, and filesystems add more. Landlock's ioctl right (ABI 5) covers devices only.
 
     So no file's metadata changes: not one outside the grant, nor one under a read-only grant, such as the import's source. Files in the data directory keep the modes they were created with.
     - **Who makes them,** and none fails for it (the `ioctl` list is the qualification's record of the release binaries' calls; a command outside it fails CI):
@@ -499,6 +502,7 @@ Through the binary, in CI's job for each OS:
     - with no `dns` source, `confinement` reports `files_only`;
   - **policy changes:** `direct` → `socks5` → `direct`, and Arti's port P → Q. Each runs in a new generation with the new `--network`; the old generation's process has exited; and a private instance, recreated after each change, gets the new rules;
   - **NAT64 discovery:** a fake resolver on a loopback address, listed in a fixture resolver file, sees one AAAA query for `ipv4only.arpa` per refresh. From `freedom-ipfsd` it sees no other DNS. `freedom-radicled`'s ordinary lookups use the system resolver in `direct` mode (0008), so for it the check is that discovery sends nothing else.
+  - **NAT64's named zones,** confined with `freedom-ipfsd`'s policy: `fe80::1%lo` is looked up through `SIOCGIFINDEX`, a numeric zone needs no lookup, and an unknown name stays unaskable. Without the `ioctl` rule, the control, the named zone is unaskable;
 - **Reporting:**
   - `hello` reports the mechanism and each property's status;
   - where CI's kernel offers Landlock, the test requires the ABI it offers, so a silent downgrade fails CI.

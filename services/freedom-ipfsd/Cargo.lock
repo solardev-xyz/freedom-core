@@ -898,6 +898,7 @@ dependencies = [
  "hickory-proto",
  "if-addrs",
  "ipconfig",
+ "rustix",
  "serde_json",
  "system-configuration",
  "windows-registry",

@@ -47,6 +47,7 @@ fn child(case: &str) {
         network: Network::Offline,
         system_resolver: false,
         descriptors: Vec::new(),
+        interface_index: false,
     })
     .unwrap();
     println!("FILES {}", report.files == Status::Enforced);

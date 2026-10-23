@@ -88,6 +88,12 @@ fc-sys = { path = "../../crates/fc-sys" }
 name = "store_confined"
 harness = false
 
+# NAT64 discovery's named zones, confined with the service's own policy
+# (src/confinement.rs): a child per case, as above.
+[[test]]
+name = "nat64_confined"
+harness = false
+
 # The core's workspace lints, copied: workspace lints don't cross workspaces.
 [lints.rust]
 unsafe_code = "forbid"

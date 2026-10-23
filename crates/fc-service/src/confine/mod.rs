@@ -75,6 +75,12 @@ pub struct Policy {
     /// [`Invalid::Descriptor`], whatever its type. Empty for the ephemeral
     /// IPFS process. Unix descriptor numbers; unused on Windows.
     pub descriptors: Vec<i32>,
+    /// Whether the service looks interfaces up by name (`SIOCGIFINDEX`, the
+    /// one `ioctl` this adds to the allowlist): NAT64 discovery's link-local
+    /// resolvers with a named zone, such as `fe80::1%eth0` (design 0010).
+    /// Sysfs's `/sys/class/net/<name>` resolves into `/sys/devices`, far
+    /// more than a grant should cover, so no grant does it.
+    pub interface_index: bool,
 }
 
 /// The network policy, fixed for the process's life (0007's `--network`).

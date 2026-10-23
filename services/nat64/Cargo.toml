@@ -50,6 +50,13 @@ if-addrs = "0.15"
 ipconfig = "0.3"
 windows-registry = "0.6"
 
+# Linux: a link-local resolver's interface index by its name, through the
+# kernel's SIOCGIFINDEX on a datagram socket (rustix's `netdevice`, a safe
+# call), which confinement allows; sysfs's /sys/class/net isn't granted
+# (design 0010). rustix is already in the graph, through fc-service.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1", default-features = false, features = ["net", "std"] }
+
 # freedom-ipfsd's lints, copied: it defines no workspace lints to inherit.
 [lints.rust]
 unsafe_code = "forbid"

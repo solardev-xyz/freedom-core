@@ -39,6 +39,7 @@
 mod args;
 mod budget;
 mod build_info;
+mod confinement;
 mod instances;
 mod nat64;
 mod network;
@@ -134,7 +135,8 @@ fn run(started: Instant, entry: &confine::Entry) -> Exit {
                     return Exit::from(&e);
                 }
             };
-            let policy = policy(vec![gate.data_dir.clone()], &network, gate.descriptors());
+            let policy =
+                confinement::policy(vec![gate.data_dir.clone()], &network, gate.descriptors());
             let confinement = match confined(&policy) {
                 Ok(report) => report,
                 Err(exit) => return exit,
@@ -152,34 +154,13 @@ fn run(started: Instant, entry: &confine::Entry) -> Exit {
             parent_pid,
         } => {
             // No lock and no directory: nothing writable, nothing kept.
-            let confinement = match confined(&policy(Vec::new(), &network, Vec::new())) {
+            let confinement = match confined(&confinement::policy(Vec::new(), &network, Vec::new()))
+            {
                 Ok(report) => report,
                 Err(exit) => return exit,
             };
             serve(Kind::Ephemeral, network, confinement, parent_pid, started)
         }
-    }
-}
-
-/// The process's confinement (design 0010, "What each service needs"): the
-/// data directory read-write (none for the ephemeral process), NAT64
-/// discovery's resolver files read-only, beside the system's own, and TCP to
-/// the proxy's port alone in `socks5` mode. freedom-ipfs-net resolves names
-/// through the C library (`getaddrinfo`), so the report says whether that
-/// reaches DNS.
-fn policy(
-    read_write: Vec<std::path::PathBuf>,
-    network: &NetworkPolicy,
-    descriptors: Vec<i32>,
-) -> confine::Policy {
-    confine::Policy {
-        read_write,
-        read_only: nat64::resolver_grants(),
-        refer: false,
-        min_abi: 1,
-        network: network.confinement(),
-        system_resolver: true,
-        descriptors,
     }
 }
 

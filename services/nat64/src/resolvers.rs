@@ -168,6 +168,34 @@ pub fn from_files<P: AsRef<std::path::Path>>(
     found
 }
 
+/// An interface's index, by its name: the kernel's `SIOCGIFINDEX`, on a
+/// datagram socket of its own, through rustix's safe call.
+///
+/// - **Confined:** design 0010 allows freedom-ipfsd this one `ioctl`, and
+///   `AF_INET` sockets. Sysfs's `/sys/class/net/<name>/ifindex` isn't read:
+///   it resolves into `/sys/devices`, which no grant covers.
+/// - **An interface that appears later** is found too: the kernel answers
+///   for whatever exists at the call.
+///
+/// `None` for a name the kernel doesn't know, or if it can't be asked.
+#[cfg(target_os = "linux")]
+pub fn interface_index(name: &str) -> Option<u32> {
+    use rustix::net::{AddressFamily, SocketFlags, SocketType};
+    if name.is_empty() {
+        return None;
+    }
+    let socket = rustix::net::socket_with(
+        AddressFamily::INET,
+        SocketType::DGRAM,
+        SocketFlags::CLOEXEC,
+        None,
+    )
+    .ok()?;
+    rustix::net::netdevice::name_to_index(&socket, name)
+        .ok()
+        .filter(|index| *index != 0)
+}
+
 #[cfg(not(any(target_os = "macos", windows)))]
 mod os {
     use super::{LINUX_FILES, Learned, from_files};
@@ -176,16 +204,16 @@ mod os {
         from_files(&LINUX_FILES, index)
     }
 
-    /// An interface's index, by its name, from sysfs.
+    /// An interface's index, by its name ([`super::interface_index`]).
+    #[cfg(target_os = "linux")]
     fn index(name: &str) -> Option<u32> {
-        if name.is_empty() || name.contains('/') || name.starts_with('.') {
-            return None;
-        }
-        std::fs::read_to_string(format!("/sys/class/net/{name}/ifindex"))
-            .ok()?
-            .trim()
-            .parse()
-            .ok()
+        super::interface_index(name)
+    }
+
+    /// Elsewhere, none: a named zone is unaskable.
+    #[cfg(not(target_os = "linux"))]
+    fn index(_name: &str) -> Option<u32> {
+        None
     }
 }
 
@@ -293,6 +321,19 @@ mod tests {
 
     fn ip(text: &str) -> IpAddr {
         text.parse().unwrap()
+    }
+
+    /// The kernel names `lo`, and no interface `nosuch0`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interfaces_are_looked_up_by_the_kernel() {
+        assert!(super::interface_index("lo").is_some_and(|index| index > 0));
+        assert_eq!(super::interface_index("nosuch0"), None);
+        assert_eq!(super::interface_index(""), None);
+        assert_eq!(
+            super::interface_index("a-name-far-too-long-for-ifnamsiz"),
+            None
+        );
     }
 
     /// A missing file lists none; one that exists but can't be read is

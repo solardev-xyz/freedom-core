@@ -20,27 +20,6 @@ const THREAD: &str = "ipfsd-nat64";
 /// The name macOS's dynamic store session carries.
 const CLIENT: &str = "freedom-ipfsd";
 
-/// The read-only grants for the files discovery reads its resolvers from
-/// (design 0010, "What each service needs"): on Linux, `/etc/resolv.conf`
-/// and systemd-resolved's export, each where it really lives. A file in
-/// `/etc` itself is granted alone, any other by its directory, so a
-/// replacement there stays readable. One that can't be read after a
-/// replacement makes discovery `unknown` (fc-nat64's `Learned::Unreadable`).
-/// Elsewhere, none.
-pub fn resolver_grants() -> Vec<std::path::PathBuf> {
-    let mut grants = Vec::new();
-    if cfg!(target_os = "linux") {
-        for file in fc_nat64::resolvers::LINUX_FILES {
-            if let Some(grant) = fc_service::confine::resolver_grant(std::path::Path::new(file))
-                && !grants.contains(&grant)
-            {
-                grants.push(grant);
-            }
-        }
-    }
-    grants
-}
-
 /// The process's discovery: the state every `direct` instance's gate reads.
 #[derive(Clone)]
 pub struct Discovery {
