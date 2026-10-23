@@ -48,6 +48,25 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo test --locked --workspace --all-features
+        if: runner.os != 'Linux'
+      # With stdio alone, as main spawns a service: the runner leaks a pipe
+      # into each step, which confinement's tests would inherit and refuse
+      # (design 0010).
+      - run: python3 scripts/stdio-only.py cargo test --locked --workspace --all-features
+        if: runner.os == 'Linux'
+
+  confine-aarch64:
+    # Confinement's seccomp filters name syscalls by number, which differ on
+    # AArch64 (design 0010, "Linux"): its tests run there too.
+    name: confine (ubuntu-24.04-arm)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: python3 scripts/stdio-only.py cargo test --locked -p fc-sys -p fc-service --all-features
 
   mobile-targets:
     # Logic crates must stay portable so freedom-mobile-ffi can link them
