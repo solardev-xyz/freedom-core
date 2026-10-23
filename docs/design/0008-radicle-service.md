@@ -916,12 +916,13 @@ One owner holds the home gate at each step, and no step waits on a gate that its
   - `structured-logger`, since the service logs through its own hook.
 
   The address families dialled are therefore IPv4, IPv6, DNS names and onion. I2P addresses are decoded but never dialled: `node.i2p` is `Drop`, which refuses the dial before any socket.
-- **Every routing field is set in memory,** whatever `config.json` says:
+- **Every routing field is set in memory,** through `Options::routing`, whatever `config.json` says:
   - `proxy`;
   - `onion`;
   - `i2p` (`Drop`);
-  - `listen` (empty);
   - `externalAddresses` (empty, so the node advertises no address of its own).
+
+  The service also passes an empty `Options::listen`, a separate option, so the node opens no listener.
 
   A `config.json` with a conflicting proxy, an onion `Forward`, or an I2P route has no effect. The service never rewrites the user's `config.json`.
 
@@ -975,9 +976,10 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
 
 **libradicle** (v0.8.0):
 1. **Policy in `Options`** (`lr:41`):
-   - add `proxy: Option<SocketAddr>`, `onion: AddressConfig`, `control_socket: bool`, a resolver hook and an address policy;
-   - `run` (`lr:757`–`793`) applies them to `profile.config.node` before `Runtime::init`, overriding every routing field (`i2p` with `Drop`) and `externalAddresses`;
-   - nothing is written to `config.json`.
+   - add `control_socket: bool`, and `routing: Option<Routing>`, where `Routing` holds `proxy: Option<SocketAddr>`, `onion: AddressConfig` and the dial gate (heartwood change 11's `Gate`, which is both the resolver hook and the address policy);
+   - with `Some`, `run` (`lr:757`–`793`) applies the routing to `profile.config.node` before `Runtime::init`, in memory only, overriding every routing field (`i2p` with `Drop`) and `externalAddresses`, and hands the gate to `Runtime::init`. Nothing is written to `config.json`;
+   - with `None`, `config.json`'s routing applies as it does today, with heartwood's `Open` gate. The add-on and UniFFI pass `None`, so their behaviour doesn't change before the service replaces them;
+   - the service always passes `Some`.
 2. **Node health:** `Embedded::node_alive()`, from the node thread's `JoinHandle::is_finished` (`lr:684`, `lr:781`).
 3. **No key generation at start: no change needed** since the custody decision ([Keys](#keys)).
    - The service calls only `start_with_key` (`lr:744`), which generates no key and writes nothing secret.
