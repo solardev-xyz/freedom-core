@@ -5,10 +5,11 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use fc_chain::FeeQuote;
 use fc_chain::machine::{
     Answer, Bounds, BroadcastOutcome, Call, ChainConfig, ChainError, ColibriReply, Effect, Emitted,
-    Machine, MyotisClass, MyotisRejection, MyotisReply, Prop, Protocol, Prover, QuorumConfig,
-    ReadOptions, Reply, Request, RpcEndpoint, Success, Transport, VerifiedOp,
+    FeeReference, Header, Machine, MyotisClass, MyotisRejection, MyotisReply, Prop, Protocol,
+    Prover, QuorumConfig, ReadOptions, Reply, Request, RpcEndpoint, Success, Transport, VerifiedOp,
 };
 
 /// A test world: the machine and everything it emitted.
@@ -867,9 +868,10 @@ fn the_adaptive_table_evicts_its_oldest_route() {
         // Colibri hits its execution limit: the route is blocked.
         world.answer(
             op,
-            Answer::Colibri(ColibriReply::Failure(
-                fc_chain::machine::ColibriClass::Capacity,
-            )),
+            Answer::Colibri(ColibriReply::Failure {
+                class: fc_chain::machine::ColibriClass::Capacity,
+                fault: false,
+            }),
         );
         let rpc = world.rpcs()[i].0;
         world.answer(rpc, ok("\"0x1\""));
@@ -1193,6 +1195,7 @@ fn colibri_reverts_and_failures_carry_no_adapter_text() {
         Answer::Colibri(ColibriReply::Revert {
             data: "0x08c379a0".into(),
             capacity: false,
+            fault: false,
         }),
     );
     match &world.reply(id).result {
@@ -1316,6 +1319,7 @@ fn a_kept_colibri_revert_is_charged_while_it_lives() {
         Answer::Colibri(ColibriReply::Revert {
             data,
             capacity: false,
+            fault: false,
         }),
     );
     assert!(!world.replied(id));
@@ -1846,6 +1850,91 @@ fn an_oversized_hash_answer_stays_ambiguous() {
 }
 
 // ---------------------------------------------------------------------------
+// Transaction lookups and Colibri's verifier faults (design 0005, Colibri;
+// freedom-browser #752). The replay holds main's cases; these pin the
+// edges of the mined test and of the fault record.
+
+/// Whether Direct's answer to `eth_getTransactionByHash` goes on to
+/// Colibri for its proof.
+fn sent_for_proof(result: &str) -> bool {
+    let mut world = World::new(Bounds::default(), &[colibri_chain(&["colibri", "direct"])]);
+    let id = world.submit(read(1, "eth_getTransactionByHash", r#"["0x01"]"#), None);
+    let (io, ..) = world.rpcs()[0].clone();
+    world.answer(io, ok(result));
+    let proof = world
+        .requests
+        .iter()
+        .any(|(_, _, request, _)| matches!(request, Request::Verified(_)));
+    assert_eq!(world.replied(id), !proof, "{result}");
+    proof
+}
+
+#[test]
+fn a_transaction_is_mined_when_its_last_block_members_are_set() {
+    assert!(sent_for_proof(r#"{"blockNumber":"0x1","blockHash":"0x2"}"#));
+    // The last of duplicate members counts, as JSON.parse keeps it.
+    assert!(sent_for_proof(
+        r#"{"blockNumber":null,"blockHash":"0x2","blockNumber":"0x1"}"#
+    ));
+    assert!(!sent_for_proof(
+        r#"{"blockNumber":"0x1","blockHash":"0x2","blockNumber":null}"#
+    ));
+    // `!= null`: any other value is set, `false` and `0` included.
+    assert!(sent_for_proof(r#"{"blockNumber":0,"blockHash":false}"#));
+    for result in [
+        "null",
+        r#"{"blockNumber":"0x1"}"#,
+        r#"{"blockNumber":"0x1","blockHash":null}"#,
+        r#""0x1""#,
+        r#"["0x1","0x2"]"#,
+        "7",
+    ] {
+        assert!(!sent_for_proof(result), "{result}");
+    }
+}
+
+#[test]
+fn a_colibri_reply_over_the_message_cap_is_no_answer_and_no_fault() {
+    let mut world = World::new(Bounds::default(), &[colibri_chain(&["colibri", "direct"])]);
+    let fault = || {
+        Answer::Colibri(ColibriReply::Failure {
+            class: fc_chain::machine::ColibriClass::Error,
+            fault: true,
+        })
+    };
+    let too_large = Answer::Colibri(ColibriReply::Failure {
+        class: fc_chain::machine::ColibriClass::TooLarge,
+        fault: false,
+    });
+    for answer in [fault(), too_large] {
+        world.submit(read(1, "eth_call", CALL), None);
+        let (op, ..) = world.requests.last().cloned().unwrap();
+        world.answer(op, answer);
+        let (io, ..) = world.rpcs().last().cloned().unwrap();
+        world.answer(io, ok(r#""0x1""#));
+    }
+    // One fault, kept: `too_large` neither counted nor cleared it.
+    let faults = world.machine.state_tables().colibri_faults;
+    assert_eq!(faults.len(), 1);
+    assert_eq!(faults[0].0, "1 eth_call");
+    assert_eq!(faults[0].1.faults.len(), 1);
+    assert!(world.machine.take_backed_off().is_empty());
+    // A second fault starts the cooldown, which the driver logs.
+    world.submit(read(1, "eth_call", CALL), None);
+    let (op, ..) = world.requests.last().cloned().unwrap();
+    world.answer(op, fault());
+    let started = world.machine.take_backed_off();
+    assert_eq!(started.len(), 1);
+    assert_eq!(
+        (
+            started[0].chain_id,
+            started[0].method.as_str(),
+            started[0].cooldown_ms
+        ),
+        (1, "eth_call", 60_000)
+    );
+}
+
 // fee-combination (design 0005, B: combining Direct's quotes): the
 // collection's machine tests, `boundary-fee-combine-*`.
 
@@ -2094,9 +2183,10 @@ fn boundary_fee_combine_mixed_without_a_verified_header() {
         // A failed header.
         (
             fee_chain(&["direct", "colibri"], &["a", "b"], true),
-            Some(Answer::Colibri(ColibriReply::Failure(
-                fc_chain::machine::ColibriClass::Error,
-            ))),
+            Some(Answer::Colibri(ColibriReply::Failure {
+                class: fc_chain::machine::ColibriClass::Error,
+                fault: false,
+            })),
         ),
         // `undefined`.
         (
@@ -2207,9 +2297,10 @@ fn boundary_fee_combine_header_with_colibri_first_in_the_order() {
         .unwrap();
     world.answer(
         gas,
-        Answer::Colibri(ColibriReply::Failure(
-            fc_chain::machine::ColibriClass::Error,
-        )),
+        Answer::Colibri(ColibriReply::Failure {
+            class: fc_chain::machine::ColibriClass::Error,
+            fault: false,
+        }),
     );
     assert_eq!(world.header_reads().len(), 1);
     world.quote_from("a", "0x64", Some("0x1"));
@@ -2352,9 +2443,10 @@ fn boundary_fee_combine_all_failing_with_the_last_error() {
     );
     world.answer(
         gas,
-        Answer::Colibri(ColibriReply::Failure(
-            fc_chain::machine::ColibriClass::Error,
-        )),
+        Answer::Colibri(ColibriReply::Failure {
+            class: fc_chain::machine::ColibriClass::Error,
+            fault: false,
+        }),
     );
     assert!(world.header_reads().is_empty());
     match &world.reply(id).result {
@@ -2526,6 +2618,425 @@ fn boundary_fee_combine_races() {
     for io in outstanding(&world) {
         assert_eq!(world.cancelled(io), Some(400));
     }
+}
+
+// ---------------------------------------------------------------------------
+// chain.fee_reference (design 0005, A: The evidence): the core's machine
+// tests.
+
+const REFERENCE: Call = Call::FeeReference { chain_id: 1 };
+
+fn evidence(reply: &Reply) -> &FeeReference {
+    match &reply.result {
+        Ok(Success::FeeReference(reference)) => reference,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The header `header(Some(base_fee))` answers, in decimal.
+fn verified_header(base_fee: Option<&str>) -> Header {
+    Header {
+        number: "20000000".into(),
+        timestamp: "1700000000".into(),
+        base_fee: base_fee.map(str::to_owned),
+    }
+}
+
+fn no_myotis_operation(world: &World) -> bool {
+    !world.requests.iter().any(|(_, _, request, _)| {
+        matches!(request, Request::Verified(VerifiedOp::MyotisRead { .. }))
+    })
+}
+
+/// Colibri asked for anything but the header (a quote's components).
+fn colibri_quotes(world: &World) -> usize {
+    world
+        .requests
+        .iter()
+        .filter(|(_, _, request, _)| {
+            matches!(request, Request::Verified(VerifiedOp::Colibri { method, .. })
+                if method != "eth_getBlockByNumber")
+        })
+        .count()
+}
+
+#[test]
+fn fee_reference_header_and_quotes() {
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["colibri", "direct"], &["a", "b", "c"], true)],
+    );
+    let id = world.submit(REFERENCE, None);
+    // Both parts at once: B's first exchanges, then the header.
+    assert_eq!(
+        world.asked(),
+        ["a", "b", "c"].map(|e| (e.to_owned(), "eth_gasPrice".to_owned(), 0))
+    );
+    let reads = world.header_reads();
+    assert_eq!(reads, [(reads[0].0, 0)]);
+    world.quote_from("a", "0x64", Some("0xa"));
+    world.quote_from("b", "0x3e8", None);
+    world.quote_from("c", "0x78", Some("0x5"));
+    // B is done; the reply waits for the header.
+    world.run(250);
+    assert!(!world.replied(id));
+    world.answer(reads[0].0, header(Some("0x7")));
+    let reply = world.reply(id);
+    assert_eq!(reply.settled, 250);
+    assert_eq!(reply.generation, 1);
+    let reference = evidence(reply);
+    assert_eq!(reference.header, Some(verified_header(Some("7"))));
+    assert_eq!(reference.lowest_priority.as_deref(), Some("5"));
+    // Mixed, and this request's header has a base fee: EIP-1559.
+    assert_eq!(
+        reference.quote.as_ref().map(FeeQuote::to_json),
+        Some(eip1559("92", "5", "190", "97", 3))
+    );
+    // Colibri gave only the header; nobody asked Colibri for a quote.
+    assert_eq!(colibri_quotes(&world), 0);
+}
+
+#[test]
+fn fee_reference_runs_past_an_earlier_sources_success() {
+    // A read order that starts with Myotis, ready: a fee quote would take
+    // Myotis's; the reference asks Myotis nothing, and still gets Colibri's
+    // header and B's quotes, the quorum's endpoints included.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(
+            &["myotis", "colibri", "quorum", "direct"],
+            &["a", "b"],
+            true,
+        )],
+    );
+    world.machine.availability(1, true);
+    let id = world.submit(REFERENCE, None);
+    world.quote_from("a", "0x64", Some("0xa"));
+    world.quote_from("b", "0x64", Some("0x9"));
+    world.answer(world.header_reads()[0].0, header(Some("0x1")));
+    let reference = evidence(world.reply(id));
+    assert_eq!(reference.header, Some(verified_header(Some("1"))));
+    assert_eq!(reference.lowest_priority.as_deref(), Some("9"));
+    assert_eq!(
+        reference.quote.as_ref().map(FeeQuote::to_json),
+        Some(eip1559("90", "9", "190", "99", 2))
+    );
+    assert!(no_myotis_operation(&world));
+    assert_eq!(colibri_quotes(&world), 0);
+    // The quorum, as a source, asks nothing either: one exchange pair per
+    // endpoint, B's.
+    assert_eq!(world.rpcs().len(), 4);
+}
+
+#[test]
+fn fee_reference_without_a_header() {
+    for config in [
+        // No prover.
+        fee_chain(&["colibri", "direct"], &["a", "b"], false),
+        // Colibri out of the read order.
+        fee_chain(&["myotis", "quorum", "direct"], &["a", "b"], true),
+    ] {
+        let mut world = World::new(Bounds::default(), &[config]);
+        let id = world.submit(REFERENCE, None);
+        assert!(world.header_reads().is_empty());
+        world.quote_from("a", "0x64", Some("0x1"));
+        world.quote_from("b", "0x3e8", None);
+        let reference = evidence(world.reply(id));
+        assert_eq!(reference.header, None);
+        assert_eq!(reference.lowest_priority.as_deref(), Some("1"));
+        // Mixed without a verified header: legacy.
+        assert_eq!(
+            reference.quote.as_ref().map(FeeQuote::to_json),
+            Some(legacy("100", 2))
+        );
+        assert_eq!(world.reply(id).settled, 0);
+    }
+}
+
+#[test]
+fn fee_reference_without_quorum_or_direct() {
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["myotis", "colibri"], &["a", "b"], true)],
+    );
+    world.machine.availability(1, true);
+    let id = world.submit(REFERENCE, None);
+    // Only the header: no endpoint is asked.
+    assert!(world.rpcs().is_empty());
+    assert_eq!(world.requests.len(), 1);
+    world.answer(world.header_reads()[0].0, header(Some("0x2a")));
+    let reference = evidence(world.reply(id));
+    assert_eq!(reference.header, Some(verified_header(Some("42"))));
+    assert_eq!(reference.lowest_priority, None);
+    assert_eq!(reference.quote, None);
+}
+
+#[test]
+fn fee_reference_when_colibri_fails_or_is_malformed() {
+    let answers = [
+        Answer::Colibri(ColibriReply::Failure {
+            class: fc_chain::machine::ColibriClass::Error,
+            fault: false,
+        }),
+        Answer::Colibri(ColibriReply::Undefined),
+        Answer::Colibri(ColibriReply::Result("null".into())),
+        Answer::Colibri(ColibriReply::Result(
+            r#"{"number":"0x10","timestamp":"0x10","baseFeePerGas":"0x007"}"#.into(),
+        )),
+        Answer::Colibri(ColibriReply::Revert {
+            data: "0x".into(),
+            capacity: false,
+            fault: false,
+        }),
+    ];
+    for answer in answers {
+        let mut world = World::new(
+            Bounds::default(),
+            &[fee_chain(&["colibri", "direct"], &["a", "b"], true)],
+        );
+        let id = world.submit(REFERENCE, None);
+        world.quote_from("a", "0x64", Some("0x1"));
+        world.quote_from("b", "0x3e8", None);
+        world.answer(world.header_reads()[0].0, answer.clone());
+        let reference = evidence(world.reply(id));
+        assert_eq!(reference.header, None, "{answer:?}");
+        assert_eq!(
+            reference.quote.as_ref().map(FeeQuote::to_json),
+            Some(legacy("100", 2)),
+            "{answer:?}"
+        );
+    }
+
+    // Colibri's own budget: at `configured` the header has failed.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["colibri", "direct"], &["a"], true)],
+    );
+    let id = world.submit(REFERENCE, None);
+    world.quote_from("a", "0x64", Some("0x1"));
+    world.run(4_999);
+    assert!(!world.replied(id));
+    world.run(5_000);
+    let reference = evidence(world.reply(id));
+    assert_eq!(reference.header, None);
+    assert_eq!(
+        reference.quote.as_ref().map(FeeQuote::to_json),
+        Some(eip1559("99", "1", "199", "100", 1))
+    );
+
+    // A header without `baseFeePerGas`: a chain without EIP-1559. Mixed
+    // quotes stay legacy.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["colibri", "direct"], &["a", "b"], true)],
+    );
+    let id = world.submit(REFERENCE, None);
+    world.quote_from("a", "0x64", Some("0x1"));
+    world.quote_from("b", "0x3e8", None);
+    world.answer(world.header_reads()[0].0, header(None));
+    let reference = evidence(world.reply(id));
+    assert_eq!(reference.header, Some(verified_header(None)));
+    assert_eq!(
+        reference.quote.as_ref().map(FeeQuote::to_json),
+        Some(legacy("100", 2))
+    );
+}
+
+#[test]
+fn fee_reference_when_no_endpoint_answers() {
+    // No endpoint: the header is still read; the quote is null.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["colibri", "direct"], &[], true)],
+    );
+    let id = world.submit(REFERENCE, None);
+    assert_eq!(world.requests.len(), 1);
+    world.answer(world.header_reads()[0].0, header(Some("0x7")));
+    let reference = evidence(world.reply(id));
+    assert_eq!(reference.header, Some(verified_header(Some("7"))));
+    assert_eq!(
+        (&reference.lowest_priority, &reference.quote),
+        (&None, &None)
+    );
+
+    // Every endpoint failing, and all-legacy quotes: no priority fee.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b"], false)],
+    );
+    let id = world.submit(REFERENCE, None);
+    world.answer(
+        world.rpc_to("a", "eth_gasPrice"),
+        node_error(-32000, "a down"),
+    );
+    world.answer(
+        world.rpc_to("b", "eth_gasPrice"),
+        node_error(-32000, "b down"),
+    );
+    let reference = evidence(world.reply(id));
+    assert_eq!(
+        *reference,
+        FeeReference {
+            header: None,
+            lowest_priority: None,
+            quote: None,
+        }
+    );
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b"], false)],
+    );
+    let id = world.submit(REFERENCE, None);
+    world.quote_from("a", "0x10", None);
+    world.quote_from("b", "0xc", Some("0xd"));
+    let reference = evidence(world.reply(id));
+    assert_eq!(reference.lowest_priority, None);
+    assert_eq!(
+        reference.quote.as_ref().map(FeeQuote::to_json),
+        Some(legacy("12", 2))
+    );
+}
+
+#[test]
+fn fee_reference_races() {
+    let chains = [fee_chain(&["colibri", "direct"], &["a", "b", "c"], true)];
+    let rpc_ios = |world: &World| -> Vec<u64> { world.rpcs().iter().map(|r| r.0).collect() };
+
+    // The deadline, B done and the header outstanding: the request ends
+    // with `deadline`; the header's operation keeps its slot.
+    let mut world = World::new(Bounds::default(), &chains);
+    let id = world.submit(REFERENCE, Some(800));
+    world.quote_from("a", "0x64", Some("0xa"));
+    world.quote_from("b", "0x64", Some("0x9"));
+    world.quote_from("c", "0x64", Some("0x8"));
+    world.run(800);
+    assert_eq!(protocol(world.reply(id)), Some(Protocol::Deadline));
+    assert_eq!(world.reply(id).settled, 800);
+    assert_eq!(world.machine.state_tables().colibri_in_flight, 1);
+    assert!(!world.machine.wants(world.header_reads()[0].0));
+
+    // A cancel, with exchanges outstanding.
+    let mut world = World::new(Bounds::default(), &chains);
+    let id = world.submit(REFERENCE, None);
+    world.run(100);
+    assert!(world.machine.cancel(id));
+    world.collect();
+    assert_eq!(protocol(world.reply(id)), Some(Protocol::Cancelled));
+    for io in rpc_ios(&world) {
+        assert_eq!(world.cancelled(io), Some(100));
+    }
+
+    // A configuration change ends it with `reconfigured`, under its own
+    // generation.
+    let mut world = World::new(Bounds::default(), &chains);
+    let id = world.submit(REFERENCE, None);
+    world.quote_from("a", "0x64", Some("0xa"));
+    world.run(300);
+    let generations =
+        world
+            .machine
+            .configure(&[fee_chain(&["colibri", "direct"], &["a", "d"], true)]);
+    world.collect();
+    assert_eq!(generations.get(&1), Some(&2));
+    assert_eq!(protocol(world.reply(id)), Some(Protocol::Reconfigured));
+    assert_eq!(world.reply(id).generation, 1);
+    for endpoint in ["b", "c"] {
+        let io = world.rpc_to(endpoint, "eth_gasPrice");
+        assert_eq!(world.cancelled(io), Some(300), "{endpoint}");
+    }
+    // The header's operation keeps its slot until main's reply.
+    assert_eq!(world.machine.state_tables().colibri_in_flight, 1);
+}
+
+#[test]
+fn fee_reference_work_counts_against_the_budget() {
+    // As for a fee quote: an endpoint's gas price whose codec index the
+    // request's budget can't hold ends the request with `budget`, not a
+    // null part. It is read as it arrives, before the hint is asked for.
+    let gas = format!("[{}]", vec!["null"; 1_000].join(","));
+    let mut world = World::new(
+        Bounds {
+            request_bytes: gas.len() + 1_000,
+            ..Bounds::default()
+        },
+        &[fee_chain(&["direct"], &["a"], false)],
+    );
+    let id = world.submit(REFERENCE, None);
+    world.answer(world.rpc_to("a", "eth_gasPrice"), ok(&gas));
+    assert_eq!(protocol(world.reply(id)), Some(Protocol::Budget));
+    assert!(
+        world
+            .asked()
+            .iter()
+            .all(|(_, method, _)| method != "eth_maxPriorityFeePerGas")
+    );
+}
+
+#[test]
+fn fee_reference_large_answers_keep_the_budget() {
+    // Review of #179, round 1, for the reference: B's collection keeps each
+    // endpoint's gas price as its value, so large valid answers on two
+    // endpoints leave the third's quote in the reference.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b", "c"], false)],
+    );
+    let id = world.submit(REFERENCE, None);
+    let large_gas = format!("\"{}100\"", "0".repeat(17 * 1024 * 1024));
+    let medium_priority = format!("\"{}1\"", "0".repeat(8 * 1024 * 1024));
+    for endpoint in ["a", "b"] {
+        assert!(world.answer(world.rpc_to(endpoint, "eth_gasPrice"), ok(&large_gas)));
+    }
+    world.quote_from("c", "0x64", Some("0x1"));
+    assert!(world.answer(
+        world.rpc_to("a", "eth_maxPriorityFeePerGas"),
+        ok(&medium_priority),
+    ));
+    assert!(world.answer(world.rpc_to("b", "eth_maxPriorityFeePerGas"), ok("\"0x1\"")));
+    match &world.reply(id).result {
+        Ok(Success::FeeReference(reference)) => {
+            assert_eq!(reference.lowest_priority.as_deref(), Some("1"));
+            assert!(
+                reference
+                    .quote
+                    .as_ref()
+                    .is_some_and(|quote| quote.to_json().contains(r#""answered":3"#))
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn fee_reference_measures_its_whole_reply() {
+    // 181-m1: an endpoint's quote of 1,024 hex digits is accepted (B's codec
+    // takes 4096 bits), and its 1,234-digit priority fee, in
+    // `lowest_priority` and in the quote, counts toward the message cap.
+    let wide = format!("\"0x{}\"", "f".repeat(1_024));
+    let reply = |message_bytes: usize| {
+        let mut world = World::new(
+            Bounds {
+                message_bytes,
+                ..Bounds::default()
+            },
+            &[fee_chain(&["direct"], &["a"], false)],
+        );
+        let id = world.submit(REFERENCE, None);
+        world.answer(world.rpc_to("a", "eth_gasPrice"), ok(&wide));
+        world.answer(world.rpc_to("a", "eth_maxPriorityFeePerGas"), ok(&wide));
+        world.reply(id).clone()
+    };
+    let reference = match reply(Bounds::default().message_bytes).result {
+        Ok(Success::FeeReference(reference)) => reference,
+        other => panic!("{other:?}"),
+    };
+    let priority = reference.lowest_priority.as_deref().unwrap();
+    assert_eq!(priority.len(), 1_234);
+    // Over 5,000 bytes in all: past a 5,000-byte cap it is too large.
+    assert!(reference.json_len() > 5_000);
+    assert_eq!(protocol(&reply(5_000)), Some(Protocol::TooLarge));
+    // Within one of its exact length plus the envelope, it is sent.
+    assert!(reply(reference.json_len() + 256).result.is_ok());
 }
 
 // Review of #179, round 1: B's endpoints run at once, so what one keeps

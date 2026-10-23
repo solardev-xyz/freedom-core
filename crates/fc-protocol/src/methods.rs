@@ -136,6 +136,7 @@ pub const METHODS: &[Method] = &[
     row("chain.availability", CS, false, NOW),
     row("chain.request", CS, false, SESSION),
     row("chain.fee_quote", CS, false, SESSION),
+    row("chain.fee_reference", CS, false, SESSION),
     row("chain.broadcast", CS, false, SESSION),
     row("chain.html", CS, false, SESSION),
 ];

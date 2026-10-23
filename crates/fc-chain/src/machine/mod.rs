@@ -4,8 +4,8 @@
 //!
 //! - **In:** `chain.configure` ([`Machine::configure`]),
 //!   `chain.availability` ([`Machine::availability`]), `chain.request`,
-//!   `chain.fee_quote`, `chain.broadcast` and design 0006's `chain.html`
-//!   ([`Machine::submit`]),
+//!   `chain.fee_quote`, `chain.fee_reference`, `chain.broadcast` and design
+//!   0006's `chain.html` ([`Machine::submit`]),
 //!   `cancel` ([`Machine::cancel`]), main's replies to the machine's I/O
 //!   ([`Machine::complete`]), and time ([`Machine::fire_next`]).
 //! - **Out:** `shell.rpc`, `shell.verified` and `shell.blockscout` requests
@@ -30,6 +30,7 @@ mod config;
 mod ctx;
 mod error;
 mod exchange;
+mod faults;
 mod header;
 mod html;
 mod io;
@@ -48,16 +49,18 @@ pub use bounds::Bounds;
 pub use config::{ChainConfig, Prover, QuorumConfig, RpcEndpoint, SOURCES};
 pub use error::{ChainError, ErrorClass, Origin, Prop, Protocol, Thrown};
 pub use exchange::{BUSY, FETCH_FAILED, NOT_SENT, TOO_LARGE};
+pub use faults::{BackedOff, FaultRecord};
 pub use fc_dweb::Class as HtmlClass;
 pub use fc_naming::session::exec::{Effect, Fired};
 pub use header::Header;
 pub use html::HTML_TOO_LARGE_CODE;
 pub use io::{
     Answer, ColibriClass, ColibriReply, Endpoint, Ms, MyotisClass, MyotisRejection, MyotisReply,
-    Request, Transport, VerifiedOp,
+    Request, Transport, Verdict, VerifiedOp,
 };
 pub use logs::{CapReader, RangeEntry, Ranker};
 pub use machine::{Call, Emitted, Machine, OverBudget, Reply, Reservation, StateTables, Success};
+pub use quote::FeeReference;
 pub use read::{COLIBRI_FAILED, MYOTIS_FAILED, ReadOptions};
 pub use route::RouteState;
 pub use send::BroadcastOutcome;

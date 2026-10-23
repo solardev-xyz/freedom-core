@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::transport::Pending;
+use fc_chain::machine::FeeReference;
 use serde_json::{Value, json};
 
 /// What the writer got: whole messages as JSON, a fragmented response as
@@ -301,6 +302,15 @@ fn request_params_are_validated_strictly() {
     cases.push(("chain.request", missing));
     cases.push(("chain.request", json!([good.clone()])));
     cases.push(("chain.fee_quote", json!({ "chain_id": 1 })));
+    cases.push(("chain.fee_reference", json!({ "chain_id": 1 })));
+    cases.push((
+        "chain.fee_reference",
+        json!({ "chain_id": 1, "deadline_ms": 120_001 }),
+    ));
+    cases.push((
+        "chain.fee_reference",
+        json!({ "chain_id": 1, "deadline_ms": 1000, "extra": true }),
+    ));
     cases.push((
         "chain.broadcast",
         json!({ "chain_id": 1, "raw": 7, "deadline_ms": 1000 }),
@@ -849,8 +859,247 @@ fn myotis_and_colibri_operations_take_the_designs_forms() {
     assert_eq!(reply["result"]["result"], "0x01", "{reply}");
 }
 
+#[test]
+fn a_fee_reference_replies_in_its_form() {
+    // Myotis first and ready: the reference asks it nothing. Colibri gives
+    // the header; B asks the endpoints.
+    let mut t = test();
+    let mut config = chain_snapshot(&["myotis", "colibri", "direct"], &["a", "b"]);
+    config["myotis"] = json!(true);
+    config["prover"] = json!({ "endpoint": "p1", "zk": true });
+    t.configure(json!([config]));
+    t.call(
+        2,
+        "chain.availability",
+        &json!({ "chain_id": 1, "ready": true }),
+    );
+    t.call(
+        3,
+        "chain.fee_reference",
+        &json!({ "chain_id": 1, "deadline_ms": 10_000 }),
+    );
+    let frames = t.written();
+    let made = requests(&frames);
+    let methods: Vec<String> = made
+        .iter()
+        .map(|r| match r["method"].as_str().unwrap() {
+            "shell.rpc" => {
+                let body: Value =
+                    serde_json::from_str(r["params"]["body"].as_str().unwrap()).unwrap();
+                format!(
+                    "{} {}",
+                    r["params"]["endpoint"].as_str().unwrap(),
+                    body["method"].as_str().unwrap()
+                )
+            }
+            _ => format!("{} {}", r["params"]["colibri"], r["params"]["method"]),
+        })
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            "a eth_gasPrice",
+            "b eth_gasPrice",
+            r#""request" "eth_getBlockByNumber""#,
+        ]
+    );
+    let header = made[2].clone();
+    assert_eq!(header["params"]["params"], json!(["latest", false]));
+    let ids: Vec<u64> = made.iter().map(|r| r["id"].as_u64().unwrap()).collect();
+    let answer = |t: &mut Test, id: u64, result: &str| {
+        let body = format!(r#"{{"jsonrpc":"2.0","id":1,"result":{result}}}"#);
+        assert!(t.answer(id, rpc_answer(&body)).is_ok());
+    };
+    answer(&mut t, ids[0], r#""0x64""#);
+    answer(&mut t, ids[1], r#""0x3e8""#);
+    let hints = requests(&t.written())
+        .iter()
+        .map(|r| r["id"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    answer(&mut t, hints[0], r#""0x1""#);
+    // b has no hint: legacy.
+    assert!(
+        t.answer(
+            hints[1],
+            rpc_answer(r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"no"}}"#)
+        )
+        .is_ok()
+    );
+    assert!(t.written().iter().all(|f| f["id"] != 3));
+    assert!(
+        t.answer(
+            ids[2],
+            Ok(json!({ "result": {
+                "number": "0x1312d00",
+                "timestamp": "0x6553f100",
+                "baseFeePerGas": "0x7",
+            } }))
+        )
+        .is_ok()
+    );
+    let reply = t.written().into_iter().find(|f| f["id"] == 3).unwrap();
+    assert_eq!(
+        reply["result"],
+        json!({
+            "header": {
+                "source": "colibri",
+                "number": "20000000",
+                "timestamp": "1700000000",
+                "base_fee": "7",
+            },
+            "lowest_priority": "1",
+            "quote": {
+                "type": "eip1559",
+                "baseFee": "99",
+                "maxPriorityFeePerGas": "1",
+                "maxFeePerGas": "199",
+                "effectiveGasPrice": "100",
+                "source": "direct",
+                "verified": false,
+                "answered": 2,
+            },
+            "generation": 1,
+        })
+    );
+    // The wire's key order, and a failed part's null.
+    for (reference, text) in [
+        (
+            FeeReference {
+                header: Some(fc_chain::machine::Header {
+                    number: "1".into(),
+                    timestamp: "2".into(),
+                    base_fee: None,
+                }),
+                lowest_priority: None,
+                quote: None,
+            },
+            r#"{"type":"response","id":5,"result":{"header":{"source":"colibri","number":"1","timestamp":"2","base_fee":null},"lowest_priority":null,"quote":null,"generation":4}}"#
+                .to_owned(),
+        ),
+        (
+            FeeReference {
+                header: None,
+                lowest_priority: Some("3".into()),
+                quote: fc_chain::fee_quote_values("direct", Some("16"), Some("3"))
+                    .ok()
+                    .and_then(|values| fc_chain::combine_fee_quotes(&[values], false)),
+            },
+            format!(
+                r#"{{"type":"response","id":5,"result":{{"header":null,"lowest_priority":"3","quote":{},"generation":4}}}}"#,
+                r#"{"type":"eip1559","baseFee":"13","maxPriorityFeePerGas":"3","maxFeePerGas":"29","effectiveGasPrice":"16","source":"direct","verified":false,"answered":1}"#
+            ),
+        ),
+    ] {
+        let done = Done {
+            id: 1,
+            result: Ok(Success::FeeReference(reference)),
+            outcome: None,
+            settled: 0,
+            generation: 4,
+        };
+        let message = reply_message(5, &done);
+        assert_eq!(message.len(), message.write().len());
+        assert_eq!(String::from_utf8(message.write().to_vec()).unwrap(), text);
+    }
+    // The machine measures the result as written, whatever its width
+    // (181-m1): here a 1,234-digit priority fee and a 78-digit base fee.
+    let wide = "9".repeat(1_234);
+    let quote = fc_chain::fee_quote_values(
+        "direct",
+        Some(&format!("\"0x{}\"", "f".repeat(1_024))),
+        Some("\"0x1\""),
+    )
+    .ok()
+    .and_then(|values| fc_chain::combine_fee_quotes(&[values], false));
+    for reference in [
+        FeeReference {
+            header: Some(fc_chain::machine::Header {
+                number: "18446744073709551615".into(),
+                timestamp: "1700000000".into(),
+                base_fee: Some("9".repeat(78)),
+            }),
+            lowest_priority: Some(wide.clone()),
+            quote,
+        },
+        FeeReference {
+            header: None,
+            lowest_priority: None,
+            quote: None,
+        },
+    ] {
+        let json_len = reference.json_len();
+        let done = Done {
+            id: 1,
+            result: Ok(Success::FeeReference(reference)),
+            outcome: None,
+            settled: 0,
+            generation: 4,
+        };
+        let text = String::from_utf8(reply_message(5, &done).write().to_vec()).unwrap();
+        let result = text
+            .strip_prefix(r#"{"type":"response","id":5,"result":"#)
+            .and_then(|rest| rest.strip_suffix(r#","generation":4}}"#))
+            .unwrap();
+        assert_eq!(result.len() + 1, json_len, "{text}");
+    }
+}
+
 fn raw(text: &str) -> Result<Box<RawValue>, ErrorBody> {
     Ok(RawValue::from_string(text.to_owned()).unwrap())
+}
+
+#[test]
+fn colibri_answers_carry_a_fault_beside_a_failure_or_a_revert() {
+    // Main's `fault: true` (design 0005, The rest): beside a failure or a
+    // revert, with `capacity` too, members in any order; only ever `true`.
+    let colibri = |text: &str| answer(Kind::Colibri, raw(text));
+    let failure = |class| {
+        Some(Answer::Colibri(ColibriReply::Failure {
+            class,
+            fault: true,
+        }))
+    };
+    assert_eq!(
+        colibri(r#"{"failure":"error","fault":true}"#),
+        failure(ColibriClass::Error)
+    );
+    assert_eq!(
+        colibri(r#"{"fault":true,"failure":"capacity"}"#),
+        failure(ColibriClass::Capacity)
+    );
+    let revert = |capacity| {
+        Some(Answer::Colibri(ColibriReply::Revert {
+            data: "0x12".into(),
+            capacity,
+            fault: true,
+        }))
+    };
+    assert_eq!(
+        colibri(r#"{"revert":{"data":"0x12"},"fault":true}"#),
+        revert(false)
+    );
+    for text in [
+        r#"{"revert":{"data":"0x12"},"capacity":true,"fault":true}"#,
+        r#"{"fault":true,"revert":{"data":"0x12"},"capacity":true}"#,
+        r#"{"capacity":true,"fault":true,"revert":{"data":"0x12"}}"#,
+    ] {
+        assert_eq!(colibri(text), revert(true), "{text}");
+    }
+    for text in [
+        r#"{"failure":"error","fault":false}"#,
+        r#"{"failure":"error","fault":null}"#,
+        r#"{"failure":"error","fault":"true"}"#,
+        r#"{"failure":"error","fault":1}"#,
+        r#"{"revert":{"data":"0x12"},"fault":false}"#,
+        r#"{"revert":{"data":"0x12","fault":true}}"#,
+        r#"{"revert":{"data":"0x12"},"capacity":false,"fault":true}"#,
+        r#"{"failure":"error","capacity":true,"fault":true}"#,
+        r#"{"fault":true}"#,
+        r#"{"result":"0x1","fault":true}"#,
+        r#"{"undefined_keys":["result"],"fault":true}"#,
+    ] {
+        assert_eq!(colibri(text), None, "{text}");
+    }
 }
 
 #[test]
@@ -863,6 +1112,7 @@ fn colibri_answers_carry_a_revert_with_capacity_and_an_undefined_result() {
         Some(Answer::Colibri(ColibriReply::Revert {
             data: "0x12".into(),
             capacity,
+            fault: false,
         }))
     };
     assert_eq!(
@@ -996,6 +1246,86 @@ fn a_colibri_revert_with_capacity_blocks_the_apps_route() {
     );
 }
 
+/// Main's late reply to Colibri operation `op`, its result written as
+/// `result`'s raw JSON: text `serde_json::Value` couldn't hold.
+fn answer_raw(t: &mut Test, op: u64, result: &str) {
+    assert_eq!(t.chain.requests.answered(op), Some(Owner::Chain));
+    let reply = shell_result(op, &format!(r#"{{"result":{result}}}"#));
+    assert!(t.chain.handle(In::Response { id: op, reply }).is_ok());
+    assert!(t.chain.flush().is_ok());
+}
+
+#[test]
+fn a_late_colibri_answer_at_the_depth_bound_still_clears_its_fault_record() {
+    // #189 review: a Colibri result nested 512 levels, the bound a value
+    // may nest (deviation `json-depth`), answers after its read moved on to
+    // Direct. The reply's own object makes it 513, and it still counts as
+    // an answer for its method's fault record (design 0005, Colibri:
+    // verifier faults); one a level deeper stays unread and counts for
+    // nothing.
+    let mut t = test();
+    let mut config = chain_snapshot(&["colibri", "direct"], &["a"]);
+    config["prover"] = json!({ "endpoint": "p", "zk": false });
+    t.configure(json!([config]));
+    let direct = |t: &mut Test, frames: &[Value]| {
+        for rpc in requests(frames)
+            .into_iter()
+            .filter(|f| f["method"] == "shell.rpc")
+        {
+            let body = r#"{"jsonrpc":"2.0","id":1,"result":"0x1"}"#;
+            assert!(
+                t.answer(rpc["id"].as_u64().unwrap(), rpc_answer(body))
+                    .is_ok()
+            );
+        }
+    };
+    let call = |id: u64, to: &str, origin: Option<&str>| {
+        let (id, mut params) = read(id, "eth_call", json!([{ "to": to }, "latest"]));
+        if let Some(origin) = origin {
+            params["origin"] = json!(origin);
+        }
+        (id, params)
+    };
+    let faults = |t: &Test| t.chain.machine.state_tables().colibri_faults;
+    // One fault, then Direct's answer.
+    let (id, params) = call(3, "0xabc", None);
+    t.call(id, "chain.request", &params);
+    let op = verified(&t.written())[0]["id"].as_u64().unwrap();
+    assert!(
+        t.answer(op, Ok(json!({ "failure": "error", "fault": true })))
+            .is_ok()
+    );
+    let frames = t.written();
+    direct(&mut t, &frames);
+    assert_eq!(faults(&t).len(), 1);
+    // Two page reads whose Colibri operations outlive their 2 s budget.
+    let mut held = Vec::new();
+    for (id, to) in [
+        (4, "0x1111111111111111111111111111111111111111"),
+        (5, "0x2222222222222222222222222222222222222222"),
+    ] {
+        let (id, params) = call(id, to, Some("https://app.example"));
+        t.call(id, "chain.request", &params);
+        held.push(verified(&t.written())[0]["id"].as_u64().unwrap());
+    }
+    t.at(2_000);
+    let frames = t.written();
+    direct(&mut t, &frames);
+    let replies: Vec<Value> = t
+        .written()
+        .into_iter()
+        .filter(|f| f["type"] == "response")
+        .collect();
+    assert_eq!(replies.len(), 2, "{replies:?}");
+    let nested = |depth: usize| format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
+    // Past the bound: unread, so the fault stays.
+    answer_raw(&mut t, held[0], &nested(513));
+    assert_eq!(faults(&t).len(), 1);
+    // At it: an answer, which deletes the record.
+    answer_raw(&mut t, held[1], &nested(512));
+    assert!(faults(&t).is_empty(), "{:?}", faults(&t));
+}
+
 #[test]
 fn mains_answers_take_one_closed_shape() {
     // Transport failures are a closed set and carry no text; only
@@ -1119,6 +1449,7 @@ fn mains_answers_take_one_closed_shape() {
         Some(Answer::Colibri(ColibriReply::Revert {
             data: "0x12".into(),
             capacity: false,
+            fault: false,
         }))
     );
     for (class, expected) in [
@@ -1130,7 +1461,10 @@ fn mains_answers_take_one_closed_shape() {
     ] {
         assert_eq!(
             colibri(&format!(r#"{{"failure":"{class}"}}"#)),
-            Some(Answer::Colibri(ColibriReply::Failure(expected)))
+            Some(Answer::Colibri(ColibriReply::Failure {
+                class: expected,
+                fault: false
+            }))
         );
     }
     // Text where a class goes, two shapes at once, members of another

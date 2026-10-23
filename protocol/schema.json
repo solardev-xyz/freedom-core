@@ -43,6 +43,7 @@
     { "name": "chain.availability", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "chain.request", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": 120000 },
     { "name": "chain.fee_quote", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": 120000 },
+    { "name": "chain.fee_reference", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": 120000 },
     { "name": "chain.broadcast", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": 120000 },
     { "name": "chain.html", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": 120000 }
   ]
