@@ -312,7 +312,7 @@ impl Swarm {
         file.insert("size".into(), json!(size));
         file.insert("redundancy".into(), json!(level));
         file.insert("root".into(), json!(h(&split.root)));
-        file.insert("tree".into(), Value::Array(tree));
+        file.insert("tree".into(), Value::Array(canonical_tree(tree)));
         file.insert("data_leaves".into(), json!(data_leaves));
         // Every chunk the split wrote that the join didn't read.
         file.insert("parities".into(), json!(all.len() - seen.len()));
@@ -390,7 +390,7 @@ impl Swarm {
             "size": size,
             "redundancy": 0,
             "root": h(&root),
-            "tree": tree,
+            "tree": canonical_tree(tree),
             "data_leaves": data.len().div_ceil(4096),
             "parities": 0,
             "joined_equals_content": true,
@@ -1139,6 +1139,26 @@ impl Swarm {
         }
         self.feed_manifest("feed-v2", &owner, &topic_v2, updates)?;
 
+        // v2 again, its latest update a manifest: the answers carry
+        // swarm-feed-resolved-version v2.
+        let topic_v2m = ant_crypto::keccak256(b"topic-v2-manifest");
+        let mut updates = Vec::new();
+        for (i, r) in [small, site_b].iter().enumerate() {
+            let wire = self.network.get(r).cloned().ok_or("v2 content root")?;
+            let span = u64::from_le_bytes(wire[..8].try_into().map_err(|_| "span")?);
+            updates.push(self.feed_update_wrapping(
+                &secret,
+                &owner,
+                &topic_v2m,
+                i as u64,
+                span,
+                &wire[8..],
+                "v2",
+                h(r),
+            )?);
+        }
+        self.feed_manifest("feed-v2-manifest", &owner, &topic_v2m, updates)?;
+
         // An 80-byte v1 update: its reference is 64 bytes, encrypted.
         let data = content::bytes("feed-encrypted-file", 3000);
         let enc = split_bytes_encrypted_with_keys(&data, 0, key_stream("feed-encrypted-file"));
@@ -1483,6 +1503,15 @@ impl Swarm {
         }
         Ok(())
     }
+}
+
+/// A tree's chunks: the root, then the rest by address. The joiner fetches
+/// children concurrently, so the order it reads them in isn't stable.
+fn canonical_tree(mut tree: Vec<Value>) -> Vec<Value> {
+    if tree.len() > 1 {
+        tree[1..].sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    }
+    tree
 }
 
 fn replace_bytes(hay: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
