@@ -441,11 +441,13 @@ dependencies = [
 name = "fc-seal"
 version = "0.6.0"
 dependencies = [
+ "aes-gcm",
  "hex",
  "hpke",
  "rand_core",
  "serde",
  "serde_json",
+ "x25519-dalek",
  "zeroize",
 ]
 

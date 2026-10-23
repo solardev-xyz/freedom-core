@@ -12,6 +12,13 @@ workspace = true
 
 [dependencies]
 hpke = { version = "=0.14.1", default-features = false, features = ["x25519", "aes"] }
+# hpke's AEAD, with its expanded key wiped on drop: hpke enables only `aes`,
+# so the `zeroize` feature is named here rather than left to another
+# crate's feature unification.
+aes-gcm = { version = "0.11", default-features = false, features = ["aes", "zeroize"] }
+# The recipient check (`valid_recipient`): hpke's own X25519, already in its
+# graph.
+x25519-dalek = { version = "3.0", default-features = false, features = ["static_secrets", "zeroize"] }
 rand_core = "0.10"
 zeroize = "1.8"
 

@@ -98,6 +98,14 @@ const MSG_DECRYPTED_INVALID: &str = "Decrypted data is not a valid mnemonic";
 pub enum Out {
     /// A JSON payload to frame and send (a response or an event).
     Send(Zeroizing<Vec<u8>>),
+    /// The reply to request `id`, valid only under the vault's `epoch`
+    /// (design 0008, "The sealed release"): checked again when it is handed
+    /// to the writer, and sent as `vault_locked` if that epoch has ended.
+    SendUnder {
+        payload: Zeroizing<Vec<u8>>,
+        id: u64,
+        epoch: u64,
+    },
     /// A job for the worker, with its ID.
     Job(u64, Job),
 }
@@ -697,6 +705,11 @@ impl Vault {
         self.file = file;
     }
 
+    /// The vault's epoch: `None` while locked.
+    pub fn epoch(&self) -> Option<u64> {
+        self.state.epoch().map(|epoch| epoch.get())
+    }
+
     pub fn set_auto_lock_ms(&mut self, auto_lock_ms: u64) {
         self.auto_lock_ms = auto_lock_ms;
     }
@@ -758,7 +771,13 @@ impl Vault {
                 Ok(json_result(id, &serde_json::json!({ "valid": valid })))
             }),
             "keys.addresses" => self.addresses(id, raw),
-            "nodes.seal_radicle_key" => self.seal_radicle_key(id, raw),
+            "nodes.seal_radicle_key" => {
+                match self.seal_radicle_key(id, raw) {
+                    Ok((payload, epoch)) => out.push(Out::SendUnder { payload, id, epoch }),
+                    Err(error) => self.reply_error(&mut out, id, error),
+                }
+                return out;
+            }
             "keys.radicle_did" => {
                 params::<PublicKeyParams>(raw).and_then(|p| radicle_did(id, &p.public_key))
             }
@@ -1011,18 +1030,22 @@ impl Vault {
     ///   throwaway key, so it is given only when the vault file is absent.
     ///   A locked vault is `vault_locked`; a file that can't be read is its
     ///   own error.
-    /// - **The epoch:** the method runs inline on the vault loop, which also
-    ///   runs every lock, manual and automatic. So the epoch it is admitted
-    ///   against is the epoch its reply is handed to the writer under: no
-    ///   lock can come between them. A lock queued behind it locks after the
-    ///   reply has left, which is the start's boundary in 0008.
+    /// - **The recipient is checked first,** whole: 32 bytes of base64, and
+    ///   not a low-order point (whose shared secret is all zero). So a
+    ///   broken recipient is `invalid_argument` whatever the vault's state,
+    ///   and never reads as `no_vault`.
+    /// - **The epoch:** the reply carries the epoch it was sealed under
+    ///   ([`Out::SendUnder`]). It is checked again when the loop hands it to
+    ///   the writer, which is 0008's boundary for the start: if a lock,
+    ///   manual or automatic, came while it waited for room, it goes as
+    ///   `vault_locked` instead, in its place.
     /// - The derived key is wiped once sealed. The method's name is logged,
     ///   never the recipient or the ciphertext.
     fn seal_radicle_key(
         &mut self,
         id: u64,
         raw: Option<&str>,
-    ) -> Result<Option<Zeroizing<Vec<u8>>>, ErrorBody> {
+    ) -> Result<(Zeroizing<Vec<u8>>, u64), ErrorBody> {
         use base64::Engine as _;
         let p = params::<RecipientParams>(raw)?;
         let invalid = || ErrorBody::new(ErrorCode::InvalidArgument, "Invalid recipient");
@@ -1031,9 +1054,13 @@ impl Vault {
             .ok()
             .and_then(|bytes| bytes.try_into().ok())
             .ok_or_else(invalid)?;
+        if !fc_seal::valid_recipient(&recipient) {
+            return Err(invalid());
+        }
         if self.file.as_ref().map_err(|e| e.body(false))?.is_none() {
             return Err(ErrorBody::new(ErrorCode::NoVault, MSG_NO_VAULT));
         }
+        let epoch = self.epoch().ok_or_else(locked)?;
         let keys = self.state.freedom_keys().map_err(locked_or_internal)?;
         let key = keys.radicle.to_secret_bytes();
         drop(keys);
@@ -1043,13 +1070,15 @@ impl Vault {
         })?;
         drop(key);
         let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
-        Ok(json_result(
+        let payload = json_result(
             id,
             &serde_json::json!({
                 "enc": b64(&sealed.enc),
                 "ciphertext": b64(&sealed.ciphertext),
             }),
-        ))
+        )
+        .ok_or_else(internal)?;
+        Ok((payload, epoch))
     }
 
     /// Validates a KDF request's parameters and pre-checks, then queues it.
@@ -1722,7 +1751,7 @@ fn deadline_exceeded() -> ErrorBody {
     ErrorBody::new(ErrorCode::Deadline, "Deadline exceeded")
 }
 
-fn locked() -> ErrorBody {
+pub(crate) fn locked() -> ErrorBody {
     ErrorBody::new(ErrorCode::VaultLocked, MSG_LOCKED)
 }
 

@@ -154,6 +154,19 @@ pub fn seal<R: TryCryptoRng + ?Sized>(
     Ok(Sealed { enc, ciphertext })
 }
 
+/// Whether `recipient` is an X25519 public key a seal can use: not one of
+/// the low-order points, whose shared secret with every key is all zero
+/// (RFC 9180 §7.1.4 refuses that). Every clamped scalar is a multiple of 8
+/// and never a multiple of the group's order, so a Diffie-Hellman with any
+/// one key tells them apart. [`seal`] refuses them too; this answers before
+/// anything else is looked at.
+pub fn valid_recipient(recipient: &[u8; PUBLIC_KEY_LEN]) -> bool {
+    // Any scalar will do: the check is on the point, not on a key.
+    x25519_dalek::StaticSecret::from([0x42; 32])
+        .diffie_hellman(&x25519_dalek::PublicKey::from(*recipient))
+        .was_contributory()
+}
+
 /// The service's key pair for one start. The private half wipes on drop,
 /// and [`RecipientKey::open`] consumes it: one attempt, whatever its result.
 pub struct RecipientKey {

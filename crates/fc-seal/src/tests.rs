@@ -116,6 +116,37 @@ fn array<const N: usize>(bytes: &[u8]) -> [u8; N] {
     bytes.try_into().unwrap()
 }
 
+/// The expanded AES-256 key hpke's AEAD keeps is wiped on drop: fc-seal
+/// enables `aes-gcm`'s `zeroize` itself (review of #175).
+#[test]
+fn the_expanded_aead_key_zeroizes_on_drop() {
+    fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+    assert_zeroize_on_drop::<aes_gcm::Aes256Gcm>();
+}
+
+/// The recipient check agrees with the seal on every low-order point, and
+/// takes ordinary keys.
+#[test]
+fn valid_recipient_is_the_seals_own_refusal() {
+    for point in [
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "0100000000000000000000000000000000000000000000000000000000000000",
+        "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+        "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+        "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    ] {
+        assert!(!valid_recipient(&array(&unhex(point))), "{point}");
+    }
+    for seed in 0..32u8 {
+        let recipient = RecipientKey::generate(&mut Bytes(vec![seed; 32])).unwrap();
+        assert!(valid_recipient(&recipient.public_key()));
+    }
+    let v = vector();
+    assert!(valid_recipient(&array(&unhex(&v.pk_rm))));
+}
+
 #[test]
 fn the_suite_reproduces_rfc_9180s_vector_key_pairs() {
     let v = vector();
