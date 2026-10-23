@@ -636,6 +636,11 @@ struct PublicKeyParams {
     public_key: String,
 }
 
+#[derive(Deserialize)]
+struct RecipientParams {
+    recipient: String,
+}
+
 #[derive(Serialize)]
 struct Status {
     exists: bool,
@@ -718,6 +723,7 @@ impl Vault {
                 | "vault.reconcile"
                 | "nodes.write_identity"
                 | "nodes.op_status"
+                | "nodes.seal_radicle_key"
                 | "keys.generate_mnemonic"
                 | "keys.validate_mnemonic"
                 | "keys.addresses"
@@ -752,6 +758,7 @@ impl Vault {
                 Ok(json_result(id, &serde_json::json!({ "valid": valid })))
             }),
             "keys.addresses" => self.addresses(id, raw),
+            "nodes.seal_radicle_key" => self.seal_radicle_key(id, raw),
             "keys.radicle_did" => {
                 params::<PublicKeyParams>(raw).and_then(|p| radicle_did(id, &p.public_key))
             }
@@ -990,6 +997,57 @@ impl Vault {
                     "did": multiformats::did_key(&radicle),
                     "node_id": multiformats::radicle_node_id(&radicle),
                 },
+            }),
+        ))
+    }
+
+    /// `nodes.seal_radicle_key` (design 0008, "The sealed release"): the
+    /// Radicle node key at `m/44'/73404'/0'/0'/0'`, sealed to the service's
+    /// key for this start, `recipient`. Only the 32-byte Ed25519 secret seed
+    /// is sealed: never a chain code, the seed, or another key, and no
+    /// parameter selects another.
+    ///
+    /// - **No vault** is `no_vault`, the one answer that leads main to a
+    ///   throwaway key, so it is given only when the vault file is absent.
+    ///   A locked vault is `vault_locked`; a file that can't be read is its
+    ///   own error.
+    /// - **The epoch:** the method runs inline on the vault loop, which also
+    ///   runs every lock, manual and automatic. So the epoch it is admitted
+    ///   against is the epoch its reply is handed to the writer under: no
+    ///   lock can come between them. A lock queued behind it locks after the
+    ///   reply has left, which is the start's boundary in 0008.
+    /// - The derived key is wiped once sealed. The method's name is logged,
+    ///   never the recipient or the ciphertext.
+    fn seal_radicle_key(
+        &mut self,
+        id: u64,
+        raw: Option<&str>,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, ErrorBody> {
+        use base64::Engine as _;
+        let p = params::<RecipientParams>(raw)?;
+        let invalid = || ErrorBody::new(ErrorCode::InvalidArgument, "Invalid recipient");
+        let recipient: [u8; fc_seal::PUBLIC_KEY_LEN] = base64::engine::general_purpose::STANDARD
+            .decode(p.recipient.as_bytes())
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(invalid)?;
+        if self.file.as_ref().map_err(|e| e.body(false))?.is_none() {
+            return Err(ErrorBody::new(ErrorCode::NoVault, MSG_NO_VAULT));
+        }
+        let keys = self.state.freedom_keys().map_err(locked_or_internal)?;
+        let key = keys.radicle.to_secret_bytes();
+        drop(keys);
+        let sealed = fc_seal::seal(&recipient, &key, &mut OsRng).map_err(|e| match e {
+            fc_seal::SealError::InvalidRecipient => invalid(),
+            fc_seal::SealError::Rng => internal(),
+        })?;
+        drop(key);
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        Ok(json_result(
+            id,
+            &serde_json::json!({
+                "enc": b64(&sealed.enc),
+                "ciphertext": b64(&sealed.ciphertext),
             }),
         ))
     }

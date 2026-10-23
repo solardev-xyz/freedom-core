@@ -17,6 +17,7 @@
     { "name": "vault.reconcile", "callers": ["shell"], "mutates": false, "deadline_ms": 30000 },
     { "name": "nodes.write_identity", "callers": ["chrome", "shell"], "mutates": true, "deadline_ms": 30000 },
     { "name": "nodes.op_status", "callers": ["shell"], "mutates": false, "deadline_ms": 30000 },
+    { "name": "nodes.seal_radicle_key", "callers": ["shell"], "mutates": false, "deadline_ms": null },
     { "name": "keys.generate_mnemonic", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "keys.validate_mnemonic", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "keys.addresses", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },

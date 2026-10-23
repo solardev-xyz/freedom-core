@@ -154,6 +154,7 @@ const CAPABILITIES: &[&str] = &[
     "vault.reconcile",
     "nodes.write_identity",
     "nodes.op_status",
+    "nodes.seal_radicle_key",
     "keys.generate_mnemonic",
     "keys.validate_mnemonic",
     "keys.addresses",

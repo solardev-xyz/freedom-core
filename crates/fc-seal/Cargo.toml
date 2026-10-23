@@ -1,0 +1,21 @@
+[package]
+name = "fc-seal"
+description = "The sealed release of the Radicle node key (design 0008): HPKE base mode, single-shot, for exactly one suite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+hpke = { version = "=0.14.1", default-features = false, features = ["x25519", "aes"] }
+rand_core = "0.10"
+zeroize = "1.8"
+
+[dev-dependencies]
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
