@@ -3,7 +3,7 @@
 **Status:** proposed. Builds on [0001](0001-freedom-cored.md) (process, framing, deadlines), [0002](0002-signing.md) (signing) and [0004](0004-naming-sessions.md) (sessions, `shell.*` requests, verified operations, endpoint references, budgets). It is roadmap item 3.4: freedom-browser's chain-data router moves into the core.
 
 **The reference** is `src/main/networks/chain-data-router.js` at freedom-browser `fb540328`, with `blockscout-logs.js` and the Ant bridge's router options (`swarm/ant-chain-bridge.js`).
-- **One later rule** of main's is ported without moving the pin: #752's Colibri ordering for transaction lookups and its verifier-fault backoff (main `94b0af4e`; [Colibri](#colibri)). Its vectors run the pinned router with that rule patched in ([Replay](#replay)).
+- **Two later rules** of main's are ported without moving the pin, both from main `94b0af4e`: #752's Colibri ordering for transaction lookups and its verifier-fault backoff ([Colibri](#colibri)), and #749's fee headroom ([Fee quotes](#fee-quotes)). Their vectors run the pinned router with those rules patched in, as the reference patches `tx-lookups` and `fee-headroom` ([Replay](#replay)).
 - **Ground truth** will be a replay harness, `vectors/chain-replay.json`, built like 0004's: it runs the pinned router through scripted worlds and records every exchange, verifier operation, timing, result and error. Its scenario IDs are cited below where a rule depends on them.
 - **Conflicts:** where this document and a vector disagree, the vector wins and the document has a bug.
 
@@ -715,7 +715,7 @@ The core can die mid-broadcast: an exit, the watchdog, a protocol error. Main th
   - **A priority fee `BigInt` can't parse** (such as `-0x1`) fails that source's quote, and Direct moves on to its next endpoint (`boundary-fee-direct-priority-unparseable`).
   - **The headroom,** on every quote:
     - **The tip floor:** `MIN_PRIORITY_FEE_WEI`, 0.05 gwei (50,000,000 wei). An EIP-1559 quote's tip is max(its tip, the floor): a tip of a few thousand wei gives a builder no reason to include the transaction.
-    - **EIP-1559:** `baseFee` is the base, `maxPriorityFeePerGas` the floored tip, `maxFeePerGas` 2·base + tip (two blocks of base-fee growth), and `effectiveGasPrice` base + tip.
+    - **EIP-1559:** `baseFee` is the base, `maxPriorityFeePerGas` the floored tip, `maxFeePerGas` 2·base + tip (the 2× base-fee cap: just under six blocks of maximum base-fee growth, 1.125⁶ ≈ 2.03), and `effectiveGasPrice` base + tip.
     - **Legacy:** `gasPrice` and `effectiveGasPrice` are ⌊G·125/100⌋ + the floor. A legacy transaction pays its whole gas price, so its margin is smaller. The 25% is main's chosen margin: slightly less than two blocks of maximum base-fee growth (1.125² = 1.265625), or a market move on a chain without a base fee.
     - **Why:** a quote signed at the raw gas price puts the fee cap on the base fee, and the transaction is dropped as soon as the base fee rises (#749).
   - **Decimal strings,** `verified` for myotis, colibri and quorum; a quorum's only when its m is more than 1 (deviation `singleton-quorum`). A Myotis quote priced from a block also names that block's source, `baseFeeSource` (its last key), and is `verified` only if that read was.
@@ -862,7 +862,7 @@ A runs in main, at the confirmation before every transaction signature: a send t
     - **Evidence gathered again** has a new request start.
     - **A rising base fee** raises R with it.
     - **During a spike** 2·B is headroom, not a forecast. A transaction quoted after the evidence was gathered can be asked about though it would pay little. The multiple and the 60 s are tuned together.
-    - **Headroom against the threshold:** R's 2·B is the same two blocks of headroom a quote signs, so neither flags the other. The 3× multiple has only to absorb the tip spread and the 60 s of drift.
+    - **Headroom against the threshold:** R's 2·B is the same 2× base-fee cap a quote signs, so neither flags the other. The 3× multiple has only to absorb the tip spread and the 60 s of drift.
   - **A wrong clock** makes every header stale; R then falls back to the combined quote.
 - **The headroom and R** (amended for main's #749, the user, 2026-10-23):
   - **Why R carries the floor:** every quote signs a tip of at least the floor. On a chain with a base fee of 0.001 gwei and a market tip of 0.001 gwei, a quote signs M ≥ 2·0.001 + 0.05 = 0.052 gwei. Against R = 0.003 gwei (an unfloored tip) that is about 17×, and against R = 0.002 gwei (2·B alone) about 26×: every quoted send would be asked again.
@@ -1021,22 +1021,22 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
   - nesting at 512 and 513 levels (`boundary-json-depth-512`, and `boundary-json-depth-513` for deviation `json-depth`);
   - canonical-equivalence pairs through the quorum: duplicate keys, number spellings, `__proto__`, lone surrogates (`boundary-agreement-*`);
   - `isCapacityFailure` on Colibri's errors: collapsed whitespace, a phrase past 500 units, elided hex and an error's own `failureKind` (`boundary-adaptive-capacity-*`).
-- **The harness** (`vectors/generator/chain-replay.js`) has 331 scenarios, each with a stable ID and a `from` field citing its source test or this document: 306 from the pinned router, and 25 for main's #752 ([Main's #752](#mains-752)).
+- **The harness** (`vectors/generator/chain-replay.js`) has 343 scenarios, each with a stable ID and a `from` field citing its source test or this document: 306 from the pinned router, 25 for main's #752 ([Main's #752](#mains-752)) and 12 for main's #749 ([Main's #749](#mains-749)).
   - **Values as text:** every value the reference produced or was given is recorded as JSON text, and `undefined` as a field of its own. No value can pass for an encoding, and every value `JSON.parse` makes survives: lone surrogates, any depth, `-0` and infinities.
   - **Large texts:** a text over 64 KiB is stored in its field's repeat form, a repeat unit plus a SHA-256, which keeps the 8 MiB `html()` answers small.
   - **Settle times:** ported scenarios carry the settle times their tests assert, and generation fails if a fixture drifts from them.
-- **The machine replays all 331** (`crates/fc-chain/tests/replay.rs`). A driver plays main from the records: it starts each call when the reference did, and answers each request with the answer its record got, at the time it got it, delivering answers due in one tick in the reference's microtask order (a failed fetch or a non-2xx status settles before a body is read; equal delays settle in registration order). It compares exactly:
+- **The machine replays all 343** (`crates/fc-chain/tests/replay.rs`). A driver plays main from the records: it starts each call when the reference did, and answers each request with the answer its record got, at the time it got it, delivering answers due in one tick in the reference's microtask order (a failed fetch or a non-2xx status settles before a body is read; equal delays settle in registration order). It compares exactly:
   - **every request the core owns** (`shell.rpc`'s endpoint and body with its `id` normalized, a verifier operation and its params, a Blockscout page) with its start, matched to a record of the same call, and **in the reference's order**: no request answers a ledger entry earlier than one already matched. No allowance for unordered concurrency is needed; the order holds across every call of every step. Main's own I/O (Blockscout's hops and DNS lookups, Myotis status samples) feeds the replies main sends instead;
   - **every cancel:** an exchange the reference aborted at T is cancelled at T, and no other is cancelled, except in two permitted races, each counted: a quorum member cancelled when a sibling launched in the same tick answered the same call in the tick both settled (128; the reference's abort came after the member's answer), and a Blockscout page cancelled by the scan's deadline in the tick its own fetch failed with `no answer within` (4). Main never delivers an answer to an exchange the machine cancelled first: it aborted it;
   - **every result and error,** with its settle time: key order, constructor, `name`, message, own properties, `-0` and UTF-16 strings;
   - **the state tables** after each step. Route keys whose target lists several addresses are compared with that list digested ([Adaptive bypass](#adaptive-bypass)). A patched scenario's tables add `colibri_faults`: `["<chain> <method>", { faults, strikes, coolUntil }]` per record, in the reference's insertion order.
   - **24 scenarios show a deviation's difference,** each listed in the test with the whole reply, the requests and the state it must show instead, and every field the deviation doesn't change still compared: `broadcast-outcome` (13: today's error, or a success with another hash, becomes `uncertain`, reporting keccak256 of the raw bytes, with each reconciliation lookup made listed with its endpoint and its whole body or params, the hash included), `config-change` (`boundary-registry-change-mid-request`: the three members asked again at 1,000 listed whole, and the one exchange the change moves, Direct's, given its new start), `order-validation` (`boundary-order-duplicates-and-unknown`), `endpoint-dedup` (`boundary-quorum-duplicate-endpoint`: a asked once, its second exchange never made, and the quorum's miss handed to Direct), `singleton-quorum` (`boundary-quorum-singleton-not-verified`: the same requests, two reads and a fee quote labelled as Direct would), `json-depth` (`boundary-json-depth-513`), `cancel-promptly` (`cancel-read-no-fallthrough`) and `adapter-error-text` (`boundary-colibri-revert-capacity`: the revert reads `execution reverted`, its route blocked as today; `tx-lookup-all-sources-fail`: Colibri's own error reads `Colibri request failed`, as main's has since #681).
-  - **`fee-combination`** ([B](#b-combining-directs-quotes)) changes three more.
+  - **`fee-combination`** ([B](#b-combining-directs-quotes)) changes nine more: three of the 306 (below); `boundary-fee-quorum-priority-disagrees`, which main's #749 makes reach Direct with three endpoints; and five of #749's twelve new scenarios ([Main's #749](#mains-749)).
     - **What each lists:** its whole requests, with their starts and cancels, and its whole reply.
     - **What is compared:** each reply's values and key order, `answered` last.
     - **The inputs stay:** the endpoints' scripted answers are unchanged.
 
-    The three:
+    The three of the 306, as they read before #749's patch (their patched replies are in [Main's #749](#mains-749)):
     - **`router-fee-quote-direct-same-endpoint`:**
       - both endpoints asked at 0;
       - the inputs: primary answers G = 3773, P = 1 (M = 7545), and secondary answers `0x1` to both (G = 1, P = 1, M = 1);
@@ -1045,7 +1045,7 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
     - **`boundary-fee-direct-priority-unparseable`:** b asked at once with a, not after it. a fails, and b's legacy quote stands: `{"type":"legacy","gasPrice":"16","effectiveGasPrice":"16","source":"direct","verified":false,"answered":1}`.
     - **`boundary-fee-direct-gas-price-fails-first`:** b asked at once with a. a fails, and b's legacy quote stands: `{"type":"legacy","gasPrice":"1000000000","effectiveGasPrice":"1000000000","source":"direct","verified":false,"answered":1}`.
 
-    The other fee-quote scenarios don't reach Direct with more than one endpoint, and stay as they are. None of the three has `colibri` in its read order, so B's header read adds nothing to them. With main's #749 the list and its values change ([Main's #749](#mains-749)).
+    Before #749's patch, the other fee-quote scenarios among the 306 don't reach Direct with more than one endpoint. None of the three has `colibri` in its read order, so B's header read adds nothing to them. With the patch, the three's replies change and `boundary-fee-quorum-priority-disagrees` joins them ([Main's #749](#mains-749)).
   - **None is skipped.**
 - **Not replayed:** the machine's own tests cover the second, third, fifth and sixth (`crates/fc-chain/tests/machine.rs` and its unit tests); the first and fourth are main's (step 5):
   - a read's reply overtaken by a configuration change after it was made: that is main's reply fencing ([Generations](#generations)), and the reference has no seam for it;
