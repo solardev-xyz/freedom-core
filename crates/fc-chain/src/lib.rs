@@ -72,7 +72,7 @@ pub use blockscout::{
 pub use broadcast::{AttemptClass, RefusalReason, broadcast_refusal, classify_broadcast_answer};
 pub use fee::{
     FeeQuote, QuoteValues, combine_fee_quotes, fee_quote, fee_quote_reserving, fee_quote_values,
-    fee_quote_values_reserving,
+    fee_quote_values_reserving, lowest_priority,
 };
 pub use js::{JsError, JsString, is_js_whitespace};
 pub use logs::{

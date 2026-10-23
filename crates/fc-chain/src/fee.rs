@@ -421,6 +421,17 @@ pub(crate) fn fee_quote_values_with_reserving<E>(
     }))
 }
 
+/// The lowest priority fee among EIP-1559 quotes, in decimal: `None` when
+/// none gave a valid hint (design 0005, A: `chain.fee_reference`'s
+/// `lowest_priority`).
+pub fn lowest_priority(quotes: &[QuoteValues]) -> Option<String> {
+    quotes
+        .iter()
+        .filter_map(|quote| quote.priority.as_ref())
+        .reduce(|lowest, priority| lowest.min(priority))
+        .map(BigInt::to_decimal)
+}
+
 /// B's combination of Direct's answered quotes (design 0005, B: combining
 /// Direct's quotes; deviation `fee-combination`), `None` for none. Each
 /// quote is read as two constraints, a max fee per gas M and a priority
@@ -744,6 +755,18 @@ mod tests {
             combine_fee_quotes(&mixed, false).unwrap().to_json(),
             r#"{"type":"legacy","gasPrice":"100","effectiveGasPrice":"100","source":"direct","verified":false,"answered":2}"#
         );
+        // The lowest hint among EIP-1559 quotes only.
+        assert_eq!(
+            lowest_priority(&[
+                values("100", Some("9")),
+                values("5", None),
+                values("100", Some("10"))
+            ])
+            .as_deref(),
+            Some("9")
+        );
+        assert_eq!(lowest_priority(&[values("5", None)]), None);
+        assert_eq!(lowest_priority(&[]), None);
         assert!(values("100", Some("1")).is_eip1559());
         assert_eq!(
             values("100", Some("1")).priority_decimal().as_deref(),

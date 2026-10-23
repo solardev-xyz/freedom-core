@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::transport::Pending;
+use fc_chain::machine::FeeReference;
 use serde_json::{Value, json};
 
 /// What the writer got: whole messages as JSON, a fragmented response as
@@ -301,6 +302,15 @@ fn request_params_are_validated_strictly() {
     cases.push(("chain.request", missing));
     cases.push(("chain.request", json!([good.clone()])));
     cases.push(("chain.fee_quote", json!({ "chain_id": 1 })));
+    cases.push(("chain.fee_reference", json!({ "chain_id": 1 })));
+    cases.push((
+        "chain.fee_reference",
+        json!({ "chain_id": 1, "deadline_ms": 120_001 }),
+    ));
+    cases.push((
+        "chain.fee_reference",
+        json!({ "chain_id": 1, "deadline_ms": 1000, "extra": true }),
+    ));
     cases.push((
         "chain.broadcast",
         json!({ "chain_id": 1, "raw": 7, "deadline_ms": 1000 }),
@@ -847,6 +857,191 @@ fn myotis_and_colibri_operations_take_the_designs_forms() {
     t.at(4);
     let reply = t.written().into_iter().find(|f| f["id"] == 4).unwrap();
     assert_eq!(reply["result"]["result"], "0x01", "{reply}");
+}
+
+#[test]
+fn a_fee_reference_replies_in_its_form() {
+    // Myotis first and ready: the reference asks it nothing. Colibri gives
+    // the header; B asks the endpoints.
+    let mut t = test();
+    let mut config = chain_snapshot(&["myotis", "colibri", "direct"], &["a", "b"]);
+    config["myotis"] = json!(true);
+    config["prover"] = json!({ "endpoint": "p1", "zk": true });
+    t.configure(json!([config]));
+    t.call(
+        2,
+        "chain.availability",
+        &json!({ "chain_id": 1, "ready": true }),
+    );
+    t.call(
+        3,
+        "chain.fee_reference",
+        &json!({ "chain_id": 1, "deadline_ms": 10_000 }),
+    );
+    let frames = t.written();
+    let made = requests(&frames);
+    let methods: Vec<String> = made
+        .iter()
+        .map(|r| match r["method"].as_str().unwrap() {
+            "shell.rpc" => {
+                let body: Value =
+                    serde_json::from_str(r["params"]["body"].as_str().unwrap()).unwrap();
+                format!(
+                    "{} {}",
+                    r["params"]["endpoint"].as_str().unwrap(),
+                    body["method"].as_str().unwrap()
+                )
+            }
+            _ => format!("{} {}", r["params"]["colibri"], r["params"]["method"]),
+        })
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            "a eth_gasPrice",
+            "b eth_gasPrice",
+            r#""request" "eth_getBlockByNumber""#,
+        ]
+    );
+    let header = made[2].clone();
+    assert_eq!(header["params"]["params"], json!(["latest", false]));
+    let ids: Vec<u64> = made.iter().map(|r| r["id"].as_u64().unwrap()).collect();
+    let answer = |t: &mut Test, id: u64, result: &str| {
+        let body = format!(r#"{{"jsonrpc":"2.0","id":1,"result":{result}}}"#);
+        assert!(t.answer(id, rpc_answer(&body)).is_ok());
+    };
+    answer(&mut t, ids[0], r#""0x64""#);
+    answer(&mut t, ids[1], r#""0x3e8""#);
+    let hints = requests(&t.written())
+        .iter()
+        .map(|r| r["id"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    answer(&mut t, hints[0], r#""0x1""#);
+    // b has no hint: legacy.
+    assert!(
+        t.answer(
+            hints[1],
+            rpc_answer(r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"no"}}"#)
+        )
+        .is_ok()
+    );
+    assert!(t.written().iter().all(|f| f["id"] != 3));
+    assert!(
+        t.answer(
+            ids[2],
+            Ok(json!({ "result": {
+                "number": "0x1312d00",
+                "timestamp": "0x6553f100",
+                "baseFeePerGas": "0x7",
+            } }))
+        )
+        .is_ok()
+    );
+    let reply = t.written().into_iter().find(|f| f["id"] == 3).unwrap();
+    assert_eq!(
+        reply["result"],
+        json!({
+            "header": {
+                "source": "colibri",
+                "number": "20000000",
+                "timestamp": "1700000000",
+                "base_fee": "7",
+            },
+            "lowest_priority": "1",
+            "quote": {
+                "type": "eip1559",
+                "baseFee": "99",
+                "maxPriorityFeePerGas": "1",
+                "maxFeePerGas": "199",
+                "effectiveGasPrice": "100",
+                "source": "direct",
+                "verified": false,
+                "answered": 2,
+            },
+            "generation": 1,
+        })
+    );
+    // The wire's key order, and a failed part's null.
+    for (reference, text) in [
+        (
+            FeeReference {
+                header: Some(fc_chain::machine::Header {
+                    number: "1".into(),
+                    timestamp: "2".into(),
+                    base_fee: None,
+                }),
+                lowest_priority: None,
+                quote: None,
+            },
+            r#"{"type":"response","id":5,"result":{"header":{"source":"colibri","number":"1","timestamp":"2","base_fee":null},"lowest_priority":null,"quote":null,"generation":4}}"#
+                .to_owned(),
+        ),
+        (
+            FeeReference {
+                header: None,
+                lowest_priority: Some("3".into()),
+                quote: fc_chain::fee_quote_values("direct", Some("16"), Some("3"))
+                    .ok()
+                    .and_then(|values| fc_chain::combine_fee_quotes(&[values], false)),
+            },
+            format!(
+                r#"{{"type":"response","id":5,"result":{{"header":null,"lowest_priority":"3","quote":{},"generation":4}}}}"#,
+                r#"{"type":"eip1559","baseFee":"13","maxPriorityFeePerGas":"3","maxFeePerGas":"29","effectiveGasPrice":"16","source":"direct","verified":false,"answered":1}"#
+            ),
+        ),
+    ] {
+        let done = Done {
+            id: 1,
+            result: Ok(Success::FeeReference(reference)),
+            outcome: None,
+            settled: 0,
+            generation: 4,
+        };
+        let message = reply_message(5, &done);
+        assert_eq!(message.len(), message.write().len());
+        assert_eq!(String::from_utf8(message.write().to_vec()).unwrap(), text);
+    }
+    // The machine measures the result as written, whatever its width
+    // (181-m1): here a 1,234-digit priority fee and a 78-digit base fee.
+    let wide = "9".repeat(1_234);
+    let quote = fc_chain::fee_quote_values(
+        "direct",
+        Some(&format!("\"0x{}\"", "f".repeat(1_024))),
+        Some("\"0x1\""),
+    )
+    .ok()
+    .and_then(|values| fc_chain::combine_fee_quotes(&[values], false));
+    for reference in [
+        FeeReference {
+            header: Some(fc_chain::machine::Header {
+                number: "18446744073709551615".into(),
+                timestamp: "1700000000".into(),
+                base_fee: Some("9".repeat(78)),
+            }),
+            lowest_priority: Some(wide.clone()),
+            quote,
+        },
+        FeeReference {
+            header: None,
+            lowest_priority: None,
+            quote: None,
+        },
+    ] {
+        let json_len = reference.json_len();
+        let done = Done {
+            id: 1,
+            result: Ok(Success::FeeReference(reference)),
+            outcome: None,
+            settled: 0,
+            generation: 4,
+        };
+        let text = String::from_utf8(reply_message(5, &done).write().to_vec()).unwrap();
+        let result = text
+            .strip_prefix(r#"{"type":"response","id":5,"result":"#)
+            .and_then(|rest| rest.strip_suffix(r#","generation":4}}"#))
+            .unwrap();
+        assert_eq!(result.len() + 1, json_len, "{text}");
+    }
 }
 
 fn raw(text: &str) -> Result<Box<RawValue>, ErrorBody> {

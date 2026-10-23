@@ -4,8 +4,8 @@
 //!
 //! - **In:** `chain.configure` ([`Machine::configure`]),
 //!   `chain.availability` ([`Machine::availability`]), `chain.request`,
-//!   `chain.fee_quote`, `chain.broadcast` and design 0006's `chain.html`
-//!   ([`Machine::submit`]),
+//!   `chain.fee_quote`, `chain.fee_reference`, `chain.broadcast` and design
+//!   0006's `chain.html` ([`Machine::submit`]),
 //!   `cancel` ([`Machine::cancel`]), main's replies to the machine's I/O
 //!   ([`Machine::complete`]), and time ([`Machine::fire_next`]).
 //! - **Out:** `shell.rpc`, `shell.verified` and `shell.blockscout` requests
@@ -58,6 +58,7 @@ pub use io::{
 };
 pub use logs::{CapReader, RangeEntry, Ranker};
 pub use machine::{Call, Emitted, Machine, OverBudget, Reply, Reservation, StateTables, Success};
+pub use quote::FeeReference;
 pub use read::{COLIBRI_FAILED, MYOTIS_FAILED, ReadOptions};
 pub use route::RouteState;
 pub use send::BroadcastOutcome;

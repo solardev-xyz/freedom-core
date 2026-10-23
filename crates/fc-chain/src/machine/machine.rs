@@ -1,8 +1,8 @@
 //! The machine a driver runs (design 0005): `chain.configure`,
 //! `chain.availability`, `chain.request`, `chain.fee_quote`,
-//! `chain.broadcast`, `chain.html` (design 0006) and `cancel` in; `shell.*`
-//! requests, cancels and replies out. Time comes in through the executor's
-//! timers.
+//! `chain.fee_reference`, `chain.broadcast`, `chain.html` (design 0006)
+//! and `cancel` in; `shell.*` requests, cancels and replies out. Time comes
+//! in through the executor's timers.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -21,7 +21,7 @@ use super::error::{ChainError, Protocol, Thrown};
 use super::html::{HtmlAnswer, html};
 use super::io::{Answer, Delivered, Ms, Request, Transport};
 use super::logs::RangeEntry;
-use super::quote::fee_quote;
+use super::quote::{FeeReference, fee_quote, fee_reference};
 use super::read::{ReadAnswer, ReadOptions, read};
 use super::route::RouteState;
 use super::send::{BroadcastOutcome, Ended, SendState, broadcast, ended_from};
@@ -42,6 +42,9 @@ pub enum Call {
     },
     /// `chain.fee_quote`.
     FeeQuote { chain_id: u64 },
+    /// `chain.fee_reference`: the evidence for main's fee check (design
+    /// 0005, A).
+    FeeReference { chain_id: u64 },
     /// `chain.broadcast`.
     Broadcast { chain_id: u64, raw: String },
     /// `chain.html` (design 0006): the `web3:` handler's `html()` read of
@@ -60,6 +63,7 @@ impl Call {
         match self {
             Self::Read { chain_id, .. }
             | Self::FeeQuote { chain_id }
+            | Self::FeeReference { chain_id }
             | Self::Broadcast { chain_id, .. }
             | Self::Html { chain_id, .. } => *chain_id,
         }
@@ -89,7 +93,7 @@ impl Call {
                         .map(String::capacity)
                         .sum::<usize>()
             }
-            Self::FeeQuote { .. } => 0,
+            Self::FeeQuote { .. } | Self::FeeReference { .. } => 0,
             Self::Broadcast { raw, .. } => raw.capacity(),
             Self::Html {
                 contract, origin, ..
@@ -112,6 +116,8 @@ pub enum Success {
     },
     /// Today's quote.
     FeeQuote(FeeQuote),
+    /// `chain.fee_reference`'s `{ header, lowest_priority, quote }`.
+    FeeReference(FeeReference),
     /// `{ hash, source, outcome }`: `sent` or `uncertain`.
     Broadcast {
         hash: Option<String>,
@@ -172,6 +178,7 @@ pub struct StateTables {
 enum Done {
     Read(Result<ReadAnswer, Thrown>),
     Fee(Result<FeeQuote, Thrown>),
+    Reference(FeeReference),
     Broadcast(Ended),
     Html(Result<HtmlAnswer, Thrown>),
 }
@@ -241,6 +248,7 @@ fn reply_wire_bytes(result: &Result<Success, ChainError>) -> usize {
                 result.as_ref().map_or(0, String::len) + trust.as_ref().map_or(0, String::len)
             }
             Ok(Success::FeeQuote(quote)) => quote.json_len(),
+            Ok(Success::FeeReference(reference)) => reference.json_len(),
             Ok(Success::Broadcast { hash, .. }) => hash.as_ref().map_or(0, String::len),
             Ok(Success::Html { html, trust, .. }) => {
                 base64_len(html.len()) + HASH_JSON + trust.as_ref().map_or(0, String::len)
@@ -260,6 +268,7 @@ fn reply_heap_bytes(result: &Result<Success, ChainError>) -> usize {
                     + trust.as_ref().map_or(0, String::capacity)
             }
             Ok(Success::FeeQuote(quote)) => quote.heap_bytes(),
+            Ok(Success::FeeReference(reference)) => reference.heap_bytes(),
             Ok(Success::Broadcast { hash, .. }) => hash.as_ref().map_or(0, String::capacity),
             Ok(Success::Html { html, trust, .. }) => {
                 html.capacity() + trust.as_ref().map_or(0, String::capacity)
@@ -503,6 +512,9 @@ impl Machine {
                 ..
             } => Task::new(async move { Done::Read(read(&req, &method, &params, &options).await) }),
             Call::FeeQuote { .. } => Task::new(async move { Done::Fee(fee_quote(&req).await) }),
+            Call::FeeReference { .. } => {
+                Task::new(async move { Done::Reference(fee_reference(&req).await) })
+            }
             Call::Html {
                 contract, origin, ..
             } => Task::new(async move { Done::Html(html(&req, &contract, origin).await) }),
@@ -701,6 +713,11 @@ impl Machine {
                 self.ctx.budget.borrow_mut().forget(id);
                 self.reply(id, Ok(Success::FeeQuote(quote)), None, generation);
             }
+            Some(Done::Reference(reference)) => {
+                drop(running);
+                self.ctx.budget.borrow_mut().forget(id);
+                self.reply(id, Ok(Success::FeeReference(reference)), None, generation);
+            }
             Some(Done::Broadcast(ended)) => {
                 drop(running);
                 self.ctx.budget.borrow_mut().forget(id);
@@ -713,9 +730,9 @@ impl Machine {
         }
     }
 
-    /// `cancel` from main: a read or fee quote ends `cancelled` at once; a
-    /// broadcast through the outcome table. False when the request has
-    /// already replied.
+    /// `cancel` from main: a read, a fee quote or a fee reference ends
+    /// `cancelled` at once; a broadcast through the outcome table. False
+    /// when the request has already replied.
     pub fn cancel(&mut self, id: u64) -> bool {
         if let Some(i) = self.running.iter().position(|r| r.id == id) {
             self.end(i, Protocol::Cancelled);
