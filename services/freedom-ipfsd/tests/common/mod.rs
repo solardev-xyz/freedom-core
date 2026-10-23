@@ -39,7 +39,9 @@ static SPAWN: Mutex<()> = Mutex::new(());
 
 /// The spawn lock: hold it across `Command::spawn` (never across a wait).
 pub fn spawning() -> std::sync::MutexGuard<'static, ()> {
-    SPAWN.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    SPAWN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 /// How long a process gets to exit when it should.
 pub const EXIT_TIMEOUT: Duration = Duration::from_secs(15);

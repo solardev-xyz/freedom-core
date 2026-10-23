@@ -35,7 +35,9 @@ static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The spawn lock: hold it across `Command::spawn` (never across a wait).
 pub fn spawning() -> std::sync::MutexGuard<'static, ()> {
-    SPAWN.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    SPAWN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// A Radicle home, a lock directory and the service's own `HOME`, removed
