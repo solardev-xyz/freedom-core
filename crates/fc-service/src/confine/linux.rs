@@ -88,11 +88,7 @@ fn thread_count() -> Result<usize, Invalid> {
 /// The process's entry ([`super::clean_entry`]): the one re-exec, if
 /// anything is open above stderr.
 pub(super) fn clean_entry(exe: &Path, one_at_a_time: bool) -> Entry {
-    let reexeced = std::env::var_os(REEXEC_MARKER).is_some();
-    if reexeced {
-        // So it goes no further. The process has one thread here.
-        let _ = fc_sys::linux::remove_env_alone(std::ffi::OsStr::new(REEXEC_MARKER));
-    }
+    let reexeced = marked();
     let open = match descriptors_above_stderr() {
         Ok(open) => open,
         Err(_) => {
@@ -116,6 +112,20 @@ pub(super) fn clean_entry(exe: &Path, one_at_a_time: bool) -> Entry {
     }
 }
 
+/// Whether this image is the re-exec: the marker holds this process's id,
+/// exactly as the re-exec wrote it. Any other value (a parent service's id,
+/// or anything not a number) is no marker. Nothing removes the marker; if a
+/// far descendant inherits it and gets the same id, it doesn't re-execute,
+/// and `confine` refuses what it inherited: that fails closed.
+fn marked() -> bool {
+    std::env::var_os(REEXEC_MARKER).is_some_and(|value| value == own_id().as_str())
+}
+
+/// This process's id, as the marker holds it.
+fn own_id() -> String {
+    std::process::id().to_string()
+}
+
 /// Marks every descriptor above stderr close-on-exec, and executes `exe`
 /// with this process's arguments and environment, plus the marker. Returns
 /// only the error of a re-exec that failed: close-on-exec is then merely
@@ -135,7 +145,7 @@ fn reexec(exe: &Path, open: &[i32], one_at_a_time: bool) -> std::io::Error {
     if let Some(arg0) = args.next() {
         command.arg0(arg0);
     }
-    command.args(args).env(REEXEC_MARKER, "1").exec()
+    command.args(args).env(REEXEC_MARKER, own_id()).exec()
 }
 
 /// The descriptors above stderr, from `/proc/self/fd`, without the

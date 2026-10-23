@@ -198,7 +198,14 @@ pub struct Options {
     pub seccomp_invalid: bool,
 }
 
-/// The environment variable the entry's re-exec sets ([`clean_entry`]).
+/// The environment variable the entry's re-exec sets ([`clean_entry`]), to
+/// the process's id. An exec keeps the id, so the re-executed image finds
+/// its own id there and doesn't re-execute again. Any other value is no
+/// marker: one inherited from a parent service names another process.
+///
+/// Nothing removes it: mutating the process's environment is unsafe, and
+/// a stale value harms nothing (below). A child a service spawns drops it
+/// with `Command::env_remove`, which touches only the child's environment.
 pub const REEXEC_MARKER: &str = "FREEDOM_SERVICE_REEXEC";
 
 /// How the process's entry went ([`clean_entry`]).
@@ -238,8 +245,11 @@ impl Entry {
 /// plus [`REEXEC_MARKER`], so the kernel closes them all. Returns only when
 /// there is nothing to drop, or the re-exec failed.
 ///
-/// - **Once:** with the marker set, nothing is re-executed. The marker is
-///   removed from the environment first, so it goes no further.
+/// - **Once:** with the marker set to this process's id, nothing is
+///   re-executed. Since an exec keeps the id, a loop can't happen.
+/// - **A reused id fails closed:** a far descendant that inherited the
+///   marker and happens to get the same id doesn't re-execute; whatever it
+///   inherited is then refused by [`confine`] (exit 77).
 /// - **Sound:** nothing is closed by a call, so no Rust owner of a
 ///   descriptor is invalidated. The re-exec replaces the whole image; a
 ///   failed one leaves only close-on-exec set, and every owner valid.

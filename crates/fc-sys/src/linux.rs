@@ -8,7 +8,6 @@
 //! `confine::clean_entry`) replaces the whole image, or fails and leaves
 //! every owner as it was.
 
-use std::ffi::OsStr;
 use std::io;
 
 /// Marks every descriptor from `low` up close-on-exec
@@ -53,32 +52,6 @@ pub fn set_cloexec(fd: i32) -> io::Result<()> {
     } else {
         Err(io::Error::last_os_error())
     }
-}
-
-/// Removes `key` from the process's environment, only while the process
-/// has one thread (`/proc/self/task`). `false`, and nothing removed, when
-/// it has more or the list can't be read.
-#[allow(unsafe_code)]
-pub fn remove_env_alone(key: &OsStr) -> bool {
-    let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
-        return false;
-    };
-    let mut threads = 0usize;
-    for task in tasks {
-        if task.is_err() {
-            return false;
-        }
-        threads += 1;
-    }
-    if threads != 1 {
-        return false;
-    }
-    // SAFETY: remove_var is unsafe because another thread may read or
-    // write the environment at the same time. The process has one thread,
-    // counted just above, and only this thread could start another, which
-    // it doesn't before the call returns.
-    unsafe { std::env::remove_var(key) };
-    true
 }
 
 /// `LANDLOCK_CREATE_RULESET_VERSION`: `landlock_create_ruleset`'s flag that

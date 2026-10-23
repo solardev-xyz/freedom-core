@@ -12,10 +12,8 @@
 //! - [`windows::drive_type`]: storage qualification in `freedom-cored` and
 //!   `fc-service` (design 0001, "Lifetime lock");
 //! - [`windows::quiet_error_reporting`]: `fc-service`'s process hardening;
-//! - [`linux::landlock_abi`], [`linux::cloexec_from`], [`linux::set_cloexec`]
-//!   and [`linux::remove_env_alone`]: `fc-service`'s confinement (design
-//!   0010). The last wraps std's `remove_var`, unsafe since edition 2024,
-//!   rather than an FFI call.
+//! - [`linux::landlock_abi`], [`linux::cloexec_from`] and
+//!   [`linux::set_cloexec`]: `fc-service`'s confinement (design 0010).
 //!
 //! On every other platform the crate is empty.
 

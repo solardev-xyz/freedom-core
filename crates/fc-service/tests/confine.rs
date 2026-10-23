@@ -81,10 +81,9 @@ mod linux {
     fn child(case: &str) {
         // At entry, as a service does: one line per image, so the parent
         // counts the re-execs.
-        println!(
-            "START marker={}",
-            std::env::var_os(confine::REEXEC_MARKER).is_some()
-        );
+        println!("START ours={}", marker() == "ours");
+        // Every argument, argv[0] included, byte for byte.
+        println!("ARGV {}", argv_hex());
         let p = paths();
         // A file this process owns before its entry, for the failure path:
         // the marks must leave it working.
@@ -96,14 +95,13 @@ mod linux {
                 false,
             ),
             // Marked one at a time, as before Linux 5.11.
-            "fallback" => confine::clean_entry_with(std::path::Path::new("/proc/self/exe"), true),
+            "fallback" | "argv-fallback" => {
+                confine::clean_entry_with(std::path::Path::new("/proc/self/exe"), true)
+            }
             _ => confine::clean_entry(),
         };
         println!("ENTRY {}", entry.name());
-        println!(
-            "MARKER {}",
-            std::env::var_os(confine::REEXEC_MARKER).is_some()
-        );
+        println!("MARKER {}", marker());
         let network = match case {
             "socks5" => Network::Socks5 {
                 port: p.allowed_port,
@@ -206,7 +204,7 @@ mod linux {
             confine::confine_with(&policy(&p, network, min_abi, registered), &options).unwrap();
         println!("REPORT {}", report.to_json());
         match case {
-            "files" | "abi1" | "abi2" | "abi3" | "fallback" => files(&p),
+            "files" | "abi1" | "abi2" | "abi3" | "fallback" | "argv" | "argv-fallback" => files(&p),
             // Only the report: the rules weren't all applied.
             "below-minimum" | "unavailable" | "blocked" => {}
             "processes" => processes(),
@@ -269,6 +267,27 @@ mod linux {
             ),
             other => panic!("unknown descriptor {other}"),
         }
+    }
+
+    /// The re-exec's marker: `ours` (this process's id), `other` (any other
+    /// value) or `absent`.
+    fn marker() -> &'static str {
+        match std::env::var_os(confine::REEXEC_MARKER) {
+            None => "absent",
+            Some(value) if value == std::process::id().to_string().as_str() => "ours",
+            Some(_) => "other",
+        }
+    }
+
+    /// This image's arguments, argv[0] first, each in hex: a JSON array.
+    fn argv_hex() -> String {
+        use std::os::unix::ffi::OsStrExt;
+        let args: Vec<String> = std::env::args_os().map(|arg| hex(arg.as_bytes())).collect();
+        serde_json::to_string(&args).unwrap()
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     /// A file in the data directory, opened read-write.
@@ -555,10 +574,9 @@ mod linux {
         command(world, case).output().unwrap()
     }
 
-    /// `case`, with an extra pipe or socket (`kind`) the child inherits:
-    /// made without close-on-exec, and closed here once it ran. `marker`
-    /// sets the re-exec's marker, as if this were the re-exec.
-    fn run_inheriting(world: &World, case: &str, kind: &str, marker: bool) -> Output {
+    /// Runs `command` with an extra pipe or socket (`kind`) it inherits:
+    /// made without close-on-exec, and closed here once it ran.
+    fn inheriting(kind: &str, mut command: Command) -> Output {
         let extra: (std::os::fd::OwnedFd, std::os::fd::OwnedFd) = match kind {
             "pipe" => rustix::pipe::pipe_with(rustix::pipe::PipeFlags::empty()).unwrap(),
             _ => rustix::net::socketpair(
@@ -569,13 +587,21 @@ mod linux {
             )
             .unwrap(),
         };
-        let mut command = command(world, case);
-        if marker {
-            command.env(confine::REEXEC_MARKER, "1");
-        }
         let output = command.output().unwrap();
         drop(extra);
         output
+    }
+
+    /// `case` through a shell that sets the marker to its own id and then
+    /// execs the case, which keeps the id: the child starts with the marker
+    /// already its own.
+    fn with_own_marker(world: &World, case: &str) -> Command {
+        let mut shell = Command::new("/bin/sh");
+        shell
+            .arg("-c")
+            .arg(format!("export {}=$$; exec \"$0\"", confine::REEXEC_MARKER))
+            .arg(std::env::current_exe().unwrap());
+        configure(shell, world, case)
     }
 
     /// The `stdio-socket` case, its stdin a socket pair's end: what it
@@ -598,7 +624,11 @@ mod linux {
     }
 
     fn command(world: &World, case: &str) -> Command {
-        let mut command = Command::new(std::env::current_exe().unwrap());
+        configure(Command::new(std::env::current_exe().unwrap()), world, case)
+    }
+
+    /// `command`, with the case and the paths the parent prepared.
+    fn configure(mut command: Command, world: &World, case: &str) -> Command {
         command
             .env(CASE, case)
             .env("FC_DATA", &world.data)
@@ -913,49 +943,93 @@ mod linux {
         );
 
         // Descriptors. Inherited from the parent: exactly one re-exec, then
-        // a clean start, with the marker gone. With the marker already set
-        // (a re-exec that left one), or a re-exec that fails: refused, and
-        // an owned descriptor still works. Opened by the startup after the
-        // entry: refused whatever its type, so the service exits 77.
+        // a clean start, the marker then this process's id. A marker with
+        // another id, or not a number, is no marker. A marker already its
+        // own (a re-exec that left one), or a re-exec that fails: refused,
+        // and an owned descriptor still works. Opened by the startup after
+        // the entry: refused whatever its type, so the service exits 77.
         let starts = |text: &str| -> Vec<String> {
             text.lines()
                 .filter(|line| line.starts_with("START "))
                 .map(str::to_owned)
                 .collect()
         };
-        for (case, kind) in [("files", "pipe"), ("files", "socket"), ("fallback", "pipe")] {
-            let output = run_inheriting(&world, case, kind, false);
+        let once = |text: &str| {
+            starts(text) == ["START ours=false", "START ours=true"]
+                && text.contains("ENTRY reexeced\n")
+                && text.contains("MARKER ours\n")
+                && text.contains("REPORT ")
+        };
+        for (case, kind, marker) in [
+            ("files", "pipe", None),
+            ("files", "socket", None),
+            ("fallback", "pipe", None),
+            // Another process's id, as a parent service's would be.
+            ("files", "pipe", Some("1")),
+            ("files", "socket", Some("yes")),
+        ] {
+            let mut command = command(&world, case);
+            if let Some(marker) = marker {
+                command.env(confine::REEXEC_MARKER, marker);
+            }
+            let output = inheriting(kind, command);
             let text = lines(&output);
-            expect(
-                &mut failures,
-                starts(&text) == ["START marker=false", "START marker=true"]
-                    && text.contains("ENTRY reexeced\n")
-                    && text.contains("MARKER false\n")
-                    && text.contains("REPORT "),
-                format!("{case}, inherited {kind}: {text}"),
-            );
-            failures.extend(passed(&format!("{case}, inherited {kind}"), &output));
+            let what = format!("{case}, inherited {kind}, marker {marker:?}");
+            expect(&mut failures, once(&text), format!("{what}: {text}"));
+            failures.extend(passed(&what, &output));
         }
-        let output = run_inheriting(&world, "marker-inherited", "pipe", true);
+        let output = inheriting("pipe", with_own_marker(&world, "marker-inherited"));
         let text = lines(&output);
         expect(
             &mut failures,
-            starts(&text) == ["START marker=true"]
+            starts(&text) == ["START ours=true"]
                 && text.contains("ENTRY left\n")
-                && text.contains("MARKER false\n")
                 && text.contains("INVALID pipe\n"),
-            format!("the marker with a descriptor left: {text}"),
+            format!("our own marker with a descriptor left: {text}"),
         );
-        let output = run_inheriting(&world, "reexec-fails", "socket", false);
+        let output = inheriting("socket", command(&world, "reexec-fails"));
         let text = lines(&output);
         expect(
             &mut failures,
-            starts(&text) == ["START marker=false"]
+            starts(&text) == ["START ours=false"]
                 && text.contains("ENTRY left\n")
                 && text.contains("INVALID socket\n"),
             format!("a failed re-exec: {text}"),
         );
         failures.extend(passed("reexec-fails", &output));
+
+        // The re-exec keeps every argument, argv[0] included, byte for
+        // byte: an empty one and bytes that aren't UTF-8 among them, on
+        // both ways of marking.
+        for case in ["argv", "argv-fallback"] {
+            use std::os::unix::ffi::OsStrExt;
+            use std::os::unix::process::CommandExt;
+            let arg0: &[u8] = b"freedom-\xff-service";
+            let args: [&[u8]; 4] = [b"serve", b"", b"--data-dir=\xc3\x28\xfe", b"last arg"];
+            let mut command = command(&world, case);
+            command.arg0(std::ffi::OsStr::from_bytes(arg0));
+            for arg in args {
+                command.arg(std::ffi::OsStr::from_bytes(arg));
+            }
+            let output = inheriting("pipe", command);
+            let text = lines(&output);
+            let expected = serde_json::to_string(
+                &std::iter::once(arg0)
+                    .chain(args)
+                    .map(|arg| arg.iter().map(|b| format!("{b:02x}")).collect::<String>())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let argv: Vec<&str> = text
+                .lines()
+                .filter_map(|line| line.strip_prefix("ARGV "))
+                .collect();
+            expect(
+                &mut failures,
+                once(&text) && argv == [expected.as_str(), expected.as_str()],
+                format!("{case}: {argv:?}, expected {expected}: {text}"),
+            );
+        }
         for kind in ["socket", "pipe", "file", "eventfd", "epoll"] {
             let case = format!("inject-{kind}");
             let output = run(&world, &case);
