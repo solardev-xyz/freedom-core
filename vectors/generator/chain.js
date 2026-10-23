@@ -3,7 +3,8 @@
 // Chain-data codec vectors (design 0005, step 1): the reference's own
 // chain-data-router.js, blockscout-logs.js and the Ant bridge
 // (swarm/ant-chain-bridge.js) produce every expected output, except the
-// broadcast refusals, which are the design's own (see there). Their internal
+// broadcast refusals and B's fee combinations, which are the design's own
+// (see there). Their internal
 // functions are reached through naming.js's harness, which appends
 // test-only exports to the original source and stubs the router's modules,
 // so no reference code is copied here. The observers appended below only
@@ -618,6 +619,104 @@ function buildFeeQuotes(router) {
     }
     return { id, source, gas_price: gasPrice, priority, ...(deviation ? { deviation } : {}), js };
   });
+}
+
+// ---------------------------------------------------------------------------
+// B's combination of Direct's quotes: design 0005's own (deviation
+// fee-combination, #92)
+//
+// The reference has no counterpart: its Direct step returns the first
+// endpoint's quote that answers. Each endpoint's quote here still comes from
+// the reference's feeQuote; the combined quote is the design's, its
+// expected values taken from design 0005's text (Plausibility, B: combining
+// Direct's quotes): each quote read as a max fee per gas M (2·G − P, or G
+// for legacy) and a priority fee P (or G); EIP-1559 with the lowest M and
+// the lowest P when all are EIP-1559, or mixed where a verified header shows
+// EIP-1559; legacy at the lowest gas price (an EIP-1559 quote's
+// effectiveGasPrice) when all are legacy, or mixed otherwise; one answer
+// unchanged. The reply adds `answered` after `verified`; an EIP-1559
+// combination's baseFee is ⌊(M − P)/2⌋ and its effectiveGasPrice
+// baseFee + P.
+
+function feeCombinationInputs() {
+  const big = (n) => jsonText('0x' + n.toString(16));
+  const max = 2n ** BigInt(BIGINT_BITS) - 1n;
+  const legacy = (gasPrice) => ({ type: 'legacy', gasPrice });
+  const eip1559 = (baseFee, priority, maxFee, effective) => ({ type: 'eip1559', baseFee, priority, maxFee, effective });
+  // [id, eip1559_verified, [[gas price, priority hint (null: none)], ...], combined]
+  return [
+    // One answer: that quote, unchanged, wherever EIP-1559 is verified.
+    ['one-eip1559', false, [['"0x64"', '"0xa"']], eip1559(90n, 10n, 190n, 100n)],
+    ['one-legacy-hint-over-gas-price', true, [['"0x10"', '"0x11"']], legacy(16n)],
+    ['one-legacy-no-hint', false, [['"0x10"', null]], legacy(16n)],
+    // All EIP-1559: the lowest M (190) and the lowest P (5).
+    ['three-eip1559', false, [['"0x64"', '"0xa"'], ['"0x78"', '"0x5"'], ['"0x6e"', '"0x14"']], eip1559(92n, 5n, 190n, 97n)],
+    // 10/1 with 10/2: M = 18, P = 1; (M − P)/2 would be 8.5 wei.
+    ['independent-minima-odd', false, [['"0xa"', '"0x1"'], ['"0xa"', '"0x2"']], eip1559(8n, 1n, 18n, 9n)],
+    // 100/10 with 100/9: M = 190, not the raw minima's 191.
+    ['raw-minima-trap', false, [['"0x64"', '"0xa"'], ['"0x64"', '"0x9"']], eip1559(90n, 9n, 190n, 99n)],
+    ['priority-equals-gas-price', false, [['"0x64"', '"0x64"'], ['"0x64"', '"0xa"']], eip1559(45n, 10n, 100n, 55n)],
+    ['priority-zero', false, [['"0x64"', '"0x0"'], ['"0x5a"', '"0xa"']], eip1559(85n, 0n, 170n, 85n)],
+    ['decimal-and-number-inputs', false, [['"30000000000"', '"1000000000"'], ['31000000000', '2000000000']], eip1559(29000000000n, 1000000000n, 59000000000n, 30000000000n)],
+    // The replay's router-fee-quote-direct-same-endpoint: 3773/1 with 1/1.
+    ['replay-same-endpoint', false, [['"0xebd"', '"0x1"'], ['"0x1"', '"0x1"']], eip1559(0n, 1n, 1n, 1n)],
+    // All legacy (no hint, a hint above G, a negative hint): the lowest G,
+    // and still legacy where EIP-1559 is verified.
+    ['all-legacy', false, [['"0x10"', null], ['"0xc"', '"0xd"'], ['"0x14"', '"-1"']], legacy(12n)],
+    ['all-legacy-verified', true, [['"0x10"', null], ['"0xc"', '"0xd"'], ['"0x14"', '"-1"']], legacy(12n)],
+    // The boundary case: an EIP-1559 100/1 (M = 199) with a legacy 1000.
+    // Verified, EIP-1559 with M = 199, P = 1: at a base fee of 1 it pays 2.
+    ['mixed-verified-boundary', true, [['"0x64"', '"0x1"'], ['"0x3e8"', null]], eip1559(99n, 1n, 199n, 100n)],
+    // Without a verified header, legacy at G = 100: it pays 100.
+    ['mixed-unverified-boundary', false, [['"0x64"', '"0x1"'], ['"0x3e8"', null]], legacy(100n)],
+    ['mixed-verified-legacy-lowest', true, [['"0x64"', '"0xa"'], ['"0x32"', null]], eip1559(20n, 10n, 50n, 30n)],
+    ['mixed-unverified-legacy-lowest', false, [['"0x64"', '"0xa"'], ['"0x32"', null]], legacy(50n)],
+    ['three-mixed-verified', true, [['"0x64"', '"0xa"'], ['"0x3e8"', null], ['"0x78"', '"0x5"']], eip1559(92n, 5n, 190n, 97n)],
+    ['three-mixed-unverified', false, [['"0x64"', '"0xa"'], ['"0x3e8"', null], ['"0x96"', '"0x200"']], legacy(100n)],
+    // Widths: a gas price of 2^4096 − 1 makes M one bit wider, and it
+    // prints; 256-bit quantities mixed where EIP-1559 is verified.
+    ['width-max', false, [[big(max), '"0x1"'], [big(max), '"0x0"']], eip1559(max - 1n, 0n, 2n * max - 1n, max - 1n)],
+    ['uint256-mixed-verified', true, [[big(2n ** 256n - 1n), big(2n ** 255n)], [big(2n ** 200n), null]], eip1559(0n, 2n ** 200n, 2n ** 200n, 2n ** 200n)],
+  ];
+}
+
+// The combined quote as the core writes it: today's keys in the router's
+// order, then `answered`.
+function combinedQuoteJson(combined, answered) {
+  if (combined.type === 'legacy') {
+    const gasPrice = combined.gasPrice.toString();
+    return jsonText({ type: 'legacy', gasPrice, effectiveGasPrice: gasPrice, source: 'direct', verified: false, answered });
+  }
+  // The reply's own relations (design 0005, B: The reply).
+  assert.equal(combined.baseFee, (combined.maxFee - combined.priority) / 2n);
+  assert.equal(combined.effective, combined.baseFee + combined.priority);
+  return jsonText({
+    type: 'eip1559',
+    baseFee: combined.baseFee.toString(),
+    maxPriorityFeePerGas: combined.priority.toString(),
+    maxFeePerGas: combined.maxFee.toString(),
+    effectiveGasPrice: combined.effective.toString(),
+    source: 'direct',
+    verified: false,
+    answered,
+  });
+}
+
+function buildFeeCombinations(router) {
+  const { feeQuote } = router.__internals;
+  const parse = (text) => (text === null ? undefined : JSON.parse(text));
+  const cases = feeCombinationInputs().map(([id, verified, endpoints, combined]) => ({
+    id,
+    eip1559_verified: verified,
+    endpoints: endpoints.map(([gasPrice, priority]) => ({
+      gas_price: gasPrice,
+      priority,
+      // Each endpoint's quote is today's: it answers, or it isn't combined.
+      js: { quote_json: jsonText(feeQuote('direct', parse(gasPrice), parse(priority))) },
+    })),
+    design: { quote_json: combinedQuoteJson(combined, endpoints.length) },
+  }));
+  return { deviation: 'fee-combination', cases };
 }
 
 // ---------------------------------------------------------------------------
@@ -2161,6 +2260,7 @@ async function buildChain(checkout, ethers, privateKey, meta) {
     equivalence: stable.equivalence,
     answers: await buildAnswers(router),
     fee_quotes: buildFeeQuotes(router),
+    fee_combinations: buildFeeCombinations(router),
     safe_error_message: safe.cases,
     safe_error_whitespace: safe.whitespace,
     failure_texts: {

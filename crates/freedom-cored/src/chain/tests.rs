@@ -532,9 +532,37 @@ fn a_fee_quote_and_a_broadcast_reply_in_their_forms() {
             "effectiveGasPrice": "100",
             "source": "direct",
             "verified": false,
+            "answered": 1,
             "generation": 1,
         })
     );
+    // Direct's quote is B's: `answered` after `verified`, then the
+    // generation; another source's keeps today's shape.
+    for (quote, tail) in [
+        (
+            fc_chain::fee_quote_values("direct", Some("16"), None)
+                .ok()
+                .and_then(|values| fc_chain::combine_fee_quotes(&[values], false))
+                .unwrap(),
+            r#""source":"direct","verified":false,"answered":1,"generation":3}}"#,
+        ),
+        (
+            fc_chain::fee_quote("myotis", Some("16"), None).unwrap(),
+            r#""source":"myotis","verified":true,"generation":3}}"#,
+        ),
+    ] {
+        let done = Done {
+            id: 1,
+            result: Ok(Success::FeeQuote(quote)),
+            outcome: None,
+            settled: 0,
+            generation: 3,
+        };
+        let message = reply_message(5, &done);
+        assert_eq!(message.len(), message.write().len());
+        let text = String::from_utf8(message.write().to_vec()).unwrap();
+        assert!(text.ends_with(tail), "{text}");
+    }
     // A broadcast the endpoint accepts.
     let raw = "0xf85f8001825208941111111111111111111111111111111111111111018026a045df4733a45ed06c5628f22221a73e0b2faa3959f649cc47e6c2a15c9792ae07a00ea422e4923de6e5b4c52d7fbd39046e96acf73b2037a5f11918ec6c2a64b40a";
     let hash = "0xdff97f6d2d938656e056527357e2ee12f38c03923ab1d11bc556fb5cc123e578";

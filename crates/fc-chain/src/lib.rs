@@ -7,7 +7,9 @@
 //! - Agreement between answers, as SHA-256 of `stableValue`:
 //!   [`stable_digest`].
 //! - `feeQuote`: [`fee_quote`], and [`fee_quote_reserving`] for a caller that
-//!   reserves its allocations first.
+//!   reserves its allocations first; B's combination of Direct's quotes,
+//!   the design's own (deviation `fee-combination`):
+//!   [`combine_fee_quotes`] of [`fee_quote_values`].
 //! - `safeErrorMessage` and the router's failure texts:
 //!   [`safe_error_message`], [`request_failure_text`],
 //!   [`no_source_left_text`], [`unsupported_read_method_text`].
@@ -27,7 +29,8 @@
 //! Deviations, each pinned by vectors: `json-depth` (nesting deeper than
 //! 512 levels is refused), `json-parse-text` (a fixed text for a body that
 //! isn't JSON), `bigint-width` (decimal input, gas prices and Myotis
-//! numbers wider than 4096 bits are refused) and `broadcast-outcome`.
+//! numbers wider than 4096 bits are refused), `broadcast-outcome` and
+//! `fee-combination`.
 //!
 //! The crate does no I/O.
 
@@ -67,7 +70,10 @@ pub use blockscout::{
     rpc_transfer_log_well_formed, rpc_transfer_logs_well_formed, transfers_json,
 };
 pub use broadcast::{AttemptClass, RefusalReason, broadcast_refusal, classify_broadcast_answer};
-pub use fee::{FeeQuote, fee_quote, fee_quote_reserving};
+pub use fee::{
+    FeeQuote, QuoteValues, combine_fee_quotes, fee_quote, fee_quote_reserving, fee_quote_values,
+    fee_quote_values_reserving,
+};
 pub use js::{JsError, JsString, is_js_whitespace};
 pub use logs::{
     LOG_RANGE_CAP_TTL_MS, LOG_RANGE_REFUSAL_CODE, LOG_SCAN_COOLDOWN_MS, LOG_SCAN_QUORUM_ROUNDS,
