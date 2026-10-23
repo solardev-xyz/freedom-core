@@ -98,6 +98,14 @@ const MSG_DECRYPTED_INVALID: &str = "Decrypted data is not a valid mnemonic";
 pub enum Out {
     /// A JSON payload to frame and send (a response or an event).
     Send(Zeroizing<Vec<u8>>),
+    /// The reply to request `id`, valid only under the vault's `epoch`
+    /// (design 0008, "The sealed release"): checked again when it is handed
+    /// to the writer, and sent as `vault_locked` if that epoch has ended.
+    SendUnder {
+        payload: Zeroizing<Vec<u8>>,
+        id: u64,
+        epoch: u64,
+    },
     /// A job for the worker, with its ID.
     Job(u64, Job),
 }
@@ -636,6 +644,11 @@ struct PublicKeyParams {
     public_key: String,
 }
 
+#[derive(Deserialize)]
+struct RecipientParams {
+    recipient: String,
+}
+
 #[derive(Serialize)]
 struct Status {
     exists: bool,
@@ -692,6 +705,11 @@ impl Vault {
         self.file = file;
     }
 
+    /// The vault's epoch: `None` while locked.
+    pub fn epoch(&self) -> Option<u64> {
+        self.state.epoch().map(|epoch| epoch.get())
+    }
+
     pub fn set_auto_lock_ms(&mut self, auto_lock_ms: u64) {
         self.auto_lock_ms = auto_lock_ms;
     }
@@ -718,6 +736,7 @@ impl Vault {
                 | "vault.reconcile"
                 | "nodes.write_identity"
                 | "nodes.op_status"
+                | "nodes.seal_radicle_key"
                 | "keys.generate_mnemonic"
                 | "keys.validate_mnemonic"
                 | "keys.addresses"
@@ -752,6 +771,13 @@ impl Vault {
                 Ok(json_result(id, &serde_json::json!({ "valid": valid })))
             }),
             "keys.addresses" => self.addresses(id, raw),
+            "nodes.seal_radicle_key" => {
+                match self.seal_radicle_key(id, raw) {
+                    Ok((payload, epoch)) => out.push(Out::SendUnder { payload, id, epoch }),
+                    Err(error) => self.reply_error(&mut out, id, error),
+                }
+                return out;
+            }
             "keys.radicle_did" => {
                 params::<PublicKeyParams>(raw).and_then(|p| radicle_did(id, &p.public_key))
             }
@@ -992,6 +1018,67 @@ impl Vault {
                 },
             }),
         ))
+    }
+
+    /// `nodes.seal_radicle_key` (design 0008, "The sealed release"): the
+    /// Radicle node key at `m/44'/73404'/0'/0'/0'`, sealed to the service's
+    /// key for this start, `recipient`. Only the 32-byte Ed25519 secret seed
+    /// is sealed: never a chain code, the seed, or another key, and no
+    /// parameter selects another.
+    ///
+    /// - **No vault** is `no_vault`, the one answer that leads main to a
+    ///   throwaway key, so it is given only when the vault file is absent.
+    ///   A locked vault is `vault_locked`; a file that can't be read is its
+    ///   own error.
+    /// - **The recipient is checked first,** whole: 32 bytes of base64, and
+    ///   not a low-order point (whose shared secret is all zero). So a
+    ///   broken recipient is `invalid_argument` whatever the vault's state,
+    ///   and never reads as `no_vault`.
+    /// - **The epoch:** the reply carries the epoch it was sealed under
+    ///   ([`Out::SendUnder`]). It is checked again when the loop hands it to
+    ///   the writer, which is 0008's boundary for the start: if a lock,
+    ///   manual or automatic, came while it waited for room, it goes as
+    ///   `vault_locked` instead, in its place.
+    /// - The derived key is wiped once sealed. The method's name is logged,
+    ///   never the recipient or the ciphertext.
+    fn seal_radicle_key(
+        &mut self,
+        id: u64,
+        raw: Option<&str>,
+    ) -> Result<(Zeroizing<Vec<u8>>, u64), ErrorBody> {
+        use base64::Engine as _;
+        let p = params::<RecipientParams>(raw)?;
+        let invalid = || ErrorBody::new(ErrorCode::InvalidArgument, "Invalid recipient");
+        let recipient: [u8; fc_seal::PUBLIC_KEY_LEN] = base64::engine::general_purpose::STANDARD
+            .decode(p.recipient.as_bytes())
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(invalid)?;
+        if !fc_seal::valid_recipient(&recipient) {
+            return Err(invalid());
+        }
+        if self.file.as_ref().map_err(|e| e.body(false))?.is_none() {
+            return Err(ErrorBody::new(ErrorCode::NoVault, MSG_NO_VAULT));
+        }
+        let epoch = self.epoch().ok_or_else(locked)?;
+        let keys = self.state.freedom_keys().map_err(locked_or_internal)?;
+        let key = keys.radicle.to_secret_bytes();
+        drop(keys);
+        let sealed = fc_seal::seal(&recipient, &key, &mut OsRng).map_err(|e| match e {
+            fc_seal::SealError::InvalidRecipient => invalid(),
+            fc_seal::SealError::Rng => internal(),
+        })?;
+        drop(key);
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let payload = json_result(
+            id,
+            &serde_json::json!({
+                "enc": b64(&sealed.enc),
+                "ciphertext": b64(&sealed.ciphertext),
+            }),
+        )
+        .ok_or_else(internal)?;
+        Ok((payload, epoch))
     }
 
     /// Validates a KDF request's parameters and pre-checks, then queues it.
@@ -1664,7 +1751,7 @@ fn deadline_exceeded() -> ErrorBody {
     ErrorBody::new(ErrorCode::Deadline, "Deadline exceeded")
 }
 
-fn locked() -> ErrorBody {
+pub(crate) fn locked() -> ErrorBody {
     ErrorBody::new(ErrorCode::VaultLocked, MSG_LOCKED)
 }
 

@@ -28,6 +28,8 @@ fc-evm = { path = "../fc-evm" }
 fc-keys = { path = "../fc-keys" }
 fc-naming = { path = "../fc-naming" }
 fc-protocol = { path = "../fc-protocol" }
+# The sealed release of the Radicle node key (design 0008).
+fc-seal = { path = "../fc-seal" }
 fc-swarm = { path = "../fc-swarm" }
 fc-vault = { path = "../fc-vault" }
 getrandom = "0.4"
@@ -46,4 +48,6 @@ fc-sys = { path = "../fc-sys" }
 rustix = { version = "1.1", default-features = false, features = ["fs", "process", "std"] }
 
 [dev-dependencies]
+# The seal test checks the opened key against the Radicle public key.
+ed25519-dalek = { version = "3.0", default-features = false }
 tempfile = "3"

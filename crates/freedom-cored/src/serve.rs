@@ -154,6 +154,7 @@ const CAPABILITIES: &[&str] = &[
     "vault.reconcile",
     "nodes.write_identity",
     "nodes.op_status",
+    "nodes.seal_radicle_key",
     "keys.generate_mnemonic",
     "keys.validate_mnemonic",
     "keys.addresses",
@@ -413,7 +414,8 @@ pub fn run(options: &Options) -> Exit {
                 }
             }
             Ok(Event::Room) => {
-                if let Flow::Exit(exit) = core.outbox.pump(Instant::now()) {
+                let epoch = core.vault.epoch();
+                if let Flow::Exit(exit) = core.outbox.pump(Instant::now(), epoch) {
                     break exit;
                 }
             }
@@ -464,7 +466,8 @@ pub fn run(options: &Options) -> Exit {
     }
     // What waits for room goes past the allowance: the drain below bounds it
     // by time instead.
-    core.outbox.drain();
+    let epoch = core.vault.epoch();
+    core.outbox.drain(epoch);
     // The writer ends once the producers' queues close; the transport's own
     // frames (main's credit) stop here.
     link.detach();
@@ -1187,6 +1190,7 @@ impl Core {
         for out in outs {
             let flow = match out {
                 Out::Send(payload) => self.send(&payload),
+                Out::SendUnder { payload, id, epoch } => self.send_under(&payload, id, epoch),
                 Out::Job(id, job) => {
                     if self.worker.submit(id, job) {
                         Flow::Continue
@@ -1225,7 +1229,57 @@ impl Core {
         let Some(frame) = transport::frame(payload) else {
             return Flow::Exit(Exit::Internal);
         };
-        self.outbox.send(frame, Instant::now())
+        self.outbox.send(frame, Instant::now(), self.vault.epoch())
+    }
+
+    /// Queues the reply to request `id`, valid only under the vault's
+    /// `epoch` (design 0008, "The sealed release": the epoch is checked at
+    /// the handoff to the writer). If that epoch has ended by the time it
+    /// would go, it goes as `vault_locked` instead, in its place.
+    fn send_under(&mut self, payload: &[u8], id: u64, epoch: u64) -> Flow {
+        let Some(frame) = transport::frame(payload) else {
+            return Flow::Exit(Exit::Internal);
+        };
+        let waiting = Waiting {
+            frame,
+            under: Some(Under { id, epoch }),
+        };
+        if crate::testhooks::hold_reply(id) {
+            return self.outbox.hold(waiting, Instant::now());
+        }
+        self.outbox
+            .push(waiting, Instant::now(), self.vault.epoch())
+    }
+}
+
+/// A frame waiting for the writer.
+struct Waiting {
+    frame: Zeroizing<Vec<u8>>,
+    under: Option<Under>,
+}
+
+/// The epoch a reply is valid under: the sealed release's (design 0008).
+#[derive(Clone, Copy)]
+struct Under {
+    id: u64,
+    epoch: u64,
+}
+
+impl Waiting {
+    /// What goes to the writer now, under the vault's epoch `now`: the
+    /// frame, or, for a reply whose epoch has ended (a lock, manual or
+    /// automatic, since its admission), `vault_locked` in its place. The
+    /// replaced frame is wiped. `None` if the error can't be framed.
+    fn current(self, now: Option<u64>) -> Option<Zeroizing<Vec<u8>>> {
+        match self.under {
+            Some(under) if now != Some(under.epoch) => {
+                drop(self.frame);
+                let mut payload = Zeroizing::new(Vec::with_capacity(128));
+                message::write_error(&mut *payload, under.id, &crate::vault::locked()).ok()?;
+                transport::frame(&payload)
+            }
+            _ => Some(self.frame),
+        }
     }
 }
 
@@ -1237,7 +1291,7 @@ struct Outbox {
     out: Sender<transport::Out>,
     allowance: Arc<Allowance>,
     link: Arc<Link>,
-    waiting: VecDeque<Zeroizing<Vec<u8>>>,
+    waiting: VecDeque<Waiting>,
     /// Since when frames have waited.
     since: Option<Instant>,
     /// [`STALL`], or a test's.
@@ -1262,25 +1316,58 @@ impl Outbox {
     }
 
     /// Queues `frame` behind the frames that wait, and hands the writer
-    /// what fits.
-    fn send(&mut self, frame: Zeroizing<Vec<u8>>, now: Instant) -> Flow {
-        self.waiting.push_back(frame);
-        self.pump(now)
+    /// what fits. `epoch` is the vault's now.
+    fn send(&mut self, frame: Zeroizing<Vec<u8>>, now: Instant, epoch: Option<u64>) -> Flow {
+        self.push(Waiting { frame, under: None }, now, epoch)
+    }
+
+    fn push(&mut self, waiting: Waiting, now: Instant, epoch: Option<u64>) -> Flow {
+        self.waiting.push_back(waiting);
+        self.pump(now, epoch)
+    }
+
+    /// A test's: queues `waiting` without handing anything over, as if the
+    /// allowance had no room.
+    fn hold(&mut self, waiting: Waiting, now: Instant) -> Flow {
+        self.waiting.push_back(waiting);
+        if self.since.is_none() {
+            self.since = Some(now);
+        }
+        Flow::Continue
     }
 
     /// Hands waiting frames to the writer, in order, while the allowance
     /// has room. A refusal arms the allowance's wake-up ([`Event::Room`]).
-    fn pump(&mut self, now: Instant) -> Flow {
-        while let Some(frame) = self.waiting.front() {
-            let Some(hold) = self.allowance.take(frame.len()) else {
+    /// Each frame is judged at its handoff, under the vault's epoch now
+    /// (`epoch`): a reply valid only under an epoch that has ended goes as
+    /// `vault_locked` ([`Waiting::current`]).
+    fn pump(&mut self, now: Instant, epoch: Option<u64>) -> Flow {
+        while let Some(front) = self.waiting.front_mut() {
+            if front.under.is_some_and(|under| epoch != Some(under.epoch)) {
+                let stale = std::mem::replace(
+                    front,
+                    Waiting {
+                        frame: Zeroizing::new(Vec::new()),
+                        under: None,
+                    },
+                );
+                let Some(frame) = stale.current(epoch) else {
+                    return Flow::Exit(Exit::Internal);
+                };
+                front.frame = frame;
+            }
+            let Some(hold) = self.allowance.take(front.frame.len()) else {
                 break;
             };
-            let Some(frame) = self.waiting.pop_front() else {
+            let Some(waiting) = self.waiting.pop_front() else {
                 break;
             };
             if self
                 .out
-                .send(transport::Out::Frame { frame, hold })
+                .send(transport::Out::Frame {
+                    frame: waiting.frame,
+                    hold,
+                })
                 .is_err()
             {
                 return Flow::Exit(Exit::Protocol);
@@ -1330,9 +1417,13 @@ impl Outbox {
     }
 
     /// Hands every waiting frame to the writer, past the allowance: on
-    /// exit, where the writer's drain is bounded by time instead.
-    fn drain(&mut self) {
-        for frame in self.waiting.drain(..) {
+    /// exit, where the writer's drain is bounded by time instead. Each is
+    /// judged under the vault's epoch then, as [`Outbox::pump`] judges it.
+    fn drain(&mut self, epoch: Option<u64>) {
+        for waiting in self.waiting.drain(..) {
+            let Some(frame) = waiting.current(epoch) else {
+                continue;
+            };
             let hold = self.allowance.force(frame.len());
             let _ = self.out.send(transport::Out::Frame { frame, hold });
         }
@@ -1389,7 +1480,7 @@ mod tests {
         let (mut outbox, queue, link, woken) = outbox(2);
         let now = Instant::now();
         for id in 1..=5 {
-            assert!(matches!(outbox.send(reply(id), now), Flow::Continue));
+            assert!(matches!(outbox.send(reply(id), now, None), Flow::Continue));
         }
         // Two went to the writer; three wait here.
         assert_eq!(outbox.waiting.len(), 3);
@@ -1397,7 +1488,7 @@ mod tests {
         let mut written = Vec::new();
         while outbox.is_waiting() || written.len() < 5 {
             written.push(write_one(&queue, &link, now));
-            assert!(matches!(outbox.pump(now), Flow::Continue));
+            assert!(matches!(outbox.pump(now, None), Flow::Continue));
         }
         assert_eq!(written, [1, 2, 3, 4, 5]);
         assert_eq!(*woken.lock().unwrap(), 3);
@@ -1412,7 +1503,10 @@ mod tests {
         let (mut outbox, queue, link, _) = outbox(1);
         let start = Instant::now();
         for id in 1..=3 {
-            assert!(matches!(outbox.send(reply(id), start), Flow::Continue));
+            assert!(matches!(
+                outbox.send(reply(id), start, None),
+                Flow::Continue
+            ));
         }
         assert_eq!(outbox.deadline(), Some(start + STALL));
         let short = STALL - Duration::from_millis(1);
@@ -1421,7 +1515,7 @@ mod tests {
         // the next frame goes, and the bound counts from that write.
         let read = start + Duration::from_secs(20);
         assert_eq!(write_one(&queue, &link, read), 1);
-        assert!(matches!(outbox.pump(read), Flow::Continue));
+        assert!(matches!(outbox.pump(read, None), Flow::Continue));
         assert!(outbox.is_waiting());
         assert_eq!(outbox.deadline(), Some(read + STALL));
         // Then it reads only other producers' frames (naming's, chain's),
@@ -1440,14 +1534,104 @@ mod tests {
         assert_eq!(exit.code(), 76);
     }
 
+    /// The next frame queued for the writer, whole, after the writer wrote
+    /// it.
+    fn take_one(queue: &Receiver<transport::Out>, link: &Link, at: Instant) -> serde_json::Value {
+        let Ok(transport::Out::Frame { frame, hold }) = queue.try_recv() else {
+            panic!("nothing for the writer");
+        };
+        link.wrote(at);
+        drop(hold);
+        serde_json::from_slice(&frame[5..]).unwrap()
+    }
+
+    fn sealed(id: u64, epoch: u64) -> Waiting {
+        Waiting {
+            frame: reply(id),
+            under: Some(Under { id, epoch }),
+        }
+    }
+
+    /// Design 0008, "The sealed release": a reply valid only under an epoch
+    /// is judged when it is handed to the writer, not when it was made. In
+    /// its place in the queue, it goes as it is under that epoch, and as
+    /// `vault_locked` once a lock ended it, a later unlock included; the
+    /// frames around it are untouched (review of #175).
+    #[test]
+    fn a_reply_under_an_epoch_is_judged_at_its_handoff() {
+        let now = Instant::now();
+        for (at_handoff, sealed_goes) in [(Some(7), true), (None, false), (Some(8), false)] {
+            // Room for one frame: 1 goes, the seal (2) and 3 wait.
+            let (mut outbox, queue, link, _) = outbox(1);
+            assert!(matches!(
+                outbox.send(reply(1), now, Some(7)),
+                Flow::Continue
+            ));
+            assert!(matches!(
+                outbox.push(sealed(2, 7), now, Some(7)),
+                Flow::Continue
+            ));
+            assert!(matches!(
+                outbox.send(reply(3), now, Some(7)),
+                Flow::Continue
+            ));
+            assert_eq!(outbox.waiting.len(), 2);
+            // The epoch the handoffs happen under: unchanged, locked, or a
+            // new one after an unlock.
+            let mut written = vec![take_one(&queue, &link, now)];
+            while written.len() < 3 {
+                assert!(matches!(outbox.pump(now, at_handoff), Flow::Continue));
+                written.push(take_one(&queue, &link, now));
+            }
+            let ids: Vec<u64> = written.iter().map(|m| m["id"].as_u64().unwrap()).collect();
+            assert_eq!(ids, [1, 2, 3], "{at_handoff:?}");
+            if sealed_goes {
+                assert_eq!(
+                    written[1]["result"],
+                    serde_json::json!({}),
+                    "{at_handoff:?}"
+                );
+            } else {
+                assert_eq!(
+                    written[1]["error"]["code"], "vault_locked",
+                    "{at_handoff:?}"
+                );
+                assert!(written[1].get("result").is_none());
+            }
+            assert_eq!(written[2]["result"], serde_json::json!({}));
+        }
+    }
+
+    /// On exit, what waits is judged the same way before it goes.
+    #[test]
+    fn exiting_judges_a_waiting_reply_under_its_epoch() {
+        // Room for one, taken: the seal waits.
+        let (mut outbox, queue, link, _) = outbox(1);
+        let now = Instant::now();
+        assert!(matches!(
+            outbox.send(reply(1), now, Some(7)),
+            Flow::Continue
+        ));
+        assert!(matches!(
+            outbox.push(sealed(2, 7), now, Some(7)),
+            Flow::Continue
+        ));
+        assert!(outbox.is_waiting());
+        outbox.drain(None);
+        assert_eq!(take_one(&queue, &link, now)["id"], 1);
+        let message = take_one(&queue, &link, now);
+        assert_eq!(message["id"], 2);
+        assert_eq!(message["error"]["code"], "vault_locked");
+    }
+
     #[test]
     fn exiting_hands_the_writer_what_waits() {
         let (mut outbox, queue, _link, _) = outbox(1);
         let now = Instant::now();
         for id in 1..=3 {
-            assert!(matches!(outbox.send(reply(id), now), Flow::Continue));
+            assert!(matches!(outbox.send(reply(id), now, None), Flow::Continue));
         }
-        outbox.drain();
+        outbox.drain(None);
         assert!(!outbox.is_waiting());
         assert_eq!(outbox.deadline(), None);
         let ids: Vec<u64> = std::iter::from_fn(|| match queue.try_recv() {

@@ -389,6 +389,7 @@ Main's proxy has to reproduce each JS handler: argument checks and defaults, the
 | `keys.radicle_did` | `{ public_key }` → `{ did }` | public conversion; works while locked (`readRadicleDid`, `identity-manager.js:381`) |
 | `nodes.write_identity` | `{ op_id, node: "bee", data_dir, api_port, p2p_port }` or `{ op_id, node: "radicle", home, alias }` → `{ address }` or `{ did, node_id }` | [multi-file protocol](#multi-file-writes). Bee generates a fresh keystore password and writes `config.yaml` exactly as `createBeeConfig` does, with main's per-profile ports. [0008](0008-radicle-service.md#identity-changes) replaces the Radicle form: `{ op_id, node: "radicle", home, alias, wipe? }` writes no key file, removes any, needs no vault, and returns no DID |
 | `nodes.op_status` | `{ op_id }` → `{ status: "installed" \| "pending_recovery" \| "not_committed" \| "corrupt" }` | reconciliation after a lost reply |
+| `nodes.seal_radicle_key` | `{ recipient }` → `{ enc, ciphertext }`, base64 | main only; [0008](0008-radicle-service.md#the-sealed-release): the Radicle node key, sealed (HPKE) to the key the Radicle service made for one start. `no_vault` only when no vault file exists, `vault_locked`, `invalid_argument`. Implemented in `fc-seal` with the `hpke` crate |
 | `vault.reconcile` | see [Reconciliation](#reconciliation) | after a lost mutation reply |
 | `compat.private_key` | `{ account }` → `{ private_key }` | temporary; see Migration |
 | `compat.bee_wallet_key` | → `{ private_key }` | temporary |
