@@ -8,6 +8,10 @@ pub enum Error {
     TypedData(String),
     #[error("invalid {0}")]
     Value(String),
+    /// The view of what is signed (#88) would be longer than one reply
+    /// can carry (deviation `view-size`).
+    #[error("invalid typed data: too large to show in one reply")]
+    ViewTooLarge,
     #[error("signing failed")]
     Signing,
 }
