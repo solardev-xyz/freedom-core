@@ -240,7 +240,17 @@ fn a_quorum_read_through_main() {
 /// `excludeSources` over the wire, on top of the profile's exclusions.
 #[test]
 fn a_read_skips_the_sources_it_excludes() {
-    let (_root, mut core) = core();
+    // The core offers the field; main sends it to no other core.
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    let hello = core.hello_fragments();
+    assert!(
+        hello["result"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("exclude_sources")),
+        "{hello}"
+    );
     configure(
         &mut core,
         2,

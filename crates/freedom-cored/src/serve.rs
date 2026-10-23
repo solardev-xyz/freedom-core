@@ -186,7 +186,9 @@ const CAPABILITIES: &[&str] = &[
 /// - `myotis_refusal_codes`: the core reads a Myotis broadcast's `{
 ///   rejected: { reason, code: -32602 } }` (The rest). Main sends that form
 ///   only to a core that offers it.
-const FEATURES: &[&str] = &["fragments", "myotis_refusal_codes"];
+/// - `exclude_sources`: the core reads `chain.request`'s `exclude_sources`
+///   (Methods main calls). Main sends it only to a core that offers it.
+const FEATURES: &[&str] = &["fragments", "myotis_refusal_codes", "exclude_sources"];
 
 pub fn run(options: &Options) -> Exit {
     hardening::harden();
