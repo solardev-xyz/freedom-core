@@ -445,9 +445,9 @@ Through the binary, in CI's job for each OS:
   - a test hook's attempt to run `/bin/sh` (`cmd.exe` on Windows) fails;
   - on Linux, `ptrace` and `process_vm_readv` of another process fail.
 - **seccomp:**
-  - each denied call, made as a raw syscall, fails;
-  - on x86-64, the same calls with `__X32_SYSCALL_BIT`, and through the i386 ABI, are killed where the kernel has those ABIs;
-  - **the generated BPF,** evaluated in a unit test on synthetic records for native, compat (i386, AArch32) and x32 calls, whatever CI's kernel enables.
+  - **live:** each denied call that std or rustix offers safely (exec and process creation, the mode, owner, xattr and time calls, `ioctl`, the socket families) fails as the filter answers. Rule 6 allows no raw-syscall facility outside `fc-sys`, and a generic one would be unsound, so calls without a safe API aren't made live;
+  - **the whole denylist:** the generated BPF, the exact programs installed, evaluated in a unit test on synthetic records for every denied call, and for native, compat (i386, AArch32) and x32 calls, whatever CI's kernel enables;
+  - **the ABI guard, live:** on x86-64, `getpid` with `__X32_SYSCALL_BIT`, and through the i386 ABI (`int 0x80`), is killed, where the kernel has those ABIs. These two calls are `fc-sys`'s only test helpers, behind its `test-abis` feature.
 - **Local IPC:** a listener on a pathname socket and one on an abstract socket, outside every grant: connecting to either fails (seccomp; and from ABI 9, Landlock), while tokio's socket pair works.
 - **Network:**
   - in `socks5` mode, a TCP connection to any port but the proxy's is refused by the kernel, on Linux from ABI 4 and on macOS;
