@@ -1,0 +1,53 @@
+# The generator of vectors/dweb-verify.json (design 0009, Tests first).
+#
+# A Cargo workspace of its own, excluded from the core's: it links the pinned
+# Ant and freedom-ipfs crates (libp2p, SQLite, tokio) only to record what those
+# nodes answer, and nothing of it ships. Normal CI reads the committed JSON and
+# never builds this; the `dweb-verify vectors` workflow builds it, regenerates
+# the file and compares it byte for byte, only when this directory or the JSON
+# changes.
+
+[package]
+name = "dweb-verify-vectors"
+description = "Records design 0009's verification vectors from the pinned Ant, Kubo and freedom-ipfs"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+repository = "https://github.com/solardev-xyz/freedom-core"
+
+[workspace]
+resolver = "3"
+
+[dependencies]
+# Ant v0.5.71 (910452d), the release freedom-browser pins on
+# integration/rust-core: its gateway's handlers, and the library code its
+# node loop runs (splitter, erasure coding, manifests, feeds, joiner).
+ant-control = { git = "https://github.com/freedom-hq/ant", tag = "v0.5.71" }
+ant-crypto = { git = "https://github.com/freedom-hq/ant", tag = "v0.5.71" }
+ant-gateway = { git = "https://github.com/freedom-hq/ant", tag = "v0.5.71" }
+ant-retrieval = { git = "https://github.com/freedom-hq/ant", tag = "v0.5.71" }
+async-trait = "0.1.89"
+axum = "0.8.9"
+base64 = "0.22.1"
+hex = "0.4.3"
+k256 = { version = "0.13.4", features = ["ecdsa"] }
+http-body-util = "0.1.3"
+serde_json = { version = "1.0.140", features = ["preserve_order"] }
+sha2 = "0.10.9"
+tokio = { version = "1.52.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tower = { version = "0.5.3", features = ["util"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+panic = "warn"
+dbg_macro = "warn"
+
+# Generation splits and joins files of up to 64 MiB at every erasure-coding
+# level: run it optimized (`cargo run --release`).
+[profile.release]
+debug = false

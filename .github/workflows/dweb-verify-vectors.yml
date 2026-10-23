@@ -1,0 +1,55 @@
+name: dweb-verify vectors
+
+# vectors/dweb-verify.json (design 0009) is recorded from the pinned Ant (and,
+# later, Kubo and freedom-ipfs) by its own generator workspace,
+# vectors/dweb-verify. Normal CI reads the committed JSON and never builds the
+# generator: its graph (libp2p, SQLite, axum) is large and ships nowhere.
+# This workflow builds it and regenerates the file, failing unless the result
+# equals the committed one byte for byte, only when the generator or the file
+# changes.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "vectors/dweb-verify/**"
+      - "vectors/dweb-verify.json"
+      - "rust-toolchain.toml"
+      - ".github/workflows/dweb-verify-vectors.yml"
+  pull_request:
+    paths:
+      - "vectors/dweb-verify/**"
+      - "vectors/dweb-verify.json"
+      - "rust-toolchain.toml"
+      - ".github/workflows/dweb-verify-vectors.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dweb-verify-vectors-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: dweb-verify vectors (regenerate and compare)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vectors/dweb-verify
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: vectors/dweb-verify -> target
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --release --all-targets -- -D warnings
+      - name: Regenerate and compare
+        run: cargo run --locked --release -- check
