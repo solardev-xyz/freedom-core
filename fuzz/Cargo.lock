@@ -329,7 +329,7 @@ dependencies = [
 
 [[package]]
 name = "fc-chain"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "fc-dweb",
  "fc-json",
@@ -342,7 +342,7 @@ dependencies = [
 
 [[package]]
 name = "fc-dweb"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "fc-json",
  "sha3",
@@ -380,7 +380,7 @@ dependencies = [
 
 [[package]]
 name = "fc-naming"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "blake2",
  "ens-normalize",
@@ -404,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "fc-seal"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aes-gcm",
  "hpke",
