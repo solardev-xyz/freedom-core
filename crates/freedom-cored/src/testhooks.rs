@@ -35,6 +35,10 @@
 //! - `FREEDOM_CORED_TEST_METHODS` enables the `test.*` methods
 //!   (`testmethods`), which make responses of any size. Release builds
 //!   don't compile them, nor this hook.
+//! - `FREEDOM_CORED_TEST_HOLD_REPLY` names a request ID: its reply, if it
+//!   is one valid only under the vault's epoch (`nodes.seal_radicle_key`),
+//!   waits in the loop's outbox as if the writer had no room, until the
+//!   loop's next frame or room moves it.
 
 use std::time::Duration;
 
@@ -149,6 +153,19 @@ pub fn swap(stage: &str, path: &std::path::Path) {
     {
         let _ = std::fs::rename(replacement, path);
     }
+}
+
+#[cfg(debug_assertions)]
+pub fn hold_reply(id: u64) -> bool {
+    std::env::var("FREEDOM_CORED_TEST_HOLD_REPLY")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        == Some(id)
+}
+
+#[cfg(not(debug_assertions))]
+pub fn hold_reply(_id: u64) -> bool {
+    false
 }
 
 #[cfg(debug_assertions)]

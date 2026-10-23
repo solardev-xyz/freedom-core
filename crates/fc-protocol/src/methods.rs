@@ -108,6 +108,9 @@ pub const METHODS: &[Method] = &[
     row("vault.reconcile", SHELL, false, VAULT),
     row("nodes.write_identity", CS, true, VAULT),
     row("nodes.op_status", SHELL, false, VAULT),
+    // Design 0008, "The sealed release": the Radicle node key, sealed to the
+    // Radicle service. Main's own: no renderer channel reaches it.
+    row("nodes.seal_radicle_key", SHELL, false, NOW),
     row("keys.generate_mnemonic", CS, false, NOW),
     row("keys.validate_mnemonic", CS, false, NOW),
     row("keys.addresses", CS, false, NOW),

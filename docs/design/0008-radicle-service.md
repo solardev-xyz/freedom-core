@@ -159,6 +159,8 @@ Electron main (profile P) ──spawn──▶ freedom-radicled serve --home <ra
   - everything else main has.
 
   `HOME` points at an empty directory the service owns. With libgit2's configuration search paths emptied ([upstream](#upstream-changes)), no global or system git configuration applies.
+
+  The service checks it before anything else, since a process that could have threads can't safely change its environment: it refuses to start (64) with any `RAD_*`, `GIT_*`, `SSH_AUTH_SOCK`, `LISTEN_*` or `XDG_CONFIG_HOME` set, or without `HOME` as an absolute directory.
 - **Handshake:** `rad.hello` within 10 s, as 0001. Its reply carries the X25519 public key the service made for this start ([The sealed release](#the-sealed-release)).
 - **The lock:** `<lock-dir>/radicle-<sha256(canonical home)>.lock`, under 0001's rules, which also cover the canonical path, the stable lock directory, network filesystems and bind mounts.
   - Contention retries for 5 s, then exits 75. Other errors and network filesystems exit 74.
@@ -492,7 +494,8 @@ The rules this design relies on, as 0007 specifies them:
 
 Exit codes:
 - 0001's: 64, 74, 75 and 76;
-- 70 for `node_down`, or a panic outside a request.
+- 70 for `node_down`, or a panic outside a request;
+- 0 after a start step the service answered with an error (`rad.identity`, `rad.reconcile`, `rad.start`): main has read the error, and doesn't restart.
 
 ### Progress
 

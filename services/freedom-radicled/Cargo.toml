@@ -1,0 +1,84 @@
+# freedom-radicled: the libradicle service process (design 0008).
+#
+# Its own Cargo workspace, excluded from the core's, as freedom-ipfsd's is:
+# its own lockfile, `cargo deny` policy and (with its release) notices, so
+# libradicle's graph (heartwood, libgit2, SQLite) never enters the core's
+# (0008, "Where the code lives"). It shares `fc-protocol`, `fc-service` and
+# `fc-seal` with the core, by path.
+
+[package]
+name = "freedom-radicled"
+description = "The libradicle service process: one Radicle node per process, over stdin and stdout frames (design 0008)"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+repository = "https://github.com/solardev-xyz/freedom-core"
+
+[workspace]
+resolver = "3"
+
+[features]
+# Fault injection for the integration tests, read from FREEDOM_RADICLED_TEST_*
+# variables: see src/testhooks.rs. Without the feature every hook is a no-op
+# and no variable is read. A release build with it doesn't compile.
+testhooks = []
+
+[dependencies]
+# The frame codec and error codes, shared with the core.
+fc-protocol = { path = "../../crates/fc-protocol" }
+# The service skeleton: the gate, hardening, the panic hook, watchdogs and the
+# connection to main.
+fc-service = { path = "../../crates/fc-service" }
+# The sealed release of the node key (0008, "The sealed release"): the
+# service's X25519 key for one start, and opening what the core sealed to it.
+fc-seal = { path = "../../crates/fc-seal" }
+# libradicle v0.8.0 (e5b137e, the release freedom-browser pins), built with
+# `no-spawn`, explicitly (0008, "Spawn and lock"): serving runs in process
+# and `git gc` is skipped. `HostKey` holds the node key; `start_with_key`
+# (a later step) runs the node with it and writes nothing secret. Pinned by
+# commit until the upstream changes 0008 lists are released (deny.toml
+# allows solardev-xyz). src/build_info.rs reports the same commit.
+libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "e5b137e429cecabd0d0b45c2b5f36f2917853eab", features = ["no-spawn"] }
+# The node identity's public forms (`did:key`, the node ID), from heartwood
+# at the commit libradicle pins: already in libradicle's graph.
+radicle-crypto = { git = "https://github.com/solardev-xyz/heartwood", rev = "c208df3ac7626402db60752f1f38d31465731f01" }
+# The public key of a node key, as libradicle computes it (ed25519-dalek 2,
+# libradicle's own version, already in its graph).
+ed25519-dalek = { version = "2", default-features = false, features = ["zeroize"] }
+# The OS's randomness: the X25519 key for one start, and a throwaway node key
+# on a profile without a vault. Already in libradicle's graph.
+getrandom = "0.4"
+rand_core = "0.10"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+zeroize = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+# The core's workspace lints, copied: workspace lints don't cross workspaces.
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+
+# Dependencies carry no debug info in dev and test builds: libradicle's graph
+# is large, and its debug info is most of a target directory.
+[profile.dev.package."*"]
+debug = false
+
+# Request panics unwind to their request's catch (0008, "Crashes and
+# restarts"): never `panic = "abort"`.
+[profile.release]
+panic = "unwind"

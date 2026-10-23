@@ -58,8 +58,9 @@ impl Ed25519Key {
         self.public
     }
 
-    /// The raw 32-byte private key (the Ed25519 seed). For key-file encoders
-    /// and the temporary `compat.*` exports only.
+    /// The raw 32-byte private key (the Ed25519 seed). For key-file encoders,
+    /// the temporary `compat.*` exports, and the sealed release of the
+    /// Radicle node key (design 0008) only.
     pub fn to_secret_bytes(&self) -> Zeroizing<[u8; 32]> {
         Zeroizing::new(*self.secret)
     }

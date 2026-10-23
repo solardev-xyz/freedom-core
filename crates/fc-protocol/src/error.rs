@@ -52,6 +52,17 @@ pub enum ErrorCode {
     /// A node's gate is held by another process: a Radicle identity write
     /// while the Radicle service runs (design 0008, "Identity changes").
     LockHeld,
+    // The Radicle service's start (design 0008, Errors). Each ends the
+    // process after its reply.
+    /// Something exists at the Radicle home's `keys/radicle`: main runs the
+    /// switch, then starts once more.
+    KeyFilePresent,
+    /// The sealed node key doesn't open with this process's key, or doesn't
+    /// hold 32 bytes.
+    BadSealedKey,
+    /// A start step that needs the node's identity came before
+    /// `rad.identity` succeeded.
+    NoIdentity,
 }
 
 /// The `error` member of a response: a closed shape, so a member it
@@ -122,6 +133,25 @@ mod tests {
             serde_json::to_value(ErrorCode::LockHeld).ok(),
             Some(serde_json::Value::from("lock_held"))
         );
+    }
+
+    #[test]
+    fn radicle_start_codes_on_the_wire() {
+        // Design 0008, Errors: the codes of the Radicle service's start.
+        for (code, wire) in [
+            (ErrorCode::KeyFilePresent, "key_file_present"),
+            (ErrorCode::BadSealedKey, "bad_sealed_key"),
+            (ErrorCode::NoIdentity, "no_identity"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(code).ok(),
+                Some(serde_json::Value::from(wire))
+            );
+            assert_eq!(
+                serde_json::from_value::<ErrorCode>(wire.into()).ok(),
+                Some(code)
+            );
+        }
     }
 
     #[test]

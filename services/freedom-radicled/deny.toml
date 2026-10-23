@@ -1,0 +1,68 @@
+# cargo-deny policy for freedom-radicled: the core's (../../deny.toml), with
+# the exceptions libradicle's graph needs, each explained. CI runs
+# `cargo deny check` here on every PR and daily, apart from the core's, so an
+# advisory in this graph never blocks a core change (design 0008, "Where the
+# code lives").
+
+[graph]
+all-features = true
+
+[advisories]
+# Vulnerabilities and unsound crates fail the check; nothing is ignored
+# without a comment explaining why.
+yanked = "deny"
+ignore = [
+    # rsa 0.9.10, through ssh-key's `rsa` feature (radicle-crypto,
+    # ssh-agent-lib): the Marvin timing side channel in RSA private-key
+    # operations, with no fixed release. The service never makes one: the
+    # node key is Ed25519, from `rad.identity` only (0008, "Keys"), never
+    # from a key file or an agent, and `SSH_AUTH_SOCK` refuses the start
+    # (src/env.rs).
+    { id = "RUSTSEC-2023-0071", reason = "no RSA private-key operation is ever made: the node key is Ed25519 from rad.identity, and no agent is reachable" },
+]
+
+[licenses]
+confidence-threshold = 0.9
+unused-allowed-license = "allow"
+# heartwood's signal handling (radicle-signals) uses two small crates under
+# the Unlicense, a public-domain dedication. Scoped to those crates, so
+# another Unlicense dependency needs its own review.
+exceptions = [
+    { allow = ["Unlicense"], crate = "sem_safe" },
+    { allow = ["Unlicense"], crate = "signals_receipts" },
+]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[licenses.private]
+# Workspace crates are unpublished and carry no license yet.
+ignore = true
+
+[bans]
+# libradicle's graph is on RustCrypto's digest-0.10 generation (heartwood's
+# ed25519-dalek 2), fc-seal's on 0.11 (the core's): both generations are
+# here, by design, until heartwood moves.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# libradicle and heartwood (the `freedom/embed` fork libradicle pins), each
+# pinned to a commit until a release carries 0008's upstream changes.
+allow-git = [
+    "https://github.com/solardev-xyz/libradicle",
+    "https://github.com/solardev-xyz/heartwood",
+]
