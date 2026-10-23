@@ -19,6 +19,13 @@
 //!   has none, and its subtype walk is exponential on diamond-shaped types.
 //!   Type hashes are computed once per type, so the work is bounded by the
 //!   input size and these limits.
+//! - A type named `EIP712Domain` is refused, as ethers' `getPayload` refuses
+//!   it: the view adds that type itself (#88).
+//!
+//! The pass that hashes also writes the view of what is signed (design 0002,
+//! "What the user is shown", #88): ethers' `getPayload(domain, types,
+//! message)`, as compact JSON text, measured while it is written, with the
+//! reports `ignored`, `named_type` and `chain`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -26,7 +33,7 @@ use serde_json::{Map, Value};
 
 use crate::{
     Error, U256, keccak256, parse_address, parse_bytes, parse_signed, quoted, quoted_list,
-    shortened,
+    shortened, to_hex,
 };
 
 const MAX_TYPES: usize = 256;
@@ -47,6 +54,7 @@ const MAX_VALUES: usize = 100_000;
 const MAX_NAME: usize = 256;
 /// The largest integer a JS number holds exactly.
 const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+const DOMAIN_TYPE: &str = "EIP712Domain";
 const DOMAIN_FIELDS: [(&str, &str); 5] = [
     ("name", "string"),
     ("version", "string"),
@@ -164,6 +172,9 @@ fn primitive(base: &str) -> Result<Option<Base>, Error> {
 
 struct Types {
     fields: BTreeMap<String, Vec<Field>>,
+    /// The type names in the order the request's object gives them, as
+    /// `getPayload` lists them.
+    order: Vec<String>,
     primary: String,
     /// keccak256 of each reachable struct's `encodeType` with its sorted
     /// subtypes appended, computed once.
@@ -204,6 +215,9 @@ impl Types {
             return Err(err("types: too many"));
         }
         for name in object.keys() {
+            if name == DOMAIN_TYPE {
+                return Err(err("types must not contain EIP712Domain"));
+            }
             if !is_identifier(name) {
                 return Err(err(format!(
                     "type name {} is not an identifier",
@@ -343,6 +357,7 @@ impl Types {
         }
         Ok(Types {
             fields,
+            order: object.keys().cloned().collect(),
             primary,
             type_hashes,
         })
@@ -356,12 +371,14 @@ impl Types {
     }
 
     /// `encodeData` of a struct: its type hash, then each field's 32 bytes.
+    /// The view gets the declared fields, in order, normalized.
     fn encode_struct(
         &self,
         name: &str,
         value: &Value,
         depth: usize,
         budget: &mut Budget,
+        view: &mut ViewText,
     ) -> Result<Vec<u8>, Error> {
         if depth > MAX_DEPTH {
             return Err(err("nested too deeply"));
@@ -375,7 +392,13 @@ impl Types {
             .ok_or_else(|| err(format!("unknown type {}", quoted(name))))?;
         let mut out = Vec::with_capacity(32 * (fields.len() + 1));
         out.extend_from_slice(&self.type_hash(name)?);
-        for field in fields {
+        view.raw("{")?;
+        for (index, field) in fields.iter().enumerate() {
+            if index > 0 {
+                view.raw(",")?;
+            }
+            view.string(&field.name)?;
+            view.raw(":")?;
             let value = object
                 .get(&field.name)
                 .filter(|v| !v.is_null())
@@ -392,8 +415,10 @@ impl Types {
                 value,
                 depth + 1,
                 budget,
+                view,
             )?);
         }
+        view.raw("}")?;
         Ok(out)
     }
 
@@ -405,6 +430,7 @@ impl Types {
         value: &Value,
         depth: usize,
         budget: &mut Budget,
+        view: &mut ViewText,
     ) -> Result<[u8; 32], Error> {
         if depth > MAX_DEPTH {
             return Err(err("nested too deeply"));
@@ -413,10 +439,10 @@ impl Types {
         let Some((outer, inner)) = dims.split_last() else {
             return match base {
                 Base::Struct(name) => {
-                    let encoded = self.encode_struct(name, value, depth, budget)?;
+                    let encoded = self.encode_struct(name, value, depth, budget, view)?;
                     budget.hash(&encoded)
                 }
-                _ => encode_base(base, value, budget),
+                _ => encode_base(base, value, budget, view),
             };
         };
         let items = value.as_array().ok_or_else(|| err("expected an array"))?;
@@ -428,17 +454,65 @@ impl Types {
             )));
         }
         let mut concatenated = Vec::with_capacity(32 * items.len());
-        for item in items {
+        view.raw("[")?;
+        for (index, item) in items.iter().enumerate() {
+            if index > 0 {
+                view.raw(",")?;
+            }
             concatenated.extend_from_slice(&self.encode_field(
                 base,
                 inner,
                 item,
                 depth + 1,
                 budget,
+                view,
             )?);
         }
+        view.raw("]")?;
         budget.hash(&concatenated)
     }
+
+    /// The view's `types`: every type as the request lists them, with the
+    /// alias-resolved field types `encodeType` uses, then `EIP712Domain`
+    /// for the domain fields present.
+    fn write_types(&self, view: &mut ViewText, domain: &[DomainField<'_>]) -> Result<(), Error> {
+        view.raw("{")?;
+        for name in &self.order {
+            view.string(name)?;
+            view.raw(":")?;
+            let fields = self.fields.get(name).map(Vec::as_slice).unwrap_or_default();
+            write_field_list(
+                view,
+                fields
+                    .iter()
+                    .map(|field| (field.name.as_str(), field.type_text.as_str())),
+            )?;
+            view.raw(",")?;
+        }
+        view.string(DOMAIN_TYPE)?;
+        view.raw(":")?;
+        write_field_list(view, domain.iter().map(|field| (field.name, field.ty)))?;
+        view.raw("}")
+    }
+}
+
+/// `[{"name":…,"type":…},…]`.
+fn write_field_list<'a>(
+    view: &mut ViewText,
+    fields: impl Iterator<Item = (&'a str, &'a str)>,
+) -> Result<(), Error> {
+    view.raw("[")?;
+    for (index, (name, ty)) in fields.enumerate() {
+        if index > 0 {
+            view.raw(",")?;
+        }
+        view.raw("{\"name\":")?;
+        view.string(name)?;
+        view.raw(",\"type\":")?;
+        view.string(ty)?;
+        view.raw("}")?;
+    }
+    view.raw("]")
 }
 
 fn collect(
@@ -494,13 +568,21 @@ fn number(value: &Value) -> Result<(bool, U256), Error> {
     }
 }
 
-fn encode_base(base: &Base, value: &Value, budget: &mut Budget) -> Result<[u8; 32], Error> {
+/// One value's 32 bytes; the view gets it as `getPayload` normalizes it:
+/// integers as decimal strings, bytes and addresses as lowercase hex.
+fn encode_base(
+    base: &Base,
+    value: &Value,
+    budget: &mut Budget,
+    view: &mut ViewText,
+) -> Result<[u8; 32], Error> {
     match base {
         Base::Uint(bits) => {
             let (negative, magnitude) = number(value)?;
             if negative || magnitude > U256::mask(*bits) {
                 return Err(err(format!("value out-of-bounds for uint{bits}")));
             }
+            view.integer(false, &magnitude)?;
             Ok(magnitude.to_be_bytes())
         }
         Base::Int(bits) => {
@@ -515,6 +597,7 @@ fn encode_base(base: &Base, value: &Value, budget: &mut Budget) -> Result<[u8; 3
             if limit.is_none_or(|limit| magnitude > limit) {
                 return Err(err(format!("value out-of-bounds for int{bits}")));
             }
+            view.integer(negative, &magnitude)?;
             Ok(if negative {
                 magnitude.wrapping_neg()
             } else {
@@ -530,6 +613,7 @@ fn encode_base(base: &Base, value: &Value, budget: &mut Budget) -> Result<[u8; 3
             if bytes.len() != *width {
                 return Err(err(format!("invalid length for bytes{width}")));
             }
+            view.hex(&bytes)?;
             let mut out = [0u8; 32];
             out[..*width].copy_from_slice(&bytes);
             Ok(out)
@@ -539,31 +623,42 @@ fn encode_base(base: &Base, value: &Value, budget: &mut Budget) -> Result<[u8; 3
                 value.as_str().ok_or_else(|| err("expected hex bytes"))?,
                 "bytes",
             )?;
+            view.hex(&bytes)?;
             budget.hash(&bytes)
         }
-        Base::String => budget.hash(
-            value
-                .as_str()
-                .ok_or_else(|| err("expected a string"))?
-                .as_bytes(),
-        ),
+        Base::String => {
+            let text = value.as_str().ok_or_else(|| err("expected a string"))?;
+            view.string(text)?;
+            budget.hash(text.as_bytes())
+        }
         Base::Address => {
             let address = parse_address(value.as_str().ok_or_else(|| err("expected an address"))?)?;
+            view.hex(&address)?;
             let mut out = [0u8; 32];
             out[12..].copy_from_slice(&address);
             Ok(out)
         }
         Base::Bool => match value {
-            Value::Bool(flag) => Ok(U256::from_u64(u64::from(*flag)).to_be_bytes()),
+            Value::Bool(flag) => {
+                view.raw(if *flag { "true" } else { "false" })?;
+                Ok(U256::from_u64(u64::from(*flag)).to_be_bytes())
+            }
             _ => Err(err("bool takes only true or false")),
         },
         Base::Struct(_) => Err(err("struct where a value was expected")),
     }
 }
 
-/// ethers' `hashDomain`: the fields present (null ones skipped), in the
-/// canonical order.
-fn domain_hash(value: &Value) -> Result<[u8; 32], Error> {
+/// A domain field present (not null), in the canonical order.
+struct DomainField<'a> {
+    name: &'static str,
+    ty: &'static str,
+    value: &'a Value,
+}
+
+/// The domain's fields present (null ones skipped, even unknown ones), in
+/// the canonical order; any other key is an error, as in ethers.
+fn domain_fields(value: &Value) -> Result<Vec<DomainField<'_>>, Error> {
     let domain: &Map<String, Value> = value
         .as_object()
         .ok_or_else(|| err("domain: expected an object"))?;
@@ -575,45 +670,287 @@ fn domain_hash(value: &Value) -> Result<[u8; 32], Error> {
             )));
         }
     }
-    let present: Vec<(&str, &str, &Value)> = DOMAIN_FIELDS
+    Ok(DOMAIN_FIELDS
         .iter()
         .filter_map(|(name, ty)| {
             domain
                 .get(*name)
                 .filter(|v| !v.is_null())
-                .map(|v| (*name, *ty, v))
+                .map(|value| DomainField { name, ty, value })
         })
-        .collect();
+        .collect())
+}
+
+/// ethers' `hashDomain` over the fields present.
+fn domain_hash(present: &[DomainField<'_>]) -> Result<[u8; 32], Error> {
     let type_text = format!(
-        "EIP712Domain({})",
+        "{DOMAIN_TYPE}({})",
         present
             .iter()
-            .map(|(name, ty, _)| format!("{ty} {name}"))
+            .map(|field| format!("{} {}", field.ty, field.name))
             .collect::<Vec<_>>()
             .join(",")
     );
     let mut out = Vec::with_capacity(32 * (present.len() + 1));
     out.extend_from_slice(&keccak256(type_text.as_bytes()));
-    for (_, ty, value) in present {
-        let base = primitive(ty)?.ok_or_else(|| err("domain type"))?;
-        out.extend_from_slice(&encode_base(&base, value, &mut Budget::default())?);
+    for field in present {
+        let base = primitive(field.ty)?.ok_or_else(|| err("domain type"))?;
+        out.extend_from_slice(&encode_base(
+            &base,
+            field.value,
+            &mut Budget::default(),
+            &mut ViewText::none(),
+        )?);
     }
     Ok(keccak256(&out))
+}
+
+/// The view's `domain`, as `getPayload` gives it: the fields present, in
+/// the canonical order; `chainId` as a hex quantity (`"0x1"`: pinned ethers
+/// tests `Number.isSafeInteger` on a `BigInt`, which never holds), the
+/// address and salt as lowercase hex. Returns the domain's chain id.
+fn write_domain(view: &mut ViewText, present: &[DomainField<'_>]) -> Result<Option<U256>, Error> {
+    let mut chain = None;
+    view.raw("{")?;
+    for (index, field) in present.iter().enumerate() {
+        if index > 0 {
+            view.raw(",")?;
+        }
+        view.string(field.name)?;
+        view.raw(":")?;
+        if field.name == "chainId" {
+            let (_, id) = number(field.value)?;
+            view.quantity(&id)?;
+            chain = Some(id);
+        } else {
+            let base = primitive(field.ty)?.ok_or_else(|| err("domain type"))?;
+            encode_base(&base, field.value, &mut Budget::default(), view)?;
+        }
+    }
+    view.raw("}")?;
+    Ok(chain)
+}
+
+/// The view's JSON text, written while the data is hashed: refused past its
+/// longest length, so no more than that is ever held. A disabled view
+/// writes nothing.
+struct ViewText {
+    out: Option<String>,
+    max: usize,
+}
+
+impl ViewText {
+    fn none() -> Self {
+        ViewText { out: None, max: 0 }
+    }
+
+    fn new(max: usize) -> Self {
+        ViewText {
+            out: Some(String::new()),
+            max,
+        }
+    }
+
+    fn raw(&mut self, text: &str) -> Result<(), Error> {
+        if let Some(out) = &mut self.out {
+            if out.len().saturating_add(text.len()) > self.max {
+                return Err(Error::ViewTooLarge);
+            }
+            out.push_str(text);
+        }
+        Ok(())
+    }
+
+    /// A JSON string, escaped as serde_json writes it.
+    fn string(&mut self, text: &str) -> Result<(), Error> {
+        if self.out.is_none() {
+            return Ok(());
+        }
+        // Each character escapes to at most 6 bytes: refuse a string that
+        // can't fit before escaping it.
+        if let Some(out) = &self.out
+            && out.len().saturating_add(text.len()) > self.max
+        {
+            return Err(Error::ViewTooLarge);
+        }
+        let escaped =
+            serde_json::to_string(text).map_err(|_| err("a string the view can't hold"))?;
+        self.raw(&escaped)
+    }
+
+    fn hex(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        if self.out.is_none() {
+            return Ok(());
+        }
+        if let Some(out) = &self.out
+            && out.len().saturating_add(2 * bytes.len()) > self.max
+        {
+            return Err(Error::ViewTooLarge);
+        }
+        self.raw("\"")?;
+        self.raw(&to_hex(bytes))?;
+        self.raw("\"")
+    }
+
+    /// An integer as a decimal string, `-` first when negative.
+    fn integer(&mut self, negative: bool, magnitude: &U256) -> Result<(), Error> {
+        if self.out.is_none() {
+            return Ok(());
+        }
+        self.raw(if negative { "\"-" } else { "\"" })?;
+        self.raw(&magnitude.to_decimal())?;
+        self.raw("\"")
+    }
+
+    /// A hex quantity string, as ethers' `toQuantity`: `"0x0"`, `"0x1f"`.
+    fn quantity(&mut self, value: &U256) -> Result<(), Error> {
+        if self.out.is_none() {
+            return Ok(());
+        }
+        let hex = to_hex(&value.to_minimal_be());
+        let digits = hex[2..].trim_start_matches('0');
+        self.raw("\"0x")?;
+        self.raw(if digits.is_empty() { "0" } else { digits })?;
+        self.raw("\"")
+    }
+
+    fn finish(self) -> String {
+        self.out.unwrap_or_default()
+    }
+}
+
+/// What a caller passes beside the typed data for its view (#88). Neither
+/// changes what is signed.
+#[derive(Debug, Clone, Copy)]
+pub struct ViewRequest<'a> {
+    /// The `primary_type` the requester named, any JSON value; `None` when
+    /// it named none.
+    pub primary_type: Option<&'a Value>,
+    /// The chain the requester is on; `None` when not given.
+    pub chain_id: Option<U256>,
+    /// The longest view text accepted, in bytes: past it the request is
+    /// refused (`view-size`).
+    pub max_len: usize,
+}
+
+/// A digest and the view of what it signs (#88).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedDataView {
+    /// `TypedDataEncoder.hash(domain, types, message)`.
+    pub hash: [u8; 32],
+    /// Compact JSON text: `{"types":…,"domain":…,"primary_type":…,
+    /// "message":…,"ignored":[…],"named_type":…,"chain":…}`. The first four
+    /// are ethers' `getPayload`, with its `primaryType` as `primary_type`:
+    /// - `ignored`: the message's top-level keys the primary type doesn't
+    ///   declare, which are sent but not signed, sorted;
+    /// - `named_type`: `match` when `primary_type` is a string equal to the
+    ///   inferred root, `mismatch` for any other value, `unknown` without
+    ///   one;
+    /// - `chain`: `absent` without a domain `chainId` (or with a null one),
+    ///   else `match` or `mismatch` against `chain_id`, `unknown` without
+    ///   one.
+    pub view: String,
+}
+
+/// The digest, with the view of exactly what is signed written in the same
+/// pass (design 0002, #88). Refuses typed data whose view would be longer
+/// than `request.max_len` ([`Error::ViewTooLarge`]), measured while it is
+/// written.
+pub fn typed_data_view(
+    domain: &Value,
+    types: &Value,
+    message: &Value,
+    request: &ViewRequest<'_>,
+) -> Result<TypedDataView, Error> {
+    let mut view = ViewText::new(request.max_len);
+    let hash = encode(domain, types, message, &mut view, Some(request))?;
+    Ok(TypedDataView {
+        hash,
+        view: view.finish(),
+    })
 }
 
 /// `TypedDataEncoder.hash(domain, types, message)`: the digest
 /// `Wallet.signTypedData` signs.
 pub fn typed_data_hash(domain: &Value, types: &Value, message: &Value) -> Result<[u8; 32], Error> {
+    encode(domain, types, message, &mut ViewText::none(), None)
+}
+
+fn encode(
+    domain: &Value,
+    types: &Value,
+    message: &Value,
+    view: &mut ViewText,
+    request: Option<&ViewRequest<'_>>,
+) -> Result<[u8; 32], Error> {
     let types = Types::parse(types)?;
-    let domain = domain_hash(domain)?;
+    let present = domain_fields(domain)?;
+    let domain = domain_hash(&present)?;
+    view.raw("{\"types\":")?;
+    types.write_types(view, &present)?;
+    view.raw(",\"domain\":")?;
+    let chain = write_domain(view, &present)?;
+    view.raw(",\"primary_type\":")?;
+    view.string(&types.primary)?;
+    view.raw(",\"message\":")?;
     let mut budget = Budget::default();
-    let encoded = types.encode_struct(&types.primary, message, 0, &mut budget)?;
-    let message = budget.hash(&encoded)?;
+    let encoded = types.encode_struct(&types.primary, message, 0, &mut budget, view)?;
+    let message_hash = budget.hash(&encoded)?;
+    if let Some(request) = request {
+        write_reports(view, &types, message, chain, request)?;
+    }
+    view.raw("}")?;
     let mut data = Vec::with_capacity(66);
     data.extend_from_slice(&[0x19, 0x01]);
     data.extend_from_slice(&domain);
-    data.extend_from_slice(&message);
+    data.extend_from_slice(&message_hash);
     Ok(keccak256(&data))
+}
+
+/// `ignored`, `named_type` and `chain` (#88). None changes what is signed.
+fn write_reports(
+    view: &mut ViewText,
+    types: &Types,
+    message: &Value,
+    chain: Option<U256>,
+    request: &ViewRequest<'_>,
+) -> Result<(), Error> {
+    let declared: BTreeSet<&str> = types
+        .fields
+        .get(&types.primary)
+        .into_iter()
+        .flatten()
+        .map(|field| field.name.as_str())
+        .collect();
+    let ignored: BTreeSet<&str> = message
+        .as_object()
+        .into_iter()
+        .flat_map(Map::keys)
+        .map(String::as_str)
+        .filter(|key| !declared.contains(key))
+        .collect();
+    view.raw(",\"ignored\":[")?;
+    for (index, key) in ignored.into_iter().enumerate() {
+        if index > 0 {
+            view.raw(",")?;
+        }
+        view.string(key)?;
+    }
+    view.raw("],\"named_type\":")?;
+    // Only a string can match: true, false and null are valid struct names,
+    // so a non-string's JSON text could name the root.
+    view.raw(match request.primary_type {
+        None => "\"unknown\"",
+        Some(Value::String(named)) if *named == types.primary => "\"match\"",
+        Some(_) => "\"mismatch\"",
+    })?;
+    view.raw(",\"chain\":")?;
+    view.raw(match (chain, request.chain_id) {
+        (None, _) => "\"absent\"",
+        (Some(_), None) => "\"unknown\"",
+        (Some(domain), Some(active)) if domain == active => "\"match\"",
+        (Some(_), Some(_)) => "\"mismatch\"",
+    })
 }
 
 #[cfg(test)]
@@ -699,8 +1036,133 @@ mod tests {
     /// Types and a message, under an empty domain.
     type Input = (Value, Value);
 
+    /// The hash, with the view written in the same pass: the timings below
+    /// cover both (#88).
     fn hash((types, message): &Input) -> Result<[u8; 32], Error> {
-        typed_data_hash(&json!({}), types, message)
+        typed_data_view(&json!({}), types, message, &unbounded()).map(|hashed| hashed.hash)
+    }
+
+    fn unbounded() -> ViewRequest<'static> {
+        ViewRequest {
+            primary_type: None,
+            chain_id: None,
+            max_len: usize::MAX,
+        }
+    }
+
+    /// The view is refused exactly past its longest length (#88,
+    /// `view-size`): measured as written, a view of that length passes and
+    /// one byte more is refused, whatever part of the view crosses it.
+    #[test]
+    fn the_view_is_refused_exactly_past_its_length() {
+        let types = json!({ "M": [
+            { "name": "s", "type": "string" },
+            { "name": "b", "type": "bytes" },
+            { "name": "n", "type": "int256[]" },
+        ] });
+        let message = json!({ "s": "q\"\u{1}é", "b": "0xABCD", "n": [-5, "0x10"], "extra": 1 });
+        let domain = json!({ "name": "N", "chainId": 31 });
+        let full = typed_data_view(&domain, &types, &message, &unbounded()).unwrap();
+        let len = full.view.len();
+        let view: Value = serde_json::from_str(&full.view).unwrap();
+        assert_eq!(
+            view["message"],
+            json!({ "s": "q\"\u{1}é", "b": "0xabcd", "n": ["-5", "16"] })
+        );
+        assert_eq!(view["domain"], json!({ "name": "N", "chainId": "0x1f" }));
+        assert_eq!(view["ignored"], json!(["extra"]));
+        // serde_json's own escaping, byte for byte.
+        assert!(
+            full.view
+                .contains(&serde_json::to_string("q\"\u{1}é").unwrap())
+        );
+        for max_len in [len, len + 1, usize::MAX] {
+            let request = ViewRequest {
+                max_len,
+                ..unbounded()
+            };
+            assert_eq!(
+                typed_data_view(&domain, &types, &message, &request),
+                Ok(full.clone())
+            );
+        }
+        // Every shorter bound is refused, wherever the view crosses it.
+        for max_len in 0..len {
+            let request = ViewRequest {
+                max_len,
+                ..unbounded()
+            };
+            assert_eq!(
+                typed_data_view(&domain, &types, &message, &request),
+                Err(Error::ViewTooLarge),
+                "{max_len}"
+            );
+        }
+        // The hash alone has no view and no bound.
+        assert_eq!(typed_data_hash(&domain, &types, &message), Ok(full.hash));
+    }
+
+    /// A long string is refused before it is escaped: no more than the
+    /// bound is ever held.
+    #[test]
+    fn a_long_string_is_refused_before_it_is_copied() {
+        let types = json!({ "M": [{ "name": "s", "type": "string" }] });
+        let message = json!({ "s": "x".repeat(1 << 20) });
+        let request = ViewRequest {
+            max_len: 1 << 10,
+            ..unbounded()
+        };
+        assert_eq!(
+            typed_data_view(&json!({}), &types, &message, &request),
+            Err(Error::ViewTooLarge)
+        );
+    }
+
+    /// ethers' getPayload refuses a type named EIP712Domain, so a view of
+    /// such data can't be ethers': refused, like every other ill-formed
+    /// type set (deviation `domain-type`).
+    #[test]
+    fn a_type_named_eip712domain_is_refused() {
+        let types = json!({
+            "M": [{ "name": "d", "type": "EIP712Domain" }],
+            "EIP712Domain": [{ "name": "name", "type": "string" }],
+        });
+        let message = json!({ "d": { "name": "x" } });
+        assert!(typed_data_hash(&json!({}), &types, &message).is_err());
+        assert!(typed_data_view(&json!({}), &types, &message, &unbounded()).is_err());
+    }
+
+    /// The reports compare and never change what is signed (#88).
+    #[test]
+    fn reports_change_nothing_signed() {
+        let types = json!({ "true": [{ "name": "v", "type": "uint8" }] });
+        let message = json!({ "v": 1 });
+        let domain = json!({ "chainId": "0x64" });
+        let reference = typed_data_hash(&domain, &types, &message).unwrap();
+        let report = |primary_type: Option<&Value>, chain_id: Option<u64>| {
+            let request = ViewRequest {
+                primary_type,
+                chain_id: chain_id.map(U256::from_u64),
+                max_len: usize::MAX,
+            };
+            let hashed = typed_data_view(&domain, &types, &message, &request).unwrap();
+            assert_eq!(hashed.hash, reference);
+            let view: Value = serde_json::from_str(&hashed.view).unwrap();
+            (view["named_type"].clone(), view["chain"].clone())
+        };
+        assert_eq!(
+            report(Some(&json!("true")), Some(100)),
+            (json!("match"), json!("match"))
+        );
+        assert_eq!(
+            report(Some(&json!(true)), Some(1)),
+            (json!("mismatch"), json!("mismatch"))
+        );
+        assert_eq!(
+            report(Some(&Value::Null), None),
+            (json!("mismatch"), json!("unknown"))
+        );
+        assert_eq!(report(None, None), (json!("unknown"), json!("unknown")));
     }
 
     /// Asserts that hashing `inputs` takes about as long as hashing
@@ -980,17 +1442,39 @@ mod tests {
 
     #[test]
     fn int_bounds() {
-        let ok = |v: Value| encode_base(&Base::Int(8), &v, &mut Budget::default()).is_ok();
+        let ok = |v: Value| {
+            encode_base(
+                &Base::Int(8),
+                &v,
+                &mut Budget::default(),
+                &mut ViewText::none(),
+            )
+            .is_ok()
+        };
         assert!(ok(json!(-128)) && ok(json!(127)) && ok(json!("-0x80")));
         assert!(!ok(json!(-129)) && !ok(json!(128)));
         assert_eq!(
-            encode_base(&Base::Int(8), &json!(-1), &mut Budget::default()).unwrap(),
+            encode_base(
+                &Base::Int(8),
+                &json!(-1),
+                &mut Budget::default(),
+                &mut ViewText::none()
+            )
+            .unwrap(),
             [0xff; 32]
         );
         let min = format!(
             "-{}",
             "57896044618658097711785492504343953926634992332820282019728792003956564819968"
         );
-        assert!(encode_base(&Base::Int(256), &json!(min), &mut Budget::default()).is_ok());
+        assert!(
+            encode_base(
+                &Base::Int(256),
+                &json!(min),
+                &mut Budget::default(),
+                &mut ViewText::none()
+            )
+            .is_ok()
+        );
     }
 }

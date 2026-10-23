@@ -116,6 +116,39 @@ impl U256 {
         U256(limbs)
     }
 
+    /// `(self / divisor, self % divisor)` for a nonzero `divisor`.
+    fn div_rem_small(&self, divisor: u64) -> (Self, u64) {
+        let mut limbs = [0u64; 4];
+        let mut remainder = 0u128;
+        for (out, limb) in limbs.iter_mut().zip(self.0).rev() {
+            let current = (remainder << 64) | u128::from(limb);
+            *out = (current / u128::from(divisor)) as u64;
+            remainder = current % u128::from(divisor);
+        }
+        (U256(limbs), remainder as u64)
+    }
+
+    /// The decimal digits, without leading zeros (`"0"` for zero), as
+    /// `BigInt.toString()` writes them.
+    pub fn to_decimal(&self) -> String {
+        const CHUNK: u64 = 10_000_000_000_000_000_000; // 10^19
+        let mut chunks = Vec::new();
+        let mut rest = *self;
+        while !rest.is_zero() {
+            let (quotient, remainder) = rest.div_rem_small(CHUNK);
+            chunks.push(remainder);
+            rest = quotient;
+        }
+        let mut out = chunks
+            .last()
+            .map(u64::to_string)
+            .unwrap_or_else(|| "0".into());
+        for chunk in chunks.iter().rev().skip(1) {
+            out.push_str(&format!("{chunk:019}"));
+        }
+        out
+    }
+
     /// Decimal digits only (at least one; leading zeros allowed).
     pub fn parse_decimal(digits: &str) -> Option<Self> {
         if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
@@ -200,6 +233,23 @@ mod tests {
         assert_eq!(parse_signed("-0"), Some((false, U256::ZERO)));
         assert_eq!(parse_unsigned("-0"), None);
         assert_eq!(parse_unsigned("0X1F"), Some(U256::from_u64(31)));
+    }
+
+    #[test]
+    fn decimal_digits() {
+        assert_eq!(U256::ZERO.to_decimal(), "0");
+        assert_eq!(U256::from_u64(7).to_decimal(), "7");
+        assert_eq!(U256::from_u64(u64::MAX).to_decimal(), u64::MAX.to_string());
+        let max = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+        assert_eq!(U256::MAX.to_decimal(), max);
+        for digits in [
+            "10000000000000000000",
+            "9999999999999999999",
+            "100000000000000000000000000000000000000",
+            "123456789012345678901234567890",
+        ] {
+            assert_eq!(U256::parse_decimal(digits).unwrap().to_decimal(), digits);
+        }
     }
 
     #[test]

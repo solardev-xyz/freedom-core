@@ -1,5 +1,7 @@
 'use strict';
 
+const assert = require('node:assert/strict');
+
 // Signing vectors (design 0002): the reference's own ethers and bee-js produce
 // every expected output from keys the reference's derivation produces. Inputs
 // are written in the core's wire form; `toEthersTx` is the only translation.
@@ -78,9 +80,16 @@ const SAFE = '0x1234567890AbcdEF1234567890aBcdef12345678';
 const TYPED_DATA = [
   { id: 'mail', typed_data: { domain: MAIL_DOMAIN, types: MAIL_TYPES, message: MAIL_MESSAGE } },
   { id: 'mail-extra-field-ignored', typed_data: { domain: MAIL_DOMAIN, types: MAIL_TYPES, message: { ...MAIL_MESSAGE, unused: 'x' } } },
+  // An undeclared field inside a nested struct: ignored too, and not shown.
+  { id: 'mail-nested-extra-field-ignored', typed_data: { domain: MAIL_DOMAIN, types: MAIL_TYPES, message: { ...MAIL_MESSAGE, from: { ...MAIL_MESSAGE.from, nested: 'y' }, zeta: 1, alpha: [] } } },
   { id: 'domain-chain-only', typed_data: { domain: { chainId: 100 }, types: ONE('uint256'), message: { v: '1' } } },
   { id: 'domain-hex-chain-and-salt', typed_data: { domain: { name: 'S', chainId: '0x64', salt: '0x' + '11'.repeat(32) }, types: ONE('uint8'), message: { v: 5 } } },
   { id: 'domain-empty', typed_data: { domain: {}, types: ONE('bool'), message: { v: false } } },
+  // The view's chainId is ethers' hex quantity at every size (#88): 0 and 1
+  // are above, and these are the largest safe integer and 2^53.
+  { id: 'domain-chain-max-safe', typed_data: { domain: { chainId: 9007199254740991 }, types: ONE('uint8'), message: { v: 1 } } },
+  { id: 'domain-chain-2-53', typed_data: { domain: { chainId: '9007199254740992' }, types: ONE('uint8'), message: { v: 1 } } },
+  { id: 'error-domain-chain-unsafe-number', typed_data: { domain: { chainId: 9007199254740992 }, types: ONE('uint8'), message: { v: 1 } } },
   { id: 'uint-boundaries', typed_data: { domain: { name: 'U' }, types: { M: [{ name: 'a', type: 'uint8' }, { name: 'b', type: 'uint256' }, { name: 'c', type: 'uint64' }, { name: 'd', type: 'uint16' }] }, message: { a: 255, b: MAX_U256, c: '0xffffffffffffffff', d: '0' } } },
   { id: 'int-boundaries', typed_data: { domain: { name: 'I' }, types: { M: [{ name: 'a', type: 'int8' }, { name: 'b', type: 'int8' }, { name: 'c', type: 'int256' }, { name: 'd', type: 'int256' }] }, message: { a: -128, b: 127, c: '-' + (2n ** 255n).toString(), d: ((2n ** 255n) - 1n).toString() } } },
   { id: 'safe-integer-numbers', typed_data: { domain: { name: 'N' }, types: { M: [{ name: 'a', type: 'uint256' }, { name: 'b', type: 'int64' }] }, message: { a: 9007199254740991, b: -9007199254740991 } } },
@@ -149,6 +158,10 @@ const TYPED_DATA = [
   // encoder (a struct "bool" hashes as true); the core refuses such names.
   { id: 'deviation-primitive-named-primary', deviation: 'names-identifiers', typed_data: { domain: { name: 'D' }, types: { bool: [{ name: 'v', type: 'uint8' }] }, message: { v: 1 } } },
   { id: 'error-primitive-named-primary-uint', typed_data: { domain: { name: 'D' }, types: { uint256: [{ name: 'b', type: 'bool' }] }, message: { b: true } } },
+  // ethers hashes and signs a struct named EIP712Domain that the primary
+  // type references, but its getPayload refuses such types, so there is no
+  // view of what is signed (#88); the core refuses the name.
+  { id: 'deviation-domain-type-referenced', deviation: 'domain-type', typed_data: { domain: { name: 'D' }, types: { M: [{ name: 'd', type: 'EIP712Domain' }], EIP712Domain: [{ name: 'name', type: 'string' }] }, message: { d: { name: 'x' } } } },
   // ethers reads no fields of an empty struct, so any value (or none)
   // passes; the core wants an object, like every struct.
   { id: 'deviation-empty-struct-null', deviation: 'struct-object', typed_data: { domain: { name: 'D' }, types: { E: [], M: [{ name: 'e', type: 'E' }] }, message: { e: null } } },
@@ -192,6 +205,47 @@ const TYPED_DATA_TEXT = [
   { id: 'error-subnormal-above-half', typed_data_json: textOf('uint256', `${FIVE_TO_1075}${'0'.repeat(17)}1e-1093`) },
   { id: 'error-unsafe-tie', typed_data_json: textOf('uint256', '9007199254740991.5') },
   { id: 'error-not-integral', typed_data_json: textOf('uint256', '4503599627370495.5') },
+];
+
+// The view's reports (design 0002, #88): what the primary_type and chain_id
+// parameters are compared with. ethers ignores both and signs the inferred
+// root; the expected reports come from the design text, not from ethers.
+const NAMED = (types, message) => ({ domain: { name: 'R' }, types, message });
+const REPORT_MAIL = { domain: { name: 'Ether Mail', version: '1', verifyingContract: MAIL_DOMAIN.verifyingContract }, types: MAIL_TYPES, message: MAIL_MESSAGE };
+const CHAIN = (chainId) => ({ domain: { name: 'C', chainId }, types: ONE('uint8'), message: { v: 1 } });
+const TYPED_DATA_REPORTS = [
+  { id: 'named-root', typed_data: REPORT_MAIL, primary_type: 'Mail', report: { named_type: 'match', chain: 'absent' } },
+  { id: 'named-other-declared-type', typed_data: REPORT_MAIL, primary_type: 'Person', report: { named_type: 'mismatch', chain: 'absent' } },
+  { id: 'named-undeclared-type', typed_data: REPORT_MAIL, primary_type: 'Order', report: { named_type: 'mismatch', chain: 'absent' } },
+  { id: 'named-eip712domain', typed_data: REPORT_MAIL, primary_type: 'EIP712Domain', report: { named_type: 'mismatch', chain: 'absent' } },
+  { id: 'named-case-differs', typed_data: REPORT_MAIL, primary_type: 'mail', report: { named_type: 'mismatch', chain: 'absent' } },
+  { id: 'named-absent', typed_data: REPORT_MAIL, report: { named_type: 'unknown', chain: 'absent' } },
+  // A non-string never matches, even beside a root of the same name: true,
+  // false and null are valid struct names.
+  { id: 'named-true-root-boolean', typed_data: NAMED({ true: [{ name: 'v', type: 'uint8' }] }, { v: 1 }), primary_type: true, report: { named_type: 'mismatch', chain: 'absent' } },
+  { id: 'named-true-root-string', typed_data: NAMED({ true: [{ name: 'v', type: 'uint8' }] }, { v: 1 }), primary_type: 'true', report: { named_type: 'match', chain: 'absent' } },
+  { id: 'named-false-root-boolean', typed_data: NAMED({ false: [{ name: 'v', type: 'uint8' }] }, { v: 1 }), primary_type: false, report: { named_type: 'mismatch', chain: 'absent' } },
+  { id: 'named-null-root-null', typed_data: NAMED({ null: [{ name: 'v', type: 'uint8' }] }, { v: 1 }), primary_type: null, report: { named_type: 'mismatch', chain: 'absent' } },
+  { id: 'named-null-root-string', typed_data: NAMED({ null: [{ name: 'v', type: 'uint8' }] }, { v: 1 }), primary_type: 'null', report: { named_type: 'match', chain: 'absent' } },
+  { id: 'named-number', typed_data: REPORT_MAIL, primary_type: 1, report: { named_type: 'mismatch', chain: 'absent' } },
+  { id: 'named-array', typed_data: REPORT_MAIL, primary_type: ['Mail'], report: { named_type: 'mismatch', chain: 'absent' } },
+  { id: 'named-object', typed_data: REPORT_MAIL, primary_type: { Mail: [] }, report: { named_type: 'mismatch', chain: 'absent' } },
+  { id: 'chain-match-number', typed_data: CHAIN(100), primary_type: 'M', chain_id: '100', report: { named_type: 'match', chain: 'match' } },
+  { id: 'chain-match-hex-string', typed_data: CHAIN('0x64'), primary_type: 'M', chain_id: '100', report: { named_type: 'match', chain: 'match' } },
+  { id: 'chain-match-hex-parameter', typed_data: CHAIN(100), chain_id: '0x64', report: { named_type: 'unknown', chain: 'match' } },
+  { id: 'chain-match-leading-zeros', typed_data: CHAIN('0x0064'), chain_id: '00100', report: { named_type: 'unknown', chain: 'match' } },
+  { id: 'chain-mismatch', typed_data: CHAIN(100), chain_id: '1', report: { named_type: 'unknown', chain: 'mismatch' } },
+  { id: 'chain-unknown', typed_data: CHAIN(100), report: { named_type: 'unknown', chain: 'unknown' } },
+  { id: 'chain-absent', typed_data: { domain: { name: 'C' }, types: ONE('uint8'), message: { v: 1 } }, chain_id: '1', report: { named_type: 'unknown', chain: 'absent' } },
+  { id: 'chain-absent-without-parameter', typed_data: { domain: { name: 'C' }, types: ONE('uint8'), message: { v: 1 } }, report: { named_type: 'unknown', chain: 'absent' } },
+  { id: 'chain-null', typed_data: CHAIN(null), chain_id: '1', report: { named_type: 'unknown', chain: 'absent' } },
+  { id: 'chain-null-without-parameter', typed_data: CHAIN(null), report: { named_type: 'unknown', chain: 'absent' } },
+  { id: 'chain-zero-match', typed_data: CHAIN(0), chain_id: '0', report: { named_type: 'unknown', chain: 'match' } },
+  { id: 'chain-zero-mismatch', typed_data: CHAIN(0), chain_id: '1', report: { named_type: 'unknown', chain: 'mismatch' } },
+  { id: 'chain-zero-unknown', typed_data: CHAIN(0), report: { named_type: 'unknown', chain: 'unknown' } },
+  { id: 'chain-2-53-match', typed_data: CHAIN('9007199254740992'), chain_id: '0x20000000000000', report: { named_type: 'unknown', chain: 'match' } },
+  { id: 'chain-max-u256-mismatch', typed_data: CHAIN(MAX_U256), chain_id: '0x' + 'f'.repeat(63) + 'e', report: { named_type: 'unknown', chain: 'mismatch' } },
+  { id: 'named-mismatch-chain-mismatch', typed_data: CHAIN(1), primary_type: 'Mail', chain_id: '100', report: { named_type: 'mismatch', chain: 'mismatch' } },
 ];
 
 const SOCS = [
@@ -271,16 +325,23 @@ async function buildSigning(reference, mnemonicFor, meta) {
     }
   }
 
+  // What the core shows of typed data it signs (#88): getPayload, for every
+  // case the core accepts. A deviation is refused, so it has no view.
+  const withPayload = (result, data, deviation) => {
+    if (result.status !== 'success' || deviation) return result;
+    return { ...result, payload: ethers.TypedDataEncoder.getPayload(data.domain, data.types, data.message) };
+  };
+
   const typedData = [];
   for (const { id, typed_data: data, deviation } of TYPED_DATA) {
     for (const signer of accounts) {
       typedData.push({
         id: `${id}/${signer.id}`, keyId: signer.id, typed_data: data,
         ...(deviation ? { deviation } : {}),
-        result: await settle(async () => ({
+        result: withPayload(await settle(async () => ({
           signature: await signer.wallet.signTypedData(data.domain, data.types, data.message),
           hash: ethers.TypedDataEncoder.hash(data.domain, data.types, data.message),
-        })),
+        })), data, deviation),
       });
     }
   }
@@ -290,13 +351,31 @@ async function buildSigning(reference, mnemonicFor, meta) {
     for (const signer of accounts) {
       typedDataText.push({
         id: `${id}/${signer.id}`, keyId: signer.id, typed_data_json: text,
-        result: await settle(async () => {
+        result: withPayload(await settle(async () => {
           const data = JSON.parse(text);
           return {
             signature: await signer.wallet.signTypedData(data.domain, data.types, data.message),
             hash: ethers.TypedDataEncoder.hash(data.domain, data.types, data.message),
           };
-        }),
+        }), JSON.parse(text), undefined),
+      });
+    }
+  }
+
+  const typedDataReports = [];
+  for (const { id, typed_data: data, report, ...parameters } of TYPED_DATA_REPORTS) {
+    for (const signer of accounts) {
+      const result = withPayload(await settle(async () => ({
+        signature: await signer.wallet.signTypedData(data.domain, data.types, data.message),
+        hash: ethers.TypedDataEncoder.hash(data.domain, data.types, data.message),
+      })), data, undefined);
+      assert.equal(result.status, 'success', `${id}: ethers signs every report case`);
+      typedDataReports.push({
+        id: `${id}/${signer.id}`, keyId: signer.id, typed_data: data,
+        // Present only when the case passes it: null is a value.
+        ...('primary_type' in parameters ? { primary_type: parameters.primary_type } : {}),
+        ...('chain_id' in parameters ? { chain_id: parameters.chain_id } : {}),
+        report, result,
       });
     }
   }
@@ -336,9 +415,11 @@ async function buildSigning(reference, mnemonicFor, meta) {
       signature: '65 bytes r || s || v with v in {27, 28}, 0x hex',
       deviation: 'ethers signs these; the core must reject them (design 0002)',
       typed_data_json: 'typed data as JSON text, which ethers signs as JSON.parse reads it; the core must read the text the same way',
+      payload: "TypedDataEncoder.getPayload's output, for each typed-data case the core accepts: the core's view is it, with primaryType as primary_type (design 0002, #88)",
+      report: 'the view\'s named_type and chain for the primary_type and chain_id given, from the design text: ethers ignores both',
     },
     keys: keys.map(({ id, mnemonicId, key, address }) => ({ id, mnemonicId, key, address })),
-    transactions, messages, typedData, typedDataText, socs,
+    transactions, messages, typedData, typedDataText, typedDataReports, socs,
   };
 }
 
