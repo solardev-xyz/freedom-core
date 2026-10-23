@@ -350,11 +350,19 @@ pub(crate) async fn via_quorum(
             &block,
         )
     };
+    // A wave whose M is below 2 (a second wave of one endpoint, after the
+    // first all errored) is one endpoint's answer: never verified
+    // (deviation `singleton-wave`, #91's rule for naming).
+    let agreed = if wave.m >= 2.0 {
+        "verified"
+    } else {
+        "unverified"
+    };
     match &wave.outcome {
         WaveOutcome::AgreedData { bytes, endpoints } => {
             return Ok(Consensus::Data {
                 resolved: bytes.clone(),
-                trust: trust_for("verified", endpoints, &[]),
+                trust: trust_for(agreed, endpoints, &[]),
             });
         }
         WaveOutcome::AgreedNotFound { reason, endpoints } => {
@@ -369,7 +377,7 @@ pub(crate) async fn via_quorum(
             return Ok(Consensus::NotFound {
                 reason,
                 error: first_error,
-                trust: trust_for("verified", endpoints, &[]),
+                trust: trust_for(agreed, endpoints, &[]),
             });
         }
         WaveOutcome::AllSettled => {}

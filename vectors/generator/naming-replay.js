@@ -378,6 +378,20 @@ const PATCHES = {
       },
     },
   }),
+  'singleton-wave': () => ({
+    text: 'A wave whose M is below 2 (a second wave of one endpoint, after the first wave all errored) is one endpoint\'s answer: its agreement is labelled unverified, not verified.',
+    source: {
+      'ens-resolver.js': {
+        edits: [
+          ["      resolverAddress: winningLeg.resolverAddress,\n      trust: trustFor('verified', agreedUrls.map(hostOf)),",
+            "      resolverAddress: winningLeg.resolverAddress,\n      trust: trustFor(wave.mUsed >= 2 ? 'verified' : 'unverified', agreedUrls.map(hostOf)),"],
+          ["      error: firstAgreer?.error?.message,\n      trust: trustFor('verified', agreedUrls.map(hostOf)),",
+            "      error: firstAgreer?.error?.message,\n      trust: trustFor(wave.mUsed >= 2 ? 'verified' : 'unverified', agreedUrls.map(hostOf)),"],
+        ],
+        append: [],
+      },
+    },
+  }),
   'decode-budget': (b) => ({
     text: `An OffchainLookup whose decoded strings and bytes exceed ${b.decodeBytes} bytes is malformed, failing as an ABI decode does (BUFFER_OVERRUN).`,
     source: {
@@ -1500,6 +1514,10 @@ function scenarioDefinitions(ethers) {
  */
 function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
   const deviation = (id, world, steps = [{ call: content() }]) => ({ id: `deviation-${id}`, deviation: id, patches: [id], world, steps });
+  // Every endpoint but one fails its eth_call as a node failure (-32603),
+  // after answering the anchor.
+  const allBut = (good) => Object.fromEntries(ENDPOINTS.map((url) => new URL(url).host).filter((host) => host !== good)
+    .map((host) => [host, { calls: { resolve: { rpc_error: { code: -32603, message: 'internal error' } } } }]));
   // A long unsupported contenthash: 8,202 hex characters with its 0x.
   const long = (byte) => contentAnswer('0x' + byte.repeat(4100));
   const twoGateways = (first) => ({ resolve: lookupVia(['gw-big.example', 'gw.example']), callback: GOOD, ...first });
@@ -1648,6 +1666,10 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
       calls: { resolve: aliasedLookup(`https://gw.example/{sender}/{data}.json?pad=${'x'.repeat(556)}`, 8), callback: GOOD },
       gateways: { 'gw.example': { body: JSON.stringify({ data: '0xcafe' }) } },
     })),
+    // The first wave's three endpoints all fail; the fourth alone answers in
+    // a second wave whose M is 1. The reference calls that verified; the
+    // core labels it unverified (#91's rule, for naming).
+    deviation('singleton-wave', base({ hosts: allBut('a.rpc.example') })),
     // One session at a time, two callers per session: the third caller of
     // a running session and a second session are both busy.
     deviation('admission', base({ bounds: { sessions: 1, callersPerSession: 2 } }), [

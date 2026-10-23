@@ -239,10 +239,11 @@ The rules below restate the reference, so a reviewer can check them against the 
 3. **Anchor:** no anchor → single source on the first *now* available endpoint, or the first one from before. A hash split throws.
 4. **Refresh:** the available list is re-read. Below 3 → single source as in 3.
 5. **First wave:** the first `min(K, available)` endpoints, with `M' = min(M, K')`.
-6. **Second wave:** after an `all_errored` or unverified first wave, the endpoints the first wave didn't use (re-read). An `all_errored` wave needs at least 1 of them; an unverified one needs M'. The wave runs with `K'' = min(K, remaining)` and `M'' = min(M, K'')`. It replaces the first wave if the first was `all_errored`, or if the second agrees.
+6. **Second wave:** after an `all_errored` or unverified first wave, the endpoints the first wave didn't use (re-read). An `all_errored` wave needs at least 1 of them; an unverified one needs M'. The wave runs with `K'' = min(K, remaining)` and `M'' = min(M, K'')`. It replaces the first wave if the first was `all_errored`, or if the second agrees. With one endpoint left after an `all_errored` wave, M'' is 1: that wave's agreement is one endpoint's answer, which rule 7 never labels `verified`.
 7. **The result** comes from the adopted wave. Trust `k` is that wave's queried count and `m` its M:
-   - `agreed_data` → `data`, `verified`;
-   - `agreed_not_found` → `not_found`, `verified`, with the first agreer's error;
+   - `agreed_data` → `data`, and `agreed_not_found` → `not_found` with the first agreer's error. Each is `verified` when the wave's M is at least 2.
+   - **A wave whose M is below 2** gives the same result, `unverified` (deviation `singleton-wave`). Only a second wave of one endpoint has one, and its agreement is that endpoint's answer. Its trust reads `k: 1, m: 1` with `achieved: false`, and it is cached as an unverified result. The reference labels it `verified`.
+   - The first wave never has M below 2: `K < 3` or `M < 2` goes to the single source (rule 2).
    - `all_errored` → throws `All N RPC providers failed for <name>`;
    - unverified → that one answer, `unverified`;
    - `conflict` → `conflict` with `dissented` = `queried`.
@@ -591,6 +592,7 @@ Each deviation gets a boundary vector in the implementation PR, generated from t
 | `monotonic-time` | TTLs, quarantine and deadlines on `Date.now()` | the monotonic clock; Tezos expiry still compares wall time | none unless the wall clock jumps |
 | `error-text` | ethers' full message, which embeds node text and request data | the class's short message, sanitized | same branches; [agreement](#errors-agreement-and-text) unchanged |
 | `classification` | rules 3, 6 and 9 of [Classification](#classification), and text matched in composed messages | the core's rules | a malformed answer quarantines; a revert never does |
+| `singleton-wave` | after a first wave that all errored, a second wave of the one endpoint left runs with M = 1, and its answer is labelled `verified` (`k: 1, m: 1, achieved: true`) | `unverified`, as a single source's answer is | one endpoint's answer is never verified; it is cached as unverified (`deviation-singleton-wave`) |
 | `null-block-hash` | a block whose hash is `null` (ethers' formatter accepts one, for pending blocks) is a hash vote like any other; when the chosen anchor's hash is `null`, the legs call at `latest`, where CCIP-Read takes ethers' built-in path | the hash fetch fails, as for a missing block | that endpoint is out of the hash vote and quarantined; the single-source anchor fails, so `direct` is unavailable |
 | `reverse-normalized` | an ENS primary name is shown as the reverse record returns it, normalized or not | only a name that is its own ENSIP-15 normalization; any other is `UNVERIFIED` with its claim and `unverifiedCause: "unnormalized"` | a lookalike primary name is never shown as the address's name |
 | `node-failures` | node errors can agree into a verified not-found (`node-errors-agree`) | freedom-browser#656's rule | until the reference pin includes it |
