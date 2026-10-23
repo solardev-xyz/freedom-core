@@ -52,13 +52,32 @@ fn keys() -> BTreeMap<String, Secp256k1Key> {
         .collect()
 }
 
+/// Every case, whatever key signs it: the chunk format doesn't depend on
+/// the signer. The core refuses account keys over the wire (design 0002,
+/// #89), which is its key policy; this crate signs with any key.
 #[test]
 fn single_owner_chunks() {
     let keys = keys();
-    let cases = load("signing.json")["socs"].as_array().unwrap().clone();
+    let vectors = load("signing.json");
+    let kinds: BTreeMap<&str, &str> = vectors["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| {
+            (
+                k["id"].as_str().unwrap(),
+                k["key"]["kind"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    let cases = vectors["socs"].as_array().unwrap().clone();
     assert!(cases.len() >= 36);
+    let mut replayed = BTreeMap::<&str, usize>::new();
     for case in &cases {
         let id = case["id"].as_str().unwrap();
+        *replayed
+            .entry(kinds[case["keyId"].as_str().unwrap()])
+            .or_default() += 1;
         let key = keys[case["keyId"].as_str().unwrap()].signing_key();
         let identifier: [u8; 32] = parse_bytes(case["identifier"].as_str().unwrap(), "id")
             .unwrap()
@@ -94,6 +113,12 @@ fn single_owner_chunks() {
             to_hex(&signed.soc_address),
             expected["socAddress"].as_str().unwrap(),
             "{id}"
+        );
+    }
+    for kind in ["account", "bee_wallet", "publisher"] {
+        assert!(
+            replayed.get(kind).is_some_and(|n| *n >= 8),
+            "{kind}: {replayed:?}"
         );
     }
 }
