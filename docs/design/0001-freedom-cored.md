@@ -521,8 +521,8 @@ The password crosses the pipe, which is no worse than today, where it is used in
   - publishes the archives and `SHA256SUMS`, with build provenance (`actions/attest`, Sigstore) for each archive and for `SHA256SUMS`. It ties each file to this repository, `release.yml`, the tagged commit and the run. Releases up to 0.5.0 predate it.
   - The service binaries have release workflows and tags of their own, with the same provenance: `ipfsd-vX.Y.Z` (`release-ipfsd.yml`, design 0007), and `radicled-vX.Y.Z` to come (design 0008).
 - **freedom-browser:**
-  - `scripts/freedom-cored-release.json` pins the version and a SHA-256 per target, like `myotis-release.json`;
-  - `npm run cored:download` fetches and verifies the binary, and `extraResources` ships it. The SHA-256 pins are what a local build checks;
+  - `scripts/fetch-freedom-cored.js` pins the release tag and the SHA-256 of that release's `SHA256SUMS`;
+  - `npm run core:download` fetches the target's archive and verifies it against the pinned `SHA256SUMS`, and `extraResources` ships it. The SHA-256 pins are what a local build checks;
   - **its CI verifies the build provenance** (decided; the freedom-browser change is pending) of every pinned asset with `gh attestation verify`, against this repository's release workflow and the pinned tag: freedom-cored's, freedom-ipfsd's, and freedom-radicled's once it ships. The release workflow does it first, and a failure to verify fails the job. The download scripts take no Sigstore dependency;
   - on macOS it goes through `mac.binaries`, signed with the hardened runtime and an empty entitlements plist;
   - Windows stays unsigned until the app itself is;
