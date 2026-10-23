@@ -15,6 +15,10 @@
 //!
 //! A gas price of 2^4096 or more fails the source (deviation
 //! `bigint-width`), where the router would quote it.
+//!
+//! B's combination of Direct's quotes ([`combine_fee_quotes`], deviation
+//! `fee-combination`) reads each endpoint's quote from the same codec
+//! ([`QuoteValues`]) and keeps the tightest constraints.
 
 use fc_json::index::{Index, Kind, Value, quoted_len};
 use fc_json::number_to_string;
@@ -23,12 +27,18 @@ use crate::bigint::{BigInt, MAX_DECIMAL_BITS, Parsed, parse_string};
 use crate::js::{JsError, JsString, NOT_PRIMITIVE, js_string_reserving};
 
 /// A fee quote, in today's shape.
+///
+/// `answered` is B's mark on Direct's quotes (design 0005, deviation
+/// `fee-combination`): the number of endpoints whose quotes were combined,
+/// written after `verified`. Every other quote has none, and keeps today's
+/// shape exactly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FeeQuote {
     Legacy {
         gas_price: String,
         source: String,
         verified: bool,
+        answered: Option<u8>,
     },
     Eip1559 {
         base_fee: String,
@@ -37,7 +47,25 @@ pub enum FeeQuote {
         effective_gas_price: String,
         source: String,
         verified: bool,
+        answered: Option<u8>,
     },
+}
+
+/// The length of `,"answered":<n>`, or 0 without it.
+fn answered_len(answered: Option<u8>) -> usize {
+    answered.map_or(0, |n| {
+        r#","answered":"#.len()
+            + match n {
+                0..=9 => 1,
+                10..=99 => 2,
+                _ => 3,
+            }
+    })
+}
+
+/// `,"answered":<n>`, or nothing without it.
+fn answered_json(answered: Option<u8>) -> String {
+    answered.map_or_else(String::new, |n| format!(r#","answered":{n}"#))
 }
 
 impl FeeQuote {
@@ -51,12 +79,14 @@ impl FeeQuote {
                 gas_price,
                 source,
                 verified,
+                answered,
             } => {
                 r#"{"type":"legacy","gasPrice":"","effectiveGasPrice":"","source":,"verified":}"#
                     .len()
                     + 2 * gas_price.len()
                     + quoted(source)
                     + flag(*verified)
+                    + answered_len(*answered)
             }
             Self::Eip1559 {
                 base_fee,
@@ -65,6 +95,7 @@ impl FeeQuote {
                 effective_gas_price,
                 source,
                 verified,
+                answered,
             } => {
                 r#"{"type":"eip1559","baseFee":"","maxPriorityFeePerGas":"","maxFeePerGas":"","effectiveGasPrice":"","source":,"verified":}"#
                     .len()
@@ -74,6 +105,7 @@ impl FeeQuote {
                     + effective_gas_price.len()
                     + quoted(source)
                     + flag(*verified)
+                    + answered_len(*answered)
             }
         }
     }
@@ -86,6 +118,13 @@ impl FeeQuote {
             Self::Legacy { verified, .. } | Self::Eip1559 { verified, .. } => *verified = false,
         }
         self
+    }
+
+    /// The number of endpoints B combined into it: Direct's quotes only.
+    pub fn answered(&self) -> Option<u8> {
+        match self {
+            Self::Legacy { answered, .. } | Self::Eip1559 { answered, .. } => *answered,
+        }
     }
 
     /// What its texts hold on the heap.
@@ -111,7 +150,8 @@ impl FeeQuote {
         }
     }
 
-    /// `JSON.stringify(quote)`, keys in the router's order.
+    /// `JSON.stringify(quote)`, keys in the router's order, then B's
+    /// `answered`.
     pub fn to_json(&self) -> String {
         let quote = |text: &str| JsString::from(text).to_json();
         match self {
@@ -119,9 +159,11 @@ impl FeeQuote {
                 gas_price,
                 source,
                 verified,
+                answered,
             } => format!(
-                r#"{{"type":"legacy","gasPrice":"{gas_price}","effectiveGasPrice":"{gas_price}","source":{},"verified":{verified}}}"#,
-                quote(source)
+                r#"{{"type":"legacy","gasPrice":"{gas_price}","effectiveGasPrice":"{gas_price}","source":{},"verified":{verified}{}}}"#,
+                quote(source),
+                answered_json(*answered),
             ),
             Self::Eip1559 {
                 base_fee,
@@ -130,10 +172,79 @@ impl FeeQuote {
                 effective_gas_price,
                 source,
                 verified,
+                answered,
             } => format!(
-                r#"{{"type":"eip1559","baseFee":"{base_fee}","maxPriorityFeePerGas":"{max_priority_fee_per_gas}","maxFeePerGas":"{max_fee_per_gas}","effectiveGasPrice":"{effective_gas_price}","source":{},"verified":{verified}}}"#,
-                quote(source)
+                r#"{{"type":"eip1559","baseFee":"{base_fee}","maxPriorityFeePerGas":"{max_priority_fee_per_gas}","maxFeePerGas":"{max_fee_per_gas}","effectiveGasPrice":"{effective_gas_price}","source":{},"verified":{verified}{}}}"#,
+                quote(source),
+                answered_json(*answered),
             ),
+        }
+    }
+}
+
+/// One source's quote as `feeQuote` accepts it, kept as numbers: its gas
+/// price G and, when the quote is EIP-1559, its priority fee P. B combines
+/// Direct's quotes from these (design 0005, B: combining Direct's quotes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuoteValues {
+    gas_price: BigInt,
+    /// `None` for a legacy quote: no hint, or one negative or above G.
+    priority: Option<BigInt>,
+}
+
+impl QuoteValues {
+    /// Whether the quote is EIP-1559.
+    pub fn is_eip1559(&self) -> bool {
+        self.priority.is_some()
+    }
+
+    /// An EIP-1559 quote's priority fee, in decimal.
+    pub fn priority_decimal(&self) -> Option<String> {
+        self.priority.as_ref().map(BigInt::to_decimal)
+    }
+
+    /// The quote today's codec makes of them, from `source`: EIP-1559 with
+    /// `baseFee = G − P` and `maxFeePerGas = 2·baseFee + P`, or legacy.
+    pub fn quote(&self, source: &str) -> FeeQuote {
+        let verified = matches!(source, "myotis" | "colibri" | "quorum");
+        let source = source.to_owned();
+        match &self.priority {
+            Some(priority) => {
+                let base_fee = self.gas_price.minus(priority);
+                FeeQuote::Eip1559 {
+                    max_fee_per_gas: base_fee.plus(&base_fee).plus(priority).to_decimal(),
+                    base_fee: base_fee.to_decimal(),
+                    max_priority_fee_per_gas: priority.to_decimal(),
+                    effective_gas_price: self.gas_price.to_decimal(),
+                    source,
+                    verified,
+                    answered: None,
+                }
+            }
+            None => FeeQuote::Legacy {
+                gas_price: self.gas_price.to_decimal(),
+                source,
+                verified,
+                answered: None,
+            },
+        }
+    }
+
+    /// What its numbers hold on the heap.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.gas_price.heap_bytes() + self.priority.as_ref().map_or(0, BigInt::heap_bytes)
+    }
+
+    /// The two constraints B reads it as: the max fee per gas M and the
+    /// priority fee P. An EIP-1559 quote gives `2·G − P` and P; a legacy
+    /// one M = P = G. P is never above M.
+    fn constraints(&self) -> (BigInt, BigInt) {
+        match &self.priority {
+            Some(priority) => {
+                let base_fee = self.gas_price.minus(priority);
+                (base_fee.plus(&base_fee).plus(priority), priority.clone())
+            }
+            None => (self.gas_price.clone(), self.gas_price.clone()),
         }
     }
 }
@@ -145,10 +256,19 @@ pub fn fee_quote(
     gas_price: Option<&str>,
     priority: Option<&str>,
 ) -> Result<FeeQuote, JsError> {
-    match fee_quote_reserving(source, gas_price, priority, |_| {
+    fee_quote_values(source, gas_price, priority).map(|values| values.quote(source))
+}
+
+/// [`fee_quote`]'s values, before they are written as a quote.
+pub fn fee_quote_values(
+    source: &str,
+    gas_price: Option<&str>,
+    priority: Option<&str>,
+) -> Result<QuoteValues, JsError> {
+    match fee_quote_values_reserving(source, gas_price, priority, |_| {
         Ok::<(), std::convert::Infallible>(())
     }) {
-        Ok(quote) => quote,
+        Ok(values) => values,
         Err(never) => match never {},
     }
 }
@@ -156,7 +276,7 @@ pub fn fee_quote(
 /// The most a quote's text, or one of its errors, holds: four decimals of
 /// at most [`MAX_DECIMAL_BITS`] bits (1,234 digits each), and the
 /// arithmetic's values, besides the source's name.
-const QUOTE_BYTES: usize = 8 * 1024;
+pub(crate) const QUOTE_BYTES: usize = 8 * 1024;
 
 /// [`fee_quote`], asking `reserve` for room before each allocation: each
 /// value's index, its conversion's text and stack, the `BigInt`'s limbs,
@@ -166,8 +286,22 @@ pub fn fee_quote_reserving<E>(
     source: &str,
     gas_price: Option<&str>,
     priority: Option<&str>,
-    mut reserve: impl FnMut(usize) -> Result<(), E>,
+    reserve: impl FnMut(usize) -> Result<(), E>,
 ) -> Result<Result<FeeQuote, JsError>, E> {
+    Ok(
+        fee_quote_values_reserving(source, gas_price, priority, reserve)?
+            .map(|values| values.quote(source)),
+    )
+}
+
+/// [`fee_quote_values`], asking `reserve` for room before each allocation
+/// as [`fee_quote_reserving`] does, the quote's room included.
+pub fn fee_quote_values_reserving<E>(
+    source: &str,
+    gas_price: Option<&str>,
+    priority: Option<&str>,
+    mut reserve: impl FnMut(usize) -> Result<(), E>,
+) -> Result<Result<QuoteValues, JsError>, E> {
     let small = source.len().saturating_mul(2).saturating_add(256);
     let gas_index = match gas_price
         .map(|text| indexed(text, &mut reserve))
@@ -224,29 +358,105 @@ pub fn fee_quote_reserving<E>(
         }
     };
     reserve(QUOTE_BYTES.saturating_add(source.len()))?;
-    let verified = matches!(source, "myotis" | "colibri" | "quorum");
-    let source = source.to_owned();
-    Ok(Ok(match priority {
-        Some(priority)
-            if !priority.is_negative()
-                && priority.compare(&gas_price) != std::cmp::Ordering::Greater =>
-        {
-            let base_fee = gas_price.minus(&priority);
-            FeeQuote::Eip1559 {
-                max_fee_per_gas: base_fee.plus(&base_fee).plus(&priority).to_decimal(),
-                base_fee: base_fee.to_decimal(),
-                max_priority_fee_per_gas: priority.to_decimal(),
-                effective_gas_price: gas_price.to_decimal(),
+    // Legacy when the hint is negative or above the gas price.
+    let priority = priority.filter(|priority| {
+        !priority.is_negative() && priority.compare(&gas_price) != std::cmp::Ordering::Greater
+    });
+    Ok(Ok(QuoteValues {
+        gas_price,
+        priority,
+    }))
+}
+
+/// B's combination of Direct's answered quotes (design 0005, B: combining
+/// Direct's quotes; deviation `fee-combination`), `None` for none. Each
+/// quote is read as two constraints, a max fee per gas M and a priority
+/// fee P ([`QuoteValues`]); the combination keeps the tightest:
+///
+/// - **One answer:** that quote, unchanged.
+/// - **All EIP-1559,** or **mixed where EIP-1559 is verified**
+///   (`eip1559_verified`: a verified header has a base fee), a legacy
+///   quote counting as M = P = G: EIP-1559 with the lowest M and the
+///   lowest P. `baseFee` is ⌊(M − P)/2⌋ and `effectiveGasPrice` is
+///   `baseFee` + P: estimates for display, never above any answering
+///   endpoint's gas price.
+/// - **All legacy,** or **mixed otherwise:** legacy, at the lowest gas
+///   price of all the quotes, an EIP-1559 quote's being its
+///   `effectiveGasPrice` (G).
+///
+/// The quote is Direct's: `source` `direct`, never `verified`, and
+/// `answered` the number of quotes combined.
+pub fn combine_fee_quotes(quotes: &[QuoteValues], eip1559_verified: bool) -> Option<FeeQuote> {
+    let (first, rest) = quotes.split_first()?;
+    let answered = Some(u8::try_from(quotes.len()).unwrap_or(u8::MAX));
+    let source = String::from("direct");
+    if rest.is_empty() {
+        return Some(match first.quote("direct") {
+            FeeQuote::Legacy {
+                gas_price,
                 source,
                 verified,
-            }
-        }
-        _ => FeeQuote::Legacy {
+                ..
+            } => FeeQuote::Legacy {
+                gas_price,
+                source,
+                verified,
+                answered,
+            },
+            FeeQuote::Eip1559 {
+                base_fee,
+                max_priority_fee_per_gas,
+                max_fee_per_gas,
+                effective_gas_price,
+                source,
+                verified,
+                ..
+            } => FeeQuote::Eip1559 {
+                base_fee,
+                max_priority_fee_per_gas,
+                max_fee_per_gas,
+                effective_gas_price,
+                source,
+                verified,
+                answered,
+            },
+        });
+    }
+    let all_eip1559 = quotes.iter().all(QuoteValues::is_eip1559);
+    let all_legacy = !quotes.iter().any(QuoteValues::is_eip1559);
+    if all_legacy || (!all_eip1559 && !eip1559_verified) {
+        let gas_price = rest.iter().fold(&first.gas_price, |lowest, quote| {
+            lowest.min(&quote.gas_price)
+        });
+        return Some(FeeQuote::Legacy {
             gas_price: gas_price.to_decimal(),
             source,
-            verified,
-        },
-    }))
+            verified: false,
+            answered,
+        });
+    }
+    let (mut max_fee, mut priority) = first.constraints();
+    for quote in rest {
+        let (m, p) = quote.constraints();
+        if m.compare(&max_fee) == std::cmp::Ordering::Less {
+            max_fee = m;
+        }
+        if p.compare(&priority) == std::cmp::Ordering::Less {
+            priority = p;
+        }
+    }
+    // Every quote's P is at most its M, so the lowest P is at most the
+    // lowest M.
+    let base_fee = max_fee.minus(&priority).half();
+    Some(FeeQuote::Eip1559 {
+        effective_gas_price: base_fee.plus(&priority).to_decimal(),
+        base_fee: base_fee.to_decimal(),
+        max_priority_fee_per_gas: priority.to_decimal(),
+        max_fee_per_gas: max_fee.to_decimal(),
+        source,
+        verified: false,
+        answered,
+    })
 }
 
 /// A value's index, its heap reserved before it is built.
@@ -437,6 +647,7 @@ mod tests {
             fee_quote("dir\"ect", Some("16"), None).unwrap(),
         ] {
             assert_eq!(quote.json_len(), quote.to_json().len());
+            assert_eq!(quote.answered(), None);
         }
         assert_eq!(
             fee_quote("x", Some("[[1,2]]"), None)
@@ -445,5 +656,46 @@ mod tests {
                 .to_string_lossy(),
             "Cannot convert 1,2 to a BigInt"
         );
+    }
+
+    #[test]
+    fn combinations() {
+        let values = |gas: &str, priority: Option<&str>| {
+            fee_quote_values("direct", Some(gas), priority).unwrap()
+        };
+        // 10/1 with 10/2: M = 18, P = 1, and M − P odd.
+        let combined =
+            combine_fee_quotes(&[values("10", Some("1")), values("10", Some("2"))], false).unwrap();
+        assert_eq!(
+            combined.to_json(),
+            r#"{"type":"eip1559","baseFee":"8","maxPriorityFeePerGas":"1","maxFeePerGas":"18","effectiveGasPrice":"9","source":"direct","verified":false,"answered":2}"#
+        );
+        assert_eq!(combined.answered(), Some(2));
+        // One answer: today's quote, marked.
+        let one = combine_fee_quotes(&[values("16", Some("17"))], true).unwrap();
+        assert_eq!(
+            one.to_json(),
+            r#"{"type":"legacy","gasPrice":"16","effectiveGasPrice":"16","source":"direct","verified":false,"answered":1}"#
+        );
+        for quote in [combined, one] {
+            assert_eq!(quote.json_len(), quote.to_json().len());
+        }
+        assert_eq!(combine_fee_quotes(&[], true), None);
+        // Mixed: EIP-1559 only where it is verified.
+        let mixed = [values("100", Some("1")), values("1000", None)];
+        assert_eq!(
+            combine_fee_quotes(&mixed, true).unwrap().to_json(),
+            r#"{"type":"eip1559","baseFee":"99","maxPriorityFeePerGas":"1","maxFeePerGas":"199","effectiveGasPrice":"100","source":"direct","verified":false,"answered":2}"#
+        );
+        assert_eq!(
+            combine_fee_quotes(&mixed, false).unwrap().to_json(),
+            r#"{"type":"legacy","gasPrice":"100","effectiveGasPrice":"100","source":"direct","verified":false,"answered":2}"#
+        );
+        assert!(values("100", Some("1")).is_eip1559());
+        assert_eq!(
+            values("100", Some("1")).priority_decimal().as_deref(),
+            Some("1")
+        );
+        assert_eq!(values("100", Some("101")).priority_decimal(), None);
     }
 }

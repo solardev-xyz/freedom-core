@@ -72,6 +72,11 @@ impl BigInt {
         self.limbs.is_empty()
     }
 
+    /// What its limbs hold on the heap.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.limbs.capacity().saturating_mul(8)
+    }
+
     /// The magnitude's width in bits.
     pub(crate) fn bits(&self) -> usize {
         self.limbs.last().map_or(0, |top| {
@@ -181,6 +186,27 @@ impl BigInt {
             borrow = first || second;
         }
         Self::new(false, limbs)
+    }
+
+    /// `⌊self / 2⌋` for a non-negative value.
+    pub(crate) fn half(&self) -> Self {
+        let mut limbs = self.limbs.clone();
+        let mut carry = 0u64;
+        for limb in limbs.iter_mut().rev() {
+            let low = *limb & 1;
+            *limb = (*limb >> 1) | (carry << 63);
+            carry = low;
+        }
+        Self::new(false, limbs)
+    }
+
+    /// The lesser of two values.
+    pub(crate) fn min<'a>(&'a self, other: &'a Self) -> &'a Self {
+        if other.compare(self) == Ordering::Less {
+            other
+        } else {
+            self
+        }
     }
 
     /// `self + other` for non-negative values.
@@ -433,5 +459,16 @@ mod tests {
             BigInt::new(false, vec![TEN_19]).to_decimal(),
             "10000000000000000000"
         );
+        // Halving carries across limbs and rounds down.
+        assert_eq!(a.half().to_hex(), "8000000000000000");
+        assert_eq!(
+            BigInt::new(false, vec![1, 1]).half().to_hex(),
+            "8000000000000000"
+        );
+        assert_eq!(BigInt::from_u64(17).half().to_decimal(), "8");
+        assert_eq!(BigInt::from_u64(1).half(), BigInt::zero());
+        assert_eq!(BigInt::zero().half(), BigInt::zero());
+        assert_eq!(a.min(&b), &b);
+        assert_eq!(b.min(&a), &b);
     }
 }
