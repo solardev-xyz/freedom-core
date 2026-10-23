@@ -2,7 +2,8 @@
 """Writes the fuzz targets' starting inputs into fuzz/seeds/<target>/.
 
 Run from the repository root: python3 fuzz/seeds/generate.py
-The vault seeds need the `cryptography` package for AES-GCM.
+The vault seeds need the `cryptography` package for AES-GCM, and the seal
+seeds for X25519 and AES-GCM.
 
 The inputs only give the fuzzer a start; nothing checks them against a
 reference. Each one is small, so libFuzzer's input-size limit stays small.
@@ -10,10 +11,12 @@ reference. Each one is small, so libFuzzer's input-size limit stays small.
 
 import base64
 import hashlib
+import hmac
 import json
 import os
 import struct
 
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)))
@@ -129,9 +132,65 @@ def openssh_seeds():
     write('openssh_public', 'written', bytes([0x80 | 3, 1]) + bytes.fromhex('d3890d10') + b'FreedomBrowser')
 
 
+# fc-seal's HPKE (RFC 9180): DHKEM(X25519, HKDF-SHA256), HKDF-SHA256,
+# AES-256-GCM, base mode, fc-seal's INFO and an empty aad.
+SEAL_KEM = b'KEM' + struct.pack('>H', 0x0020)
+SEAL_SUITE = b'HPKE' + struct.pack('>HHH', 0x0020, 0x0001, 0x0002)
+SEAL_INFO = b'freedom-radicle-node-key/1'
+
+
+def hkdf_extract(salt, ikm):
+    return hmac.new(salt or bytes(32), ikm, hashlib.sha256).digest()
+
+
+def hkdf_expand(prk, info, length):
+    out, block, counter = b'', b'', 1
+    while len(out) < length:
+        block = hmac.new(prk, block + info + bytes([counter]), hashlib.sha256).digest()
+        out += block
+        counter += 1
+    return out[:length]
+
+
+def labeled_extract(suite, salt, label, ikm):
+    return hkdf_extract(salt, b'HPKE-v1' + suite + label + ikm)
+
+
+def labeled_expand(suite, prk, label, info, length):
+    return hkdf_expand(prk, struct.pack('>H', length) + b'HPKE-v1' + suite + label + info, length)
+
+
+def derive_keypair(ikm):
+    """DeriveKeyPair: what `RecipientKey::generate` and a seal's ephemeral
+    key make of 32 bytes."""
+    prk = labeled_extract(SEAL_KEM, b'', b'dkp_prk', ikm)
+    secret = X25519PrivateKey.from_private_bytes(labeled_expand(SEAL_KEM, prk, b'sk', b'', 32))
+    return secret, secret.public_key().public_bytes_raw()
+
+
+def hpke_seal(recipient, key, ikm):
+    """`fc_seal::seal(recipient, key)` with `ikm` as its 32 random bytes:
+    enc and ciphertext."""
+    ephemeral, enc = derive_keypair(ikm)
+    dh = ephemeral.exchange(X25519PublicKey.from_public_bytes(recipient))
+    prk = labeled_extract(SEAL_KEM, b'', b'eae_prk', dh)
+    shared = labeled_expand(SEAL_KEM, prk, b'shared_secret', enc + recipient, 32)
+    context = (bytes([0]) + labeled_extract(SEAL_SUITE, b'', b'psk_id_hash', b'')
+               + labeled_extract(SEAL_SUITE, b'', b'info_hash', SEAL_INFO))
+    secret = labeled_extract(SEAL_SUITE, shared, b'secret', b'')
+    aead_key = labeled_expand(SEAL_SUITE, secret, b'key', context, 32)
+    nonce = labeled_expand(SEAL_SUITE, secret, b'base_nonce', context, 12)
+    return enc, AESGCM(aead_key).encrypt(nonce, key, b'')
+
+
 def seal_seeds():
     # Even: a recipient's seed, then a relayed enc and ciphertext, cut at 32.
     write('seal_open', 'relayed', bytes([64]) + bytes(range(32)) + bytes(range(32, 112)))
+    # The same, relaying a genuine seal of 0x52 * 32 to that recipient
+    # (review of #199): it opens, so the target checks what a seal implies.
+    _, recipient = derive_keypair(bytes([0x31] * 32))
+    enc, ciphertext = hpke_seal(recipient, bytes([0x52] * 32), bytes([0x73] * 32))
+    write('seal_open', 'relayed-genuine', bytes([64]) + bytes([0x31] * 32) + enc + ciphertext)
     # Odd: a recipient's public key, a key, a seed.
     write('seal_open', 'sealed', bytes([1]) + bytes(range(1, 97)))
     # A low-order point as the recipient: seal must refuse it.
@@ -160,20 +219,43 @@ def naming_seeds():
     write('naming_answer', 'contenthash-swarm', bytes([0]) + bytes([0xe4, 0x01, 0x01, 0xfa, 0x01, 0x1b, 0x20]) + digest)
     write('naming_answer', 'cid', bytes([1]) + bytes([0x01, 0x70, 0x12, 0x20]) + digest)
     write('naming_answer', 'gateway', bytes([2]) + b'{"data":"0x' + digest.hex().encode() + b'"}')
-    # Mode 3 + 4 * shape: ABI data for [bytes] and for OffchainLookup.
-    write('naming_answer', 'abi-bytes', bytes([3]) + word(32) + abi_bytes(digest))
+    # Mode 3 + 4 * shape, the output bound (two bytes), then ABI data: for
+    # [bytes], and for OffchainLookup.
+    unbounded = struct.pack('>H', 0xffff)
+    one_bytes = word(32) + abi_bytes(digest)
+    write('naming_answer', 'abi-bytes', bytes([3]) + unbounded + one_bytes)
+    # Its 32 bytes exactly at the bound, and one byte over it.
+    write('naming_answer', 'abi-bytes-at-bound', bytes([3]) + struct.pack('>H', 32) + one_bytes)
+    write('naming_answer', 'abi-bytes-over-bound', bytes([3]) + struct.pack('>H', 31) + one_bytes)
+    url = b'https://gateway.example/{sender}/{data}.json'
+    lookup = offchain_lookup(word(1) + word(32) + abi_bytes(url))
+    write('naming_answer', 'abi-offchain-lookup', bytes([3 + 4 * 5]) + unbounded + lookup)
+    # Its output (the URL, callData and extraData) at the bound, and over it.
+    output = len(url) + 2
+    write('naming_answer', 'abi-offchain-lookup-at-bound',
+          bytes([3 + 4 * 5]) + struct.pack('>H', output) + lookup)
+    write('naming_answer', 'abi-offchain-lookup-over-bound',
+          bytes([3 + 4 * 5]) + struct.pack('>H', output - 1) + lookup)
+    # A urls string[] that fails after reading its first URL (the second
+    # offset is above 2^53 - 1): the URL counts against the bound but isn't
+    # in the answer, so a bound of what the answer holds (callData's 2
+    # bytes) refuses it.
+    failing = offchain_lookup(word(2) + word(64) + word(2 ** 64) + abi_bytes(url))
+    write('naming_answer', 'abi-offchain-lookup-failed-urls',
+          bytes([3 + 4 * 5]) + struct.pack('>H', 2) + failing)
+
+
+def offchain_lookup(urls):
+    """An OffchainLookup revert's ABI data around `urls` (string[])."""
     sender = bytes(12) + bytes(range(20))
-    urls = word(1) + word(32) + abi_bytes(b'https://gateway.example/{sender}/{data}.json')
     call = abi_bytes(b'\x12\x34')
     extra = abi_bytes(b'')
     head_len = 5 * 32
     urls_at = head_len
     call_at = urls_at + len(urls)
     extra_at = call_at + len(call)
-    lookup = (word(int.from_bytes(sender, 'big')) + word(urls_at) + word(call_at)
-              + bytes([0xde, 0xad, 0xbe, 0xef]) + bytes(28) + word(extra_at) + urls + call + extra)
-    write('naming_answer', 'abi-offchain-lookup', bytes([3 + 4 * 5]) + lookup)
-
+    return (word(int.from_bytes(sender, 'big')) + word(urls_at) + word(call_at)
+            + bytes([0xde, 0xad, 0xbe, 0xef]) + bytes(28) + word(extra_at) + urls + call + extra)
 
 if __name__ == '__main__':
     json_seeds()
