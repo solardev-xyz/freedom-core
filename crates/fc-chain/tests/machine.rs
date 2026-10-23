@@ -1743,25 +1743,31 @@ fn a_broadcast_answer_stays_charged_while_its_error_is_copied() {
 
 #[test]
 fn a_fee_quotes_codec_work_counts_against_the_budget() {
-    // Two answers kept (a gas price of 1,000 nulls, a 9,000-character
-    // priority fee) fit; the codec's index of the first does not.
+    // A gas price of 1,000 nulls fits as an answer; the codec's index of it
+    // does not. The gas price is read as it arrives, before the hint is
+    // asked for, so the request ends there.
     let gas = format!("[{}]", vec!["null"; 1_000].join(","));
     let priority = format!("\"{}\"", "a".repeat(9_000));
-    let quote = |bounds: Bounds| {
-        let mut world = World::new(bounds, &[chain(1, &["direct"], &["a"], ("3", "2", "5000"))]);
-        let id = world.submit(Call::FeeQuote { chain_id: 1 }, None);
-        world.answer(world.rpcs()[0].0, ok(&gas));
-        assert!(!world.replied(id));
-        world.answer(world.rpcs()[1].0, ok(&priority));
-        world.reply(id).clone()
-    };
-    let bounded = quote(Bounds {
-        request_bytes: 15_000,
+    let bounds = Bounds {
+        request_bytes: gas.len() + 1_000,
         ..Bounds::default()
-    });
-    assert_eq!(protocol(&bounded), Some(Protocol::Budget));
-    // Within the default budget the codec's answer is today's.
-    match quote(Bounds::default()).result {
+    };
+    let mut world = World::new(bounds, &[chain(1, &["direct"], &["a"], ("3", "2", "5000"))]);
+    let id = world.submit(Call::FeeQuote { chain_id: 1 }, None);
+    world.answer(world.rpcs()[0].0, ok(&gas));
+    assert_eq!(protocol(world.reply(id)), Some(Protocol::Budget));
+    assert_eq!(world.rpcs().len(), 1);
+    // Within the default budget the codec's answer is today's, once the
+    // hint's exchange has ended.
+    let mut world = World::new(
+        Bounds::default(),
+        &[chain(1, &["direct"], &["a"], ("3", "2", "5000"))],
+    );
+    let id = world.submit(Call::FeeQuote { chain_id: 1 }, None);
+    world.answer(world.rpcs()[0].0, ok(&gas));
+    assert!(!world.replied(id));
+    world.answer(world.rpcs()[1].0, ok(&priority));
+    match &world.reply(id).result {
         Err(ChainError::Thrown(error)) => assert!(
             error
                 .message
@@ -2520,4 +2526,142 @@ fn boundary_fee_combine_races() {
     for io in outstanding(&world) {
         assert_eq!(world.cancelled(io), Some(400));
     }
+}
+
+// Review of #179, round 1: B's endpoints run at once, so what one keeps
+// across its hint's request is kept three times over. Each reads its gas
+// price as it arrives and keeps only the value: valid answers within the
+// answer cap can't push the request past its budget and discard a quote
+// another endpoint answered.
+#[test]
+fn boundary_fee_combine_large_answers_keep_the_budget() {
+    // Two endpoints answer ~17 MiB gas prices (leading zeros, then 100);
+    // an ordinary one answers 100/1; then the first answers an ~8 MiB hint.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b", "c"], false)],
+    );
+    let id = world.submit(FEE, None);
+    let large_gas = format!("\"{}100\"", "0".repeat(17 * 1024 * 1024));
+    let medium_priority = format!("\"{}1\"", "0".repeat(8 * 1024 * 1024));
+    for endpoint in ["a", "b"] {
+        assert!(world.answer(world.rpc_to(endpoint, "eth_gasPrice"), ok(&large_gas)));
+    }
+    world.quote_from("c", "0x64", Some("0x1"));
+    assert!(!world.replied(id));
+    assert!(world.answer(
+        world.rpc_to("a", "eth_maxPriorityFeePerGas"),
+        ok(&medium_priority),
+    ));
+    assert!(!world.replied(id));
+    assert!(world.answer(world.rpc_to("b", "eth_maxPriorityFeePerGas"), ok("\"0x1\"")));
+    // All three quoted 100/1.
+    assert_eq!(
+        quote_json(world.reply(id)),
+        r#"{"type":"eip1559","baseFee":"99","maxPriorityFeePerGas":"1","maxFeePerGas":"199","effectiveGasPrice":"100","source":"direct","verified":false,"answered":3}"#
+    );
+
+    // Three gas prices at the answer cap, then three hints as large: each
+    // is read on arrival, so the request stays within its budget.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b", "c"], false)],
+    );
+    let id = world.submit(FEE, None);
+    let result = format!("\"{}1\"", "0".repeat(17 * 1024 * 1024));
+    for endpoint in ["a", "b", "c"] {
+        assert!(world.answer(world.rpc_to(endpoint, "eth_gasPrice"), ok(&result)));
+        assert!(world.machine.held() <= Bounds::default().request_bytes);
+    }
+    assert_eq!(
+        world
+            .asked()
+            .iter()
+            .filter(|(_, method, _)| method == "eth_maxPriorityFeePerGas")
+            .count(),
+        3
+    );
+    for endpoint in ["a", "b", "c"] {
+        assert!(!world.replied(id));
+        assert!(world.answer(
+            world.rpc_to(endpoint, "eth_maxPriorityFeePerGas"),
+            ok(&result),
+        ));
+    }
+    assert_eq!(protocol(world.reply(id)), None);
+    assert!(quote_json(world.reply(id)).contains(r#""answered":3"#));
+
+    // Two large endpoints and one ordinary gas price: the request goes on.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b", "c"], false)],
+    );
+    let id = world.submit(FEE, None);
+    for endpoint in ["a", "b"] {
+        assert!(world.answer(world.rpc_to(endpoint, "eth_gasPrice"), ok(&result)));
+    }
+    assert!(world.answer(world.rpc_to("c", "eth_gasPrice"), ok("\"0x1\"")));
+    assert!(world.answer(world.rpc_to("a", "eth_maxPriorityFeePerGas"), ok(&result)));
+    assert!(!world.replied(id), "{:?}", protocol(world.reply(id)));
+}
+
+// Review of #179, round 1: an endpoint's failure, and B's other errors,
+// are kept only while no quote has answered: the reply is an error only
+// then. A gas price that fails the codec still fails its endpoint once the
+// hint's exchange has ended, with the codec's error.
+#[test]
+fn boundary_fee_combine_errors_after_the_hint() {
+    let mut world = World::new(Bounds::default(), &[fee_chain(&["direct"], &["a"], false)]);
+    let id = world.submit(FEE, None);
+    assert!(world.answer(world.rpc_to("a", "eth_gasPrice"), ok("\"0xzz\"")));
+    // The hint is still asked for.
+    assert!(!world.replied(id));
+    assert!(world.answer(world.rpc_to("a", "eth_maxPriorityFeePerGas"), ok("\"0x1\"")));
+    match &world.reply(id).result {
+        Err(ChainError::Thrown(error)) => {
+            assert_eq!(
+                error.message.to_string_lossy(),
+                "Cannot convert 0xzz to a BigInt"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+// Review of #179, round 1 (from its probes): a tick's answers count
+// before its failures. A failure in the tick a quote answered isn't
+// replaced: once one has answered, no endpoint starts.
+#[test]
+fn boundary_fee_combine_no_replacement_in_an_answers_tick() {
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b", "c", "d"], false)],
+    );
+    let id = world.submit(FEE, None);
+    assert!(world.answer(world.rpc_to("b", "eth_gasPrice"), ok("\"0x64\"")));
+    // a's failure and b's quote, handed to the machine at one instant.
+    let a = world.rpc_to("a", "eth_gasPrice");
+    let b = world.rpc_to("b", "eth_maxPriorityFeePerGas");
+    assert!(world.machine.complete(a, node_error(-32000, "a down")));
+    assert!(world.machine.complete(b, ok("\"0x1\"")));
+    world.collect();
+    // c is still running, and d is never asked.
+    assert!(!world.replied(id));
+    assert!(world.asked().iter().all(|(endpoint, ..)| endpoint != "d"));
+    world.quote_from("c", "0x64", Some("0x1"));
+    assert!(quote_json(world.reply(id)).contains(r#""answered":2"#));
+    assert!(world.asked().iter().all(|(endpoint, ..)| endpoint != "d"));
+
+    // Before any answer, a failure is still replaced in its tick.
+    let mut world = World::new(
+        Bounds::default(),
+        &[fee_chain(&["direct"], &["a", "b", "c", "d"], false)],
+    );
+    let id = world.submit(FEE, None);
+    assert!(world.answer(
+        world.rpc_to("a", "eth_gasPrice"),
+        node_error(-32000, "a down")
+    ));
+    assert!(!world.replied(id));
+    assert!(world.asked().iter().any(|(endpoint, ..)| endpoint == "d"));
 }

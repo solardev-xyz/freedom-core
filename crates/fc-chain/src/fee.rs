@@ -302,6 +302,44 @@ pub fn fee_quote_values_reserving<E>(
     priority: Option<&str>,
     mut reserve: impl FnMut(usize) -> Result<(), E>,
 ) -> Result<Result<QuoteValues, JsError>, E> {
+    match gas_price_reserving(source, gas_price, &mut reserve)? {
+        Ok(gas_price) => fee_quote_values_with_reserving(source, gas_price, priority, reserve),
+        Err(error) => Ok(Err(error)),
+    }
+}
+
+/// A positive gas price, as the codec reads it before the priority fee:
+/// its value when a quote can carry it, or that it is wider than
+/// [`MAX_DECIMAL_BITS`] bits, which fails the quote once the priority fee
+/// has been read. Nothing of its text is kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GasPrice {
+    Fits(BigInt),
+    Wide,
+}
+
+impl GasPrice {
+    /// What it holds on the heap.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        match self {
+            Self::Fits(value) => value.heap_bytes(),
+            Self::Wide => 0,
+        }
+    }
+}
+
+/// The first half of [`fee_quote_values_reserving`]: the gas price read
+/// alone, its errors (no JSON, no `BigInt`, not positive) the codec's,
+/// with every allocation asked of `reserve` first. A caller can read the
+/// gas price as it arrives and keep only this while the priority fee is
+/// asked for, so an endpoint's raw answer isn't kept across that request;
+/// the second half, [`fee_quote_values_with_reserving`], gives the same
+/// quote or error the whole codec gives.
+pub(crate) fn gas_price_reserving<E>(
+    source: &str,
+    gas_price: Option<&str>,
+    mut reserve: impl FnMut(usize) -> Result<(), E>,
+) -> Result<Result<GasPrice, JsError>, E> {
     let small = source.len().saturating_mul(2).saturating_add(256);
     let gas_index = match gas_price
         .map(|text| indexed(text, &mut reserve))
@@ -327,6 +365,21 @@ pub fn fee_quote_values_reserving<E>(
             format!("{source} returned a non-positive gas price").as_str(),
         )));
     }
+    Ok(Ok(match gas_price {
+        Parsed::Value(value) if value.bits() <= MAX_DECIMAL_BITS => GasPrice::Fits(value.compact()),
+        _ => GasPrice::Wide,
+    }))
+}
+
+/// The second half of [`fee_quote_values_reserving`]: the quote of a gas
+/// price [`gas_price_reserving`] read, with `priority`'s text.
+pub(crate) fn fee_quote_values_with_reserving<E>(
+    source: &str,
+    gas_price: GasPrice,
+    priority: Option<&str>,
+    mut reserve: impl FnMut(usize) -> Result<(), E>,
+) -> Result<Result<QuoteValues, JsError>, E> {
+    let small = source.len().saturating_mul(2).saturating_add(256);
     let priority_index = match priority
         .map(|text| indexed(text, &mut reserve))
         .transpose()?
@@ -339,7 +392,7 @@ pub fn fee_quote_values_reserving<E>(
         None => None,
         Some(value) if value.kind() == Kind::Null => None,
         Some(value) => match to_bigint_reserving(Some(value), &mut reserve)? {
-            Ok(Parsed::Value(priority)) => Some(priority),
+            Ok(Parsed::Value(priority)) => Some(priority.compact()),
             // Negative, or above any gas price that can be quoted.
             Ok(Parsed::TooWide { .. }) => None,
             Err(error) => return Ok(Err(error)),
@@ -347,8 +400,8 @@ pub fn fee_quote_values_reserving<E>(
     };
     drop(priority_index);
     let gas_price = match gas_price {
-        Parsed::Value(value) if value.bits() <= MAX_DECIMAL_BITS => value,
-        _ => {
+        GasPrice::Fits(value) => value,
+        GasPrice::Wide => {
             reserve(small)?;
             return Ok(Err(JsError::new(
                 "Error",
@@ -697,5 +750,49 @@ mod tests {
             Some("1")
         );
         assert_eq!(values("100", Some("101")).priority_decimal(), None);
+    }
+
+    // The codec in two halves, the gas price read first: the same quote or
+    // error as the whole, and only the value kept of a long text.
+    #[test]
+    fn gas_price_first() {
+        let whole = |gas: &str, priority: Option<&str>| {
+            fee_quote_values_reserving("x", Some(gas), priority, |_| Ok::<(), ()>(()))
+        };
+        let halves =
+            |gas: &str, priority: Option<&str>| match gas_price_reserving("x", Some(gas), |_| {
+                Ok::<(), ()>(())
+            })? {
+                Ok(read) => fee_quote_values_with_reserving("x", read, priority, |_| Ok(())),
+                Err(error) => Ok(Err(error)),
+            };
+        let wide = format!("\"0x1{}\"", "0".repeat(1_100));
+        for (gas, priority) in [
+            (r#""0x64""#, Some(r#""0x1""#)),
+            (r#""0x64""#, Some("{")),
+            (r#""0xzz""#, Some("{")),
+            ("0", Some("{")),
+            (wide.as_str(), Some("{")),
+            (wide.as_str(), Some(r#""0x1""#)),
+            (r#""0x64""#, Some(r#""0x65""#)),
+        ] {
+            assert_eq!(
+                halves(gas, priority),
+                whole(gas, priority),
+                "{gas:.20} {priority:?}"
+            );
+        }
+        // Leading zeros: the value keeps none of its text's room.
+        let padded = format!("\"0x{}64\"", "0".repeat(64 * 1024));
+        let read = gas_price_reserving("x", Some(&padded), |_| Ok::<(), ()>(()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(read, GasPrice::Fits(BigInt::from_u64(100)));
+        assert!(read.heap_bytes() <= 8);
+        let quoted =
+            fee_quote_values_with_reserving("x", read, Some(&padded), |_| Ok::<(), ()>(()))
+                .unwrap()
+                .unwrap();
+        assert!(quoted.heap_bytes() <= 16);
     }
 }
