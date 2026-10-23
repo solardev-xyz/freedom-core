@@ -1,3 +1,4 @@
 /target
+/vectors/dweb-verify/target
 node_modules/
 __pycache__/
