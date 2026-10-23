@@ -1,20 +1,30 @@
 //! A fee quote (design 0005, Fee quotes): the router's `getFeeQuote`. It
 //! walks the read order with no capabilities, exclusions, bypass or Myotis
-//! slots.
+//! slots. Direct's step is B's (deviation `fee-combination`): up to three
+//! endpoints at once, their quotes combined.
 
 use std::cell::RefCell;
+use std::future::Future;
+use std::pin::Pin;
+use std::task::Poll;
 
 use fc_json::index::Index;
+use fc_naming::session::exec::Sleep;
 
-use super::ctx::{Over, Release, Req, reply, reserve, within};
+use super::budget::Charge;
+use super::ctx::{Over, Release, Req, reply, reserve, started, within};
 use super::error::{ErrorClass, Thrown};
 use super::exchange::{ResultText, exchange};
-use super::io::{Answer, Delivered, MyotisReply, Request, VerifiedOp};
+use super::header::{HeaderRead, reads_header};
+use super::io::{Answer, Delivered, Ms, MyotisReply, Request, VerifiedOp};
 use super::logs::Keeper;
 use super::read::{
     MYOTIS_FAILED, SourceOptions, charged, myotis_adapter_error, myotis_failure, request_source,
 };
-use crate::fee::{FeeQuote, fee_quote_reserving};
+use crate::fee::{
+    FeeQuote, QUOTE_BYTES, QuoteValues, combine_fee_quotes, fee_quote_reserving,
+    fee_quote_values_reserving,
+};
 use crate::js::JsError;
 use crate::myotis::{MYOTIS_NOT_READY, MyotisOperation, myotis_fee_values};
 use crate::text::fee_quote_failure_text;
@@ -117,30 +127,197 @@ async fn myotis(req: &Req) -> Result<FeeQuote, Thrown> {
     }
 }
 
-/// `requestDirectFeeQuote`: both components from one endpoint.
-async fn direct(req: &Req) -> Result<FeeQuote, Thrown> {
+/// How many endpoints B asks at once (design 0005, B: Collection).
+pub(crate) const FEE_ENDPOINTS: usize = 3;
+
+/// How long B's collection waits for more quotes after the first answered.
+pub(crate) const FEE_CUTOFF_MS: Ms = 1_000;
+
+/// `feeQuote`'s values with every allocation reserved first, as
+/// [`quote_within`] reserves them. They stay charged, at what they hold,
+/// while they are kept.
+async fn values_within(
+    req: &Req,
+    source: &str,
+    gas_price: Option<&str>,
+    priority: Option<&str>,
+) -> Result<(QuoteValues, Charge), Thrown> {
+    let mut work = reserve!(req.ctx, 0);
+    let quoted = fee_quote_values_reserving(source, gas_price, priority, |bytes| {
+        work.settle(work.bytes().saturating_add(bytes))
+            .map_err(|()| Over)
+    });
+    match within!(quoted) {
+        Ok(values) => {
+            within!(work.settle(values.heap_bytes()).map_err(|()| Over));
+            Ok((values, work))
+        }
+        Err(error) => Err(within!(charged(js(error), work))),
+    }
+}
+
+/// One endpoint's quote, as `requestDirectFeeQuote` asks it:
+/// `eth_gasPrice`, then, once that has answered, `eth_maxPriorityFeePerGas`
+/// of the same endpoint, each within `configured`. A failed hint gives a
+/// legacy quote; a failed gas price, a non-positive one or an unparseable
+/// hint fails the endpoint.
+async fn endpoint_quote(req: &Req, url: &str) -> Result<(QuoteValues, Charge), Thrown> {
     let timeout = req.chain.timeout;
+    let gas = exchange(req, url, "eth_gasPrice", "[]", timeout).await?;
+    let priority = exchange(req, url, "eth_maxPriorityFeePerGas", "[]", timeout)
+        .await
+        .unwrap_or(None);
+    values_within(req, "direct", json(&gas), json(&priority)).await
+}
+
+/// B's answered quotes, each charged while it is kept.
+pub(crate) struct Collected {
+    pub values: Vec<QuoteValues>,
+    _charges: Vec<Charge>,
+}
+
+impl Collected {
+    /// Whether the answers mix EIP-1559 and legacy quotes.
+    pub(crate) fn mixed(&self) -> bool {
+        self.values.iter().any(QuoteValues::is_eip1559)
+            && !self.values.iter().all(QuoteValues::is_eip1559)
+    }
+}
+
+type Asking<'a> = Pin<Box<dyn Future<Output = Result<(QuoteValues, Charge), Thrown>> + 'a>>;
+
+/// B's collection (design 0005, B: combining Direct's quotes; deviation
+/// `fee-combination`):
+///
+/// - **Three at once:** the chain's endpoints in registry order, the
+///   quorum's included; the first three start together.
+/// - **Replacement:** until a quote has answered, an endpoint that fails
+///   is replaced by the next one not yet asked. Once one has answered, no
+///   endpoint starts.
+/// - **Cutoff:** collection ends when no started endpoint is still
+///   running, or [`FEE_CUTOFF_MS`] after the first quote answered. The
+///   cutoff goes first in its tick: an answer in that tick is left out.
+///   Outstanding exchanges are then cancelled.
+/// - **No quote:** every endpoint failed: the last error to arrive, in one
+///   tick the higher registry index's. With no endpoint, today's `No RPC
+///   endpoint configured`.
+///
+/// `header`, the verified header read, is polled alongside from the
+/// collection's start; whether anything waits for it is the caller's.
+pub(crate) async fn collect(
+    req: &Req,
+    mut header: Option<&mut HeaderRead<'_>>,
+) -> Result<Collected, Thrown> {
     let urls = req.chain.urls();
     if urls.is_empty() {
         return Err(Thrown::unavailable("No RPC endpoint configured"));
     }
-    let mut last: Option<Thrown> = None;
-    for url in &urls {
-        let attempt = async {
-            let gas = exchange(req, url, "eth_gasPrice", "[]", timeout).await?;
-            // The same endpoint, deliberately; without a hint the quote is
-            // legacy.
-            let priority = exchange(req, url, "eth_maxPriorityFeePerGas", "[]", timeout)
-                .await
-                .unwrap_or(None);
-            quote_within(req, "direct", json(&gas), json(&priority)).await
-        };
-        match attempt.await {
-            Ok(quote) => return Ok(quote),
-            Err(error) => last = Some(error),
+    let mut asking: Vec<(usize, Asking<'_>)> = urls
+        .iter()
+        .take(FEE_ENDPOINTS)
+        .enumerate()
+        .map(|(index, url)| (index, Box::pin(endpoint_quote(req, url)) as Asking<'_>))
+        .collect();
+    let mut next = asking.len();
+    let mut values: Vec<QuoteValues> = Vec::new();
+    let mut charges: Vec<Charge> = Vec::new();
+    // The last error, when it arrived, and its endpoint's registry index.
+    let mut last: Option<(Ms, usize, Thrown)> = None;
+    let mut cutoff: Option<(Ms, Sleep<Request, Delivered>)> = None;
+    std::future::poll_fn(|cx| {
+        if cutoff.as_ref().is_some_and(|(at, _)| req.now() >= *at) {
+            return Poll::Ready(());
         }
+        let mut i = 0;
+        while i < asking.len() {
+            let Poll::Ready(settled) = asking[i].1.as_mut().poll(cx) else {
+                i += 1;
+                continue;
+            };
+            let (index, _) = asking.remove(i);
+            match settled {
+                Ok((quote, charge)) => {
+                    values.push(quote);
+                    charges.push(charge);
+                    if cutoff.is_none() {
+                        let at = req.now().saturating_add(FEE_CUTOFF_MS);
+                        cutoff = Some((at, started(req.ctx.rt.sleep(FEE_CUTOFF_MS))));
+                    }
+                }
+                Err(error) => {
+                    let now = req.now();
+                    if last
+                        .as_ref()
+                        .is_none_or(|(at, at_index, _)| now > *at || index > *at_index)
+                    {
+                        last = Some((now, index, error));
+                    }
+                    if values.is_empty()
+                        && let Some(url) = urls.get(next)
+                    {
+                        asking.push((next, Box::pin(endpoint_quote(req, url))));
+                        next += 1;
+                    }
+                }
+            }
+        }
+        if let Some(header) = header.as_deref_mut() {
+            let _ = header.poll(cx);
+        }
+        if asking.is_empty() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await;
+    // Exchanges still outstanding are cancelled: those endpoints haven't
+    // answered.
+    drop(asking);
+    drop(cutoff);
+    if values.is_empty() {
+        return Err(last.map_or_else(
+            || Thrown::unavailable("All RPC endpoints failed"),
+            |(_, _, error)| error,
+        ));
     }
-    Err(last.unwrap_or_else(|| Thrown::unavailable("All RPC endpoints failed")))
+    Ok(Collected {
+        values,
+        _charges: charges,
+    })
+}
+
+/// B's combination of collected quotes, its arithmetic and quote reserved
+/// first.
+pub(crate) async fn combined(
+    req: &Req,
+    collected: &Collected,
+    eip1559_verified: bool,
+) -> Result<FeeQuote, Thrown> {
+    let _work = reserve!(req.ctx, 2 * QUOTE_BYTES);
+    combine_fee_quotes(&collected.values, eip1559_verified)
+        .ok_or_else(|| Thrown::unavailable("All RPC endpoints failed"))
+}
+
+/// Direct's step: B's collection and combination, in place of
+/// `requestDirectFeeQuote`'s walk. Mixed answers wait for the verified
+/// header, within Colibri's budget, where the chain has one; otherwise
+/// nothing waits for it, and its outcome is dropped when it arrives.
+async fn direct(req: &Req) -> Result<FeeQuote, Thrown> {
+    if req.chain.rpc.is_empty() {
+        // No endpoint: no header is read.
+        return Err(Thrown::unavailable("No RPC endpoint configured"));
+    }
+    let mut header = reads_header(&req.chain).then(|| HeaderRead::new(req));
+    let collected = collect(req, header.as_mut()).await?;
+    let eip1559_verified = match header.as_mut() {
+        Some(header) if collected.mixed() => header
+            .outcome()
+            .await
+            .is_some_and(|header| header.base_fee.is_some()),
+        _ => false,
+    };
+    combined(req, &collected, eip1559_verified).await
 }
 
 /// Colibri and the quorum make two requests; any other source fails as

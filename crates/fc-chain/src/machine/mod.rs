@@ -18,7 +18,8 @@
 //! `order-validation`, `endpoint-dedup`, `singleton-quorum`,
 //! `quorum-clamps`, `config-change`, `memory-budgets`,
 //! `monotonic-time`, `state-retention`, `rpc-id`, `adapter-error-text`,
-//! `cancel-promptly`, `paired-endpoint-text` and `broadcast-outcome`. It
+//! `cancel-promptly`, `paired-endpoint-text`, `broadcast-outcome` and
+//! `fee-combination`. It
 //! keeps no wall clock: every instant is the executor's monotonic
 //! milliseconds.
 
@@ -29,6 +30,7 @@ mod config;
 mod ctx;
 mod error;
 mod exchange;
+mod header;
 mod html;
 mod io;
 mod logs;
@@ -48,6 +50,7 @@ pub use error::{ChainError, ErrorClass, Origin, Prop, Protocol, Thrown};
 pub use exchange::{BUSY, FETCH_FAILED, NOT_SENT, TOO_LARGE};
 pub use fc_dweb::Class as HtmlClass;
 pub use fc_naming::session::exec::{Effect, Fired};
+pub use header::Header;
 pub use html::HTML_TOO_LARGE_CODE;
 pub use io::{
     Answer, ColibriClass, ColibriReply, Endpoint, Ms, MyotisClass, MyotisRejection, MyotisReply,

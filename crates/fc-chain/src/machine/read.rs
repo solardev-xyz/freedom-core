@@ -583,7 +583,7 @@ pub(crate) fn myotis_adapter_error(req: &Req, class: MyotisClass) -> Thrown {
 
 /// `requestColibri`: at most 8 in flight, 2 per route, each held until
 /// main's terminal reply.
-async fn colibri(
+pub(crate) async fn colibri(
     req: &Req,
     method: &str,
     params: &str,
