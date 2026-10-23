@@ -568,6 +568,66 @@ fn a_home_replaced_during_its_write_is_written_where_it_was_staged() {
     assert_eq!(alias(&moved), "FreedomBrowser");
 }
 
+/// Review of #177, round 4: two cores with identity directories of their
+/// own share a Radicle home. B holds the home's gate, its sealed config
+/// staged, held at its commit. A, with an intent of its own for that home
+/// left from an operation that died before its commit, asks for another
+/// write: its recovery waits for the gate, so A answers `lock_held` and
+/// B's staged config stays. Released, B installs.
+#[test]
+fn a_cores_recovery_never_removes_another_cores_staged_files() {
+    let (root, data_a, locks) = dirs();
+    let data_b = root.path().join("identity-b");
+    let home = root.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("config.json"), b"{\"old\":true}").unwrap();
+    let mut a = spawn("serve", &data_a, &locks, &[]);
+    a.hello();
+    let (claimed, release) = (root.path().join("claimed"), root.path().join("release"));
+    let mut b = spawn_env(
+        "serve",
+        &data_b,
+        &locks,
+        &[],
+        &[
+            (
+                "FREEDOM_CORED_TEST_COMMIT_MARKER",
+                claimed.to_str().unwrap(),
+            ),
+            ("FREEDOM_CORED_TEST_COMMIT_HOLD", release.to_str().unwrap()),
+        ],
+    );
+    b.hello();
+    // A's intent, from an operation that died before its commit, for the
+    // home's canonical path.
+    let canonical = std::fs::canonicalize(&home).unwrap();
+    std::fs::write(
+        data_a.join("node-identity-staging.json"),
+        json!({ "op_id": "earlier-a", "node": "radicle", "root": canonical }).to_string(),
+    )
+    .unwrap();
+    b.send(&request(
+        2,
+        "nodes.write_identity",
+        sealed("live-b", &home, None),
+    ));
+    let until = Instant::now() + Duration::from_secs(30);
+    while !claimed.exists() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(claimed.exists(), "B never reached its commit");
+    let staged = home.join("config.json.freedom-new");
+    assert!(staged.exists());
+    let reply = a.call(2, "nodes.write_identity", sealed("new-a", &home, None));
+    assert_eq!(reply["error"]["code"], "lock_held", "{reply}");
+    assert!(staged.exists(), "A's recovery removed B's staged config");
+    assert!(data_a.join("node-identity-staging.json").exists());
+    std::fs::write(&release, b"go").unwrap();
+    let reply = b.response(2);
+    assert_eq!(reply["result"]["status"], "installed", "{reply}");
+    assert_eq!(alias(&home), "FreedomBrowser");
+}
+
 /// The switch reads only the private key file's public part: a key whose
 /// private section is corrupt still names its identity (review of #177).
 #[test]

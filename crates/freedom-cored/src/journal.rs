@@ -369,8 +369,10 @@ pub enum Recovered {
     /// A journal left behind by an operation the done list already records
     /// as finished (its removal didn't persist) was removed.
     Cleaned,
-    /// A Radicle journal was left in place: its home's gate is held, by the
-    /// Radicle service or a `hold-lock` (0008, "Identity changes").
+    /// A Radicle journal, or the intent of a Radicle operation that died
+    /// before its commit, was left in place: its home's gate is held, by the
+    /// Radicle service, a `hold-lock`, or another core writing that home
+    /// (0008, "Identity changes").
     Waiting {
         op_id: String,
         node: String,
@@ -507,7 +509,7 @@ pub fn recover(identity_dir: &Path, gates: &Gates) -> std::io::Result<Recovered>
     // Read, judged and later flushed through one handle, never opened again
     // by name: what is flushed is what was checked (review of #114).
     let Some((bytes, handle)) = read_journal(&path)? else {
-        return discard_intent(identity_dir);
+        return discard_intent(identity_dir, gates);
     };
     crate::testhooks::swap("journal", &path);
     let journal = match serde_json::from_slice::<Journal>(&bytes) {
@@ -974,7 +976,7 @@ fn discard(identity_dir: &Path, node: &str, top: &Dir) {
 
 /// No journal: an intent left by an operation that died before its commit
 /// names staged files to remove (only the node layout's own).
-fn discard_intent(identity_dir: &Path) -> std::io::Result<Recovered> {
+fn discard_intent(identity_dir: &Path, gates: &Gates) -> std::io::Result<Recovered> {
     let path = identity_dir.join(STAGING);
     let Some(bytes) = read_record(&path)? else {
         return Ok(Recovered::Nothing);
@@ -985,14 +987,47 @@ fn discard_intent(identity_dir: &Path) -> std::io::Result<Recovered> {
         && intent.root != identity_dir
         && NODES.contains(&intent.node.as_str())
     {
-        // The core's own staged files, never a node's: no gate is needed.
-        // Through no symlink below the root, as every node file is. A root
-        // that is gone holds none: the operation died before it made it
-        // (review of #177, round 2), or it was removed since.
-        if let Some(top) = open_root(&intent.node, &intent.root, None)? {
-            for target in staged_targets(&intent.node, &intent.root) {
-                if let Some((dir, name)) = top.under(&target, false)? {
-                    dir.unlink(&staged_name(&name))?;
+        // The core's own staged names, through no symlink below the root, as
+        // every node file is. A Radicle home's are fixed names that another
+        // core writing the same home, under its gate, may be using now: so
+        // they are removed only under that gate too, the caller's or taken
+        // here (review of #177, round 4). Held, the intent stays. A root
+        // that is gone holds none of this operation's (it died before it
+        // made it, review of #177, round 2, or the root was removed since):
+        // its intent goes without the gate, which would make the home, and
+        // without looking under the root, which another writer may be making
+        // meanwhile.
+        let present = match std::fs::symlink_metadata(&intent.root) {
+            Ok(_) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(e),
+        };
+        if present {
+            let mut identity = None;
+            let _home_gate = if intent.node == "radicle" {
+                match radicle_gate(&intent.root, gates)? {
+                    HomeGate::Held => {
+                        return Ok(Recovered::Waiting {
+                            op_id: intent.op_id,
+                            node: intent.node,
+                        });
+                    }
+                    HomeGate::Taken(gate) => {
+                        identity = match &gate {
+                            Some(gate) => gate.identity,
+                            None => gates.held_identity,
+                        };
+                        gate
+                    }
+                }
+            } else {
+                None
+            };
+            if let Some(top) = open_root(&intent.node, &intent.root, identity)? {
+                for target in staged_targets(&intent.node, &intent.root) {
+                    if let Some((dir, name)) = top.under(&target, false)? {
+                        dir.unlink(&staged_name(&name))?;
+                    }
                 }
             }
         }
@@ -1663,5 +1698,79 @@ mod tests {
         // The path's checks alone pass: a real directory is at the
         // canonical path.
         assert!(write_root("radicle", &home, None).is_ok());
+    }
+
+    /// Review of #177, round 4: another core writing the same Radicle home
+    /// holds its gate and has staged its config. This core's recovery of an
+    /// intent of its own for that home waits for the gate rather than
+    /// remove those fixed staged names: the other write installs. Once the
+    /// gate is free, the intent goes.
+    #[test]
+    fn an_intent_waits_for_its_homes_gate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let home = base.join("home");
+        let locks = base.join("locks");
+        let (first, second) = (made(&base.join("identity-a")), base.join("identity-b"));
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(home.join("config.json"), b"{\"old\":true}").unwrap();
+        let intent = Intent {
+            op_id: "earlier".into(),
+            node: "radicle".into(),
+            root: home.clone(),
+        };
+        put_record(&first, STAGING, &intent).unwrap();
+        let zero = std::time::Duration::ZERO;
+        let gate = fc_service::gate::acquire(&home, &locks, RADICLE_GATE, zero).unwrap();
+        let writing = Gates {
+            lock_dir: locks.clone(),
+            retry: zero,
+            held: Some(home.clone()),
+            held_identity: gate.identity,
+        };
+        let recovering = Gates {
+            lock_dir: locks,
+            retry: zero,
+            held: None,
+            held_identity: None,
+        };
+        let plan = Plan {
+            entries: vec![
+                Entry::Remove(home.join("keys/radicle")),
+                Entry::Remove(home.join("keys/radicle.pub")),
+                Entry::Install(FileSpec {
+                    target: home.join("config.json"),
+                    contents: b"{\"new\":true}",
+                }),
+            ],
+            wipe: Vec::new(),
+        };
+        let top = write_root("radicle", &home, gate.identity).unwrap();
+        let outcome = super::write(&second, "live", "radicle", &top, &plan, &writing, || {
+            assert!(home.join("config.json.freedom-new").exists());
+            assert_eq!(
+                super::recover(&first, &recovering).unwrap(),
+                Recovered::Waiting {
+                    op_id: "earlier".into(),
+                    node: "radicle".into(),
+                }
+            );
+            assert!(home.join("config.json.freedom-new").exists());
+            true
+        })
+        .unwrap();
+        assert_eq!(outcome, Outcome::Installed);
+        assert_eq!(
+            std::fs::read(home.join("config.json")).unwrap(),
+            b"{\"new\":true}"
+        );
+        assert!(first.join(STAGING).exists());
+        drop(top);
+        drop(gate);
+        assert_eq!(
+            super::recover(&first, &recovering).unwrap(),
+            Recovered::Discarded
+        );
+        assert!(!first.join(STAGING).exists());
     }
 }
