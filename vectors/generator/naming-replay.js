@@ -378,6 +378,20 @@ const PATCHES = {
       },
     },
   }),
+  'reduced-quorum-wave': () => ({
+    text: 'An agreement is verified only with the configured M (at least 2) of distinct agreeing endpoints, in any wave: a reduced first wave or a second wave after the first all errored agrees on fewer, and its answer is labelled unverified.',
+    source: {
+      'ens-resolver.js': {
+        edits: [
+          ["      resolverAddress: winningLeg.resolverAddress,\n      trust: trustFor('verified', agreedUrls.map(hostOf)),",
+            "      resolverAddress: winningLeg.resolverAddress,\n      trust: trustFor(new Set(agreedUrls).size >= Math.max(desiredM, 2) ? 'verified' : 'unverified', agreedUrls.map(hostOf)),"],
+          ["      error: firstAgreer?.error?.message,\n      trust: trustFor('verified', agreedUrls.map(hostOf)),",
+            "      error: firstAgreer?.error?.message,\n      trust: trustFor(new Set(agreedUrls).size >= Math.max(desiredM, 2) ? 'verified' : 'unverified', agreedUrls.map(hostOf)),"],
+        ],
+        append: [],
+      },
+    },
+  }),
   'decode-budget': (b) => ({
     text: `An OffchainLookup whose decoded strings and bytes exceed ${b.decodeBytes} bytes is malformed, failing as an ABI decode does (BUFFER_OVERRUN).`,
     source: {
@@ -1500,6 +1514,10 @@ function scenarioDefinitions(ethers) {
  */
 function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
   const deviation = (id, world, steps = [{ call: content() }]) => ({ id: `deviation-${id}`, deviation: id, patches: [id], world, steps });
+  // Endpoints that fail their eth_call as a node failure (-32603), after
+  // answering the anchor.
+  const failing = (hosts) => Object.fromEntries(hosts.map((host) => [`${host}.rpc.example`,
+    { calls: { resolve: { rpc_error: { code: -32603, message: 'internal error' } } } }]));
   // A long unsupported contenthash: 8,202 hex characters with its 0x.
   const long = (byte) => contentAnswer('0x' + byte.repeat(4100));
   const twoGateways = (first) => ({ resolve: lookupVia(['gw-big.example', 'gw.example']), callback: GOOD, ...first });
@@ -1648,6 +1666,30 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
       calls: { resolve: aliasedLookup(`https://gw.example/{sender}/{data}.json?pad=${'x'.repeat(556)}`, 8), callback: GOOD },
       gateways: { 'gw.example': { body: JSON.stringify({ data: '0xcafe' }) } },
     })),
+    // Deviation reduced-quorum-wave: an agreement of fewer than the
+    // configured M distinct endpoints (at least 2) is never verified, in
+    // either wave. The reference labels each of these verified. With seed 7
+    // the first wave is c, b, d of four endpoints, and d, b, c of five.
+    ...(() => {
+      const NOT_FOUND = { resolve: revert('0x77209fe8'), callback: GOOD }; // ResolverNotFound
+      const FIVE = [...ENDPOINTS, 'https://e.rpc.example'];
+      const quorumOf = (k, m) => ({ ...QUORUM_NETWORK, quorum: { ...QUORUM_NETWORK.quorum, k, m } });
+      const reduced = (suffix, world) => ({ ...deviation('reduced-quorum-wave', world), id: `deviation-reduced-quorum-wave${suffix}` });
+      return [
+        // K = 3, M = 2: the first wave all fails, and a alone answers in a
+        // second wave whose M is 1.
+        reduced('', base({ hosts: failing(['b', 'c', 'd']) })),
+        reduced('-singleton-not-found', base({ calls: NOT_FOUND, hosts: failing(['b', 'c', 'd']) })),
+        // K = 3, M = 3: the first wave all fails, and a and e agree in a
+        // second wave whose M is 2.
+        reduced('-second-wave', base({ endpoints: FIVE, network: quorumOf(3, 3), hosts: failing(['b', 'c', 'd']) })),
+        reduced('-second-wave-not-found', base({ endpoints: FIVE, network: quorumOf(3, 3), calls: NOT_FOUND, hosts: failing(['b', 'c', 'd']) })),
+        // K = M = 4 with three endpoints: the first wave's M is 3, and all
+        // three agree.
+        reduced('-first-wave', base({ endpoints: ENDPOINTS.slice(0, 3), network: quorumOf(4, 4) })),
+        reduced('-first-wave-not-found', base({ endpoints: ENDPOINTS.slice(0, 3), network: quorumOf(4, 4), calls: NOT_FOUND })),
+      ];
+    })(),
     // One session at a time, two callers per session: the third caller of
     // a running session and a second session are both busy.
     deviation('admission', base({ bounds: { sessions: 1, callersPerSession: 2 } }), [
