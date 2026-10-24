@@ -796,7 +796,12 @@ fn replay(scenario: &JsValue) -> Result<Vec<String>, String> {
 
 /// Scenarios a declared deviation changes (design 0004, Deviations). They
 /// must differ from the reference until their deviation vectors land.
-const DEVIATIONS: &[(&str, &str)] = &[("node-errors-agree", "node-failures")];
+const DEVIATIONS: &[(&str, &str)] = &[
+    ("node-errors-agree", "node-failures"),
+    ("node-errors-agree-rate-limit-underscore", "node-failures"),
+    ("node-errors-agree-rate-limit-tab", "node-failures"),
+    ("node-errors-agree-rate-limit-colon", "node-failures"),
+];
 
 #[test]
 fn replays_match_the_reference() {
