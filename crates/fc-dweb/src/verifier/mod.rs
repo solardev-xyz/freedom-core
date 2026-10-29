@@ -291,8 +291,8 @@ enum Kind {
 }
 
 #[derive(Debug)]
-struct Piece {
-    tag: Tag,
+struct Piece<T> {
+    tag: T,
     kind: Kind,
     cancelled: bool,
 }
@@ -306,18 +306,19 @@ struct Queued {
     from: Option<PieceId>,
 }
 
-/// The machine's bookkeeping, which the walk drives.
+/// The machine's bookkeeping, which the walk drives; `T` is the walk's
+/// own record of what each piece and job is for.
 #[derive(Debug)]
-pub(crate) struct Core {
+pub(crate) struct Core<T> {
     request: u64,
     pub(crate) head_only: bool,
     trust_name: Option<String>,
     limit: usize,
     outputs: VecDeque<Output>,
     phase: Phase,
-    pieces: BTreeMap<PieceId, Piece>,
+    pieces: BTreeMap<PieceId, Piece<T>>,
     next_piece: u64,
-    jobs: BTreeMap<u64, (Tag, usize)>,
+    jobs: BTreeMap<u64, (T, usize)>,
     next_job: u64,
     /// Bytes the walk holds: piece bodies, stream bytes, parsed structure.
     walk_held: usize,
@@ -330,7 +331,7 @@ pub(crate) struct Core {
     end_after_queue: bool,
 }
 
-impl Core {
+impl<T: Copy> Core<T> {
     fn new(request: u64, head_only: bool, trust_name: Option<String>, limit: usize) -> Self {
         Self {
             request,
@@ -399,7 +400,7 @@ impl Core {
     /// the window for a stream. `None` when it doesn't fit.
     pub(crate) fn fetch(
         &mut self,
-        tag: Tag,
+        tag: T,
         path: String,
         headers: Vec<(String, String)>,
         stream: bool,
@@ -467,7 +468,7 @@ impl Core {
 
     /// Sends work to the hashing pool; its bytes leave the walk's holding
     /// and count as the job's.
-    pub(crate) fn hash(&mut self, tag: Tag, work: jobs::Work) {
+    pub(crate) fn hash(&mut self, tag: T, work: jobs::Work) {
         let size = work.size();
         self.walk_held = self.walk_held.saturating_sub(size);
         let id = JobId {
@@ -633,7 +634,7 @@ enum PieceEvent {
 /// A request's verifier. See the module documentation.
 #[derive(Debug)]
 pub struct Verifier {
-    core: Core,
+    core: Core<Tag>,
     walk: Option<swarm::Walk>,
     partition: Option<String>,
     private: bool,

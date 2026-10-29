@@ -31,7 +31,10 @@ use fc_swarm::verify::{Chunk, FeedUpdate, MAX_CHUNK_WIRE, Refusal, SPAN_SIZE};
 
 use super::ant::{self, Entry, Feed, NotFound, Ranges};
 use super::jobs::{Verdict, Work};
-use super::{Core, Failure, MAX_CHUNK_PIECES, PieceFailure, PieceId};
+use super::{Failure, MAX_CHUNK_PIECES, PieceFailure, PieceId};
+
+/// The machine's bookkeeping, with the Swarm walk's tags.
+type Core = super::Core<Tag>;
 use crate::bzz::SWARM_HEADERS;
 use crate::plan::ContentTrust;
 use crate::validate::Refusal as PlanRefusal;
