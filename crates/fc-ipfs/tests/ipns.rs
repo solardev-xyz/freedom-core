@@ -52,8 +52,10 @@ fn the_designs_cases() {
         let record = b64.decode(c["record"]["base64"].as_str().unwrap()).unwrap();
         let got = check(c["name"].as_str().unwrap(), &record, now);
         assert_eq!(as_json(&got), c["expect"], "{id}");
-        // freedom-ipfs agrees, unless the case names a deviation.
-        if c.get("deviation").is_none() {
+        // freedom-ipfs agrees, unless the case names a deviation. The
+        // ECDSA record passes the generator's build, whose libp2p has
+        // ECDSA; freedom-ipfsd's can't decode the key (meta.oracles).
+        if c.get("deviation").is_none() && c["id"] != "ecdsa-key" {
             assert_eq!(
                 got.is_ok(),
                 c["native"].get("ok").is_some(),
