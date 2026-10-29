@@ -311,3 +311,107 @@ fn content(seed: &str, n: usize) -> Vec<u8> {
     out.truncate(n);
     out
 }
+
+/// Every manifest lookup in dweb-verify.json (ant-retrieval's lookup_path
+/// answers), replayed with fc_swarm::manifest: the nodes come from the
+/// recorded chunks, joined with fc_swarm::tree.
+#[test]
+fn manifest_lookups() {
+    use fc_swarm::manifest::{self, Lookup, Outcome, Step};
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vectors/dweb-verify.json");
+    let doc: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let chunks = &doc["swarm"]["chunks"];
+    let mut checked = 0;
+    for m in doc["swarm"]["manifests"].as_array().unwrap() {
+        let id = m["id"].as_str().unwrap();
+        let root = join_node(chunks, &hex32(&m["root"]));
+        for l in m["lookups"].as_array().unwrap() {
+            let p = l["path"].as_str().unwrap();
+            let (mut lookup, mut step) = Lookup::new(manifest::parse_node(&root).unwrap(), p);
+            let outcome = loop {
+                match step {
+                    Step::Done(o) => break Some(o),
+                    Step::Failed(e) => panic!("{id} {p:?}: {e:?}"),
+                    Step::Need(r) if r.len() == 64 => break None,
+                    Step::Need(r) => {
+                        let bytes = join_node(chunks, &r.try_into().unwrap());
+                        step = lookup.node(&bytes);
+                    }
+                }
+            };
+            let Some(outcome) = outcome else {
+                // An encrypted node below a plain root: the walk refuses it
+                // (encrypted-in-walk); Ant decrypts and finds the entry.
+                assert_eq!(
+                    l["data_ref"].as_str().map(str::len),
+                    Some(128),
+                    "{id} {p:?}"
+                );
+                continue;
+            };
+            match (outcome, l["error"].as_str()) {
+                (Outcome::Found { data_ref, metadata }, None) => {
+                    assert_eq!(hex::encode(&data_ref), l["data_ref"], "{id} {p:?}");
+                    assert_eq!(
+                        metadata.get(manifest::CONTENT_TYPE),
+                        l["content_type"].as_str(),
+                        "{id} {p:?}"
+                    );
+                    for key in [manifest::CONTENT_TYPE, manifest::FILENAME] {
+                        assert_eq!(
+                            metadata.get(key),
+                            l["metadata"][key].as_str(),
+                            "{id} {p:?} {key}"
+                        );
+                    }
+                }
+                (Outcome::NotFound { root }, Some(e)) => {
+                    let shown = if root {
+                        "(root)".to_owned()
+                    } else {
+                        p.trim_start_matches('/').to_owned()
+                    };
+                    assert_eq!(e, format!("path '{shown}' not found"), "{id} {p:?}");
+                }
+                (Outcome::Directory, Some(e)) => {
+                    assert_eq!(
+                        e,
+                        format!(
+                            "path '{}' is a directory (redirect to trailing slash)",
+                            p.trim_start_matches('/')
+                        ),
+                        "{id} {p:?}"
+                    );
+                }
+                (o, e) => panic!("{id} {p:?}: {o:?} where Ant says {e:?}"),
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked >= 100, "{checked}");
+}
+
+/// A manifest node's bytes: its chunk tree, joined.
+fn join_node(chunks: &Value, address: &[u8; 32]) -> Vec<u8> {
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let wire = b64
+        .decode(chunks[hex::encode(address)].as_str().unwrap())
+        .unwrap();
+    let chunk = check_chunk(address, &wire).unwrap();
+    let (_, len) = fc_swarm::tree::decode_span(&chunk.span);
+    if fc_swarm::tree::is_leaf(len) {
+        return chunk.payload[..len as usize].to_vec();
+    }
+    let node = fc_swarm::tree::intermediate(&chunk, len).unwrap();
+    let mut out = Vec::new();
+    for i in 0..node.len() {
+        let (child, child_len) = node.child(i).unwrap();
+        let w = b64
+            .decode(chunks[hex::encode(child)].as_str().unwrap())
+            .unwrap();
+        let c = check_chunk(&child, &w).unwrap();
+        assert!(fc_swarm::tree::is_leaf(child_len));
+        out.extend_from_slice(&c.payload[..child_len as usize]);
+    }
+    out
+}

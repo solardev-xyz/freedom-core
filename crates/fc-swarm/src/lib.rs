@@ -8,6 +8,7 @@
 //!
 //! [`verify`] checks what an external node serves (design 0009).
 
+pub mod manifest;
 pub mod tree;
 pub mod verify;
 
