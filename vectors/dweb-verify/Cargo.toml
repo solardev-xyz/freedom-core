@@ -28,6 +28,21 @@ ant-crypto = { git = "https://github.com/freedom-hq/ant", tag = "v0.5.71" }
 ant-gateway = { git = "https://github.com/freedom-hq/ant", tag = "v0.5.71" }
 ant-retrieval = { git = "https://github.com/freedom-hq/ant", tag = "v0.5.71" }
 async-trait = "0.1.89"
+# freedom-ipfs at the commit freedom-ipfsd pins (services/freedom-ipfsd),
+# the native node Freedom ships: GatewayCore's answers are the parity target,
+# and namesys's verify_ipns_record gives each record's native verdict.
+freedom-ipfs-core = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "e7dcc6f60b2a30932e6f95a58e30cbf5fdc9f353" }
+freedom-ipfs-gateway = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "e7dcc6f60b2a30932e6f95a58e30cbf5fdc9f353" }
+freedom-ipfs-namesys = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "e7dcc6f60b2a30932e6f95a58e30cbf5fdc9f353" }
+cid = "0.11"
+multibase = "0.9"
+multihash = "0.19"
+# The generator signs its IPNS records itself, from seeded keys.
+ed25519-dalek = "2"
+rand_chacha = "0.3"
+rsa = { version = "=0.9.10", features = ["sha2"] }
+# Kubo's gateway, over loopback.
+reqwest = { version = "0.12", default-features = false }
 axum = "0.8.9"
 base64 = "0.22.1"
 hex = "0.4.3"
