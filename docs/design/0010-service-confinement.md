@@ -402,6 +402,14 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
      - **What takes precedence:** so a default directory that is a symlink into another owner's data exempts nothing of it. Another owner's root stays protected.
      - **A collision is refused outright:** if the service's own default directory resolves into a protected root, main refuses to spawn it, even when the grant is elsewhere.
    - **Compared as canonical paths,** under 0001's rules: symlinks resolved, and case folded on case-insensitive volumes. So an override such as `FREEDOM_IPFS_DATA` can't widen the grant over the secrets. A path climbs out of another only by a whole `..` component: a name that begins with two dots, such as `..vault`, is an ordinary name.
+   - **Names that don't exist yet, on a case-insensitive volume:** the volume folds case by Unicode rules (Σ and ς name one directory there). No string comparison reproduces that, and no `realpath` resolves a name that doesn't exist yet. So main refuses an override path whose missing names aren't all ASCII. Names that exist are resolved, and these are developer overrides (`FREEDOM_*_DATA`), so refusing costs nothing in use.
+   - **No hard link in the grant:** a hard link has the grant's path but another file's data, and Landlock and Seatbelt authorize an open by its path. So before each spawn main walks the grant, with `lstat` and following no link. It refuses the grant if any entry other than a directory has more than one name. Legitimate service data never hard-links, so this costs nothing in use.
+     - **Bounded:** the walk stops at 100,000 entries or 32 levels, and refuses past either. It refuses an entry it can't read too.
+     - **The race model:** the check runs at spawn.
+       - The confined service can't make a link to a file outside its grant: Landlock needs rights on the source (`refer` from ABI 2; before it, no link crosses directories) and `make_reg` on the destination, and Seatbelt allows `file-link` only inside the grant.
+       - A link made later by another process running as the same user is outside the boundary, since that process could read the data directly.
+       - Bind mounts are out of scope.
+     - **Radicle:** its grant check, which comes with its browser integration, applies the same rule. It must also show that git's local-clone hard links don't occur inside its home.
    - **Radicle's part comes later:** main checks the IPFS grant first; the Radicle home's check, and `--network` for `freedom-radicled`, come with that service's integration in the browser.
 
 **Later:**
@@ -526,7 +534,10 @@ Through the binary, in CI's job for each OS:
   - so is one inside another profile's Radicle home, packaged (`<appRoot>/R/<slot>`) and in a development build (`<parent of appRoot>/R/<checkout>/<slot>`), or inside the default profile's browser storage (`<appRoot>/Local Storage`), present or not yet created, and through their aliases;
   - this profile's default IPFS directory as a symlink into another profile's directory, or into the default profile's storage, exempts nothing there. A service whose default directory resolves into a protected root is refused, even when its grant is elsewhere;
   - a grant that holds, or lies inside, a directory whose name begins with two dots (`..vault`) is refused;
-  - a `--profile-dir` profile's and a test profile's browser storage are refused, and their IPFS directories pass.
+  - a `--profile-dir` profile's and a test profile's browser storage are refused, and their IPFS directories pass;
+  - a grant holding a hard link to the vault is refused, as is one holding an entry that can't be read, or more entries or levels than the walk's bounds. A grant as the service leaves it passes;
+  - on a case-insensitive volume, an identity override under `Σ` and a grant under `ς`, neither existing yet, are refused. The ASCII control, `S` and `s`, is refused as the identity directory it aliases;
+  - a confined service can't make a hard link to a file outside its grant.
 - **D5,** the import process:
   - a working copy outside the home; a linked worktree; a separate git directory; alternates; a symlink out of the source;
   - a source that contains a protected root: refused;
