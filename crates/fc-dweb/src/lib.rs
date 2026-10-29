@@ -19,6 +19,11 @@
 //!   (the chain machine's `chain.html`) learns the decode's one allocation
 //!   first ([`decode_html_room`]) and classifies the trust as text, in
 //!   place ([`classify_trust`]).
+//! - **Verify plans** (design 0009): with verification on, a fetch for an
+//!   external backend becomes a [`Verify`] plan, unless its content can't
+//!   be verified (an encrypted Swarm reference, a DNSLink name, another
+//!   inlined key type), when it stays a fetch, or, in strict mode, a 403.
+//!   `vectors/dweb-verify-plans.json` is the contract.
 //! - **Validation** ([`validate_plan`]): what main checks before it dials.
 //!   It has no reference; its vectors are the design's.
 //!
@@ -45,6 +50,7 @@ mod plan;
 mod response;
 mod url;
 mod validate;
+mod verify;
 
 pub use bzz::{
     FORWARDED_REQUEST_HEADERS, SWARM_HEADERS, is_reference as is_swarm_reference,
@@ -72,7 +78,8 @@ pub use open::{
 pub use plan::{
     Ant, BODY_IDLE_MS, BZZ_HEADERS_MS, BZZ_RETRY_DELAYS_MS, BZZ_RETRY_STATUSES, Backend,
     ContentTrust, ErrorPlan, Fetch, Ipfs, NATIVE_HEADERS_MS, NATIVE_QUEUE_MS, Node, Plan, Redirect,
-    ResponseOp, Retry, Scheme, Timers, Trust, content_trust, retry, timers,
+    ResponseOp, Retry, Root, Scheme, Timers, Trust, Verification, Verify, content_trust, retry,
+    timers,
 };
 pub use response::{
     BZZ_REDIRECT_STATUSES, BodyAction, DECODED_ENCODING_HEADERS, PAGE_STATE_RESPONSE_HEADERS,
@@ -81,3 +88,8 @@ pub use response::{
     strip_decoded_encoding, strip_page_state,
 };
 pub use validate::{ERROR_STATUSES, MAX_MESSAGE_UNITS, PlanRequest, Refusal, validate_plan};
+pub use verify::{
+    NameKind, STRICT_DNSLINK, STRICT_ENCRYPTED, STRICT_KEY, STRICT_MESSAGES, STRICT_OFF,
+    STRICT_STATUS, STRICT_UNSUPPORTED, VERIFY_HEADERS_ANT, VERIFY_HEADERS_IPFS, canonical_cid,
+    ipns_name_kind,
+};
