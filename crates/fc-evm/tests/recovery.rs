@@ -58,6 +58,8 @@ fn small(n: u8) -> [u8; 32] {
 
 /// secp256k1's group order.
 const N: &str = "0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141";
+/// The order plus 2: an r a decoder that reduces mod n would read as 2.
+const N_PLUS_2: &str = "0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364143";
 /// The base point's x-coordinate.
 const G_X: &str = "0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 
@@ -84,6 +86,7 @@ fn scalar_boundaries_are_refused() {
     let digest = keccak256(b"a digest");
     let order = scalar(N);
     for (what, r, s) in [
+        ("zero r", [0u8; 32], small(1)),
         ("zero s", small(2), [0u8; 32]),
         ("r equal to the order", order, small(1)),
         ("s equal to the order", small(2), order),
@@ -95,6 +98,15 @@ fn scalar_boundaries_are_refused() {
                 "{what}, v = {v}"
             );
         }
+    }
+    // r past the order: n + 2, which reduced mod n is the r that recovers
+    // for v = 29 and 30 above; it must be refused, not reduced.
+    for v in 27u8..=30 {
+        assert_eq!(
+            recover_address(&[0u8; 32], &signature(&scalar(N_PLUS_2), &small(1), v)),
+            Err(fc_evm::Error::Recovery),
+            "r = n + 2, v = {v}"
+        );
     }
 }
 
