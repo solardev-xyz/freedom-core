@@ -224,6 +224,8 @@ pub mod mach {
         static mach_task_self_: Port;
         static bootstrap_port: Port;
         fn bootstrap_look_up(bp: Port, service_name: *const c_char, sp: *mut Port) -> c_int;
+        fn mach_host_self() -> Port;
+        fn mach_thread_self() -> Port;
         fn mach_port_deallocate(task: Port, name: Port) -> c_int;
         fn mach_port_names(
             task: Port,
@@ -244,8 +246,15 @@ pub mod mach {
 
     /// Whether the bootstrap server gives this process a send right to
     /// `name`; a right it gives is released at once.
-    #[allow(unsafe_code)]
     pub fn look_up(name: &CStr) -> bool {
+        look_up_name(name).is_some()
+    }
+
+    /// The name this task gives the send right the bootstrap server hands
+    /// out for `name`, or None; the right is released at once. A task holds
+    /// one name per port, so a name it already held is the same service.
+    #[allow(unsafe_code)]
+    pub fn look_up_name(name: &CStr) -> Option<u32> {
         // SAFETY: bootstrap_port is set before main and never written after.
         let bootstrap = unsafe { bootstrap_port };
         let mut port: Port = 0;
@@ -253,12 +262,39 @@ pub mod mach {
         // and `port` a valid place for the right's name.
         let result = unsafe { bootstrap_look_up(bootstrap, name.as_ptr(), &raw mut port) };
         if result != 0 {
-            return false;
+            return None;
         }
-        // SAFETY: `port` names a send right this task was just given, and
-        // it is released once.
+        release(port);
+        Some(port)
+    }
+
+    /// Releases one reference to the send right `port`.
+    #[allow(unsafe_code)]
+    fn release(port: Port) {
+        // SAFETY: `port` names a send right this task was just given a
+        // reference to, and that reference is released once.
         let _ = unsafe { mach_port_deallocate(task(), port) };
-        true
+    }
+
+    /// The task's own special ports, by name: its task, bootstrap, host and
+    /// main-thread ports.
+    #[allow(unsafe_code)]
+    pub fn special_ports() -> Vec<(&'static str, u32)> {
+        // SAFETY: bootstrap_port is set before main and never written after.
+        let bootstrap = unsafe { bootstrap_port };
+        // SAFETY: mach_host_self takes nothing and returns a send right to
+        // the host port, one reference of which is released below.
+        let host = unsafe { mach_host_self() };
+        release(host);
+        // SAFETY: as for mach_host_self, for the calling thread's port.
+        let thread = unsafe { mach_thread_self() };
+        release(thread);
+        vec![
+            ("task", task()),
+            ("bootstrap", bootstrap),
+            ("host", host),
+            ("thread", thread),
+        ]
     }
 
     /// The port names the task holds, each with its type bits

@@ -77,9 +77,50 @@ fn child(case: &str) {
     let p = paths();
     if case == "ports" {
         // The Mach rights the process holds at the confinement point, for
-        // the record (design 0010: they cross, as descriptors would).
-        let ports = fc_sys::macos::mach::port_names().unwrap_or_default();
-        println!("PORTS {ports:?}");
+        // the record (design 0010: they cross, as descriptors would), each
+        // named where it can be: the task's special ports, and the system
+        // services a task holds one name for, found by looking each up.
+        use fc_sys::macos::mach;
+        let ports = mach::port_names().unwrap_or_default();
+        let mut labels: Vec<(u32, String)> = mach::special_ports()
+            .into_iter()
+            .map(|(label, name)| (name, label.to_owned()))
+            .collect();
+        for service in [
+            "com.apple.system.notification_center",
+            "com.apple.logd",
+            "com.apple.diagnosticd",
+            "com.apple.system.logger",
+            "com.apple.system.opendirectoryd.libinfo",
+            "com.apple.system.opendirectoryd.membership",
+            "com.apple.cfprefsd.daemon",
+            "com.apple.cfprefsd.agent",
+            "com.apple.SystemConfiguration.configd",
+            "com.apple.SystemConfiguration.DNSConfiguration",
+            "com.apple.trustd",
+            "com.apple.analyticsd",
+            "com.apple.coreservices.launchservicesd",
+        ] {
+            let Ok(c_name) = std::ffi::CString::new(service) else {
+                continue;
+            };
+            if let Some(name) = mach::look_up_name(&c_name)
+                && ports.iter().any(|(held, _)| *held == name)
+            {
+                labels.push((name, service.to_owned()));
+            }
+        }
+        let named: Vec<String> = ports
+            .iter()
+            .map(|(name, kind)| {
+                let label = labels
+                    .iter()
+                    .find(|(held, _)| held == name)
+                    .map_or("?", |(_, label)| label.as_str());
+                format!("{name}:{kind:#x}:{label}")
+            })
+            .collect();
+        println!("PORTS {}", named.join(" "));
     }
     let network = match case {
         "socks5" => Network::Socks5 {
