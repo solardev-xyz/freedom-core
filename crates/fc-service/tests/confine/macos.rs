@@ -40,6 +40,8 @@ struct Paths {
     socket: PathBuf,
     allowed_port: u16,
     other_port: u16,
+    /// A process outside, with a canary in its environment.
+    target_pid: i32,
 }
 
 fn paths() -> Paths {
@@ -51,6 +53,7 @@ fn paths() -> Paths {
         socket: var("FC_SOCKET").into(),
         allowed_port: var("FC_PORT").parse().unwrap(),
         other_port: var("FC_OTHER_PORT").parse().unwrap(),
+        target_pid: var("FC_TARGET_PID").parse().unwrap(),
     }
 }
 
@@ -135,6 +138,11 @@ fn child(case: &str) {
         _ => Network::Direct,
     };
     let (registered, held) = registered(&p);
+    let refer = case == "refer";
+    let policy = |p: &Paths, network: Network, descriptors: Vec<i32>| Policy {
+        refer,
+        ..policy(p, network, descriptors)
+    };
     match case {
         "inject-pipe" => {
             let pipe = std::io::pipe().unwrap();
@@ -191,6 +199,9 @@ fn child(case: &str) {
     println!("REPORT {}", report.to_json());
     match case {
         "files" | "reexec" | "ports" => files(&p),
+        "refer" => refer_links(&p),
+        "sysctl" => sysctls(&p),
+        "exec-direct" => exec_direct(),
         "processes" => processes(),
         "ipc" => ipc(&p, true),
         "socks5" | "lan" | "offline" => {
@@ -328,6 +339,75 @@ fn files(p: &Paths) {
     );
 }
 
+/// With `refer`, hard links inside the grant; still none from outside it
+/// or from the read-only grant.
+fn refer_links(p: &Paths) {
+    let a = p.data.join(format!("a-{}", std::process::id()));
+    std::fs::write(&a, b"a").unwrap();
+    let b = p.data.join(format!("b-{}", std::process::id()));
+    check(
+        "a hard link inside the grant",
+        std::fs::hard_link(&a, &b).is_ok(),
+    );
+    check(
+        "its source has two names",
+        std::fs::metadata(&a).is_ok_and(|m| m.nlink() == 2),
+    );
+    check(
+        "a hard link from outside refused",
+        std::fs::hard_link(p.outside.join("canary"), p.data.join("from-outside")).is_err(),
+    );
+    check(
+        "a hard link from the read-only grant refused",
+        std::fs::hard_link(p.read_only.join("file"), p.data.join("from-read-only")).is_err(),
+    );
+}
+
+/// The sysctls a service reads work, by name and by number; another
+/// process's arguments and environment, and the process list, don't.
+fn sysctls(p: &Paths) {
+    use fc_sys::macos::probe;
+    check("hw.ncpu by name", probe::sysctl_name(c"hw.ncpu").is_ok());
+    check("hw.ncpu by number", probe::ncpu().is_ok_and(|n| n > 0));
+    check(
+        "kern.osversion",
+        probe::sysctl_name(c"kern.osversion").is_ok(),
+    );
+    check(
+        "hw.optional by prefix",
+        probe::sysctl_name(c"hw.optional.floatingpoint").is_ok(),
+    );
+    check(
+        "another process's arguments and environment refused",
+        probe::procargs(p.target_pid).is_err(),
+    );
+    let parent = rustix::process::getppid().map_or(1, |pid| pid.as_raw_nonzero().get());
+    check(
+        "the parent's arguments and environment refused",
+        probe::procargs(parent).is_err(),
+    );
+    check("the process list refused", probe::all_processes().is_err());
+    check(
+        "kern.proc by name refused",
+        probe::sysctl_name(c"kern.proc.all").is_err(),
+    );
+    check(
+        "the interface list in direct mode",
+        probe::interface_addresses().is_ok_and(|n| n > 0),
+    );
+}
+
+/// An exec in place, with no fork: refused. Were it allowed, this process
+/// would become `/usr/bin/true` and print nothing more.
+fn exec_direct() {
+    use std::os::unix::process::CommandExt;
+    let error = Command::new("/usr/bin/true").exec();
+    check(
+        &format!("an exec in place refused ({})", error.kind()),
+        true,
+    );
+}
+
 fn processes() {
     check(
         "exec refused",
@@ -415,6 +495,16 @@ struct World {
     allowed: TcpListener,
     other: TcpListener,
     _unix: UnixListener,
+    /// A process with a canary in its environment, outside.
+    target: std::process::Child,
+}
+
+/// The environment variable the target process holds, and its value.
+fn canary_env() -> (String, String) {
+    (
+        "FC_ENV_CANARY".to_owned(),
+        format!("fc-canary-{}", std::process::id()),
+    )
 }
 
 fn world() -> World {
@@ -442,6 +532,14 @@ fn world() -> World {
         allowed: TcpListener::bind("127.0.0.1:0").unwrap(),
         other: TcpListener::bind("127.0.0.1:0").unwrap(),
         _unix: unix,
+        target: {
+            let (key, value) = canary_env();
+            Command::new("/bin/sleep")
+                .arg("120")
+                .env(key, value)
+                .spawn()
+                .unwrap()
+        },
         _root: root,
     }
 }
@@ -449,6 +547,7 @@ fn world() -> World {
 fn command(world: &World, case: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
+        .env("FC_TARGET_PID", world.target.id().to_string())
         .env(CASE, case)
         .env("FC_DATA", &world.data)
         .env("FC_OUTSIDE", &world.outside)
@@ -531,6 +630,28 @@ fn parent() {
     let before = std::fs::metadata(&canary).unwrap();
     let mut failures: Vec<String> = Vec::new();
 
+    // The probe works: unconfined, the target's environment is readable,
+    // canary and all, so a refusal below is the sandbox's.
+    let target_pid = i32::try_from(world.target.id()).unwrap();
+    let (_, canary_value) = canary_env();
+    let mut seen = false;
+    for _ in 0..50 {
+        if fc_sys::macos::probe::procargs(target_pid).is_ok_and(|args| {
+            args.windows(canary_value.len())
+                .any(|w| w == canary_value.as_bytes())
+        }) {
+            seen = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    expect(
+        &mut failures,
+        seen,
+        "unconfined, the target's environment canary isn't readable: the probe proves nothing"
+            .into(),
+    );
+
     for case in [
         "files",
         "processes",
@@ -539,6 +660,9 @@ fn parent() {
         "socks5",
         "lan",
         "offline",
+        "refer",
+        "sysctl",
+        "exec-direct",
     ] {
         let output = run(&world, case);
         let report = report_json(&output);
@@ -583,6 +707,14 @@ fn parent() {
             && after.nlink() == 1
             && std::fs::read(&canary).unwrap() == b"canary",
         "the canary changed".into(),
+    );
+    expect(
+        &mut failures,
+        std::fs::metadata(world.read_only.join("file"))
+            .unwrap()
+            .nlink()
+            == 1,
+        "the read-only grant's file gained a hard link".into(),
     );
 
     let ephemeral = run(&world, "ephemeral");
@@ -632,6 +764,9 @@ fn parent() {
     }
     failures.extend(passed("ports", &ports));
 
+    let mut target = world.target;
+    let _ = target.kill();
+    let _ = target.wait();
     if failures.is_empty() {
         println!("confine: all macOS cases passed");
     } else {

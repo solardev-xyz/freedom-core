@@ -19,6 +19,12 @@
 //!   modes stay hidden.
 //! - **Processes:** no exec and no fork (denied by default); signals and
 //!   process information for the process itself only.
+//! - **`sysctl`, by name only** ([`SYSCTLS`]): what std, tokio and the
+//!   services read about the machine and the OS, after Chromium's
+//!   `common.sb`. Nothing about other processes: `kern.proc` and
+//!   `KERN_PROCARGS2`, which read another process's arguments and
+//!   environment, stay denied. In `direct` mode, the routing sysctls too,
+//!   for NAT64 discovery's interface list (`getifaddrs`).
 //! - **IPC,** in `direct` mode only: configd (`.configd` for NAT64
 //!   discovery's dynamic store, `.DNSConfiguration` for the resolver's
 //!   servers) and mDNSResponder's socket, which resolves names. Nothing in
@@ -69,6 +75,47 @@ const SYSTEM_READ: &str = r#"(allow file-read*
 (allow file-write-data (literal "/dev/null"))
 "#;
 
+/// The sysctls the services read, by name: the CPU (std and tokio's
+/// parallelism, the crypto crates' feature detection) and the OS's
+/// version. After Chromium's `common.sb`.
+pub const SYSCTLS: &str = r#"(allow sysctl-read
+    (sysctl-name "hw.activecpu")
+    (sysctl-name "hw.byteorder")
+    (sysctl-name "hw.cachelinesize")
+    (sysctl-name "hw.cpufamily")
+    (sysctl-name "hw.cputype")
+    (sysctl-name "hw.cpusubtype")
+    (sysctl-name "hw.l1dcachesize")
+    (sysctl-name "hw.l1icachesize")
+    (sysctl-name "hw.l2cachesize")
+    (sysctl-name "hw.l3cachesize")
+    (sysctl-name "hw.logicalcpu")
+    (sysctl-name "hw.logicalcpu_max")
+    (sysctl-name "hw.machine")
+    (sysctl-name "hw.memsize")
+    (sysctl-name "hw.ncpu")
+    (sysctl-name "hw.pagesize")
+    (sysctl-name "hw.physicalcpu")
+    (sysctl-name "hw.physicalcpu_max")
+    (sysctl-name "hw.vectorunit")
+    (sysctl-name "kern.hostname")
+    (sysctl-name "kern.maxfilesperproc")
+    (sysctl-name "kern.osproductversion")
+    (sysctl-name "kern.osrelease")
+    (sysctl-name "kern.ostype")
+    (sysctl-name "kern.osvariant_status")
+    (sysctl-name "kern.osversion")
+    (sysctl-name "kern.usrstack64")
+    (sysctl-name "kern.version")
+    (sysctl-name "sysctl.proc_cputype")
+    (sysctl-name-prefix "hw.optional.")
+    (sysctl-name-prefix "hw.perflevel"))
+"#;
+
+/// The routing sysctls `getifaddrs` reads: NAT64 discovery's interface
+/// list, in `direct` mode only.
+const INTERFACE_SYSCTLS: &str = "(allow sysctl-read (sysctl-name-prefix \"net.route\"))\n";
+
 /// The root symlinks every absolute path the services use may cross.
 const ROOT_LINKS: [&str; 4] = ["/", "/etc", "/tmp", "/var"];
 
@@ -108,7 +155,7 @@ pub fn profile(network: Network, refer: bool, grants: &Grants) -> Result<Profile
     let mut text = String::from("(version 1)\n(deny default)\n");
     text.push_str("(allow process-info* (target self))\n");
     text.push_str("(allow signal (target self))\n");
-    text.push_str("(allow sysctl-read)\n");
+    text.push_str(SYSCTLS);
     text.push_str(SYSTEM_READ);
 
     // Metadata on each grant's ancestors, so its path resolves; none on
@@ -158,6 +205,7 @@ pub fn profile(network: Network, refer: bool, grants: &Grants) -> Result<Profile
     match network {
         Network::Direct => {
             text.push_str(DIRECT_IPC);
+            text.push_str(INTERFACE_SYSCTLS);
             text.push_str("(allow network-outbound (remote ip \"*:*\"))\n");
             text.push_str("(allow network-bind (local udp \"*:*\"))\n");
         }
@@ -188,8 +236,7 @@ mod tests {
 (deny default)
 (allow process-info* (target self))
 (allow signal (target self))
-(allow sysctl-read)
-(allow file-read*
+SYSCTLS(allow file-read*
     (subpath "/usr/lib")
     (subpath "/System/Library")
     (subpath "/System/Cryptexes")
@@ -220,6 +267,7 @@ mod tests {
     (global-name "com.apple.SystemConfiguration.DNSConfiguration"))
 (allow network-outbound
     (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))
+(allow sysctl-read (sysctl-name-prefix "net.route"))
 (allow network-outbound (remote ip "*:*"))
 (allow network-bind (local udp "*:*"))
 "#;
@@ -227,7 +275,7 @@ mod tests {
     #[test]
     fn the_persistent_process_in_direct_mode() {
         let profile = profile(Network::Direct, false, &grants()).unwrap();
-        assert_eq!(profile.text, PERSISTENT_DIRECT);
+        assert_eq!(profile.text, PERSISTENT_DIRECT.replace("SYSCTLS", SYSCTLS));
         let value = |name: &str| {
             profile
                 .params
@@ -349,6 +397,31 @@ mod tests {
             "system.sb",
         ] {
             assert!(!text.contains(operation), "{operation}");
+        }
+    }
+
+    #[test]
+    fn sysctls_are_read_by_name_and_none_about_other_processes() {
+        for network in [
+            Network::Direct,
+            Network::Socks5 {
+                port: 9150,
+                loopback: true,
+            },
+            Network::Offline,
+        ] {
+            let text = profile(network, false, &grants()).unwrap().text;
+            // Never unrestricted, never another process's.
+            assert!(!text.contains("(allow sysctl-read)"), "{text}");
+            assert!(!text.contains("kern.proc"), "{text}");
+            assert!(!text.contains("procargs"), "{text}");
+            assert!(text.contains("(sysctl-name \"hw.ncpu\")"));
+            // The interface list in direct mode alone.
+            assert_eq!(
+                text.contains("net.route"),
+                network == Network::Direct,
+                "{network:?}"
+            );
         }
     }
 

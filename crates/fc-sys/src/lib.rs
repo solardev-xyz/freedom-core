@@ -16,7 +16,7 @@
 //!   [`unix::set_cloexec`]: `fc-service`'s confinement on Linux (design
 //!   0010);
 //! - [`macos::executable_path`], [`macos::thread_count`],
-//!   [`macos::apply_profile`], [`macos::sandboxed`] and [`macos::check`]:
+//!   [`macos::apply_profile`], [`macos::sandboxed`], [`macos::check`] and [`macos::exec_allowed`]:
 //!   its confinement on macOS, through Seatbelt's private calls.
 //!
 //! On every other platform the crate is empty.

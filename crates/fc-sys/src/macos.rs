@@ -158,6 +158,29 @@ pub fn sandboxed() -> bool {
     result == 1
 }
 
+/// Whether the sandbox refuses this process an exec in place: an `execv`
+/// of `program`, which must be a program that exits at once (`/usr/bin/true`).
+/// `Ok(false)` when refused (`EPERM` or `EACCES`), `Err` with any other
+/// errno. Allowed, it doesn't return: the process becomes `program`, which
+/// exits, so a service that should have been confined ends instead (fails
+/// closed). `sandbox_check` doesn't answer for `process-exec`, so this asks
+/// the kernel itself; std's `CommandExt::exec` would reset the signal
+/// handling first, whether or not the exec happens.
+#[allow(unsafe_code)]
+pub fn exec_allowed(program: &CStr) -> Result<bool, i32> {
+    let argv = [program.as_ptr(), std::ptr::null()];
+    // SAFETY: `program` and the NULL-terminated `argv` are borrowed for the
+    // call. On success the image is replaced, and nothing of this process's
+    // memory is used after; on failure it returns -1 with errno, changing
+    // nothing.
+    let _ = unsafe { libc::execv(program.as_ptr(), argv.as_ptr()) };
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::EPERM | libc::EACCES) => Ok(false),
+        Some(code) => Err(code),
+        None => Err(0),
+    }
+}
+
 /// The flag that keeps a check's denial out of the violation log.
 #[allow(unsafe_code)]
 fn no_report() -> c_int {
@@ -342,6 +365,111 @@ pub mod mach {
             let _ = unsafe { vm_deallocate(task(), array as usize, bytes) };
         }
         Some(ports)
+    }
+}
+
+/// Test-only probes of what the sandbox lets a process read about the
+/// system and other processes (design 0010, Tests): `sysctl` by number and
+/// by name, and the interface list.
+#[cfg(feature = "test-macos")]
+pub mod probe {
+    use std::ffi::{CStr, c_int, c_uint};
+
+    fn errno() -> i32 {
+        std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+    }
+
+    /// The bytes `sysctl` returns for `mib`, read into a buffer of `len`,
+    /// or the errno.
+    #[allow(unsafe_code)]
+    fn sysctl(mib: &[c_int], len: usize) -> Result<Vec<u8>, i32> {
+        let mut mib = mib.to_vec();
+        let count = c_uint::try_from(mib.len()).map_err(|_| 0)?;
+        let mut buf = vec![0u8; len];
+        let mut size = buf.len();
+        // SAFETY: `mib` holds `count` integers, `buf` is ours for `size`
+        // bytes, which the call writes at most and then updates `size` to,
+        // and no new value is set (NULL, 0).
+        let result = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                count,
+                buf.as_mut_ptr().cast(),
+                &raw mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if result != 0 {
+            return Err(errno());
+        }
+        buf.truncate(size.min(len));
+        Ok(buf)
+    }
+
+    /// Another process's arguments and environment
+    /// (`{CTL_KERN, KERN_PROCARGS2, pid}`), or the errno.
+    pub fn procargs(pid: i32) -> Result<Vec<u8>, i32> {
+        sysctl(&[libc::CTL_KERN, libc::KERN_PROCARGS2, pid], 1 << 20)
+    }
+
+    /// Every process's `kinfo_proc` (`{CTL_KERN, KERN_PROC, KERN_PROC_ALL}`):
+    /// how many bytes, or the errno.
+    pub fn all_processes() -> Result<usize, i32> {
+        sysctl(
+            &[libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_ALL],
+            8 << 20,
+        )
+        .map(|b| b.len())
+    }
+
+    /// The CPU count by number (`{CTL_HW, HW_NCPU}`), or the errno.
+    pub fn ncpu() -> Result<u32, i32> {
+        let bytes = sysctl(&[libc::CTL_HW, libc::HW_NCPU], 4)?;
+        let bytes: [u8; 4] = bytes.as_slice().try_into().map_err(|_| 0)?;
+        Ok(u32::from_ne_bytes(bytes))
+    }
+
+    /// How many bytes `sysctlbyname(name)` has, or the errno.
+    #[allow(unsafe_code)]
+    pub fn sysctl_name(name: &CStr) -> Result<usize, i32> {
+        let mut size = 0usize;
+        // SAFETY: `name` is a NUL-terminated string borrowed for the call;
+        // with a NULL buffer the call only writes the size into `size`.
+        let result = unsafe {
+            libc::sysctlbyname(
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if result == 0 { Ok(size) } else { Err(errno()) }
+    }
+
+    /// How many interface addresses `getifaddrs` lists, or the errno: NAT64
+    /// discovery's interface indexes come from the same list.
+    #[allow(unsafe_code)]
+    pub fn interface_addresses() -> Result<usize, i32> {
+        let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+        // SAFETY: `list` is a valid place for the call to store the head of
+        // a list it allocates.
+        let result = unsafe { libc::getifaddrs(&raw mut list) };
+        if result != 0 {
+            return Err(errno());
+        }
+        let mut count = 0;
+        let mut entry = list;
+        while !entry.is_null() {
+            count += 1;
+            // SAFETY: `entry` is a node of the list getifaddrs returned,
+            // valid until it is freed below.
+            entry = unsafe { (*entry).ifa_next };
+        }
+        // SAFETY: `list` came from getifaddrs and is freed once.
+        unsafe { libc::freeifaddrs(list) };
+        Ok(count)
     }
 }
 

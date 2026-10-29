@@ -279,6 +279,9 @@ fn blocked(why: &str) -> Report {
 /// derived `files` status asks the sandbox about.
 const OUTSIDE_READ: &std::ffi::CStr = c"/Library/Preferences";
 const OUTSIDE_WRITE: &std::ffi::CStr = c"/Library/Caches";
+/// A program every macOS has that exits at once: the derived `exec`
+/// status's probe.
+const EXEC_PROBE: &std::ffi::CStr = c"/usr/bin/true";
 /// A Mach service outside the authorized channels: the derived `ipc`
 /// status asks about it.
 const SOME_SERVICE: &std::ffi::CStr = c"com.apple.pasteboard.1";
@@ -326,11 +329,19 @@ fn derive(policy: &Policy, grants: &Grants) -> Report {
         file_checks.push(sys::check(c"file-write-mode", Filter::Path(dir)));
     }
     let files = status("files", &file_checks);
-    // Every new process forks first (`posix_spawn` too), and the sandbox
-    // answers for `process-fork`; it answers -1 for `process-exec` with a
-    // path (macOS CI), so that check proves nothing either way. The profile
-    // denies both by default.
-    let exec = status("exec", &[sys::check(c"process-fork", Filter::None)]);
+    // A new process (fork, `posix_spawn`) and an exec in place are two
+    // things. The sandbox answers `sandbox_check` for `process-fork`, not
+    // for `process-exec` (it returns -1, macOS CI), so the exec is asked of
+    // the kernel itself: an exec of a program that exits at once. Refused,
+    // the process goes on; allowed, it would become that program and end,
+    // so a service that should be confined fails closed.
+    let exec = status(
+        "exec",
+        &[
+            sys::check(c"process-fork", Filter::None),
+            sys::exec_allowed(EXEC_PROBE),
+        ],
+    );
     let ipc = status(
         "ipc",
         &[sys::check(c"mach-lookup", Filter::GlobalName(SOME_SERVICE))],
