@@ -198,6 +198,9 @@ publish job that runs no repository code.
      - `fc-service`'s confinement test (`cargo test -p fc-service --test
        confine`, with stdio alone), which also prints the Mach rights held
        at the confinement point;
+     - whether a confined service can read the running app's arguments and
+       environment through `KERN_PROCARGS2`, the gap 0010 records: note the
+       answer for the signed, hardened build;
      - Seatbelt's calls are private: a version where the profile no longer
        applies exits 77, and that release waits for a fix.
    - **Windows** follows with its job object; until then its report says
