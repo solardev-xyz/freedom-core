@@ -1,8 +1,10 @@
 //! A bounded DAG-CBOR reader (0009, Bounded decoding): definite lengths
 //! only, each checked against the bytes remaining; nesting at most
 //! [`MAX_DEPTH`] levels (the outermost container the first), walked on an
-//! explicit stack; map keys strings, without duplicates; tag 42 (a CID) the
-//! only tag. It allocates nothing but its fixed stack.
+//! explicit stack; map keys strings at every level, without duplicates in
+//! the top-level map; tag 42 the only tag, wherever DAG-CBOR allows a link,
+//! its content a CID (a byte string of 0x00 and a CID that parses). It
+//! allocates nothing but its fixed stack.
 
 /// The deepest nesting read; past it, structure is unverifiable
 /// (deviation `decoder-caps`).
@@ -11,7 +13,8 @@ pub const MAX_DEPTH: usize = 8;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     /// Not DAG-CBOR the reader takes: an indefinite length, a length past
-    /// the bytes, a key that isn't a string or repeats, another tag.
+    /// the bytes, a key that isn't a string or repeats, another tag, or a
+    /// tag 42 whose content isn't a CID.
     Malformed,
     /// Nested past [`MAX_DEPTH`].
     TooDeep,
@@ -75,8 +78,10 @@ impl<'a> Reader<'a> {
     /// Skips one value whose head was read, at nesting `depth` (the
     /// container holding it is at `depth`), without recursion.
     fn skip(&mut self, major: u8, arg: u64, depth: usize) -> Result<(), Error> {
-        // Items still to read in each open container.
+        // Items still to read in each open container, and whether it is a
+        // map (whose items alternate key, value).
         let mut stack = [0u64; MAX_DEPTH + 1];
+        let mut maps = [false; MAX_DEPTH + 1];
         let mut top = 0usize;
         let mut pending = Some((major, arg));
         loop {
@@ -89,8 +94,13 @@ impl<'a> Reader<'a> {
                     if top == 0 {
                         return Ok(());
                     }
+                    let key = maps[top - 1] && stack[top - 1] % 2 == 0;
                     stack[top - 1] -= 1;
-                    self.head()?
+                    let head = self.head()?;
+                    if key && head.0 != 3 {
+                        return Err(Error::Malformed);
+                    }
+                    head
                 }
             };
             match major {
@@ -116,6 +126,7 @@ impl<'a> Reader<'a> {
                         return Err(Error::Malformed);
                     }
                     stack[top] = items;
+                    maps[top] = major == 5;
                     top += 1;
                 }
                 6 => {
@@ -126,7 +137,11 @@ impl<'a> Reader<'a> {
                     if m != 2 {
                         return Err(Error::Malformed);
                     }
-                    self.take_len(a)?;
+                    let cid = self.take_len(a)?;
+                    match cid.split_first() {
+                        Some((0, rest)) if crate::cid::parse(rest).is_some() => {}
+                        _ => return Err(Error::Malformed),
+                    }
                 }
                 // Major 7, already checked in `head`.
                 _ => {}
@@ -206,6 +221,13 @@ mod tests {
             &[0xa1, 0x01, 0x01],
             &[0xa1, 0x61, b'a', 0xc1, 0x01],
             &[0xa0, 0x00],
+            // A non-string key in a nested map; tag 42 over an integer,
+            // over bytes without the 0x00 prefix, and over 0x00 and bytes
+            // that aren't a CID.
+            &[0xa1, 0x61, b'a', 0xa1, 0x01, 0x01],
+            &[0xa1, 0x61, b'a', 0xd8, 0x2a, 0x01],
+            &[0xa1, 0x61, b'a', 0xd8, 0x2a, 0x41, 0x01],
+            &[0xa1, 0x61, b'a', 0xd8, 0x2a, 0x44, 0x00, 0x07, 0x07, 0x07],
         ] {
             assert_eq!(top_map(bad), Err(Error::Malformed), "{bad:02x?}");
         }
@@ -225,5 +247,11 @@ mod tests {
                 ("c", Item::Other)
             ]
         );
+        // A link where DAG-CBOR allows one: 0x00, then a CID (CIDv1, raw,
+        // an empty identity digest), here inside a nested map.
+        let m = top_map(&[
+            0xa1, 0x61, b'l', 0xa1, 0x61, b'x', 0xd8, 0x2a, 0x45, 0x00, 0x01, 0x55, 0x00, 0x00,
+        ]);
+        assert_eq!(m, Ok(vec![("l", Item::Other)]));
     }
 }
