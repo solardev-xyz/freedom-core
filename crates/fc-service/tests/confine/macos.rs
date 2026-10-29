@@ -682,13 +682,23 @@ fn parent() {
             report["mechanism"] == "seatbelt",
             format!("{case}: mechanism {report}"),
         );
-        for property in ["files", "exec", "ipc"] {
+        for property in ["files", "exec"] {
             expect(
                 &mut failures,
                 report[property] == "enforced",
                 format!("{case}: {property} {report}"),
             );
         }
+        // Partial, naming what stays open: another process's arguments
+        // and environment (the KERN_PROCARGS2 gap).
+        expect(
+            &mut failures,
+            report["ipc"] == "partial"
+                && report["gaps"]
+                    .as_array()
+                    .is_some_and(|gaps| gaps.iter().any(|g| g == "process_args")),
+            format!("{case}: ipc {report}"),
+        );
         let network = if matches!(case, "socks5" | "lan" | "offline") {
             "enforced"
         } else {

@@ -67,9 +67,18 @@ fn hello_reports_the_policy_and_the_confinement_the_kernel_offers() {
         _ if cfg!(target_os = "macos") => {
             // Seatbelt, each status from the sandbox's own checks.
             assert_eq!(confinement["mechanism"], "seatbelt", "{confinement}");
-            for property in ["files", "exec", "ipc"] {
+            for property in ["files", "exec"] {
                 assert_eq!(confinement[property], "enforced", "{confinement}");
             }
+            // Another process's arguments and environment stay readable
+            // (KERN_PROCARGS2, design 0010): partial, and named.
+            assert_eq!(confinement["ipc"], "partial", "{confinement}");
+            assert!(
+                confinement["gaps"]
+                    .as_array()
+                    .is_some_and(|gaps| gaps.iter().any(|g| g == "process_args")),
+                "{confinement}"
+            );
             assert_eq!(confinement["network"], "none", "{confinement}");
         }
         _ => assert!(confinement.is_object(), "{confinement}"),

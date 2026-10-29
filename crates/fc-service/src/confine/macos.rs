@@ -342,10 +342,18 @@ fn derive(policy: &Policy, grants: &Grants) -> Report {
             sys::exec_allowed(EXEC_PROBE),
         ],
     );
-    let ipc = status(
+    let mut ipc = status(
         "ipc",
         &[sys::check(c"mach-lookup", Filter::GlobalName(SOME_SERVICE))],
     );
+    // Seatbelt doesn't mediate KERN_PROCARGS2: another same-user process's
+    // arguments and environment stay readable by pid (design 0010,
+    // "macOS"). The report never claims more than holds, so `ipc` is
+    // `partial`, naming it, until a macOS closes it on evidence.
+    if ipc == Status::Enforced {
+        ipc = Status::Partial;
+    }
+    gaps.push("process_args");
     // The network rule names the proxy's port (and loopback host) alone:
     // the profile holds no other, and the sandbox can't be asked about an
     // address.
