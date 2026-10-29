@@ -2,7 +2,8 @@
 //! strict profile at every level: definite lengths only, each checked
 //! against the bytes remaining; integers, lengths and counts in their
 //! shortest form; map keys strings in canonical order (shorter first,
-//! then bytewise), so none repeats; 64-bit floats that are finite, and
+//! then bytewise), so none repeats; 64-bit floats that are finite and not
+//! negative zero, and
 //! `false`, `true` and `null` the only simple values; tag 42 the only
 //! tag, wherever DAG-CBOR allows a link, its content 0x00 and one whole
 //! CID (its varints minimal). Nesting is at most [`MAX_DEPTH`] levels, the
@@ -71,7 +72,10 @@ impl<'a> Reader<'a> {
         if major == 7 {
             return match ai {
                 20..=22 => Ok((major, arg)),
-                27 if f64::from_bits(arg).is_finite() => Ok((major, arg)),
+                // Finite, and not negative zero (DAG-CBOR's strictness).
+                27 if f64::from_bits(arg).is_finite() && arg != 0x8000_0000_0000_0000 => {
+                    Ok((major, arg))
+                }
                 _ => Err(Error::Malformed),
             };
         }
@@ -347,9 +351,11 @@ mod tests {
             &[0xa1, 0x61, b'a', 0x18, 0x01],
             &[0xa1, 0x78, 0x01, b'a', 0x01],
             &[0xa1, 0x61, b'a', 0x19, 0x00, 0xff],
-            // Floats: NaN, infinity, a 32-bit float; and undefined.
+            // Floats: NaN, infinity, negative zero, a 32-bit float; and
+            // undefined.
             &[0xa1, 0x61, b'a', 0xfb, 0x7f, 0xf8, 0, 0, 0, 0, 0, 0],
             &[0xa1, 0x61, b'a', 0xfb, 0x7f, 0xf0, 0, 0, 0, 0, 0, 0],
+            &[0xa1, 0x61, b'a', 0xfb, 0x80, 0, 0, 0, 0, 0, 0, 0],
             &[0xa1, 0x61, b'a', 0xfa, 0x3f, 0xc0, 0, 0],
             &[0xa1, 0x61, b'a', 0xf7],
         ] {
