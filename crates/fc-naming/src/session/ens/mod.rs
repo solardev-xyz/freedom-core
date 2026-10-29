@@ -598,6 +598,111 @@ mod tests {
     }
 
     #[test]
+    fn status_digits_in_a_node_message_are_not_provider_failures() {
+        let call = Method::Call {
+            to: [0; 20],
+            data: Vec::new(),
+            block: "latest".into(),
+        };
+        let classify =
+            |status: u16, body: &str| match rpc::answer(1, &call, status, body.as_bytes()) {
+                Err(error) => CallError::Rpc(error).provider_failure(),
+                Ok(_) => unreachable!(),
+            };
+        let node = |message: &str| {
+            format!(
+                r#"{{"id":1,"error":{{"code":-32000,"message":{}}}}}"#,
+                serde_json::Value::from(message)
+            )
+        };
+        // freedom-browser#656's rows (46b3d891), as the node's own message
+        // carries them: calldata with 429 or a 5xx inside it, a figure
+        // that contains one, and the bare digits. None is a status; rule 8.
+        for status in ["429", "502", "503", "504"] {
+            let calldata = format!("0x9061b923{}{status}0{}", "00".repeat(4), "ab".repeat(8));
+            for message in [
+                format!("invalid opcode: INVALID at pc=0, input {calldata}"),
+                format!("out of gas: gas required exceeds allowance ({status}0000)"),
+                format!("upstream answered {status}"),
+            ] {
+                assert!(!classify(200, &node(&message)), "{message}");
+            }
+            // The status itself still is one: rule 3.
+            assert!(classify(status.parse().unwrap(), &node(status)));
+        }
+        // A JSON-RPC code 429 is one of #656's codes: rule 7.
+        assert!(classify(
+            200,
+            r#"{"id":1,"error":{"code":429,"message":"slow down"}}"#
+        ));
+        // #656's patterns and the reference's own still match.
+        for message in [
+            "header not found",
+            "Too Many Requests",
+            "no response",
+            "timeout",
+        ] {
+            assert!(classify(200, &node(message)), "{message}");
+        }
+    }
+
+    #[test]
+    fn rate_limit_takes_any_one_character_between_its_words() {
+        let call = Method::Call {
+            to: [0; 20],
+            data: Vec::new(),
+            block: "latest".into(),
+        };
+        let classify = |body: &str| match rpc::answer(1, &call, 200, body.as_bytes()) {
+            Err(error) => CallError::Rpc(error).provider_failure(),
+            Ok(_) => unreachable!(),
+        };
+        let node = |code: i32, message: &str, data: Option<&str>| {
+            let mut error = serde_json::json!({ "code": code, "message": message });
+            if let Some(data) = data {
+                error["data"] = data.into();
+            }
+            serde_json::json!({ "id": 1, "error": error }).to_string()
+        };
+        // #656's `/rate.?limit/i`: at most one character, any but a line
+        // terminator, under a code #656 doesn't list (rule 7).
+        let tab = char::from(9u8);
+        let matched = [
+            "rate_limit: 429".to_owned(),
+            format!("rate{tab}limit"),
+            "rate:limit".to_owned(),
+            "RATE LIMIT".to_owned(),
+            "ratelimit".to_owned(),
+            "rate-limit".to_owned(),
+            "Rate\u{e9}limit".to_owned(),
+        ];
+        for message in &matched {
+            assert!(classify(&node(-32000, message, None)), "{message:?}");
+            // Revert evidence comes first: a revert's code or data, or a
+            // message that says it reverted, is never a provider failure.
+            assert!(!classify(&node(3, message, None)), "{message:?}");
+            assert!(
+                !classify(&node(-32000, message, Some("0x08c379a0"))),
+                "{message:?}"
+            );
+            let reverted = format!("execution reverted: {message}");
+            assert!(!classify(&node(-32000, &reverted, None)), "{reverted:?}");
+        }
+        let newline = char::from(10u8);
+        let not_matched = [
+            "rate__limit".to_owned(),
+            format!("rate{newline}limit"),
+            "rate\u{2028}limit".to_owned(),
+            // An astral character is two UTF-16 code units.
+            "rate\u{1f600}limit".to_owned(),
+            "rated".to_owned(),
+        ];
+        for message in &not_matched {
+            assert!(!classify(&node(-32000, message, None)), "{message:?}");
+        }
+    }
+
+    #[test]
     fn caches_keep_map_order_and_evict_expired_first() {
         let mut cache = Cache::default();
         cache.set("a", JsValue::Null, 10.0, 0, usize::MAX);

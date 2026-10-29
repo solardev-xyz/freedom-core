@@ -19,6 +19,13 @@ ignore = [
     # from a key file or an agent, and `SSH_AUTH_SOCK` refuses the start
     # (src/env.rs).
     { id = "RUSTSEC-2023-0071", reason = "no RSA private-key operation is ever made: the node key is Ed25519 from rad.identity, and no agent is reachable" },
+    # crypto-bigint 0.5.5, through elliptic-curve 0.13 and ssh-key's p256,
+    # p384 and p521 (radicle-crypto, ssh-agent-lib): branches that aren't
+    # constant-time on secret integers, fixed only in 0.7.6, which needs
+    # elliptic-curve 0.14 upstream. The same reason as the RSA entry: the
+    # service makes no ECDSA private-key operation, since its only key is the
+    # Ed25519 node key from `rad.identity`.
+    { id = "RUSTSEC-2026-0387", reason = "no ECDSA private-key operation is ever made: the node key is Ed25519 from rad.identity, and no agent is reachable" },
 ]
 
 [licenses]

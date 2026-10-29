@@ -39,6 +39,12 @@ ignore = [
     # libp2p-tcp): unmaintained, compile time only, as freedom-ipfsd's policy
     # notes for the same crate.
     { id = "RUSTSEC-2024-0436", reason = "unmaintained proc macro, compile time only; no upgrade exists" },
+    # crypto-bigint 0.5.5, through k256 0.13 (ant-crypto, pinned Ant
+    # v0.5.71): branches that aren't constant-time on secret integers, fixed
+    # only in 0.7.6, which Ant's k256 0.13 can't take. The generator signs
+    # only fixture records, with seeded keys that are published in the
+    # vectors, offline; it has no secret to leak.
+    { id = "RUSTSEC-2026-0387", reason = "signs only fixtures with public seeded test keys, offline; no secret to leak" },
     # rsa 0.9.10, the generator's own: it signs the vectors' RSA-keyed IPNS
     # records. The Marvin timing side channel is in private-key operations,
     # and these are made, but with test keys derived from public labels
