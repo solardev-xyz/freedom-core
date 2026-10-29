@@ -6338,6 +6338,44 @@
       }
     },
     {
+      "id": "ipns/value-names-dnslink",
+      "note": "a valid record whose value names a DNSLink name (/ipns/example.com): the walk can't follow it, and never falls back to an unverified fetch",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipns": "k51qzi5uqu5dm4byyvx1rm820bmhg9pb9mbauoya4h97fj7y3281b68piobf5u"
+        },
+        "path": "/",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "record",
+            "name": "k51qzi5uqu5dm4byyvx1rm820bmhg9pb9mbauoya4h97fj7y3281b68piobf5u",
+            "record": {
+              "base64": "QkAKRGy1PQs3YyWq/o0sPN5/coIp7wNp9r5RZK+oH25m/aupW0O70017Vc8TjhJZbYtXMrxc7VTlwUbBvSQtKL0JSmelY1RUTBsAAABF2WS4AGVWYWx1ZVEvaXBucy9leGFtcGxlLmNvbWhTZXF1ZW5jZQFoVmFsaWRpdHlYHjIwOTktMDEtMDFUMDA6MDA6MDAuMDAwMDAwMDAwWmxWYWxpZGl0eVR5cGUA"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "This content can't be verified with the external IPFS gateway"
+          }
+        }
+      }
+    },
+    {
       "id": "ipns/floor",
       "note": "one partition verifies sequence 5, then is served sequence 3, still valid: refused below the floor; another partition takes sequence 3",
       "deviation": "ipns-floor",
