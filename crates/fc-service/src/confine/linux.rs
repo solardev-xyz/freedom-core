@@ -48,7 +48,8 @@ pub(super) fn confine(policy: &Policy, options: &Options) -> Result<Report, Inva
     let seccomp = match seccomp::target() {
         None => Installed::Unavailable("no seccomp filter for this architecture".into()),
         Some(arch) => {
-            let mut programs = seccomp::programs(policy.network, arch).map_err(Invalid::Rules)?;
+            let mut programs = seccomp::programs(policy.network, arch, policy.interface_index)
+                .map_err(Invalid::Rules)?;
             if options.seccomp_invalid {
                 programs.insert(0, seccomp::invalid_program());
             }
@@ -529,6 +530,7 @@ mod tests {
             network,
             system_resolver: false,
             descriptors: Vec::new(),
+            interface_index: false,
         }
     }
 

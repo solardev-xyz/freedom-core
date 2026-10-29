@@ -1015,6 +1015,7 @@ dependencies = [
  "fc-protocol",
  "fc-seal",
  "fc-service",
+ "fc-sys",
  "getrandom 0.4.3",
  "libradicle",
  "radicle-crypto",
