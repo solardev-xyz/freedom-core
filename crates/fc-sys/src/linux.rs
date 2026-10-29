@@ -105,7 +105,10 @@ mod tests {
     fn marking_a_range_close_on_exec_closes_nothing() {
         use std::io::{Read, Seek, Write};
         use std::os::fd::AsRawFd;
-        let path = std::env::temp_dir().join(format!("fc-sys-cloexec-{}", std::process::id()));
+        // Its own name: the unix module's test makes a file beside it, in the
+        // same process, at the same time.
+        let path =
+            std::env::temp_dir().join(format!("fc-sys-cloexec-range-{}", std::process::id()));
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(true)

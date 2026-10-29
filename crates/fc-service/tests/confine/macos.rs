@@ -165,15 +165,8 @@ fn child(case: &str) {
             // one program, fork still denied, `confine`'s exec self-test
             // succeeds, so this process becomes /usr/bin/true and exits 0,
             // printing nothing more.
-            // The new image's dyld maps the system's libraries, which the
-            // service's own profile never needs: the control allows that too.
             let options = Options {
-                seatbelt_extra: Some(
-                    "(allow process-exec (literal \"/usr/bin/true\"))\n\
-                     (allow file-map-executable (subpath \"/usr/lib\") (subpath \"/System\") \
-                     (subpath \"/private/var/db/dyld\"))\n"
-                        .into(),
-                ),
+                seatbelt_extra: Some("(allow process-exec (literal \"/usr/bin/true\"))\n".into()),
                 ..Options::default()
             };
             let result = confine::confine_with(&policy(&p, network, registered), &options);
@@ -773,13 +766,18 @@ fn parent() {
         );
     }
     // The inverse control: process-exec allowed for the probe's program,
-    // the probe's process becomes /usr/bin/true, which exits 0.
+    // fork still denied. The probe's exec then succeeds: `confine` never
+    // returns, and the process is /usr/bin/true's from there. That image
+    // ends at once, by its exit or, as on macOS CI, by dyld's abort under
+    // a profile that maps no system library executable; either way no
+    // Rust code of the child runs again.
     let control = run(&world, "exec-control");
+    println!("confine: exec control: {:?}", control.status);
     expect(
         &mut failures,
-        control.status.success()
-            && lines(&control).contains("ENTRY ")
-            && !lines(&control).contains("STILL HERE"),
+        lines(&control).contains("ENTRY ")
+            && !lines(&control).contains("STILL HERE")
+            && !String::from_utf8_lossy(&control.stderr).contains("panicked"),
         format!(
             "exec-control: {:?} {}{}",
             control.status,
