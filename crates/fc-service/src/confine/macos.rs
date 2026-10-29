@@ -279,8 +279,6 @@ fn blocked(why: &str) -> Report {
 /// derived `files` status asks the sandbox about.
 const OUTSIDE_READ: &std::ffi::CStr = c"/Library/Preferences";
 const OUTSIDE_WRITE: &std::ffi::CStr = c"/Library/Caches";
-/// A program every macOS has: the derived `exec` status asks about it.
-const SOME_PROGRAM: &std::ffi::CStr = c"/bin/sh";
 /// A Mach service outside the authorized channels: the derived `ipc`
 /// status asks about it.
 const SOME_SERVICE: &std::ffi::CStr = c"com.apple.pasteboard.1";
@@ -328,13 +326,11 @@ fn derive(policy: &Policy, grants: &Grants) -> Report {
         file_checks.push(sys::check(c"file-write-mode", Filter::Path(dir)));
     }
     let files = status("files", &file_checks);
-    let exec = status(
-        "exec",
-        &[
-            sys::check(c"process-fork", Filter::None),
-            sys::check(c"process-exec", Filter::Path(SOME_PROGRAM)),
-        ],
-    );
+    // Every new process forks first (`posix_spawn` too), and the sandbox
+    // answers for `process-fork`; it answers -1 for `process-exec` with a
+    // path (macOS CI), so that check proves nothing either way. The profile
+    // denies both by default.
+    let exec = status("exec", &[sys::check(c"process-fork", Filter::None)]);
     let ipc = status(
         "ipc",
         &[sys::check(c"mach-lookup", Filter::GlobalName(SOME_SERVICE))],
