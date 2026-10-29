@@ -159,7 +159,7 @@ fn world(changes: Value) -> Value {
     json!({ "changes": changes })
 }
 
-fn swarm(doc: &Doc, out: &mut Cases) -> Result<(), Err> {
+async fn swarm(doc: &Doc, out: &mut Cases) -> Result<(), Err> {
     // site-a: style.css is 5,000 bytes, a root over two leaves.
     let site = doc.0["swarm"]["manifests"]
         .as_array()
@@ -412,9 +412,125 @@ fn swarm(doc: &Doc, out: &mut Cases) -> Result<(), Err> {
     refs.extend_from_slice(&tl);
     let file_span = 128 * 4096 + 4096;
     let (froot, frootw) = cac(span(file_span), &refs)?;
-    out.push("swarm/soc-as-intermediate", "a file root of span 528,384 whose first child, an intermediate chunk's place, is a single-owner chunk: after the head, nothing released", swarm_plan(&h(&froot), "/", &[]), "GET",
+    out.push("swarm/soc-as-intermediate", "the URL's reference is a root of span 528,384 whose first child, an intermediate chunk's place, is a single-owner chunk: telling a raw file from a manifest reads down to the first data chunk, so the refusal comes before the head", swarm_plan(&h(&froot), "/", &[]), "GET",
         json!({ "chunks": { h(&froot): bytes(&frootw), h(&soc_addr): bytes(&soc_a), h(&tl): bytes(&tlw) }, "changes": [] }),
-        truncated(raw_head(&froot, file_span as usize), content_body("requests-soc-tail", 0, 0), "unverifiable", SWARM_UNVERIFIABLE), Some("soc-references"));
+        error(502, SWARM_UNVERIFIABLE), Some("soc-references"));
+    // The same file behind a manifest entry: the entry says it is a file,
+    // so the head goes out on its root chunk, and the single-owner chunk
+    // is met after it.
+    let value = Node {
+        obfuscation_key: [0; 32],
+        ref_size: 32,
+        entry: froot.to_vec(),
+        forks: Vec::new(),
+    }
+    .marshal();
+    let (v_addr, v_wire) = cac(span(value.len() as u64), &value)?;
+    let entry_manifest = Node {
+        obfuscation_key: [0; 32],
+        ref_size: 32,
+        entry: vec![0; 32],
+        forks: vec![Fork {
+            node_type: mantaray::TYPE_VALUE | mantaray::TYPE_WITH_METADATA,
+            prefix: b"file.bin".to_vec(),
+            child: v_addr.to_vec(),
+            metadata: Some(mantaray::metadata(&[
+                ("Content-Type", "application/octet-stream"),
+                ("Filename", "file.bin"),
+            ])),
+        }],
+    }
+    .marshal();
+    let (e_root, e_wire) = cac(span(entry_manifest.len() as u64), &entry_manifest)?;
+    let entry_head = json!({
+        "status": 200,
+        "headers": [
+            ["content-type", "application/octet-stream"],
+            ["content-length", file_span.to_string()],
+            ["accept-ranges", "bytes"],
+            ["content-disposition", "inline; filename=\"file.bin\""],
+            ["cache-control", "public, max-age=31536000, immutable"],
+            ["etag", format!("\"{}\"", h(&froot))],
+        ],
+        "trust": { "name": null, "content": "verified" },
+        "from": "Ant's head for a manifest entry, as site-a#8",
+    });
+    // Hold the head to Ant's: the same manifest over an honest file of the
+    // same size, through Ant's gateway, gives these headers but the ETag.
+    let honest = content::bytes("requests-soc-honest", file_span as usize);
+    let split = ant_retrieval::split_bytes(&honest);
+    let mut net: std::collections::HashMap<Addr, Vec<u8>> = split
+        .chunks
+        .into_iter()
+        .map(|c| (c.address, c.wire))
+        .collect();
+    let value = Node {
+        obfuscation_key: [0; 32],
+        ref_size: 32,
+        entry: split.root.to_vec(),
+        forks: Vec::new(),
+    }
+    .marshal();
+    let (hv, hvw) = cac(span(value.len() as u64), &value)?;
+    net.insert(hv, hvw);
+    let honest_manifest = Node {
+        obfuscation_key: [0; 32],
+        ref_size: 32,
+        entry: vec![0; 32],
+        forks: vec![Fork {
+            node_type: mantaray::TYPE_VALUE | mantaray::TYPE_WITH_METADATA,
+            prefix: b"file.bin".to_vec(),
+            child: hv.to_vec(),
+            metadata: Some(mantaray::metadata(&[
+                ("Content-Type", "application/octet-stream"),
+                ("Filename", "file.bin"),
+            ])),
+        }],
+    }
+    .marshal();
+    let (hm, hmw) = cac(span(honest_manifest.len() as u64), &honest_manifest)?;
+    net.insert(hm, hmw);
+    let ant = crate::gateway::Ant::new(std::sync::Arc::new(crate::store::MemFetcher::new(net)));
+    let request_headers: Vec<(String, String)> = doc.0["meta"]["request_headers"]
+        .as_array()
+        .ok_or("request_headers")?
+        .iter()
+        .map(|kv| {
+            (
+                kv[0].as_str().unwrap_or_default().to_string(),
+                kv[1].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    let answer = ant
+        .send(
+            "GET",
+            &format!("/bzz/{}/file.bin", h(&hm)),
+            &request_headers,
+        )
+        .await
+        .map_err(|e| format!("Ant's answer for the honest entry: {e}"))?;
+    let theirs: Vec<Value> = answer
+        .headers
+        .iter()
+        .filter(|(k, _)| k != "server")
+        .map(|(k, v)| {
+            if k == "etag" {
+                json!([k, format!("\"{}\"", h(&froot))])
+            } else {
+                json!([k, v])
+            }
+        })
+        .collect();
+    if answer.status != 200
+        || Value::Array(theirs) != entry_head["headers"]
+        || answer.body != honest
+    {
+        return Err("the manifest entry's head isn't Ant's".into());
+    }
+    out.push("swarm/soc-as-intermediate-in-manifest", "the same file as the entry file.bin of a manifest: the head goes out once the file's root chunk has passed, and its first child, a single-owner chunk, is refused after it, with nothing released", swarm_plan(&h(&e_root), "/file.bin", &[]), "GET",
+        json!({ "chunks": { h(&e_root): bytes(&e_wire), h(&v_addr): bytes(&v_wire), h(&froot): bytes(&frootw), h(&soc_addr): bytes(&soc_a), h(&tl): bytes(&tlw) }, "changes": [] }),
+        truncated(entry_head, content_body("requests-soc-tail", 0, 0), "unverifiable", SWARM_UNVERIFIABLE), Some("soc-references"));
     out.0.push(json!({
         "id": "swarm/soc-two-payloads",
         "note": "one owner's two SOCs at one address, served one after the other in one partition: each request is unverifiable, and nothing of the first is cached for the second",
@@ -707,6 +823,22 @@ fn ipfs(doc: &Doc, out: &mut Cases) -> Result<(), Err> {
         None,
     );
     out.push(
+        "ipfs/car-no-duplicates-raw-leaf-wrong",
+        "the dups=n CAR, honest, and the raw answer for the leaf another block's bytes: the core takes no block from the CAR, so the leaf the type's sniffing needs fails before the head. A core that read the CAR would answer 200",
+        ipfs_plan(
+            json!({ "ipfs": "bafybeiaw4srkelv2eyvj7r6x36d375tsptrlfzsvlxhidyj5me5huasve4" }),
+            "",
+            &[],
+        ),
+        "GET",
+        gw(true, json!([
+            { "piece": "car", "answer": "no_dups" },
+            { "piece": "raw", "cid": "bafkreiaediwvfaybu3walxpbful7vqemyuqrqhr3uhndtg5zox7aw6fypq", "as": "bafybeiaw4srkelv2eyvj7r6x36d375tsptrlfzsvlxhidyj5me5huasve4" },
+        ])),
+        error(502, IPFS_FAILED),
+        None,
+    );
+    out.push(
         "ipfs/car-no-duplicates-unannounced",
         "the same, its Content-Type still saying dups=y: the CAR ends cleanly before the walk does, which fetches the rest raw",
         ipfs_plan(
@@ -786,12 +918,34 @@ fn ipfs(doc: &Doc, out: &mut Cases) -> Result<(), Err> {
         error(502, IPFS_FAILED),
         None,
     );
-    out.push("ipfs/car-long-varint", "after the root's section, a section length in 11 bytes", big_plan(&[]), "GET",
-        gw(true, json!([{ "piece": "car", "after_sections": 1, "insert": bytes(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00]) }])),
-        truncated(doc.head("file-10485760-v1-balanced#1", "verified")?, content_body("ipfs-file-10485760", 0, 0), "verification_failed", IPFS_FAILED), None);
-    out.push("ipfs/car-section-past-limit", "after the root's section, a section length of 3 MiB", big_plan(&[]), "GET",
-        gw(true, json!([{ "piece": "car", "after_sections": 1, "insert": bytes(&[0x80, 0x80, 0xc0, 0x01]) }])),
-        truncated(doc.head("file-10485760-v1-balanced#1", "verified")?, content_body("ipfs-file-10485760", 0, 0), "verification_failed", IPFS_FAILED), None);
+    // The file has no extension and its root holds no bytes, so its type
+    // is sniffed from the first leaf: framing that breaks before that
+    // leaf is a failure before the head; after it, a truncation.
+    let long_varint = [
+        0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00,
+    ];
+    let past_limit = [0x80, 0x80, 0xc0, 0x01];
+    out.push("ipfs/car-long-varint", "after the root's section, a section length in 11 bytes: before the first leaf, which the type's sniffing needs, so before the head", big_plan(&[]), "GET",
+        gw(true, json!([{ "piece": "car", "after_sections": 1, "insert": bytes(&long_varint) }])),
+        error(502, IPFS_FAILED), None);
+    out.push(
+        "ipfs/car-section-past-limit",
+        "after the root's section, a section length of 3 MiB: before the head, as car-long-varint",
+        big_plan(&[]),
+        "GET",
+        gw(
+            true,
+            json!([{ "piece": "car", "after_sections": 1, "insert": bytes(&past_limit) }]),
+        ),
+        error(502, IPFS_FAILED),
+        None,
+    );
+    out.push("ipfs/car-long-varint-after-sniff", "the 11-byte section length after the first leaf's section: the head went out on the first leaf's bytes, which are released, then the body is cut", big_plan(&[]), "GET",
+        gw(true, json!([{ "piece": "car", "after_sections": 2, "insert": bytes(&long_varint) }])),
+        truncated(doc.head("file-10485760-v1-balanced#1", "verified")?, content_body("ipfs-file-10485760", 0, 262_144), "verification_failed", IPFS_FAILED), None);
+    out.push("ipfs/car-section-past-limit-after-sniff", "the 3 MiB section length after the first leaf's section: the first leaf released, then the body is cut", big_plan(&[]), "GET",
+        gw(true, json!([{ "piece": "car", "after_sections": 2, "insert": bytes(&past_limit) }])),
+        truncated(doc.head("file-10485760-v1-balanced#1", "verified")?, content_body("ipfs-file-10485760", 0, 262_144), "verification_failed", IPFS_FAILED), None);
     let blake3 = {
         let mh = multihash::Multihash::<64>::wrap(0x1e, &[0u8; 32])?;
         cid::Cid::new_v1(0x55, mh).to_string()
@@ -891,10 +1045,10 @@ fn ipfs(doc: &Doc, out: &mut Cases) -> Result<(), Err> {
     Ok(())
 }
 
-pub fn build() -> Result<Value, Err> {
+pub async fn build() -> Result<Value, Err> {
     let doc = Doc(serde_json::from_str(&std::fs::read_to_string(crate::OUT)?)?);
     let mut out = Cases(Vec::new());
-    swarm(&doc, &mut out)?;
+    swarm(&doc, &mut out).await?;
     ipfs(&doc, &mut out)?;
     Ok(Value::Array(out.0))
 }

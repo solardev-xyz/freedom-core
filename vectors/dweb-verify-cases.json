@@ -11478,7 +11478,7 @@
     },
     {
       "id": "swarm/soc-as-intermediate",
-      "note": "a file root of span 528,384 whose first child, an intermediate chunk's place, is a single-owner chunk: after the head, nothing released",
+      "note": "the URL's reference is a root of span 528,384 whose first child, an intermediate chunk's place, is a single-owner chunk: telling a raw file from a manifest reads down to the first data chunk, so the refusal comes before the head",
       "plan": {
         "node": "ant",
         "root": {
@@ -11492,6 +11492,51 @@
       "partition": null,
       "world": {
         "chunks": {
+          "7ed67154a5c1a4e7e65210f9cfab68084275cf5f3a723ea9455446d7ed5fd33e": {
+            "base64": "ABAIAAAAAAD8SICnTrNzlmGyo0OIPkjFnX7vVOMX+o+nuENQEzWAwxvdkzpCMx4uaAHhkmbntFl6hlx0jxzQW1f0Z9bAdfj/"
+          },
+          "fc4880a74eb3739661b2a343883e48c59d7eef54e317fa8fa7b84350133580c3": {
+            "base64": "Vs9mTsWZX+vWviW4ioR5vy0yCigrMWxh8+gGY3LKmpzKhvkyjHdBeuTUUuenZsbQFH1s/1QFdq+D8oPWbgwVsTJO0ubjVhIOHyLpUT85NzD13H1xNOkTdsvGYGcy6OSUHGQAAAAAAAAAGebjki/S3ux0+i5FIJG0Xt7mLFnUio5dce+fPvgmujUNscMUIW22kAdrTKMEjDOES8L/CHc6jW9UeEukFIwIyIGgBqBnNStHB7m43APGX5m1rIbViGDhaTWr2T08EieqxBDu/g=="
+          },
+          "1bdd933a42331e2e6801e19266e7b4597a865c748f1cd05b57f467d6c075f8ff": {
+            "base64": "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"
+          }
+        },
+        "changes": []
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "This content can't be verified with the external Swarm node"
+          }
+        }
+      },
+      "deviation": "soc-references"
+    },
+    {
+      "id": "swarm/soc-as-intermediate-in-manifest",
+      "note": "the same file as the entry file.bin of a manifest: the head goes out once the file's root chunk has passed, and its first child, a single-owner chunk, is refused after it, with nothing released",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "f680375d1c4e6840a2d9c8fdb5ec21ea221687a3fcf38443e9254812d244e315"
+        },
+        "path": "/file.bin",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "chunks": {
+          "f680375d1c4e6840a2d9c8fdb5ec21ea221687a3fcf38443e9254812d244e315": {
+            "base64": "IAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFdos7an21bSHRq/9A1Bzr/INEj+2NfpsG7A07Bz8o8gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAABIIZmlsZS5iaW4AAAAAAAAAAAAAAAAAAAAAAAAAAAAA8YyJz5lO8cmHIozL2K/Du2apKnDN/0bi97/YqnNkIVoAXnsiQ29udGVudC1UeXBlIjoiYXBwbGljYXRpb24vb2N0ZXQtc3RyZWFtIiwiRmlsZW5hbWUiOiJmaWxlLmJpbiJ9CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo="
+          },
+          "f18c89cf994ef1c987228ccbd8afc3bb66a92a70cdff46e2f7bfd8aa7364215a": {
+            "base64": "gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFdos7an21bSHRq/9A1Bzr/INEj+2NfpsG7A07Bz8o8gftZxVKXBpOfmUhD5z6toCEJ1z186cj6pRVRG1+1f0z4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+          },
           "7ed67154a5c1a4e7e65210f9cfab68084275cf5f3a723ea9455446d7ed5fd33e": {
             "base64": "ABAIAAAAAAD8SICnTrNzlmGyo0OIPkjFnX7vVOMX+o+nuENQEzWAwxvdkzpCMx4uaAHhkmbntFl6hlx0jxzQW1f0Z9bAdfj/"
           },
@@ -11521,6 +11566,10 @@
               "bytes"
             ],
             [
+              "content-disposition",
+              "inline; filename=\"file.bin\""
+            ],
+            [
               "cache-control",
               "public, max-age=31536000, immutable"
             ],
@@ -11533,7 +11582,7 @@
             "name": null,
             "content": "verified"
           },
-          "from": "Ant's head for a reference that isn't a manifest, as file-524288-rs0#3"
+          "from": "Ant's head for a manifest entry, as site-a#8"
         },
         "truncated": {
           "released": {
@@ -12462,6 +12511,46 @@
       }
     },
     {
+      "id": "ipfs/car-no-duplicates-raw-leaf-wrong",
+      "note": "the dups=n CAR, honest, and the raw answer for the leaf another block's bytes: the core takes no block from the CAR, so the leaf the type's sniffing needs fails before the head. A core that read the CAR would answer 200",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeiaw4srkelv2eyvj7r6x36d375tsptrlfzsvlxhidyj5me5huasve4"
+        },
+        "path": "",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "car",
+            "answer": "no_dups"
+          },
+          {
+            "piece": "raw",
+            "cid": "bafkreiaediwvfaybu3walxpbful7vqemyuqrqhr3uhndtg5zox7aw6fypq",
+            "as": "bafybeiaw4srkelv2eyvj7r6x36d375tsptrlfzsvlxhidyj5me5huasve4"
+          }
+        ]
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "IPFS content verification failed"
+          }
+        }
+      }
+    },
+    {
       "id": "ipfs/car-no-duplicates-unannounced",
       "note": "the same, its Content-Type still saying dups=y: the CAR ends cleanly before the walk does, which fetches the rest raw",
       "plan": {
@@ -12836,7 +12925,7 @@
     },
     {
       "id": "ipfs/car-long-varint",
-      "note": "after the root's section, a section length in 11 bytes",
+      "note": "after the root's section, a section length in 11 bytes: before the first leaf, which the type's sniffing needs, so before the head",
       "plan": {
         "node": "ipfs",
         "root": {
@@ -12856,6 +12945,82 @@
           {
             "piece": "car",
             "after_sections": 1,
+            "insert": {
+              "base64": "gICAgICAgICAgAA="
+            }
+          }
+        ]
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "IPFS content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "ipfs/car-section-past-limit",
+      "note": "after the root's section, a section length of 3 MiB: before the head, as car-long-varint",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeicts2tssv6avpna26sql26mlrowdhxwjpskl35ibnxdf7tf7cgo5a"
+        },
+        "path": "",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "car",
+            "after_sections": 1,
+            "insert": {
+              "base64": "gIDAAQ=="
+            }
+          }
+        ]
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "IPFS content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "ipfs/car-long-varint-after-sniff",
+      "note": "the 11-byte section length after the first leaf's section: the head went out on the first leaf's bytes, which are released, then the body is cut",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeicts2tssv6avpna26sql26mlrowdhxwjpskl35ibnxdf7tf7cgo5a"
+        },
+        "path": "",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "car",
+            "after_sections": 2,
             "insert": {
               "base64": "gICAgICAgICAgAA="
             }
@@ -12895,7 +13060,11 @@
         },
         "truncated": {
           "released": {
-            "length": 0
+            "content": {
+              "seed": "ipfs-file-10485760",
+              "from": 0,
+              "length": 262144
+            }
           },
           "abort": {
             "code": "verification_failed",
@@ -12905,8 +13074,8 @@
       }
     },
     {
-      "id": "ipfs/car-section-past-limit",
-      "note": "after the root's section, a section length of 3 MiB",
+      "id": "ipfs/car-section-past-limit-after-sniff",
+      "note": "the 3 MiB section length after the first leaf's section: the first leaf released, then the body is cut",
       "plan": {
         "node": "ipfs",
         "root": {
@@ -12925,7 +13094,7 @@
         "changes": [
           {
             "piece": "car",
-            "after_sections": 1,
+            "after_sections": 2,
             "insert": {
               "base64": "gIDAAQ=="
             }
@@ -12965,7 +13134,11 @@
         },
         "truncated": {
           "released": {
-            "length": 0
+            "content": {
+              "seed": "ipfs-file-10485760",
+              "from": 0,
+              "length": 262144
+            }
           },
           "abort": {
             "code": "verification_failed",

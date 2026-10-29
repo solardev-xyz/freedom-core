@@ -92,7 +92,7 @@ pub async fn build() -> Result<Value, Err> {
         "swarm": swarm::build().await?,
         "ipfs": ipfs::build().await?,
         "ipns": ipns::build()?,
-        "requests": requests::build()?,
+        "requests": requests::build().await?,
     }))
 }
 
