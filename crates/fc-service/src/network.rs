@@ -84,7 +84,10 @@ impl NetworkPolicy {
     pub fn confinement(&self) -> confine::Network {
         match self {
             NetworkPolicy::Direct => confine::Network::Direct,
-            NetworkPolicy::Socks5 { proxy } => confine::Network::Socks5 { port: proxy.port() },
+            NetworkPolicy::Socks5 { proxy } => confine::Network::Socks5 {
+                port: proxy.port(),
+                loopback: proxy.ip().to_canonical().is_loopback(),
+            },
         }
     }
 }
@@ -180,7 +183,29 @@ mod tests {
         );
         assert_eq!(
             policy.confinement(),
-            confine::Network::Socks5 { port: 9150 }
+            confine::Network::Socks5 {
+                port: 9150,
+                loopback: true
+            }
+        );
+        // A LAN proxy, and an IPv4-mapped loopback one.
+        assert_eq!(
+            NetworkPolicy::parse("socks5:192.168.1.10:9150")
+                .unwrap()
+                .confinement(),
+            confine::Network::Socks5 {
+                port: 9150,
+                loopback: false
+            }
+        );
+        assert_eq!(
+            NetworkPolicy::parse("socks5:[::ffff:127.0.0.1]:9150")
+                .unwrap()
+                .confinement(),
+            confine::Network::Socks5 {
+                port: 9150,
+                loopback: true
+            }
         );
         assert_eq!(
             NetworkPolicy::Direct.confinement(),

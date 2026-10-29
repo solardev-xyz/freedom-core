@@ -146,6 +146,11 @@ pub fn server_addresses(plist: &str) -> Vec<(IpAddr, Option<String>)> {
 /// grants them read-only (design 0010).
 pub const LINUX_FILES: [&str; 2] = ["/etc/resolv.conf", "/run/systemd/resolve/resolv.conf"];
 
+/// The file macOS lists resolvers in beside the dynamic store: configd
+/// writes it (`/etc/resolv.conf`, a link into `/var/run`). A confined
+/// service grants it read-only (design 0010).
+pub const MACOS_FILES: [&str; 1] = ["/etc/resolv.conf"];
+
 /// The resolvers `files` list, in order, with `index` naming interfaces. A
 /// file that doesn't exist lists none. One that exists but can't be read is
 /// [`Learned::Unreadable`], never taken as listing none.
@@ -219,7 +224,7 @@ mod os {
 
 #[cfg(target_os = "macos")]
 mod os {
-    use super::{Learned, from_files, learn, server_addresses};
+    use super::{Learned, MACOS_FILES, from_files, learn, server_addresses};
     use system_configuration::core_foundation::propertylist::{
         create_data, kCFPropertyListXMLFormat_v1_0,
     };
@@ -237,7 +242,7 @@ mod os {
                 .and_then(|interface| interface.index)
         };
         let mut found = dynamic_store(client, index);
-        found.extend(from_files(&["/etc/resolv.conf"], index));
+        found.extend(from_files(&MACOS_FILES, index));
         found
     }
 
