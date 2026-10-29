@@ -9,41 +9,41 @@ use k256::elliptic_curve::PrimeField;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
-type Addr = [u8; 32];
+pub(super) type Addr = [u8; 32];
 
 fn h(b: &[u8]) -> String {
     hex::encode(b)
 }
 
-fn cac(span: [u8; 8], payload: &[u8]) -> Result<(Addr, Vec<u8>), Err> {
+pub(super) fn cac(span: [u8; 8], payload: &[u8]) -> Result<(Addr, Vec<u8>), Err> {
     let addr = ant_crypto::bmt_hash_with_span(&span, payload).ok_or("payload past 4096 bytes")?;
     let mut wire = span.to_vec();
     wire.extend_from_slice(payload);
     Ok((addr, wire))
 }
 
-fn span(n: u64) -> [u8; 8] {
+pub(super) fn span(n: u64) -> [u8; 8] {
     n.to_le_bytes()
 }
 
-fn secret(label: &str) -> [u8; 32] {
+pub(super) fn secret(label: &str) -> [u8; 32] {
     keccak256(label.as_bytes())
 }
 
-fn owner(secret: &[u8; 32]) -> Result<[u8; 20], Err> {
+pub(super) fn owner(secret: &[u8; 32]) -> Result<[u8; 20], Err> {
     let sk = k256::ecdsa::SigningKey::from_bytes(secret.into()).map_err(|e| e.to_string())?;
     Ok(ant_crypto::ethereum_address_from_public_key(
         sk.verifying_key(),
     ))
 }
 
-fn soc_address(id: &Addr, owner: &[u8; 20]) -> Addr {
+pub(super) fn soc_address(id: &Addr, owner: &[u8; 20]) -> Addr {
     let mut input = id.to_vec();
     input.extend_from_slice(owner);
     keccak256(&input)
 }
 
-fn feed_id(topic: &Addr, index: u64) -> Addr {
+pub(super) fn feed_id(topic: &Addr, index: u64) -> Addr {
     let mut input = topic.to_vec();
     input.extend_from_slice(&index.to_be_bytes());
     keccak256(&input)
@@ -51,7 +51,7 @@ fn feed_id(topic: &Addr, index: u64) -> Addr {
 
 /// A single-owner chunk: `id ‖ signature ‖ inner wire`, the signature over
 /// the EIP-191 digest of `keccak256(id ‖ inner address)`, as Bee signs.
-fn soc(secret: &[u8; 32], id: &Addr, inner: &[u8]) -> Result<Vec<u8>, Err> {
+pub(super) fn soc(secret: &[u8; 32], id: &Addr, inner: &[u8]) -> Result<Vec<u8>, Err> {
     let inner_addr = inner_address(inner)?;
     let mut sig_data = id.to_vec();
     sig_data.extend_from_slice(&inner_addr);

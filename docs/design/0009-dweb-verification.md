@@ -440,7 +440,7 @@ The 2 MiB block limit bounds a block's bytes, not what decoding it allocates: a 
   - depth-first, with a repeated block sent again where it repeats (`dups=y`);
   - `Content-Type: application/vnd.ipld.car; version=1; order=dfs; dups=y`.
 - **What the core accepts:**
-  - a 200 with that type and those parameters;
+  - a 200 with that type and those parameters. A CAR of another type or parameters (`dups=n` among them) isn't read: the core cancels it and fetches raw blocks;
   - a header of at most 64 KiB, a DAG-CBOR map with `version: 1`. Its roots are ignored, as the spec says clients should;
   - sections of at most 2 MiB plus the CID's length, each length checked before a byte of the block is buffered.
 - **Each block** is hashed, then must be the block the core's own walk needs next. The core releases a leaf's content only after both checks.
@@ -525,6 +525,8 @@ Reported by the research for this design on 2026-10-13, from code and from probe
 ### Heads
 
 The core builds every head from verified data, by the bundled node's rules. The vectors record the bundled node's answers header by header, and the core must reproduce them.
+
+**When a head goes out:** a GET's head is sent when a HEAD's would end. For `bzz:`, that is once the walk and the file's root chunk have passed ([The Swarm walk](#the-swarm-walk), [Leaves](#leaves), 5). For `ipfs:` and `ipns:`, it is once the file's root node has passed, or its first 513 bytes when the type must be sniffed ([The IPFS walk](#the-ipfs-walk), 5). So a failure in a manifest, a directory, a record or the file's root is an error with its status. One in an intermediate chunk, a file node below the root or a leaf truncates the body only if the reads before the head have finished; one those reads meet is an error too. They are the first data chunk, which tells a raw `bzz:` reference from a manifest (Ant reads down to it), and the blocks holding the first 513 bytes of a file whose type is sniffed.
 
 - **`bzz:`, Ant v0.5.71's rules** (`ag/retrieval.rs`, `ant-p2p/src/behaviour.rs`), with Ant configured as Freedom configures it:
   - **`Content-Type`:** the entry's `Content-Type` metadata as written, or `application/octet-stream`. Ant doesn't sniff.
@@ -643,6 +645,8 @@ The core builds every head from verified data, by the bundled node's rules. The 
 | main refuses the plan ([Verify plans](#verify-plans), Validation), a verify plan whose root isn't in its canonical form included; never an unverified fallback | 502, a logged core fault, as 0006's refused plans | 0006's |
 
 **After the head,** the body is truncated: the core sends `abort { code, message }`, and main errors the body, as a node's mid-body failure is surfaced today (0006). The codes are `verification_failed`, `unverifiable`, `malformed`, `piece_failed`, `busy` and `cancelled`.
+
+- **Each code's message** is its cause's text in the table above. A piece that fails after the head (its body ends early or stalls, its 206 names another interval, or a CAR ends broken) is `piece_failed`, with "The external Swarm node stopped sending" or "The external IPFS gateway stopped sending".
 
 - **What the page has received** is a prefix of the right content: every byte of it came from a chunk or block that passed its check before any of its bytes were released.
   - **The prefix may end anywhere,** inside a checked chunk or block too. A verified block is released in frames as credit allows, and 0007's `abort` purges what is still queued in the core and in main's ring, so the page can see part of a block that passed. The guarantee is about which bytes are released, not where the release stops.
@@ -800,7 +804,8 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
   - **The expected plans are composed from the reference's outcome on that backend,** by this section's rules. No reference has a verified mode. Validation cases change one member of a plan and name the stage that refuses it.
 - **Adversarial vectors,** the design's own: each takes an honest exchange and changes one thing, and states the outcome.
   - **They are in `vectors/dweb-verify-cases.json`,** which the same generator writes. Each outcome is written out by hand, from this design; the generator only lays the bytes out, signs them and checks each case's shape. Beside each, it records what the pinned nodes' own checks say of the same bytes (Ant's `cac_valid` and `soc_valid`; freedom-ipfs's `verify_block`, its CAR parser and `verify_ipns_record`), and a case where the design differs names its deviation.
-  - **Checks on single pieces come first,** for `fc-swarm` and `fc-ipfs`: a chunk where a content-addressed one is needed, a feed update, a leaf against its logical length, an intermediate chunk's references, padding, levels and child geometry (checked against Ant's joiner), a mantaray node's decoding within its caps (checked against Ant's lookup), a block against its CID, dag-pb and UnixFS decoding, HAMT lookup by hash (checked against Kubo's own layout, and against GatewayCore where an entry is out of its place), CAR framing and its header's CBOR, and IPNS records with their CBOR and DER. Whole requests through the verifier, with what is released and when, follow.
+  - **Checks on single pieces come first,** for `fc-swarm` and `fc-ipfs`: a chunk where a content-addressed one is needed, a feed update, a leaf against its logical length, an intermediate chunk's references, padding, levels and child geometry (checked against Ant's joiner), a mantaray node's decoding within its caps (checked against Ant's lookup), a block against its CID, dag-pb and UnixFS decoding, HAMT lookup by hash (checked against Kubo's own layout, and against GatewayCore where an entry is out of its place), CAR framing and its header's CBOR, and IPNS records with their CBOR and DER.
+  - **Whole requests through the verifier follow:** a plan, the honest node of `dweb-verify.json` with one thing changed (a piece flipped, replaced or failed; a stream that ignores `Range`, ends early, stalls or names another interval; a CAR in another shape; a record served), and what the page gets: the head and body, the error before the head, or the head and exactly the bytes released before the abort. A case of several steps shares one partition, for the structure cache and the IPNS floors.
   - **Swarm:**
     - a bit flipped in a leaf, an intermediate chunk, a manifest node and a feed update;
     - a leaf whose authentic payload is shorter than its logical length (`unverifiable`);
