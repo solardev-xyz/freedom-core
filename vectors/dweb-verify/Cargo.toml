@@ -41,6 +41,11 @@ multihash = "0.19"
 ed25519-dalek = "2"
 rand_chacha = "0.3"
 rsa = { version = "=0.9.10", features = ["sha2"] }
+# The cases' RSA signatures for exponents the rsa crate won't take (its
+# own big integers, already in the graph through rsa), and a SHA-1
+# signature (sha1, already in the graph).
+num-bigint-dig = { version = "0.8.6", default-features = false }
+sha1 = "0.10.6"
 # Kubo's gateway, over loopback.
 reqwest = { version = "0.12", default-features = false }
 axum = "0.8.9"

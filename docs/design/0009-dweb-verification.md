@@ -246,6 +246,7 @@ The formats Ant and Bee share, with Ant's reading where they differ, since the b
 - **A content-addressed chunk (CAC)** is `span ‖ payload`: an 8-byte little-endian span, then 0 to 4,096 bytes (`ac/bmt.rs:179`; Bee `pkg/cac/cac.go:73`).
   - **Its address** is `keccak256(span ‖ bmt_root)`. The BMT root is a binary keccak tree over the payload zero-padded to 4,096 bytes, as 128 segments of 32 bytes (`ac/bmt.rs:33`–`102`).
   - **The check** is that the address matches. Neither node compares the span with the payload's length.
+  - **Trailing zeros don't change the address:** the BMT pads the payload with zeros, so the same payload with zero bytes appended, up to 4,096 in all, has the same address, and both nodes accept it. So does the core. A leaf's content is the first bytes its logical length gives ([Leaves](#leaves)), so the extra zeros are never served.
   - **The empty chunk** (span 0, no payload) is valid. Its address, `b34ca8c2…171526`, is also the reference of an empty file. `fc_swarm::bmt_root` refuses an empty payload today; the check accepts it.
 - **A single-owner chunk (SOC)** is `id(32) ‖ signature(65) ‖ span(8) ‖ payload`, 105 to 4,201 bytes (`ac/soc.rs:8`–`30`).
   - **Its address** is `keccak256(id ‖ owner)`.
@@ -410,12 +411,13 @@ The 2 MiB block limit bounds a block's bytes, not what decoding it allocates: a 
   - integers positive and minimally encoded, the modulus at most 8,192 bits and the exponent at most 33 bits, both checked before a big integer is built.
 - **CBOR** (the CAR header, the IPNS record's signed data):
   - definite lengths only, as DAG-CBOR requires, each checked against the bytes remaining;
-  - nesting at most 8 levels, on an explicit stack;
+  - nesting at most 8 levels, the outermost map or array the first, on an explicit stack;
   - map keys are strings, without duplicates;
   - unknown keys and the values the reader doesn't need are skipped iteratively, under the same depth bound;
   - tag 42 only where a CID is expected.
 - **Caps on decoded structure,** beyond the wire caps:
   - 65,536 links per dag-pb node. This is a supported-content limit, not a malformedness test. Typical directories and files are far below it, but valid content can exceed it within 2 MiB: compact links, such as identity CIDs with short names, need only about 17 bytes each. Such a node is refused as `unverifiable`, never reported as malformed;
+  - as many UnixFS `blocksizes` entries, which a node keeps as numbers. A node with more is refused the same way, before its entries are compared with its links;
   - 256 forks per mantaray node (one per first byte), and fork metadata within its 2-byte length, read with `fc-json`'s depth bound. Only a flat object of strings is accepted, and only the keys the walk reads are kept.
 - **What this means for sharing code:** `fc-ipfs` can't use `freedom-ipfs-unixfs`'s decoders as they are. They decode with `prost`, which allocates repeated fields while it reads, before any reservation can be made. `fc-ipfs` carries its own bounded decoders, held to vectors from the native reader on the blocks both accept. freedom-ipfs adopts them later, so there is one reader, not two ([Decisions](#decisions), 11).
 
@@ -437,7 +439,9 @@ The 2 MiB block limit bounds a block's bytes, not what decoding it allocates: a 
   - it may have read the path differently.
 
   Then the core cancels the CAR and fetches what its walk still needs as [raw blocks](#raw-blocks). Only a block whose bytes don't hash to its CID is a verification failure.
-- **An early end:** the spec lets a gateway end the stream when it loses a child block, and recent boxo appends a marker that breaks the framing. Either way the walk is unfinished: a piece failure, a truncation if the head was sent.
+- **An early end:** the spec lets a gateway end the stream when it loses a child block, and recent boxo appends a marker that breaks the framing (`\n\n[Gateway Error: CAR stream truncated, response is incomplete]`, ipfs/boxo#1197). Either way the walk is unfinished: a piece failure, a truncation if the head was sent.
+  - **What counts as an early end:** a stream that ends inside a section, or that has that marker where the next section would begin.
+  - **What is a verification failure instead:** any other framing the reader can't take (a section length past the limit or over 10 bytes, a CID it can't read, a malformed header), and a block that doesn't hash to its CID.
 - **A directory URL** costs a second CAR: once the core has the directory and finds `index.html` in it, it asks for that file by its CID (`/ipfs/<cid of index.html>?format=car&dag-scope=entity`), with no path to resolve again.
 
 ### Raw blocks
@@ -473,6 +477,7 @@ For `ipfs://<cid><path>`, with `GatewayCore`'s rules:
 - **The record:**
   - the core asks `GET /ipns/<name>?format=ipns-record` with `Accept: application/vnd.ipfs.ipns-record`, at most 10 KiB;
   - it checks the record as freedom-ipfs's `verify_ipns_record` does (`freedom-ipfs-namesys/src/lib.rs:586`–`649`), with [bounded decoding](#bounded-decoding): the key matches the name, `signatureV2` over `"ipns-signature:" ‖ data` verifies, the DAG-CBOR data parses, the validity type is EOL and the EOL is after now, and the value starts with `/ipfs/` or `/ipns/`;
+  - **Ed25519 signatures are checked non-strictly,** as freedom-ipfs (`ed25519-dalek`'s `verify`) and Go's `crypto/ed25519`, which Kubo uses, check them: `S` must be canonical, and a key of small order isn't refused. That is safe here: an IPNS name commits to its key, so a weak key weakens only its owner's own name. The vectors pin it with the identity point as key, which a signature of `R` the identity and `S` = 0 satisfies for any message;
   - **V2-only records are accepted.** The legacy V1 fields are optional; when present, they must equal the signed ones. Unknown fields in the entry and unknown keys in the signed data are skipped, not refused, as the IPNS record specification allows;
   - the value's path, then the request's path, are walked as above. A value naming another name with an Ed25519 or RSA key is followed the same way, at most 4 times in all (`GatewayCore`'s limit on DNSLink chains); one naming a DNSLink name, or a name with another inlined key, is `unverifiable`.
   - The label is `latest_asserted`: a gateway can serve an older record that hasn't expired yet.
@@ -614,7 +619,7 @@ The core builds every head from verified data, by the bundled node's rules. The 
 |---|---|---|
 | a chunk, block, manifest node, directory, CAR or record fails its check (an IPNS record's key or signature outside libp2p's rules included) | 502 | `Swarm content verification failed` / `IPFS content verification failed` |
 | content the core can't check: an unsupported hash function, codec or node type; a single-owner chunk off the feed path; an encrypted reference inside a walk; a Swarm leaf shorter than its logical length; a manifest node over 1 MiB; an IPNS record whose key is neither Ed25519 nor RSA; structure past the decoders' caps; a walk past its [bounds](#bounds) or its request's memory | 502 | `This content can't be verified with the external Swarm node` / `… IPFS gateway` |
-| content that passes its hashes but is inconsistent: a UnixFS file whose sizes disagree (deviation `unixfs-sizes`) | 502 | `This IPFS content is malformed` |
+| content that passes its hashes but can't be decoded or is inconsistent: a dag-pb node or UnixFS `Data` the [bounded decoders](#bounded-decoding) refuse (a link without a hash, a group, an over-long varint, a length past the end), a UnixFS file whose sizes disagree (deviation `unixfs-sizes`) | 502 | `This IPFS content is malformed` |
 | the path isn't in a verified manifest or directory | 404, through the bundled node's rules ([Heads](#heads)) | the bundled node's |
 | a piece's final answer is 404 | 404 | `Not found on the external Swarm node` / `… IPFS gateway` (node-asserted) |
 | a piece's final answer is another 4xx or 5xx | that status | `The external Swarm node answered <status>` / `… IPFS gateway …` |
@@ -776,6 +781,8 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
     - `rsa-keys`: an RSA key's protobuf encoded otherwise than libp2p's deterministic form (an unknown field, the fields out of order), which the native reader re-encodes and accepts, and a modulus of 2,041 bits, which ring accepts. The core refuses each as a failed check. A long-form DER length both refuse.
 - **Plan vectors,** which `validate_plan` and main's `plan-validation.js` both pass: `{ verify }` plans and their refusals, and what stays a `{ fetch }`: a 128-hex reference, a DNSLink name, an IPNS name with an inlined secp256k1 key. Each again with `strict`, as its 403 and message, and a `{ fetch }` plan against a strict backend refused at `trust`.
 - **Adversarial vectors,** the design's own: each takes an honest exchange and changes one thing, and states the outcome.
+  - **They are in `vectors/dweb-verify-cases.json`,** which the same generator writes. Each outcome is written out by hand, from this design; the generator only lays the bytes out, signs them and checks each case's shape. Beside each, it records what the pinned nodes' own checks say of the same bytes (Ant's `cac_valid` and `soc_valid`; freedom-ipfs's `verify_block`, its CAR parser and `verify_ipns_record`), and a case where the design differs names its deviation.
+  - **Checks on single pieces come first,** for `fc-swarm` and `fc-ipfs`: a chunk where a content-addressed one is needed, a feed update, a leaf against its logical length, a block against its CID, dag-pb and UnixFS decoding, HAMT lookup by hash (checked against Kubo's own layout), CAR framing, and IPNS records. Whole requests through the verifier, with what is released and when, follow.
   - **Swarm:**
     - a bit flipped in a leaf, an intermediate chunk, a manifest node and a feed update;
     - a leaf whose authentic payload is shorter than its logical length (`unverifiable`);
@@ -843,7 +850,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 | Swarm walk | 8 levels of intermediate chunks (Bee's cap); 64 manifest nodes per lookup; one feed per walk | `unverifiable` |
 | IPFS walk | 64 levels of file DAG; 8 HAMT levels per name (fanout 256); 256 path segments; 4 IPNS hops | `unverifiable` |
 | a CAR header; a CAR section | 64 KiB; 2 MiB plus the CID | `verification_failed` |
-| decoded structure | 65,536 links per dag-pb node; CBOR nested 8 levels; 256 forks per mantaray node | `unverifiable` |
+| decoded structure | 65,536 links, and as many `blocksizes` entries, per dag-pb node; CBOR nested 8 levels; 256 forks per mantaray node | `unverifiable` |
 | an IPNS record | 10 KiB | `verification_failed` |
 | an IPNS record's RSA key | a modulus of 2,048 to 8,192 bits; an odd exponent from 3 to 2^33 − 1; one signature check per record | `verification_failed` |
 | IPNS sequence floors | 1,024 names, in memory | least recently used first |
@@ -918,7 +925,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 | `hamt-lookup` | the native reader finds a HAMT entry by its name | the core follows the name's hash and the bitfield | an entry that isn't where its hash points is a 404; only malformed directories differ |
 | `ant-lone-reference` | Ant, bundled or external, serves a tree its level-0 splitter wrote with a level's lone reference wrapped, with the wrapper's first payload bytes where the last leaf's content belongs: the wrong bytes ([freedom-hq/ant#234](https://github.com/freedom-hq/ant/issues/234)) | the same answer, verified: the wrapper passes the leaf check | none: parity with the bundled Ant, until Ant's fix ships and the pin moves. Bee's tree for the same content, which carries the reference unwrapped, is served as its content |
 | `ant-raw-feed-answer` | Ant answers a bare request for a feed whose latest update names raw bytes with the feed manifest's own node, not the content ([freedom-hq/ant#235](https://github.com/freedom-hq/ant/issues/235)) | the same answer, labelled `verified`: those bytes are the URL's reference's own | none: parity with the bundled Ant, until Ant's fix ships and the pin moves. An update naming an encrypted reference is `unverifiable` instead |
-| `decoder-caps` | the native reader decodes any structure a block holds | at most 65,536 links per dag-pb node, and CBOR nested at most 8 levels | structure past the caps is refused as `unverifiable`. That is mostly degenerate encodings, but also rare valid content such as a directory of more than 65,536 compact identity-CID links |
+| `decoder-caps` | the native reader decodes any structure a block holds | at most 65,536 links and `blocksizes` entries per dag-pb node, and CBOR nested at most 8 levels | structure past the caps is refused as `unverifiable`. That is mostly degenerate encodings, but also rare valid content such as a directory of more than 65,536 compact identity-CID links |
 | `rsa-keys` | the native reader hashes its own re-encoding of an RSA key, so it takes a key encoded another way; ring takes a modulus of 2,041 to 2,047 bits | the record's `pubKey` must hash to the name as it arrived, in libp2p's deterministic encoding and canonical DER, and the modulus is at least 2,048 bits, as go-libp2p requires | only keys no libp2p implementation writes differ: such a record fails its check |
 | `strict-mode` | none | a profile setting, off by default, that answers every unverified external request with a 403 that says why | with it on, DNSLink names, encrypted references, IPNS names with other inlined keys, and backends that don't verify stop loading |
 | `navigation-error-page` | a failed navigation shows the `{ code, message }` JSON the core or main wrote | an HTML error page in plain words, with the same status, for a request whose first `Accept` token is `text/html` | every navigation and frame gets the page, and so does a `fetch` or subresource sending that `Accept`; any other request, and `permission-manifests.js`, keeps the JSON; a node's own answers, and the bundled node's bodies the core reproduces, are unchanged |
