@@ -1830,6 +1830,7 @@ function verifyValidationCases(requests, todays) {
   const ipfsBase = find('ipfs-small-text-nav-verify');
   const ipnsBase = find('ipns-key-base36-verify');
   const nameBase = find('bzz-name-ok-verify');
+  const ipfsNameBase = find('ipfs-name-ok-decoded-v0-verify');
   const strictBase = find('bzz-hash-encrypted-verify-strict');
   const fetchBase = find('bzz-hash-encrypted-verify');
   const mutate = (id, from, change, expect, request = from.request) => {
@@ -1899,7 +1900,10 @@ function verifyValidationCases(requests, todays) {
     ['encoded-climb', '/..%2F..%2Fapi/v0/id', 'path'],
     ['encoded-backslash-climb', '/%2E%2E%5C%2E%2E%5Cipns%5Cx', 'path'],
     ['double-encoded', '/%252e%252e%252fapi/v0/id', 'valid'],
-  ]) mutate(`path-ipfs-${id}`, ipfsBase, (p) => { v(p).path = path; }, expect);
+  ]) mutate(`path-ipfs-${id}`, ipfsNameBase, (p) => { v(p).path = path; }, expect);
+  // A hash or CID host's path is its own (0006, #97): the tie refuses any
+  // other at path, whatever its encoding. So the IPFS encodings above run
+  // on a name host, whose path comes from the name and isn't tied.
   mutate('path-hash-host-other-file', base, (p) => { v(p).path = '/other'; }, 'path');
   // Query: the admitted URL's, exactly.
   mutate('query-own', base, () => {}, 'valid');

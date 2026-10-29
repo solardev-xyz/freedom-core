@@ -51454,12 +51454,16 @@
       "id": "path-ipfs-encoded-separator",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://site.eth/",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -51489,8 +51493,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -51504,12 +51507,16 @@
       "id": "path-ipfs-encoded-climb",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://site.eth/",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -51539,8 +51546,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -51554,12 +51560,16 @@
       "id": "path-ipfs-encoded-backslash-climb",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://site.eth/",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -51589,8 +51599,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
@@ -51604,12 +51613,16 @@
       "id": "path-ipfs-double-encoded",
       "source": "design",
       "request": {
-        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "url": "ipfs://site.eth/",
         "method": "GET",
         "headers": [
           [
             "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
           ]
         ],
         "backend": {
@@ -51639,8 +51652,7 @@
             "body_idle_ms": 60000
           },
           "response": [
-            "strip_page_state",
-            "small_text"
+            "strip_page_state"
           ],
           "trust": {
             "name": null,
