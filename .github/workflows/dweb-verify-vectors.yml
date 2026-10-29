@@ -14,12 +14,14 @@ on:
     paths:
       - "vectors/dweb-verify/**"
       - "vectors/dweb-verify.json"
+      - "vectors/dweb-verify-cases.json"
       - "rust-toolchain.toml"
       - ".github/workflows/dweb-verify-vectors.yml"
   pull_request:
     paths:
       - "vectors/dweb-verify/**"
       - "vectors/dweb-verify.json"
+      - "vectors/dweb-verify-cases.json"
       - "rust-toolchain.toml"
       - ".github/workflows/dweb-verify-vectors.yml"
   workflow_dispatch:

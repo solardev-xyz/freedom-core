@@ -180,7 +180,7 @@ fn verdict(spec: &Spec) -> Value {
     }))
 }
 
-struct Records(Vec<Value>);
+struct Records(Vec<Value>, Vec<String>);
 
 impl Records {
     fn push(
@@ -193,6 +193,11 @@ impl Records {
         deviation: Option<&str>,
     ) {
         let native = ipns::native_verdict(name, record);
+        // The native verdict agrees with the design's unless a deviation is named.
+        if deviation.is_none() && native.get("ok").is_some() != expect.get("ok").is_some() {
+            self.1
+                .push(format!("record case {id}: freedom-ipfs says {native}"));
+        }
         let mut case = json!({
             "id": id,
             "note": note,
@@ -581,8 +586,11 @@ fn other_keys(r: &mut Records) -> Result<(), Err> {
 }
 
 pub fn build() -> Result<Value, Err> {
-    let mut r = Records(Vec::new());
+    let mut r = Records(Vec::new(), Vec::new());
     rsa_records(&mut r)?;
     other_keys(&mut r)?;
+    if !r.1.is_empty() {
+        return Err(r.1.join("; ").into());
+    }
     Ok(json!({ "records": r.0 }))
 }

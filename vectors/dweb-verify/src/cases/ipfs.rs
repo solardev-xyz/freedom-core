@@ -125,17 +125,31 @@ fn b64(b: &[u8]) -> String {
 
 fn blocks() -> Result<Vec<Value>, Err> {
     let mut out = Vec::new();
-    let mut push =
-        |id: &str, note: &str, cid: &Cid, block: &[u8], block_v: Value, expect: Value| {
-            out.push(json!({
-                "id": id,
-                "note": note,
-                "cid": cid.to_string(),
-                "block": block_v,
-                "expect": expect,
-                "native": native(cid, block),
-            }));
-        };
+    let mut push = |id: &str,
+                    note: &str,
+                    cid: &Cid,
+                    block: &[u8],
+                    block_v: Value,
+                    expect: Value|
+     -> Result<(), Err> {
+        // verify_block reads the hash and the size; a codec it doesn't serve
+        // is the walk's refusal, the one way the two may differ here.
+        let native_ok = freedom_ipfs_core::verify_block(cid, block).is_ok();
+        let codec_refusal =
+            expect["fail"] == "unverifiable" && cid.codec() != DAG_PB && cid.codec() != RAW;
+        if native_ok != expect.get("ok").is_some() && !codec_refusal {
+            return Err(format!("block case {id}: verify_block disagrees").into());
+        }
+        out.push(json!({
+            "id": id,
+            "note": note,
+            "cid": cid.to_string(),
+            "block": block_v,
+            "expect": expect,
+            "native": native(cid, block),
+        }));
+        Ok(())
+    };
     let raw = crate::content::bytes("checks-block-raw", 1000);
     let c = sha256_cid(RAW, &raw)?;
     push(
@@ -145,7 +159,7 @@ fn blocks() -> Result<Vec<Value>, Err> {
         &raw,
         bytes(&raw),
         ok(json!({ "codec": "raw" })),
-    );
+    )?;
     let mut flipped = raw.clone();
     flipped[500] ^= 0x01;
     push(
@@ -155,7 +169,7 @@ fn blocks() -> Result<Vec<Value>, Err> {
         &flipped,
         bytes(&flipped),
         fail("verification_failed"),
-    );
+    )?;
     let mut leaf = Unixfs::new(2);
     leaf.data = Some(b"checks".to_vec());
     leaf.filesize = Some(6);
@@ -168,7 +182,7 @@ fn blocks() -> Result<Vec<Value>, Err> {
         &node,
         bytes(&node),
         ok(json!({ "codec": "dag-pb" })),
-    );
+    )?;
     let c1 = sha256_cid(DAG_PB, &node)?;
     push(
         "dag-pb-v1",
@@ -177,7 +191,7 @@ fn blocks() -> Result<Vec<Value>, Err> {
         &node,
         bytes(&node),
         ok(json!({ "codec": "dag-pb" })),
-    );
+    )?;
     let id = identity_cid(b"hello")?;
     push(
         "identity",
@@ -186,7 +200,7 @@ fn blocks() -> Result<Vec<Value>, Err> {
         b"hello",
         bytes(b"hello"),
         ok(json!({ "codec": "raw" })),
-    );
+    )?;
     push(
         "identity-mismatch",
         "an identity CID with other bytes",
@@ -194,7 +208,7 @@ fn blocks() -> Result<Vec<Value>, Err> {
         b"hellp",
         bytes(b"hellp"),
         fail("verification_failed"),
-    );
+    )?;
     let unit = [0x5a_u8; 32];
     let (max, max_v) = parts(&[(&[][..], &unit[..], MAX_BLOCK / 32)]);
     let cm = sha256_cid(RAW, &max)?;
@@ -205,7 +219,7 @@ fn blocks() -> Result<Vec<Value>, Err> {
         &max,
         max_v,
         ok(json!({ "codec": "raw" })),
-    );
+    )?;
     let (over, over_v) = parts(&[
         (&[][..], &unit[..], MAX_BLOCK / 32),
         (&[0x5a_u8][..], &[][..], 0),
@@ -218,7 +232,7 @@ fn blocks() -> Result<Vec<Value>, Err> {
         &over,
         over_v,
         fail("verification_failed"),
-    );
+    )?;
     let blake3 = Cid::new_v1(RAW, mh(0x1e, &Sha256::digest(&raw))?);
     push(
         "blake3",
@@ -227,7 +241,7 @@ fn blocks() -> Result<Vec<Value>, Err> {
         &raw,
         bytes(&raw),
         fail("unverifiable"),
-    );
+    )?;
     let sha512 = Cid::new_v1(RAW, mh(0x13, &[0u8; 64])?);
     push(
         "sha2-512",
@@ -236,7 +250,7 @@ fn blocks() -> Result<Vec<Value>, Err> {
         &raw,
         bytes(&raw),
         fail("unverifiable"),
-    );
+    )?;
     let truncated = Cid::new_v1(RAW, mh(0x12, &Sha256::digest(&raw)[..20])?);
     push(
         "sha2-256-short-digest",
@@ -245,7 +259,7 @@ fn blocks() -> Result<Vec<Value>, Err> {
         &raw,
         bytes(&raw),
         fail("verification_failed"),
-    );
+    )?;
     let cbor = sha256_cid(0x71, &raw)?;
     push(
         "dag-cbor",
@@ -254,7 +268,7 @@ fn blocks() -> Result<Vec<Value>, Err> {
         &raw,
         bytes(&raw),
         fail("unverifiable"),
-    );
+    )?;
     Ok(out)
 }
 
@@ -713,7 +727,7 @@ fn hamt() -> Result<Vec<Value>, Err> {
                 }
                 Some((c, n)) => {
                     levels.push(json!({ "depth": depth, "bucket": bucket, "link": n }));
-                    if &n[2..] == name {
+                    if n[2..] == name {
                         found = json!(c.to_string());
                     }
                     break;
