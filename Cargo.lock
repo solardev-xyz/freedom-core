@@ -394,9 +394,12 @@ dependencies = [
 name = "fc-dweb"
 version = "0.8.0"
 dependencies = [
+ "base64",
  "fc-json",
+ "fc-swarm",
  "hex",
  "serde_json",
+ "sha2",
  "sha3",
  "thiserror",
  "url",
