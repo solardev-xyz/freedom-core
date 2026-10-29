@@ -58,6 +58,11 @@ zeroize = "1"
 [dev-dependencies]
 tempfile = "3"
 
+# tests/process.rs: the kernel's Landlock ABI, which the report must name
+# (design 0010, Tests: a silent downgrade fails).
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+fc-sys = { path = "../../crates/fc-sys" }
+
 # The core's workspace lints, copied: workspace lints don't cross workspaces.
 [lints.rust]
 unsafe_code = "forbid"

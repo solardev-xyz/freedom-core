@@ -358,6 +358,7 @@ mod linux {
             // read grants alone.
             system_resolver: true,
             descriptors,
+            interface_index: false,
         }
     }
 
@@ -382,6 +383,12 @@ mod linux {
         check(
             "create outside refused",
             std::fs::write(p.outside.join("new"), b"x").is_err(),
+        );
+        // A hard link to a file outside the grant would give it the
+        // grant's path (design 0010, step 7): refused.
+        check(
+            "a hard link to a file outside refused",
+            std::fs::hard_link(&canary, p.data.join("linked-canary")).is_err(),
         );
         check("stat outside allowed", std::fs::metadata(&canary).is_ok());
         check(
@@ -813,6 +820,11 @@ mod linux {
             &mut failures,
             after.mode() == before.mode(),
             "the canary's mode changed".into(),
+        );
+        expect(
+            &mut failures,
+            after.nlink() == 1,
+            "the canary gained a hard link".into(),
         );
         expect(
             &mut failures,

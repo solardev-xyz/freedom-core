@@ -52,6 +52,12 @@ pub const IOCTL_ALLOWED: [u64; 6] = [
     libc::TIOCGWINSZ as u64,
 ];
 
+/// `SIOCGIFINDEX`: an interface's index, by its name. Allowed only for a
+/// policy that asks ([`super::Policy::interface_index`]): it reads one
+/// index and changes nothing.
+#[allow(clippy::unnecessary_cast)]
+pub const SIOCGIFINDEX: u64 = libc::SIOCGIFINDEX as u64;
+
 /// This build's architecture, or `None` where the services have no filter.
 pub fn target() -> Option<TargetArch> {
     if cfg!(target_arch = "x86_64") {
@@ -192,11 +198,13 @@ fn enosys(arch: TargetArch) -> Result<BpfProgram, String> {
     compile(rules, SeccompAction::Errno(libc::ENOSYS as u32), arch)
 }
 
-/// Program 3: `ENOTTY` for an `ioctl` command outside the allowlist.
-fn enotty(arch: TargetArch) -> Result<BpfProgram, String> {
+/// Program 3: `ENOTTY` for an `ioctl` command outside the allowlist, which
+/// takes `SIOCGIFINDEX` too when `interface_index` is set.
+fn enotty(arch: TargetArch, interface_index: bool) -> Result<BpfProgram, String> {
     let outside = rule(
         IOCTL_ALLOWED
             .iter()
+            .chain(interface_index.then_some(&SIOCGIFINDEX))
             .map(|cmd| condition(1, SeccompCmpArgLen::Dword, SeccompCmpOp::Ne, *cmd))
             .collect::<Result<_, _>>()?,
     )?;
@@ -247,9 +255,18 @@ fn x32_guard() -> BpfProgram {
     ]
 }
 
-/// The programs for `network`, in the order they are installed.
-pub fn programs(network: Network, arch: TargetArch) -> Result<Vec<BpfProgram>, String> {
-    let mut programs = vec![eperm(network, arch)?, enosys(arch)?, enotty(arch)?];
+/// The programs for `network`, in the order they are installed, with
+/// `SIOCGIFINDEX` allowed when `interface_index` is set.
+pub fn programs(
+    network: Network,
+    arch: TargetArch,
+    interface_index: bool,
+) -> Result<Vec<BpfProgram>, String> {
+    let mut programs = vec![
+        eperm(network, arch)?,
+        enosys(arch)?,
+        enotty(arch, interface_index)?,
+    ];
     if matches!(arch, TargetArch::x86_64) {
         programs.push(x32_guard());
     }
@@ -473,7 +490,7 @@ mod tests {
     #[test]
     fn every_denied_call_answers_eperm_and_common_ones_pass() {
         let (arch, _, _) = native();
-        let programs = programs(Network::Direct, arch).unwrap();
+        let programs = programs(Network::Direct, arch, false).unwrap();
         for nr in denied() {
             assert_eq!(
                 errno(verdict(&programs, &call(nr, [0; 6]))),
@@ -619,7 +636,7 @@ mod tests {
     fn the_required_calls_answer_eperm_and_nothing_else_is_denied() {
         let (arch, _, _) = native();
         for network in [Network::Direct, Network::Offline] {
-            let programs = programs(network, arch).unwrap();
+            let programs = programs(network, arch, false).unwrap();
             for (name, nr) in REQUIRED {
                 assert_eq!(
                     errno(verdict(&programs, &call(*nr, [0; 6]))),
@@ -659,7 +676,7 @@ mod tests {
     #[test]
     fn threads_are_created_and_processes_are_not() {
         let (arch, _, _) = native();
-        let programs = programs(Network::Direct, arch).unwrap();
+        let programs = programs(Network::Direct, arch, false).unwrap();
         let thread = (libc::CLONE_VM | libc::CLONE_THREAD | libc::CLONE_SIGHAND) as u64;
         assert_eq!(
             verdict(&programs, &call(libc::SYS_clone, [thread, 0, 0, 0, 0, 0])),
@@ -686,7 +703,7 @@ mod tests {
     #[test]
     fn sockets_are_inet_only_and_pairs_stream_only() {
         let (arch, _, _) = native();
-        let online = programs(Network::Socks5 { port: 9150 }, arch).unwrap();
+        let online = programs(Network::Socks5 { port: 9150 }, arch, false).unwrap();
         let socket = |programs: &[BpfProgram], family: i32| {
             verdict(
                 programs,
@@ -710,7 +727,7 @@ mod tests {
                 "family {family}"
             );
         }
-        let offline = programs(Network::Offline, arch).unwrap();
+        let offline = programs(Network::Offline, arch, false).unwrap();
         assert_eq!(errno(socket(&offline, libc::AF_INET)), Some(libc::EPERM));
         let pair = |kind: i32| {
             verdict(
@@ -737,7 +754,7 @@ mod tests {
     #[test]
     fn ioctl_answers_enotty_outside_the_allowlist_on_the_low_32_bits() {
         let (arch, _, _) = native();
-        let programs = programs(Network::Direct, arch).unwrap();
+        let programs = programs(Network::Direct, arch, false).unwrap();
         let ioctl = |cmd: u64| verdict(&programs, &call(libc::SYS_ioctl, [3, cmd, 0, 0, 0, 0]));
         for cmd in IOCTL_ALLOWED {
             assert_eq!(ioctl(cmd), libc::SECCOMP_RET_ALLOW, "cmd {cmd:#x}");
@@ -758,10 +775,33 @@ mod tests {
         }
     }
 
+    /// `SIOCGIFINDEX` only for a policy that asks, and then nothing else
+    /// new.
+    #[test]
+    fn the_interface_index_query_is_allowed_only_when_asked() {
+        let (arch, _, _) = native();
+        let ioctl = |programs: &[BpfProgram], cmd: u64| {
+            verdict(programs, &call(libc::SYS_ioctl, [3, cmd, 0, 0, 0, 0]))
+        };
+        let without = programs(Network::Direct, arch, false).unwrap();
+        assert_eq!(errno(ioctl(&without, SIOCGIFINDEX)), Some(libc::ENOTTY));
+        let with = programs(Network::Direct, arch, true).unwrap();
+        assert_eq!(ioctl(&with, SIOCGIFINDEX), libc::SECCOMP_RET_ALLOW);
+        assert_eq!(
+            ioctl(&with, SIOCGIFINDEX | 0xffff_ffff_0000_0000),
+            libc::SECCOMP_RET_ALLOW
+        );
+        // Its neighbours stay refused: SIOCGIFNAME, SIOCSIFFLAGS, SIOCGIFADDR.
+        for cmd in [0x8910u64, 0x8914, 0x8915] {
+            assert_eq!(errno(ioctl(&with, cmd)), Some(libc::ENOTTY), "cmd {cmd:#x}");
+        }
+        assert_eq!(SIOCGIFINDEX, 0x8933);
+    }
+
     #[test]
     fn other_abis_are_killed() {
         let (arch, _, compat) = native();
-        let programs = programs(Network::Direct, arch).unwrap();
+        let programs = programs(Network::Direct, arch, false).unwrap();
         let compat_call = Data {
             nr: 20,
             arch: compat,
