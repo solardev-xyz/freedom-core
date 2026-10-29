@@ -1002,7 +1002,7 @@ fn car() -> Result<Vec<Value>, Err> {
     let body = [header.clone(), sections[0].clone()].concat();
     push(
         "ends-between-sections",
-        "the stream ends after the first section: the reader is done, and the walk, still missing blocks, takes it as a piece failure",
+        "the stream ends after the first section: the reader is done, and the walk fetches the blocks it still needs raw",
         &body,
         ok(json!({ "sections": [cr.to_string()] })),
         None,

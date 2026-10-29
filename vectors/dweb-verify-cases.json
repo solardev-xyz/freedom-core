@@ -2797,7 +2797,7 @@
       },
       {
         "id": "ends-between-sections",
-        "note": "the stream ends after the first section: the reader is done, and the walk, still missing blocks, takes it as a piece failure",
+        "note": "the stream ends after the first section: the reader is done, and the walk fetches the blocks it still needs raw",
         "car": {
           "base64": "OqJlcm9vdHOB2CpYJQABcBIg5X1SA4ERV+LCPBjGoy280DLG/pTpVBM4hjlazYlNj3tndmVyc2lvbgGLAQFwEiDlfVIDgRFX4sI8GMajLbzQMsb+lOlUEziGOVrNiU2PexIrCiQBVRIgUiHxctyIukUq8l8th0vmcaGPj0KvWgNDDspmH8wQ9xQSABisAhIrCiQBVRIglW+NvJ1grlZTTAzaH9oGgsaVfL9bVYpoYfIVZtHnkvUSABjIAQoLCAIY9AMgrAIgyAE="
         },
