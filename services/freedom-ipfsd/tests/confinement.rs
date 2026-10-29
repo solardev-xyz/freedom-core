@@ -64,6 +64,14 @@ fn hello_reports_the_policy_and_the_confinement_the_kernel_offers() {
                 "{confinement}"
             );
         }
+        _ if cfg!(target_os = "macos") => {
+            // Seatbelt, each status from the sandbox's own checks.
+            assert_eq!(confinement["mechanism"], "seatbelt", "{confinement}");
+            for property in ["files", "exec", "ipc"] {
+                assert_eq!(confinement[property], "enforced", "{confinement}");
+            }
+            assert_eq!(confinement["network"], "none", "{confinement}");
+        }
         _ => assert!(confinement.is_object(), "{confinement}"),
     }
     ipfsd.shutdown();
@@ -82,6 +90,9 @@ fn hello_reports_the_policy_and_the_confinement_the_kernel_offers() {
     if let Some(abi) = landlock_abi().filter(|_| cfg!(target_os = "linux")) {
         let expected = if abi >= 4 { "enforced" } else { "unavailable" };
         assert_eq!(result["confinement"]["network"], expected, "{hello}");
+    }
+    if cfg!(target_os = "macos") {
+        assert_eq!(result["confinement"]["network"], "enforced", "{hello}");
     }
     ipfsd.shutdown();
     assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));

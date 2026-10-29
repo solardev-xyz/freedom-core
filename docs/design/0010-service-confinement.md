@@ -229,6 +229,10 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
 
 **A Seatbelt profile, applied by the service itself:**
 - **The mechanism:** the `sandbox_init` family of calls, deprecated since macOS 10.8 but still the kernel's sandbox. Chromium confines its helper processes with the same mechanism, through private calls.
+  - **The calls are private and undocumented:** `sandbox_init_with_parameters` applies the profile, with each path as a parameter, and `sandbox_check` answers what the applied sandbox allows. No public header declares either: `fc-sys` declares them, as Chromium and WebKit do, each behind a safe function with its `SAFETY` reasoning. Apple can change or remove them in any release, and the qualification gate is what notices.
+  - **Each status is derived from the sandbox's own answers:** once the profile is applied, `sandbox_check` is asked whether it allows a read and a write outside the grants, a mode change inside the read-write grant, an exec and an unlisted Mach service. A status is `enforced` only where every answer is a denial. The network status comes from the rule installed, since the sandbox can't be asked about an address.
+  - **An outer sandbox:** a process sandboxed already can't take another profile, so `confine` reports every property `blocked`, and the service runs (D2).
+  - **The oldest macOS:** 12, the browser's floor. electron-builder sets no `minimumSystemVersion`, so it is Electron 45's own. The profile uses only operations that macOS 12 knows.
 - **What it protects:**
   - file reads and writes outside the profile's paths, which can be parameters such as the data directory;
   - `process-exec` and `process-fork`;
@@ -241,6 +245,14 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
   - Apple may change it.
   - **What the profile must allow:** name resolution through mDNSResponder, a Mach service and a UNIX socket; read access to system libraries and frameworks; for NAT64 discovery, `com.apple.SystemConfiguration.configd`, and in `direct` mode port 53 to loopback and private addresses.
     - mDNSResponder and `configd` are the `ipc` property's authorized channels on macOS, besides main's stdio, and the profile allows them by name. If qualification finds another system service the services need, it joins this list by name, with a change to this design. The profile allows nothing else.
+    - **By name, in `direct` mode only:** the Mach services `com.apple.SystemConfiguration.configd` (NAT64 discovery's dynamic store) and `com.apple.SystemConfiguration.DNSConfiguration` (the resolver's servers, which `getaddrinfo` reads), and mDNSResponder's socket, `/private/var/run/mDNSResponder` (name resolution). In `socks5` and offline modes neither runs, so the profile allows none, and stdio is the only channel.
+    - **Each addition names its caller:** a service joins only with CI's evidence, naming the call that needed it.
+  - **What else the profile allows:**
+    - **Files:** the system's libraries, frameworks and dyld's shared cache, read-only. Metadata is readable only on each grant's ancestors, so other files' names and modes stay hidden.
+    - **The read-write grant:** reads, creating, writing (truncating included), unlinking and `ioctl`, plus hard links with `refer`. No mode, owner, flags, times or xattr change, anywhere.
+    - **Processes:** signals and process information for the process itself only.
+    - **Network:** in `socks5` mode, TCP alone: no UDP and no bind.
+  - **Mach rights held before `confine` stay usable, and no descriptor check can see them.** Seatbelt filters lookups, not rights already held, and libSystem's initializers may take some before `main`. This is a macOS limitation without a Linux counterpart. The services' setup before `confine` makes no lookup of its own. The confinement test lists the task's port names at the confinement point on CI, for the record.
 - **A qualification gate:** Linux tests can't show what a profile must allow. Before a release ships, its signed build runs the contract suite confined on every supported macOS version: DNS, TLS, the file operations in the data directory, NAT64 discovery, and `socks5` mode through Arti on loopback and through a SOCKS proxy on the LAN.
 
 **`sandbox-exec(1)`, run by main:** `/usr/bin/sandbox-exec -f <profile> -D DATA_DIR=<dir> freedom-ipfsd serve …`.
@@ -323,7 +335,11 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
           - **Why it stays:** changing the process's environment is unsafe, since a thread could read it at the same moment, and checking for a single thread first doesn't prove there isn't one. So the marker stays.
           - **A reused id fails closed:** a far descendant that inherits the marker and happens to get the same id doesn't re-execute, and `confine` refuses what it inherited (exit 77).
         - **If a service ever spawns a child,** it drops the marker from the child's environment with `Command::env_remove`, which touches only the child's. None does today: the services start no process (0008), and seccomp refuses exec once they are confined. This is tidiness, not safety: a child has another id, so it would ignore the marker anyway.
-        - **On macOS** (with the Seatbelt work): a loop over `/dev/fd`, and `execv` of `_NSGetExecutablePath`'s path.
+        - **On macOS:**
+          - a loop over `/dev/fd`, then an exec of the path `proc_pidpath` names: absolute and free of symlinks, which `_NSGetExecutablePath` isn't;
+          - **an exec runs a path, not the running image,** so the marker carries the identity of that file too, `<pid>:<dev>:<ino>` from an `fstat` of it just before the exec;
+          - the re-executed image compares that identity with its own file's, and a mismatch exits 77;
+          - **a binary replaced before the re-exec is caught by main:** it checks `hello`'s `service_version` against the release it pinned, and refuses another.
         - **Why a re-exec:** a close can't prove that no Rust object owns the descriptor it closes. Close-on-exec closes nothing, and the exec replaces the whole image, so no owner of a closed descriptor survives. If the exec fails, close-on-exec is merely set, and every owner is still valid. The calls are `fc-sys`'s, as rule 6 says, and the exec is std's.
      2. **Only the listed setup:**
         - the process is hardened;
@@ -336,7 +352,8 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
      - So the re-exec should seldom happen. It means the launcher leaked a descriptor into main.
    - **After it,** everything that starts a thread: logging's writer (`log::init`; lines before it are written directly), the async runtimes (built explicitly, never by `#[tokio::main]`), `conn::run`'s reader, writer, stdin and lifecycle threads, and the watchdogs. Then the handshake, and only then any untrusted input.
    - **Why:** before ABI 8, Landlock restricts only the calling thread and the threads it starts later. A thread started earlier stays unconfined, and a compromise could use it. seccomp is installed with `TSYNC`, and Landlock with its `TSYNC` from ABI 8, as backstops. The order doesn't rely on them.
-   - **Checked:** `confine` counts the process's threads first (`/proc/self/task` on Linux). More than one is a bug, so the service exits 77 rather than report confinement.
+   - **Checked:** `confine` counts the process's threads first (`/proc/self/task` on Linux, `proc_pidinfo` on macOS). More than one is a bug, so the service exits 77 rather than report confinement.
+     - **On macOS** Seatbelt confines the whole process, not a thread at a time, so the check is there for uniformity. A system thread started before `confine` would exit 77, and CI would show it.
    - **Checked too: only the registered descriptors cross.** Landlock and seccomp check new opens and calls only. Nothing they do closes or revokes a descriptor opened before them: a connected socket, a pipe or FIFO, or a file opened outside the grants stays usable.
      - **The check:** `confine` compares every descriptor in the process's table (`/proc/self/fd` on Linux, `/dev/fd` on macOS) with stdio and the descriptors the service registered, whatever its type. The table's own descriptor, which `confine` opens to read it, is known by its number and skipped, and nothing else is opened while it reads.
      - **Anything else** above stderr, opened by the setup or left after the entry's re-exec, is a bug, and the service exits 77:

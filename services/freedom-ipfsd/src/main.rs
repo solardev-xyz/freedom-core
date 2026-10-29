@@ -105,6 +105,10 @@ fn run(started: Instant, entry: &confine::Entry) -> Exit {
             "re-executed once at entry: descriptors were inherited",
             json!({}),
         ),
+        confine::Entry::Replaced => log::error(
+            "re-executed at entry, but not from the file that ran: confinement refuses it",
+            json!({}),
+        ),
         confine::Entry::Left { reexeced, error } => log::error(
             "descriptors inherited at entry are left",
             json!({

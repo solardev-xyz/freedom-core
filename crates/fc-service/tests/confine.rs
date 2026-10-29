@@ -8,9 +8,10 @@
 //! the lines, and checks from outside what the child must not have
 //! changed.
 //!
-//! On other platforms it does nothing yet (macOS and Windows follow).
+//! Linux and macOS; on Windows it does nothing yet.
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[allow(clippy::print_stderr)]
 fn main() {
     eprintln!("confine: nothing to test on this platform yet");
 }
@@ -19,6 +20,15 @@ fn main() {
 fn main() {
     linux::main();
 }
+
+#[cfg(target_os = "macos")]
+fn main() {
+    macos::main();
+}
+
+#[cfg(target_os = "macos")]
+#[path = "confine/macos.rs"]
+mod macos;
 
 #[cfg(target_os = "linux")]
 #[allow(
@@ -105,6 +115,7 @@ mod linux {
         let network = match case {
             "socks5" => Network::Socks5 {
                 port: p.allowed_port,
+                loopback: true,
             },
             "offline" => Network::Offline,
             _ => Network::Direct,

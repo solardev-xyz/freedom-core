@@ -1,0 +1,333 @@
+//! macOS calls `fc-service`'s confinement needs (design 0010, "macOS"):
+//! the process's own executable and thread count (libproc), and Seatbelt.
+//!
+//! **Seatbelt's calls are private and undocumented:** no public header
+//! declares `sandbox_init_with_parameters` or `sandbox_check`, so they are
+//! declared here, as Chromium and WebKit declare them. libSystem exports
+//! them (`libsystem_sandbox`), and Apple can change them in any release.
+//!
+//! None of these calls closes a descriptor.
+
+use std::ffi::{CStr, OsString, c_char, c_int};
+use std::io;
+use std::os::unix::ffi::OsStringExt;
+use std::path::PathBuf;
+
+// libsystem_sandbox, part of libSystem.
+#[allow(unsafe_code)]
+unsafe extern "C" {
+    /// Compiles `profile` (SBPL text) with `parameters` (key, value, …,
+    /// NULL) and applies it to the calling process. 0, or -1 with
+    /// `*errorbuf` set to an allocated message.
+    fn sandbox_init_with_parameters(
+        profile: *const c_char,
+        flags: u64,
+        parameters: *const *const c_char,
+        errorbuf: *mut *mut c_char,
+    ) -> c_int;
+    /// Frees a message `sandbox_init_with_parameters` allocated.
+    fn sandbox_free_error(errorbuf: *mut c_char);
+    /// Whether `pid`'s sandbox allows `operation` on the filter's value (0)
+    /// or not (1); with a NULL operation, whether `pid` is sandboxed at all
+    /// (1) or not (0). Variadic: one argument follows for a filter type
+    /// that takes a value.
+    fn sandbox_check(pid: libc::pid_t, operation: *const c_char, filter_type: c_int, ...) -> c_int;
+    /// The flag a check ORs into its filter type so a denial isn't logged
+    /// as a violation: an exported constant, not a macro.
+    static SANDBOX_CHECK_NO_REPORT: c_int;
+}
+
+/// `sandbox_filter_type`'s values: no value, a path, a global (Mach) name.
+const FILTER_NONE: c_int = 0;
+
+/// What a [`allows`] check names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Filter {
+    /// A file system path.
+    Path,
+    /// A Mach service's global name.
+    GlobalName,
+}
+
+impl Filter {
+    fn raw(self) -> c_int {
+        match self {
+            Filter::Path => 1,
+            Filter::GlobalName => 2,
+        }
+    }
+}
+
+/// This process's id, as libproc and Seatbelt take it.
+fn own_pid() -> libc::pid_t {
+    libc::pid_t::try_from(std::process::id()).unwrap_or(libc::pid_t::MAX)
+}
+
+/// The absolute path of the file this process's image was executed from
+/// (`proc_pidpath`): the entry's re-exec runs it (design 0010, step 1).
+/// It names a path, not the running image: a file replaced there since is
+/// what an exec of it runs.
+#[allow(unsafe_code)]
+pub fn executable_path() -> io::Result<PathBuf> {
+    let size = libc::PROC_PIDPATHINFO_MAXSIZE;
+    let mut buf = vec![0u8; usize::try_from(size).unwrap_or(4096)];
+    let capacity = u32::try_from(buf.len()).unwrap_or(0);
+    // SAFETY: proc_pidpath writes at most `capacity` bytes into `buf`,
+    // which holds exactly that many and is ours for the call, and returns
+    // how many it wrote, or 0 or less with errno.
+    let written = unsafe { libc::proc_pidpath(own_pid(), buf.as_mut_ptr().cast(), capacity) };
+    let Ok(written) = usize::try_from(written) else {
+        return Err(io::Error::last_os_error());
+    };
+    if written == 0 || written > buf.len() {
+        return Err(io::Error::last_os_error());
+    }
+    buf.truncate(written);
+    Ok(PathBuf::from(OsString::from_vec(buf)))
+}
+
+/// How many threads this process has (`proc_pidinfo`'s
+/// `PROC_PIDTASKINFO`, `pti_threadnum`): `confine` refuses more than one
+/// (design 0010, step 1).
+#[allow(unsafe_code)]
+pub fn thread_count() -> io::Result<usize> {
+    let size = std::mem::size_of::<libc::proc_taskinfo>();
+    let mut buf = vec![0u8; size];
+    let capacity = c_int::try_from(size).unwrap_or(0);
+    // SAFETY: with PROC_PIDTASKINFO and an argument of 0, proc_pidinfo
+    // reads nothing of ours and writes at most `capacity` bytes into
+    // `buf`, which holds exactly that many; it returns how many it wrote.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            own_pid(),
+            libc::PROC_PIDTASKINFO,
+            0,
+            buf.as_mut_ptr().cast(),
+            capacity,
+        )
+    };
+    if written != capacity {
+        return Err(io::Error::last_os_error());
+    }
+    // The field, read out of the bytes the call wrote: no unaligned or
+    // uninitialized read.
+    let offset = std::mem::offset_of!(libc::proc_taskinfo, pti_threadnum);
+    let field: [u8; 4] = buf
+        .get(offset..offset + 4)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| io::Error::other("proc_taskinfo too short"))?;
+    usize::try_from(i32::from_ne_bytes(field))
+        .map_err(|_| io::Error::other("negative thread count"))
+}
+
+/// Applies the Seatbelt `profile` (SBPL text) to this process, with
+/// `parameters` for its `(param "…")` (`sandbox_init_with_parameters`):
+/// once applied, it can't be lifted. `Err` with the sandbox's message.
+#[allow(unsafe_code)]
+pub fn apply_profile(profile: &CStr, parameters: &[(&CStr, &CStr)]) -> Result<(), String> {
+    let mut argv: Vec<*const c_char> = Vec::with_capacity(parameters.len() * 2 + 1);
+    for (key, value) in parameters {
+        argv.push(key.as_ptr());
+        argv.push(value.as_ptr());
+    }
+    argv.push(std::ptr::null());
+    let mut error: *mut c_char = std::ptr::null_mut();
+    // SAFETY: `profile` and every pointer in `argv` refer to NUL-terminated
+    // strings borrowed for the whole call, `argv` ends in NULL, and `error`
+    // is a valid place for the call to store a message it allocates.
+    let result =
+        unsafe { sandbox_init_with_parameters(profile.as_ptr(), 0, argv.as_ptr(), &raw mut error) };
+    if result == 0 {
+        return Ok(());
+    }
+    if error.is_null() {
+        return Err(format!("sandbox_init_with_parameters returned {result}"));
+    }
+    // SAFETY: on failure the call set `error` to a NUL-terminated message it
+    // allocated, valid until it is freed below; it is copied out first.
+    let message = unsafe { CStr::from_ptr(error) }
+        .to_string_lossy()
+        .into_owned();
+    // SAFETY: `error` came from sandbox_init_with_parameters, and is freed
+    // once, after its last use above.
+    unsafe { sandbox_free_error(error) };
+    Err(message)
+}
+
+/// Whether this process is sandboxed already (`sandbox_check` with no
+/// operation): an outer sandbox, which `confine` reports as `blocked`.
+#[allow(unsafe_code)]
+pub fn sandboxed() -> bool {
+    // SAFETY: with a NULL operation and the filter type that takes no
+    // value, sandbox_check reads no memory of ours and takes no variadic
+    // argument: it only answers whether the process is sandboxed.
+    let result = unsafe { sandbox_check(own_pid(), std::ptr::null(), FILTER_NONE) };
+    result == 1
+}
+
+/// The flag that keeps a check's denial out of the violation log.
+#[allow(unsafe_code)]
+fn no_report() -> c_int {
+    // SAFETY: SANDBOX_CHECK_NO_REPORT is a constant libsystem_sandbox
+    // exports and never writes: reading it is a plain load.
+    unsafe { SANDBOX_CHECK_NO_REPORT }
+}
+
+/// Whether this process's sandbox allows `operation` (an SBPL operation,
+/// such as `file-read-data`) on `value` (`sandbox_check`), without logging
+/// a denial: `Some(true)` or `Some(false)`, or `None` if the check failed.
+/// `confine` derives each status from these, once the profile is applied.
+#[allow(unsafe_code)]
+pub fn allows(operation: &CStr, filter: Filter, value: &CStr) -> Option<bool> {
+    let filter_type = filter.raw() | no_report();
+    // SAFETY: `operation` and `value` are NUL-terminated strings borrowed
+    // for the call, and a filter type that takes a value takes exactly one
+    // pointer to such a string as its variadic argument.
+    let result =
+        unsafe { sandbox_check(own_pid(), operation.as_ptr(), filter_type, value.as_ptr()) };
+    match result {
+        0 => Some(true),
+        1 => Some(false),
+        _ => None,
+    }
+}
+
+/// Test-only Mach calls (design 0010, Tests): a lookup of a Mach service,
+/// and how many port names the task holds.
+#[cfg(feature = "test-macos")]
+pub mod mach {
+    use std::ffi::{CStr, c_char, c_int};
+
+    /// Mach's port name, message count and address types, as
+    /// `<mach/port.h>` and `<mach/vm_types.h>` declare them (libc's are
+    /// deprecated in favour of a crate this one doesn't take).
+    type Port = u32;
+    type Count = u32;
+
+    #[allow(unsafe_code)]
+    unsafe extern "C" {
+        static mach_task_self_: Port;
+        static bootstrap_port: Port;
+        fn bootstrap_look_up(bp: Port, service_name: *const c_char, sp: *mut Port) -> c_int;
+        fn mach_port_deallocate(task: Port, name: Port) -> c_int;
+        fn mach_port_names(
+            task: Port,
+            names: *mut *mut Port,
+            names_count: *mut Count,
+            types: *mut *mut u32,
+            types_count: *mut Count,
+        ) -> c_int;
+        fn vm_deallocate(task: Port, address: usize, size: usize) -> c_int;
+    }
+
+    #[allow(unsafe_code)]
+    fn task() -> Port {
+        // SAFETY: mach_task_self_ is the task's own port name, which the
+        // runtime sets before main and never changes: a plain load.
+        unsafe { mach_task_self_ }
+    }
+
+    /// Whether the bootstrap server gives this process a send right to
+    /// `name`; a right it gives is released at once.
+    #[allow(unsafe_code)]
+    pub fn look_up(name: &CStr) -> bool {
+        // SAFETY: bootstrap_port is set before main and never written after.
+        let bootstrap = unsafe { bootstrap_port };
+        let mut port: Port = 0;
+        // SAFETY: `name` is a NUL-terminated string borrowed for the call,
+        // and `port` a valid place for the right's name.
+        let result = unsafe { bootstrap_look_up(bootstrap, name.as_ptr(), &raw mut port) };
+        if result != 0 {
+            return false;
+        }
+        // SAFETY: `port` names a send right this task was just given, and
+        // it is released once.
+        let _ = unsafe { mach_port_deallocate(task(), port) };
+        true
+    }
+
+    /// The port names the task holds, each with its type bits
+    /// (`mach_port_names`), or None.
+    #[allow(unsafe_code)]
+    pub fn port_names() -> Option<Vec<(u32, u32)>> {
+        let mut names: *mut Port = std::ptr::null_mut();
+        let mut names_count: Count = 0;
+        let mut types: *mut u32 = std::ptr::null_mut();
+        let mut types_count: Count = 0;
+        // SAFETY: each out-pointer is a valid place the call fills with an
+        // array it allocates in this task, and its length.
+        let result = unsafe {
+            mach_port_names(
+                task(),
+                &raw mut names,
+                &raw mut names_count,
+                &raw mut types,
+                &raw mut types_count,
+            )
+        };
+        if result != 0 {
+            return None;
+        }
+        let count = usize::try_from(names_count.min(types_count)).unwrap_or(0);
+        let ports: Vec<(u32, u32)> = if count == 0 || names.is_null() || types.is_null() {
+            Vec::new()
+        } else {
+            // SAFETY: the call allocated `names` with `names_count`
+            // initialized entries, at least `count`, which stay valid until
+            // freed below.
+            let names = unsafe { std::slice::from_raw_parts(names, count) };
+            // SAFETY: as for `names`: `types_count` entries, at least `count`.
+            let types = unsafe { std::slice::from_raw_parts(types, count) };
+            names.iter().copied().zip(types.iter().copied()).collect()
+        };
+        for (array, count) in [
+            (names.cast::<u8>(), names_count),
+            (types.cast::<u8>(), types_count),
+        ] {
+            let bytes = usize::try_from(count).unwrap_or(0) * std::mem::size_of::<u32>();
+            // SAFETY: the call allocated `array`, `count` four-byte entries
+            // long, in this task's address space; it is freed once, unused
+            // after.
+            let _ = unsafe { vm_deallocate(task(), array as usize, bytes) };
+        }
+        Some(ports)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_executable_is_this_test_binary() {
+        let path = executable_path().unwrap();
+        assert!(path.is_absolute());
+        assert_eq!(
+            std::fs::canonicalize(&path).unwrap(),
+            std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn threads_are_counted() {
+        let before = thread_count().unwrap();
+        assert!(before >= 1);
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            let _ = rx.recv();
+        });
+        assert!(thread_count().unwrap() > before);
+        drop(tx);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn an_unconfined_test_is_not_sandboxed() {
+        assert!(!sandboxed());
+        // Unconfined, a check allows everything.
+        assert_eq!(
+            allows(c"file-read-data", Filter::Path, c"/usr/lib"),
+            Some(true)
+        );
+    }
+}

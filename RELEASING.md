@@ -186,8 +186,22 @@ publish job that runs no repository code.
      once.
    - **Measured:** cold start to `ipfs.hello`, IPFS over direct TCP and QUIC,
      and `socks5` reconnects to Arti, all confined.
-   - **macOS and Windows** follow with their confinement (0010's Seatbelt
-     profile and job object); until then their reports say `unavailable`.
+   - **macOS,** on the signed release build, by hand on every supported
+     version CI doesn't run (from macOS 12, the browser's floor, to the
+     newest; CI runs only `macos-latest`):
+     - `confinement` reports `seatbelt` with `files`, `exec` and `ipc`
+       `enforced`, and `network` `none` in `direct` mode, `enforced` in
+       `socks5`;
+     - the contract suite confined: DNS, TLS, the store's file
+       operations, NAT64 discovery, and `socks5` through Arti on loopback
+       and through a LAN proxy;
+     - `fc-service`'s confinement test (`cargo test -p fc-service --test
+       confine`, with stdio alone), which also prints the Mach rights held
+       at the confinement point;
+     - Seatbelt's calls are private: a version where the profile no longer
+       applies exits 77, and that release waits for a fix.
+   - **Windows** follows with its job object; until then its report says
+     `unavailable`.
 
    `freedom-radicled`'s first release (`radicled-v*`) runs the same list,
    with libgit2's writes in place of SQLite's (a repository created, loose

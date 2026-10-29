@@ -16,7 +16,7 @@ use std::io;
 /// valid until an exec.
 ///
 /// `Err` with the OS error: `EINVAL` or `ENOSYS` before 5.11, where
-/// [`set_cloexec`] does it one descriptor at a time.
+/// [`crate::unix::set_cloexec`] does it one descriptor at a time.
 #[allow(unsafe_code)]
 pub fn cloexec_from(low: u32) -> io::Result<()> {
     // SAFETY: close_range takes two descriptor numbers and a flag set, and
@@ -31,22 +31,6 @@ pub fn cloexec_from(low: u32) -> io::Result<()> {
             libc::CLOSE_RANGE_CLOEXEC,
         )
     };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-/// Marks descriptor `fd` close-on-exec (`fcntl(fd, F_SETFD, FD_CLOEXEC)`),
-/// the fallback before Linux 5.11. Closes nothing. `EBADF` if `fd` isn't
-/// open.
-#[allow(unsafe_code)]
-pub fn set_cloexec(fd: i32) -> io::Result<()> {
-    // SAFETY: fcntl with F_SETFD takes a descriptor number and an integer,
-    // reads no memory, and only sets the descriptor's flags, of which
-    // FD_CLOEXEC is the one there is: it closes nothing.
-    let result = unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
     if result == 0 {
         Ok(())
     } else {
@@ -118,7 +102,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn marking_close_on_exec_closes_nothing() {
+    fn marking_a_range_close_on_exec_closes_nothing() {
         use std::io::{Read, Seek, Write};
         use std::os::fd::AsRawFd;
         let path = std::env::temp_dir().join(format!("fc-sys-cloexec-{}", std::process::id()));
@@ -130,15 +114,14 @@ mod tests {
             .open(&path)
             .unwrap();
         let _ = std::fs::remove_file(&path);
-        set_cloexec(file.as_raw_fd()).unwrap();
         // Above every descriptor this test holds, and before 5.11 refused.
         let _ = cloexec_from(1 << 20);
+        let _ = cloexec_from(u32::try_from(file.as_raw_fd()).unwrap());
         file.write_all(b"still mine").unwrap();
         file.rewind().unwrap();
         let mut text = String::new();
         file.read_to_string(&mut text).unwrap();
         assert_eq!(text, "still mine");
-        assert!(set_cloexec(1 << 20).is_err());
     }
 
     #[test]
