@@ -1210,9 +1210,8 @@ async fn ant_decoding(fetcher: &MemFetcher, root: &Addr) -> Result<(&'static str
         // A fork for the path's first byte may lead to a value node.
         Err(E::NotFound { .. } | E::DescendPastLeaf { .. }) => "parsed",
         other => {
-            return Err(
-                format!("Ant's lookup of an absent path didn't decode the node: {other:?}").into(),
-            );
+            let message = format!("Ant's lookup of an absent path didn't decode it: {other:?}");
+            return Err(message.into());
         }
     };
     Ok((parsed, detail))
