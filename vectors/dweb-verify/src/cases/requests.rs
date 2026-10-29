@@ -692,7 +692,7 @@ fn ipfs(doc: &Doc, out: &mut Cases) -> Result<(), Err> {
         complete(doc.head("file-10485760-v1-balanced#13", "verified")?, doc.body("file-10485760-v1-balanced#13")?), None);
     out.push(
         "ipfs/car-no-duplicates",
-        "a file whose one leaf is linked four times; the CAR sends it once (dups=n)",
+        "a file whose one leaf is linked four times; the CAR sends it once and says dups=n, which the core doesn't take: every block is fetched raw",
         ipfs_plan(
             json!({ "ipfs": "bafybeiaw4srkelv2eyvj7r6x36d375tsptrlfzsvlxhidyj5me5huasve4" }),
             "",
@@ -700,6 +700,22 @@ fn ipfs(doc: &Doc, out: &mut Cases) -> Result<(), Err> {
         ),
         "GET",
         gw(true, json!([{ "piece": "car", "answer": "no_dups" }])),
+        complete(
+            doc.head("file-repeat-v1#1", "verified")?,
+            doc.body("file-repeat-v1#1")?,
+        ),
+        None,
+    );
+    out.push(
+        "ipfs/car-no-duplicates-unannounced",
+        "the same, its Content-Type still saying dups=y: the CAR ends cleanly before the walk does, which fetches the rest raw",
+        ipfs_plan(
+            json!({ "ipfs": "bafybeiaw4srkelv2eyvj7r6x36d375tsptrlfzsvlxhidyj5me5huasve4" }),
+            "",
+            &[],
+        ),
+        "GET",
+        gw(true, json!([{ "piece": "car", "answer": "no_dups_unannounced" }])),
         complete(
             doc.head("file-repeat-v1#1", "verified")?,
             doc.body("file-repeat-v1#1")?,
