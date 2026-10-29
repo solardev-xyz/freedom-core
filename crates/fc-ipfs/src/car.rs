@@ -17,7 +17,8 @@ pub const MAX_SECTION: usize = MAX_BLOCK + 4 * varint::MAX_LEN + cid::MAX_DIGEST
 pub const BOXO_MARKER: &[u8] = b"\n\n[Gateway Error: CAR stream truncated, response is incomplete]";
 
 /// A section, whole: its CID's bytes, then its block, in the one buffer the
-/// reader filled (no copy).
+/// reader filled (no copy), allocated at exactly the section's length once
+/// that length was admitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Section {
     bytes: Vec<u8>,
@@ -31,6 +32,12 @@ impl Section {
 
     pub fn block(&self) -> &[u8] {
         &self.bytes[self.cid_len..]
+    }
+
+    /// What the section holds: its buffer's capacity, which is its length,
+    /// and the section itself.
+    pub fn held(&self) -> usize {
+        self.bytes.capacity() + std::mem::size_of::<Self>()
     }
 }
 
@@ -65,7 +72,14 @@ enum State {
 #[derive(Debug)]
 pub struct Reader {
     state: State,
+    /// A header's or section's bytes: allocated at exactly their admitted
+    /// length, so it never grows.
     buf: Vec<u8>,
+    /// A length varint's bytes so far.
+    len_bytes: [u8; varint::MAX_LEN],
+    len_n: usize,
+    /// How much of boxo's marker has been matched.
+    marker: usize,
 }
 
 impl Default for Reader {
@@ -79,8 +93,8 @@ fn check_header(bytes: &[u8]) -> Result<(), Refusal> {
         cbor::Error::TooDeep => Refusal::Unverifiable,
         cbor::Error::Malformed => Refusal::VerificationFailed,
     })?;
-    match map.iter().find(|(k, _)| *k == "version") {
-        Some((_, cbor::Item::Uint(1))) => Ok(()),
+    match map.get("version") {
+        Some(cbor::Item::Uint(1)) => Ok(()),
         _ => Err(Refusal::VerificationFailed),
     }
 }
@@ -90,16 +104,21 @@ impl Reader {
         Self {
             state: State::HeaderLen,
             buf: Vec::new(),
+            len_bytes: [0; varint::MAX_LEN],
+            len_n: 0,
+            marker: 0,
         }
     }
 
-    /// The bytes the item being read still needs held, at most: what a
-    /// caller reserves before feeding more.
+    /// What the item being read holds on the heap once it is whole: a
+    /// header's admitted length, or a section's ([`Section::held`]). The
+    /// buffer is allocated at that length when the length is admitted, and
+    /// never grows; between items the reader holds nothing on the heap.
     pub fn holding(&self) -> usize {
         match self.state {
-            State::Header(n) | State::Section(n) => n,
-            State::Marker => BOXO_MARKER.len(),
-            _ => varint::MAX_LEN,
+            State::Header(n) => n,
+            State::Section(n) => n + std::mem::size_of::<Section>(),
+            _ => 0,
         }
     }
 
@@ -113,6 +132,7 @@ impl Reader {
         if result.is_err() {
             self.state = State::Failed;
             self.buf = Vec::new();
+            self.len_n = 0;
         }
         Pushed {
             sections,
@@ -126,26 +146,29 @@ impl Reader {
                 State::Failed => return Err(Refusal::VerificationFailed),
                 State::HeaderLen | State::SectionLen => {
                     if self.state == State::SectionLen
-                        && self.buf.is_empty()
+                        && self.len_n == 0
                         && input[0] == BOXO_MARKER[0]
                     {
                         // Boxo's marker, or a section of 10 bytes: the next
                         // byte tells, since no CID starts with a newline.
-                        self.buf.push(input[0]);
                         *input = &input[1..];
+                        self.marker = 1;
                         self.state = State::Marker;
                         continue;
                     }
-                    self.buf.push(input[0]);
+                    let b = input[0];
                     *input = &input[1..];
-                    if self.buf.last().is_some_and(|b| b & 0x80 != 0) {
-                        if self.buf.len() >= varint::MAX_LEN {
+                    self.len_bytes[self.len_n] = b;
+                    self.len_n += 1;
+                    if b & 0x80 != 0 {
+                        if self.len_n >= varint::MAX_LEN {
                             return Err(Refusal::VerificationFailed);
                         }
                         continue;
                     }
-                    let (len, _) = varint::read(&self.buf).ok_or(Refusal::VerificationFailed)?;
-                    self.buf.clear();
+                    let (len, _) = varint::read(&self.len_bytes[..self.len_n])
+                        .ok_or(Refusal::VerificationFailed)?;
+                    self.len_n = 0;
                     let len = usize::try_from(len).map_err(|_| Refusal::VerificationFailed)?;
                     self.state = if self.state == State::HeaderLen {
                         if len == 0 || len > MAX_HEADER {
@@ -158,6 +181,8 @@ impl Reader {
                         }
                         State::Section(len)
                     };
+                    // Admitted: exactly this much, never more.
+                    self.buf = Vec::with_capacity(len);
                 }
                 State::Header(len) | State::Section(len) => {
                     let take = (len - self.buf.len()).min(input.len());
@@ -176,20 +201,21 @@ impl Reader {
                     self.state = State::SectionLen;
                 }
                 State::Marker => {
-                    let have = self.buf.len();
+                    let have = self.marker;
                     if have >= BOXO_MARKER.len() {
                         // Bytes after the marker: not a CAR.
                         return Err(Refusal::VerificationFailed);
                     }
                     if input[0] == BOXO_MARKER[have] {
-                        self.buf.push(input[0]);
+                        self.marker += 1;
                         *input = &input[1..];
                         continue;
                     }
                     if have == 1 {
                         // The newline was a section length of 10.
-                        self.buf.clear();
+                        self.marker = 0;
                         self.state = State::Section(10);
+                        self.buf = Vec::with_capacity(10);
                         continue;
                     }
                     return Err(Refusal::VerificationFailed);
@@ -202,7 +228,7 @@ impl Reader {
     /// The stream ended.
     pub fn finish(&self) -> Result<End, Refusal> {
         match self.state {
-            State::SectionLen if self.buf.is_empty() => Ok(End::Complete),
+            State::SectionLen if self.len_n == 0 => Ok(End::Complete),
             State::SectionLen | State::Section(_) | State::Marker => Ok(End::Early),
             State::HeaderLen | State::Header(_) | State::Failed => Err(Refusal::VerificationFailed),
         }
@@ -274,6 +300,39 @@ mod tests {
     fn a_lone_newline_is_a_cut_section() {
         let body = [HEADER, &[0x0a][..]].concat();
         assert_eq!(read(&[&body]).2, Ok(End::Early));
+    }
+
+    #[test]
+    fn a_section_holds_what_was_reserved() {
+        // A 36-byte CID and a 2 MiB block, fed 64 KiB at a time: a buffer
+        // grown by doubling would end at 4 MiB of capacity.
+        let block = vec![0x5a_u8; MAX_BLOCK];
+        let mut cid = vec![0x01, 0x55, 0x12, 0x20];
+        cid.extend_from_slice(&[7u8; 32]);
+        let len = cid.len() + block.len();
+        let mut body = HEADER.to_vec();
+        let mut n = len;
+        while n >= 0x80 {
+            body.push((n as u8) | 0x80);
+            n >>= 7;
+        }
+        body.push(n as u8);
+        body.extend_from_slice(&cid);
+        body.extend_from_slice(&block);
+        let mut r = Reader::new();
+        let mut reserved = 0;
+        let mut sections = Vec::new();
+        for piece in body.chunks(64 * 1024) {
+            let p = r.push(piece);
+            assert_eq!(p.error, None);
+            sections.extend(p.sections);
+            reserved = reserved.max(r.holding());
+        }
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].block().len(), MAX_BLOCK);
+        assert_eq!(sections[0].held(), len + std::mem::size_of::<Section>());
+        assert_eq!(reserved, sections[0].held());
+        assert_eq!(r.holding(), 0);
     }
 
     #[test]

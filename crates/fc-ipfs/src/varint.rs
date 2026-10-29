@@ -21,9 +21,36 @@ pub fn read(bytes: &[u8]) -> Option<(u64, usize)> {
     None
 }
 
+/// [`read`], in the minimal encoding only, as the multiformats varint
+/// specification requires of a CID's version, codec, hash function and
+/// digest length: no trailing `0x80`-continued zero group (`81 00` is not
+/// 1). Protobuf and CAR framing keep [`read`].
+pub fn read_minimal(bytes: &[u8]) -> Option<(u64, usize)> {
+    let (value, n) = read(bytes)?;
+    // The last byte is the most significant group: zero only for 0 itself.
+    if n > 1 && bytes[n - 1] == 0 {
+        return None;
+    }
+    Some((value, n))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn minimal_encodings() {
+        for (canonical, padded, value) in [
+            (&[0x01][..], &[0x81, 0x00][..], 1u64),
+            (&[0x55], &[0xd5, 0x00], 0x55),
+            (&[0x00], &[0x80, 0x00], 0),
+            (&[0xac, 0x02], &[0xac, 0x82, 0x00], 300),
+        ] {
+            assert_eq!(read_minimal(canonical), Some((value, canonical.len())));
+            assert_eq!(read(padded), Some((value, padded.len())));
+            assert_eq!(read_minimal(padded), None, "{padded:02x?}");
+        }
+    }
 
     #[test]
     fn reads_and_bounds() {

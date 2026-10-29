@@ -77,7 +77,8 @@ fn count_packed(mut p: &[u8]) -> Option<usize> {
 ///   before they're compared with the links;
 /// - a file (or raw node) needs `filesize`, one entry per link, and
 ///   `filesize` equal to its `Data` plus the entries (malformed otherwise);
-/// - a HAMT shard of another hash or fanout is unverifiable.
+/// - a HAMT shard of another hash or fanout is unverifiable, and one whose
+///   bitfield is wider than its fanout's 32 bytes is malformed.
 pub fn decode<'a>(node: &Node<'a>) -> Result<Data<'a>, Refusal> {
     let bytes = node.data.ok_or(Refusal::Malformed)?;
     let mut kind = None;
@@ -136,6 +137,11 @@ pub fn decode<'a>(node: &Node<'a>) -> Result<Data<'a>, Refusal> {
         }
         Kind::HamtShard if hash_type != Some(MURMUR3) || fanout != Some(FANOUT) => {
             return Err(Refusal::Unverifiable);
+        }
+        // The bitfield is at most fanout / 8 bytes, as boxo's
+        // NewHamtFromDag reads it: zero padding past that is refused too.
+        Kind::HamtShard if data.map_or(0, <[u8]>::len) as u64 > FANOUT / 8 => {
+            return Err(Refusal::Malformed);
         }
         _ => {}
     }

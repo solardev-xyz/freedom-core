@@ -49,15 +49,17 @@ pub fn read(bytes: &[u8]) -> Option<(Cid<'_>, usize)> {
             34,
         ));
     }
-    let (version, mut at) = varint::read(bytes)?;
+    // Each of the four in its minimal encoding: `81 00 55 00 00` is not
+    // the empty identity CID.
+    let (version, mut at) = varint::read_minimal(bytes)?;
     if version != 1 {
         return None;
     }
-    let (codec, n) = varint::read(&bytes[at..])?;
+    let (codec, n) = varint::read_minimal(&bytes[at..])?;
     at += n;
-    let (hash, n) = varint::read(&bytes[at..])?;
+    let (hash, n) = varint::read_minimal(&bytes[at..])?;
     at += n;
-    let (len, n) = varint::read(&bytes[at..])?;
+    let (len, n) = varint::read_minimal(&bytes[at..])?;
     at += n;
     let len = usize::try_from(len).ok().filter(|&l| l <= MAX_DIGEST)?;
     let digest = bytes.get(at..at + len)?;
@@ -202,6 +204,25 @@ mod tests {
         ] {
             assert_eq!(from_base32(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn each_component_is_a_minimal_varint() {
+        // CIDv1, raw, identity, an empty digest: 01 55 00 00.
+        assert!(parse(&[0x01, 0x55, 0x00, 0x00]).is_some());
+        // The same CID with each of its four varints padded by a zero group.
+        for padded in [
+            &[0x81, 0x00, 0x55, 0x00, 0x00][..],
+            &[0x01, 0xd5, 0x00, 0x00, 0x00],
+            &[0x01, 0x55, 0x80, 0x00, 0x00],
+            &[0x01, 0x55, 0x00, 0x80, 0x00],
+        ] {
+            assert_eq!(parse(padded), None, "{padded:02x?}");
+        }
+        // A two-byte codec in its minimal form is read: dag-json, 0x0129.
+        let c = parse(&[0x01, 0xa9, 0x02, 0x00, 0x00]);
+        assert_eq!(c.map(|c| c.codec), Some(0x0129));
+        assert_eq!(parse(&[0x01, 0xa9, 0x82, 0x00, 0x00, 0x00]), None);
     }
 
     #[test]
