@@ -168,7 +168,7 @@ impl Spec {
     }
 }
 
-fn cbor_head(major: u8, v: u64, out: &mut Vec<u8>) {
+pub fn cbor_head(major: u8, v: u64, out: &mut Vec<u8>) {
     let m = major << 5;
     match v {
         0..=23 => out.push(m | v as u8),
@@ -188,12 +188,12 @@ fn cbor_head(major: u8, v: u64, out: &mut Vec<u8>) {
     }
 }
 
-fn cbor_text(s: &str, out: &mut Vec<u8>) {
+pub fn cbor_text(s: &str, out: &mut Vec<u8>) {
     cbor_head(3, s.len() as u64, out);
     out.extend_from_slice(s.as_bytes());
 }
 
-fn cbor_bytes(b: &[u8], out: &mut Vec<u8>) {
+pub fn cbor_bytes(b: &[u8], out: &mut Vec<u8>) {
     cbor_head(2, b.len() as u64, out);
     out.extend_from_slice(b);
 }
