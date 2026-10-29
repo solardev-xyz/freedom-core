@@ -67,19 +67,10 @@ fn planning_cost_grows_with_the_headers_not_their_square() {
         // bzz:'s allowlist drops them all, after grouping them.
         (
             format!("bzz://{reference}/"),
-            Backend::Ant {
-                mode: Ant::Bundled,
-                up: true,
-            },
+            Backend::ant(Ant::Bundled, true),
         ),
         // IPFS's strip-list keeps them all.
-        (
-            format!("ipfs://{cid}/"),
-            Backend::Ipfs {
-                mode: Ipfs::Native,
-                up: true,
-            },
-        ),
+        (format!("ipfs://{cid}/"), Backend::ipfs(Ipfs::Native, true)),
     ];
     let (small, large) = (distinct(N), distinct(8 * N));
     for (url, backend) in cases {
