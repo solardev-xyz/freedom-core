@@ -65,6 +65,9 @@ jobs:
           echo "KUBO_BIN=$RUNNER_TEMP/kubo/ipfs" >> "$GITHUB_ENV"
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --release --all-targets -- -D warnings
+      # The generator's own tests: an inherited proxy setting is ignored, and
+      # every recorded CAR rebuilds from the committed vectors alone.
+      - run: cargo test --locked --release
       - name: Regenerate and compare
         run: cargo run --locked --release -- check
 

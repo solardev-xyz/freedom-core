@@ -457,14 +457,29 @@ impl Ipfs {
             .unwrap_or_default();
         let body_v = if ctype.starts_with("application/vnd.ipld.car") {
             match car::read(&body) {
-                Some(c) => json!({
-                    "car": {
-                        "blocks": c.blocks.iter().map(|(cid, _)| cid.to_string()).collect::<Vec<_>>(),
-                        "complete": c.complete,
-                    },
-                    "length": body.len(),
-                    "sha256": hex::encode(Sha256::digest(&body)),
-                }),
+                Some(c) => {
+                    // The wire bytes must be the header, the sections as a
+                    // CAR writes them, and the trailing bytes: what a replay
+                    // rebuilds from this record and the blocks.
+                    let mut rebuilt = c.header.clone();
+                    for (cid, block) in &c.blocks {
+                        rebuilt.extend_from_slice(&car::section(cid, block));
+                    }
+                    rebuilt.extend_from_slice(&c.trailing);
+                    if rebuilt != body {
+                        return Err(format!("{case}: Kubo's CAR isn't framed canonically").into());
+                    }
+                    json!({
+                        "car": {
+                            "header": B64.encode(&c.header),
+                            "blocks": c.blocks.iter().map(|(cid, _)| cid.to_string()).collect::<Vec<_>>(),
+                            "trailing": B64.encode(&c.trailing),
+                            "complete": c.complete,
+                        },
+                        "length": body.len(),
+                        "sha256": hex::encode(Sha256::digest(&body)),
+                    })
+                }
                 None => {
                     json!({ "length": body.len(), "sha256": hex::encode(Sha256::digest(&body)), "car": null })
                 }
@@ -1543,7 +1558,7 @@ pub async fn build() -> Result<Value, Err> {
         .iter()
         .map(|(k, v)| (k.clone(), Value::String(B64.encode(v))))
         .collect();
-    Ok(json!({
+    let section = json!({
         "files": s.files,
         "directories": s.directories,
         "identity": s.identity,
@@ -1551,7 +1566,10 @@ pub async fn build() -> Result<Value, Err> {
         "blocks": blocks,
         "native": s.native,
         "kubo": s.kubo,
-    }))
+    });
+    // Every recorded CAR, rebuilt from the section alone, as a replay does.
+    crate::replay::rebuild_kubo_cars(&section)?;
+    Ok(section)
 }
 
 /// A record whose `pubKey` is `proto`, signed by `key`.

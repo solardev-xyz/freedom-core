@@ -17,6 +17,7 @@ mod kubo;
 mod mantaray;
 mod murmur3;
 mod node;
+mod replay;
 mod store;
 mod swarm;
 
@@ -136,7 +137,7 @@ fn formats() -> Value {
         "ipfs_directories": "trees added with ipfs add -r: root, add, blocks (every block of the tree but its files' leaves) and entries, each with path, seed (or text for a literal body), size, cid, nodes and leaves as for files.",
         "ipns": "keys (label, type, bits, exponent, public_key: the libp2p PublicKey protobuf, base64, and name) and records (id, name, signer, note, record: the IpnsEntry protobuf, base64, and native: freedom-ipfs's verdict, {ok: {value, sequence, validity, ttl_ns}} or {error}). Ed25519 keys come from SHA-256(label); RSA keys from a ChaCha20 stream seeded with SHA-256(label), with the bits and exponent given. A record's data is DAG-CBOR with its keys in canonical order.",
         "ipfs_native": "requests to GatewayCore and its answers, as exchanges below; a request the native-request parser refuses has parse_error instead of a response.",
-        "ipfs_kubo": "requests to Kubo's gateway and its answers, as exchanges below; a CAR body is {car: {blocks (CIDs in order), complete}, length, sha256}, a raw block {block: cid, length}.",
+        "ipfs_kubo": "requests to Kubo's gateway and its answers, as exchanges below; a CAR body is {car: {header, blocks, trailing, complete}, length, sha256}: the bytes before the first section (base64, its length varint included), the sections' CIDs in order, each section written as a CAR writes it (the length varint, the CID's bytes, the block, which ipfs.blocks or a leaf gives), and the bytes after the last whole section (base64: a cut section, or boxo's truncation marker); complete is false when there are such bytes. A raw block is {block: cid, length}.",
         "exchanges": "requests through Ant's gateway and its answers: id (case#n), case, note, request (method, path, headers; every bzz request carries meta.request_headers), response (status, headers in Ant's order, and body). A body is {length: 0}, {content: {seed, from, length}} for a slice of content(seed, …), {base64} up to 64 KiB, or {length, sha256}. A multipart boundary, which Ant draws at random, is written {boundary} in the header and the body.",
     })
 }
