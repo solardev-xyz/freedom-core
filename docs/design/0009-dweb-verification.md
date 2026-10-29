@@ -439,9 +439,10 @@ The 2 MiB block limit bounds a block's bytes, not what decoding it allocates: a 
   - it may have read the path differently.
 
   Then the core cancels the CAR and fetches what its walk still needs as [raw blocks](#raw-blocks). Only a block whose bytes don't hash to its CID is a verification failure.
-- **An early end:** the spec lets a gateway end the stream when it loses a child block, and recent boxo appends a marker that breaks the framing (`\n\n[Gateway Error: CAR stream truncated, response is incomplete]`, ipfs/boxo#1197). Either way the walk is unfinished: a piece failure, a truncation if the head was sent.
-  - **What counts as an early end:** a stream that ends inside a section, or that has that marker where the next section would begin.
-  - **What is a verification failure instead:** any other framing the reader can't take (a section length past the limit or over 10 bytes, a CID it can't read, a malformed header), and a block that doesn't hash to its CID.
+- **A CAR that ends before the walk does:**
+  - **ending cleanly,** at a section boundary, is like the shapes above: the core fetches what its walk still needs as raw blocks. A gateway that sent no duplicates ends that way, and so may one that lost a child block, as the spec lets it; the raw request for that block then fails on its own;
+  - **ending broken is an early end:** a stream that ends inside a section, or that has boxo's truncation marker where the next section would begin (`\n\n[Gateway Error: CAR stream truncated, response is incomplete]`, ipfs/boxo#1197). The gateway has said it failed, so the walk is unfinished: a piece failure, a truncation if the head was sent;
+  - **what is a verification failure instead:** any other framing the reader can't take (a section length past the limit or over 10 bytes, a CID it can't read, a malformed header), and a block that doesn't hash to its CID.
 - **A directory URL** costs a second CAR: once the core has the directory and finds `index.html` in it, it asks for that file by its CID (`/ipfs/<cid of index.html>?format=car&dag-scope=entity`), with no path to resolve again.
 
 ### Raw blocks
