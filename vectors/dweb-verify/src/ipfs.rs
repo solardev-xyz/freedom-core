@@ -53,7 +53,7 @@ const V1: [&str; 4] = [
 
 /// Blocks by CID, as a store that holds exactly these would answer. An
 /// identity CID's block is its digest, which any provider can give.
-struct MemProvider(HashMap<Cid, Vec<u8>>);
+pub struct MemProvider(pub HashMap<Cid, Vec<u8>>);
 
 impl BlockProvider for MemProvider {
     fn get_block(&self, cid: &Cid) -> freedom_ipfs_core::Result<Option<Block>> {

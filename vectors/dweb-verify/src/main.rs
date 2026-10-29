@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("usage: dweb-verify-vectors generate | check | cases".into());
     }
     if mode == "cases" {
-        std::fs::write(CASES, cases_text()?)?;
+        std::fs::write(CASES, cases_text().await?)?;
         return Ok(());
     }
     let doc = json!({
@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     text.push('\n');
     if mode == "generate" {
         std::fs::write(OUT, text)?;
-        std::fs::write(CASES, cases_text()?)?;
+        std::fs::write(CASES, cases_text().await?)?;
         return Ok(());
     }
     let committed = std::fs::read_to_string(OUT)?;
@@ -55,14 +55,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("vectors/dweb-verify.json differs from what the generator records".into());
     }
     // The cases read the committed dweb-verify.json, now known to be current.
-    if std::fs::read_to_string(CASES)? != cases_text()? {
+    if std::fs::read_to_string(CASES)? != cases_text().await? {
         return Err("vectors/dweb-verify-cases.json differs from what the generator writes".into());
     }
     Ok(())
 }
 
-fn cases_text() -> Result<String, Box<dyn std::error::Error>> {
-    let mut text = serde_json::to_string_pretty(&cases::build()?)?;
+async fn cases_text() -> Result<String, Box<dyn std::error::Error>> {
+    let mut text = serde_json::to_string_pretty(&cases::build().await?)?;
     text.push('\n');
     Ok(text)
 }
