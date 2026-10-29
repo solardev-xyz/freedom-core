@@ -183,6 +183,13 @@ fn verdict(spec: &Spec) -> Value {
 struct Records(Vec<Value>, Vec<String>);
 
 impl Records {
+    /// A case whose native verdict is checked by its caller.
+    fn push_unchecked(&mut self, id: &str, note: &str, name: &str, record: &[u8], expect: Value) {
+        let before = self.1.len();
+        self.push(id, note, name, record, expect, None);
+        self.1.truncate(before);
+    }
+
     fn push(
         &mut self,
         id: &str,
@@ -429,41 +436,167 @@ fn rsa_records(r: &mut Records) -> Result<(), Err> {
         fail("verification_failed"),
         None,
     );
+
+    // Canonical DER (0009, Bounded decoding): each key below is a's, its
+    // SPKI encoded one other way, the name the hash of the bytes as they
+    // arrive, and the signature valid for a's modulus and exponent. Only
+    // the encoding is outside the rules.
+    let n_int = der_uint(&a.n);
+    let e_int = der_uint(&a.e);
+    let null_alg = [RSA_OID.to_vec(), vec![0x05, 0x00]].concat();
+    let rsa_key = |n: &[u8], e: &[u8], extra: &[u8]| der(0x30, &[n, e, extra].concat());
+    let bit_string = |unused: u8, inner: &[u8]| der(0x03, &[&[unused][..], inner].concat());
+    let spki_of = |alg: &[u8], key: &[u8]| der(0x30, &[der(0x30, alg), key.to_vec()].concat());
+    if spki_of(&null_alg, &bit_string(0, &rsa_key(&n_int, &e_int, &[]))) != canon {
+        return Err("the DER cases' SPKI differs from the canonical one".into());
+    }
+    let n_bytes = a.n.to_bytes_be();
+    let honest_key = rsa_key(&n_int, &e_int, &[]);
+    let mut indefinite = vec![0x30, 0x80];
+    indefinite.extend_from_slice(&canon[4..]);
+    indefinite.extend_from_slice(&[0x00, 0x00]);
+    let mut long_alg = vec![0x30, 0x81, null_alg.len() as u8];
+    long_alg.extend_from_slice(&null_alg);
+    let pss = [
+        vec![
+            0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0a,
+        ],
+        vec![0x05, 0x00],
+    ]
+    .concat();
+    for (id, note, key) in [
+        (
+            "rsa-der-modulus-leading-zero",
+            "the modulus INTEGER with a second leading zero byte: not minimal",
+            spki_of(
+                &null_alg,
+                &bit_string(
+                    0,
+                    &rsa_key(
+                        &der(0x02, &[&[0u8, 0u8][..], &n_bytes].concat()),
+                        &e_int,
+                        &[],
+                    ),
+                ),
+            ),
+        ),
+        (
+            "rsa-der-modulus-negative",
+            "the modulus INTEGER without its zero sign byte: a negative integer",
+            spki_of(
+                &null_alg,
+                &bit_string(0, &rsa_key(&der(0x02, &n_bytes), &e_int, &[])),
+            ),
+        ),
+        (
+            "rsa-der-exponent-leading-zero",
+            "the exponent as 00 01 00 01: not minimal",
+            spki_of(
+                &null_alg,
+                &bit_string(
+                    0,
+                    &rsa_key(&n_int, &der(0x02, &[0x00, 0x01, 0x00, 0x01]), &[]),
+                ),
+            ),
+        ),
+        (
+            "rsa-der-extra-integer",
+            "a third INTEGER in the RSAPublicKey",
+            spki_of(
+                &null_alg,
+                &bit_string(0, &rsa_key(&n_int, &e_int, &der(0x02, &[0x00]))),
+            ),
+        ),
+        (
+            "rsa-der-indefinite-length",
+            "the outer SEQUENCE with an indefinite length and end-of-contents",
+            indefinite.clone(),
+        ),
+        (
+            "rsa-der-long-form-short-length",
+            "the AlgorithmIdentifier's length, 13, in long form",
+            der(
+                0x30,
+                &[long_alg.clone(), bit_string(0, &honest_key)].concat(),
+            ),
+        ),
+        (
+            "rsa-der-parameters-absent",
+            "the AlgorithmIdentifier without its NULL parameters",
+            spki_of(&RSA_OID, &bit_string(0, &honest_key)),
+        ),
+        (
+            "rsa-der-other-algorithm",
+            "the AlgorithmIdentifier of RSASSA-PSS (1.2.840.113549.1.1.10)",
+            spki_of(&pss, &bit_string(0, &honest_key)),
+        ),
+        (
+            "rsa-der-unused-bits",
+            "the BIT STRING declaring one unused bit",
+            spki_of(&null_alg, &bit_string(1, &honest_key)),
+        ),
+        (
+            "rsa-der-octet-string",
+            "the RSAPublicKey in an OCTET STRING, not a BIT STRING",
+            spki_of(&null_alg, &der(0x04, &honest_key)),
+        ),
+        (
+            "rsa-der-trailing-byte",
+            "a zero byte after the SPKI",
+            [canon.clone(), vec![0x00]].concat(),
+        ),
+        (
+            "rsa-der-pkcs1",
+            "the bare PKCS#1 RSAPublicKey, without the SPKI around it",
+            honest_key.clone(),
+        ),
+    ] {
+        let p = proto(0, &key);
+        let rec = entry(Some(&p), Some(&a.sign(&signed_message(&d))?), &d);
+        r.push(
+            id,
+            note,
+            &name_of(&p)?,
+            &rec,
+            fail("verification_failed"),
+            None,
+        );
+    }
     Ok(())
 }
-
-/// P-256's base point, uncompressed: a valid ECDSA public key.
-const P256_G: [u8; 65] = [
-    0x04, 0x6b, 0x17, 0xd1, 0xf2, 0xe1, 0x2c, 0x42, 0x47, 0xf8, 0xbc, 0xe6, 0xe5, 0x63, 0xa4, 0x40,
-    0xf2, 0x77, 0x03, 0x7d, 0x81, 0x2d, 0xeb, 0x33, 0xa0, 0xf4, 0xa1, 0x39, 0x45, 0xd8, 0x98, 0xc2,
-    0x96, 0x4f, 0xe3, 0x42, 0xe2, 0xfe, 0x1a, 0x7f, 0x9b, 0x8e, 0xe7, 0xeb, 0x4a, 0x7c, 0x0f, 0x9e,
-    0x16, 0x2b, 0xce, 0x33, 0x57, 0x6b, 0x31, 0x5e, 0xce, 0xcb, 0xb6, 0x40, 0x68, 0x37, 0xbf, 0x51,
-    0xf5,
-];
 
 fn other_keys(r: &mut Records) -> Result<(), Err> {
     let s = spec(VALUE, 1);
     let d = data(&s);
-    // ECDSA: id-ecPublicKey, prime256v1.
+    // ECDSA: id-ecPublicKey, prime256v1, a seeded key, and a valid
+    // signature (DER, over SHA-256, as libp2p signs): only the key's type
+    // is outside the rules.
+    let sk = p256::ecdsa::SigningKey::from_bytes(&Sha256::digest(b"checks-ecdsa"))?;
+    let point = sk.verifying_key().to_encoded_point(false);
     let mut alg = vec![0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
     alg.extend_from_slice(&[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07]);
     let mut bits = vec![0x00];
-    bits.extend_from_slice(&P256_G);
+    bits.extend_from_slice(point.as_bytes());
     let mut body = der(0x30, &alg);
     body.extend_from_slice(&der(0x03, &bits));
     let p = proto(3, &der(0x30, &body));
-    let rec = entry(
-        Some(&p),
-        Some(&[0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01]),
-        &d,
-    );
-    r.push(
+    let sig: p256::ecdsa::Signature =
+        p256::ecdsa::signature::Signer::sign(&sk, &signed_message(&d));
+    p256::ecdsa::signature::Verifier::verify(sk.verifying_key(), &signed_message(&d), &sig)?;
+    let rec = entry(Some(&p), Some(sig.to_der().as_bytes()), &d);
+    let name = name_of(&p)?;
+    // This generator's libp2p-identity has ECDSA (through Ant's libp2p),
+    // so its verdict shows the record otherwise valid; freedom-ipfsd's
+    // can't decode the key.
+    if ipns::native_verdict(&name, &rec) != verdict(&s) {
+        return Err("the ECDSA record isn't otherwise valid".into());
+    }
+    r.push_unchecked(
         "ecdsa-key",
-        "a sha2-256 name whose record's key is ECDSA (P-256)",
-        &name_of(&p)?,
+        "a sha2-256 name whose record's key is ECDSA (P-256), validly signed: only the key's type differs from an RSA record",
+        &name,
         &rec,
         fail("unverifiable"),
-        None,
     );
 
     // Ed25519's identity point, a small-order key, and the signature
@@ -525,6 +658,201 @@ fn other_keys(r: &mut Records) -> Result<(), Err> {
         let rec = entry(None, Some(&ed.sign(&signed_message(&dd))?), &dd);
         r.push(id, &format!("signed data with an unknown key whose value nests maps {depth} levels deep, the record's map the first"), &name, &rec, expect, dev);
     }
+
+    // Bounded CBOR (0009, Bounded decoding): the honest signed data with
+    // one change the reader refuses, each validly signed.
+    use crate::ipns::{cbor_bytes, cbor_head, cbor_text};
+    let kv_uint = |k: &str, v: u64| {
+        let mut o = Vec::new();
+        cbor_text(k, &mut o);
+        cbor_head(0, v, &mut o);
+        o
+    };
+    let kv_bytes = |k: &str, v: &[u8]| {
+        let mut o = Vec::new();
+        cbor_text(k, &mut o);
+        cbor_bytes(v, &mut o);
+        o
+    };
+    let ttl = kv_uint("TTL", s.ttl_ns);
+    let value = kv_bytes("Value", s.value.as_bytes());
+    let rest = [
+        kv_uint("Sequence", s.sequence),
+        kv_bytes("Validity", s.validity.as_bytes()),
+        kv_uint("ValidityType", 0),
+    ]
+    .concat();
+    if [vec![0xa5], ttl.clone(), value.clone(), rest.clone()].concat() != data(&s) {
+        return Err("the CBOR cases' data differs from the honest one".into());
+    }
+    let mut extra_key = Vec::new();
+    cbor_text("Extra", &mut extra_key);
+    let cid = cid::Cid::try_from(&VALUE[6..])?;
+    let mut tag42 = vec![0xd8, 0x2a];
+    cbor_bytes(&[&[0u8][..], &cid.to_bytes()].concat(), &mut tag42);
+    let mut tag42_no_prefix = vec![0xd8, 0x2a];
+    cbor_bytes(&cid.to_bytes(), &mut tag42_no_prefix);
+    let mut value_key = Vec::new();
+    cbor_text("Value", &mut value_key);
+    let mut indefinite_value = value_key.clone();
+    indefinite_value.push(0x5f);
+    cbor_bytes(s.value.as_bytes(), &mut indefinite_value);
+    indefinite_value.push(0xff);
+    let mut tagged_value = value_key.clone();
+    tagged_value.extend_from_slice(&[0xd8, 0x2a]);
+    cbor_bytes(s.value.as_bytes(), &mut tagged_value);
+    let mut ttl_key = Vec::new();
+    cbor_text("TTL", &mut ttl_key);
+    let mut indefinite_key = vec![0x7f];
+    indefinite_key.extend_from_slice(&ttl_key);
+    indefinite_key.push(0xff);
+    cbor_head(0, s.ttl_ns, &mut indefinite_key);
+    for (id, note, dd) in [
+        (
+            "cbor-indefinite-map",
+            "the data's map with an indefinite length",
+            [
+                vec![0xbf],
+                ttl.clone(),
+                value.clone(),
+                rest.clone(),
+                vec![0xff],
+            ]
+            .concat(),
+        ),
+        (
+            "cbor-indefinite-bytes",
+            "Value as an indefinite-length byte string",
+            [
+                vec![0xa5],
+                ttl.clone(),
+                indefinite_value.clone(),
+                rest.clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "cbor-indefinite-key",
+            "the key TTL as an indefinite-length text string",
+            [
+                vec![0xa5],
+                indefinite_key.clone(),
+                value.clone(),
+                rest.clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "cbor-integer-key",
+            "an entry whose key is the integer 1",
+            [
+                vec![0xa6, 0x01, 0x01],
+                ttl.clone(),
+                value.clone(),
+                rest.clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "cbor-integer-key-nested",
+            "an unknown key whose value is a map with an integer key",
+            [
+                vec![0xa6],
+                ttl.clone(),
+                extra_key.clone(),
+                vec![0xa1, 0x01, 0x01],
+                value.clone(),
+                rest.clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "cbor-duplicate-key",
+            "TTL twice, with the same value",
+            [
+                vec![0xa6],
+                ttl.clone(),
+                ttl.clone(),
+                value.clone(),
+                rest.clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "cbor-tag-42-not-bytes",
+            "an unknown key whose value is tag 42 over an integer: not a CID",
+            [
+                vec![0xa6],
+                ttl.clone(),
+                extra_key.clone(),
+                vec![0xd8, 0x2a, 0x01],
+                value.clone(),
+                rest.clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "cbor-tag-42-no-prefix",
+            "an unknown key whose value is tag 42 over a CID's bytes without the 0x00 prefix",
+            [
+                vec![0xa6],
+                ttl.clone(),
+                extra_key.clone(),
+                tag42_no_prefix.clone(),
+                value.clone(),
+                rest.clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "cbor-tag-42-not-a-cid",
+            "an unknown key whose value is tag 42 over 0x00 and bytes that aren't a CID",
+            [
+                vec![0xa6],
+                ttl.clone(),
+                extra_key.clone(),
+                vec![0xd8, 0x2a, 0x44, 0x00, 0x07, 0x07, 0x07],
+                value.clone(),
+                rest.clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "cbor-tag-42-value",
+            "Value's bytes under tag 42",
+            [vec![0xa5], ttl.clone(), tagged_value.clone(), rest.clone()].concat(),
+        ),
+        (
+            "cbor-other-tag",
+            "an unknown key whose value is tag 1 (an epoch time): DAG-CBOR has only tag 42",
+            [
+                vec![0xa6],
+                ttl.clone(),
+                extra_key.clone(),
+                vec![0xc1, 0x00],
+                value.clone(),
+                rest.clone(),
+            ]
+            .concat(),
+        ),
+    ] {
+        let rec = entry(None, Some(&ed.sign(&signed_message(&dd))?), &dd);
+        // The native reader takes an indefinite-length key (dag-cbor-strict).
+        let dev = (id == "cbor-indefinite-key").then_some("dag-cbor-strict");
+        r.push(id, note, &name, &rec, fail("verification_failed"), dev);
+    }
+    // A CID wherever DAG-CBOR allows a link: under an unknown key, skipped.
+    let dd = [
+        vec![0xa6],
+        ttl.clone(),
+        extra_key.clone(),
+        tag42.clone(),
+        value.clone(),
+        rest.clone(),
+    ]
+    .concat();
+    let rec = entry(None, Some(&ed.sign(&signed_message(&dd))?), &dd);
+    r.push("cbor-tag-42-unknown-key", "an unknown key whose value is a CID (tag 42): a link where DAG-CBOR allows one, skipped as the IPNS specification skips unknown keys", &name, &rec, verdict(&s), None);
     let mut dd = data(&s);
     // "Value"'s byte string: claim more bytes than remain.
     let at = dd
