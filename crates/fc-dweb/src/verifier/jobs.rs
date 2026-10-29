@@ -8,6 +8,8 @@
 //! result's verdict because the job's own code produced it, and it refuses
 //! one it didn't ask for or got already ([`super::Misuse`]).
 
+use fc_ipfs::Refusal as BlockRefusal;
+use fc_ipfs::ipns::Record;
 use fc_swarm::verify::{self, FeedUpdate, Refusal};
 
 /// A job's identity: the `dweb.verify` request it belongs to and its number
@@ -43,6 +45,14 @@ pub(crate) enum Work {
         bytes: Vec<u8>,
         wire: Vec<u8>,
     },
+    /// An IPFS block against its CID (`fc_ipfs::block::check`).
+    Block { cid: Vec<u8>, block: Vec<u8> },
+    /// An IPNS record for the name whose CID is `name`, at `now`.
+    Record {
+        name: Vec<u8>,
+        record: Vec<u8>,
+        now: i64,
+    },
 }
 
 impl Work {
@@ -52,6 +62,8 @@ impl Work {
             Self::Chunk { wire, .. } | Self::FeedUpdate { wire, .. } => wire.len(),
             Self::Leaf { bytes, .. } => bytes.len(),
             Self::LeafChunk { bytes, wire, .. } => bytes.len() + wire.len(),
+            Self::Block { cid, block } => cid.len() + block.len(),
+            Self::Record { name, record, .. } => name.len() + record.len(),
         }
     }
 }
@@ -64,6 +76,8 @@ pub(crate) enum Verdict {
     /// Whether the streamed bytes hash to the address.
     Leaf(bool),
     LeafChunk(Result<(), Refusal>),
+    Block(Result<(), BlockRefusal>),
+    Record(Result<Record, BlockRefusal>),
 }
 
 /// Work for the hashing pool. Run it with [`Job::run`] and hand the result
@@ -84,8 +98,8 @@ impl Job {
         self.work.size()
     }
 
-    /// Does the hashing: BMT roots and keccak, and for a feed update the
-    /// signature recovery.
+    /// Does the hashing: BMT roots and keccak, a feed update's signature
+    /// recovery, an IPFS block's digest, an IPNS record's signature.
     pub fn run(self) -> Hashed {
         let verdict = match &self.work {
             Work::Chunk { address, wire } => {
@@ -108,6 +122,14 @@ impl Job {
                 bytes,
                 wire,
             } => Verdict::LeafChunk(verify::check_leaf_chunk(address, *len, bytes, wire)),
+            Work::Block { cid, block } => Verdict::Block(match fc_ipfs::cid::parse(cid) {
+                Some(cid) => fc_ipfs::block::check(&cid, block),
+                None => Err(BlockRefusal::VerificationFailed),
+            }),
+            Work::Record { name, record, now } => Verdict::Record(match fc_ipfs::cid::parse(name) {
+                Some(name) => fc_ipfs::ipns::check(&name, record, *now),
+                None => Err(BlockRefusal::Unverifiable),
+            }),
         };
         Hashed {
             id: self.id,
