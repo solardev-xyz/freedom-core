@@ -108,7 +108,7 @@ impl Kubo {
             .stderr(Stdio::null())
             .spawn()?;
         self.daemon = Some(child);
-        let client = reqwest::Client::new();
+        let client = client()?;
         for _ in 0..200 {
             if client
                 .get(format!("{}/ipfs/bafkqaaa", self.gateway))
@@ -131,9 +131,7 @@ impl Kubo {
         path: &str,
         headers: &[(String, String)],
     ) -> Result<(u16, Vec<(String, String)>, Vec<u8>), Err> {
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
+        let client = client()?;
         let method = reqwest::Method::from_bytes(method.as_bytes())?;
         let mut req = client.request(method, format!("{}{path}", self.gateway));
         for (k, v) in headers {
@@ -157,6 +155,16 @@ impl Kubo {
     }
 }
 
+/// The one client the generator uses to reach Kubo: no proxy, whatever
+/// HTTP_PROXY, HTTPS_PROXY, ALL_PROXY or NO_PROXY say, so its requests go
+/// to the loopback address they name and nowhere else; and no redirects.
+pub fn client() -> Result<reqwest::Client, Err> {
+    Ok(reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?)
+}
+
 impl Drop for Kubo {
     fn drop(&mut self) {
         if let Some(mut child) = self.daemon.take() {
@@ -164,5 +172,86 @@ impl Drop for Kubo {
             let _ = child.wait();
         }
         let _ = std::fs::remove_dir_all(&self.repo);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic)]
+mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    const CHILD: &str = "DWEB_VERIFY_PROXY_CANARY_CHILD";
+
+    /// Run in a child process with proxies set in its environment: the
+    /// client must reach the loopback server it names, and the canary,
+    /// the proxy every variable points at, must hear nothing.
+    #[test]
+    fn inherited_proxy_settings_are_ignored() {
+        let exe = std::env::current_exe().unwrap_or_default();
+        let canary = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|e| panic!("{e}"));
+        let proxy = format!(
+            "http://{}",
+            canary.local_addr().unwrap_or_else(|e| panic!("{e}"))
+        );
+        let out = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "kubo::tests::child_requests_a_loopback_server",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("HTTP_PROXY", &proxy)
+            .env("http_proxy", &proxy)
+            .env("HTTPS_PROXY", &proxy)
+            .env("ALL_PROXY", &proxy)
+            .env("all_proxy", &proxy)
+            .env("NO_PROXY", "")
+            .env("no_proxy", "")
+            .output()
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("1 passed"),
+            "the child test didn't run"
+        );
+        canary
+            .set_nonblocking(true)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(canary.accept().is_err(), "the proxy canary was reached");
+    }
+
+    #[tokio::test]
+    async fn child_requests_a_loopback_server() {
+        if std::env::var_os(CHILD).is_none() {
+            return;
+        }
+        let server = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|e| panic!("{e}"));
+        let addr = server.local_addr().unwrap_or_else(|e| panic!("{e}"));
+        let serve = std::thread::spawn(move || {
+            if let Ok((mut conn, _)) = server.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = conn.read(&mut buf);
+                let _ = conn.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                );
+            }
+        });
+        let client = super::client().unwrap_or_else(|e| panic!("{e}"));
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.get(format!("http://{addr}/ipfs/bafkqaaa")).send(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("timed out: {e}"))
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(resp.text().await.unwrap_or_default(), "ok");
+        let _ = serve.join();
     }
 }
