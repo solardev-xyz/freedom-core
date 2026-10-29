@@ -121,7 +121,9 @@ pub fn open(request: &Request<'_>) -> Result<Opening, OpenError> {
 }
 
 /// A fetch for a node-relative target (`/<namespace>/<ref>…`), or the
-/// node's absence as an error.
+/// node's absence as an error. For an external backend with verification
+/// or strict mode, the fetch then becomes what 0009 makes of it: a verify
+/// plan, the fetch as it is, or strict mode's 403 ([`crate::verify`]).
 pub(crate) fn fetch_plan(
     scheme: Scheme,
     backend: Backend,
@@ -164,7 +166,7 @@ pub(crate) fn fetch_plan(
     {
         response.push(ResponseOp::SmallText);
     }
-    Plan::Fetch(Fetch {
+    let fetch = Fetch {
         node,
         path: url::normalize_target(target).unwrap_or_else(|| target.to_owned()),
         headers,
@@ -175,7 +177,8 @@ pub(crate) fn fetch_plan(
             name: name_trust,
             content: content_trust(backend),
         },
-    })
+    };
+    crate::verify::compose(fetch, backend, small_text)
 }
 
 /// `getAntApiUrl()` is null: either Ant mode.
