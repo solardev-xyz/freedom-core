@@ -8,6 +8,7 @@ use base64::Engine;
 use cid::Cid;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
 const DAG_PB: u64 = 0x70;
 const RAW: u64 = 0x55;
@@ -27,6 +28,19 @@ fn v0(block: &[u8]) -> Result<Cid, Err> {
 
 fn identity_cid(data: &[u8]) -> Result<Cid, Err> {
     Ok(Cid::new_v1(RAW, mh(0x00, data)?))
+}
+
+/// Whether a CID's digest is its block's under the hash it names, for the
+/// hashes the cases use; `None` for another.
+fn honest_digest(cid: &Cid, block: &[u8]) -> Option<bool> {
+    let d = cid.hash().digest();
+    Some(match cid.hash().code() {
+        0x00 => d == block,
+        0x12 => d == Sha256::digest(block).as_slice(),
+        0x13 => d == sha2::Sha512::digest(block).as_slice(),
+        0x1e => d == blake3::hash(block).as_bytes(),
+        _ => return None,
+    })
 }
 
 fn native(cid: &Cid, block: &[u8]) -> Value {
@@ -133,12 +147,34 @@ fn blocks() -> Result<Vec<Value>, Err> {
                     expect: Value|
      -> Result<(), Err> {
         // verify_block reads the hash and the size; a codec it doesn't serve
-        // is the walk's refusal, the one way the two may differ here.
-        let native_ok = freedom_ipfs_core::verify_block(cid, block).is_ok();
-        let codec_refusal =
-            expect["fail"] == "unverifiable" && cid.codec() != DAG_PB && cid.codec() != RAW;
-        if native_ok != expect.get("ok").is_some() && !codec_refusal {
-            return Err(format!("block case {id}: verify_block disagrees").into());
+        // is the walk's refusal, the one way the two may differ here. Its
+        // error must be the case's one change: an unsupported hash over
+        // an honest digest, a size past the limit, or a mismatch.
+        use freedom_ipfs_core::CoreError;
+        let verdict = freedom_ipfs_core::verify_block(cid, block);
+        let honest = honest_digest(cid, block);
+        let fits = match (&verdict, expect.get("ok"), expect["fail"].as_str()) {
+            (Ok(()), Some(_), _) => honest == Some(true),
+            // Only dag-pb and raw are read: the hash checks.
+            (Ok(()), None, Some("unverifiable")) => {
+                cid.codec() != DAG_PB && cid.codec() != RAW && honest == Some(true)
+            }
+            (Err(CoreError::UnsupportedHash(_)), None, Some("unverifiable")) => {
+                honest == Some(true)
+            }
+            (Err(CoreError::BlockTooLarge { .. }), None, Some("verification_failed")) => {
+                honest == Some(true)
+            }
+            (Err(CoreError::HashMismatch { .. }), None, Some("verification_failed")) => {
+                honest == Some(false)
+            }
+            _ => false,
+        };
+        if !fits {
+            return Err(format!(
+                "block case {id}: verify_block's {verdict:?} doesn't fit {expect}"
+            )
+            .into());
         }
         out.push(json!({
             "id": id,
@@ -233,19 +269,19 @@ fn blocks() -> Result<Vec<Value>, Err> {
         over_v,
         fail("verification_failed"),
     )?;
-    let blake3 = Cid::new_v1(RAW, mh(0x1e, &Sha256::digest(&raw))?);
+    let blake3 = Cid::new_v1(RAW, mh(0x1e, blake3::hash(&raw).as_bytes())?);
     push(
         "blake3",
-        "a blake3 CID (its digest arbitrary): an unsupported hash",
+        "a blake3 CID with the block's BLAKE3 digest: an unsupported hash, honest",
         &blake3,
         &raw,
         bytes(&raw),
         fail("unverifiable"),
     )?;
-    let sha512 = Cid::new_v1(RAW, mh(0x13, &[0u8; 64])?);
+    let sha512 = Cid::new_v1(RAW, mh(0x13, &sha2::Sha512::digest(&raw))?);
     push(
         "sha2-512",
-        "a sha2-512 CID: an unsupported hash",
+        "a sha2-512 CID with the block's SHA-512 digest: an unsupported hash, honest",
         &sha512,
         &raw,
         bytes(&raw),
@@ -677,17 +713,17 @@ fn unixfs() -> Result<Vec<Value>, Err> {
     Ok(out)
 }
 
-pub fn build() -> Result<Value, Err> {
+pub async fn build() -> Result<Value, Err> {
     Ok(json!({
         "blocks": blocks()?,
         "dag_pb": dag_pb()?,
         "unixfs": unixfs()?,
-        "hamt": hamt()?,
+        "hamt": hamt().await?,
         "car": car()?,
     }))
 }
 
-fn hamt() -> Result<Vec<Value>, Err> {
+async fn hamt() -> Result<Vec<Value>, Err> {
     let doc: Value = serde_json::from_str(&std::fs::read_to_string(crate::OUT)?)?;
     let dir = doc["ipfs"]["directories"]
         .as_array()
@@ -747,6 +783,7 @@ fn hamt() -> Result<Vec<Value>, Err> {
             "expect": if listed { ok(json!({ "cid": found })) } else { json!({ "absent": true }) },
         }));
     }
+    hamt_misplaced(&doc, dir, &mut out).await?;
     Ok(out)
 }
 
@@ -1007,6 +1044,207 @@ fn car() -> Result<Vec<Value>, Err> {
         ok(json!({ "sections": [cr.to_string()] })),
         None,
     );
+    // Bounded CBOR (0009, Bounded decoding): each header changes the
+    // honest one in one way the reader refuses.
+    let tag42 = |c: &Cid| {
+        let mut b = vec![0x00];
+        b.extend_from_slice(&c.to_bytes());
+        let mut out = vec![0xd8, 0x2a, 0x58, b.len() as u8];
+        out.extend_from_slice(&b);
+        out
+    };
+    let roots_key = vec![0x65, b'r', b'o', b'o', b't', b's'];
+    let roots_kv = [roots_key.clone(), vec![0x81], tag42(&cr)].concat();
+    let version_kv = vec![0x67, b'v', b'e', b'r', b's', b'i', b'o', b'n', 0x01];
+    let pad_key = vec![0x63, b'p', b'a', b'd'];
+    let framed = |cbor: Vec<u8>| {
+        let mut o = Vec::new();
+        uvarint(cbor.len() as u64, &mut o);
+        o.extend_from_slice(&cbor);
+        [o, sections.concat()].concat()
+    };
+    if framed([vec![0xa2], roots_kv.clone(), version_kv.clone()].concat()) != honest {
+        return Err("the CBOR cases' header differs from the honest one".into());
+    }
+    let mut indefinite_bytes = vec![0xd8, 0x2a, 0x5f];
+    indefinite_bytes.extend_from_slice(&tag42(&cr)[2..]);
+    indefinite_bytes.push(0xff);
+    for (id, note, cbor) in [
+        (
+            "header-indefinite-map",
+            "the header's map with an indefinite length",
+            [vec![0xbf], roots_kv.clone(), version_kv.clone(), vec![0xff]].concat(),
+        ),
+        (
+            "header-indefinite-array",
+            "the roots array with an indefinite length",
+            [
+                vec![0xa2],
+                roots_key.clone(),
+                vec![0x9f],
+                tag42(&cr),
+                vec![0xff],
+                version_kv.clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "header-indefinite-key",
+            "the key roots as an indefinite-length text string",
+            [
+                vec![0xa2, 0x7f],
+                roots_key.clone(),
+                vec![0xff, 0x81],
+                tag42(&cr),
+                version_kv.clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "header-indefinite-cid",
+            "the root's CID bytes as an indefinite-length byte string",
+            [
+                vec![0xa2],
+                roots_key.clone(),
+                vec![0x81],
+                indefinite_bytes.clone(),
+                version_kv.clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "header-integer-key",
+            "an entry whose key is the integer 1",
+            [vec![0xa3, 0x01, 0x01], roots_kv.clone(), version_kv.clone()].concat(),
+        ),
+        (
+            "header-integer-key-nested",
+            "an unknown key whose value is a map with an integer key",
+            [
+                vec![0xa3],
+                pad_key.clone(),
+                vec![0xa1, 0x01, 0x01],
+                roots_kv.clone(),
+                version_kv.clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "header-duplicate-key",
+            "version twice, with the same value",
+            [
+                vec![0xa3],
+                roots_kv.clone(),
+                version_kv.clone(),
+                version_kv.clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "header-tag-42-not-bytes",
+            "an unknown key whose value is tag 42 over an integer: not a CID",
+            [
+                vec![0xa3],
+                pad_key.clone(),
+                vec![0xd8, 0x2a, 0x01],
+                roots_kv.clone(),
+                version_kv.clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "header-tag-42-no-prefix",
+            "a root as tag 42 over the CID's bytes without the 0x00 prefix",
+            [
+                vec![0xa2],
+                roots_key.clone(),
+                vec![0x81, 0xd8, 0x2a, 0x58, cr.to_bytes().len() as u8],
+                cr.to_bytes(),
+                version_kv.clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "header-tag-42-not-a-cid",
+            "a root as tag 42 over 0x00 and bytes that aren't a CID",
+            [
+                vec![0xa2],
+                roots_key.clone(),
+                vec![0x81, 0xd8, 0x2a, 0x44, 0x00, 0x07, 0x07, 0x07],
+                version_kv.clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "header-other-tag",
+            "an unknown key whose value is tag 1 (an epoch time): DAG-CBOR has only tag 42",
+            [
+                vec![0xa3],
+                pad_key.clone(),
+                vec![0xc1, 0x00],
+                roots_kv.clone(),
+                version_kv.clone(),
+            ]
+            .concat(),
+        ),
+    ] {
+        push(
+            id,
+            note,
+            &framed(cbor),
+            json!({ "fail": "verification_failed", "after": 0 }),
+            None,
+        );
+    }
+    push(
+        "header-unknown-key",
+        "an unknown key with a text value: skipped, as the CBOR rules allow",
+        &framed(
+            [
+                vec![0xa3],
+                pad_key.clone(),
+                vec![0x61, b'x'],
+                roots_kv.clone(),
+                version_kv.clone(),
+            ]
+            .concat(),
+        ),
+        ok(json!({ "sections": ids })),
+        None,
+    );
+    push(
+        "header-tag-42-unknown-key",
+        "an unknown key whose value is a CID (tag 42): a link where DAG-CBOR allows one, skipped",
+        &framed(
+            [
+                vec![0xa3],
+                pad_key.clone(),
+                tag42(&cr),
+                roots_kv.clone(),
+                version_kv.clone(),
+            ]
+            .concat(),
+        ),
+        ok(json!({ "sections": ids })),
+        None,
+    );
+    push(
+        "header-tag-42-nested",
+        "an unknown key whose value is a map holding a CID (tag 42), skipped",
+        &framed(
+            [
+                vec![0xa3],
+                pad_key.clone(),
+                vec![0xa1, 0x61, b'a'],
+                tag42(&cr),
+                roots_kv.clone(),
+                version_kv.clone(),
+            ]
+            .concat(),
+        ),
+        ok(json!({ "sections": ids })),
+        None,
+    );
     let idc = identity_cid(b"abc")?;
     let body = [header.clone(), section(&idc, b"abd")].concat();
     push(
@@ -1031,4 +1269,282 @@ fn varint_at(buf: &[u8], pos: &mut usize) -> Option<u64> {
         *pos += 1;
         shift += 7;
     }
+}
+
+/// A protobuf message's fields: number, wire type, and the value's bytes
+/// (a varint's encoding, or a length-delimited field's contents).
+fn pb_fields(buf: &[u8]) -> Result<Vec<(u64, u8, Vec<u8>)>, Err> {
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while pos < buf.len() {
+        let key = varint_at(buf, &mut pos).ok_or("field key")?;
+        pos += 1;
+        let wt = (key & 7) as u8;
+        match wt {
+            0 => {
+                let start = pos;
+                varint_at(buf, &mut pos).ok_or("varint")?;
+                pos += 1;
+                out.push((key >> 3, wt, buf[start..pos].to_vec()));
+            }
+            2 => {
+                let len = varint_at(buf, &mut pos).ok_or("length")? as usize;
+                pos += 1;
+                out.push((
+                    key >> 3,
+                    wt,
+                    buf.get(pos..pos + len).ok_or("past end")?.to_vec(),
+                ));
+                pos += len;
+            }
+            _ => return Err("an unexpected wire type".into()),
+        }
+    }
+    Ok(out)
+}
+
+fn varint_value(b: &[u8]) -> u64 {
+    let mut pos = 0;
+    varint_at(b, &mut pos).unwrap_or(0)
+}
+
+/// A HAMT shard's links (hash, name, tsize) and its bitfield.
+fn shard_parts(block: &[u8]) -> Result<(Vec<Link>, Vec<u8>), Err> {
+    let mut links = Vec::new();
+    let mut bitfield = None;
+    for (num, _, v) in pb_fields(block)? {
+        match num {
+            2 => {
+                let mut l = Link {
+                    hash: None,
+                    name: None,
+                    tsize: None,
+                };
+                for (n, _, f) in pb_fields(&v)? {
+                    match n {
+                        1 => l.hash = Some(f),
+                        2 => l.name = Some(String::from_utf8(f)?),
+                        3 => l.tsize = Some(varint_value(&f)),
+                        _ => return Err("an unknown link field".into()),
+                    }
+                }
+                links.push(l);
+            }
+            1 => {
+                for (n, _, f) in pb_fields(&v)? {
+                    match n {
+                        1 if varint_value(&f) != 5 => return Err("not a HAMT shard".into()),
+                        2 => bitfield = Some(f),
+                        5 if varint_value(&f) != 0x22 => return Err("not murmur3".into()),
+                        6 if varint_value(&f) != 256 => return Err("not fanout 256".into()),
+                        _ => {}
+                    }
+                }
+            }
+            _ => return Err("an unknown node field".into()),
+        }
+    }
+    Ok((links, bitfield.ok_or("no bitfield")?))
+}
+
+fn shard_block(links: &[Link], bitfield: &[u8]) -> Vec<u8> {
+    let mut data = Unixfs::new(5);
+    data.data = Some(bitfield.to_vec());
+    data.hash_type = Some(0x22);
+    data.fanout = Some(256);
+    pb_node(links, Some(&data.encode()))
+}
+
+/// Bucket `i` of a big-endian, right-aligned bitfield.
+fn bit(bitfield: &[u8], i: u8) -> bool {
+    let byte = usize::from(i / 8);
+    byte < bitfield.len() && (bitfield[bitfield.len() - 1 - byte] >> (i % 8)) & 1 == 1
+}
+
+fn set_bit(bitfield: &mut [u8], i: u8, on: bool) {
+    let at = bitfield.len() - 1 - usize::from(i / 8);
+    if on {
+        bitfield[at] |= 1 << (i % 8);
+    } else {
+        bitfield[at] &= !(1 << (i % 8));
+    }
+}
+
+/// GatewayCore's answer for a path over these blocks: the native reader.
+async fn native_get(blocks: HashMap<Cid, Vec<u8>>, path: &str) -> Result<Value, Err> {
+    let core = freedom_ipfs_gateway::GatewayCore::with_provider_config(
+        std::sync::Arc::new(crate::ipfs::MemProvider(blocks)),
+        freedom_ipfs_gateway::GatewayConfig::new(8),
+    );
+    let parsed = freedom_ipfs_gateway::parse_native_request(freedom_ipfs_gateway::NativeRequest {
+        method: Some("GET".to_string()),
+        path: path.to_string(),
+        headers: Some(Vec::new()),
+        request_id: Some(1),
+        parent_request_id: None,
+        top_level_path: Some(path.to_string()),
+    })
+    .map_err(|e| e.to_string())?;
+    let resp = core.handle(parsed.request).await;
+    let status = resp.status().as_u16();
+    let body = http_body_util::BodyExt::collect(resp.into_body())
+        .await
+        .map_err(|e| e.to_string())?
+        .to_bytes();
+    Ok(
+        json!({ "status": status, "length": body.len(), "sha256": hex::encode(Sha256::digest(&body)) }),
+    )
+}
+
+/// hamt-lookup's cases: an entry that isn't where its hash and the
+/// bitfield point, in a root shard rebuilt from hamt-v1's. The native
+/// reader finds it by name; the core follows the hash and answers absent.
+async fn hamt_misplaced(doc: &Value, dir: &Value, out: &mut Vec<Value>) -> Result<(), Err> {
+    let blocks = &doc["ipfs"]["blocks"];
+    let mut all = HashMap::new();
+    for (cid, b) in blocks.as_object().ok_or("blocks")? {
+        all.insert(
+            Cid::try_from(cid.as_str())?,
+            base64::engine::general_purpose::STANDARD.decode(b.as_str().ok_or("block")?)?,
+        );
+    }
+    // The entries' leaves, from their seeded content.
+    for e in dir["entries"].as_array().ok_or("entries")? {
+        let seed = e["seed"].as_str().ok_or("an entry without a seed")?;
+        for l in e["leaves"].as_array().ok_or("leaves")? {
+            let (from, len) = (
+                l["from"].as_u64().ok_or("from")? as usize,
+                l["length"].as_u64().ok_or("length")? as usize,
+            );
+            let data = crate::content::bytes(seed, from + len)[from..].to_vec();
+            all.insert(Cid::try_from(l["cid"].as_str().ok_or("cid")?)?, data);
+        }
+    }
+    let root = dir["root"].as_str().ok_or("root")?;
+    let root_block = all.get(&Cid::try_from(root)?).ok_or("root block")?.clone();
+    // GatewayCore finds hamt-v1's own entries.
+    let honest = native_get(
+        all.clone(),
+        &format!(
+            "/ipfs/{root}/{}",
+            dir["entries"][0]["path"].as_str().ok_or("path")?
+        ),
+    )
+    .await?;
+    if honest["status"] != 200 {
+        return Err(format!("GatewayCore doesn't find hamt-v1's entry: {honest}").into());
+    }
+    let (links, bitfield) = shard_parts(&root_block)?;
+    if shard_block(&links, &bitfield) != root_block {
+        return Err("the HAMT rebuild doesn't give Kubo's root shard back".into());
+    }
+    // Two entries at the root, in different buckets.
+    let entries: Vec<usize> = links
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.name.as_deref().is_some_and(|n| n.len() > 2))
+        .map(|(i, _)| i)
+        .take(2)
+        .collect();
+    let [first, second] = entries[..] else {
+        return Err("hamt-v1's root holds fewer than two entries".into());
+    };
+    let name_of = |l: &Link| -> Result<(u8, String), Err> {
+        let n = l.name.as_deref().ok_or("name")?;
+        Ok((u8::from_str_radix(&n[..2], 16)?, n[2..].to_string()))
+    };
+    let (bucket, name) = name_of(&links[first])?;
+    if crate::murmur3::hamt_bits(&name)[0] != bucket {
+        return Err("hamt-v1's entry isn't in its hash's bucket".into());
+    }
+    let empty = (0..=255u8)
+        .find(|&b| !bit(&bitfield, b))
+        .ok_or("a full root shard")?;
+    let mut push = |id: &str,
+                    note: &str,
+                    links: &[Link],
+                    bitfield: &[u8],
+                    name: &str,
+                    bucket: u8,
+                    native: Value|
+     -> Result<(), Err> {
+        let block = shard_block(links, bitfield);
+        let cid = sha256_cid(DAG_PB, &block)?;
+        out.push(json!({
+            "id": id,
+            "note": note,
+            "root": cid.to_string(),
+            "blocks": { cid.to_string(): base64::engine::general_purpose::STANDARD.encode(&block) },
+            "name": name,
+            "hash_bits": hex::encode(crate::murmur3::hamt_bits(name)),
+            "levels": [{ "depth": 0, "bucket": bucket, "link": null }],
+            "expect": { "absent": true },
+            "deviation": "hamt-lookup",
+            "native": native,
+        }));
+        Ok(())
+    };
+    // The entry renamed into an empty bucket, the bitfield moved with it.
+    let mut moved: Vec<Link> = links
+        .iter()
+        .map(|l| Link {
+            hash: l.hash.clone(),
+            name: l.name.clone(),
+            tsize: l.tsize,
+        })
+        .collect();
+    moved[first].name = Some(format!("{empty:02X}{name}"));
+    moved.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut bf = bitfield.clone();
+    set_bit(&mut bf, bucket, false);
+    set_bit(&mut bf, empty, true);
+    let block = shard_block(&moved, &bf);
+    let mut with = all.clone();
+    let cid = sha256_cid(DAG_PB, &block)?;
+    with.insert(cid, block);
+    let native = native_get(with, &format!("/ipfs/{cid}/{name}")).await?;
+    if native["status"] != 200 {
+        return Err(format!("GatewayCore didn't find the moved entry: {native}").into());
+    }
+    push(
+        &format!("hamt-v1-moved/{name}"),
+        &format!(
+            "hamt-v1's root with the entry for {name} moved from bucket {bucket:02X}, where its hash points, to the empty bucket {empty:02X}, the bitfield moved with it: the native reader finds it by name, the core's lookup finds the bucket empty"
+        ),
+        &moved,
+        &bf,
+        &name,
+        bucket,
+        native,
+    )?;
+    // Two entries' links swapped, names and bitfield unchanged.
+    let mut swapped: Vec<Link> = links
+        .iter()
+        .map(|l| Link {
+            hash: l.hash.clone(),
+            name: l.name.clone(),
+            tsize: l.tsize,
+        })
+        .collect();
+    swapped.swap(first, second);
+    let block = shard_block(&swapped, &bitfield);
+    let mut with = all.clone();
+    let cid = sha256_cid(DAG_PB, &block)?;
+    with.insert(cid, block);
+    let native = native_get(with, &format!("/ipfs/{cid}/{name}")).await?;
+    if native["status"] != 200 {
+        return Err(format!("GatewayCore didn't find the swapped entry: {native}").into());
+    }
+    push(
+        &format!("hamt-v1-swapped/{name}"),
+        &format!(
+            "hamt-v1's root with the links of its first two entries swapped: at bucket {bucket:02X}'s position among the set bits is another bucket's link, so the core's lookup of {name} finds no entry there, where the native reader finds it by name"
+        ),
+        &swapped,
+        &bitfield,
+        &name,
+        bucket,
+        native,
+    )?;
+    Ok(())
 }
