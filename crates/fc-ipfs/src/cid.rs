@@ -110,6 +110,36 @@ pub fn from_base32(text: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// A libp2p-key CID's bytes from an IPNS name's text: base36 (`k…`), as
+/// Kubo writes names, or base32 (`b…`). `None` for anything else.
+pub fn from_key_text(text: &str) -> Option<Vec<u8>> {
+    if text.starts_with('b') {
+        return from_base32(text).filter(|b| parse(b).is_some_and(|c| c.codec == LIBP2P_KEY));
+    }
+    let body = text.strip_prefix('k')?;
+    const B36: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    // Base36 is a big-endian base change, as multibase defines it: leading
+    // '0's are leading zero bytes.
+    let zeros = body.bytes().take_while(|&c| c == b'0').count();
+    let mut out: Vec<u8> = Vec::with_capacity(body.len());
+    for c in body.bytes() {
+        let mut carry = B36.iter().position(|&x| x == c)? as u32;
+        for b in out.iter_mut().rev() {
+            carry += u32::from(*b) * 36;
+            *b = carry as u8;
+            carry >>= 8;
+        }
+        while carry > 0 {
+            out.insert(0, carry as u8);
+            carry >>= 8;
+        }
+    }
+    let mut bytes = vec![0u8; zeros];
+    bytes.extend(out);
+    parse(&bytes).filter(|c| c.version == 1 && c.codec == LIBP2P_KEY)?;
+    Some(bytes)
+}
+
 /// A CID's text as a verify plan and GatewayCore write it: CIDv1 in
 /// lowercase base32; CIDv0 in base58btc.
 pub fn to_text(cid: &Cid<'_>) -> String {
