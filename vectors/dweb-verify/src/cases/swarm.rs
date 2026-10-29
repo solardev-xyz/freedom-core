@@ -3,9 +3,11 @@
 
 use super::{Err, bytes, fail, ok};
 use crate::content;
+use crate::store::MemFetcher;
 use ant_crypto::keccak256;
 use k256::elliptic_curve::PrimeField;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 
 type Addr = [u8; 32];
 
@@ -578,10 +580,1226 @@ fn leaves() -> Result<Vec<Value>, Err> {
     Ok(out)
 }
 
-pub fn build() -> Result<Value, Err> {
+pub async fn build() -> Result<Value, Err> {
     Ok(json!({
         "chunks": chunks()?,
         "feed_updates": feed_updates()?,
         "leaves": leaves()?,
+        "intermediates": intermediates().await?,
+        "manifest_nodes": nodes().await?,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Intermediate chunks (0009, Files): references, padding, geometry and
+// erasure coding, read from a chunk that passed its address check.
+
+const CHUNK: u64 = 4096;
+
+/// The design's geometry: for `n` data references under a span of `total`,
+/// `branch` is the smallest 4096·b^k with total − (n − 1)·branch ≤ branch;
+/// the first n − 1 children cover `branch` bytes each, the last the rest.
+fn child_lengths(n: usize, total: u64, branching: u64) -> Vec<u64> {
+    let before = n.saturating_sub(1) as u64;
+    let mut branch = CHUNK;
+    while total.saturating_sub(branch.saturating_mul(before)) > branch {
+        branch = branch.saturating_mul(branching);
+    }
+    let mut rest = total;
+    (0..n)
+        .map(|i| {
+            let l = if i + 1 == n { rest } else { branch.min(rest) };
+            rest -= l;
+            l
+        })
+        .collect()
+}
+
+/// A span's level and plain value (a top byte past 128 carries the level).
+fn level_of(span: [u8; 8]) -> (u8, u64) {
+    let mut plain = span;
+    if plain[7] > 128 {
+        let level = plain[7] & 0x7f;
+        plain[7] = 0;
+        return (level, u64::from_le_bytes(plain));
+    }
+    (0, u64::from_le_bytes(plain))
+}
+
+/// The branching at a level: 128 references, less a full chunk's parities
+/// (Bee's `GetMaxShards`, as Ant carries its table).
+fn branching(level: u8) -> u64 {
+    ant_retrieval::rs::max_shards(level) as u64
+}
+
+/// The parities a node of this span holds at this level: Bee's
+/// `ReferenceCount`, as Ant carries it; none at level 0 or for a leaf.
+fn parities_for(level: u8, total: u64) -> usize {
+    if level == 0 || total <= CHUNK {
+        return 0;
+    }
+    ant_retrieval::rs::reference_count(total, level).1
+}
+
+/// What the parse yields: the level, the counts, and each data child.
+fn inter_ok(level: u8, parities: usize, children: &[(Addr, u64)]) -> Value {
+    ok(json!({
+        "level": level,
+        "data_references": children.len(),
+        "parities": parities,
+        "children": children
+            .iter()
+            .map(|(a, l)| json!({ "address": h(a), "length": l }))
+            .collect::<Vec<_>>(),
+    }))
+}
+
+struct Inters {
+    out: Vec<Value>,
+    net: HashMap<Addr, Vec<u8>>,
+}
+
+impl Inters {
+    /// A leaf of `len` bytes for a constructed node, held in the network.
+    fn leaf(&mut self, label: &str, len: u64) -> Result<(Addr, Vec<u8>), Err> {
+        let data = content::bytes(label, len as usize);
+        let (a, w) = cac(span(len), &data)?;
+        self.net.insert(a, w);
+        Ok((a, data))
+    }
+
+    /// Records a case after Ant's joiner reads it: `content` is the file
+    /// the node's children make, which the join must give back, or `None`
+    /// where the design refuses the node and Ant's joiner must too.
+    async fn push(
+        &mut self,
+        id: &str,
+        note: &str,
+        wire: &[u8],
+        expect: Value,
+        content: Option<&[u8]>,
+    ) -> Result<(), Err> {
+        let s: [u8; 8] = wire.get(..8).ok_or("no span")?.try_into()?;
+        let (_, total) = level_of(s);
+        let address = ant_crypto::bmt_hash_with_span(&s, &wire[8..]).ok_or("payload past 4096")?;
+        let fetcher = MemFetcher::new(self.net.clone());
+        let joined = ant_retrieval::join(&fetcher, wire, usize::MAX).await;
+        let ant = match &joined {
+            Ok(b) => json!({ "join": "ok", "length": b.len() }),
+            Err(e) => json!({ "join": e.to_string() }),
+        };
+        let agrees = match (&joined, content) {
+            (Ok(b), Some(c)) => b.as_slice() == c,
+            (Err(_), None) => true,
+            _ => false,
+        };
+        if !agrees || content.is_some() != expect.get("ok").is_some() {
+            return Err(format!("intermediate case {id}: Ant's joiner says {ant}").into());
+        }
+        self.out.push(json!({
+            "id": id,
+            "note": note,
+            "address": h(&address),
+            "wire": bytes(wire),
+            "logical_length": total,
+            "expect": expect,
+            "ant": ant,
+        }));
+        Ok(())
+    }
+
+    /// A node over leaves of the given lengths at `level`, with its
+    /// parities (arbitrary addresses: nothing reads them when no data is
+    /// missing) and `padding` trailing zero references. Its geometry and
+    /// parity count must be the design's.
+    async fn built(
+        &mut self,
+        id: &str,
+        note: &str,
+        level: u8,
+        lengths: &[u64],
+        padding: usize,
+    ) -> Result<(), Err> {
+        let total: u64 = lengths.iter().sum();
+        if child_lengths(lengths.len(), total, branching(level)) != lengths {
+            return Err(format!("intermediate case {id}: not the design's geometry").into());
+        }
+        let parities = parities_for(level, total);
+        let mut children = Vec::new();
+        let mut file = Vec::new();
+        for (i, &l) in lengths.iter().enumerate() {
+            let (a, d) = self.leaf(&format!("checks-inter-{id}-{i}"), l)?;
+            children.push((a, l));
+            file.extend_from_slice(&d);
+        }
+        let mut payload: Vec<u8> = children.iter().flat_map(|(a, _)| *a).collect();
+        for p in 0..parities {
+            payload.extend_from_slice(&keccak256(
+                format!("checks-inter-{id}-parity-{p}").as_bytes(),
+            ));
+        }
+        payload.extend(std::iter::repeat_n(0u8, 32 * padding));
+        let mut s = span(total);
+        if level > 0 {
+            s[7] = 0x80 | level;
+        }
+        let (_, wire) = cac(s, &payload)?;
+        self.push(
+            id,
+            note,
+            &wire,
+            inter_ok(level, parities, &children),
+            Some(&file),
+        )
+        .await
+    }
+
+    /// The root of Ant's own split of `size` bytes at `level`; its children
+    /// and parities read off its payload by the design's rules, and each
+    /// child's own span checked against the length its parent gives it.
+    async fn split(&mut self, id: &str, note: &str, size: usize, level: u8) -> Result<(), Err> {
+        let data = content::bytes(&format!("checks-inter-{id}"), size);
+        let split = ant_retrieval::split_bytes_with_redundancy(&data, level);
+        for c in &split.chunks {
+            self.net.insert(c.address, c.wire.clone());
+        }
+        let wire = split.root_wire.clone();
+        let s: [u8; 8] = wire[..8].try_into()?;
+        let (lvl, total) = level_of(s);
+        let parities = parities_for(lvl, total);
+        let refs: Vec<Addr> = wire[8..]
+            .chunks(32)
+            .map(<[u8; 32]>::try_from)
+            .collect::<Result<_, _>>()?;
+        let n = refs
+            .len()
+            .checked_sub(parities)
+            .ok_or("fewer references than parities")?;
+        let lengths = child_lengths(n, total, branching(lvl));
+        let mut children = Vec::new();
+        // What Ant's joiner gives: a leaf child's payload up to its length
+        // (Ant's one-reference wrapper streams its own payload's first
+        // byte, ant-lone-reference), else the content beneath it.
+        let mut joined = Vec::new();
+        let mut offset = 0usize;
+        for (a, l) in refs[..n].iter().zip(lengths) {
+            let child = self.net.get(a).ok_or("a child the split didn't write")?;
+            let own: [u8; 8] = child[..8].try_into()?;
+            if level_of(own).1 != l {
+                return Err(
+                    format!("intermediate case {id}: a child's span isn't its length").into(),
+                );
+            }
+            let len = usize::try_from(l)?;
+            if l <= CHUNK {
+                joined.extend_from_slice(child.get(8..8 + len).ok_or("a short leaf")?);
+            } else {
+                joined.extend_from_slice(&data[offset..offset + len]);
+            }
+            offset += len;
+            children.push((*a, l));
+        }
+        self.push(
+            id,
+            note,
+            &wire,
+            inter_ok(lvl, parities, &children),
+            Some(&joined),
+        )
+        .await
+    }
+}
+
+async fn intermediates() -> Result<Vec<Value>, Err> {
+    let mut c = Inters {
+        out: Vec::new(),
+        net: HashMap::new(),
+    };
+    c.built(
+        "two-references",
+        "two full leaves: the fewest references Bee writes",
+        0,
+        &[4096, 4096],
+        0,
+    )
+    .await?;
+    c.built(
+        "last-short",
+        "three references, the last child 1,808 bytes",
+        0,
+        &[4096, 4096, 1808],
+        0,
+    )
+    .await?;
+    c.built(
+        "references-128",
+        "128 full leaves: a full payload",
+        0,
+        &[4096; 128],
+        0,
+    )
+    .await?;
+    c.built("zero-padding", "last-short with two all-zero references after it: trailing zero references are padding, not children", 0, &[4096, 4096, 1808], 2).await?;
+    // A zero reference between two others is a child; the network holds a
+    // chunk at the zero address for Ant's joiner (whose fetcher doesn't
+    // check addresses), where the walk's own check would refuse it.
+    let (a, da) = c.leaf("checks-inter-zero-inside-0", 4096)?;
+    let zero_leaf = content::bytes("checks-inter-zero-inside-1", 4096);
+    let (_, zw) = cac(span(4096), &zero_leaf)?;
+    c.net.insert([0u8; 32], zw);
+    let (b, db) = c.leaf("checks-inter-zero-inside-2", 100)?;
+    let mut payload = a.to_vec();
+    payload.extend_from_slice(&[0u8; 32]);
+    payload.extend_from_slice(&b);
+    let (_, w) = cac(span(8292), &payload)?;
+    let file = [da, zero_leaf, db].concat();
+    c.push("zero-reference-inside", "a zero reference between two others: only trailing zeros are padding, so it is the second child (whose chunk then fails its own address check)", &w,
+        inter_ok(0, 0, &[(a, 4096), ([0u8; 32], 4096), (b, 100)]), Some(&file)).await?;
+    // One reference over a two-leaf node: Ant reads a node of one.
+    let (a0, d0) = c.leaf("checks-inter-one-0", 4096)?;
+    let (a1, d1) = c.leaf("checks-inter-one-1", 4096)?;
+    let (inner, inner_w) = cac(span(8192), &[a0, a1].concat())?;
+    c.net.insert(inner, inner_w);
+    let (_, w) = cac(span(8192), &inner)?;
+    c.push("one-reference", "one reference with a span of 8,192: its only child is the whole span, an intermediate of two leaves; Ant reads it, and so does the core", &w,
+        inter_ok(0, 0, &[(inner, 8192)]), Some(&[d0, d1].concat())).await?;
+    c.split("two-levels-ant", "Ant's split of 524,289 bytes: 128 leaves' node, then its one-reference wrapper of the last leaf (ant-lone-reference)", 524_289, 0).await?;
+    c.split(
+        "two-levels",
+        "Ant's split of 2 MiB: four children of 128 leaves each",
+        2 * 1024 * 1024,
+        0,
+    )
+    .await?;
+    for level in 1..=4u8 {
+        let full = ant_retrieval::rs::max_shards(level);
+        c.split(&format!("level-{level}-full"), &format!("Ant's split at level {level} of {full} leaves: the most data references a node holds at that level, then its parities"), full * 4096, level).await?;
+        c.split(
+            &format!("level-{level}-ten"),
+            &format!("Ant's split at level {level} of ten leaves: Bee's parity count for ten"),
+            10 * 4096,
+            level,
+        )
+        .await?;
+        c.split(&format!("level-{level}-two-levels"), &format!("Ant's split at level {level} of {} leaves: a full node and the leftover leaf, carried up; the first child's length is {full} leaves", full + 1), (full + 1) * 4096, level).await?;
+        c.built(
+            &format!("level-{level}-last-short"),
+            &format!("level {level}, three leaves, the last 1,000 bytes"),
+            level,
+            &[4096, 4096, 1000],
+            0,
+        )
+        .await?;
+    }
+    for (id, top) in [("level-5", 0x85u8), ("level-127", 0xff)] {
+        let lengths = [4096u64, 4096];
+        let mut children = Vec::new();
+        let mut file = Vec::new();
+        for (i, &l) in lengths.iter().enumerate() {
+            let (a, d) = c.leaf(&format!("checks-inter-{id}-{i}"), l)?;
+            children.push((a, l));
+            file.extend_from_slice(&d);
+        }
+        let mut s = span(8192);
+        s[7] = top;
+        let payload: Vec<u8> = children.iter().flat_map(|(a, _)| *a).collect();
+        let (_, w) = cac(s, &payload)?;
+        c.push(id, &format!("two full leaves, the span's top byte {top:#04x}: level {}, which no table has, so no parities and a branching of 128, as Ant reads it", top & 0x7f), &w,
+            inter_ok(top & 0x7f, 0, &children), Some(&file)).await?;
+    }
+    let (a, _) = c.leaf("checks-inter-bad-0", 4096)?;
+    let mut payload = a.to_vec();
+    payload.extend_from_slice(&a[..1]);
+    let (_, w) = cac(span(8192), &payload)?;
+    c.push(
+        "not-whole-references",
+        "a payload of 33 bytes: not whole references",
+        &w,
+        fail("unverifiable"),
+        None,
+    )
+    .await?;
+    let (_, w) = cac(span(8192), &[0u8; 64])?;
+    c.push(
+        "all-zero",
+        "two all-zero references: no reference once the padding goes",
+        &w,
+        fail("unverifiable"),
+        None,
+    )
+    .await?;
+    let (_, w) = cac(span(8192), &[])?;
+    c.push(
+        "no-references",
+        "span 8,192 and no payload: a valid chunk, but no reference to read",
+        &w,
+        fail("unverifiable"),
+        None,
+    )
+    .await?;
+    // Level 1 at ten leaves' span implies four parities: four references
+    // leave no data reference.
+    let mut s = span(10 * 4096);
+    s[7] = 0x81;
+    let refs: Vec<u8> = (0..4)
+        .flat_map(|i| keccak256(format!("checks-inter-few-{i}").as_bytes()))
+        .collect();
+    let (_, w) = cac(s, &refs)?;
+    c.push("parities-not-fewer-than-references", "level 1 with a span of ten leaves, whose four parities leave four references no data reference", &w, fail("unverifiable"), None).await?;
+    Ok(c.out)
+}
+
+// ---------------------------------------------------------------------------
+// Mantaray nodes (0009, Manifests and feeds; Bounded decoding): a node's
+// joined bytes, decoded as Ant decodes them, within the core's caps.
+
+/// A node's bytes as `(prefix, unit, count)` segments: `prefix` once,
+/// then `unit` repeated `count` times.
+type Seg = (Vec<u8>, Vec<u8>, usize);
+type Segs = Vec<Seg>;
+
+/// The metadata keys the walk reads, the only ones a decoded fork keeps.
+pub const KEPT_METADATA: [&str; 7] = [
+    "Content-Type",
+    "Filename",
+    "website-index-document",
+    "website-error-document",
+    "swarm-feed-owner",
+    "swarm-feed-topic",
+    "swarm-feed-type",
+];
+
+const MAX_NODE: usize = 1 << 20;
+
+fn version(v: &str) -> [u8; 31] {
+    let h = keccak256(v.as_bytes());
+    let mut out = [0u8; 31];
+    out.copy_from_slice(&h[..31]);
+    out
+}
+
+/// A fork as the bytes lay it out, every field the case's to set.
+struct RawFork {
+    /// The bitmap bit it sits under.
+    bit: u8,
+    node_type: u8,
+    prefix_len: u8,
+    /// Up to 30 bytes, zero-padded.
+    prefix: Vec<u8>,
+    child: Vec<u8>,
+    /// The metadata as `(prefix, unit, count)` segments, and the length
+    /// its 2-byte field declares (its own length unless a case lies).
+    meta: Option<(Segs, Option<u16>)>,
+}
+
+fn meta_len(segs: &[Seg]) -> usize {
+    segs.iter().map(|(p, u, n)| p.len() + u.len() * n).sum()
+}
+
+/// A node's bytes as segments for `parts`, so long metadata stays short in
+/// the file. Obfuscation needs whole bytes, so only a node held whole
+/// (`key` non-zero) is obfuscated.
+fn raw_node(
+    key: [u8; 32],
+    ver: [u8; 31],
+    ref_size: u8,
+    entry: &[u8],
+    forks: &[RawFork],
+    tail: &[u8],
+) -> Segs {
+    let mut segs: Segs = Vec::new();
+    let mut cur = key.to_vec();
+    cur.extend_from_slice(&ver);
+    cur.push(ref_size);
+    cur.extend_from_slice(entry);
+    let mut bitmap = [0u8; 32];
+    for f in forks {
+        bitmap[usize::from(f.bit / 8)] |= 1 << (f.bit % 8);
+    }
+    cur.extend_from_slice(&bitmap);
+    for f in forks {
+        cur.push(f.node_type);
+        cur.push(f.prefix_len);
+        let mut p = f.prefix.clone();
+        p.resize(30, 0);
+        cur.extend_from_slice(&p);
+        cur.extend_from_slice(&f.child);
+        if let Some((m, declared)) = &f.meta {
+            let len = declared.unwrap_or(meta_len(m) as u16);
+            cur.extend_from_slice(&len.to_be_bytes());
+            for (p, u, n) in m {
+                cur.extend_from_slice(p);
+                if *n > 0 {
+                    segs.push((std::mem::take(&mut cur), u.clone(), *n));
+                }
+            }
+        }
+    }
+    cur.extend_from_slice(tail);
+    segs.push((cur, Vec::new(), 0));
+    if key != [0u8; 32] {
+        let mut whole: Vec<u8> = segs
+            .iter()
+            .flat_map(|(p, u, n)| {
+                let mut v = p.clone();
+                for _ in 0..*n {
+                    v.extend_from_slice(u);
+                }
+                v
+            })
+            .collect();
+        for chunk in whole[32..].chunks_mut(32) {
+            for (i, b) in chunk.iter_mut().enumerate() {
+                *b ^= key[i];
+            }
+        }
+        return vec![(whole, Vec::new(), 0)];
+    }
+    segs
+}
+
+fn seg(text: &str) -> Segs {
+    vec![(text.as_bytes().to_vec(), Vec::new(), 0)]
+}
+
+/// Bee's newline padding of a fork's metadata (`manifest_writer.rs`).
+fn bee_padded(meta: &str) -> String {
+    let with_size = meta.len() + 2;
+    let pad = match with_size.cmp(&32) {
+        std::cmp::Ordering::Less => 32 - with_size,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 32 - with_size % 32,
+    };
+    format!("{meta}{}", "\n".repeat(pad))
+}
+
+struct NodeCases {
+    out: Vec<Value>,
+    net: HashMap<Addr, Vec<u8>>,
+    /// The value node each file reference's fork names.
+    children: Vec<(Addr, Addr)>,
+}
+
+/// What a lookup of a fork's prefix through Ant should give: the child's
+/// entry, and the kept metadata.
+struct Probe {
+    path: String,
+    entry: Addr,
+    kept: Vec<(String, String)>,
+}
+
+impl NodeCases {
+    /// The `i`th value node: an entry of a file reference, no forks.
+    fn child(&mut self, i: usize) -> Result<(Addr, Addr), Err> {
+        while self.children.len() <= i {
+            let file = keccak256(format!("checks-node-file-{}", self.children.len()).as_bytes());
+            let node = crate::mantaray::Node {
+                obfuscation_key: [0; 32],
+                ref_size: 32,
+                entry: file.to_vec(),
+                forks: Vec::new(),
+            }
+            .marshal();
+            let (a, w) = ant_crypto::cac_new(&node).ok_or("value node past a chunk")?;
+            self.net.insert(a, w);
+            self.children.push((a, file));
+        }
+        Ok(self.children[i])
+    }
+
+    /// Records a case after Ant reads the node: stored as a file, then
+    /// looked up through `lookup_path`, once at a path no fork holds (so
+    /// the node is parsed whole, or refused) and once per probe.
+    async fn push(
+        &mut self,
+        id: &str,
+        note: &str,
+        segs: &[Seg],
+        expect: Value,
+        probes: &[Probe],
+        deviation: Option<&str>,
+    ) -> Result<(), Err> {
+        let seg_refs: Vec<(&[u8], &[u8], usize)> = segs
+            .iter()
+            .map(|(p, u, n)| (p.as_slice(), u.as_slice(), *n))
+            .collect();
+        let (node, node_v) = super::parts(&seg_refs);
+        // Stored as Bee splits it: Ant's own split of a node whose last
+        // leaf is a level's lone one would read back wrong
+        // (ant-lone-reference).
+        let (root, chunks) = crate::bee::split(&node).ok_or("Bee's split")?;
+        let mut net = self.net.clone();
+        for (a, w) in chunks {
+            net.insert(a, w);
+        }
+        let fetcher = MemFetcher::new(net);
+        let absent = format!("{}absent", char::from(1u8));
+        let probe = ant_retrieval::lookup_path(&fetcher, &root, &absent).await;
+        let detail = probe
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        let parsed = match probe {
+            Err(
+                ant_retrieval::ManifestError::TooShort(_)
+                | ant_retrieval::ManifestError::InvalidRefLength(_)
+                | ant_retrieval::ManifestError::InvalidMetadata(_)
+                | ant_retrieval::ManifestError::UnsupportedVersion(_),
+            ) => "malformed",
+            Err(ant_retrieval::ManifestError::NotAManifest) => "not_a_manifest",
+            _ => "parsed",
+        };
+        let mut looked = Vec::new();
+        for p in probes {
+            let r = ant_retrieval::lookup_path(&fetcher, &root, &p.path)
+                .await
+                .map_err(|e| format!("node case {id}: Ant's lookup of {:?}: {e}", p.path))?;
+            let mut kept: Vec<(String, String)> = r
+                .metadata
+                .iter()
+                .filter(|(k, _)| KEPT_METADATA.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            kept.sort();
+            let mut want = p.kept.clone();
+            want.sort();
+            if r.data_ref != p.entry || kept != want {
+                return Err(format!("node case {id}: Ant's lookup of {:?} differs", p.path).into());
+            }
+            looked.push(json!(p.path));
+        }
+        let want = match (expect.get("ok"), expect["fail"].as_str()) {
+            (Some(v), _) if v["manifest"] == false => "not_a_manifest",
+            (Some(_), _) => "parsed",
+            (None, Some("malformed")) => "malformed",
+            // Past the core's cap, Ant still reads it (manifest-node-cap).
+            (None, Some("unverifiable")) => "parsed",
+            _ => "?",
+        };
+        if parsed != want
+            || (want == "parsed" && expect.get("fail").is_some() != deviation.is_some())
+        {
+            return Err(format!("node case {id}: Ant says {parsed} ({detail})").into());
+        }
+        let mut case = json!({
+            "id": id,
+            "note": note,
+            "node": node_v,
+            "expect": expect,
+            "ant": { "decoded": parsed, "lookups": looked },
+        });
+        if let Some(d) = deviation {
+            case["deviation"] = json!(d);
+        }
+        self.out.push(case);
+        Ok(())
+    }
+}
+
+fn fork_json(bit: u8, node_type: u8, prefix: &[u8], child: &[u8], kept: &[(&str, &str)]) -> Value {
+    let mut m = serde_json::Map::new();
+    for (k, v) in kept {
+        m.insert((*k).to_string(), json!(v));
+    }
+    json!({ "byte": bit, "type": node_type, "prefix": h(prefix), "child": h(child), "metadata": m })
+}
+
+fn node_ok(ref_size: u8, entry: &[u8], forks: Vec<Value>) -> Value {
+    ok(json!({ "manifest": true, "ref_size": ref_size, "entry": h(entry), "forks": forks }))
+}
+
+const VALUE: u8 = crate::mantaray::TYPE_VALUE;
+const META: u8 = crate::mantaray::TYPE_WITH_METADATA;
+
+/// A flat object of exactly `len` bytes: Content-Type, then unknown keys
+/// (repeated, as JSON allows, the last winning) to fill it.
+fn max_metadata(len: usize) -> Segs {
+    let head = r#"{"Content-Type":"text/plain""#;
+    let unit = format!(r#","x":"{}""#, "v".repeat(57));
+    let room = len - head.len();
+    let count = (room - 8) / unit.len();
+    let fill = room - count * unit.len() - 8;
+    let last = format!(r#","y":"{}"}}"#, "w".repeat(fill));
+    vec![
+        (head.as_bytes().to_vec(), unit.into_bytes(), count),
+        (last.into_bytes(), Vec::new(), 0),
+    ]
+}
+
+async fn nodes() -> Result<Vec<Value>, Err> {
+    let mut c = NodeCases {
+        out: Vec::new(),
+        net: HashMap::new(),
+        children: Vec::new(),
+    };
+    let v02 = version("mantaray:0.2");
+    let v01 = version("mantaray:0.1");
+    let (ca, fa) = c.child(0)?;
+    let (cb, fb) = c.child(1)?;
+    let plain_meta =
+        crate::mantaray::metadata(&[("Content-Type", "text/plain"), ("Filename", "a.txt")]);
+    let plain_forks = |key: [u8; 32]| {
+        raw_node(
+            key,
+            v02,
+            32,
+            &[0u8; 32],
+            &[
+                RawFork {
+                    bit: b'a',
+                    node_type: VALUE | META,
+                    prefix_len: 5,
+                    prefix: b"a.txt".to_vec(),
+                    child: ca.to_vec(),
+                    meta: Some((seg(&bee_padded(&plain_meta)), None)),
+                },
+                RawFork {
+                    bit: b'b',
+                    node_type: VALUE,
+                    prefix_len: 6,
+                    prefix: b"b.html".to_vec(),
+                    child: cb.to_vec(),
+                    meta: None,
+                },
+            ],
+            &[],
+        )
+    };
+    // Hold the case writer to the generator's (itself held to Ant's).
+    let honest = crate::mantaray::Node {
+        obfuscation_key: [0; 32],
+        ref_size: 32,
+        entry: vec![0; 32],
+        forks: vec![
+            crate::mantaray::Fork {
+                node_type: VALUE | META,
+                prefix: b"a.txt".to_vec(),
+                child: ca.to_vec(),
+                metadata: Some(plain_meta.clone()),
+            },
+            crate::mantaray::Fork {
+                node_type: VALUE,
+                prefix: b"b.html".to_vec(),
+                child: cb.to_vec(),
+                metadata: None,
+            },
+        ],
+    }
+    .marshal();
+    if plain_forks([0; 32]).concat_bytes() != honest {
+        return Err("the node cases' writer differs from the generator's mantaray writer".into());
+    }
+    let plain_expect = node_ok(
+        32,
+        &[0u8; 32],
+        vec![
+            fork_json(
+                b'a',
+                VALUE | META,
+                b"a.txt",
+                &ca,
+                &[("Content-Type", "text/plain"), ("Filename", "a.txt")],
+            ),
+            fork_json(b'b', VALUE, b"b.html", &cb, &[]),
+        ],
+    );
+    let plain_probes = || {
+        vec![
+            Probe {
+                path: "a.txt".into(),
+                entry: fa,
+                kept: vec![
+                    ("Content-Type".into(), "text/plain".into()),
+                    ("Filename".into(), "a.txt".into()),
+                ],
+            },
+            Probe {
+                path: "b.html".into(),
+                entry: fb,
+                kept: vec![],
+            },
+        ]
+    };
+    c.push(
+        "plain",
+        "two forks, one with Bee's padded metadata",
+        &plain_forks([0; 32]),
+        plain_expect.clone(),
+        &plain_probes(),
+        None,
+    )
+    .await?;
+    c.push(
+        "obfuscated",
+        "the same node under a non-zero obfuscation key",
+        &plain_forks(keccak256(b"checks-node-key")),
+        plain_expect,
+        &plain_probes(),
+        None,
+    )
+    .await?;
+    c.push(
+        "version-0.1",
+        "mantaray:0.1, whose forks carry no metadata even with the metadata bit set",
+        &raw_node(
+            [0; 32],
+            v01,
+            32,
+            &[0u8; 32],
+            &[RawFork {
+                bit: b'a',
+                node_type: VALUE | META,
+                prefix_len: 5,
+                prefix: b"a.txt".to_vec(),
+                child: ca.to_vec(),
+                meta: None,
+            }],
+            &[],
+        ),
+        node_ok(
+            32,
+            &[0u8; 32],
+            vec![fork_json(b'a', VALUE | META, b"a.txt", &ca, &[])],
+        ),
+        &[Probe {
+            path: "a.txt".into(),
+            entry: fa,
+            kept: vec![],
+        }],
+        None,
+    )
+    .await?;
+    c.push(
+        "not-a-manifest",
+        "200 bytes without a version hash: a file, which Ant serves as the reference's bytes",
+        &[(content::bytes("checks-node-raw", 200), Vec::new(), 0)],
+        ok(json!({ "manifest": false })),
+        &[],
+        None,
+    )
+    .await?;
+    let mut short = plain_forks([0; 32]).concat_bytes();
+    short.truncate(64 + 10);
+    c.push(
+        "entry-truncated",
+        "a version hash, then 10 of the entry's 32 bytes",
+        &[(short, Vec::new(), 0)],
+        fail("malformed"),
+        &[],
+        None,
+    )
+    .await?;
+    let mut short = plain_forks([0; 32]).concat_bytes();
+    short.truncate(64 + 32 + 20);
+    c.push(
+        "bitmap-truncated",
+        "the entry, then 20 of the fork bitmap's 32 bytes",
+        &[(short, Vec::new(), 0)],
+        fail("malformed"),
+        &[],
+        None,
+    )
+    .await?;
+    c.push(
+        "ref-size-0",
+        "an empty node: reference size 0, no entry, no forks, which Ant accepts",
+        &raw_node([0; 32], v02, 0, &[], &[], &[]),
+        node_ok(0, &[], vec![]),
+        &[],
+        None,
+    )
+    .await?;
+    let wide: Vec<u8> = [ca, keccak256(b"checks-node-enc-key")].concat();
+    c.push("ref-size-64", "64-byte references (an encrypted manifest's): decoded, and refused by the walk as encrypted", &raw_node([0; 32], v02, 64, &[0u8; 64], &[
+        RawFork { bit: b'a', node_type: VALUE, prefix_len: 5, prefix: b"a.txt".to_vec(), child: wide.clone(), meta: None },
+    ], &[]), node_ok(64, &[0u8; 64], vec![fork_json(b'a', VALUE, b"a.txt", &wide, &[])]), &[], None).await?;
+    c.push(
+        "ref-size-33",
+        "reference size 33",
+        &raw_node([0; 32], v02, 33, &[0u8; 33], &[], &[]),
+        fail("malformed"),
+        &[],
+        None,
+    )
+    .await?;
+    for (id, len, expect) in [
+        ("prefix-length-0", 0u8, false),
+        ("prefix-length-31", 31, false),
+        ("prefix-length-30", 30, true),
+    ] {
+        let prefix = vec![b'a'; usize::from(len.min(30))];
+        let segs = raw_node(
+            [0; 32],
+            v02,
+            32,
+            &[0u8; 32],
+            &[RawFork {
+                bit: b'a',
+                node_type: VALUE,
+                prefix_len: len,
+                prefix: prefix.clone(),
+                child: ca.to_vec(),
+                meta: None,
+            }],
+            &[],
+        );
+        let (e, probes) = if expect {
+            (
+                node_ok(
+                    32,
+                    &[0u8; 32],
+                    vec![fork_json(b'a', VALUE, &prefix, &ca, &[])],
+                ),
+                vec![Probe {
+                    path: "a".repeat(30),
+                    entry: fa,
+                    kept: vec![],
+                }],
+            )
+        } else {
+            (fail("malformed"), vec![])
+        };
+        c.push(
+            id,
+            &format!("a fork whose prefix length is {len}: 1 to 30 are read"),
+            &segs,
+            e,
+            &probes,
+            None,
+        )
+        .await?;
+    }
+    let mut forks = Vec::new();
+    let mut expect = Vec::new();
+    let mut probes = Vec::new();
+    for b in 0..=255u8 {
+        let (cc, fc) = c.child(2 + usize::from(b))?;
+        forks.push(RawFork {
+            bit: b,
+            node_type: VALUE,
+            prefix_len: 1,
+            prefix: vec![b],
+            child: cc.to_vec(),
+            meta: None,
+        });
+        expect.push(fork_json(b, VALUE, &[b], &cc, &[]));
+        if b.is_ascii_alphanumeric() && b % 8 == 1 {
+            probes.push(Probe {
+                path: char::from(b).to_string(),
+                entry: fc,
+                kept: vec![],
+            });
+        }
+    }
+    c.push(
+        "forks-256",
+        "a fork for every first byte: 256, the most a bitmap holds",
+        &raw_node([0; 32], v02, 32, &[0u8; 32], &forks, &[]),
+        node_ok(32, &[0u8; 32], expect),
+        &probes,
+        None,
+    )
+    .await?;
+    let mut two = raw_node(
+        [0; 32],
+        v02,
+        32,
+        &[0u8; 32],
+        &[RawFork {
+            bit: b'a',
+            node_type: VALUE,
+            prefix_len: 5,
+            prefix: b"a.txt".to_vec(),
+            child: ca.to_vec(),
+            meta: None,
+        }],
+        &[],
+    )
+    .concat_bytes();
+    two[64 + 32 + usize::from(b'b' / 8)] |= 1 << (b'b' % 8);
+    c.push(
+        "fork-missing",
+        "a bitmap of two forks over the bytes of one",
+        &[(two, Vec::new(), 0)],
+        fail("malformed"),
+        &[],
+        None,
+    )
+    .await?;
+    c.push("fork-under-other-byte", "the bitmap's bit for 'a' over a fork whose prefix starts with 'b': it sits under 'a', so no path reaches it", &raw_node([0; 32], v02, 32, &[0u8; 32], &[
+        RawFork { bit: b'a', node_type: VALUE, prefix_len: 5, prefix: b"b.txt".to_vec(), child: ca.to_vec(), meta: None },
+    ], &[]), node_ok(32, &[0u8; 32], vec![fork_json(b'a', VALUE, b"b.txt", &ca, &[])]), &[], None).await?;
+
+    // Metadata: one fork, its metadata as given.
+    let one = |m: Segs, declared: Option<u16>| {
+        raw_node(
+            [0; 32],
+            v02,
+            32,
+            &[0u8; 32],
+            &[RawFork {
+                bit: b'a',
+                node_type: VALUE | META,
+                prefix_len: 5,
+                prefix: b"a.txt".to_vec(),
+                child: ca.to_vec(),
+                meta: Some((m, declared)),
+            }],
+            &[],
+        )
+    };
+    let a_ok = |kept: &[(&str, &str)]| {
+        node_ok(
+            32,
+            &[0u8; 32],
+            vec![fork_json(b'a', VALUE | META, b"a.txt", &ca, kept)],
+        )
+    };
+    let a_probe = |kept: &[(&str, &str)]| {
+        vec![Probe {
+            path: "a.txt".into(),
+            entry: fa,
+            kept: kept
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+        }]
+    };
+    let ct = [("Content-Type", "text/plain")];
+    c.push("metadata-max-length", "metadata of 65,535 bytes, its 2-byte length's most: Content-Type, then unknown keys, repeated, which only cost time", &one(max_metadata(65_535), None), a_ok(&ct), &a_probe(&ct), None).await?;
+    let head = r#"{"Content-Type":"text/plain","x":"#;
+    let k = (65_535 - head.len() - 4) / 6;
+    let pad = 65_535 - head.len() - 6 * k - 4;
+    let deep = vec![
+        (head.as_bytes().to_vec(), br#"{"x":"#.to_vec(), k),
+        (br#""v""#.to_vec(), b"}".to_vec(), k),
+        (format!("{}}}", " ".repeat(pad)).into_bytes(), Vec::new(), 0),
+    ];
+    c.push("metadata-nested-deep", &format!("65,535 bytes of metadata whose value for x nests {k} objects deep: only a flat object of strings is read, so it is refused where the first value isn't a string, without descending"), &one(deep, None), fail("malformed"), &[], None).await?;
+    for (id, text, note) in [
+        (
+            "metadata-nested",
+            r#"{"Content-Type":{"a":"b"}}"#,
+            "a value that is an object",
+        ),
+        (
+            "metadata-number",
+            r#"{"Content-Type":"text/plain","size":12}"#,
+            "a value that is a number",
+        ),
+        (
+            "metadata-array",
+            r#"{"Content-Type":["text/plain"]}"#,
+            "a value that is an array",
+        ),
+        (
+            "metadata-not-object",
+            r#"["Content-Type","text/plain"]"#,
+            "an array, not an object",
+        ),
+        (
+            "metadata-unterminated",
+            r#"{"Content-Type":"text/plain"#,
+            "a string that never ends",
+        ),
+    ] {
+        c.push(
+            id,
+            note,
+            &one(seg(text), None),
+            fail("malformed"),
+            &[],
+            None,
+        )
+        .await?;
+    }
+    c.push(
+        "metadata-trailing-text",
+        "text after the object, which Ant's reader stops before: the object is read",
+        &one(seg(r#"{"Content-Type":"text/plain"}x"#), None),
+        a_ok(&ct),
+        &a_probe(&ct),
+        None,
+    )
+    .await?;
+    let bad_utf8 = vec![
+        (br#"{"Content-Type":"text/pl"#.to_vec(), Vec::new(), 0),
+        (vec![0xff], Vec::new(), 0),
+        (br#"ain"}"#.to_vec(), Vec::new(), 0),
+    ];
+    c.push(
+        "metadata-not-utf8",
+        "a 0xff byte inside a string",
+        &one(bad_utf8, None),
+        fail("malformed"),
+        &[],
+        None,
+    )
+    .await?;
+    c.push(
+        "metadata-length-past-end",
+        "a metadata length 100 bytes past the node's end",
+        &one(seg(r#"{"Content-Type":"text/plain"}"#), Some(129)),
+        fail("malformed"),
+        &[],
+        None,
+    )
+    .await?;
+    c.push(
+        "metadata-empty",
+        "the metadata bit with a length of 0",
+        &one(Vec::new(), None),
+        a_ok(&[]),
+        &a_probe(&[]),
+        None,
+    )
+    .await?;
+    c.push(
+        "metadata-newlines",
+        "metadata of Bee's newline padding only",
+        &one(seg("\n\n\n\n\n\n"), None),
+        a_ok(&[]),
+        &a_probe(&[]),
+        None,
+    )
+    .await?;
+    c.push(
+        "metadata-duplicate-key",
+        "Content-Type twice: the last wins, as in Ant's map",
+        &one(
+            seg(r#"{"Content-Type":"text/plain","Content-Type":"text/html"}"#),
+            None,
+        ),
+        a_ok(&[("Content-Type", "text/html")]),
+        &a_probe(&[("Content-Type", "text/html")]),
+        None,
+    )
+    .await?;
+    c.push(
+        "metadata-unknown-keys",
+        "keys the walk doesn't read are dropped",
+        &one(
+            seg(r#"{"Content-Type":"text/plain","foo":"bar","Filename":"a.txt"}"#),
+            None,
+        ),
+        a_ok(&[("Content-Type", "text/plain"), ("Filename", "a.txt")]),
+        &a_probe(&[("Content-Type", "text/plain"), ("Filename", "a.txt")]),
+        None,
+    )
+    .await?;
+    // Escapes, built at run time: \/, \", \n, and a \u escape of é.
+    let bs = '\\';
+    let esc = format!(
+        r#"{{"Content-Type":"text{bs}/plain","Filename":"caf{bs}u00e9 {bs}"x{bs}"{bs}n.txt"}}"#
+    );
+    let fname = "caf\u{e9} \"x\"\n.txt";
+    c.push(
+        "metadata-escapes",
+        "JSON escapes in a value: \\/, \\\", \\n and a \\u escape",
+        &one(seg(&esc), None),
+        a_ok(&[("Content-Type", "text/plain"), ("Filename", fname)]),
+        &a_probe(&[("Content-Type", "text/plain"), ("Filename", fname)]),
+        None,
+    )
+    .await?;
+
+    // Size: maximal metadata on fifteen forks, then the 1 MiB cap.
+    let mut forks = Vec::new();
+    let mut expect = Vec::new();
+    let mut probes = Vec::new();
+    for i in 0..15u8 {
+        let b = b'a' + i;
+        let (cc, fc) = c.child(300 + usize::from(i))?;
+        forks.push(RawFork {
+            bit: b,
+            node_type: VALUE | META,
+            prefix_len: 1,
+            prefix: vec![b],
+            child: cc.to_vec(),
+            meta: Some((max_metadata(65_535), None)),
+        });
+        expect.push(fork_json(b, VALUE | META, &[b], &cc, &ct));
+        probes.push(Probe {
+            path: char::from(b).to_string(),
+            entry: fc,
+            kept: ct
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+        });
+    }
+    let segs = raw_node([0; 32], v02, 32, &[0u8; 32], &forks, &[]);
+    let size = segs.concat_bytes().len();
+    c.push(
+        "metadata-max-every-fork",
+        &format!(
+            "fifteen forks, each with 65,535 bytes of metadata: {size} bytes, within the 1 MiB cap"
+        ),
+        &segs,
+        node_ok(32, &[0u8; 32], expect),
+        &probes,
+        None,
+    )
+    .await?;
+    for (id, size, note) in [
+        (
+            "node-1-mib",
+            MAX_NODE,
+            "a node of exactly 1 MiB: sixteen forks of near-maximal metadata",
+        ),
+        (
+            "node-past-1-mib",
+            MAX_NODE + 1,
+            "a node of 1 MiB and one byte: past the core's cap, which Ant's 32 MiB allows (manifest-node-cap)",
+        ),
+    ] {
+        let header = 32 + 31 + 1 + 32 + 32;
+        let per_fork = 1 + 1 + 30 + 32 + 2;
+        let mut forks = Vec::new();
+        let mut expect = Vec::new();
+        let total = size - header - 16 * per_fork;
+        for i in 0..16u8 {
+            let b = b'a' + i;
+            let (cc, _) = c.child(400 + usize::from(i))?;
+            let len = if i < 15 { 65_535 } else { total - 15 * 65_535 };
+            forks.push(RawFork {
+                bit: b,
+                node_type: VALUE | META,
+                prefix_len: 1,
+                prefix: vec![b],
+                child: cc.to_vec(),
+                meta: Some((max_metadata(len), None)),
+            });
+            expect.push(fork_json(b, VALUE | META, &[b], &cc, &ct));
+        }
+        let segs = raw_node([0; 32], v02, 32, &[0u8; 32], &forks, &[]);
+        if segs.concat_bytes().len() != size {
+            return Err(format!("node case {id}: {} bytes", segs.concat_bytes().len()).into());
+        }
+        let (e, dev) = if size > MAX_NODE {
+            (fail("unverifiable"), Some("manifest-node-cap"))
+        } else {
+            (node_ok(32, &[0u8; 32], expect), None)
+        };
+        c.push(id, note, &segs, e, &[], dev).await?;
+    }
+    Ok(c.out)
+}
+
+trait ConcatBytes {
+    fn concat_bytes(&self) -> Vec<u8>;
+}
+
+impl ConcatBytes for Segs {
+    fn concat_bytes(&self) -> Vec<u8> {
+        let mut v = Vec::new();
+        for (p, u, n) in self {
+            v.extend_from_slice(p);
+            for _ in 0..*n {
+                v.extend_from_slice(u);
+            }
+        }
+        v
+    }
 }
