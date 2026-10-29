@@ -216,6 +216,13 @@ impl Failure {
 
 /// Rules 6–8: the node's own error, without revert evidence (−32603 is
 /// rule 5, checked first).
+///
+/// No HTTP status is read from the node's message. A status is a field of
+/// its own: a non-2xx answer is rule 3 (`RpcError::Http`), and a JSON-RPC
+/// code 429 is one of #656's codes. The message is the node's free text,
+/// and digits in it can be anything: calldata or an address it echoes, a
+/// gas figure, a reason. Matched as text, "429" or "503" there would turn
+/// an honest node's answer into a provider failure and quarantine it.
 pub(crate) fn node_failure(node: &rpc::NodeError) -> bool {
     let code = node.code();
     let message = node.message();
@@ -234,7 +241,7 @@ pub(crate) fn node_failure(node: &rpc::NodeError) -> bool {
     if code.is_some_and(|c| CODES.contains(&c)) {
         return true;
     }
-    const PATTERNS: [&str; 19] = [
+    const PATTERNS: [&str; 15] = [
         "header not found",
         "missing trie node",
         "unknown block",
@@ -249,16 +256,26 @@ pub(crate) fn node_failure(node: &rpc::NodeError) -> bool {
         "request count exceeded",
         "compute units",
         "no response",
-        "502",
-        "503",
-        "504",
-        "429",
         "timeout",
     ];
-    PATTERNS.iter().any(|p| lower.contains(p))
-        || lower.contains("rate limit")
-        || lower.contains("ratelimit")
-        || lower.contains("rate-limit")
+    PATTERNS.iter().any(|p| lower.contains(p)) || rate_limit(&lower)
+}
+
+/// #656's `/rate.?limit/i` on an ASCII-lowercased message: `rate`, then at
+/// most one character, then `limit`. JavaScript's `.` is one UTF-16 code
+/// unit that isn't a line terminator, so `rate_limit`, `rate\tlimit` and
+/// `rate:limit` match, and two characters, a line break or an astral
+/// character (two code units) between them don't.
+fn rate_limit(lower: &str) -> bool {
+    lower.match_indices("rate").any(|(at, _)| {
+        let rest = &lower[at + "rate".len()..];
+        rest.starts_with("limit")
+            || rest.chars().next().is_some_and(|c| {
+                c.len_utf16() == 1
+                    && !matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}')
+                    && rest[c.len_utf8()..].starts_with("limit")
+            })
+    })
 }
 
 /// A leg's outcome (`runQuorumLeg`).

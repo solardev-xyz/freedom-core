@@ -1,0 +1,76 @@
+# cargo-deny policy for the dweb-verify vector generator: the core's
+# (../../deny.toml), with the exceptions the pinned nodes' graphs need, each
+# explained. The `dweb-verify vectors` workflow runs `cargo deny --locked
+# check` here whenever the generator changes.
+#
+# What every exception below rests on: this workspace is a test-vector
+# generator. It ships in nothing, and runs only where its vectors are
+# regenerated. Its Swarm half drives Ant's gateway router in process over a
+# memory chunk source (src/gateway.rs, src/store.rs): it opens no listener
+# and no socket, and resolves no name. The patched releases these pins allow
+# are taken (tokio 1.54.1, h2 0.4.20, crossbeam-epoch 0.9.21, spin 0.9.9);
+# what remains needs a manifest change in Ant v0.5.71, the oracle, which
+# would change what the vectors record.
+
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+ignore = [
+    # hickory-proto 0.25.2, through libp2p-dns (libp2p, ant-retrieval): the
+    # NSEC3 loop is in DNSSEC validation, which needs hickory's dnssec
+    # features, and this graph builds it without them. The fix is hickory
+    # 0.26, which libp2p-dns 0.44 doesn't take. The generator resolves no
+    # name.
+    { id = "RUSTSEC-2026-0118", reason = "DNSSEC validation only, built without its features; the generator resolves no name" },
+    # The same crate and path: quadratic name compression when encoding a
+    # message. The generator encodes and sends no DNS message.
+    { id = "RUSTSEC-2026-0119", reason = "message encoding only; the generator sends no DNS message" },
+    # instant 0.1.13, through parking_lot 0.11 (reed-solomon-erasure 6,
+    # ant-retrieval): unmaintained, no upgrade within Ant's pins. It reads the
+    # clock; nothing of it is security-relevant here.
+    { id = "RUSTSEC-2024-0384", reason = "unmaintained, no upgrade within the pinned Ant; a clock shim in a generator that ships nowhere" },
+    # paste 1.0.15, a proc macro through netlink-packet-core (if-watch,
+    # libp2p-tcp): unmaintained, compile time only, as freedom-ipfsd's policy
+    # notes for the same crate.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained proc macro, compile time only; no upgrade exists" },
+    # crypto-bigint 0.5.5, through k256 0.13 (ant-crypto, pinned Ant
+    # v0.5.71): branches that aren't constant-time on secret integers, fixed
+    # only in 0.7.6, which Ant's k256 0.13 can't take. The generator signs
+    # only fixture records, with seeded keys that are published in the
+    # vectors, offline; it has no secret to leak.
+    { id = "RUSTSEC-2026-0387", reason = "signs only fixtures with public seeded test keys, offline; no secret to leak" },
+]
+
+[licenses]
+confidence-threshold = 0.9
+unused-allowed-license = "allow"
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[licenses.private]
+# The generator is unpublished and carries no license yet.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Ant, pinned by its v0.5.71 tag.
+allow-git = ["https://github.com/freedom-hq/ant"]

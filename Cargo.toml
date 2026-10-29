@@ -3,8 +3,9 @@ resolver = "3"
 members = ["crates/*"]
 # The service processes (design 0007) are workspaces of their own, with their
 # own lockfiles and `cargo deny` policies: their dependency graphs never enter
-# the core's.
-exclude = ["services"]
+# the core's. So is design 0009's vector generator, which links the pinned
+# nodes only to record what they answer.
+exclude = ["services", "vectors/dweb-verify"]
 
 [workspace.package]
 version = "0.8.0"

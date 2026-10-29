@@ -239,10 +239,10 @@ The rules below restate the reference, so a reviewer can check them against the 
 3. **Anchor:** no anchor → single source on the first *now* available endpoint, or the first one from before. A hash split throws.
 4. **Refresh:** the available list is re-read. Below 3 → single source as in 3.
 5. **First wave:** the first `min(K, available)` endpoints, with `M' = min(M, K')`.
-6. **Second wave:** after an `all_errored` or unverified first wave, the endpoints the first wave didn't use (re-read). An `all_errored` wave needs at least 1 of them; an unverified one needs M'. The wave runs with `K'' = min(K, remaining)` and `M'' = min(M, K'')`. It replaces the first wave if the first was `all_errored`, or if the second agrees.
+6. **Second wave:** after an `all_errored` or unverified first wave, the endpoints the first wave didn't use (re-read). An `all_errored` wave needs at least 1 of them; an unverified one needs M'. The wave runs with `K'' = min(K, remaining)` and `M'' = min(M, K'')`. It replaces the first wave if the first was `all_errored`, or if the second agrees. A wave's threshold drops to the endpoints it has: after an `all_errored` wave, a second wave of one endpoint has M'' = 1, and one of two under M = 3 has M'' = 2. Likewise, a first wave with fewer than M available endpoints has M' < M. Rule 7 never labels what such a wave agrees on `verified`.
 7. **The result** comes from the adopted wave. Trust `k` is that wave's queried count and `m` its M:
-   - `agreed_data` → `data`, `verified`;
-   - `agreed_not_found` → `not_found`, `verified`, with the first agreer's error;
+   - `agreed_data` → `data`, and `agreed_not_found` → `not_found` with the first agreer's error. Each is `verified` only when at least M distinct endpoints agree: the configured M after rule 1's clamps, and never fewer than 2, whatever the wave's own threshold.
+   - **A smaller agreement** gives the same result, `unverified` (deviation `reduced-quorum-wave`). Its trust reads the wave's `k` and `m` with `achieved: false`, and it is cached as an unverified result. The reference labels it `verified`.
    - `all_errored` → throws `All N RPC providers failed for <name>`;
    - unverified → that one answer, `unverified`;
    - `conflict` → `conflict` with `dissented` = `queried`.
@@ -347,12 +347,18 @@ How a failed exchange is classified. The core's rules are ordered, and the first
 | 5 | A node error with code −32603, with or without revert data: **yes** | yes |
 | 5a | A call exception with revert data ethers extracted (`spelunkData`): **no** | no, unless the composed message matches the text rule |
 | 6 | A node error with revert evidence (code 3 or −32015; `data` as even-length hex or `Reverted 0x…`; a message mentioning a revert): **no** † | yes when its message matches `/no response/` (and #656 keeps that) |
-| 7 | A node error whose code is one of #656's node-failure codes, or whose message matches #656's patterns, `/no response/`, or an HTTP status pattern (`502`, `503`, `504`, `429`, `timeout`): **yes** | the pin: only `/no response/` and the text rule; #656: its codes and patterns too |
+| 7 | A node error whose code is one of #656's node-failure codes, or whose message matches #656's patterns (as its regex reads them: `rate.?limit` takes any one UTF-16 unit but a line terminator between its words, so `rate_limit`), `/no response/` or `timeout`: **yes**. A status's digits (`502`, `503`, `504`, `429`) in the message are not matched: statuses are rule 3 | the pin: only `/no response/` and the text rule; #656: its codes and patterns too |
 | 8 | Any other node error (`out of gas`, `invalid opcode`, …): **no** | no, unless the composed message matches the text rule |
 | 9 | A result ethers' formatting refuses (not hex, missing, a malformed block): **yes** † | the text rule decides, so `"timeout"` or `"0x429"` counts and `"junk"` doesn't |
 | 10 | Anything else: **no** | the text rule decides |
 
-**The reference's text rule:** the pattern `502`, `503`, `504`, `429`, `timeout`, `ECONNREFUSED`, `ENOTFOUND` or `ETIMEDOUT` (case-insensitive) against ethers' composed message, which embeds the request and the offending value. The core matches text only in rule 7: the node's own message, when nothing says the call reverted. Rule 2 uses socket codes, not text.
+**The reference's text rule:** the pattern `502`, `503`, `504`, `429`, `timeout`, `ECONNREFUSED`, `ENOTFOUND` or `ETIMEDOUT` (case-insensitive) against ethers' composed message, which embeds the request and the offending value but not the node's own message. Main's 46b3d891, after #656, matches the four statuses only digit-bounded, with hex runs removed first, so a name whose calldata contains `429` no longer reads as a provider failure there.
+
+**The core matches text only in rule 7:** the node's own message, when nothing says the call reverted. It never matches a status's digits there.
+- **A status is a field:** a non-2xx answer is rule 3, and a JSON-RPC code 429 is one of #656's codes.
+- **The message is the node's free text:** calldata or an address it echoes, a gas figure or a reason can contain `429` or `503`. Read as a status, it would quarantine an honest endpoint.
+
+Rule 2 uses socket codes, not text.
 
 **Per operation**, in the reference's order:
 - **Forward legs** (`runQuorumLeg`):
@@ -590,7 +596,8 @@ Each deviation gets a boundary vector in the implementation PR, generated from t
 | `ccip-gateway-tls` | a gateway's certificate is checked by Chromium's verifier, under the session's policy | a clearnet gateway's certificate is checked by Node's `https`, against Node's bundled roots and the roots its system API exposes, for the gateway's host name ([CCIP-Read](#ccip-read)) | a certificate that Chromium's own root store, Certificate Transparency or CRLSets would judge differently, or one that chains to a root only Chromium reads (on Linux, a root only in the NSS database), changes whether that gateway answers; a refusal moves on to the next gateway |
 | `monotonic-time` | TTLs, quarantine and deadlines on `Date.now()` | the monotonic clock; Tezos expiry still compares wall time | none unless the wall clock jumps |
 | `error-text` | ethers' full message, which embeds node text and request data | the class's short message, sanitized | same branches; [agreement](#errors-agreement-and-text) unchanged |
-| `classification` | rules 3, 6 and 9 of [Classification](#classification), and text matched in composed messages | the core's rules | a malformed answer quarantines; a revert never does |
+| `classification` | rules 3, 6 and 9 of [Classification](#classification), and text matched in ethers' composed messages, status digits included | the core's rules; a status comes only from the answer's status, never from text: not from the node's own message, and the core composes no message | a malformed answer quarantines; a revert never does |
+| `reduced-quorum-wave` | a wave with fewer endpoints than the configured M lowers its threshold to them, and its agreement is labelled `verified`: a second wave of one endpoint after the first all errored (`k: 1, m: 1, achieved: true`), two endpoints in a second wave under K = M = 3, or a first wave of three endpoints under K = M = 4 | `verified` only with the configured M of distinct agreeing endpoints, and at least 2; a smaller agreement is returned `unverified`, as a single source's answer is | a reduced wave's answer is never verified, and it is cached as unverified (`deviation-reduced-quorum-wave`, `-singleton-not-found`, `-second-wave`, `-second-wave-not-found`, `-first-wave`, `-first-wave-not-found`) |
 | `null-block-hash` | a block whose hash is `null` (ethers' formatter accepts one, for pending blocks) is a hash vote like any other; when the chosen anchor's hash is `null`, the legs call at `latest`, where CCIP-Read takes ethers' built-in path | the hash fetch fails, as for a missing block | that endpoint is out of the hash vote and quarantined; the single-source anchor fails, so `direct` is unavailable |
 | `reverse-normalized` | an ENS primary name is shown as the reverse record returns it, normalized or not | only a name that is its own ENSIP-15 normalization; any other is `UNVERIFIED` with its claim and `unverifiedCause: "unnormalized"` | a lookalike primary name is never shown as the address's name |
 | `node-failures` | node errors can agree into a verified not-found (`node-errors-agree`) | freedom-browser#656's rule | until the reference pin includes it |
