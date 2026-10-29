@@ -5,6 +5,12 @@
 //!
 //! The chunk address is computed here from the payload, so a caller can only
 //! get genuine SOC digests signed, never an arbitrary 32-byte value.
+//!
+//! [`verify`] checks what an external node serves (design 0009).
+
+pub mod manifest;
+pub mod tree;
+pub mod verify;
 
 use fc_evm::{address_of, eip191_digest, keccak256, sign_digest};
 use k256::ecdsa::SigningKey;

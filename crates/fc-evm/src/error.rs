@@ -14,6 +14,10 @@ pub enum Error {
     ViewTooLarge,
     #[error("signing failed")]
     Signing,
+    /// A signature no address can be recovered from, under the rules
+    /// [`crate::recover_address`] states.
+    #[error("invalid signature")]
+    Recovery,
 }
 
 /// The most characters of an input an error message quotes.
