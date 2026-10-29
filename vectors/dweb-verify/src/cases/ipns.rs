@@ -933,6 +933,12 @@ fn other_keys(r: &mut Records) -> Result<(), Err> {
             true,
         ),
         (
+            "cbor-float-negative-zero",
+            "an unknown key whose value is negative zero, which DAG-CBOR's strictness refuses",
+            extra(&[0xfb, 0x80, 0, 0, 0, 0, 0, 0, 0]),
+            true,
+        ),
+        (
             "cbor-float-32",
             "an unknown key whose value is a 32-bit float",
             extra(&[0xfa, 0x3f, 0xc0, 0, 0]),
@@ -962,6 +968,16 @@ fn other_keys(r: &mut Records) -> Result<(), Err> {
         let dev = (dev && native_ok).then_some("dag-cbor-strict");
         r.push(id, note, &name, &rec, fail("unverifiable"), dev);
     }
+    let dd = extra(&[0xfb, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let rec = entry(None, Some(&ed.sign(&signed_message(&dd))?), &dd);
+    r.push(
+        "cbor-float-zero",
+        "an unknown key whose value is the 64-bit float 0 (positive): read",
+        &name,
+        &rec,
+        verdict(&s),
+        None,
+    );
     let dd = extra(&[0xfb, 0x3f, 0xf8, 0, 0, 0, 0, 0, 0]);
     let rec = entry(None, Some(&ed.sign(&signed_message(&dd))?), &dd);
     r.push(
