@@ -416,6 +416,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fc-ipfs"
+version = "0.8.0"
+dependencies = [
+ "base64",
+ "hex",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "fc-json"
 version = "0.8.0"
 dependencies = [
