@@ -985,7 +985,7 @@ The source research for this design found four ways the node gives away more tha
 |---|---|---|
 | 1 | An onion `Forward` without a proxy leaks onion names to DNS | **Covered.** The service sets `onion` in memory, never `Forward` ([Network policy](#network-policy)), and the dial gate refuses an onion name before any socket in `direct` mode (heartwood change 11). It stays open in the shipped add-on until libradicle `main` moves to these changes |
 | 2 | Each connection gets the node's signed inventory, tied to its node ID | **The user's decision** ([Open questions](#open-questions), 12) |
-| 3 | A node meant to reach no one still takes Iris and Rosa, and dials gossip peers | **Being built:** the `isolated` mode ([Modes](#modes)), heartwood change 15 (solardev-xyz/heartwood#17) and libradicle's `Options::isolated` |
+| 3 | A node meant to reach no one still takes Iris and Rosa, and dials gossip peers | **Partly built:** the `isolated` mode ([Modes](#modes)). Heartwood change 15 is built upstream (solardev-xyz/heartwood#17, merged). libradicle's `Options::isolated`, and the service's use of it, are still to come |
 | 4 | SOCKS has no stream isolation, so every peer shares Arti's circuits | **Decided:** isolation per remote node ([Modes](#modes)). Heartwood change 16 is in review (solardev-xyz/heartwood#19). The Arti isolation check (solardev-xyz/freedom-browser#964) is still to run live |
 
 ### Seeding and serving
@@ -1072,7 +1072,7 @@ The source research for this design found four ways the node gives away more tha
     - before serving a repository to a peer (`hw/radicle-node/src/worker.rs:243`–`258`);
     - a deferred fetch runs once its repository reopens.
     - **Each consultation holds a pass** for its purpose (mutate, serve, announce, or inventory) until the work it admits is done or queued. Closing a repository returns once the passes its new state doesn't permit have dropped. So a close that has returned is never overtaken by work admitted before it.
-15. **A static peer set takes no bootstrap nodes:** `Runtime::init` adds Iris and Rosa only for a dynamic peer set, so an `isolated` node's address book holds no one (in review: solardev-xyz/heartwood#17).
+15. **A static peer set takes no bootstrap nodes:** `Runtime::init` adds Iris and Rosa only for a dynamic peer set, so an `isolated` node's address book holds no one (built: solardev-xyz/heartwood#17, merged).
 16. **SOCKS5 with credentials** (in review: solardev-xyz/heartwood#19):
     - an RFC 1929 state machine for `Wire::dial`: a greeting offering username/password (method `0x02`) only, the subnegotiation, then `CONNECT`, with strict, length-bounded reply parsing;
     - with a password derived per remote node ID from a per-process secret ([Modes](#modes), stream isolation): HMAC-SHA-256 of the node ID under a 128-bit secret;
