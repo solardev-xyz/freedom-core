@@ -256,6 +256,16 @@ fn files(p: &Paths) {
         "create outside refused",
         std::fs::write(p.outside.join("new"), b"x").is_err(),
     );
+    // A hard link to a file outside would give it the grant's path
+    // (design 0010, step 7): Seatbelt allows `file-link` only inside it.
+    check(
+        "a hard link to a file outside refused",
+        std::fs::hard_link(
+            &canary,
+            p.data.join(format!("linked-{}", std::process::id())),
+        )
+        .is_err(),
+    );
     check("stat outside refused", std::fs::metadata(&canary).is_err());
     check(
         "chmod outside refused",
@@ -528,7 +538,9 @@ fn parent() {
     let after = std::fs::metadata(&canary).unwrap();
     expect(
         &mut failures,
-        after.mode() == before.mode() && std::fs::read(&canary).unwrap() == b"canary",
+        after.mode() == before.mode()
+            && after.nlink() == 1
+            && std::fs::read(&canary).unwrap() == b"canary",
         "the canary changed".into(),
     );
 
