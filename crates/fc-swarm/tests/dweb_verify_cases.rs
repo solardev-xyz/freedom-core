@@ -356,3 +356,168 @@ fn content(seed: &str, n: usize) -> Vec<u8> {
     out.truncate(n);
     out
 }
+
+/// Every manifest lookup in dweb-verify.json (ant-retrieval's lookup_path
+/// answers), replayed with fc_swarm::manifest: the nodes come from the
+/// recorded chunks, joined with fc_swarm::tree.
+#[test]
+fn manifest_lookups() {
+    use fc_swarm::manifest::{self, Lookup, Outcome, Step};
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vectors/dweb-verify.json");
+    let doc: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let chunks = &doc["swarm"]["chunks"];
+    let mut checked = 0;
+    for m in doc["swarm"]["manifests"].as_array().unwrap() {
+        let id = m["id"].as_str().unwrap();
+        let root = join_node(chunks, &hex32(&m["root"]));
+        for l in m["lookups"].as_array().unwrap() {
+            let p = l["path"].as_str().unwrap();
+            let (mut lookup, mut step) = Lookup::new(manifest::parse_node(&root).unwrap(), p);
+            let outcome = loop {
+                match step {
+                    Step::Done(o) => break Some(o),
+                    Step::Failed(e) => panic!("{id} {p:?}: {e:?}"),
+                    Step::TooManyNodes => panic!("{id} {p:?}: past the node bound"),
+                    Step::Need(r) if r.len() == 64 => break None,
+                    Step::Need(r) => {
+                        let bytes = join_node(chunks, &r.try_into().unwrap());
+                        step = lookup.node(&bytes);
+                    }
+                }
+            };
+            let Some(outcome) = outcome else {
+                // An encrypted node below a plain root: the walk refuses it
+                // (encrypted-in-walk); Ant decrypts and finds the entry.
+                assert_eq!(
+                    l["data_ref"].as_str().map(str::len),
+                    Some(128),
+                    "{id} {p:?}"
+                );
+                continue;
+            };
+            match (outcome, l["error"].as_str()) {
+                (Outcome::Found { data_ref, metadata }, None) => {
+                    assert_eq!(hex::encode(&data_ref), l["data_ref"], "{id} {p:?}");
+                    assert_eq!(
+                        metadata.get(manifest::CONTENT_TYPE),
+                        l["content_type"].as_str(),
+                        "{id} {p:?}"
+                    );
+                    for key in [manifest::CONTENT_TYPE, manifest::FILENAME] {
+                        assert_eq!(
+                            metadata.get(key),
+                            l["metadata"][key].as_str(),
+                            "{id} {p:?} {key}"
+                        );
+                    }
+                }
+                (Outcome::NotFound { root }, Some(e)) => {
+                    let shown = if root {
+                        "(root)".to_owned()
+                    } else {
+                        p.trim_start_matches('/').to_owned()
+                    };
+                    assert_eq!(e, format!("path '{shown}' not found"), "{id} {p:?}");
+                }
+                (Outcome::Directory, Some(e)) => {
+                    assert_eq!(
+                        e,
+                        format!(
+                            "path '{}' is a directory (redirect to trailing slash)",
+                            p.trim_start_matches('/')
+                        ),
+                        "{id} {p:?}"
+                    );
+                }
+                (o, e) => panic!("{id} {p:?}: {o:?} where Ant says {e:?}"),
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked >= 100, "{checked}");
+}
+
+/// A manifest node's bytes: its chunk tree, joined.
+fn join_node(chunks: &Value, address: &[u8; 32]) -> Vec<u8> {
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let wire = b64
+        .decode(chunks[hex::encode(address)].as_str().unwrap())
+        .unwrap();
+    let chunk = check_chunk(address, &wire).unwrap();
+    let (_, len) = fc_swarm::tree::decode_span(&chunk.span);
+    if fc_swarm::tree::is_leaf(len) {
+        return chunk.payload[..len as usize].to_vec();
+    }
+    let node = fc_swarm::tree::intermediate(&chunk, len).unwrap();
+    let mut out = Vec::new();
+    for i in 0..node.len() {
+        let (child, child_len) = node.child(i).unwrap();
+        let w = b64
+            .decode(chunks[hex::encode(child)].as_str().unwrap())
+            .unwrap();
+        let c = check_chunk(&child, &w).unwrap();
+        assert!(fc_swarm::tree::is_leaf(child_len));
+        out.extend_from_slice(&c.payload[..child_len as usize]);
+    }
+    out
+}
+
+/// Mantaray nodes, decoded as Ant decodes them, within the core's caps:
+/// every case's forks and kept metadata, or its refusal.
+#[test]
+fn manifest_nodes() {
+    use std::collections::BTreeMap;
+
+    use fc_swarm::manifest::{NodeError, parse_node};
+    let all = cases();
+    let list = all["swarm"]["manifest_nodes"].as_array().unwrap();
+    assert!(list.len() >= 30);
+    for case in list {
+        let id = &case["id"];
+        let node = bytes(&case["node"]);
+        let got = parse_node(&node);
+        let expect = &case["expect"];
+        match (&expect["ok"], expect["fail"].as_str()) {
+            (ok, None) if ok["manifest"] == false => {
+                assert_eq!(got, Err(NodeError::NotAManifest), "{id}");
+            }
+            (ok, None) if ok.is_object() => {
+                let parsed = got.unwrap_or_else(|e| panic!("{id}: {e:?}"));
+                assert_eq!(hex::encode(&parsed.entry), ok["entry"], "{id}");
+                assert_eq!(
+                    parsed.entry.len() as u64,
+                    ok["ref_size"].as_u64().unwrap(),
+                    "{id}"
+                );
+                let forks = ok["forks"].as_array().unwrap();
+                assert_eq!(parsed.forks.len(), forks.len(), "{id}");
+                for (f, want) in parsed.forks.iter().zip(forks) {
+                    assert_eq!(u64::from(f.byte), want["byte"].as_u64().unwrap(), "{id}");
+                    assert_eq!(
+                        u64::from(f.node_type),
+                        want["type"].as_u64().unwrap(),
+                        "{id}"
+                    );
+                    assert_eq!(hex::encode(&f.prefix), want["prefix"], "{id}");
+                    assert_eq!(hex::encode(&f.child), want["child"], "{id}");
+                    let got: BTreeMap<&str, &str> = f
+                        .metadata
+                        .0
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), v.as_str()))
+                        .collect();
+                    let wanted: BTreeMap<&str, &str> = want["metadata"]
+                        .as_object()
+                        .unwrap()
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), v.as_str().unwrap()))
+                        .collect();
+                    assert_eq!(got, wanted, "{id}: fork {}", f.byte);
+                }
+            }
+            (_, Some("malformed")) => assert_eq!(got, Err(NodeError::Malformed), "{id}"),
+            (_, Some("unverifiable")) => assert_eq!(got, Err(NodeError::TooLarge), "{id}"),
+            _ => panic!("{id}: no expect"),
+        }
+    }
+}
