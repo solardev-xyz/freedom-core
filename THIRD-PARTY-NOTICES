@@ -25,10 +25,10 @@ Crates:
 - const-oid 0.10.2: Apache-2.0 OR MIT
 - cpubits 0.1.1: MIT OR Apache-2.0
 - cpufeatures 0.3.1: MIT OR Apache-2.0
-- crypto-bigint 0.7.6: Apache-2.0 OR MIT
+- crypto-bigint 0.7.10: Apache-2.0 OR MIT
 - crypto-common 0.2.2: MIT OR Apache-2.0
 - ctr 0.10.1: MIT OR Apache-2.0
-- ctutils 0.4.5: Apache-2.0 OR MIT
+- ctutils 0.4.7: Apache-2.0 OR MIT
 - curve25519-dalek 5.0.0: BSD-3-Clause
 - der 0.8.2: Apache-2.0 OR MIT
 - digest 0.11.3: MIT OR Apache-2.0
@@ -1014,7 +1014,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 ========================================================================
-Used by: aead 0.6.1 (LICENSE-APACHE), aes 0.9.3 (LICENSE-APACHE), aes-gcm 0.11.1 (LICENSE-APACHE), base16ct 1.0.0 (LICENSE-APACHE), blake2 0.11.0 (LICENSE-APACHE), block-buffer 0.12.1 (LICENSE-APACHE), cipher 0.5.2 (LICENSE-APACHE), const-oid 0.10.2 (LICENSE-APACHE), cpubits 0.1.1 (LICENSE-APACHE), cpufeatures 0.3.1 (LICENSE-APACHE), crypto-bigint 0.7.6 (LICENSE-APACHE), crypto-common 0.2.2 (LICENSE-APACHE), ctr 0.10.1 (LICENSE-APACHE), der 0.8.2 (LICENSE-APACHE), digest 0.11.3 (LICENSE-APACHE), elliptic-curve 0.14.1 (LICENSE-APACHE), ghash 0.6.0 (LICENSE-APACHE), hkdf 0.13.0 (LICENSE-APACHE), hmac 0.13.0 (LICENSE-APACHE), hybrid-array 0.4.15 (LICENSE-APACHE), inout 0.2.2 (LICENSE-APACHE), k256 0.14.0 (LICENSE-APACHE), keccak 0.2.2 (LICENSE-APACHE), pbkdf2 0.13.0 (LICENSE-APACHE), polyval 0.7.3 (LICENSE-APACHE), primefield 0.14.0 (LICENSE-APACHE), primeorder 0.14.0 (LICENSE-APACHE), salsa20 0.11.0 (LICENSE-APACHE), scrypt 0.12.0 (LICENSE-APACHE), sec1 0.8.1 (LICENSE-APACHE), sha2 0.11.0 (LICENSE-APACHE), sha3 0.12.0 (LICENSE-APACHE), signature 3.0.0 (LICENSE-APACHE), sponge-cursor 0.1.0 (LICENSE-APACHE), universal-hash 0.6.1 (LICENSE-APACHE), wnaf 0.14.1 (LICENSE-APACHE)
+Used by: aead 0.6.1 (LICENSE-APACHE), aes 0.9.3 (LICENSE-APACHE), aes-gcm 0.11.1 (LICENSE-APACHE), base16ct 1.0.0 (LICENSE-APACHE), blake2 0.11.0 (LICENSE-APACHE), block-buffer 0.12.1 (LICENSE-APACHE), cipher 0.5.2 (LICENSE-APACHE), const-oid 0.10.2 (LICENSE-APACHE), cpubits 0.1.1 (LICENSE-APACHE), cpufeatures 0.3.1 (LICENSE-APACHE), crypto-bigint 0.7.10 (LICENSE-APACHE), crypto-common 0.2.2 (LICENSE-APACHE), ctr 0.10.1 (LICENSE-APACHE), der 0.8.2 (LICENSE-APACHE), digest 0.11.3 (LICENSE-APACHE), elliptic-curve 0.14.1 (LICENSE-APACHE), ghash 0.6.0 (LICENSE-APACHE), hkdf 0.13.0 (LICENSE-APACHE), hmac 0.13.0 (LICENSE-APACHE), hybrid-array 0.4.15 (LICENSE-APACHE), inout 0.2.2 (LICENSE-APACHE), k256 0.14.0 (LICENSE-APACHE), keccak 0.2.2 (LICENSE-APACHE), pbkdf2 0.13.0 (LICENSE-APACHE), polyval 0.7.3 (LICENSE-APACHE), primefield 0.14.0 (LICENSE-APACHE), primeorder 0.14.0 (LICENSE-APACHE), salsa20 0.11.0 (LICENSE-APACHE), scrypt 0.12.0 (LICENSE-APACHE), sec1 0.8.1 (LICENSE-APACHE), sha2 0.11.0 (LICENSE-APACHE), sha3 0.12.0 (LICENSE-APACHE), signature 3.0.0 (LICENSE-APACHE), sponge-cursor 0.1.0 (LICENSE-APACHE), universal-hash 0.6.1 (LICENSE-APACHE), wnaf 0.14.1 (LICENSE-APACHE)
 ------------------------------------------------------------------------
 Apache License
                         Version 2.0, January 2004
@@ -1799,7 +1799,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-Used by: cmov 0.5.4 (LICENSE-APACHE), ctutils 0.4.5 (LICENSE-APACHE), seccompiler 0.5.0 (LICENSE-APACHE), tinyvec 1.13.3 (LICENSE-APACHE.md), utf8_iter 1.0.4 (LICENSE-APACHE), zeroize 1.9.1 (LICENSE-APACHE)
+Used by: cmov 0.5.4 (LICENSE-APACHE), ctutils 0.4.7 (LICENSE-APACHE), seccompiler 0.5.0 (LICENSE-APACHE), tinyvec 1.13.3 (LICENSE-APACHE.md), utf8_iter 1.0.4 (LICENSE-APACHE), zeroize 1.9.1 (LICENSE-APACHE)
 ------------------------------------------------------------------------
 Apache License
                            Version 2.0, January 2004
@@ -2370,7 +2370,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-Used by: crypto-bigint 0.7.6 (LICENSE-MIT), scrypt 0.12.0 (LICENSE-MIT), sec1 0.8.1 (LICENSE-MIT)
+Used by: crypto-bigint 0.7.10 (LICENSE-MIT), scrypt 0.12.0 (LICENSE-MIT), sec1 0.8.1 (LICENSE-MIT)
 ------------------------------------------------------------------------
 Copyright (c) 2021-2026 The RustCrypto Project Developers
 
@@ -2458,7 +2458,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-Used by: ctutils 0.4.5 (LICENSE-MIT)
+Used by: ctutils 0.4.7 (LICENSE-MIT)
 ------------------------------------------------------------------------
 Copyright (c) 2025-2026 The RustCrypto Project Developers
 
