@@ -11,8 +11,11 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+fc-ipfs = { path = "../fc-ipfs" }
 fc-json = { path = "../fc-json" }
 fc-swarm = { path = "../fc-swarm" }
+# freedom-ipfs's locked release, so the core types files as GatewayCore does.
+mime_guess = "=2.0.5"
 sha3 = "0.12"
 thiserror = "2"
 # The WHATWG URL parser the handlers' `new URL` follows; fc-naming links it already.

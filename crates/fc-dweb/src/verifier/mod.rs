@@ -28,6 +28,8 @@
 //! The Swarm walk is [`swarm`]'s; the heads are Ant's ([`ant`]).
 
 mod ant;
+mod gateway;
+mod ipfs;
 mod jobs;
 mod swarm;
 
@@ -37,7 +39,6 @@ pub use jobs::{Hashed, Job, JobId};
 
 use crate::plan::{Backend, ContentTrust, ErrorPlan, Node, ResponseOp, Root, Trust, Verify};
 use crate::validate::Refusal;
-use swarm::Tag;
 
 /// A request's memory: its piece windows, the pieces and blocks it holds,
 /// its jobs' bytes and its queued body (0009, Bounds).
@@ -194,6 +195,11 @@ pub const SWARM_VERIFICATION_FAILED: &str = "Swarm content verification failed";
 pub const SWARM_UNVERIFIABLE: &str = "This content can't be verified with the external Swarm node";
 pub const SWARM_NOT_FOUND: &str = "Not found on the external Swarm node";
 pub const SWARM_STOPPED: &str = "The external Swarm node stopped sending";
+pub const IPFS_VERIFICATION_FAILED: &str = "IPFS content verification failed";
+pub const IPFS_UNVERIFIABLE: &str = "This content can't be verified with the external IPFS gateway";
+pub const IPFS_MALFORMED: &str = "This IPFS content is malformed";
+pub const IPFS_NOT_FOUND: &str = "Not found on the external IPFS gateway";
+pub const IPFS_STOPPED: &str = "The external IPFS gateway stopped sending";
 pub const DEADLINE_PASSED: &str = "Deadline passed";
 pub const TOO_MANY_REQUESTS: &str = "Too many requests";
 pub const CANCELLED: &str = "The request was cancelled";
@@ -201,10 +207,12 @@ pub const CANCELLED: &str = "The request was cancelled";
 /// Why a walk ended early.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Failure {
-    /// A piece isn't what its address or signature commits to.
+    /// A piece isn't what its address, CID or signature commits to.
     VerificationFailed,
     /// Content the core can't check, or a walk past its bounds.
     Unverifiable,
+    /// Authentic content that can't be decoded or is inconsistent (IPFS).
+    Malformed,
     /// A piece's final answer was this status.
     Status(u16),
     /// A piece's dial failed, or its stream stopped.
@@ -216,53 +224,96 @@ pub(crate) enum Failure {
     InvalidPath,
 }
 
+/// A node's texts.
+struct Texts {
+    verification_failed: &'static str,
+    unverifiable: &'static str,
+    not_found: &'static str,
+    stopped: &'static str,
+    who: &'static str,
+}
+
+fn texts(node: Node) -> Texts {
+    match node {
+        Node::Ant => Texts {
+            verification_failed: SWARM_VERIFICATION_FAILED,
+            unverifiable: SWARM_UNVERIFIABLE,
+            not_found: SWARM_NOT_FOUND,
+            stopped: SWARM_STOPPED,
+            who: "Swarm node",
+        },
+        Node::Ipfs => Texts {
+            verification_failed: IPFS_VERIFICATION_FAILED,
+            unverifiable: IPFS_UNVERIFIABLE,
+            not_found: IPFS_NOT_FOUND,
+            stopped: IPFS_STOPPED,
+            who: "IPFS gateway",
+        },
+    }
+}
+
 impl Failure {
-    /// The Swarm walk's texts; the IPFS walk's come with it (0009, step
-    /// 3b-2).
-    fn before_head(self) -> ErrorPlan {
+    fn before_head(self, node: Node) -> ErrorPlan {
+        let t = texts(node);
         match self {
             Self::VerificationFailed | Self::Piece(PieceFailure::TooLarge) => {
-                ErrorPlan::new(502, SWARM_VERIFICATION_FAILED)
+                ErrorPlan::new(502, t.verification_failed)
             }
-            Self::Unverifiable => ErrorPlan::new(502, SWARM_UNVERIFIABLE),
-            Self::Status(404) => ErrorPlan::new(404, SWARM_NOT_FOUND),
+            Self::Unverifiable => ErrorPlan::new(502, t.unverifiable),
+            Self::Malformed => ErrorPlan::new(502, IPFS_MALFORMED),
+            Self::Status(404) => ErrorPlan::new(404, t.not_found),
             Self::Status(status) => {
                 let shown = if (400..600).contains(&status) {
                     status
                 } else {
                     502
                 };
-                ErrorPlan::new(shown, format!("The external Swarm node answered {status}"))
+                ErrorPlan::new(shown, format!("The external {} answered {status}", t.who))
             }
             Self::Piece(failure) => {
                 let code = (failure == PieceFailure::Unreachable).then_some("ECONNREFUSED");
+                let backend = match node {
+                    Node::Ant => Backend::ant(crate::plan::Ant::External, true),
+                    Node::Ipfs => Backend::ipfs(crate::plan::Ipfs::Gateway, true),
+                };
                 crate::failure::after_dial(
-                    Backend::ant(crate::plan::Ant::External, true),
+                    backend,
                     &crate::failure::Thrown {
                         code,
                         ..Default::default()
                     },
                 )
             }
-            Self::Stopped => ErrorPlan::new(502, SWARM_STOPPED),
+            Self::Stopped => ErrorPlan::new(502, t.stopped),
             Self::Deadline => ErrorPlan::new(504, DEADLINE_PASSED),
             Self::InvalidPath => ErrorPlan::new(400, "Invalid URL"),
         }
     }
 
-    fn after_head(self) -> (AbortCode, &'static str) {
+    fn after_head(self, node: Node) -> (AbortCode, &'static str) {
+        let t = texts(node);
         match self {
             Self::VerificationFailed | Self::Piece(PieceFailure::TooLarge) => {
-                (AbortCode::VerificationFailed, SWARM_VERIFICATION_FAILED)
+                (AbortCode::VerificationFailed, t.verification_failed)
             }
-            Self::Unverifiable => (AbortCode::Unverifiable, SWARM_UNVERIFIABLE),
+            Self::Unverifiable => (AbortCode::Unverifiable, t.unverifiable),
+            Self::Malformed => (AbortCode::Malformed, IPFS_MALFORMED),
             Self::Status(_)
             | Self::Piece(_)
             | Self::Stopped
             | Self::Deadline
-            | Self::InvalidPath => (AbortCode::PieceFailed, SWARM_STOPPED),
+            | Self::InvalidPath => (AbortCode::PieceFailed, t.stopped),
         }
     }
+}
+
+/// What a piece is asked as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ask {
+    /// Read whole, up to this many bytes.
+    Whole(usize),
+    /// Streamed under credit; main ends it past this many bytes, if any.
+    Stream(Option<usize>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -311,6 +362,7 @@ struct Queued {
 #[derive(Debug)]
 pub(crate) struct Core<T> {
     request: u64,
+    node: Node,
     pub(crate) head_only: bool,
     trust_name: Option<String>,
     limit: usize,
@@ -332,9 +384,16 @@ pub(crate) struct Core<T> {
 }
 
 impl<T: Copy> Core<T> {
-    fn new(request: u64, head_only: bool, trust_name: Option<String>, limit: usize) -> Self {
+    fn new(
+        request: u64,
+        node: Node,
+        head_only: bool,
+        trust_name: Option<String>,
+        limit: usize,
+    ) -> Self {
         Self {
             request,
+            node,
             head_only,
             trust_name,
             limit,
@@ -396,31 +455,36 @@ impl<T: Copy> Core<T> {
         self.walk_held = self.walk_held.saturating_sub(n);
     }
 
-    /// Asks for a piece, reserving its room: `max_bytes` for a whole one,
-    /// the window for a stream. `None` when it doesn't fit.
+    /// Asks for a piece, reserving its room: a whole piece's bound, or a
+    /// stream's window. `None` when it doesn't fit.
     pub(crate) fn fetch(
         &mut self,
         tag: T,
         path: String,
         headers: Vec<(String, String)>,
-        stream: bool,
-        max_bytes: usize,
+        ask: Ask,
     ) -> Option<PieceId> {
-        let room = if stream { STREAM_WINDOW } else { max_bytes };
+        let room = match ask {
+            Ask::Whole(max) => max,
+            Ask::Stream(_) => STREAM_WINDOW,
+        };
         if !self.fits(room) || self.ended() {
             return None;
         }
         let id = PieceId(self.next_piece);
         self.next_piece += 1;
-        let kind = if stream {
-            Kind::Stream(Stream {
-                headed: false,
-                received: 0,
-                credited: 0,
-                owed: 0,
-            })
-        } else {
-            Kind::Whole { max: max_bytes }
+        let (kind, stream, max_bytes) = match ask {
+            Ask::Whole(max) => (Kind::Whole { max }, false, Some(max)),
+            Ask::Stream(max) => (
+                Kind::Stream(Stream {
+                    headed: false,
+                    received: 0,
+                    credited: 0,
+                    owed: 0,
+                }),
+                true,
+                max,
+            ),
         };
         self.pieces.insert(
             id,
@@ -435,7 +499,7 @@ impl<T: Copy> Core<T> {
             path,
             headers,
             stream,
-            max_bytes: (!stream).then_some(max_bytes),
+            max_bytes,
         }));
         Some(id)
     }
@@ -541,9 +605,11 @@ impl<T: Copy> Core<T> {
     /// Ends the request early: an error before the head, an abort after.
     pub(crate) fn fail(&mut self, failure: Failure) {
         match self.phase {
-            Phase::Walking => self.outputs.push_back(Output::Error(failure.before_head())),
+            Phase::Walking => self
+                .outputs
+                .push_back(Output::Error(failure.before_head(self.node))),
             Phase::Headed => {
-                let (code, message) = failure.after_head();
+                let (code, message) = failure.after_head(self.node);
                 self.outputs.push_back(Output::Abort { code, message });
             }
             Phase::Ended => return,
@@ -631,140 +697,39 @@ enum PieceEvent {
     Failed(PieceFailure),
 }
 
-/// A request's verifier. See the module documentation.
-#[derive(Debug)]
-pub struct Verifier {
-    core: Core<Tag>,
-    walk: Option<swarm::Walk>,
-    partition: Option<String>,
-    private: bool,
+/// What a walk takes from the machine: its pieces' inputs, already checked
+/// against each piece, and its jobs' results.
+pub(crate) trait Events<T> {
+    fn whole(
+        &mut self,
+        core: &mut Core<T>,
+        tag: T,
+        status: u16,
+        headers: &[(String, String)],
+        body: Vec<u8>,
+    );
+    fn stream_head(
+        &mut self,
+        core: &mut Core<T>,
+        tag: T,
+        id: PieceId,
+        status: u16,
+        headers: &[(String, String)],
+    );
+    fn stream_data(&mut self, core: &mut Core<T>, tag: T, id: PieceId, bytes: Vec<u8>);
+    fn stream_end(&mut self, core: &mut Core<T>, tag: T, id: PieceId);
+    fn failed(&mut self, core: &mut Core<T>, tag: T, failure: PieceFailure);
+    fn hashed(&mut self, core: &mut Core<T>, tag: T, verdict: jobs::Verdict, work: jobs::Work);
 }
 
-impl Verifier {
-    /// A machine for `plan`, which it checks again against `method` and
-    /// itself (0009, `dweb.verify`): a refusal is a core fault, answered
-    /// 502 as 0006's refused plans are. `request` is the `dweb.verify`
-    /// request's id; it tags the machine's jobs.
-    pub fn new(
-        request: u64,
-        plan: &Verify,
-        method: Method,
-        partition: Option<&str>,
-        private: bool,
-    ) -> Result<Self, Refusal> {
-        Self::with_budget(request, plan, method, partition, private, REQUEST_BUDGET)
-    }
+/// A core and the walk it drives.
+#[derive(Debug)]
+struct Machine<T, W> {
+    core: Core<T>,
+    walk: Option<W>,
+}
 
-    /// [`Verifier::new`] with another memory bound, for tests of budgets
-    /// exhausted at each reservation.
-    pub fn with_budget(
-        request: u64,
-        plan: &Verify,
-        method: Method,
-        partition: Option<&str>,
-        private: bool,
-        budget: usize,
-    ) -> Result<Self, Refusal> {
-        check_plan(plan)?;
-        let Root::Swarm(root) = &plan.root else {
-            // The IPFS walk is 0009's step 3b-2.
-            return Err(Refusal::Node);
-        };
-        let range = plan
-            .headers
-            .iter()
-            .find(|(n, _)| n == "range")
-            .map(|(_, v)| v.clone());
-        let mut core = Core::new(
-            request,
-            method == Method::Head,
-            plan.trust.name.clone(),
-            budget,
-        );
-        let walk = swarm::Walk::start(&mut core, root, &plan.path, &plan.query, range)?;
-        let mut v = Self {
-            core,
-            walk: Some(walk),
-            partition: partition.map(str::to_owned),
-            private,
-        };
-        v.settle();
-        Ok(v)
-    }
-
-    /// The request's partition, as main named it.
-    pub fn partition(&self) -> Option<&str> {
-        self.partition.as_deref()
-    }
-
-    /// A private window's request: its references are never logged.
-    pub fn private(&self) -> bool {
-        self.private
-    }
-
-    /// The next output, if any.
-    pub fn poll(&mut self) -> Option<Output> {
-        self.core.outputs.pop_front()
-    }
-
-    /// Bytes the request holds or has reserved.
-    pub fn reserved(&self) -> usize {
-        self.core.reserved()
-    }
-
-    /// The terminal output is out, every piece has ended and every job has
-    /// come back: the request's memory is released.
-    pub fn finished(&self) -> bool {
-        self.core.ended()
-            && self.core.pieces.is_empty()
-            && self.core.jobs.is_empty()
-            && self.core.outputs.is_empty()
-    }
-
-    /// A whole piece's reply.
-    pub fn piece_whole(
-        &mut self,
-        id: PieceId,
-        status: u16,
-        headers: Vec<(String, String)>,
-        body: Vec<u8>,
-    ) -> Result<(), Misuse> {
-        self.piece(
-            id,
-            PieceEvent::Whole {
-                status,
-                headers,
-                body,
-            },
-        )
-    }
-
-    /// A streamed piece's head.
-    pub fn piece_head(
-        &mut self,
-        id: PieceId,
-        status: u16,
-        headers: Vec<(String, String)>,
-    ) -> Result<(), Misuse> {
-        self.piece(id, PieceEvent::Head { status, headers })
-    }
-
-    /// A streamed piece's data frame: 1 to [`MAX_FRAME`] bytes, within the
-    /// piece's window.
-    pub fn piece_data(&mut self, id: PieceId, bytes: Vec<u8>) -> Result<(), Misuse> {
-        self.piece(id, PieceEvent::Data(bytes))
-    }
-
-    /// A streamed piece's end.
-    pub fn piece_end(&mut self, id: PieceId) -> Result<(), Misuse> {
-        self.piece(id, PieceEvent::End)
-    }
-
-    /// A piece failed: before its head, or its stream after.
-    pub fn piece_failed(&mut self, id: PieceId, failure: PieceFailure) -> Result<(), Misuse> {
-        self.piece(id, PieceEvent::Failed(failure))
-    }
-
+impl<T: Copy, W: Events<T>> Machine<T, W> {
     fn piece(&mut self, id: PieceId, event: PieceEvent) -> Result<(), Misuse> {
         if id.0 >= self.core.next_piece {
             return Err(Misuse::UnknownPiece);
@@ -843,7 +808,7 @@ impl Verifier {
                     walk.whole(core, tag, status, &headers, body);
                 }
                 PieceEvent::Head { status, headers } => {
-                    walk.stream_head(core, tag, id, status, &headers)
+                    walk.stream_head(core, tag, id, status, &headers);
                 }
                 PieceEvent::Data(bytes) => {
                     core.hold(bytes.len());
@@ -857,8 +822,7 @@ impl Verifier {
         Ok(())
     }
 
-    /// A hash job's result.
-    pub fn hashed(&mut self, result: Hashed) -> Result<(), Misuse> {
+    fn hashed(&mut self, result: Hashed) -> Result<(), Misuse> {
         let id = result.id;
         if id.request != self.core.request || id.seq >= self.core.next_job {
             return Err(Misuse::UnknownJob);
@@ -874,8 +838,7 @@ impl Verifier {
         Ok(())
     }
 
-    /// Main's credit for the verified body: bytes it has handed on.
-    pub fn body_credit(&mut self, bytes: usize) -> Result<(), Misuse> {
+    fn body_credit(&mut self, bytes: usize) -> Result<(), Misuse> {
         if bytes == 0 || self.core.credited + bytes > self.core.sent {
             return Err(Misuse::BodyCredit);
         }
@@ -885,9 +848,7 @@ impl Verifier {
         Ok(())
     }
 
-    /// The page went away: every piece is cancelled, and the request ends
-    /// `cancelled`.
-    pub fn cancel(&mut self) {
+    fn cancel(&mut self) {
         match self.core.phase {
             Phase::Walking => {
                 self.core.outputs.push_back(Output::Cancelled);
@@ -905,9 +866,7 @@ impl Verifier {
         self.settle();
     }
 
-    /// `deadline_ms` passed: before the head, a 504; after it there is no
-    /// core deadline.
-    pub fn deadline(&mut self) {
+    fn deadline(&mut self) {
         if self.core.phase == Phase::Walking {
             self.core.fail(Failure::Deadline);
         }
@@ -922,6 +881,217 @@ impl Verifier {
             self.core.walk_held = 0;
         }
         self.core.flush_credit();
+    }
+
+    fn finished(&self) -> bool {
+        self.core.ended()
+            && self.core.pieces.is_empty()
+            && self.core.jobs.is_empty()
+            && self.core.outputs.is_empty()
+    }
+}
+
+#[derive(Debug)]
+enum Inner {
+    Swarm(Machine<swarm::Tag, swarm::Walk>),
+    Ipfs(Machine<ipfs::Tag, ipfs::Walk>),
+}
+
+/// The same call on whichever machine the request has.
+macro_rules! machine {
+    ($self:expr, $m:ident => $body:expr) => {
+        match &mut $self.inner {
+            Inner::Swarm($m) => $body,
+            Inner::Ipfs($m) => $body,
+        }
+    };
+}
+
+/// What a request runs under, beside its plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Options {
+    /// The request's memory bound ([`REQUEST_BUDGET`]; smaller in tests of
+    /// budgets exhausted at each reservation).
+    pub budget: usize,
+    /// The wall clock, in Unix seconds, for an IPNS record's validity.
+    pub now: i64,
+    /// Whether the gateway's probe found ordered CARs (0009, Modes): without
+    /// them every block is fetched raw.
+    pub car: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            budget: REQUEST_BUDGET,
+            now: 0,
+            car: true,
+        }
+    }
+}
+
+/// A request's verifier. See the module documentation.
+#[derive(Debug)]
+pub struct Verifier {
+    inner: Inner,
+    partition: Option<String>,
+    private: bool,
+}
+
+impl Verifier {
+    /// A machine for `plan`, which it checks again against `method` and
+    /// itself (0009, `dweb.verify`): a refusal is a core fault, answered
+    /// 502 as 0006's refused plans are. `request` is the `dweb.verify`
+    /// request's id; it tags the machine's jobs.
+    pub fn new(
+        request: u64,
+        plan: &Verify,
+        method: Method,
+        partition: Option<&str>,
+        private: bool,
+        options: Options,
+    ) -> Result<Self, Refusal> {
+        check_plan(plan)?;
+        let header = |name: &str| {
+            plan.headers
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.clone())
+        };
+        let head_only = method == Method::Head;
+        let name = plan.trust.name.clone();
+        let inner = match &plan.root {
+            Root::Swarm(root) => {
+                let mut core = Core::new(request, Node::Ant, head_only, name, options.budget);
+                let walk =
+                    swarm::Walk::start(&mut core, root, &plan.path, &plan.query, header("range"))?;
+                Inner::Swarm(Machine {
+                    core,
+                    walk: Some(walk),
+                })
+            }
+            Root::Ipfs(_) | Root::Ipns(_) => {
+                let mut core = Core::new(request, Node::Ipfs, head_only, name, options.budget);
+                let walk = ipfs::Walk::start(
+                    &mut core,
+                    &plan.root,
+                    &plan.path,
+                    ipfs::Asked {
+                        range: header("range"),
+                        if_none_match: header("if-none-match"),
+                        now: options.now,
+                        car: options.car,
+                    },
+                )?;
+                Inner::Ipfs(Machine {
+                    core,
+                    walk: Some(walk),
+                })
+            }
+        };
+        let mut v = Self {
+            inner,
+            partition: partition.map(str::to_owned),
+            private,
+        };
+        machine!(v, m => m.settle());
+        Ok(v)
+    }
+
+    /// The request's partition, as main named it.
+    pub fn partition(&self) -> Option<&str> {
+        self.partition.as_deref()
+    }
+
+    /// A private window's request: its references are never logged.
+    pub fn private(&self) -> bool {
+        self.private
+    }
+
+    /// The next output, if any.
+    pub fn poll(&mut self) -> Option<Output> {
+        machine!(self, m => m.core.outputs.pop_front())
+    }
+
+    /// Bytes the request holds or has reserved.
+    pub fn reserved(&self) -> usize {
+        match &self.inner {
+            Inner::Swarm(m) => m.core.reserved(),
+            Inner::Ipfs(m) => m.core.reserved(),
+        }
+    }
+
+    /// The terminal output is out, every piece has ended and every job has
+    /// come back: the request's memory is released.
+    pub fn finished(&self) -> bool {
+        match &self.inner {
+            Inner::Swarm(m) => m.finished(),
+            Inner::Ipfs(m) => m.finished(),
+        }
+    }
+
+    /// A whole piece's reply.
+    pub fn piece_whole(
+        &mut self,
+        id: PieceId,
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    ) -> Result<(), Misuse> {
+        let event = PieceEvent::Whole {
+            status,
+            headers,
+            body,
+        };
+        machine!(self, m => m.piece(id, event))
+    }
+
+    /// A streamed piece's head.
+    pub fn piece_head(
+        &mut self,
+        id: PieceId,
+        status: u16,
+        headers: Vec<(String, String)>,
+    ) -> Result<(), Misuse> {
+        machine!(self, m => m.piece(id, PieceEvent::Head { status, headers }))
+    }
+
+    /// A streamed piece's data frame: 1 to [`MAX_FRAME`] bytes, within the
+    /// piece's window.
+    pub fn piece_data(&mut self, id: PieceId, bytes: Vec<u8>) -> Result<(), Misuse> {
+        machine!(self, m => m.piece(id, PieceEvent::Data(bytes)))
+    }
+
+    /// A streamed piece's end.
+    pub fn piece_end(&mut self, id: PieceId) -> Result<(), Misuse> {
+        machine!(self, m => m.piece(id, PieceEvent::End))
+    }
+
+    /// A piece failed: before its head, or its stream after.
+    pub fn piece_failed(&mut self, id: PieceId, failure: PieceFailure) -> Result<(), Misuse> {
+        machine!(self, m => m.piece(id, PieceEvent::Failed(failure)))
+    }
+
+    /// A hash job's result.
+    pub fn hashed(&mut self, result: Hashed) -> Result<(), Misuse> {
+        machine!(self, m => m.hashed(result))
+    }
+
+    /// Main's credit for the verified body: bytes it has handed on.
+    pub fn body_credit(&mut self, bytes: usize) -> Result<(), Misuse> {
+        machine!(self, m => m.body_credit(bytes))
+    }
+
+    /// The page went away: every piece is cancelled, and the request ends
+    /// `cancelled`.
+    pub fn cancel(&mut self) {
+        machine!(self, m => m.cancel());
+    }
+
+    /// `deadline_ms` passed: before the head, a 504; after it there is no
+    /// core deadline.
+    pub fn deadline(&mut self) {
+        machine!(self, m => m.deadline());
     }
 }
 

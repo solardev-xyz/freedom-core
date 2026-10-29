@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use base64::Engine as _;
 use fc_dweb::verifier::{
-    Head, Method, Misuse, Output, PieceFailure, PieceId, PieceRequest, REQUEST_BUDGET,
+    Head, Method, Misuse, Options, Output, PieceFailure, PieceId, PieceRequest, REQUEST_BUDGET,
     STREAM_WINDOW, Verifier,
 };
 use fc_dweb::{
@@ -572,8 +572,18 @@ struct SimStream {
 }
 
 fn run(label: &str, plan: &Verify, method: Method, world: &World<'_>, opts: Opts) -> Run {
-    let mut v = Verifier::with_budget(7, plan, method, None, false, opts.budget)
-        .unwrap_or_else(|e| panic!("plan refused at {e}: {plan:?}"));
+    let mut v = Verifier::new(
+        7,
+        plan,
+        method,
+        None,
+        false,
+        Options {
+            budget: opts.budget,
+            ..Options::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("plan refused at {e}: {plan:?}"));
     let mut out = Run::default();
     let mut queue: VecDeque<Action> = VecDeque::new();
     let mut streams: BTreeMap<PieceId, SimStream> = BTreeMap::new();
@@ -1030,7 +1040,7 @@ fn replay(choose: impl Fn(&str, &str) -> bool) -> Replayed {
             Method::Get
         };
         let p = plan(root, path, query, headers);
-        if Verifier::new(1, &p, method, None, false).is_err() {
+        if Verifier::new(1, &p, method, None, false, Options::default()).is_err() {
             // No verify plan reaches it: main's validation refuses an
             // encoded separator, as the core does.
             unplanned.push(id.to_owned());
@@ -1304,8 +1314,8 @@ fn hash_results_it_did_not_ask_for_are_refused() {
     let store = Store::new(&doc);
     let world = World::honest(&store);
     let p = plan(SITE_A, "/style.css", "", vec![]);
-    let mut v = Verifier::new(3, &p, Method::Get, None, false).unwrap();
-    let mut other = Verifier::new(4, &p, Method::Get, None, false).unwrap();
+    let mut v = Verifier::new(3, &p, Method::Get, None, false, Options::default()).unwrap();
+    let mut other = Verifier::new(4, &p, Method::Get, None, false, Options::default()).unwrap();
     let Some(Output::Piece(req)) = v.poll() else {
         panic!("the root first")
     };
@@ -1352,7 +1362,7 @@ fn stream_protocol_errors() {
     let store = Store::new(&doc);
     let world = World::honest(&store);
     let p = plan(FILE_512K, "/", "", vec![]);
-    let mut v = Verifier::new(5, &p, Method::Get, None, false).unwrap();
+    let mut v = Verifier::new(5, &p, Method::Get, None, false, Options::default()).unwrap();
     let mut queue = VecDeque::new();
     let stream = loop {
         while let Some(o) = v.poll() {
