@@ -904,6 +904,8 @@ fn pairs(v: &Json) -> Vec<(String, String)> {
 enum Kind {
     /// Ant's answer, reproduced.
     Same,
+    /// Several ranges: the whole body with 200 (deviation `multi-range`).
+    MultiRange,
     /// An encrypted reference inside the walk (`encrypted-in-walk`).
     Encrypted,
     /// A feed with no update: the node's 404, with the core's message.
@@ -912,6 +914,11 @@ enum Kind {
 
 fn kind_of(e: &Json) -> Kind {
     let case = e["case"].as_str().unwrap();
+    let r = &e["response"];
+    if header(&r["headers"], "content-type").is_some_and(|t| t.starts_with("multipart/byteranges"))
+    {
+        return Kind::MultiRange;
+    }
     match case {
         "feed-encrypted" | "encrypted-below-plain-root" => Kind::Encrypted,
         "feed-empty" => Kind::NodeMiss,
@@ -934,40 +941,41 @@ fn big(case: &str, id: &str, part: usize) -> bool {
 #[test]
 fn bzz_exchanges() {
     let n = replay(|case, _| !case.starts_with("file-67108865-"));
-    assert_eq!(n.total, 249, "{n:?}");
+    assert_eq!(n.total, 675, "{n:?}");
     assert_eq!(n.unplanned, 2, "{n:?}");
-    assert_eq!(n.kinds.get(&Kind::Encrypted), Some(&5), "{n:?}");
-    assert_eq!(n.kinds.get(&Kind::NodeMiss), Some(&4), "{n:?}");
-    assert!(n.runs > 150, "{n:?}");
+    assert_eq!(n.kinds[&Kind::MultiRange], 21, "{n:?}");
+    assert_eq!(n.kinds.get(&Kind::Encrypted), Some(&8), "{n:?}");
+    assert_eq!(n.kinds.get(&Kind::NodeMiss), Some(&7), "{n:?}");
+    assert!(n.runs > 400, "{n:?}");
 }
 
 #[test]
 fn bzz_exchanges_big_raw() {
-    assert_eq!(replay(|case, id| big(case, id, 0)).total, 12);
+    assert_eq!(replay(|case, id| big(case, id, 0)).total, 18);
 }
 
 #[test]
 fn bzz_exchanges_big_manifest_0() {
-    assert_eq!(replay(|case, id| big(case, id, 1)).total, 3);
+    assert_eq!(replay(|case, id| big(case, id, 1)).total, 13);
 }
 
 #[test]
 fn bzz_exchanges_big_manifest_1() {
-    assert_eq!(replay(|case, id| big(case, id, 2)).total, 4);
+    assert_eq!(replay(|case, id| big(case, id, 2)).total, 13);
 }
 
 #[test]
 fn bzz_exchanges_big_manifest_2() {
-    assert_eq!(replay(|case, id| big(case, id, 3)).total, 3);
+    assert_eq!(replay(|case, id| big(case, id, 3)).total, 13);
 }
 
 #[test]
 fn bzz_exchanges_big_manifest_3() {
-    assert_eq!(replay(|case, id| big(case, id, 4)).total, 4);
+    assert_eq!(replay(|case, id| big(case, id, 4)).total, 13);
 }
 
-/// What a plan is made of here: root, path, query and headers.
-type PlanKey = (String, String, String, Vec<(String, String)>);
+/// What a plan is made of here: root, path, query, headers and method.
+type PlanKey = (String, String, String, Vec<(String, String)>, bool);
 
 #[derive(Debug)]
 struct Replayed {
@@ -1006,18 +1014,22 @@ fn replay(choose: impl Fn(&str, &str) -> bool) -> Replayed {
         if !choose(e["case"].as_str().unwrap(), id) {
             continue;
         }
-        // HEAD and ranges are step 3b-1's second part.
-        if req["method"] != "GET" || header(&req["headers"], "range").is_some() {
-            continue;
-        }
         total += 1;
         let (root, below) = rest.split_at(64);
         let (path, query) = match below.find('?') {
             Some(at) => (&below[..at], &below[at..]),
             None => (below, ""),
         };
-        let method = Method::Get;
-        let p = plan(root, path, query, vec![]);
+        let headers: Vec<(String, String)> = pairs(&req["headers"])
+            .into_iter()
+            .filter(|(n, _)| n == "range")
+            .collect();
+        let method = if req["method"] == "HEAD" {
+            Method::Head
+        } else {
+            Method::Get
+        };
+        let p = plan(root, path, query, headers);
         if Verifier::new(1, &p, method, None, false).is_err() {
             // No verify plan reaches it: main's validation refuses an
             // encoded separator, as the core does.
@@ -1031,6 +1043,7 @@ fn replay(choose: impl Fn(&str, &str) -> bool) -> Replayed {
             path.to_owned(),
             query.to_owned(),
             p.headers.clone(),
+            method == Method::Get,
         );
         let got = runs
             .entry(key)
@@ -1038,8 +1051,23 @@ fn replay(choose: impl Fn(&str, &str) -> bool) -> Replayed {
         let kind = kind_of(e);
         *kinds.entry(kind).or_default() += 1;
         match kind {
-            Kind::Same => {
-                let r = &e["response"];
+            Kind::Same | Kind::MultiRange => {
+                let want = if kind == Kind::MultiRange {
+                    // The same request without its ranges.
+                    let sibling = exchanges
+                        .iter()
+                        .find(|x| {
+                            x["case"] == e["case"]
+                                && x["request"]["path"] == req["path"]
+                                && x["request"]["method"] == "GET"
+                                && header(&x["request"]["headers"], "range").is_none()
+                        })
+                        .unwrap();
+                    by_id[sibling["id"].as_str().unwrap()]
+                } else {
+                    e
+                };
+                let r = &want["response"];
                 let head = got
                     .head
                     .as_ref()
@@ -1126,7 +1154,11 @@ fn check_case(store: &Store, id: &str, step: &Json, opts: Opts) {
         p["query"].as_str().unwrap(),
         pairs(&p["headers"]),
     );
-    let method = Method::Get;
+    let method = if step["method"] == "HEAD" {
+        Method::Head
+    } else {
+        Method::Get
+    };
     let world = World::of(store, &step["world"]);
     let got = run(id, &plan, method, &world, opts);
     let x = &step["expect"];
@@ -1199,24 +1231,12 @@ fn error_plan(status: u16, message: &str) -> ErrorPlan {
     }
 }
 
-/// The `swarm/*` cases, less those with HEAD or a range: step 3b-1's
-/// second part.
 fn swarm_cases() -> Vec<Json> {
-    let plain = |s: &Json| {
-        s["method"] == "GET"
-            && s["plan"]["headers"]
-                .as_array()
-                .is_some_and(|h| h.is_empty())
-    };
     load("dweb-verify-cases.json")["requests"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|c| c["id"].as_str().unwrap().starts_with("swarm/"))
-        .filter(|c| match c["steps"].as_array() {
-            Some(steps) => steps.iter().all(plain),
-            None => plain(c),
-        })
         .cloned()
         .collect()
 }
@@ -1239,7 +1259,7 @@ fn every_swarm_request_case() {
             n += 1;
         }
     }
-    assert_eq!(n, 26, "{n}");
+    assert_eq!(n, 33, "{n}");
 }
 
 /// The same cases with replies and hash results out of order, and a page
@@ -1397,7 +1417,12 @@ fn budgets_exhausted_at_each_reservation() {
     let store = Store::new(&load("dweb-verify.json"));
     let world = World::honest(&store);
     let style = plan(SITE_A, "/style.css", "", vec![]);
-    let big = plan(FILE_512K, "/", "", vec![]);
+    let big = plan(
+        FILE_512K,
+        "/",
+        "",
+        vec![("range".to_owned(), "bytes=4096-8191".to_owned())],
+    );
     for p in [&style, &big] {
         let honest = run("budget", p, Method::Get, &world, Opts::default());
         assert_eq!(honest.ending, Some(Ending::End));
@@ -1443,10 +1468,15 @@ fn budgets_exhausted_at_each_reservation() {
 fn cancel_at_every_step() {
     let store = Store::new(&load("dweb-verify.json"));
     let world = World::honest(&store);
-    let p = plan(FILE_512K, "/", "", vec![]);
+    let p = plan(
+        FILE_512K,
+        "/",
+        "",
+        vec![("range".to_owned(), "bytes=100-300000".to_owned())],
+    );
     let honest = run("cancel", &p, Method::Get, &world, Opts::default());
     let want = content("file-524288", 524_288);
-    assert_eq!(honest.body, want);
+    assert_eq!(honest.body, want[100..=300_000]);
     for at in 1..200 {
         let got = run(
             "cancel",
@@ -1468,19 +1498,64 @@ fn cancel_at_every_step() {
             other => panic!("{at}: {other:?}"),
         }
         assert!(
-            want.starts_with(&got.body),
+            want[100..].starts_with(&got.body),
             "{at}: a prefix of the right bytes"
         );
     }
 }
 
+/// Ranges at leaf boundaries: each the right bytes, the stream asked for
+/// whole leaves only.
+#[test]
+fn ranges_at_leaf_boundaries() {
+    let store = Store::new(&load("dweb-verify.json"));
+    let world = World::honest(&store);
+    let want = content("file-524288", 524_288);
+    for (a, b) in [
+        (0u64, 0u64),
+        (0, 4095),
+        (4095, 4096),
+        (4096, 4096),
+        (8191, 12_288),
+        (524_287, 524_287),
+        (1, 524_286),
+    ] {
+        let p = plan(
+            FILE_512K,
+            "/",
+            "",
+            vec![("range".to_owned(), format!("bytes={a}-{b}"))],
+        );
+        let got = run("range", &p, Method::Get, &world, Opts::default());
+        assert_eq!(got.head.as_ref().unwrap().status, 206);
+        assert_eq!(got.body, want[a as usize..=b as usize], "{a}-{b}");
+        let stream = got.pieces.iter().find(|r| r.stream).unwrap();
+        let range = &stream.headers.iter().find(|(n, _)| n == "range").unwrap().1;
+        let fs = a / 4096 * 4096;
+        let fe = ((b / 4096 + 1) * 4096).min(524_288) - 1;
+        assert_eq!(range, &format!("bytes={fs}-{fe}"));
+    }
+}
+
+/// A HEAD reads nothing past the file's root, and has no body.
+#[test]
+fn head_reads_only_to_the_file_root() {
+    let store = Store::new(&load("dweb-verify.json"));
+    let world = World::honest(&store);
+    let p = plan(SITE_A, "/style.css", "", vec![]);
+    let got = run("head", &p, Method::Head, &world, Opts::default());
+    assert!(!got.head.as_ref().unwrap().body);
+    assert!(got.pieces.iter().all(|r| r.path.starts_with("/chunks/")));
+    assert!(got.body.is_empty());
+}
+
 /// Credit stays within the reservation (the driver checks it at every
 /// step: credit only for bytes received, none once a piece is cancelled,
-/// and every open stream's room reserved) on an abort after a leaf fails,
-/// and on a cancel mid-body, with a page that reads slowly so verified
-/// bytes wait in the machine. A range's is step 3b-1's second part.
+/// and every open stream's room reserved) on a range, on an abort after a
+/// leaf fails, and on a cancel mid-body, with a page that reads slowly so
+/// verified bytes wait in the machine.
 #[test]
-fn credit_within_the_reservation_on_an_abort_and_a_cancel() {
+fn credit_within_the_reservation_on_a_range_and_an_abort() {
     let store = Store::new(&load("dweb-verify.json"));
     let honest = World::honest(&store);
     let want = content("file-524288", 524_288);
@@ -1488,6 +1563,16 @@ fn credit_within_the_reservation_on_an_abort_and_a_cancel() {
         page: Some(4096),
         ..Opts::default()
     };
+    // A range, read through a page slower than the node.
+    let ranged = plan(
+        FILE_512K,
+        "/",
+        "",
+        vec![("range".to_owned(), "bytes=5000-400000".to_owned())],
+    );
+    let got = run("range", &ranged, Method::Get, &honest, slow);
+    assert_eq!(got.ending, Some(Ending::End));
+    assert_eq!(got.body, want[5000..=400_000]);
     // An abort: the sixth leaf flipped in the stream and in /chunks.
     let flipped = World {
         store: &store,
@@ -1509,7 +1594,7 @@ fn credit_within_the_reservation_on_an_abort_and_a_cancel() {
     // A cancel while the body streams.
     let got = run(
         "cancel",
-        &whole,
+        &ranged,
         Method::Get,
         &honest,
         Opts {
@@ -1522,7 +1607,7 @@ fn credit_within_the_reservation_on_an_abort_and_a_cancel() {
         "{:?}",
         got.ending
     );
-    assert!(want.starts_with(&got.body));
+    assert!(want[5000..].starts_with(&got.body));
 }
 
 /// A page that reads slowly holds the node back: the machine credits a
