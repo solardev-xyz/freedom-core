@@ -203,8 +203,8 @@ Normal CI reads the committed file and never builds the generator. The
 `dweb-verify vectors` workflow builds it and runs `check`, and runs `cargo deny
 --locked check` against the generator's own `deny.toml`, only when the generator
 or the file changes. That policy is the core's, with the advisories the pinned
-nodes' graphs carry, each explained: the generator ships in nothing, and opens
-no socket.
+nodes' graphs carry, each explained: the generator ships in nothing, and its
+only sockets are to the Kubo it starts, offline, on loopback.
 
 `bee-check/` is a one-off cross-check against Bee's own writers at a93fb7a7, not
 part of CI. It needs Go 1.26 and Bee's module; run it after `generate`, then
