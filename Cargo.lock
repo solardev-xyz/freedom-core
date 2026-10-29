@@ -511,10 +511,13 @@ dependencies = [
 name = "fc-swarm"
 version = "0.8.0"
 dependencies = [
+ "base64",
  "fc-evm",
  "fc-keys",
+ "hex",
  "k256",
  "serde_json",
+ "sha2",
  "thiserror",
 ]
 
