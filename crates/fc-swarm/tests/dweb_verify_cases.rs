@@ -377,6 +377,7 @@ fn manifest_lookups() {
                 match step {
                     Step::Done(o) => break Some(o),
                     Step::Failed(e) => panic!("{id} {p:?}: {e:?}"),
+                    Step::TooManyNodes => panic!("{id} {p:?}: past the node bound"),
                     Step::Need(r) if r.len() == 64 => break None,
                     Step::Need(r) => {
                         let bytes = join_node(chunks, &r.try_into().unwrap());

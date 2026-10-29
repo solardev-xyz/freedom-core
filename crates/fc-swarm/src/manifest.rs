@@ -14,6 +14,9 @@ use fc_evm::keccak256;
 
 /// The core's cap on one node (deviation `manifest-node-cap`; Ant's is 32 MiB).
 pub const MAX_NODE: usize = 1 << 20;
+/// The most manifest nodes one lookup loads, the root included, across
+/// all its phases (0009, Bounds).
+pub const MAX_LOOKUP_NODES: usize = 64;
 const KEY: usize = 32;
 const VERSION: usize = 31;
 const HEADER: usize = KEY + VERSION + 1;
@@ -340,6 +343,9 @@ pub enum Step {
     /// path that isn't a manifest or can't be parsed, or an entry whose
     /// reference size isn't 32 or 64.
     Failed(NodeError),
+    /// The lookup would load a node past [`MAX_LOOKUP_NODES`]: the walk is
+    /// past its bound, which the verifier answers as unverifiable.
+    TooManyNodes,
 }
 
 #[derive(Debug, Clone)]
@@ -367,6 +373,9 @@ pub struct Lookup {
     root: Node,
     node: Node,
     phase: Phase,
+    /// The nodes loaded so far, the root included; never reset when a
+    /// phase starts again from the root, which is held.
+    loaded: usize,
 }
 
 fn walk(path: &str, then: Phase) -> Phase {
@@ -423,6 +432,7 @@ impl Lookup {
             node: root.clone(),
             root,
             phase,
+            loaded: 1,
         };
         let step = l.run();
         (l, step)
@@ -510,7 +520,7 @@ impl Lookup {
                     }
                     let need = fork.child.clone();
                     self.phase = Phase::Walk { path, at, then };
-                    return Step::Need(need);
+                    return self.need(need);
                 }
                 Phase::Prefix { path, at, then } => {
                     if at == path.len() {
@@ -542,10 +552,21 @@ impl Lookup {
                     }
                     let need = fork.child.clone();
                     self.phase = Phase::Prefix { path, at, then };
-                    return Step::Need(need);
+                    return self.need(need);
                 }
             }
         }
+    }
+
+    /// Asks for one more node, unless that would pass the bound; past it
+    /// the lookup is over.
+    fn need(&mut self, reference: Vec<u8>) -> Step {
+        if self.loaded >= MAX_LOOKUP_NODES {
+            self.phase = Phase::Done(Outcome::NotFound { root: false });
+            return Step::TooManyNodes;
+        }
+        self.loaded += 1;
+        Step::Need(reference)
     }
 
     /// The next phase starts again from the root.
@@ -690,5 +711,60 @@ mod tests {
         let (mut l, step) = Lookup::new(root, "a");
         assert_eq!(step, Step::Need(vec![3; 32]));
         assert_eq!(l.node(&child), Step::Failed(NodeError::Malformed));
+    }
+
+    /// A chain of nodes, each with one fork `a` to the next: node `d`'s
+    /// reference is `[d; 32]`; the node at `last` has no fork, and an entry
+    /// when `found`.
+    fn chain(path: &str, last: u8, found: bool) -> (Step, usize) {
+        let link = |d: u8| {
+            let entry = if d == last && found {
+                [0x55u8; 32]
+            } else {
+                [0u8; 32]
+            };
+            if d == last {
+                node(&entry, &[])
+            } else {
+                node(&entry, &[(b"a", &[d + 1; 32], None)])
+            }
+        };
+        let (mut lookup, mut step) = Lookup::new(parse_node(&link(0)).unwrap(), path);
+        let mut loaded = 1;
+        while let Step::Need(r) = &step {
+            loaded += 1;
+            let d = r[0];
+            step = lookup.node(&link(d));
+        }
+        (step, loaded)
+    }
+
+    #[test]
+    fn a_lookup_loads_at_most_64_nodes() {
+        // The root and 63 more: found.
+        let (step, loaded) = chain(&"a".repeat(63), 63, true);
+        assert!(
+            matches!(step, Step::Done(Outcome::Found { .. })),
+            "{step:?}"
+        );
+        assert_eq!(loaded, MAX_LOOKUP_NODES);
+        // A 65th is never asked for.
+        let (step, loaded) = chain(&"a".repeat(64), 64, true);
+        assert_eq!(step, Step::TooManyNodes);
+        assert_eq!(loaded, MAX_LOOKUP_NODES);
+    }
+
+    #[test]
+    fn the_bound_spans_the_fallback_phases() {
+        // A literal walk of 31 nodes misses (no entry), and the directory
+        // check walks them again from the root: 63 in all, then no fork
+        // for "/".
+        let (step, loaded) = chain(&"a".repeat(31), 31, false);
+        assert_eq!(step, Step::Done(Outcome::NotFound { root: false }));
+        assert_eq!(loaded, 63);
+        // 32 and 32 more: the directory check would load the 65th.
+        let (step, loaded) = chain(&"a".repeat(32), 32, false);
+        assert_eq!(step, Step::TooManyNodes);
+        assert_eq!(loaded, MAX_LOOKUP_NODES);
     }
 }
