@@ -11,6 +11,14 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# IPNS records with an inlined Ed25519 key: the core's own version
+# (fc-keys), on the preferred list.
+ed25519-dalek = { version = "3.0", default-features = false }
+# RSA-keyed IPNS names (decided, 0009 decision 9): verification only,
+# pinned exactly; default features (std, pem) off, u64_digit on. Its
+# advisory RUSTSEC-2023-0071 concerns private-key operations, which the
+# core never makes (deny.toml).
+rsa = { version = "=0.9.10", default-features = false, features = ["u64_digit"] }
 sha2 = "0.11"
 
 [dev-dependencies]
