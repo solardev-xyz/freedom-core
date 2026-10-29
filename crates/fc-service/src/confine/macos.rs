@@ -206,6 +206,9 @@ pub(super) fn confine(policy: &Policy, options: &Options) -> Result<Report, Inva
     let profile =
         seatbelt::profile(policy.network, policy.refer, &grants).map_err(Invalid::Rules)?;
     let mut text = profile.text;
+    if let Some(extra) = &options.seatbelt_extra {
+        text.push_str(extra);
+    }
     if options.seatbelt_invalid {
         // Not SBPL: the service's own rules refused.
         text.push_str("(allow no-such-operation\n");

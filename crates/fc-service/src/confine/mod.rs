@@ -218,6 +218,9 @@ pub struct Options {
     /// Append text Seatbelt can't compile to the profile: the service's own
     /// rules refused.
     pub seatbelt_invalid: bool,
+    /// Append these rules to the profile: the confinement test's inverse
+    /// controls (an exec the probe must then perform).
+    pub seatbelt_extra: Option<String>,
 }
 
 /// The environment variable the entry's re-exec sets ([`clean_entry`]), to

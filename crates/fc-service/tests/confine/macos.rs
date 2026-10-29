@@ -160,6 +160,19 @@ fn child(case: &str) {
             let _ = handle.join();
             return;
         }
+        "exec-control" => {
+            // The inverse control: with process-exec allowed for the probe's
+            // one program, fork still denied, `confine`'s exec self-test
+            // succeeds, so this process becomes /usr/bin/true and exits 0,
+            // printing nothing more.
+            let options = Options {
+                seatbelt_extra: Some("(allow process-exec (literal \"/usr/bin/true\"))\n".into()),
+                ..Options::default()
+            };
+            let result = confine::confine_with(&policy(&p, network, registered), &options);
+            println!("STILL HERE {}", result.is_ok());
+            return;
+        }
         "invalid" => {
             let options = Options {
                 seatbelt_invalid: true,
@@ -405,9 +418,11 @@ fn sysctls(p: &Paths) {
 fn exec_direct() {
     use std::os::unix::process::CommandExt;
     let error = Command::new("/usr/bin/true").exec();
+    // The profile lets the process read and map it: only process-exec
+    // refuses it, with EPERM or EACCES.
     check(
-        &format!("an exec in place refused ({})", error.kind()),
-        true,
+        &format!("an exec in place refused by process-exec ({error})"),
+        matches!(error.raw_os_error(), Some(1 | 13)),
     );
 }
 
@@ -750,6 +765,22 @@ fn parent() {
             ),
         );
     }
+    // The inverse control: process-exec allowed for the probe's program,
+    // the probe's process becomes /usr/bin/true, which exits 0.
+    let control = run(&world, "exec-control");
+    expect(
+        &mut failures,
+        control.status.success()
+            && has_line(&control, "ENTRY clean")
+            && !lines(&control).contains("STILL HERE"),
+        format!(
+            "exec-control: {:?} {}{}",
+            control.status,
+            lines(&control),
+            String::from_utf8_lossy(&control.stderr)
+        ),
+    );
+
     let invalid = run(&world, "invalid");
     expect(
         &mut failures,

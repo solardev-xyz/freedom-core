@@ -18,13 +18,16 @@
 //!   readable only on each grant's ancestors, so other files' names and
 //!   modes stay hidden.
 //! - **Processes:** no exec and no fork (denied by default); signals and
-//!   process information for the process itself only.
+//!   process information for the process itself only. The exec self-test's
+//!   one program, `/usr/bin/true`, is readable and mappable, so the only
+//!   thing that can refuse its exec is `process-exec` itself.
 //! - **`sysctl`, by name only** ([`SYSCTLS`]): what std, tokio and the
 //!   services read about the machine and the OS, after Chromium's
-//!   `common.sb`. Nothing about other processes: `kern.proc` and
-//!   `KERN_PROCARGS2`, which read another process's arguments and
-//!   environment, stay denied. In `direct` mode, the routing sysctls too,
-//!   for NAT64 discovery's interface list (`getifaddrs`).
+//!   `common.sb`. `kern.proc`'s process list is denied. `KERN_PROCARGS2`,
+//!   another process's arguments and environment, is absent from the list
+//!   but unmediated: Seatbelt doesn't check it, so it stays readable (the
+//!   report's `process_args` gap). In `direct` mode, the routing sysctls
+//!   too, for NAT64 discovery's interface list (`getifaddrs`).
 //! - **IPC,** in `direct` mode only: configd (`.configd` for NAT64
 //!   discovery's dynamic store, `.DNSConfiguration` for the resolver's
 //!   servers) and mDNSResponder's socket, which resolves names. Nothing in
@@ -73,6 +76,7 @@ const SYSTEM_READ: &str = r#"(allow file-read*
     (literal "/dev/random")
     (literal "/dev/urandom"))
 (allow file-write-data (literal "/dev/null"))
+(allow file-read* file-map-executable (literal "/usr/bin/true"))
 "#;
 
 /// The sysctls the services read, by name: the CPU (std and tokio's
@@ -246,6 +250,7 @@ SYSCTLS(allow file-read*
     (literal "/dev/random")
     (literal "/dev/urandom"))
 (allow file-write-data (literal "/dev/null"))
+(allow file-read* file-map-executable (literal "/usr/bin/true"))
 (allow file-read-metadata
     (literal (param "UP_0"))
     (literal (param "UP_1"))

@@ -189,9 +189,10 @@ publish job that runs no repository code.
    - **macOS,** on the signed release build, by hand on every supported
      version CI doesn't run (from macOS 12, the browser's floor, to the
      newest; CI runs only `macos-latest`):
-     - `confinement` reports `seatbelt` with `files`, `exec` and `ipc`
-       `enforced`, and `network` `none` in `direct` mode, `enforced` in
-       `socks5`;
+     - `confinement` reports `seatbelt` with `files` and `exec` `enforced`,
+       `ipc` `partial` with the gap `process_args` (0010's `KERN_PROCARGS2`
+       gap, unless the probe below shows the signed build closes it), and
+       `network` `none` in `direct` mode, `enforced` in `socks5`;
      - the contract suite confined: DNS, TLS, the store's file
        operations, NAT64 discovery, and `socks5` through Arti on loopback
        and through a LAN proxy;
