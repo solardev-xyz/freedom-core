@@ -395,9 +395,13 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
      - the lock directory;
      - every catalog profile's component directories as main resolves them, outside its userData directory too: each profile's Radicle home (`<appRoot>/R/<slot>`, or `<parent of appRoot>/R/<checkout>/<slot>` in a development build), and this profile's overrides (`FREEDOM_IDENTITY_DATA`, …);
      - every other profile's whole userData directory, this profile's userData directory, and the app data root, which holds the catalog.
+     - **Whatever the profile's source:** this profile's userData directory and its browser storage are protected for a catalog profile, one started with `--profile-dir`, and a test's alike. Only the other profiles and their Radicle homes come from the catalog.
    - **A root that holds this profile:** a directory that holds this profile's userData directory, or the service's own default directory, is never a root itself. Its entries are, recursively along that path, together with the names that may not exist yet: each component's directory and the browser's storage (`Local Storage`, `IndexedDB`, `Session Storage`, `Service Worker`, …). So the default profile, kept in the app data root, has its browser storage, identity and node directories protected, and the `Profiles` directory that holds the profile in use has every other profile in it protected. This profile's own userData directory likewise gives up only the service's own default directory (`ipfs-data`, or the Radicle home).
    - **The rule:** main refuses a grant that is, contains, or lies inside a protected root. The service's own directory is the grant, never a protected root.
-   - **Compared as canonical paths,** under 0001's rules: symlinks resolved, and case folded on case-insensitive volumes. So an override such as `FREEDOM_IPFS_DATA` can't widen the grant over the secrets.
+   - **Ownership is by layout, comparison by canonical path:** which directory holds this profile, and which is the service's own default directory, are decided on the paths main lays out, before any symlink is followed. Only the comparison with the grant follows symlinks.
+     - **What takes precedence:** so a default directory that is a symlink into another owner's data exempts nothing of it. Another owner's root stays protected.
+     - **A collision is refused outright:** if the service's own default directory resolves into a protected root, main refuses to spawn it, even when the grant is elsewhere.
+   - **Compared as canonical paths,** under 0001's rules: symlinks resolved, and case folded on case-insensitive volumes. So an override such as `FREEDOM_IPFS_DATA` can't widen the grant over the secrets. A path climbs out of another only by a whole `..` component: a name that begins with two dots, such as `..vault`, is an ordinary name.
    - **Radicle's part comes later:** main checks the IPFS grant first; the Radicle home's check, and `--network` for `freedom-radicled`, come with that service's integration in the browser.
 
 **Later:**
@@ -519,7 +523,10 @@ Through the binary, in CI's job for each OS:
 - **Main:**
   - the default directories pass: `<userData>/ipfs-data/freedom-ipfs`, and the Radicle homes `<appRoot>/R/<slot>` and `<userData>/radicle-data`, for a named profile and for the default one;
   - a grant equal to, inside, or containing the identity directory, the lock directory or another component's directory is refused, through overrides (`FREEDOM_IPFS_DATA`, `FREEDOM_RADICLE_DATA`), a symlink alias and, on macOS and Windows, a case alias;
-  - so is one inside another profile's Radicle home, packaged (`<appRoot>/R/<slot>`) and in a development build (`<parent of appRoot>/R/<checkout>/<slot>`), or inside the default profile's browser storage (`<appRoot>/Local Storage`), present or not yet created, and through their aliases.
+  - so is one inside another profile's Radicle home, packaged (`<appRoot>/R/<slot>`) and in a development build (`<parent of appRoot>/R/<checkout>/<slot>`), or inside the default profile's browser storage (`<appRoot>/Local Storage`), present or not yet created, and through their aliases;
+  - this profile's default IPFS directory as a symlink into another profile's directory, or into the default profile's storage, exempts nothing there. A service whose default directory resolves into a protected root is refused, even when its grant is elsewhere;
+  - a grant that holds, or lies inside, a directory whose name begins with two dots (`..vault`) is refused;
+  - a `--profile-dir` profile's and a test profile's browser storage are refused, and their IPFS directories pass.
 - **D5,** the import process:
   - a working copy outside the home; a linked worktree; a separate git directory; alternates; a symlink out of the source;
   - a source that contains a protected root: refused;
