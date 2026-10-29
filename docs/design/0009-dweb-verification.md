@@ -262,7 +262,7 @@ The formats Ant and Bee share, with Ant's reading where they differ, since the b
 ### Files
 
 - **Leaves** are consecutive 4,096-byte slices of the file; only the last may be shorter (`ar/splitter.rs:1`–`25`).
-- **An intermediate chunk** is `span ‖ references`: the span is the number of file bytes beneath it, and the payload holds 2 to 128 references of 32 bytes. Trailing all-zero references are padding. A chunk whose span is at most its payload's length is a leaf.
+- **An intermediate chunk** is `span ‖ references`: the span is the number of file bytes beneath it, and the payload holds references of 32 bytes. Bee writes 2 to 128 of them; the reader also takes a single reference, as Ant reads one, whose child then covers the whole span. Trailing all-zero references are padding. A chunk whose span is at most its payload's length is a leaf.
 - **Geometry:** for a node with `n` data references and span `T`, `branch` is the smallest `4096 · b^k` with `T − (n − 1) · branch ≤ branch`. The first `n − 1` children cover `branch` bytes each, and the last the rest (`ar/joiner.rs:1314`–`1335`). Every leaf but the last is full, so byte `o` of the file is in leaf `⌊o / 4096⌋`.
   - The core takes each child's logical length from this geometry, as Ant's joiner does, never from the child's own span. [The leaf check](#leaves) covers a leaf whose span or payload length differs from the length its parent gives it.
 - **Erasure coding:** an intermediate chunk with parities has its span's top byte set to `0x80 | level`, for levels 1 to 4. Its payload is the data references followed by parity references. Their counts come from Bee's `ReferenceCount` (the span, the level and whether the tree is encrypted; `ar/rs.rs:315`–`391`, `ar/joiner.rs:631`–`640`).

@@ -688,9 +688,11 @@ impl Inters {
             Ok(b) => json!({ "join": "ok", "length": b.len() }),
             Err(e) => json!({ "join": e.to_string() }),
         };
+        // A refusal must be the joiner's own: a fetch that failed proves
+        // nothing about the node.
         let agrees = match (&joined, content) {
             (Ok(b), Some(c)) => b.as_slice() == c,
-            (Err(_), None) => true,
+            (Err(ant_retrieval::JoinError::MalformedChunk { .. }), None) => true,
             _ => false,
         };
         if !agrees || content.is_some() != expect.get("ok").is_some() {
@@ -1133,23 +1135,9 @@ impl NodeCases {
             net.insert(a, w);
         }
         let fetcher = MemFetcher::new(net);
-        let absent = format!("{}absent", char::from(1u8));
-        let probe = ant_retrieval::lookup_path(&fetcher, &root, &absent).await;
-        let detail = probe
-            .as_ref()
-            .err()
-            .map(ToString::to_string)
-            .unwrap_or_default();
-        let parsed = match probe {
-            Err(
-                ant_retrieval::ManifestError::TooShort(_)
-                | ant_retrieval::ManifestError::InvalidRefLength(_)
-                | ant_retrieval::ManifestError::InvalidMetadata(_)
-                | ant_retrieval::ManifestError::UnsupportedVersion(_),
-            ) => "malformed",
-            Err(ant_retrieval::ManifestError::NotAManifest) => "not_a_manifest",
-            _ => "parsed",
-        };
+        let (parsed, detail) = ant_decoding(&fetcher, &root)
+            .await
+            .map_err(|e| format!("node case {id}: {e}"))?;
         let mut looked = Vec::new();
         for p in probes {
             let r = ant_retrieval::lookup_path(&fetcher, &root, &p.path)
@@ -1195,6 +1183,39 @@ impl NodeCases {
         self.out.push(case);
         Ok(())
     }
+}
+
+/// How Ant decoded a node stored at `root`, from its lookup of a path no
+/// fork holds: parsed only when the answer is the miss a decoded manifest
+/// gives, malformed or not a manifest when Ant refused the node as such.
+/// Anything else (a fetch or join that failed, a feed, a found entry) is
+/// the generator's error, not a verdict.
+async fn ant_decoding(fetcher: &MemFetcher, root: &Addr) -> Result<(&'static str, String), Err> {
+    use ant_retrieval::ManifestError as E;
+    let absent = format!("{}absent", char::from(1u8));
+    let probe = ant_retrieval::lookup_path(fetcher, root, &absent).await;
+    let detail = probe
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let parsed = match probe {
+        Err(
+            E::TooShort(_)
+            | E::InvalidRefLength(_)
+            | E::InvalidMetadata(_)
+            | E::UnsupportedVersion(_),
+        ) => "malformed",
+        Err(E::NotAManifest) => "not_a_manifest",
+        // A fork for the path's first byte may lead to a value node.
+        Err(E::NotFound { .. } | E::DescendPastLeaf { .. }) => "parsed",
+        other => {
+            return Err(
+                format!("Ant's lookup of an absent path didn't decode the node: {other:?}").into(),
+            );
+        }
+    };
+    Ok((parsed, detail))
 }
 
 fn fork_json(bit: u8, node_type: u8, prefix: &[u8], child: &[u8], kept: &[(&str, &str)]) -> Value {
@@ -1801,5 +1822,46 @@ impl ConcatBytes for Segs {
             }
         }
         v
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The node oracle refuses to call a node it never got decoded.
+    #[tokio::test]
+    async fn a_missing_node_is_an_error() {
+        let node = crate::mantaray::Node {
+            obfuscation_key: [0; 32],
+            ref_size: 32,
+            entry: vec![0; 32],
+            forks: Vec::new(),
+        }
+        .marshal();
+        let (root, wire) = ant_crypto::cac_new(&node).expect("a node within a chunk");
+        let held = MemFetcher::new(HashMap::from([(root, wire)]));
+        assert_eq!(
+            ant_decoding(&held, &root).await.map(|d| d.0).ok(),
+            Some("parsed")
+        );
+        let empty = MemFetcher::new(HashMap::new());
+        assert!(ant_decoding(&empty, &root).await.is_err());
+    }
+
+    /// An intermediate case whose children are missing isn't Ant refusing
+    /// the node.
+    #[tokio::test]
+    async fn a_missing_child_is_no_refusal() {
+        let mut c = Inters {
+            out: Vec::new(),
+            net: HashMap::new(),
+        };
+        let (_, w) = cac(span(8192), &[[1u8; 32], [2u8; 32]].concat()).expect("a chunk");
+        assert!(
+            c.push("missing", "", &w, fail("unverifiable"), None)
+                .await
+                .is_err()
+        );
     }
 }
