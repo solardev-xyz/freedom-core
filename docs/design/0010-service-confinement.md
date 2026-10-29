@@ -413,7 +413,7 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
        - The confined service can't make a link to a file outside its grant: Landlock needs rights on the source (`refer` from ABI 2; before it, no link crosses directories) and `make_reg` on the destination, and Seatbelt allows `file-link` only inside the grant.
        - A link made later by another process running as the same user is outside the boundary, since that process could read the data directly.
        - Bind mounts are out of scope.
-     - **Radicle:** its grant check, which comes with its browser integration, applies the same rules: no hard link and no special file. It must also show that git's local-clone hard links don't occur inside its home, and that the node's control socket is made by the confined service, never found there.
+     - **Radicle:** its grant check, which comes with its browser integration, applies the same rules: no hard link and no special file. It must also show that git's local-clone hard links don't occur inside its home.
    - **Radicle's part comes later:** main checks the IPFS grant first; the Radicle home's check, and `--network` for `freedom-radicled`, come with that service's integration in the browser.
 
 **Later:**
