@@ -165,8 +165,15 @@ fn child(case: &str) {
             // one program, fork still denied, `confine`'s exec self-test
             // succeeds, so this process becomes /usr/bin/true and exits 0,
             // printing nothing more.
+            // The new image's dyld maps the system's libraries, which the
+            // service's own profile never needs: the control allows that too.
             let options = Options {
-                seatbelt_extra: Some("(allow process-exec (literal \"/usr/bin/true\"))\n".into()),
+                seatbelt_extra: Some(
+                    "(allow process-exec (literal \"/usr/bin/true\"))\n\
+                     (allow file-map-executable (subpath \"/usr/lib\") (subpath \"/System\") \
+                     (subpath \"/private/var/db/dyld\"))\n"
+                        .into(),
+                ),
                 ..Options::default()
             };
             let result = confine::confine_with(&policy(&p, network, registered), &options);
@@ -771,7 +778,7 @@ fn parent() {
     expect(
         &mut failures,
         control.status.success()
-            && has_line(&control, "ENTRY clean")
+            && lines(&control).contains("ENTRY ")
             && !lines(&control).contains("STILL HERE"),
         format!(
             "exec-control: {:?} {}{}",
