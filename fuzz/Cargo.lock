@@ -345,9 +345,21 @@ name = "fc-dweb"
 version = "0.8.0"
 dependencies = [
  "fc-json",
+ "fc-swarm",
  "sha3",
  "thiserror",
  "url",
+]
+
+[[package]]
+name = "fc-evm"
+version = "0.8.0"
+dependencies = [
+ "fc-json",
+ "k256",
+ "serde_json",
+ "sha3",
+ "thiserror",
 ]
 
 [[package]]
@@ -411,6 +423,15 @@ dependencies = [
  "rand_core",
  "x25519-dalek",
  "zeroize",
+]
+
+[[package]]
+name = "fc-swarm"
+version = "0.8.0"
+dependencies = [
+ "fc-evm",
+ "k256",
+ "thiserror",
 ]
 
 [[package]]
