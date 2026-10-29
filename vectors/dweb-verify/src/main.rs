@@ -5,10 +5,15 @@
 //! `cargo run --release -- generate`.
 
 mod bee;
+mod car;
 mod content;
 mod gateway;
+mod ipfs;
+mod ipns;
+mod kubo;
 mod mantaray;
 mod node;
+mod replay;
 mod store;
 mod swarm;
 
@@ -27,6 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "meta": meta()?,
         "formats": formats(),
         "swarm": swarm::build().await?,
+        "ipfs": ipfs::build().await?,
     });
     let mut text = serde_json::to_string_pretty(&doc)?;
     text.push('\n');
@@ -74,6 +80,20 @@ fn meta() -> Result<Value, Box<dyn std::error::Error>> {
             "differ": differ,
             "why_they_differ": "Ant's level-0 splitter wraps a level's lone leftover reference in an intermediate chunk of one reference, where Bee's hashtrie Sum carries it up unwrapped; the files marked lone_leaf_wrappers are Ant's trees, and their -bee cases are Bee's",
         },
+        "kubo": {
+            "version": kubo::VERSION,
+            "asset": "kubo_v0.43.1_linux-amd64.tar.gz",
+            "sha512": "ff53b2428794fc8cca39505d28c15b4cceaef4b90a09284f291f611fcdc8c06399690575fc89cbd4d85ef71f3652581296c6f2e710386f887c8edf36b6e89d71",
+            "how": "a repository of its own (init --empty-repo --profile=test, no swarm addresses), offline: `ipfs add` writes the fixtures, `ipfs dag export` gives their blocks, and `ipfs daemon --offline` serves the trustless answers on loopback. The Date header, the one that varies, is left out of each answer.",
+        },
+        "freedom_ipfs": {
+            "repository": "https://github.com/solardev-xyz/freedom-ipfs",
+            "commit": "e7dcc6f60b2a30932e6f95a58e30cbf5fdc9f353",
+            "why": "the commit freedom-ipfsd pins: the native node Freedom ships",
+            "gateway": "GatewayCore over a memory provider holding every block (an identity CID's block is its digest) and a resolver holding each name's valid record with the highest sequence; each request goes through parse_native_request exactly as freedom-ipfsd makes it (request_id 1, top_level_path the path)",
+            "records": "namesys verify_ipns_record gives each record's verdict, at the wall clock: the records' validity is far from any day the generator runs (2099 valid, 2000 expired)",
+            "percent_encoding": "parse_native_request passes a percent-encoded path through undecoded, so a name with a space or a non-ASCII character isn't found; the same names unencoded are, and the vectors hold both",
+        },
         "request_headers": [
             ["swarm-chunk-retrieval-timeout", "30s"],
             ["swarm-redundancy-strategy", "3"],
@@ -85,7 +105,7 @@ fn meta() -> Result<Value, Box<dyn std::error::Error>> {
 
 fn formats() -> Value {
     json!({
-        "content": "content(seed, n): SHA-256(seed ‖ u64_be(i)) for i = 0, 1, 2, …, concatenated and cut to n bytes. A file case's body is content(seed, size).",
+        "content": "content(seed, n): SHA-256(seed ‖ u64_be(i)) for i = 0, 1, 2, …, concatenated and cut to n bytes. A file case's body is content(seed, size). A seed of the form literal:<text> stands for the text's UTF-8 bytes.",
         "key_stream": "key_stream(label): the chunk keys of an encrypted split, in Ant's chunk-write order; key i is keccak256(label ‖ u32_be(i)). Ant pads the ciphertext with zeros when keys are injected.",
         "owner_secret": "a feed owner's secp256k1 secret is keccak256(label), the label given with the feed.",
         "chunks": "address (hex) → wire bytes (base64), for every chunk a reader needs that isn't a slice of some content: roots, intermediates, the wrappers Ant's splitter writes, manifest nodes, feed updates, encrypted chunks and the crafted shapes. A data leaf is rebuilt from its content: leaf i of a file of n bytes is u64_le(len) ‖ content[i·4096 .. min(n, (i+1)·4096)]. Parity chunks are left out: nothing reads them when nothing is missing.",
@@ -93,6 +113,11 @@ fn formats() -> Value {
         "manifests": "id, root, writer, nodes (the chunks of the manifest's nodes), entries, and lookups: ant-retrieval's lookup_path answer for each path, the resolved data_ref, content_type, metadata and feed, or the error's text.",
         "feeds": "sequence feeds: owner, topic, manifest (build_feed_manifest), manifest_nodes, and updates (index, address, id, version, and the reference or root the update names). v1 updates wrap u64_be(timestamp) ‖ reference, timestamps counted from meta.clock_unix; v2 updates wrap the root chunk itself.",
         "shapes": "trees Ant reads that a simple reader wouldn't, each a root over two leaves whose second leaf's span or payload differs from the 60 bytes its parent gives it.",
+        "ipfs_files": "DAGs Kubo writes from content(seed, size) with the flags in add: id, seed, size, add, root, nodes (the blocks besides the leaves, recorded whole in ipfs.blocks), and leaves in order: a raw leaf is content[from .. from+length]; a dag-pb leaf is prefix ‖ content[from .. from+length] ‖ suffix (base64). file-repeat-v1's content is content(seed, unit) repeated count times, and its one leaf is linked count times.",
+        "ipfs_directories": "trees added with ipfs add -r: root, add, blocks (every block of the tree but its files' leaves) and entries, each with path, seed (or text for a literal body), size, cid, nodes and leaves as for files.",
+        "ipns": "keys (label, type, bits, exponent, public_key: the libp2p PublicKey protobuf, base64, and name) and records (id, name, signer, note, record: the IpnsEntry protobuf, base64, and native: freedom-ipfs's verdict, {ok: {value, sequence, validity, ttl_ns}} or {error}). Ed25519 keys come from SHA-256(label); RSA keys from a ChaCha20 stream seeded with SHA-256(label), with the bits and exponent given. A record's data is DAG-CBOR with its keys in canonical order.",
+        "ipfs_native": "requests to GatewayCore and its answers, as exchanges below; a request the native-request parser refuses has parse_error instead of a response.",
+        "ipfs_kubo": "requests to Kubo's gateway and its answers, as exchanges below; a CAR body is {car: {header, blocks, trailing, complete}, length, sha256}: the bytes before the first section (base64, its length varint included), the sections' CIDs in order, each section written as a CAR writes it (the length varint, the CID's bytes, the block, which ipfs.blocks or a leaf gives), and the bytes after the last whole section (base64: a cut section, or boxo's truncation marker); complete is false when there are such bytes. A raw block is {block: cid, length}.",
         "exchanges": "requests through Ant's gateway and its answers: id (case#n), case, note, request (method, path, headers; every bzz request carries meta.request_headers), response (status, headers in Ant's order, and body). A body is {length: 0}, {content: {seed, from, length}} for a slice of content(seed, …), {base64} up to 64 KiB, or {length, sha256}. A multipart boundary, which Ant draws at random, is written {boundary} in the header and the body.",
     })
 }

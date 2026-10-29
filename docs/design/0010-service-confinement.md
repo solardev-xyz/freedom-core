@@ -408,7 +408,7 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
 
    - **seccomp's first filter:** when the kernel refuses it, a filter that allows everything is tried. If the kernel takes that one, it takes filters, so it refused the service's own: invalid policy. If it refuses that one too, its error decides: `EINVAL` or `ENOSYS` is `unavailable`, anything else `blocked`.
 
-7. **Main's check,** before it spawns a service:
+7. **Main's check,** before every spawn of a service: the first one, each restart after a crash, each new process a change of policy starts, and a start that waited for Tor's endpoint. A refusal spawns nothing.
    - **The grant:** this service's own directory: the persistent IPFS data directory, or the Radicle home with its `HOME` directory.
    - **The protected roots:**
      - the lock directory;
@@ -421,14 +421,18 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
      - **What takes precedence:** so a default directory that is a symlink into another owner's data exempts nothing of it. Another owner's root stays protected.
      - **A collision is refused outright:** if the service's own default directory resolves into a protected root, main refuses to spawn it, even when the grant is elsewhere.
    - **Compared as canonical paths,** under 0001's rules: symlinks resolved, and case folded on case-insensitive volumes. So an override such as `FREEDOM_IPFS_DATA` can't widen the grant over the secrets. A path climbs out of another only by a whole `..` component: a name that begins with two dots, such as `..vault`, is an ordinary name.
+   - **A symlink that doesn't resolve is refused:** if a component of the grant's path, or of a protected root's, exists but doesn't resolve, main refuses. That covers a symlink to a name that doesn't exist yet, and one that loops. Its target could be created later, inside the grant: `identity` pointing at the grant's absent `future-identity`, which the confined service may make, would then put the vault in the grant.
    - **Names that don't exist yet, on a case-insensitive volume:** the volume folds case by Unicode rules (Σ and ς name one directory there). No string comparison reproduces that, and no `realpath` resolves a name that doesn't exist yet. So main refuses an override path whose missing names aren't all ASCII. Names that exist are resolved, and these are developer overrides (`FREEDOM_*_DATA`), so refusing costs nothing in use.
-   - **No hard link in the grant:** a hard link has the grant's path but another file's data, and Landlock and Seatbelt authorize an open by its path. So before each spawn main walks the grant, with `lstat` and following no link. It refuses the grant if any entry other than a directory has more than one name. Legitimate service data never hard-links, so this costs nothing in use.
-     - **Bounded:** the walk stops at 100,000 entries or 32 levels, and refuses past either. It refuses an entry it can't read too.
+   - **Only regular files, directories and symlinks in the grant:** before each spawn main walks the grant, with `lstat` and following no link, and refuses it if it holds anything else, or a hard link. Legitimate service data is never either, so this costs nothing in use.
+     - **A hard link** has the grant's path but another file's data, and Landlock and Seatbelt authorize an open by its path. So a regular file with more than one name is refused.
+     - **A special file** that is already there would otherwise be a channel outside the grant: a FIFO, a socket, a character or block device, or anything else that isn't a regular file, directory or symlink. Its other end could be held by an outside process. Landlock's and Seatbelt's rules refuse making one (`make_fifo`, `make_sock`, `make_char`, `make_block`), not opening one that is there.
+     - **Symlinks** aren't followed: the kernel resolves each at its open, against the rules.
+     - **Bounded:** the walk reads each directory one entry at a time, holding at most one name, and closes it however it ends. It stops at 100,000 entries or 32 levels, and refuses past either. It refuses an entry it can't read too.
      - **The race model:** the check runs at spawn.
        - The confined service can't make a link to a file outside its grant: Landlock needs rights on the source (`refer` from ABI 2; before it, no link crosses directories) and `make_reg` on the destination, and Seatbelt allows `file-link` only inside the grant.
        - A link made later by another process running as the same user is outside the boundary, since that process could read the data directly.
        - Bind mounts are out of scope.
-     - **Radicle:** its grant check, which comes with its browser integration, applies the same rule. It must also show that git's local-clone hard links don't occur inside its home.
+     - **Radicle:** its grant check, which comes with its browser integration, applies the same rules: no hard link and no special file. It must also show that git's local-clone hard links don't occur inside its home.
    - **Radicle's part comes later:** main checks the IPFS grant first; the Radicle home's check, and `--network` for `freedom-radicled`, come with that service's integration in the browser.
 
 **Later:**
@@ -556,7 +560,10 @@ Through the binary, in CI's job for each OS:
   - a `--profile-dir` profile's and a test profile's browser storage are refused, and their IPFS directories pass;
   - a grant holding a hard link to the vault is refused, as is one holding an entry that can't be read, or more entries or levels than the walk's bounds. A grant as the service leaves it passes;
   - on a case-insensitive volume, an identity override under `Σ` and a grant under `ς`, neither existing yet, are refused. The ASCII control, `S` and `s`, is refused as the identity directory it aliases;
-  - a confined service can't make a hard link to a file outside its grant.
+  - a confined service can't make a hard link to a file outside its grant;
+  - a FIFO or a socket already in the grant is refused, as is a protected root that is a symlink to a name inside the grant that doesn't exist yet, or a symlink that loops;
+  - the check runs before every spawn: a crash's restart, a new policy's process and a start that waited for Tor each run it once, and a refusal there spawns nothing;
+  - the walk with a bound of 1 reads one name, and closes the directory.
 - **D5,** the import process:
   - a working copy outside the home; a linked worktree; a separate git directory; alternates; a symlink out of the source;
   - a source that contains a protected root: refused;

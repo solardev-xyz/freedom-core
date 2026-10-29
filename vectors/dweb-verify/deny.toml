@@ -6,11 +6,15 @@
 # What every exception below rests on: this workspace is a test-vector
 # generator. It ships in nothing, and runs only where its vectors are
 # regenerated. Its Swarm half drives Ant's gateway router in process over a
-# memory chunk source (src/gateway.rs, src/store.rs): it opens no listener
-# and no socket, and resolves no name. The patched releases these pins allow
-# are taken (tokio 1.54.1, h2 0.4.20, crossbeam-epoch 0.9.21, spin 0.9.9);
-# what remains needs a manifest change in Ant v0.5.71, the oracle, which
-# would change what the vectors record.
+# memory chunk source (src/gateway.rs, src/store.rs), and its IPFS half runs
+# freedom-ipfs's GatewayCore over a memory provider and a resolver of its own
+# (src/ipfs.rs). Its only sockets are to the Kubo it starts itself, offline,
+# on 127.0.0.1, by address (src/kubo.rs): it resolves no name and reaches
+# nothing else. The patched releases these pins allow are taken (tokio
+# 1.54.1, h2 0.4.20, crossbeam-epoch 0.9.21, spin 0.9.9, quinn-proto 0.11.19,
+# rustls 0.23.46, rustls-webpki 0.103.16); what remains needs a manifest
+# change in Ant v0.5.71 or freedom-ipfs, the oracles, which would change what
+# the vectors record.
 
 [graph]
 all-features = true
@@ -41,11 +45,20 @@ ignore = [
     # only fixture records, with seeded keys that are published in the
     # vectors, offline; it has no secret to leak.
     { id = "RUSTSEC-2026-0387", reason = "signs only fixtures with public seeded test keys, offline; no secret to leak" },
+    # rsa 0.9.10, the generator's own: it signs the vectors' RSA-keyed IPNS
+    # records. The Marvin timing side channel is in private-key operations,
+    # and these are made, but with test keys derived from public labels
+    # (src/ipns.rs), offline, where no one times them: there is no secret.
+    { id = "RUSTSEC-2023-0071", reason = "signs test records with public test keys, offline; there is no secret to leak" },
 ]
 
 [licenses]
 confidence-threshold = 0.9
 unused-allowed-license = "allow"
+# webpki-roots (Mozilla's root certificates, through reqwest and
+# libp2p-websocket): data under the Community Data License Agreement,
+# permissive, as freedom-ipfsd's policy allows it. Scoped to that crate.
+exceptions = [{ allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" }]
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
@@ -72,5 +85,9 @@ allow-wildcard-paths = true
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# Ant, pinned by its v0.5.71 tag.
-allow-git = ["https://github.com/freedom-hq/ant"]
+# Ant, pinned by its v0.5.71 tag, and freedom-ipfs, by the commit
+# freedom-ipfsd pins.
+allow-git = [
+    "https://github.com/freedom-hq/ant",
+    "https://github.com/solardev-xyz/freedom-ipfs",
+]
