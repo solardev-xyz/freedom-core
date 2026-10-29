@@ -16,5 +16,8 @@ k256 = { version = "0.14", default-features = false, features = ["arithmetic", "
 thiserror = "2"
 
 [dev-dependencies]
+base64 = "0.22"
 fc-keys = { path = "../fc-keys" }
+hex = "0.4"
 serde_json = "1"
+sha2 = "0.11"
