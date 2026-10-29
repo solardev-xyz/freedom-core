@@ -1075,7 +1075,7 @@ The source research for this design found four ways the node gives away more tha
 16. **SOCKS5 with credentials:**
     - an RFC 1929 state machine for `Wire::dial`: a greeting offering username/password (method `0x02`) only, the subnegotiation, then `CONNECT`, with strict, length-bounded reply parsing;
     - with a password derived per remote node ID from a per-process secret ([Modes](#modes), stream isolation);
-    - it replaces `socks5_client::Socks5`, which offers no authentication.
+    - it replaces cyphernet's `proxy::socks5::Socks5` (`socks5-client` 0.4), which offers no authentication.
 
 ## Where the code lives
 
