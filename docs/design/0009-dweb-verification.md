@@ -137,6 +137,7 @@ Chromium ◀─body── main ◀─verified body (stream)── freedom-cored
   - `strict: true`, when the profile's [strict mode](#strict-mode) is on.
 
   For example `{ ant: "external", up, verify: true }` or `{ ipfs: "gateway", up, verify: true, strict: true }`. Both are absent for the bundled nodes, and each is absent when off, so a backend with neither keeps its exact two-key form and today's plans.
+  - **`unsupported: true`** marks a gateway whose verification is on but which the probe found without raw blocks ([Modes](#modes)). It has no `verify`, so its plans stay `{ fetch }`. Strict mode refuses them with the second of its messages, and a backend with neither member gets the first.
 - **With `verify`, a `{ fetch }` plan becomes a `{ verify }` plan.** Redirect and error plans are unchanged: the same URL checks, name results, 404/415/502 mapping, gateway-form 307s and 503s for a backend that isn't up.
   - **What stays a `{ fetch }`,** decided from the URL or the name's result before anything is fetched: an encrypted Swarm reference, a DNSLink name, and an IPNS name with an inlined key other than Ed25519 ([Modes](#modes)). Each keeps today's fetch plan, labelled `unverified`.
   - **With `strict`,** any plan whose content would be `unverified` becomes an error plan, a 403 that says why ([Strict mode](#strict-mode)).
@@ -144,7 +145,7 @@ Chromium ◀─body── main ◀─verified body (stream)── freedom-cored
   ```jsonc
   { "verify": {
       "node": "ant",                                    // or "ipfs": a reference, as in a fetch plan
-      "root": { "swarm": "<64 hex>" },                  // or { "ipfs": "<CIDv1, base32>" }, { "ipns": "<a name with an Ed25519 or RSA key>" }
+      "root": { "swarm": "<64 hex>" },                  // or { "ipfs": "<CIDv1, lowercase base32>" }, { "ipns": "<a name with an Ed25519 or RSA key>" }
       "path": "/docs/page.html",                        // below the root, normalized, as an HTTP client sends it
       "query": "?state=1",                              // the request's query, for redirects only; "" when none
       "headers": [["range", "bytes=0-"]],               // the request headers the verifier honours
@@ -154,6 +155,8 @@ Chromium ◀─body── main ◀─verified body (stream)── freedom-cored
   ```
 
   - **`root`** is the reference the fetch plan's path would have named: a hash host, or a name's resolved contenthash with any published base path moved into `path`.
+    - **An IPFS root is always canonical:** a CIDv1 in lowercase base32. A CIDv0 (`Qm…`, which an ENS contenthash can decode to) is converted to its CIDv1, as the handler's `cidV0ToV1Base32` converts a host, and base32 in either case is lowercased. Both conversions are lossless, so a site whose contenthash is a CIDv0 still verifies.
+    - **A root that is still not in its form** (a name whose result isn't a CID, say) gets the verify plan all the same, and validation refuses it at `root` ([Failures](#failures)). It never falls back to an unverified fetch, so no name result can move a request out of verified mode.
   - **`path`** passes the same checks as a fetch plan's ([0006, Validation](0006-dweb-transports.md#validation-before-any-dial)), applied to `/<namespace>/<root><path>`. The core decodes its segments itself during the walk.
   - **`query`** is the request URL's query, exactly as main admitted it (`?` and all, or empty). It never takes part in a lookup: Ant's `/bzz` ignores it for content, and `GatewayCore` reads none. It exists for one thing: Ant keeps the query on its directory redirect, so the core's 308 `Location` must carry it too ([Heads](#heads)).
   - **`headers`** keeps only the request headers the bundled node reads: `range` for `bzz:` (Ant handles no conditional request), and `range` and `if-none-match` for IPFS ([Responses](#responses)). Everything else of the request stays in main.
@@ -162,6 +165,12 @@ Chromium ◀─body── main ◀─verified body (stream)── freedom-cored
   - **`trust.content`** is `verified`: the promise for the mode. The head carries the final label ([Labels](#labels)).
 - **Why a plan, then a second call.** `dweb.open` runs on the naming thread, stateless once it answers, and main fences its plans against naming's generations (0006). A verified fetch is long-lived and stateful. Splitting them means a plan overtaken by a naming change is planned again before any piece is fetched, and naming's thread never holds a fetch.
 - **Validation** (`validate_plan`, and main's `plan-validation.js`, with the same vectors): `shape`, `node` (the admitted backend, up, with `verify`), `root` (a 64-hex reference; a CIDv1 in lowercase base32; an IPNS name whose key is an inlined Ed25519 key, or whose multihash is sha2-256), `path`, `query` (equal to the admitted URL's query, and within 0006's URL bound), `header`, `retry`, `timers`, `response` and `trust` (`content` is `verified`). A refused plan is a 502 and a logged core fault, as in 0006.
+  - **What they check, past 0006's:**
+    - `root` ties to the request as a fetch plan's target does (0006, #97): for a hash or CID host it is the host's own reference, exactly, in its canonical form; for a name host it is the name's result, which validation can't judge beyond its form.
+    - **A `{ fetch }` plan for a hash or CID host the core verifies** is refused at `path`: that request's own plan is a `{ verify }`, so no fetch target ties to it, and a fetch would downgrade verified content to `unverified`.
+    - `header`: only the names the bundled node reads, each at most once and in lowercase, with 0006's value rules: `range` for Ant; `range` and `if-none-match` for IPFS.
+    - `response`: a subset of the bundled node's operations: `canonicalize_redirect` and `strip_page_state` for Ant; `strip_page_state` and `small_text` for IPFS.
+    - `retry` and `timers`: the backend's tables, as for its fetch plans.
   - **Against a strict backend,** 0006's checks change in two places: a `{ fetch }` plan is refused at `trust`, since its content would be `unverified`; and an `error` may also be a 403, with exactly one of strict mode's fixed messages. A 403 for a backend that isn't strict is refused at `error`.
 
 ### `dweb.verify`
@@ -622,6 +631,7 @@ The core builds every head from verified data, by the bundled node's rules. The 
 | the dweb thread is full, or memory can't be reserved in time | 503 | `Too many requests`, as a `busy` from `dweb.open` reads today |
 | no head within `deadline_ms` | 504 | `Deadline passed` |
 | [strict mode](#strict-mode) refuses unverified content (an error plan, before `dweb.verify`) | 403 | strict mode's, by cause |
+| main refuses the plan ([Verify plans](#verify-plans), Validation), a verify plan whose root isn't in its canonical form included; never an unverified fallback | 502, a logged core fault, as 0006's refused plans | 0006's |
 
 **After the head,** the body is truncated: the core sends `abort { code, message }`, and main errors the body, as a node's mid-body failure is surfaced today (0006). The codes are `verification_failed`, `unverifiable`, `malformed`, `piece_failed`, `busy` and `cancelled`.
 
@@ -774,7 +784,9 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
     - `unixfs-sizes`: a file whose declared child size disagrees with its raw leaf, and one whose content doesn't add up to `filesize`. The native reader slices by the declared size; the core cuts the body as malformed at that point;
     - `hamt-lookup`: an entry that isn't where its hash and the bitfield point. The native reader finds it by name; the core answers 404;
     - `rsa-keys`: an RSA key's protobuf encoded otherwise than libp2p's deterministic form (an unknown field, the fields out of order), which the native reader re-encodes and accepts, and a modulus of 2,041 bits, which ring accepts. The core refuses each as a failed check. A long-form DER length both refuse.
-- **Plan vectors,** which `validate_plan` and main's `plan-validation.js` both pass: `{ verify }` plans and their refusals, and what stays a `{ fetch }`: a 128-hex reference, a DNSLink name, an IPNS name with an inlined secp256k1 key. Each again with `strict`, as its 403 and message, and a `{ fetch }` plan against a strict backend refused at `trust`.
+- **Plan vectors,** which `validate_plan` and main's `plan-validation.js` both pass: `{ verify }` plans and their refusals, and what stays a `{ fetch }`: a 128-hex reference, a DNSLink name, an IPNS name with an inlined secp256k1 key. Each again with `strict`, as its 403 and message, and a `{ fetch }` plan against a strict backend refused at `trust`. A name whose contenthash is a CIDv0, and CID hosts in uppercase base32, show the canonical root; today's `{ fetch }` for a hash, CID or key host the core verifies is refused at `path`.
+  - **They are in `vectors/dweb-verify-plans.json`,** written by the JavaScript generator from the cases `dweb.json`'s requests come from. Every case whose plan 0006 accepts runs again on its external backend in four forms: with verification, with verification and strict mode, with strict mode and verification off, and, for IPFS, with strict mode and a gateway without raw blocks.
+  - **The expected plans are composed from the reference's outcome on that backend,** by this section's rules. No reference has a verified mode. Validation cases change one member of a plan and name the stage that refuses it.
 - **Adversarial vectors,** the design's own: each takes an honest exchange and changes one thing, and states the outcome.
   - **Swarm:**
     - a bit flipped in a leaf, an intermediate chunk, a manifest node and a feed update;
