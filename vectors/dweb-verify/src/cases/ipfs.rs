@@ -324,8 +324,24 @@ fn decoded(links: &[Link], data: Option<&[u8]>) -> Result<Value, Err> {
     Ok(ok(v))
 }
 
-fn dag_pb() -> Result<Vec<Value>, Err> {
+/// DAG-PB's strictness cases: the native reader (prost) takes what the
+/// core and Kubo refuse (deviation dag-pb-strict).
+const DAG_PB_STRICT: [&str; 10] = [
+    "unknown-field",
+    "unknown-maximal",
+    "duplicate-data",
+    "links-data-links",
+    "data-links-data",
+    "link-name-before-hash",
+    "link-tsize-before-name",
+    "link-duplicate-hash",
+    "link-duplicate-name",
+    "link-unknown-field",
+];
+
+async fn dag_pb() -> Result<Vec<Value>, Err> {
     let mut out = Vec::new();
+    let mut held: Vec<Vec<u8>> = Vec::new();
     let mut push = |id: &str,
                     note: &str,
                     block: &[u8],
@@ -344,6 +360,7 @@ fn dag_pb() -> Result<Vec<Value>, Err> {
             case["deviation"] = json!(d);
         }
         out.push(case);
+        held.push(block.to_vec());
         Ok(())
     };
     let a = crate::content::bytes("checks-dag-a", 300);
@@ -598,6 +615,34 @@ fn dag_pb() -> Result<Vec<Value>, Err> {
         fail("malformed"),
         None,
     )?;
+    // The native reader's answer for the strictness cases, and for two
+    // honest controls: GatewayCore over the node and the leaves it names.
+    let leaves = [
+        crate::content::bytes("checks-dag-a", 300),
+        crate::content::bytes("checks-dag-b", 200),
+    ];
+    let mut base = HashMap::new();
+    for leaf in &leaves {
+        base.insert(sha256_cid(RAW, leaf)?, leaf.clone());
+    }
+    for (case, block) in out.iter_mut().zip(held) {
+        let id = case["id"].as_str().unwrap_or_default().to_string();
+        let strict = DAG_PB_STRICT.contains(&id.as_str());
+        if !strict && id != "file" && id != "data-first" {
+            continue;
+        }
+        let cid = sha256_cid(DAG_PB, &block)?;
+        let mut blocks = base.clone();
+        blocks.insert(cid, block);
+        let native = native_get(blocks, &format!("/ipfs/{cid}")).await?;
+        let served = native["status"] == 200;
+        if strict && served {
+            case["deviation"] = json!("dag-pb-strict");
+        } else if strict || !served {
+            return Err(format!("dag-pb case {id}: GatewayCore says {native}").into());
+        }
+        case["native"] = native;
+    }
     Ok(out)
 }
 
@@ -825,7 +870,7 @@ fn unixfs() -> Result<Vec<Value>, Err> {
 pub async fn build() -> Result<Value, Err> {
     Ok(json!({
         "blocks": blocks()?,
-        "dag_pb": dag_pb()?,
+        "dag_pb": dag_pb().await?,
         "unixfs": unixfs()?,
         "hamt": hamt().await?,
         "car": car()?,
@@ -1337,6 +1382,8 @@ fn car() -> Result<Vec<Value>, Err> {
     let nan = [0xfb, 0x7f, 0xf8, 0, 0, 0, 0, 0, 0];
     let infinity = [0xfb, 0x7f, 0xf0, 0, 0, 0, 0, 0, 0];
     let one_and_a_half = [0xfb, 0x3f, 0xf8, 0, 0, 0, 0, 0, 0];
+    let negative_zero = [0xfb, 0x80, 0, 0, 0, 0, 0, 0, 0];
+    let zero = [0xfb, 0, 0, 0, 0, 0, 0, 0, 0];
     for (id, note, cbor) in [
         (
             "header-key-order",
@@ -1415,6 +1462,18 @@ fn car() -> Result<Vec<Value>, Err> {
             .concat(),
         ),
         (
+            "header-float-negative-zero",
+            "an unknown key whose value is negative zero: DAG-CBOR's strictness refuses it",
+            [
+                vec![0xa3],
+                pad_key.clone(),
+                negative_zero.to_vec(),
+                roots_kv.clone(),
+                version_kv.clone(),
+            ]
+            .concat(),
+        ),
+        (
             "header-float-32",
             "an unknown key whose value is a 32-bit float: DAG-CBOR has 64-bit floats only",
             [
@@ -1477,6 +1536,22 @@ fn car() -> Result<Vec<Value>, Err> {
                 vec![0xa3],
                 pad_key.clone(),
                 one_and_a_half.to_vec(),
+                roots_kv.clone(),
+                version_kv.clone(),
+            ]
+            .concat(),
+        ),
+        ok(json!({ "sections": ids })),
+        None,
+    );
+    push(
+        "header-float-zero",
+        "an unknown key whose value is the 64-bit float 0 (positive): read",
+        &framed(
+            [
+                vec![0xa3],
+                pad_key.clone(),
+                zero.to_vec(),
                 roots_kv.clone(),
                 version_kv.clone(),
             ]

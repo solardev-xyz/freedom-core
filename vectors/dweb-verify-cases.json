@@ -19,7 +19,7 @@
     "swarm_manifest_nodes": "a mantaray node's joined bytes (node), decoded: expect {ok: {manifest: true, ref_size, entry, forks: [{byte, type, prefix, child, metadata}]}} with prefix, child and entry in hex and metadata only the keys the walk reads (Content-Type, Filename, website-index-document, website-error-document, swarm-feed-owner, swarm-feed-topic, swarm-feed-type), the last value of a repeated key; {ok: {manifest: false}} for bytes without a version hash; or {fail}: malformed for a node Ant refuses, unverifiable past the core's 1 MiB (deviation manifest-node-cap). ant records Ant's decoding (parsed, malformed or not_a_manifest) and the fork paths it looked up, each agreeing",
     "swarm_leaves": "a leaf in a /bytes stream: address (as its parent names it), logical_length (from the parent's geometry), streamed (the stream's bytes for it), chunk (the wire /chunks/<address> answers, read only when the streamed bytes don't hash to the address), expect {ok: {fallback}} or {fail, fallback}; fallback says whether /chunks was read",
     "ipfs_blocks": "a block as a CAR section or a raw block brings it: cid, block, expect {ok: {codec}} or {fail}",
-    "ipfs_dag_pb": "a block that passed its CID, decoded as dag-pb: cid, block, expect {ok: {links: [{hash, name, tsize}], data}} or {fail}; data is the Data field's bytes or null",
+    "ipfs_dag_pb": "a block that passed its CID, decoded as dag-pb by DAG-PB's strictness rules: cid, block, expect {ok: {links: [{hash, name, tsize}], data}} or {fail}; data is the Data field's bytes or null. native, for the strictness cases and two controls, is GatewayCore's answer for /ipfs/<cid> over the block and the leaves it names; a strictness case it serves names dag-pb-strict",
     "ipfs_unixfs": "a dag-pb node's Data decoded as UnixFS, checked against its links where it is a file: cid, block, expect {ok: {type, filesize, blocksizes, data_length}} or {fail}",
     "ipfs_hamt": "a name's lookup in dweb-verify.json's HAMT (ipfs.directories, hamt-v1; its shards are in ipfs.blocks): root, name, hash_bits (the first 64 bits of MurmurHash3 x64 128 of the name, seed 0, big-endian; a byte per level), levels (per shard: depth, bucket, and the link named by the bucket's two uppercase hex digits, alone for a sub-shard or followed by the name for an entry, or null), expect {ok: {cid}} or {absent: true}. The generator checks every name against Kubo's own layout. A case with blocks carries its own root shard (cid → base64), rebuilt from hamt-v1's with an entry out of its place (deviation hamt-lookup), and native is GatewayCore's answer for /ipfs/<root>/<name>",
     "ipfs_car": "a CAR body: car, expect {ok: {sections: [cid]}} when it reads to its end at a section boundary; {fail, after: k}, k the sections read whole before the failure; or {ended: {after: k}} when the stream ends inside a section, an early end the walk takes as a piece failure. Whether the walk then has what it needs is the walk's question, not the reader's",
@@ -7247,6 +7247,11 @@
               }
             ]
           }
+        },
+        "native": {
+          "status": 200,
+          "length": 500,
+          "sha256": "fec8424fce47d2e7e4e3e0ba1d363eab7327f8c2f5ba1e161f0cef83ec3c8b4f"
         }
       },
       {
@@ -7273,6 +7278,11 @@
               }
             ]
           }
+        },
+        "native": {
+          "status": 200,
+          "length": 500,
+          "sha256": "fec8424fce47d2e7e4e3e0ba1d363eab7327f8c2f5ba1e161f0cef83ec3c8b4f"
         }
       },
       {
@@ -7347,6 +7357,12 @@
         },
         "expect": {
           "fail": "malformed"
+        },
+        "deviation": "dag-pb-strict",
+        "native": {
+          "status": 200,
+          "length": 500,
+          "sha256": "fec8424fce47d2e7e4e3e0ba1d363eab7327f8c2f5ba1e161f0cef83ec3c8b4f"
         }
       },
       {
@@ -7358,6 +7374,12 @@
         },
         "expect": {
           "fail": "malformed"
+        },
+        "deviation": "dag-pb-strict",
+        "native": {
+          "status": 200,
+          "length": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         }
       },
       {
@@ -7369,6 +7391,12 @@
         },
         "expect": {
           "fail": "malformed"
+        },
+        "deviation": "dag-pb-strict",
+        "native": {
+          "status": 200,
+          "length": 500,
+          "sha256": "fec8424fce47d2e7e4e3e0ba1d363eab7327f8c2f5ba1e161f0cef83ec3c8b4f"
         }
       },
       {
@@ -7380,6 +7408,12 @@
         },
         "expect": {
           "fail": "malformed"
+        },
+        "deviation": "dag-pb-strict",
+        "native": {
+          "status": 200,
+          "length": 500,
+          "sha256": "fec8424fce47d2e7e4e3e0ba1d363eab7327f8c2f5ba1e161f0cef83ec3c8b4f"
         }
       },
       {
@@ -7391,6 +7425,12 @@
         },
         "expect": {
           "fail": "malformed"
+        },
+        "deviation": "dag-pb-strict",
+        "native": {
+          "status": 200,
+          "length": 300,
+          "sha256": "26f6ddba35fa7e47120d42c9001c59f839f57e21ccfe503d57a426bdb858e843"
         }
       },
       {
@@ -7402,6 +7442,12 @@
         },
         "expect": {
           "fail": "malformed"
+        },
+        "deviation": "dag-pb-strict",
+        "native": {
+          "status": 200,
+          "length": 300,
+          "sha256": "26f6ddba35fa7e47120d42c9001c59f839f57e21ccfe503d57a426bdb858e843"
         }
       },
       {
@@ -7413,6 +7459,12 @@
         },
         "expect": {
           "fail": "malformed"
+        },
+        "deviation": "dag-pb-strict",
+        "native": {
+          "status": 200,
+          "length": 300,
+          "sha256": "26f6ddba35fa7e47120d42c9001c59f839f57e21ccfe503d57a426bdb858e843"
         }
       },
       {
@@ -7424,6 +7476,12 @@
         },
         "expect": {
           "fail": "malformed"
+        },
+        "deviation": "dag-pb-strict",
+        "native": {
+          "status": 200,
+          "length": 300,
+          "sha256": "26f6ddba35fa7e47120d42c9001c59f839f57e21ccfe503d57a426bdb858e843"
         }
       },
       {
@@ -7435,6 +7493,12 @@
         },
         "expect": {
           "fail": "malformed"
+        },
+        "deviation": "dag-pb-strict",
+        "native": {
+          "status": 200,
+          "length": 300,
+          "sha256": "26f6ddba35fa7e47120d42c9001c59f839f57e21ccfe503d57a426bdb858e843"
         }
       },
       {
@@ -7556,6 +7620,12 @@
         },
         "expect": {
           "fail": "malformed"
+        },
+        "deviation": "dag-pb-strict",
+        "native": {
+          "status": 200,
+          "length": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         }
       }
     ],
@@ -9483,6 +9553,22 @@
         }
       },
       {
+        "id": "header-float-negative-zero",
+        "note": "an unknown key whose value is negative zero: DAG-CBOR's strictness refuses it",
+        "car": {
+          "base64": "R6NjcGFk+4AAAAAAAAAAZXJvb3RzgdgqWCUAAXASIOV9UgOBEVfiwjwYxqMtvNAyxv6U6VQTOIY5Ws2JTY97Z3ZlcnNpb24BiwEBcBIg5X1SA4ERV+LCPBjGoy280DLG/pTpVBM4hjlazYlNj3sSKwokAVUSIFIh8XLciLpFKvJfLYdL5nGhj49Cr1oDQw7KZh/MEPcUEgAYrAISKwokAVUSIJVvjbydYK5WU0wM2h/aBoLGlXy/W1WKaGHyFWbR55L1EgAYyAEKCwgCGPQDIKwCIMgB0AIBVRIgUiHxctyIukUq8l8th0vmcaGPj0KvWgNDDspmH8wQ9xQY1kdCu+KIm4gupSV5Hxa/mLIoceCUbmvXbNBh52hRyAEspkx9lTESNLqDEX4AwS+1Spf+KnBmwjUVK8syrfrrG7nxgRclEElx4bv3Mhz2J1tKzL3Jy6WThOTnTz/5j+gpHxiJTAOZcBXWESqJ2KxS2fS5zfa7ApFVugTZI7pQnvySqmYSogp7SCVzQhTDrSy0VcDyCZnXU5c1LIkGrBxJt+IfFa9Ol6ECtRQUeeSWAtUxckFfnZutaywOIE0LP7dhlXuRk5L+eOovvMlcWqo1JAxUVd/q/cAtFDQKQPZQCorfpCzHEFoFo7RRr8VSbIIjaykzLj9HTnNTZcjvd+2fx+PeEvL8sh5P4dh1RGKjPEha8us3VTlod46X4qnOCCHVlFHYN4+Y9JCnsHjsAQFVEiCVb428nWCuVlNMDNof2gaCxpV8v1tVimhh8hVm0eeS9WIhrPdCtemkuVB5EBbyUFtwUXJaGkGLcJNNJsoevxdA4RHUSwE/6m0gtCNftRvNnl+zrkdEL5lRyGe+n+OnGIBGn3NqIVSuWnzmOo4raUSwxmteqRypyotJ5p3Dr4uTYaOAyJCUZLqjVnzeos3EENZ5W8gkPKN1Sn24Yv8mG2sn1/z3gW4aKEfkwdnj6i6emM3z8k6q99rpFcuCxb1tSmDPSe0EzqDmn/XOSc5FdHV11N+bw+1VwPmTub1SO1uOQ8LazcfLJqGm"
+        },
+        "expect": {
+          "fail": "verification_failed",
+          "after": 0
+        },
+        "native": {
+          "parse_car_v1": {
+            "sections": 3
+          }
+        }
+      },
+      {
         "id": "header-float-32",
         "note": "an unknown key whose value is a 32-bit float: DAG-CBOR has 64-bit floats only",
         "car": {
@@ -9551,6 +9637,27 @@
         "note": "an unknown key whose value is the 64-bit float 1.5: read",
         "car": {
           "base64": "R6NjcGFk+z/4AAAAAAAAZXJvb3RzgdgqWCUAAXASIOV9UgOBEVfiwjwYxqMtvNAyxv6U6VQTOIY5Ws2JTY97Z3ZlcnNpb24BiwEBcBIg5X1SA4ERV+LCPBjGoy280DLG/pTpVBM4hjlazYlNj3sSKwokAVUSIFIh8XLciLpFKvJfLYdL5nGhj49Cr1oDQw7KZh/MEPcUEgAYrAISKwokAVUSIJVvjbydYK5WU0wM2h/aBoLGlXy/W1WKaGHyFWbR55L1EgAYyAEKCwgCGPQDIKwCIMgB0AIBVRIgUiHxctyIukUq8l8th0vmcaGPj0KvWgNDDspmH8wQ9xQY1kdCu+KIm4gupSV5Hxa/mLIoceCUbmvXbNBh52hRyAEspkx9lTESNLqDEX4AwS+1Spf+KnBmwjUVK8syrfrrG7nxgRclEElx4bv3Mhz2J1tKzL3Jy6WThOTnTz/5j+gpHxiJTAOZcBXWESqJ2KxS2fS5zfa7ApFVugTZI7pQnvySqmYSogp7SCVzQhTDrSy0VcDyCZnXU5c1LIkGrBxJt+IfFa9Ol6ECtRQUeeSWAtUxckFfnZutaywOIE0LP7dhlXuRk5L+eOovvMlcWqo1JAxUVd/q/cAtFDQKQPZQCorfpCzHEFoFo7RRr8VSbIIjaykzLj9HTnNTZcjvd+2fx+PeEvL8sh5P4dh1RGKjPEha8us3VTlod46X4qnOCCHVlFHYN4+Y9JCnsHjsAQFVEiCVb428nWCuVlNMDNof2gaCxpV8v1tVimhh8hVm0eeS9WIhrPdCtemkuVB5EBbyUFtwUXJaGkGLcJNNJsoevxdA4RHUSwE/6m0gtCNftRvNnl+zrkdEL5lRyGe+n+OnGIBGn3NqIVSuWnzmOo4raUSwxmteqRypyotJ5p3Dr4uTYaOAyJCUZLqjVnzeos3EENZ5W8gkPKN1Sn24Yv8mG2sn1/z3gW4aKEfkwdnj6i6emM3z8k6q99rpFcuCxb1tSmDPSe0EzqDmn/XOSc5FdHV11N+bw+1VwPmTub1SO1uOQ8LazcfLJqGm"
+        },
+        "expect": {
+          "ok": {
+            "sections": [
+              "bafybeihfpvjahairk7rmepayy2rs3pgqgldp5fhjkqjtrbrzllgystmppm",
+              "bafkreicsehyxfxeixjcsv4s7fwduxztrughy6qvplibugdwkmyp4yehxcq",
+              "bafkreievn6g3zhlavzlfgtam3ip5ubucy2kxzp23kwfgqypscvtndz4s6u"
+            ]
+          }
+        },
+        "native": {
+          "parse_car_v1": {
+            "sections": 3
+          }
+        }
+      },
+      {
+        "id": "header-float-zero",
+        "note": "an unknown key whose value is the 64-bit float 0 (positive): read",
+        "car": {
+          "base64": "R6NjcGFk+wAAAAAAAAAAZXJvb3RzgdgqWCUAAXASIOV9UgOBEVfiwjwYxqMtvNAyxv6U6VQTOIY5Ws2JTY97Z3ZlcnNpb24BiwEBcBIg5X1SA4ERV+LCPBjGoy280DLG/pTpVBM4hjlazYlNj3sSKwokAVUSIFIh8XLciLpFKvJfLYdL5nGhj49Cr1oDQw7KZh/MEPcUEgAYrAISKwokAVUSIJVvjbydYK5WU0wM2h/aBoLGlXy/W1WKaGHyFWbR55L1EgAYyAEKCwgCGPQDIKwCIMgB0AIBVRIgUiHxctyIukUq8l8th0vmcaGPj0KvWgNDDspmH8wQ9xQY1kdCu+KIm4gupSV5Hxa/mLIoceCUbmvXbNBh52hRyAEspkx9lTESNLqDEX4AwS+1Spf+KnBmwjUVK8syrfrrG7nxgRclEElx4bv3Mhz2J1tKzL3Jy6WThOTnTz/5j+gpHxiJTAOZcBXWESqJ2KxS2fS5zfa7ApFVugTZI7pQnvySqmYSogp7SCVzQhTDrSy0VcDyCZnXU5c1LIkGrBxJt+IfFa9Ol6ECtRQUeeSWAtUxckFfnZutaywOIE0LP7dhlXuRk5L+eOovvMlcWqo1JAxUVd/q/cAtFDQKQPZQCorfpCzHEFoFo7RRr8VSbIIjaykzLj9HTnNTZcjvd+2fx+PeEvL8sh5P4dh1RGKjPEha8us3VTlod46X4qnOCCHVlFHYN4+Y9JCnsHjsAQFVEiCVb428nWCuVlNMDNof2gaCxpV8v1tVimhh8hVm0eeS9WIhrPdCtemkuVB5EBbyUFtwUXJaGkGLcJNNJsoevxdA4RHUSwE/6m0gtCNftRvNnl+zrkdEL5lRyGe+n+OnGIBGn3NqIVSuWnzmOo4raUSwxmteqRypyotJ5p3Dr4uTYaOAyJCUZLqjVnzeos3EENZ5W8gkPKN1Sn24Yv8mG2sn1/z3gW4aKEfkwdnj6i6emM3z8k6q99rpFcuCxb1tSmDPSe0EzqDmn/XOSc5FdHV11N+bw+1VwPmTub1SO1uOQ8LazcfLJqGm"
         },
         "expect": {
           "ok": {
@@ -10477,6 +10584,27 @@
         "deviation": "dag-cbor-strict"
       },
       {
+        "id": "cbor-float-negative-zero",
+        "note": "an unknown key whose value is negative zero, which DAG-CBOR's strictness refuses",
+        "name": "k51qzi5uqu5dja9it0ilm72uimu8sunfn5hbu86wwb6yxrl8kif10fkruhtcwi",
+        "record": {
+          "base64": "QkChINDkbrToqpmGYILWYnvMNs/S54wBe0t3Pcu0kNLesLjQreLw+8AJRqdOTRbIinn+V/RKWzUuf/Y8lXRaZJwMSqcBpmNUVEwbAAAARdlkuABlRXh0cmH7gAAAAAAAAABlVmFsdWVYQS9pcGZzL2JhZnliZWlndXdqbWRkdnI0aWlhaDZla2d2cm92YjV6ZmI2ZWc1YzZsb2lreHZ4bHh6bHdlYTVkYWJtaFNlcXVlbmNlAWhWYWxpZGl0eVgeMjA5OS0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQA="
+        },
+        "now": 1760000000,
+        "expect": {
+          "fail": "unverifiable"
+        },
+        "native": {
+          "ok": {
+            "value": "/ipfs/bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm",
+            "sequence": 1,
+            "validity": "2099-01-01T00:00:00.000000000Z",
+            "ttl_ns": 300000000000
+          }
+        },
+        "deviation": "dag-cbor-strict"
+      },
+      {
         "id": "cbor-float-32",
         "note": "an unknown key whose value is a 32-bit float",
         "name": "k51qzi5uqu5dja9it0ilm72uimu8sunfn5hbu86wwb6yxrl8kif10fkruhtcwi",
@@ -10540,6 +10668,31 @@
         },
         "native": {
           "error": "invalid IPNS record: data decode failed: Msg(\"Failed to deserialize CID: Failed to decode unsigned varint format\")"
+        }
+      },
+      {
+        "id": "cbor-float-zero",
+        "note": "an unknown key whose value is the 64-bit float 0 (positive): read",
+        "name": "k51qzi5uqu5dja9it0ilm72uimu8sunfn5hbu86wwb6yxrl8kif10fkruhtcwi",
+        "record": {
+          "base64": "QkALi5UI8zB2V3nnoFIM57a3K+16vameJIjtnmlbPYzsMJ3Wbl0yTlWniM1O1BwY2qT6dDQWeplOH0b6sEtvZ8MKSqcBpmNUVEwbAAAARdlkuABlRXh0cmH7AAAAAAAAAABlVmFsdWVYQS9pcGZzL2JhZnliZWlndXdqbWRkdnI0aWlhaDZla2d2cm92YjV6ZmI2ZWc1YzZsb2lreHZ4bHh6bHdlYTVkYWJtaFNlcXVlbmNlAWhWYWxpZGl0eVgeMjA5OS0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQA="
+        },
+        "now": 1760000000,
+        "expect": {
+          "ok": {
+            "value": "/ipfs/bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm",
+            "sequence": 1,
+            "validity": "2099-01-01T00:00:00.000000000Z",
+            "ttl_ns": 300000000000
+          }
+        },
+        "native": {
+          "ok": {
+            "value": "/ipfs/bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm",
+            "sequence": 1,
+            "validity": "2099-01-01T00:00:00.000000000Z",
+            "ttl_ns": 300000000000
+          }
         }
       },
       {
