@@ -93,6 +93,51 @@ fn chunks() {
     }
 }
 
+/// Intermediate chunks, read as Ant's joiner reads them: the level, the
+/// parity count from the chunk's own span, the data references after the
+/// padding, and each child's length from the parent's geometry.
+#[test]
+fn intermediates() {
+    let all = cases();
+    let list = all["swarm"]["intermediates"].as_array().unwrap();
+    assert!(list.len() >= 25);
+    for case in list {
+        let id = &case["id"];
+        let address = hex32(&case["address"]);
+        let wire = bytes(&case["wire"]);
+        let chunk = check_chunk(&address, &wire).unwrap_or_else(|e| panic!("{id}: {e:?}"));
+        let len = case["logical_length"].as_u64().unwrap();
+        assert!(!fc_swarm::tree::is_leaf(len), "{id}");
+        let got = fc_swarm::tree::intermediate(&chunk, len);
+        match (&case["expect"]["ok"], case["expect"]["fail"].as_str()) {
+            (ok, None) if ok.is_object() => {
+                let node = got.unwrap_or_else(|e| panic!("{id}: {e:?}"));
+                assert_eq!(u64::from(node.level), ok["level"].as_u64().unwrap(), "{id}");
+                assert_eq!(
+                    node.parities as u64,
+                    ok["parities"].as_u64().unwrap(),
+                    "{id}"
+                );
+                assert_eq!(
+                    node.len() as u64,
+                    ok["data_references"].as_u64().unwrap(),
+                    "{id}"
+                );
+                let children: Vec<Value> = (0..node.len())
+                    .map(|i| {
+                        let (a, l) = node.child(i).unwrap();
+                        serde_json::json!({ "address": hex::encode(a), "length": l })
+                    })
+                    .collect();
+                assert_eq!(Value::Array(children), ok["children"], "{id}");
+                assert_eq!(node.child(node.len()), None, "{id}");
+            }
+            (_, Some(fail)) => assert_eq!(got.map(|_| ()).map_err(code), Err(fail), "{id}"),
+            _ => panic!("{id}: no expect"),
+        }
+    }
+}
+
 #[test]
 fn feed_updates() {
     let all = cases();
