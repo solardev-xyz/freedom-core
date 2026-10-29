@@ -42,16 +42,23 @@ pub fn policy(
 /// really lives. A file in `/etc` itself is granted alone, any other by its
 /// directory, so a replacement there stays readable. One that can't be read
 /// after a replacement makes discovery `unknown` (fc-nat64's
-/// `Learned::Unreadable`). Elsewhere, none.
+/// `Learned::Unreadable`). On macOS, the file `/etc/resolv.conf` names,
+/// which Seatbelt matches by path, so a replacement stays readable.
+/// Elsewhere, none.
 pub fn resolver_grants() -> Vec<PathBuf> {
     let mut grants = Vec::new();
-    if cfg!(target_os = "linux") {
-        for file in fc_nat64::resolvers::LINUX_FILES {
-            if let Some(grant) = confine::resolver_grant(Path::new(file))
-                && !grants.contains(&grant)
-            {
-                grants.push(grant);
-            }
+    let files: &[&str] = if cfg!(target_os = "linux") {
+        &fc_nat64::resolvers::LINUX_FILES
+    } else if cfg!(target_os = "macos") {
+        &fc_nat64::resolvers::MACOS_FILES
+    } else {
+        &[]
+    };
+    for file in files {
+        if let Some(grant) = confine::resolver_grant(Path::new(file))
+            && !grants.contains(&grant)
+        {
+            grants.push(grant);
         }
     }
     grants

@@ -703,7 +703,15 @@ mod tests {
     #[test]
     fn sockets_are_inet_only_and_pairs_stream_only() {
         let (arch, _, _) = native();
-        let online = programs(Network::Socks5 { port: 9150 }, arch, false).unwrap();
+        let online = programs(
+            Network::Socks5 {
+                port: 9150,
+                loopback: true,
+            },
+            arch,
+            false,
+        )
+        .unwrap();
         let socket = |programs: &[BpfProgram], family: i32| {
             verdict(
                 programs,
