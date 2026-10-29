@@ -622,6 +622,36 @@ fn other_keys(r: &mut Records) -> Result<(), Err> {
         verdict(&s),
         None,
     );
+    // A non-empty signatureV1 asks for every legacy field to match the
+    // signed data, an absent one as its protobuf default (the IPNS record
+    // specification; boxo's validation.go); the native reader compares
+    // only the legacy fields present.
+    let mut v1_alone = rec.clone();
+    pb_bytes(2, &[0x01], &mut v1_alone);
+    r.push(
+        "ed25519-signature-v1-alone",
+        "the honest V2-only record with a one-byte signatureV1 and none of the legacy fields",
+        &name,
+        &v1_alone,
+        fail("verification_failed"),
+        Some("ipns-legacy-fields"),
+    );
+    // An Ed25519 key hashed into its name, carried in pubKey and validly
+    // signed: libp2p inlines an Ed25519 key, so a sha2-256 name's key must
+    // be RSA.
+    let hashed = {
+        let mh = multihash::Multihash::<64>::wrap(0x12, &Sha256::digest(&ed.proto))?;
+        cid::Cid::new_v1(0x72, mh).to_string_of_base(multibase::Base::Base36Lower)?
+    };
+    let rec_hashed = entry(Some(&ed.proto), Some(&good), &d);
+    r.push(
+        "ed25519-hashed-name",
+        "a sha2-256 name over an Ed25519 key's protobuf, with the key in pubKey and the honest signature",
+        &hashed,
+        &rec_hashed,
+        fail("unverifiable"),
+        None,
+    );
     // S + L: the same S modulo L, not canonical.
     let l: [u8; 32] = [
         0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde,

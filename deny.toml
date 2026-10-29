@@ -7,7 +7,14 @@ all-features = true
 # Vulnerabilities and unsound crates fail the check; nothing is ignored
 # without a comment explaining why.
 yanked = "deny"
-ignore = []
+ignore = [
+    # rsa 0.9.10, in fc-ipfs, for one use: checking RSA-keyed IPNS records'
+    # signatures with the public keys the records carry (design 0009,
+    # Upstream). The Marvin timing side channel is in RSA private-key
+    # operations, with no fixed release; the core makes none, and holds no
+    # RSA private key.
+    { id = "RUSTSEC-2023-0071", reason = "no RSA private-key operation is ever made: fc-ipfs only verifies IPNS record signatures with public keys" },
+]
 
 [licenses]
 confidence-threshold = 0.9

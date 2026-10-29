@@ -10211,6 +10211,42 @@
         }
       },
       {
+        "id": "ed25519-signature-v1-alone",
+        "note": "the honest V2-only record with a one-byte signatureV1 and none of the legacy fields",
+        "name": "k51qzi5uqu5dja9it0ilm72uimu8sunfn5hbu86wwb6yxrl8kif10fkruhtcwi",
+        "record": {
+          "base64": "QkBANodKRivqsPYQu52ef3V/Wd35rbyfgtApdWiN89ikJTWdmSt8TEDURNr4RX1Q1GLCLoiR31EdmWp+2aRkxGILSpgBpWNUVEwbAAAARdlkuABlVmFsdWVYQS9pcGZzL2JhZnliZWlndXdqbWRkdnI0aWlhaDZla2d2cm92YjV6ZmI2ZWc1YzZsb2lreHZ4bHh6bHdlYTVkYWJtaFNlcXVlbmNlAWhWYWxpZGl0eVgeMjA5OS0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQASAQE="
+        },
+        "now": 1760000000,
+        "expect": {
+          "fail": "verification_failed"
+        },
+        "native": {
+          "ok": {
+            "value": "/ipfs/bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm",
+            "sequence": 1,
+            "validity": "2099-01-01T00:00:00.000000000Z",
+            "ttl_ns": 300000000000
+          }
+        },
+        "deviation": "ipns-legacy-fields"
+      },
+      {
+        "id": "ed25519-hashed-name",
+        "note": "a sha2-256 name over an Ed25519 key's protobuf, with the key in pubKey and the honest signature",
+        "name": "k2k4r8kng5gj1vpuyjjyso24vx9fgrflajrsq5yhy23bizeu9q4tocsl",
+        "record": {
+          "base64": "OiQIARIgfHZXYvdrfDu2GnmxxmHuZjoBRo/NJiRnNl71FxwKf5JCQEA2h0pGK+qw9hC7nZ5/dX9Z3fmtvJ+C0Cl1aI3z2KQlNZ2ZK3xMQNRE2vhFfVDUYsIuiJHfUR2Zan7ZpGTEYgtKmAGlY1RUTBsAAABF2WS4AGVWYWx1ZVhBL2lwZnMvYmFmeWJlaWd1d2ptZGR2cjRpaWFoNmVrZ3Zyb3ZiNXpmYjZlZzVjNmxvaWt4dnhseHpsd2VhNWRhYm1oU2VxdWVuY2UBaFZhbGlkaXR5WB4yMDk5LTAxLTAxVDAwOjAwOjAwLjAwMDAwMDAwMFpsVmFsaWRpdHlUeXBlAA=="
+        },
+        "now": 1760000000,
+        "expect": {
+          "fail": "unverifiable"
+        },
+        "native": {
+          "error": "invalid IPNS record: public key does not match IPNS name"
+        }
+      },
+      {
         "id": "ed25519-s-not-canonical",
         "note": "the honest signature with L added to S",
         "name": "k51qzi5uqu5dja9it0ilm72uimu8sunfn5hbu86wwb6yxrl8kif10fkruhtcwi",
