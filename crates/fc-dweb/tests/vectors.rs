@@ -67,18 +67,9 @@ fn backend(request: &Json) -> Backend {
     backend
 }
 
-const BUNDLED: Backend = Backend::Ant {
-    mode: fc_dweb::Ant::Bundled,
-    up: true,
-};
-const NATIVE: Backend = Backend::Ipfs {
-    mode: fc_dweb::Ipfs::Native,
-    up: true,
-};
-const GATEWAY: Backend = Backend::Ipfs {
-    mode: fc_dweb::Ipfs::Gateway,
-    up: true,
-};
+const BUNDLED: Backend = Backend::ant(fc_dweb::Ant::Bundled, true);
+const NATIVE: Backend = Backend::ipfs(fc_dweb::Ipfs::Native, true);
+const GATEWAY: Backend = Backend::ipfs(fc_dweb::Ipfs::Gateway, true);
 
 fn plan_json(plan: &Plan) -> Json {
     serde_json::from_str(&plan.to_json()).unwrap()
@@ -310,6 +301,7 @@ fn requests() {
                 assert_eq!(headers, pairs(&js["redirect"]["headers"]), "{}", id(entry));
                 assert_eq!(js["redirect"]["status"], 307);
             }
+            Plan::Verify(_) => panic!("{}: dweb.json has no verify plan", id(entry)),
             Plan::Error(error) => {
                 assert_eq!(error.body(), s(&js["error"], "body"), "{}", id(entry));
                 assert_eq!(
