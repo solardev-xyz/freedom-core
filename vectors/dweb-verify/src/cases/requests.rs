@@ -868,6 +868,16 @@ fn ipfs(doc: &Doc, out: &mut Cases) -> Result<(), Err> {
         error(502, IPFS_FAILED),
         None,
     );
+    let c_name = "k51qzi5uqu5dm4byyvx1rm820bmhg9pb9mbauoya4h97fj7y3281b68piobf5u";
+    out.push(
+        "ipns/value-names-dnslink",
+        "a valid record whose value names a DNSLink name (/ipns/example.com): the walk can't follow it, and never falls back to an unverified fetch",
+        ipfs_plan(json!({ "ipns": c_name }), "/", &[]),
+        "GET",
+        gw(true, json!([{ "piece": "record", "name": c_name, "record": { "base64": rec("ed25519-to-dnslink")? } }])),
+        error(502, IPFS_UNVERIFIABLE),
+        None,
+    );
     out.0.push(json!({
         "id": "ipns/floor",
         "note": "one partition verifies sequence 5, then is served sequence 3, still valid: refused below the floor; another partition takes sequence 3",
