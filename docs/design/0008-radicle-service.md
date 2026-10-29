@@ -246,7 +246,7 @@ Each ref is renamed into place atomically, but the steps together aren't. So bef
 - **Failure:**
   - Anything the procedure doesn't recognize, or can't repair, is left exactly as it is. An example is an owned ref that points at a missing object.
   - **Within one repository,** that repository is quarantined ([the escape](#the-escape)), with the step and the evidence kept. The [repository gate](#the-repository-gate) shuts it, and the node runs without it.
-  - **Outside any one repository,** for example an unreadable cache database or storage directory, `rad.reconcile` answers `recovery_failed`.
+  - **Outside any one repository,** for example an unreadable cache database or storage directory, or a temporary clone that can't be removed, `rad.reconcile` answers `recovery_failed`. A temporary clone isn't its repository, so its failure doesn't quarantine it.
   - Either way, nothing is deleted to make the start succeed.
 - **Logs:** counts and repository IDs, never paths inside a repository.
 
@@ -257,7 +257,7 @@ Every potentially long step is a **unit**. Each unit has a work limit and a time
 | Unit | Work limit | Time limit |
 |---|---|---|
 | removing one temporary clone, or one repository's ref lock files | one directory | 30 s |
-| checking one named namespace against its `rad/sigrefs` | 1,024 refs; a larger namespace takes several units, each with a checkpoint | 30 s |
+| checking one named namespace against its `rad/sigrefs` | 1,024 refs; a larger namespace takes several units, each with a checkpoint. Two things stay O(n) in each unit: it reads every ref name of the namespace to find the next ones after its checkpoint, a string comparison each, and libgit2 reads `packed-refs` whole | 30 s |
 | re-signing the running identity's namespace | one ref update, flushed, with libgit2's fsync option on | 30 s |
 | materializing one COB into staging | one COB | 30 s |
 | committing a batch | one transaction: at most 64 staged COBs and the checkpoint | 30 s |
@@ -267,10 +267,14 @@ Every potentially long step is a **unit**. Each unit has a work limit and a time
   - Each batch materializes its COBs into a staging table in `cobs/cache.db` (`rebuild_staging`) and records its checkpoint, the last COB it finished. Both go in one durable transaction, with `synchronous = FULL` during reconciliation.
   - When every COB is staged, **publication** swaps the repository's live cache rows for the staged ones in one transaction, and clears its staging.
   - So a rebuild interrupted at any point resumes from its last checkpoint, and readers never see a half-built cache.
-- **The progress state** (`reconcile_state`, in the same database) holds the checkpoints, each repository's finished steps, and the unit in progress.
+- **The progress state,** in the same database, holds the checkpoints, each repository's finished steps, and the unit in progress. Its tables are its own (`reconcile_repository`, `reconcile_namespace`, `reconcile_unit`, `reconcile_cache`, beside `rebuild_staging`), created if absent, and the cache's schema version doesn't change. It is progress about derived data, and is lost with the cache, which only makes the next run start over.
   - An entry is written in the same transaction as the work it records. For a re-sign, it is written after the ref update has been flushed.
   - So the state never claims work that isn't durable.
   - **It is bound to its input:** each repository's checkpoints carry the repository's input version, a hash over its refs taken when its repair began. A resumed repair whose input version differs discards that repository's staging and starts it over.
+    - **The repository's version** is a SHA-1 over every ref as libgit2 stores it, none skipped: its name's raw bytes, UTF-8 or not, and its object ID or, for a symbolic ref, the name it points at, unresolved. Each is length-prefixed.
+    - **A namespace's version** is a fold of one hash per ref, so a unit needn't hold the namespace's refs. It is an accidental-change fingerprint, not an authentication boundary: chosen sets of refs can be made to share one. It relies on the single writer: the home's lock, the [repository gate](#the-repository-gate), and no `rad` CLI running at the same time.
+    - **If that boundary ever widens,** it has to become a collision-resistant digest: capped-page canonical scans, feeding length-prefixed records to SHA-256 or BLAKE3.
+    - **Re-signing moves `rad/sigrefs`,** and with it the repository's version: the repair goes on at the new version, with the steps it finished recorded again.
   - **And to the signing authority:** each namespace check's checkpoint names the namespace it checks (its node ID), that namespace's input version (a hash over its refs), and the signing authority that applies: the namespace's own identity when the running key is that identity, and otherwise none.
     - A resumed check keeps its checkpoint while all three are unchanged, whatever the running key. So successive throwaway keys, none of which can sign A's namespace, each continue A's read-only check where the last one stopped.
     - It starts that namespace over only when its input version or the authority changes: A's key arrives, or A's key goes. A retry alone never changes either.
@@ -309,13 +313,14 @@ A unit that doesn't return can't be interrupted from inside the process. So time
 
 A unit that can't finish is not retried forever.
 
-- **After one interrupted attempt,** the next attempt reruns the unit in its smallest form: a batch one COB at a time, and a namespace check in single refs. It records each piece durably before starting it.
+- **After one interrupted attempt,** the next attempt reruns the unit in its smallest form: a batch one COB at a time, and a namespace check in single refs. It does so for the work the unit held in its usual form, 64 COBs or 1,024 refs, then goes back to the usual form. It records each piece durably before starting it.
+  - The unit the last process ended during is read when the progress state opens, and its record is kept until that unit runs again, whatever units run before it. So a later process still counts it.
 - **A poison unit:** a unit that was in progress when two processes ended quarantines its repository, with the unit's kind and position. A unit that fails with an error quarantines it at once.
 - **So every retry makes progress or reaches a diagnosis:** it advances a checkpoint, or it quarantines a repository.
 - **Two kinds of quarantine:**
   - **`cache`:** a COB or the cache can't be rebuilt. The repository's git data and the node's namespace are intact.
   - **`namespace`:** a namespace the marker names doesn't verify and can't be re-signed: for example an owned ref that points at a missing object, or an earlier identity's refs that its `rad/sigrefs` doesn't sign.
-- **The record:** a quarantine is recorded durably, in a `quarantine` table that outlives the run, before anything else resumes:
+- **The record:** a quarantine is recorded durably, in a `quarantine` table that outlives the run, before anything else resumes. The table is in a database of its own, `node/reconcile.db`, in WAL mode with `synchronous = FULL` and its own migrations. It isn't in `cobs/cache.db`, which is derived data that may be deleted, nor in the node's database, whose schema stays heartwood's. It is written:
   - at a start, before `rad.reconcile` replies;
   - online, before the writer takes its next task.
 
@@ -323,11 +328,11 @@ A unit that can't finish is not retried forever.
 - **Unseed doesn't clear it:**
   - Unseeding changes the seeding policy, not the record. While `storage/<rid>` exists, the record stays and the gate stays shut. A later seed or clone of the same repository is refused with `quarantined`.
   - **Remove** (`rad.remove_repo`) is the only way out, and only for a quarantined repository.
-    - **Each record has its own `qid`,** a random 128-bit ID created with the record. Every quarantine entry carries it, and main passes back the `qid` of the entry the user saw in the warning.
+    - **Each record has its own `qid`,** a random 128-bit ID created with the record: 16 bytes from the operating system's cryptographic generator, never from a generator the process seeds. A new `qid` that another record holds is refused, and nothing is recorded. Every quarantine entry carries it, and main passes back the `qid` of the entry the user saw in the warning.
     - **The precondition:** when the writer starts the removal, it checks under the repository gate that the record for `rid` exists and has that `qid`. If the record is missing or has another `qid`, nothing is deleted, and the answer is `not_quarantined`. A delayed or duplicate removal can therefore never act on a repository that was cloned again after an earlier removal.
     - It then does these in order, durably, with the gate shut throughout:
       1. unseeds the repository;
-      2. deletes `storage/<rid>`, following no symlinks;
+      2. deletes `storage/<rid>`, following no symlinks (a link or a Windows junction in its place is removed itself), then flushes the storage directory, so that the deletion is on disk before the record goes. A flush that fails keeps the record;
       3. deletes the repository's cache rows;
       4. clears the record.
     - **Partial failure or cancel:** the record, and its `qid`, stay until step 4. A retry with the same `qid` repeats the steps, each of which is idempotent.
@@ -1012,13 +1017,20 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
     - apply the address policy to every answer, and connect to a checked address. Through the proxy, that is a SOCKS `CONNECT` to the IP literal (`Wire::dial`, `wire.rs:1089`–`1172`);
     - treat a failed, empty or wholly refused answer as an error that fails the dial, never as a reason to hand the proxy the name;
     - route onion names to the proxy as names, through a separate, explicit path;
+    - blame each failed dial on its side. The node's own failures count nothing against the peer: its policy refusing the address, no resolver free, or an onion or I2P name with no route. The peer's do: a name that doesn't resolve, or an address that can't be reached;
     - apply the same policy where announced addresses enter the address book.
 12. **Errors, not panics:**
     - in the reactor's policy-store calls (`hw/radicle-protocol/src/service.rs:863`–`896`, `1185`, `1556`, `1641`, `2066`);
     - in start-time configuration checks (`service.rs:566`, `service/gossip.rs:12`–`16`, `runtime.rs:163`–`165`).
 
     A failure there should stop the node with an error the host can see.
-13. **`Storage::reconcile`,** the procedure in [Reconciliation](#reconciliation):
+13. **`Storage::reconcile`,** the procedure in [Reconciliation](#reconciliation). It is built as `radicle::storage::git::reconcile`:
+    - `driver::run` is `Storage::reconcile`;
+    - `driver::Repair::online`, stepped one unit per call, is `reconcile_repository(rid)`;
+    - `driver::Watch` is the watchdog's hook;
+    - `quarantine` holds the record and `remove_repo`, `state` the progress, and `cache` the rebuild.
+
+    It does:
     - typed recognition of temporary clones (`<RID>.tmp`, legacy `<RID>.lock`) and ref lock files, with no symlinks followed;
     - validation of every namespace the marker names, and re-signing of the running identity's, with a signer the host passes in (the key from `rad.identity`), since the node isn't running yet. A namespace whose node ID isn't the signer's is never signed;
     - a COB cache rebuild in batches into a staging table, with durable checkpoints and atomic publication;
@@ -1027,13 +1039,15 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
     - a cancel token and a deadline checked between units;
     - a `quarantine` table with its two kinds, and `remove_repo`;
     - `reconcile_repository(rid)` for the online repair, one unit per call;
+    - a hook that tells the host's watchdog of each unit as it starts and ends;
     - a report of what it changed, and an error that names anything it couldn't repair.
 14. **The repository gate:**
     - a per-repository state (`open`, `repairing`, `quarantined` with its kind) that the host sets;
     - heartwood consults it before every fetch, the automatic retries of seeded repositories included (`hw/radicle-protocol/src/service.rs:765`–`772`, `2486`–`2538`), and before every COB cache update;
-    - before refs and inventory announcements (`service.rs:1967`–`1968`, `2131`, `2394`);
+    - before refs and inventory announcements (`service.rs:1967`–`1968`, `2131`, `2394`). That covers every one the node sends of its own: a new refs announcement, a stored one replayed to a peer that subscribes, a peer's initial inventory, and each inventory announcement;
     - before serving a repository to a peer (`hw/radicle-node/src/worker.rs:243`–`258`);
     - a deferred fetch runs once its repository reopens.
+    - **Each consultation holds a pass** for its purpose (mutate, serve, announce, or inventory) until the work it admits is done or queued. Closing a repository returns once the passes its new state doesn't permit have dropped. So a close that has returned is never overtaken by work admitted before it.
 
 ## Where the code lives
 
