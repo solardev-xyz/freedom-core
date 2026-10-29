@@ -1637,6 +1637,343 @@ function validationCases(requests) {
 }
 
 // ---------------------------------------------------------------------------
+// Design 0009: verify plans. Every request above again, on its external
+// backend with verification on, and strict mode on or off: the design's
+// plans, composed from the reference's outcome on the external backend as
+// 0009's Verify plans and Strict mode state. No reference has a verified
+// mode, so `source` is `design` throughout.
+
+const VERIFY_RESPONSE_OPS = { ant: ['canonicalize_redirect', 'strip_page_state'], ipfs: ['strip_page_state'] };
+const VERIFY_HEADERS = { ant: ['range'], ipfs: ['range', 'if-none-match'] };
+const STRICT_MESSAGES = {
+  off: 'This profile loads only verified content, and verification is off for this node',
+  unsupported: "This profile loads only verified content, and this gateway doesn't serve verifiable responses",
+  dnslink: "This profile loads only verified content, and a DNSLink name can't be verified",
+  key: "This profile loads only verified content, and this IPNS name's key type can't be verified",
+  encrypted: "This profile loads only verified content, and an encrypted Swarm reference can't be verified with an external node",
+};
+const B36 = '0123456789abcdefghijklmnopqrstuvwxyz';
+
+function baseDecode(text, alphabet) {
+  let n = 0n;
+  for (const c of text) {
+    const v = alphabet.indexOf(c);
+    if (v < 0) return null;
+    n = n * BigInt(alphabet.length) + BigInt(v);
+  }
+  let hex = n === 0n ? '' : n.toString(16);
+  if (hex.length % 2) hex = '0' + hex;
+  let zeros = 0;
+  while (zeros < text.length && text[zeros] === alphabet[0]) zeros++;
+  return Uint8Array.from(Buffer.from('00'.repeat(zeros) + hex, 'hex'));
+}
+
+function base32Decode(text) {
+  let bits = 0;
+  let value = 0;
+  const out = [];
+  for (const c of text) {
+    const v = B32.indexOf(c);
+    if (v < 0) return null;
+    value = (value << 5) | v;
+    bits += 5;
+    if (bits >= 8) {
+      out.push((value >>> (bits - 8)) & 0xff);
+      bits -= 8;
+    }
+  }
+  return Uint8Array.from(out);
+}
+
+function readVarint(bytes, at) {
+  let v = 0;
+  let shift = 0;
+  for (let i = at; i < bytes.length && i < at + 9; i++) {
+    v += (bytes[i] & 0x7f) * 2 ** shift;
+    if ((bytes[i] & 0x80) === 0) return [v, i + 1];
+    shift += 7;
+  }
+  return null;
+}
+
+/**
+ * An IPNS name as a plan's path carries it: `ed25519` (an inlined
+ * Ed25519 key), `sha256` (a hashed key, RSA if it verifies), `other_key`
+ * (another inlined key type), or `dnslink` (not a libp2p-key CID).
+ */
+function ipnsNameKind(name) {
+  let bytes = null;
+  if (name.startsWith('k')) bytes = baseDecode(name.slice(1), B36);
+  else if (name.startsWith('b')) bytes = base32Decode(name.slice(1));
+  if (!bytes) return 'dnslink';
+  const version = readVarint(bytes, 0);
+  const codec = version && readVarint(bytes, version[1]);
+  const code = codec && readVarint(bytes, codec[1]);
+  const len = code && readVarint(bytes, code[1]);
+  if (!len || version[0] !== 1 || codec[0] !== 0x72 || len[1] + len[0] !== bytes.length) return 'dnslink';
+  if (code[0] === 0x12 && len[0] === 32) return 'sha256';
+  if (code[0] !== 0x00) return 'other_key';
+  // The inlined libp2p PublicKey: field 1, the key type, first.
+  const digest = bytes.slice(len[1]);
+  if (digest[0] !== 0x08) return 'other_key';
+  return digest[1] === 1 ? 'ed25519' : 'other_key';
+}
+
+/**
+ * A verify plan's IPFS root, canonical: a CIDv0 (an ENS contenthash can
+ * decode to one) as the CIDv1 base32 the reference's own cidV0ToV1Base32
+ * makes, and base32 in either case lowercased. Both are lossless. Anything
+ * else stays as it is, and validation refuses it at `root`.
+ */
+function canonicalCid(ref, target) {
+  const v1 = ref.cids.cidV0ToV1Base32(target);
+  if (v1) return v1;
+  return /^b[a-z2-7]+$/i.test(target) ? target.toLowerCase() : target;
+}
+
+/** The verify plan for a fetch plan, or why the content stays unverified. */
+function verifyPlanOf(fetch, request, ref, jsRequest) {
+  const node = fetch.node;
+  const [pathPart, ...rest] = fetch.path.split('?');
+  const query = rest.length ? '?' + rest.join('?') : '';
+  const segments = pathPart.split('/');
+  const namespace = segments[1];
+  const target = segments[2];
+  const below = segments.length > 3 ? '/' + segments.slice(3).join('/') : '';
+  let root;
+  let unverified = null;
+  if (node === 'ant') {
+    if (target.length === 128) unverified = 'encrypted';
+    else root = { swarm: target };
+  } else if (namespace === 'ipfs') {
+    root = { ipfs: canonicalCid(ref, target) };
+  } else {
+    const kind = ipnsNameKind(target);
+    if (kind === 'dnslink') unverified = 'dnslink';
+    else if (kind === 'other_key') unverified = 'key';
+    else root = { ipns: target };
+  }
+  if (unverified) return { unverified };
+  const keep = VERIFY_HEADERS[node];
+  const response = [...VERIFY_RESPONSE_OPS[node]];
+  if (node === 'ipfs' && request.method.toUpperCase() === 'GET' && ref.ipfs.__internals.isDocumentRequest(jsRequest)) response.push('small_text');
+  return {
+    plan: {
+      verify: {
+        node,
+        root,
+        path: below,
+        query,
+        headers: fetch.headers.filter(([name]) => keep.includes(name)),
+        retry: fetch.retry,
+        timers: fetch.timers,
+        response,
+        trust: { name: fetch.trust.name, content: 'verified' },
+      },
+    },
+  };
+}
+
+const strictError = (cause) => ({ error: { status: 403, code: 403, message: STRICT_MESSAGES[cause] } });
+
+async function buildVerifyRequests(ref, table) {
+  const out = [];
+  // Each request's plan today, by id, for the downgrade cases.
+  const todays = new Map();
+  for (const c of [...bzzCases(), ...ipfsCases()]) {
+    // Plans 0006 refuses (plan-paths, plan-headers) stay with dweb.json.
+    if (c.validation) continue;
+    const external = { ...c, backend: c.scheme === 'bzz' ? 'external' : 'gateway' };
+    const run = await runRequest(ref, external);
+    const js = outcomeOf(external, run, ref);
+    if (!js.fetch) {
+      const { response } = run;
+      if (response.status === 307) js.redirect = { status: 307, headers: [...response.headers] };
+      else js.error = { status: response.status, headers: [...response.headers], body: await response.text() };
+    }
+    const today = planOf(external, run.request, js, run, ref, table);
+    const derived = today.fetch ? verifyPlanOf(today.fetch, run.request, ref, run.jsRequest) : null;
+    const variants = [
+      ['verify', { verify: true }],
+      ['verify-strict', { verify: true, strict: true }],
+      ['off-strict', { strict: true }],
+    ];
+    if (c.scheme !== 'bzz') variants.push(['unsupported-strict', { unsupported: true, strict: true }]);
+    for (const [suffix, flags] of variants) {
+      const request = structuredClone(run.request);
+      Object.assign(request.backend, flags);
+      let plan;
+      if (!today.fetch) plan = today;
+      else if (!flags.verify) plan = flags.strict ? strictError(flags.unsupported ? 'unsupported' : 'off') : today;
+      else if (derived.unverified) plan = flags.strict ? strictError(derived.unverified) : today;
+      else plan = derived.plan;
+      const entry = { id: `${c.scheme}-${c.id}-${suffix}`, from: `${c.scheme}-${c.id}`, request };
+      if (c.resolution) entry.resolution = c.resolution;
+      entry.plan = plan;
+      entry.validation = 'valid';
+      out.push(entry);
+      todays.set(entry.id, today);
+    }
+  }
+  return { requests: out, todays };
+}
+
+function verifyValidationCases(requests, todays) {
+  const out = [];
+  for (const entry of requests) out.push({ id: `plan-${entry.id}`, source: 'design', request_id: entry.id, expect: entry.validation });
+  const find = (id) => {
+    const e = requests.find((x) => x.id === id);
+    assert.ok(e, id);
+    return e;
+  };
+  const base = find('bzz-hash-path-query-verify');
+  const ipfsBase = find('ipfs-small-text-nav-verify');
+  const ipnsBase = find('ipns-key-base36-verify');
+  const nameBase = find('bzz-name-ok-verify');
+  const strictBase = find('bzz-hash-encrypted-verify-strict');
+  const fetchBase = find('bzz-hash-encrypted-verify');
+  const mutate = (id, from, change, expect, request = from.request) => {
+    const plan = structuredClone(from.plan);
+    change(plan);
+    out.push({ id, source: 'design', request, plan, expect });
+  };
+  const withRequest = (from, change) => { const request = structuredClone(from.request); change(request); return request; };
+  const v = (plan) => plan.verify;
+  const h = SWARM_REF;
+  const v1 = b32cid(CID_BYTES.dagPb);
+  // Shape.
+  mutate('shape-unknown-field', base, (p) => { v(p).url = 'http://127.0.0.1:1633/'; }, 'shape');
+  mutate('shape-missing-query', base, (p) => { delete v(p).query; }, 'shape');
+  mutate('shape-verify-not-object', base, (p) => { p.verify = 'x'; }, 'shape');
+  mutate('shape-two-variants', base, (p) => { p.fetch = fetchBase.plan.fetch; }, 'shape');
+  // Node: the admitted backend, up, with verify.
+  mutate('node-ipfs-for-ant', base, (p) => { v(p).node = 'ipfs'; }, 'node');
+  mutate('node-down', base, () => {}, 'node', withRequest(base, (r) => { r.backend.up = false; }));
+  mutate('node-verification-off', base, () => {}, 'node', withRequest(base, (r) => { delete r.backend.verify; }));
+  mutate('node-bundled', base, () => {}, 'node', withRequest(base, (r) => { r.backend = { ant: 'bundled', up: true }; }));
+  mutate('node-gateway-unsupported', ipfsBase, () => {}, 'node', withRequest(ipfsBase, (r) => { delete r.backend.verify; r.backend.unsupported = true; }));
+  // Root.
+  for (const [id, root, expect] of [
+    ['swarm-63', { swarm: h.slice(1) }, 'root'],
+    ['swarm-65', { swarm: h + 'a' }, 'root'],
+    ['swarm-encrypted', { swarm: SWARM_REF_ENCRYPTED }, 'root'],
+    ['swarm-not-hex', { swarm: h.slice(1) + 'g' }, 'root'],
+    ['swarm-other', { swarm: 'b'.repeat(64) }, 'root'],
+    ['swarm-ipfs-key', { ipfs: v1 }, 'root'],
+    ['swarm-two-keys', { swarm: h, ipfs: v1 }, 'shape'],
+    ['swarm-not-string', { swarm: 12 }, 'shape'],
+  ]) mutate(`root-${id}`, base, (p) => { v(p).root = root; }, expect);
+  mutate('root-name-host-any-reference', nameBase, (p) => { v(p).root = { swarm: 'b'.repeat(64) }; }, 'valid');
+  for (const [id, root, expect] of [
+    ['ipfs-v0', { ipfs: CIDV0 }, 'root'],
+    ['ipfs-base58', { ipfs: zcid(CID_BYTES.dagPb) }, 'root'],
+    ['ipfs-uppercase', { ipfs: v1.toUpperCase() }, 'root'],
+    ['ipfs-other', { ipfs: b32cid(CID_BYTES.raw) }, 'root'],
+    ['ipfs-not-cid', { ipfs: 'not-a-cid' }, 'root'],
+  ]) mutate(`root-${id}`, ipfsBase, (p) => { v(p).root = root; }, expect);
+  const ed25519 = ipnsBase.plan.verify.root.ipns;
+  for (const [id, root, expect] of [
+    ['ipns-ed25519', { ipns: ed25519 }, 'valid'],
+    ['ipns-dnslink', { ipns: 'docs.ipfs.tech' }, 'root'],
+    ['ipns-secp256k1', { ipns: find('ipns-key-peer-secp256k1-verify').plan.fetch.path.split('/')[2] }, 'root'],
+    ['ipns-not-key-codec', { ipns: v1 }, 'root'],
+  ]) mutate(`root-${id}`, ipnsBase, (p) => { v(p).root = root; }, expect);
+  mutate('root-ipns-sha256', find('ipns-key-peer-sha256-verify'), () => {}, 'valid');
+  // Path: 0006's checks, on /<namespace>/<root><path>.
+  for (const [id, path, expect] of [
+    ['empty', '', 'valid'],
+    ['slash', '/', 'valid'],
+    ['no-leading-slash', 'a/b', 'path'],
+    ['dot-dot', '/../stamps', 'path'],
+    ['encoded-dot-dot', '/%2e%2e/%2E%2E/stamps', 'path'],
+    ['backslash', '/a\\b', 'path'],
+    ['encoded-climb', '/..%2f..%2fstamps', 'path'],
+    ['query-in-path', '/a?b', 'path'],
+    ['fragment', '/a#b', 'path'],
+    ['unencoded-space', '/a b', 'path'],
+    ['encoded-dots-in-name', '/x%2e%2e/..%2E/y', 'valid'],
+    ['not-string', 12, 'shape'],
+  ]) mutate(`path-bzz-${id}`, nameBase, (p) => { v(p).path = path; }, expect);
+  for (const [id, path, expect] of [
+    ['encoded-separator', '/a%2Fb/c%5Cd.txt', 'valid'],
+    ['encoded-climb', '/..%2F..%2Fapi/v0/id', 'path'],
+    ['encoded-backslash-climb', '/%2E%2E%5C%2E%2E%5Cipns%5Cx', 'path'],
+    ['double-encoded', '/%252e%252e%252fapi/v0/id', 'valid'],
+  ]) mutate(`path-ipfs-${id}`, ipfsBase, (p) => { v(p).path = path; }, expect);
+  mutate('path-hash-host-other-file', base, (p) => { v(p).path = '/other'; }, 'path');
+  // Query: the admitted URL's, exactly.
+  mutate('query-own', base, () => {}, 'valid');
+  mutate('query-dropped', base, (p) => { v(p).query = ''; }, 'query');
+  mutate('query-other', base, (p) => { v(p).query = '?x=2'; }, 'query');
+  mutate('query-no-mark', base, (p) => { v(p).query = v(p).query.slice(1); }, 'query');
+  mutate('query-added', ipfsBase, (p) => { v(p).query = '?a'; }, 'query');
+  mutate('query-not-string', base, (p) => { v(p).query = null; }, 'shape');
+  // Headers: only those the bundled node reads.
+  mutate('header-range', base, (p) => { v(p).headers = [['range', 'bytes=0-']]; }, 'valid');
+  mutate('header-accept', base, (p) => { v(p).headers = [['accept', '*/*']]; }, 'header');
+  mutate('header-if-none-match-bzz', base, (p) => { v(p).headers = [['if-none-match', '"a"']]; }, 'header');
+  mutate('header-if-none-match-ipfs', ipfsBase, (p) => { v(p).headers = [['if-none-match', '"a"'], ['range', 'bytes=0-']]; }, 'valid');
+  mutate('header-range-twice', base, (p) => { v(p).headers = [['range', 'bytes=0-'], ['range', 'bytes=1-']]; }, 'header');
+  mutate('header-uppercase', base, (p) => { v(p).headers = [['Range', 'bytes=0-']]; }, 'header');
+  mutate('header-swarm', base, (p) => { v(p).headers = [['swarm-redundancy-strategy', '3']]; }, 'header');
+  mutate('header-value-newline', base, (p) => { v(p).headers = [['range', 'bytes=0-\r\nx: 1']]; }, 'header');
+  mutate('header-not-pair', base, (p) => { v(p).headers = [['range']]; }, 'shape');
+  // Retry and timers: the fetch plan's tables.
+  mutate('retry-attempts-11', base, (p) => { v(p).retry.attempts = 11; v(p).retry.delays_ms.push(15000); }, 'retry');
+  mutate('retry-ipfs', ipfsBase, (p) => { v(p).retry = structuredClone(base.plan.verify.retry); }, 'retry');
+  mutate('timers-headers-over', base, (p) => { v(p).timers.headers_ms = 30001; }, 'timers');
+  mutate('timers-body-idle-null', base, (p) => { v(p).timers.body_idle_ms = null; }, 'timers');
+  // Response operations: the bundled node's.
+  mutate('response-small-text-ant', base, (p) => { v(p).response.push('small_text'); }, 'response');
+  mutate('response-gateway-ops', ipfsBase, (p) => { v(p).response = ['strip_decoded_encoding', 'strip_page_state', 'canonicalize_redirect']; }, 'response');
+  mutate('response-redirect-ipfs', ipfsBase, (p) => { v(p).response.push('canonicalize_redirect'); }, 'response');
+  mutate('response-empty', base, (p) => { v(p).response = []; }, 'valid');
+  // Trust: the plan promises verified; a hash host has no name label.
+  mutate('trust-unverified', base, (p) => { v(p).trust.content = 'unverified'; }, 'trust');
+  mutate('trust-latest-asserted', ipnsBase, (p) => { v(p).trust.content = 'latest_asserted'; }, 'trust');
+  mutate('trust-name-hash-host', base, (p) => { v(p).trust.name = 'verified'; }, 'trust');
+  mutate('trust-name-name-host', nameBase, (p) => { v(p).trust.name = 'verified'; }, 'valid');
+  // Strict mode.
+  mutate('strict-fetch-refused', fetchBase, () => {}, 'trust', withRequest(fetchBase, (r) => { r.backend.strict = true; }));
+  mutate('strict-own-403', strictBase, () => {}, 'valid');
+  mutate('strict-403-not-strict', strictBase, () => {}, 'error', withRequest(strictBase, (r) => { delete r.backend.strict; }));
+  mutate('strict-403-other-message', strictBase, (p) => { p.error.message = 'Not verified'; }, 'error');
+  mutate('strict-403-any-fixed-message', strictBase, (p) => { p.error.message = STRICT_MESSAGES.dnslink; }, 'valid');
+  mutate('strict-403-code', strictBase, (p) => { p.error.code = 502; }, 'error');
+  mutate('strict-verify-plan', base, () => {}, 'valid', withRequest(base, (r) => { r.backend.strict = true; }));
+  // Downgrades: today's fetch where the core verifies. A hash host's own
+  // plan is a verify plan, so no fetch target ties to it (0006, #97).
+  const downgrade = (id, from, expect) => out.push({ id, source: 'design', request: from.request, plan: todays.get(from.id), expect });
+  downgrade('downgrade-fetch-bzz-hash-host', base, 'path');
+  downgrade('downgrade-fetch-ipfs-cid-host', ipfsBase, 'path');
+  downgrade('downgrade-fetch-ipns-key-host', ipnsBase, 'path');
+  return out;
+}
+
+async function buildVerifyPlans(checkout, meta) {
+  const ref = loadReference(checkout);
+  const table = tables(ref);
+  const { requests, todays } = await buildVerifyRequests(ref, table);
+  return {
+    meta,
+    formats: {
+      source: 'design: every plan is 0009\'s, composed from the reference\'s outcome on the external backend (as dweb.json\'s requests are, from the same cases), as 0009\'s Verify plans and Strict mode state; no reference has a verified mode',
+      backend: '{ ant | ipfs: mode, up }, as in dweb.json, plus verify: true when verification is on and supported, strict: true when the profile\'s strict mode is on, and unsupported: true for a gateway whose verification is on but which the probe found without raw blocks',
+      requests: 'every dweb.json case whose plan 0006 accepts, on its external backend: id (the case\'s, suffixed verify, verify-strict, off-strict, or for IPFS unsupported-strict), from (dweb.json\'s request id), request, resolution, the expected plan, and validation',
+      plan: '{verify: {node, root ({swarm: 64 hex} | {ipfs: a CIDv1 in lowercase base32, canonical: a CIDv0 converted, base32 lowercased} | {ipns: a libp2p-key CID}), path (below the root, as the fetch plan sends it), query (the admitted URL\'s, with its ?, or empty), headers (only range for Ant; range and if-none-match for IPFS), retry and timers (the fetch plan\'s), response (the bundled node\'s operations), trust ({name, content: verified})}}; or the fetch plan that stays, unverified; or a redirect or error plan, unchanged; or strict mode\'s {error: {status: 403, code: 403, message}}',
+      validation: 'validate_plan\'s verdict, valid or the stage that refuses (0009, Verify plans): request_id names a request above, or the case has its own request and plan',
+    },
+    constants: {
+      verify_response_operations: VERIFY_RESPONSE_OPS,
+      verify_headers: VERIFY_HEADERS,
+      strict_messages: STRICT_MESSAGES,
+    },
+    requests,
+    validation: verifyValidationCases(requests, todays),
+  };
+}
+
+// ---------------------------------------------------------------------------
 
 async function buildDweb(checkout, ethers, meta) {
   const ref = loadReference(checkout);
@@ -1683,4 +2020,4 @@ async function buildDweb(checkout, ethers, meta) {
   };
 }
 
-module.exports = { buildDweb, expandRecipe };
+module.exports = { buildDweb, buildVerifyPlans, expandRecipe };

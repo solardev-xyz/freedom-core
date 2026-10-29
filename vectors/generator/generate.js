@@ -13,7 +13,7 @@ const { buildNaming } = require('./naming');
 const { buildNamingReplay } = require('./naming-replay');
 const { buildChain } = require('./chain');
 const { buildChainReplay } = require('./chain-replay');
-const { buildDweb } = require('./dweb');
+const { buildDweb, buildVerifyPlans } = require('./dweb');
 const { buildStreams } = require('./streams');
 
 const REFERENCE_COMMIT = 'fb540328162839e68150fe2c5e517edb86734d1c';
@@ -532,6 +532,8 @@ async function main() {
         packages: { ...reference.meta.packages, '@sinonjs/fake-timers': packageVersion(createRequire(path.join(reference.checkout, 'package.json')), '@sinonjs/fake-timers') },
       }),
     'dweb.json': await buildDweb(reference.checkout, reference.ethers, reference.meta),
+    // Design 0009's verify plans, from the same cases on external backends.
+    'dweb-verify-plans.json': await buildVerifyPlans(reference.checkout, reference.meta),
     // The design's, with no reference: its meta is the shared one.
     'streams.json': buildStreams(reference.meta),
   };

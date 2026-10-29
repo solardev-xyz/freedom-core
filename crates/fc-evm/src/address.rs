@@ -31,8 +31,13 @@ pub fn parse_address(text: &str) -> Result<[u8; 20], Error> {
 /// The address of a signing key: the last 20 bytes of the keccak256 of its
 /// uncompressed public key.
 pub fn address_of(key: &k256::ecdsa::SigningKey) -> [u8; 20] {
+    address_of_public(key.verifying_key())
+}
+
+/// The address of a public key, as [`address_of`] computes it.
+pub(crate) fn address_of_public(key: &k256::ecdsa::VerifyingKey) -> [u8; 20] {
     use k256::elliptic_curve::sec1::ToSec1Point;
-    let point = key.verifying_key().as_affine().to_sec1_point(false);
+    let point = key.as_affine().to_sec1_point(false);
     let hash = keccak256(&point.as_bytes()[1..]);
     let mut out = [0u8; 20];
     out.copy_from_slice(&hash[12..]);
