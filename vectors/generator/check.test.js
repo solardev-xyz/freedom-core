@@ -14,7 +14,7 @@ const FILES = ['keys.json', 'mnemonic-validation.json', 'identity-formats.json',
   'generator/generate.js', 'generator/signing.js', 'generator/naming.js', 'generator/naming-replay.js', 'generator/chain.js',
   'generator/chain-replay.js'];
 
-FILES.push('dweb.json', 'generator/dweb.js');
+FILES.push('dweb.json', 'dweb-verify-plans.json', 'generator/dweb.js');
 FILES.push('streams.json', 'generator/streams.js');
 
 function corruptedCheck(filename, corrupt) {
@@ -612,6 +612,22 @@ test('check rejects a changed dweb validation expectation', () => {
     entry.expect = 'valid';
   });
   assert.match(stderr, /Byte mismatch: dweb.json/);
+});
+
+test('check rejects a changed verify plan', () => {
+  const stderr = corruptedCheck('dweb-verify-plans.json', (contents) => {
+    const entry = contents.requests.find((item) => item.id === 'bzz-hash-verify');
+    entry.plan.verify.trust.content = 'node_asserted';
+  });
+  assert.match(stderr, /Byte mismatch: dweb-verify-plans.json/);
+});
+
+test('check rejects a changed verify validation expectation', () => {
+  const stderr = corruptedCheck('dweb-verify-plans.json', (contents) => {
+    const entry = contents.validation.find((item) => item.id === 'root-swarm-63');
+    entry.expect = 'valid';
+  });
+  assert.match(stderr, /Byte mismatch: dweb-verify-plans.json/);
 });
 
 test('check rejects a changed stream expectation', () => {
