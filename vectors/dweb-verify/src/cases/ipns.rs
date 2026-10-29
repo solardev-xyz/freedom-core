@@ -660,7 +660,8 @@ fn other_keys(r: &mut Records) -> Result<(), Err> {
     }
 
     // Bounded CBOR (0009, Bounded decoding): the honest signed data with
-    // one change the reader refuses, each validly signed.
+    // one change the reader refuses, each validly signed. The signer made
+    // it, so once its signature passes it is unverifiable, not a lie.
     use crate::ipns::{cbor_bytes, cbor_head, cbor_text};
     let kv_uint = |k: &str, v: u64| {
         let mut o = Vec::new();
@@ -839,8 +840,138 @@ fn other_keys(r: &mut Records) -> Result<(), Err> {
         let rec = entry(None, Some(&ed.sign(&signed_message(&dd))?), &dd);
         // The native reader takes an indefinite-length key (dag-cbor-strict).
         let dev = (id == "cbor-indefinite-key").then_some("dag-cbor-strict");
-        r.push(id, note, &name, &rec, fail("verification_failed"), dev);
+        r.push(id, note, &name, &rec, fail("unverifiable"), dev);
     }
+    // The strict profile, at every level, each validly signed.
+    let mut seq_key = Vec::new();
+    cbor_text("Sequence", &mut seq_key);
+    let validity = kv_bytes("Validity", s.validity.as_bytes());
+    let sequence = kv_uint("Sequence", s.sequence);
+    let validity_type = kv_uint("ValidityType", 0);
+    let mut ttl_long_key = vec![0x78, 0x03];
+    ttl_long_key.extend_from_slice(b"TTL");
+    cbor_head(0, s.ttl_ns, &mut ttl_long_key);
+    let mut non_minimal_cid = vec![0xd8, 0x2a];
+    let mut cid_bytes = vec![0x00, 0x81, 0x00];
+    cid_bytes.extend_from_slice(&cid.to_bytes()[1..]);
+    cbor_bytes(&cid_bytes, &mut non_minimal_cid);
+    let extra = |v: &[u8]| {
+        [
+            vec![0xa6],
+            ttl.clone(),
+            extra_key.clone(),
+            v.to_vec(),
+            value.clone(),
+            rest.clone(),
+        ]
+        .concat()
+    };
+    for (id, note, dd, dev) in [
+        (
+            "cbor-key-order",
+            "Validity before Sequence: not canonical order",
+            [
+                vec![0xa5],
+                ttl.clone(),
+                value.clone(),
+                validity.clone(),
+                sequence.clone(),
+                validity_type.clone(),
+            ]
+            .concat(),
+            true,
+        ),
+        (
+            "cbor-key-order-nested",
+            "an unknown key whose map has b before a",
+            extra(&[0xa2, 0x61, b'b', 0x01, 0x61, b'a', 0x01]),
+            true,
+        ),
+        (
+            "cbor-duplicate-key-nested",
+            "an unknown key whose map has a twice",
+            extra(&[0xa2, 0x61, b'a', 0x01, 0x61, b'a', 0x01]),
+            true,
+        ),
+        (
+            "cbor-integer-not-minimal",
+            "Sequence 1 in two bytes (0x18 0x01)",
+            [
+                vec![0xa5],
+                ttl.clone(),
+                value.clone(),
+                seq_key.clone(),
+                vec![0x18, 0x01],
+                validity.clone(),
+                validity_type.clone(),
+            ]
+            .concat(),
+            true,
+        ),
+        (
+            "cbor-length-not-minimal",
+            "the key TTL with its length in two bytes (0x78 0x03)",
+            [
+                vec![0xa5],
+                ttl_long_key.clone(),
+                value.clone(),
+                rest.clone(),
+            ]
+            .concat(),
+            true,
+        ),
+        (
+            "cbor-float-nan",
+            "an unknown key whose value is a NaN",
+            extra(&[0xfb, 0x7f, 0xf8, 0, 0, 0, 0, 0, 0]),
+            true,
+        ),
+        (
+            "cbor-float-infinity",
+            "an unknown key whose value is infinity",
+            extra(&[0xfb, 0x7f, 0xf0, 0, 0, 0, 0, 0, 0]),
+            true,
+        ),
+        (
+            "cbor-float-32",
+            "an unknown key whose value is a 32-bit float",
+            extra(&[0xfa, 0x3f, 0xc0, 0, 0]),
+            true,
+        ),
+        (
+            "cbor-tag-42-empty",
+            "an unknown key whose value is tag 42 over an empty byte string",
+            extra(&[0xd8, 0x2a, 0x40]),
+            true,
+        ),
+        (
+            "cbor-tag-42-prefix-only",
+            "an unknown key whose value is tag 42 over 0x00 alone",
+            extra(&[0xd8, 0x2a, 0x41, 0x00]),
+            true,
+        ),
+        (
+            "cbor-tag-42-cid-not-minimal",
+            "an unknown key whose value is a CID whose version is the varint 0x81 0x00",
+            extra(&non_minimal_cid),
+            true,
+        ),
+    ] {
+        let rec = entry(None, Some(&ed.sign(&signed_message(&dd))?), &dd);
+        let native_ok = ipns::native_verdict(&name, &rec).get("ok").is_some();
+        let dev = (dev && native_ok).then_some("dag-cbor-strict");
+        r.push(id, note, &name, &rec, fail("unverifiable"), dev);
+    }
+    let dd = extra(&[0xfb, 0x3f, 0xf8, 0, 0, 0, 0, 0, 0]);
+    let rec = entry(None, Some(&ed.sign(&signed_message(&dd))?), &dd);
+    r.push(
+        "cbor-float-finite",
+        "an unknown key whose value is the 64-bit float 1.5: read",
+        &name,
+        &rec,
+        verdict(&s),
+        None,
+    );
     // A CID wherever DAG-CBOR allows a link: under an unknown key, skipped.
     let dd = [
         vec![0xa6],
@@ -866,10 +997,10 @@ fn other_keys(r: &mut Records) -> Result<(), Err> {
     let rec = entry(None, Some(&ed.sign(&signed_message(&dd))?), &dd);
     r.push(
         "cbor-length-past-end",
-        "signed data whose Value claims 65,535 bytes",
+        "signed data whose Value claims 65,535 bytes: validly signed, so unverifiable",
         &name,
         &rec,
-        fail("verification_failed"),
+        fail("unverifiable"),
         None,
     );
 

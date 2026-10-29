@@ -7340,28 +7340,101 @@
       },
       {
         "id": "unknown-field",
-        "note": "the file node with an unknown varint field: skipped",
+        "note": "the file node with an unknown varint field: refused, as DAG-PB's strictness rules and go-codec-dagpb (Kubo's decoder) refuse it",
         "cid": "bafybeigd6gwpo57jg5yrrqpz3f5sn37z7ydztrptwf2nqqtvju3ssecdru",
         "block": {
           "base64": "EisKJAFVEiAm9t26Nfp+RxINQskAHFn4OfV+Icz+UD1XpCa9uFjoQxIAGKwCEisKJAFVEiCPPRyPuUDGiFeKIfiPEkoa0ylVEVAApqy2aY5c6XsL0BIAGMgBCgsIAhj0AyCsAiDIASgH"
         },
         "expect": {
-          "ok": {
-            "link_count": 2,
-            "data": "CAIY9AMgrAIgyAE=",
-            "links": [
-              {
-                "hash": "bafkreibg63o3unp2pzdredkczeabywpyhh2x4iom7zid2v5ee263qwhiim",
-                "name": "",
-                "tsize": 300
-              },
-              {
-                "hash": "bafkreiephuoi7okay2efpcrb7chresq22muvkekqactkzntjrzoos6yl2a",
-                "name": "",
-                "tsize": 200
-              }
-            ]
-          }
+          "fail": "malformed"
+        }
+      },
+      {
+        "id": "duplicate-data",
+        "note": "two Data fields",
+        "cid": "bafybeidpym5upiwevmusi24luiq3fwrinxcsppppzlshnuhfxi6kriemrq",
+        "block": {
+          "base64": "CgsIAhj0AyCsAiDIAQoLCAIY9AMgrAIgyAE="
+        },
+        "expect": {
+          "fail": "malformed"
+        }
+      },
+      {
+        "id": "links-data-links",
+        "note": "a link, Data, then another link: the Links aren't contiguous",
+        "cid": "bafybeihdcwuu4vtgsydmqvvswvdpefl3lkidfux6kp6fe5df3nywh3uffa",
+        "block": {
+          "base64": "EisKJAFVEiAm9t26Nfp+RxINQskAHFn4OfV+Icz+UD1XpCa9uFjoQxIAGKwCCgsIAhj0AyCsAiDIARIrCiQBVRIgjz0cj7lAxohXiiH4jxJKGtMpVRFQAKastmmOXOl7C9ASABjIAQ=="
+        },
+        "expect": {
+          "fail": "malformed"
+        }
+      },
+      {
+        "id": "data-links-data",
+        "note": "Data, the links, then Data again",
+        "cid": "bafybeigcdh5bny4hizidfzqdlxdcrka7svntfpusq7uyps2ccnkshqklxy",
+        "block": {
+          "base64": "CgsIAhj0AyCsAiDIARIrCiQBVRIgJvbdujX6fkcSDULJABxZ+Dn1fiHM/lA9V6QmvbhY6EMSABisAhIrCiQBVRIgjz0cj7lAxohXiiH4jxJKGtMpVRFQAKastmmOXOl7C9ASABjIAQoLCAIY9AMgrAIgyAE="
+        },
+        "expect": {
+          "fail": "malformed"
+        }
+      },
+      {
+        "id": "link-name-before-hash",
+        "note": "a PBLink of Name, then Hash",
+        "cid": "bafybeib3itlin6lfyaptnqfy5qig7iajbsgoe74zq2eyqdmdtfg4v5shc4",
+        "block": {
+          "base64": "EikSAWEKJAFVEiAm9t26Nfp+RxINQskAHFn4OfV+Icz+UD1XpCa9uFjoQwoLCAIY9AMgrAIgyAE="
+        },
+        "expect": {
+          "fail": "malformed"
+        }
+      },
+      {
+        "id": "link-tsize-before-name",
+        "note": "a PBLink of Hash, Tsize, then Name",
+        "cid": "bafybeia2nufk2d2p3t3hil22asjtcjtz5lhqec3dcp5wxufjdgnpww6oky",
+        "block": {
+          "base64": "EiwKJAFVEiAm9t26Nfp+RxINQskAHFn4OfV+Icz+UD1XpCa9uFjoQxisAhIBYQoLCAIY9AMgrAIgyAE="
+        },
+        "expect": {
+          "fail": "malformed"
+        }
+      },
+      {
+        "id": "link-duplicate-hash",
+        "note": "a PBLink with Hash twice",
+        "cid": "bafybeiei5hn5k2ennbr3icbmlehlm5wnflwagbee4ulpgdntpcpfeo5p54",
+        "block": {
+          "base64": "Ek8KJAFVEiAm9t26Nfp+RxINQskAHFn4OfV+Icz+UD1XpCa9uFjoQwokAVUSICb23bo1+n5HEg1CyQAcWfg59X4hzP5QPVekJr24WOhDEgFhCgsIAhj0AyCsAiDIAQ=="
+        },
+        "expect": {
+          "fail": "malformed"
+        }
+      },
+      {
+        "id": "link-duplicate-name",
+        "note": "a PBLink with Name twice",
+        "cid": "bafybeihovy7cvj4dc7lecqaswggfbqd7wfg3istuzhbrpw35w5a2cjrakm",
+        "block": {
+          "base64": "EiwKJAFVEiAm9t26Nfp+RxINQskAHFn4OfV+Icz+UD1XpCa9uFjoQxIBYRIBYQoLCAIY9AMgrAIgyAE="
+        },
+        "expect": {
+          "fail": "malformed"
+        }
+      },
+      {
+        "id": "link-unknown-field",
+        "note": "a PBLink with an unknown field 4",
+        "cid": "bafybeifkarsqxkt27dj7fzy7sj6hdzdgrellufutwxx3clinlxmpcjlqfi",
+        "block": {
+          "base64": "Ei4KJAFVEiAm9t26Nfp+RxINQskAHFn4OfV+Icz+UD1XpCa9uFjoQxIBYRisAiABCgsIAhj0AyCsAiDIAQ=="
+        },
+        "expect": {
+          "fail": "malformed"
         }
       },
       {
@@ -7464,7 +7537,7 @@
       },
       {
         "id": "unknown-maximal",
-        "note": "2 MiB of unknown varint fields (field 15), then Data: skipped in linear time, no memory",
+        "note": "2 MiB of unknown varint fields (field 15), then Data: refused at the first, as DAG-PB allows no unknown field",
         "cid": "bafybeihzj5d3iqmhuisgn4xwg5ujx2mmuuiiwy6zn2linrdihgjmtdlbxe",
         "block": {
           "parts": [
@@ -7482,11 +7555,7 @@
           "sha256": "f94f47b44187a22466f2f637689be98ca5108b63d96e9686c4683992c98d61b9"
         },
         "expect": {
-          "ok": {
-            "link_count": 0,
-            "data": "CAI=",
-            "links": []
-          }
+          "fail": "malformed"
         }
       }
     ],
@@ -7604,6 +7673,34 @@
             "data_length": 1,
             "links": 0
           }
+        }
+      },
+      {
+        "id": "hamt-bitfield-32",
+        "note": "a HAMT shard of fanout 256 whose bitfield is 32 zero bytes",
+        "cid": "bafybeicdeigfagyomxvkggevsfarx6dh5imwat53nw6fgo5akljmy4ewju",
+        "block": {
+          "base64": "CikIBRIgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoIjCAAg=="
+        },
+        "expect": {
+          "ok": {
+            "type": "hamt_shard",
+            "filesize": null,
+            "blocksizes": [],
+            "data_length": 32,
+            "links": 0
+          }
+        }
+      },
+      {
+        "id": "hamt-bitfield-33",
+        "note": "a HAMT shard of fanout 256 whose bitfield is 33 zero bytes",
+        "cid": "bafybeidgjslnigibm6zwmzae364v2gcyqthxiybbjie32mnswdr6yxuhhq",
+        "block": {
+          "base64": "CioIBRIhAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKCIwgAI="
+        },
+        "expect": {
+          "fail": "malformed"
         }
       },
       {
@@ -9035,6 +9132,20 @@
         }
       },
       {
+        "id": "section-cid-not-minimal",
+        "note": "the second section's CID with its codec as the varint 0xd5 0x00: a CID's varints are minimal",
+        "car": {
+          "base64": "OqJlcm9vdHOB2CpYJQABcBIg5X1SA4ERV+LCPBjGoy280DLG/pTpVBM4hjlazYlNj3tndmVyc2lvbgGLAQFwEiDlfVIDgRFX4sI8GMajLbzQMsb+lOlUEziGOVrNiU2PexIrCiQBVRIgUiHxctyIukUq8l8th0vmcaGPj0KvWgNDDspmH8wQ9xQSABisAhIrCiQBVRIglW+NvJ1grlZTTAzaH9oGgsaVfL9bVYpoYfIVZtHnkvUSABjIAQoLCAIY9AMgrAIgyAHRAgHVABIgUiHxctyIukUq8l8th0vmcaGPj0KvWgNDDspmH8wQ9xQY1kdCu+KIm4gupSV5Hxa/mLIoceCUbmvXbNBh52hRyAEspkx9lTESNLqDEX4AwS+1Spf+KnBmwjUVK8syrfrrG7nxgRclEElx4bv3Mhz2J1tKzL3Jy6WThOTnTz/5j+gpHxiJTAOZcBXWESqJ2KxS2fS5zfa7ApFVugTZI7pQnvySqmYSogp7SCVzQhTDrSy0VcDyCZnXU5c1LIkGrBxJt+IfFa9Ol6ECtRQUeeSWAtUxckFfnZutaywOIE0LP7dhlXuRk5L+eOovvMlcWqo1JAxUVd/q/cAtFDQKQPZQCorfpCzHEFoFo7RRr8VSbIIjaykzLj9HTnNTZcjvd+2fx+PeEvL8sh5P4dh1RGKjPEha8us3VTlod46X4qnOCCHVlFHYN4+Y9JCnsHg="
+        },
+        "expect": {
+          "fail": "verification_failed",
+          "after": 1
+        },
+        "native": {
+          "parse_car_v1": "invalid car: invalid block cid: Failed to decode unsigned varint format"
+        }
+      },
+      {
         "id": "ends-inside-a-section",
         "note": "the stream ends 50 bytes into the second section: an early end, which the walk takes as a piece failure",
         "car": {
@@ -9252,6 +9363,203 @@
         "expect": {
           "fail": "verification_failed",
           "after": 0
+        },
+        "native": {
+          "parse_car_v1": {
+            "sections": 3
+          }
+        }
+      },
+      {
+        "id": "header-key-order",
+        "note": "version before roots: not canonical order",
+        "car": {
+          "base64": "OqJndmVyc2lvbgFlcm9vdHOB2CpYJQABcBIg5X1SA4ERV+LCPBjGoy280DLG/pTpVBM4hjlazYlNj3uLAQFwEiDlfVIDgRFX4sI8GMajLbzQMsb+lOlUEziGOVrNiU2PexIrCiQBVRIgUiHxctyIukUq8l8th0vmcaGPj0KvWgNDDspmH8wQ9xQSABisAhIrCiQBVRIglW+NvJ1grlZTTAzaH9oGgsaVfL9bVYpoYfIVZtHnkvUSABjIAQoLCAIY9AMgrAIgyAHQAgFVEiBSIfFy3Ii6RSryXy2HS+ZxoY+PQq9aA0MOymYfzBD3FBjWR0K74oibiC6lJXkfFr+Ysihx4JRua9ds0GHnaFHIASymTH2VMRI0uoMRfgDBL7VKl/4qcGbCNRUryzKt+usbufGBFyUQSXHhu/cyHPYnW0rMvcnLpZOE5OdPP/mP6CkfGIlMA5lwFdYRKonYrFLZ9LnN9rsCkVW6BNkjulCe/JKqZhKiCntIJXNCFMOtLLRVwPIJmddTlzUsiQasHEm34h8Vr06XoQK1FBR55JYC1TFyQV+dm61rLA4gTQs/t2GVe5GTkv546i+8yVxaqjUkDFRV3+r9wC0UNApA9lAKit+kLMcQWgWjtFGvxVJsgiNrKTMuP0dOc1NlyO937Z/H494S8vyyHk/h2HVEYqM8SFry6zdVOWh3jpfiqc4IIdWUUdg3j5j0kKeweOwBAVUSIJVvjbydYK5WU0wM2h/aBoLGlXy/W1WKaGHyFWbR55L1YiGs90K16aS5UHkQFvJQW3BRcloaQYtwk00myh6/F0DhEdRLAT/qbSC0I1+1G82eX7OuR0QvmVHIZ76f46cYgEafc2ohVK5afOY6jitpRLDGa16pHKnKi0nmncOvi5Nho4DIkJRkuqNWfN6izcQQ1nlbyCQ8o3VKfbhi/yYbayfX/PeBbhooR+TB2ePqLp6YzfPyTqr32ukVy4LFvW1KYM9J7QTOoOaf9c5JzkV0dXXU35vD7VXA+ZO5vVI7W45DwtrNx8smoaY="
+        },
+        "expect": {
+          "fail": "verification_failed",
+          "after": 0
+        },
+        "native": {
+          "parse_car_v1": {
+            "sections": 3
+          }
+        }
+      },
+      {
+        "id": "header-key-order-nested",
+        "note": "an unknown key whose map has b before a",
+        "car": {
+          "base64": "RaNjcGFkomFiAWFhAWVyb290c4HYKlglAAFwEiDlfVIDgRFX4sI8GMajLbzQMsb+lOlUEziGOVrNiU2Pe2d2ZXJzaW9uAYsBAXASIOV9UgOBEVfiwjwYxqMtvNAyxv6U6VQTOIY5Ws2JTY97EisKJAFVEiBSIfFy3Ii6RSryXy2HS+ZxoY+PQq9aA0MOymYfzBD3FBIAGKwCEisKJAFVEiCVb428nWCuVlNMDNof2gaCxpV8v1tVimhh8hVm0eeS9RIAGMgBCgsIAhj0AyCsAiDIAdACAVUSIFIh8XLciLpFKvJfLYdL5nGhj49Cr1oDQw7KZh/MEPcUGNZHQrviiJuILqUleR8Wv5iyKHHglG5r12zQYedoUcgBLKZMfZUxEjS6gxF+AMEvtUqX/ipwZsI1FSvLMq366xu58YEXJRBJceG79zIc9idbSsy9yculk4Tk508/+Y/oKR8YiUwDmXAV1hEqidisUtn0uc32uwKRVboE2SO6UJ78kqpmEqIKe0glc0IUw60stFXA8gmZ11OXNSyJBqwcSbfiHxWvTpehArUUFHnklgLVMXJBX52brWssDiBNCz+3YZV7kZOS/njqL7zJXFqqNSQMVFXf6v3ALRQ0CkD2UAqK36QsxxBaBaO0Ua/FUmyCI2spMy4/R05zU2XI73ftn8fj3hLy/LIeT+HYdURiozxIWvLrN1U5aHeOl+Kpzggh1ZRR2DePmPSQp7B47AEBVRIglW+NvJ1grlZTTAzaH9oGgsaVfL9bVYpoYfIVZtHnkvViIaz3QrXppLlQeRAW8lBbcFFyWhpBi3CTTSbKHr8XQOER1EsBP+ptILQjX7UbzZ5fs65HRC+ZUchnvp/jpxiARp9zaiFUrlp85jqOK2lEsMZrXqkcqcqLSeadw6+Lk2GjgMiQlGS6o1Z83qLNxBDWeVvIJDyjdUp9uGL/JhtrJ9f894FuGihH5MHZ4+ounpjN8/JOqvfa6RXLgsW9bUpgz0ntBM6g5p/1zknORXR1ddTfm8PtVcD5k7m9UjtbjkPC2s3Hyyahpg=="
+        },
+        "expect": {
+          "fail": "verification_failed",
+          "after": 0
+        },
+        "native": {
+          "parse_car_v1": {
+            "sections": 3
+          }
+        }
+      },
+      {
+        "id": "header-duplicate-key-nested",
+        "note": "an unknown key whose map has a twice",
+        "car": {
+          "base64": "RaNjcGFkomFhAWFhAWVyb290c4HYKlglAAFwEiDlfVIDgRFX4sI8GMajLbzQMsb+lOlUEziGOVrNiU2Pe2d2ZXJzaW9uAYsBAXASIOV9UgOBEVfiwjwYxqMtvNAyxv6U6VQTOIY5Ws2JTY97EisKJAFVEiBSIfFy3Ii6RSryXy2HS+ZxoY+PQq9aA0MOymYfzBD3FBIAGKwCEisKJAFVEiCVb428nWCuVlNMDNof2gaCxpV8v1tVimhh8hVm0eeS9RIAGMgBCgsIAhj0AyCsAiDIAdACAVUSIFIh8XLciLpFKvJfLYdL5nGhj49Cr1oDQw7KZh/MEPcUGNZHQrviiJuILqUleR8Wv5iyKHHglG5r12zQYedoUcgBLKZMfZUxEjS6gxF+AMEvtUqX/ipwZsI1FSvLMq366xu58YEXJRBJceG79zIc9idbSsy9yculk4Tk508/+Y/oKR8YiUwDmXAV1hEqidisUtn0uc32uwKRVboE2SO6UJ78kqpmEqIKe0glc0IUw60stFXA8gmZ11OXNSyJBqwcSbfiHxWvTpehArUUFHnklgLVMXJBX52brWssDiBNCz+3YZV7kZOS/njqL7zJXFqqNSQMVFXf6v3ALRQ0CkD2UAqK36QsxxBaBaO0Ua/FUmyCI2spMy4/R05zU2XI73ftn8fj3hLy/LIeT+HYdURiozxIWvLrN1U5aHeOl+Kpzggh1ZRR2DePmPSQp7B47AEBVRIglW+NvJ1grlZTTAzaH9oGgsaVfL9bVYpoYfIVZtHnkvViIaz3QrXppLlQeRAW8lBbcFFyWhpBi3CTTSbKHr8XQOER1EsBP+ptILQjX7UbzZ5fs65HRC+ZUchnvp/jpxiARp9zaiFUrlp85jqOK2lEsMZrXqkcqcqLSeadw6+Lk2GjgMiQlGS6o1Z83qLNxBDWeVvIJDyjdUp9uGL/JhtrJ9f894FuGihH5MHZ4+ounpjN8/JOqvfa6RXLgsW9bUpgz0ntBM6g5p/1zknORXR1ddTfm8PtVcD5k7m9UjtbjkPC2s3Hyyahpg=="
+        },
+        "expect": {
+          "fail": "verification_failed",
+          "after": 0
+        },
+        "native": {
+          "parse_car_v1": {
+            "sections": 3
+          }
+        }
+      },
+      {
+        "id": "header-integer-not-minimal",
+        "note": "version 1 in two bytes (0x18 0x01)",
+        "car": {
+          "base64": "O6Jlcm9vdHOB2CpYJQABcBIg5X1SA4ERV+LCPBjGoy280DLG/pTpVBM4hjlazYlNj3tndmVyc2lvbhgBiwEBcBIg5X1SA4ERV+LCPBjGoy280DLG/pTpVBM4hjlazYlNj3sSKwokAVUSIFIh8XLciLpFKvJfLYdL5nGhj49Cr1oDQw7KZh/MEPcUEgAYrAISKwokAVUSIJVvjbydYK5WU0wM2h/aBoLGlXy/W1WKaGHyFWbR55L1EgAYyAEKCwgCGPQDIKwCIMgB0AIBVRIgUiHxctyIukUq8l8th0vmcaGPj0KvWgNDDspmH8wQ9xQY1kdCu+KIm4gupSV5Hxa/mLIoceCUbmvXbNBh52hRyAEspkx9lTESNLqDEX4AwS+1Spf+KnBmwjUVK8syrfrrG7nxgRclEElx4bv3Mhz2J1tKzL3Jy6WThOTnTz/5j+gpHxiJTAOZcBXWESqJ2KxS2fS5zfa7ApFVugTZI7pQnvySqmYSogp7SCVzQhTDrSy0VcDyCZnXU5c1LIkGrBxJt+IfFa9Ol6ECtRQUeeSWAtUxckFfnZutaywOIE0LP7dhlXuRk5L+eOovvMlcWqo1JAxUVd/q/cAtFDQKQPZQCorfpCzHEFoFo7RRr8VSbIIjaykzLj9HTnNTZcjvd+2fx+PeEvL8sh5P4dh1RGKjPEha8us3VTlod46X4qnOCCHVlFHYN4+Y9JCnsHjsAQFVEiCVb428nWCuVlNMDNof2gaCxpV8v1tVimhh8hVm0eeS9WIhrPdCtemkuVB5EBbyUFtwUXJaGkGLcJNNJsoevxdA4RHUSwE/6m0gtCNftRvNnl+zrkdEL5lRyGe+n+OnGIBGn3NqIVSuWnzmOo4raUSwxmteqRypyotJ5p3Dr4uTYaOAyJCUZLqjVnzeos3EENZ5W8gkPKN1Sn24Yv8mG2sn1/z3gW4aKEfkwdnj6i6emM3z8k6q99rpFcuCxb1tSmDPSe0EzqDmn/XOSc5FdHV11N+bw+1VwPmTub1SO1uOQ8LazcfLJqGm"
+        },
+        "expect": {
+          "fail": "verification_failed",
+          "after": 0
+        },
+        "native": {
+          "parse_car_v1": {
+            "sections": 3
+          }
+        }
+      },
+      {
+        "id": "header-length-not-minimal",
+        "note": "the key roots with its length in two bytes (0x78 0x05)",
+        "car": {
+          "base64": "O6J4BXJvb3RzgdgqWCUAAXASIOV9UgOBEVfiwjwYxqMtvNAyxv6U6VQTOIY5Ws2JTY97Z3ZlcnNpb24BiwEBcBIg5X1SA4ERV+LCPBjGoy280DLG/pTpVBM4hjlazYlNj3sSKwokAVUSIFIh8XLciLpFKvJfLYdL5nGhj49Cr1oDQw7KZh/MEPcUEgAYrAISKwokAVUSIJVvjbydYK5WU0wM2h/aBoLGlXy/W1WKaGHyFWbR55L1EgAYyAEKCwgCGPQDIKwCIMgB0AIBVRIgUiHxctyIukUq8l8th0vmcaGPj0KvWgNDDspmH8wQ9xQY1kdCu+KIm4gupSV5Hxa/mLIoceCUbmvXbNBh52hRyAEspkx9lTESNLqDEX4AwS+1Spf+KnBmwjUVK8syrfrrG7nxgRclEElx4bv3Mhz2J1tKzL3Jy6WThOTnTz/5j+gpHxiJTAOZcBXWESqJ2KxS2fS5zfa7ApFVugTZI7pQnvySqmYSogp7SCVzQhTDrSy0VcDyCZnXU5c1LIkGrBxJt+IfFa9Ol6ECtRQUeeSWAtUxckFfnZutaywOIE0LP7dhlXuRk5L+eOovvMlcWqo1JAxUVd/q/cAtFDQKQPZQCorfpCzHEFoFo7RRr8VSbIIjaykzLj9HTnNTZcjvd+2fx+PeEvL8sh5P4dh1RGKjPEha8us3VTlod46X4qnOCCHVlFHYN4+Y9JCnsHjsAQFVEiCVb428nWCuVlNMDNof2gaCxpV8v1tVimhh8hVm0eeS9WIhrPdCtemkuVB5EBbyUFtwUXJaGkGLcJNNJsoevxdA4RHUSwE/6m0gtCNftRvNnl+zrkdEL5lRyGe+n+OnGIBGn3NqIVSuWnzmOo4raUSwxmteqRypyotJ5p3Dr4uTYaOAyJCUZLqjVnzeos3EENZ5W8gkPKN1Sn24Yv8mG2sn1/z3gW4aKEfkwdnj6i6emM3z8k6q99rpFcuCxb1tSmDPSe0EzqDmn/XOSc5FdHV11N+bw+1VwPmTub1SO1uOQ8LazcfLJqGm"
+        },
+        "expect": {
+          "fail": "verification_failed",
+          "after": 0
+        },
+        "native": {
+          "parse_car_v1": {
+            "sections": 3
+          }
+        }
+      },
+      {
+        "id": "header-float-nan",
+        "note": "an unknown key whose value is a NaN",
+        "car": {
+          "base64": "R6NjcGFk+3/4AAAAAAAAZXJvb3RzgdgqWCUAAXASIOV9UgOBEVfiwjwYxqMtvNAyxv6U6VQTOIY5Ws2JTY97Z3ZlcnNpb24BiwEBcBIg5X1SA4ERV+LCPBjGoy280DLG/pTpVBM4hjlazYlNj3sSKwokAVUSIFIh8XLciLpFKvJfLYdL5nGhj49Cr1oDQw7KZh/MEPcUEgAYrAISKwokAVUSIJVvjbydYK5WU0wM2h/aBoLGlXy/W1WKaGHyFWbR55L1EgAYyAEKCwgCGPQDIKwCIMgB0AIBVRIgUiHxctyIukUq8l8th0vmcaGPj0KvWgNDDspmH8wQ9xQY1kdCu+KIm4gupSV5Hxa/mLIoceCUbmvXbNBh52hRyAEspkx9lTESNLqDEX4AwS+1Spf+KnBmwjUVK8syrfrrG7nxgRclEElx4bv3Mhz2J1tKzL3Jy6WThOTnTz/5j+gpHxiJTAOZcBXWESqJ2KxS2fS5zfa7ApFVugTZI7pQnvySqmYSogp7SCVzQhTDrSy0VcDyCZnXU5c1LIkGrBxJt+IfFa9Ol6ECtRQUeeSWAtUxckFfnZutaywOIE0LP7dhlXuRk5L+eOovvMlcWqo1JAxUVd/q/cAtFDQKQPZQCorfpCzHEFoFo7RRr8VSbIIjaykzLj9HTnNTZcjvd+2fx+PeEvL8sh5P4dh1RGKjPEha8us3VTlod46X4qnOCCHVlFHYN4+Y9JCnsHjsAQFVEiCVb428nWCuVlNMDNof2gaCxpV8v1tVimhh8hVm0eeS9WIhrPdCtemkuVB5EBbyUFtwUXJaGkGLcJNNJsoevxdA4RHUSwE/6m0gtCNftRvNnl+zrkdEL5lRyGe+n+OnGIBGn3NqIVSuWnzmOo4raUSwxmteqRypyotJ5p3Dr4uTYaOAyJCUZLqjVnzeos3EENZ5W8gkPKN1Sn24Yv8mG2sn1/z3gW4aKEfkwdnj6i6emM3z8k6q99rpFcuCxb1tSmDPSe0EzqDmn/XOSc5FdHV11N+bw+1VwPmTub1SO1uOQ8LazcfLJqGm"
+        },
+        "expect": {
+          "fail": "verification_failed",
+          "after": 0
+        },
+        "native": {
+          "parse_car_v1": {
+            "sections": 3
+          }
+        }
+      },
+      {
+        "id": "header-float-infinity",
+        "note": "an unknown key whose value is infinity",
+        "car": {
+          "base64": "R6NjcGFk+3/wAAAAAAAAZXJvb3RzgdgqWCUAAXASIOV9UgOBEVfiwjwYxqMtvNAyxv6U6VQTOIY5Ws2JTY97Z3ZlcnNpb24BiwEBcBIg5X1SA4ERV+LCPBjGoy280DLG/pTpVBM4hjlazYlNj3sSKwokAVUSIFIh8XLciLpFKvJfLYdL5nGhj49Cr1oDQw7KZh/MEPcUEgAYrAISKwokAVUSIJVvjbydYK5WU0wM2h/aBoLGlXy/W1WKaGHyFWbR55L1EgAYyAEKCwgCGPQDIKwCIMgB0AIBVRIgUiHxctyIukUq8l8th0vmcaGPj0KvWgNDDspmH8wQ9xQY1kdCu+KIm4gupSV5Hxa/mLIoceCUbmvXbNBh52hRyAEspkx9lTESNLqDEX4AwS+1Spf+KnBmwjUVK8syrfrrG7nxgRclEElx4bv3Mhz2J1tKzL3Jy6WThOTnTz/5j+gpHxiJTAOZcBXWESqJ2KxS2fS5zfa7ApFVugTZI7pQnvySqmYSogp7SCVzQhTDrSy0VcDyCZnXU5c1LIkGrBxJt+IfFa9Ol6ECtRQUeeSWAtUxckFfnZutaywOIE0LP7dhlXuRk5L+eOovvMlcWqo1JAxUVd/q/cAtFDQKQPZQCorfpCzHEFoFo7RRr8VSbIIjaykzLj9HTnNTZcjvd+2fx+PeEvL8sh5P4dh1RGKjPEha8us3VTlod46X4qnOCCHVlFHYN4+Y9JCnsHjsAQFVEiCVb428nWCuVlNMDNof2gaCxpV8v1tVimhh8hVm0eeS9WIhrPdCtemkuVB5EBbyUFtwUXJaGkGLcJNNJsoevxdA4RHUSwE/6m0gtCNftRvNnl+zrkdEL5lRyGe+n+OnGIBGn3NqIVSuWnzmOo4raUSwxmteqRypyotJ5p3Dr4uTYaOAyJCUZLqjVnzeos3EENZ5W8gkPKN1Sn24Yv8mG2sn1/z3gW4aKEfkwdnj6i6emM3z8k6q99rpFcuCxb1tSmDPSe0EzqDmn/XOSc5FdHV11N+bw+1VwPmTub1SO1uOQ8LazcfLJqGm"
+        },
+        "expect": {
+          "fail": "verification_failed",
+          "after": 0
+        },
+        "native": {
+          "parse_car_v1": {
+            "sections": 3
+          }
+        }
+      },
+      {
+        "id": "header-float-32",
+        "note": "an unknown key whose value is a 32-bit float: DAG-CBOR has 64-bit floats only",
+        "car": {
+          "base64": "Q6NjcGFk+j/AAABlcm9vdHOB2CpYJQABcBIg5X1SA4ERV+LCPBjGoy280DLG/pTpVBM4hjlazYlNj3tndmVyc2lvbgGLAQFwEiDlfVIDgRFX4sI8GMajLbzQMsb+lOlUEziGOVrNiU2PexIrCiQBVRIgUiHxctyIukUq8l8th0vmcaGPj0KvWgNDDspmH8wQ9xQSABisAhIrCiQBVRIglW+NvJ1grlZTTAzaH9oGgsaVfL9bVYpoYfIVZtHnkvUSABjIAQoLCAIY9AMgrAIgyAHQAgFVEiBSIfFy3Ii6RSryXy2HS+ZxoY+PQq9aA0MOymYfzBD3FBjWR0K74oibiC6lJXkfFr+Ysihx4JRua9ds0GHnaFHIASymTH2VMRI0uoMRfgDBL7VKl/4qcGbCNRUryzKt+usbufGBFyUQSXHhu/cyHPYnW0rMvcnLpZOE5OdPP/mP6CkfGIlMA5lwFdYRKonYrFLZ9LnN9rsCkVW6BNkjulCe/JKqZhKiCntIJXNCFMOtLLRVwPIJmddTlzUsiQasHEm34h8Vr06XoQK1FBR55JYC1TFyQV+dm61rLA4gTQs/t2GVe5GTkv546i+8yVxaqjUkDFRV3+r9wC0UNApA9lAKit+kLMcQWgWjtFGvxVJsgiNrKTMuP0dOc1NlyO937Z/H494S8vyyHk/h2HVEYqM8SFry6zdVOWh3jpfiqc4IIdWUUdg3j5j0kKeweOwBAVUSIJVvjbydYK5WU0wM2h/aBoLGlXy/W1WKaGHyFWbR55L1YiGs90K16aS5UHkQFvJQW3BRcloaQYtwk00myh6/F0DhEdRLAT/qbSC0I1+1G82eX7OuR0QvmVHIZ76f46cYgEafc2ohVK5afOY6jitpRLDGa16pHKnKi0nmncOvi5Nho4DIkJRkuqNWfN6izcQQ1nlbyCQ8o3VKfbhi/yYbayfX/PeBbhooR+TB2ePqLp6YzfPyTqr32ukVy4LFvW1KYM9J7QTOoOaf9c5JzkV0dXXU35vD7VXA+ZO5vVI7W45DwtrNx8smoaY="
+        },
+        "expect": {
+          "fail": "verification_failed",
+          "after": 0
+        },
+        "native": {
+          "parse_car_v1": {
+            "sections": 3
+          }
+        }
+      },
+      {
+        "id": "header-tag-42-empty",
+        "note": "a root as tag 42 over an empty byte string",
+        "car": {
+          "base64": "FKJlcm9vdHOB2CpAZ3ZlcnNpb24BiwEBcBIg5X1SA4ERV+LCPBjGoy280DLG/pTpVBM4hjlazYlNj3sSKwokAVUSIFIh8XLciLpFKvJfLYdL5nGhj49Cr1oDQw7KZh/MEPcUEgAYrAISKwokAVUSIJVvjbydYK5WU0wM2h/aBoLGlXy/W1WKaGHyFWbR55L1EgAYyAEKCwgCGPQDIKwCIMgB0AIBVRIgUiHxctyIukUq8l8th0vmcaGPj0KvWgNDDspmH8wQ9xQY1kdCu+KIm4gupSV5Hxa/mLIoceCUbmvXbNBh52hRyAEspkx9lTESNLqDEX4AwS+1Spf+KnBmwjUVK8syrfrrG7nxgRclEElx4bv3Mhz2J1tKzL3Jy6WThOTnTz/5j+gpHxiJTAOZcBXWESqJ2KxS2fS5zfa7ApFVugTZI7pQnvySqmYSogp7SCVzQhTDrSy0VcDyCZnXU5c1LIkGrBxJt+IfFa9Ol6ECtRQUeeSWAtUxckFfnZutaywOIE0LP7dhlXuRk5L+eOovvMlcWqo1JAxUVd/q/cAtFDQKQPZQCorfpCzHEFoFo7RRr8VSbIIjaykzLj9HTnNTZcjvd+2fx+PeEvL8sh5P4dh1RGKjPEha8us3VTlod46X4qnOCCHVlFHYN4+Y9JCnsHjsAQFVEiCVb428nWCuVlNMDNof2gaCxpV8v1tVimhh8hVm0eeS9WIhrPdCtemkuVB5EBbyUFtwUXJaGkGLcJNNJsoevxdA4RHUSwE/6m0gtCNftRvNnl+zrkdEL5lRyGe+n+OnGIBGn3NqIVSuWnzmOo4raUSwxmteqRypyotJ5p3Dr4uTYaOAyJCUZLqjVnzeos3EENZ5W8gkPKN1Sn24Yv8mG2sn1/z3gW4aKEfkwdnj6i6emM3z8k6q99rpFcuCxb1tSmDPSe0EzqDmn/XOSc5FdHV11N+bw+1VwPmTub1SO1uOQ8LazcfLJqGm"
+        },
+        "expect": {
+          "fail": "verification_failed",
+          "after": 0
+        },
+        "native": {
+          "parse_car_v1": {
+            "sections": 3
+          }
+        }
+      },
+      {
+        "id": "header-tag-42-prefix-only",
+        "note": "a root as tag 42 over 0x00 alone",
+        "car": {
+          "base64": "FaJlcm9vdHOB2CpBAGd2ZXJzaW9uAYsBAXASIOV9UgOBEVfiwjwYxqMtvNAyxv6U6VQTOIY5Ws2JTY97EisKJAFVEiBSIfFy3Ii6RSryXy2HS+ZxoY+PQq9aA0MOymYfzBD3FBIAGKwCEisKJAFVEiCVb428nWCuVlNMDNof2gaCxpV8v1tVimhh8hVm0eeS9RIAGMgBCgsIAhj0AyCsAiDIAdACAVUSIFIh8XLciLpFKvJfLYdL5nGhj49Cr1oDQw7KZh/MEPcUGNZHQrviiJuILqUleR8Wv5iyKHHglG5r12zQYedoUcgBLKZMfZUxEjS6gxF+AMEvtUqX/ipwZsI1FSvLMq366xu58YEXJRBJceG79zIc9idbSsy9yculk4Tk508/+Y/oKR8YiUwDmXAV1hEqidisUtn0uc32uwKRVboE2SO6UJ78kqpmEqIKe0glc0IUw60stFXA8gmZ11OXNSyJBqwcSbfiHxWvTpehArUUFHnklgLVMXJBX52brWssDiBNCz+3YZV7kZOS/njqL7zJXFqqNSQMVFXf6v3ALRQ0CkD2UAqK36QsxxBaBaO0Ua/FUmyCI2spMy4/R05zU2XI73ftn8fj3hLy/LIeT+HYdURiozxIWvLrN1U5aHeOl+Kpzggh1ZRR2DePmPSQp7B47AEBVRIglW+NvJ1grlZTTAzaH9oGgsaVfL9bVYpoYfIVZtHnkvViIaz3QrXppLlQeRAW8lBbcFFyWhpBi3CTTSbKHr8XQOER1EsBP+ptILQjX7UbzZ5fs65HRC+ZUchnvp/jpxiARp9zaiFUrlp85jqOK2lEsMZrXqkcqcqLSeadw6+Lk2GjgMiQlGS6o1Z83qLNxBDWeVvIJDyjdUp9uGL/JhtrJ9f894FuGihH5MHZ4+ounpjN8/JOqvfa6RXLgsW9bUpgz0ntBM6g5p/1zknORXR1ddTfm8PtVcD5k7m9UjtbjkPC2s3Hyyahpg=="
+        },
+        "expect": {
+          "fail": "verification_failed",
+          "after": 0
+        },
+        "native": {
+          "parse_car_v1": {
+            "sections": 3
+          }
+        }
+      },
+      {
+        "id": "header-tag-42-cid-not-minimal",
+        "note": "a root whose CID's version is the varint 0x81 0x00, not 0x01",
+        "car": {
+          "base64": "O6Jlcm9vdHOB2CpYJgCBAHASIOV9UgOBEVfiwjwYxqMtvNAyxv6U6VQTOIY5Ws2JTY97Z3ZlcnNpb24BiwEBcBIg5X1SA4ERV+LCPBjGoy280DLG/pTpVBM4hjlazYlNj3sSKwokAVUSIFIh8XLciLpFKvJfLYdL5nGhj49Cr1oDQw7KZh/MEPcUEgAYrAISKwokAVUSIJVvjbydYK5WU0wM2h/aBoLGlXy/W1WKaGHyFWbR55L1EgAYyAEKCwgCGPQDIKwCIMgB0AIBVRIgUiHxctyIukUq8l8th0vmcaGPj0KvWgNDDspmH8wQ9xQY1kdCu+KIm4gupSV5Hxa/mLIoceCUbmvXbNBh52hRyAEspkx9lTESNLqDEX4AwS+1Spf+KnBmwjUVK8syrfrrG7nxgRclEElx4bv3Mhz2J1tKzL3Jy6WThOTnTz/5j+gpHxiJTAOZcBXWESqJ2KxS2fS5zfa7ApFVugTZI7pQnvySqmYSogp7SCVzQhTDrSy0VcDyCZnXU5c1LIkGrBxJt+IfFa9Ol6ECtRQUeeSWAtUxckFfnZutaywOIE0LP7dhlXuRk5L+eOovvMlcWqo1JAxUVd/q/cAtFDQKQPZQCorfpCzHEFoFo7RRr8VSbIIjaykzLj9HTnNTZcjvd+2fx+PeEvL8sh5P4dh1RGKjPEha8us3VTlod46X4qnOCCHVlFHYN4+Y9JCnsHjsAQFVEiCVb428nWCuVlNMDNof2gaCxpV8v1tVimhh8hVm0eeS9WIhrPdCtemkuVB5EBbyUFtwUXJaGkGLcJNNJsoevxdA4RHUSwE/6m0gtCNftRvNnl+zrkdEL5lRyGe+n+OnGIBGn3NqIVSuWnzmOo4raUSwxmteqRypyotJ5p3Dr4uTYaOAyJCUZLqjVnzeos3EENZ5W8gkPKN1Sn24Yv8mG2sn1/z3gW4aKEfkwdnj6i6emM3z8k6q99rpFcuCxb1tSmDPSe0EzqDmn/XOSc5FdHV11N+bw+1VwPmTub1SO1uOQ8LazcfLJqGm"
+        },
+        "expect": {
+          "fail": "verification_failed",
+          "after": 0
+        },
+        "native": {
+          "parse_car_v1": {
+            "sections": 3
+          }
+        }
+      },
+      {
+        "id": "header-float-finite",
+        "note": "an unknown key whose value is the 64-bit float 1.5: read",
+        "car": {
+          "base64": "R6NjcGFk+z/4AAAAAAAAZXJvb3RzgdgqWCUAAXASIOV9UgOBEVfiwjwYxqMtvNAyxv6U6VQTOIY5Ws2JTY97Z3ZlcnNpb24BiwEBcBIg5X1SA4ERV+LCPBjGoy280DLG/pTpVBM4hjlazYlNj3sSKwokAVUSIFIh8XLciLpFKvJfLYdL5nGhj49Cr1oDQw7KZh/MEPcUEgAYrAISKwokAVUSIJVvjbydYK5WU0wM2h/aBoLGlXy/W1WKaGHyFWbR55L1EgAYyAEKCwgCGPQDIKwCIMgB0AIBVRIgUiHxctyIukUq8l8th0vmcaGPj0KvWgNDDspmH8wQ9xQY1kdCu+KIm4gupSV5Hxa/mLIoceCUbmvXbNBh52hRyAEspkx9lTESNLqDEX4AwS+1Spf+KnBmwjUVK8syrfrrG7nxgRclEElx4bv3Mhz2J1tKzL3Jy6WThOTnTz/5j+gpHxiJTAOZcBXWESqJ2KxS2fS5zfa7ApFVugTZI7pQnvySqmYSogp7SCVzQhTDrSy0VcDyCZnXU5c1LIkGrBxJt+IfFa9Ol6ECtRQUeeSWAtUxckFfnZutaywOIE0LP7dhlXuRk5L+eOovvMlcWqo1JAxUVd/q/cAtFDQKQPZQCorfpCzHEFoFo7RRr8VSbIIjaykzLj9HTnNTZcjvd+2fx+PeEvL8sh5P4dh1RGKjPEha8us3VTlod46X4qnOCCHVlFHYN4+Y9JCnsHjsAQFVEiCVb428nWCuVlNMDNof2gaCxpV8v1tVimhh8hVm0eeS9WIhrPdCtemkuVB5EBbyUFtwUXJaGkGLcJNNJsoevxdA4RHUSwE/6m0gtCNftRvNnl+zrkdEL5lRyGe+n+OnGIBGn3NqIVSuWnzmOo4raUSwxmteqRypyotJ5p3Dr4uTYaOAyJCUZLqjVnzeos3EENZ5W8gkPKN1Sn24Yv8mG2sn1/z3gW4aKEfkwdnj6i6emM3z8k6q99rpFcuCxb1tSmDPSe0EzqDmn/XOSc5FdHV11N+bw+1VwPmTub1SO1uOQ8LazcfLJqGm"
+        },
+        "expect": {
+          "ok": {
+            "sections": [
+              "bafybeihfpvjahairk7rmepayy2rs3pgqgldp5fhjkqjtrbrzllgystmppm",
+              "bafkreicsehyxfxeixjcsv4s7fwduxztrughy6qvplibugdwkmyp4yehxcq",
+              "bafkreievn6g3zhlavzlfgtam3ip5ubucy2kxzp23kwfgqypscvtndz4s6u"
+            ]
+          }
         },
         "native": {
           "parse_car_v1": {
@@ -9865,7 +10173,7 @@
         },
         "now": 1760000000,
         "expect": {
-          "fail": "verification_failed"
+          "fail": "unverifiable"
         },
         "native": {
           "error": "invalid IPNS record: data decode failed: IndefiniteSize"
@@ -9880,7 +10188,7 @@
         },
         "now": 1760000000,
         "expect": {
-          "fail": "verification_failed"
+          "fail": "unverifiable"
         },
         "native": {
           "error": "invalid IPNS record: data decode failed: IndefiniteSize"
@@ -9895,7 +10203,7 @@
         },
         "now": 1760000000,
         "expect": {
-          "fail": "verification_failed"
+          "fail": "unverifiable"
         },
         "native": {
           "ok": {
@@ -9916,7 +10224,7 @@
         },
         "now": 1760000000,
         "expect": {
-          "fail": "verification_failed"
+          "fail": "unverifiable"
         },
         "native": {
           "error": "invalid IPNS record: data decode failed: Eof"
@@ -9931,7 +10239,7 @@
         },
         "now": 1760000000,
         "expect": {
-          "fail": "verification_failed"
+          "fail": "unverifiable"
         },
         "native": {
           "error": "invalid IPNS record: data decode failed: Eof"
@@ -9946,7 +10254,7 @@
         },
         "now": 1760000000,
         "expect": {
-          "fail": "verification_failed"
+          "fail": "unverifiable"
         },
         "native": {
           "error": "invalid IPNS record: data decode failed: Msg(\"Duplicate map key\")"
@@ -9961,7 +10269,7 @@
         },
         "now": 1760000000,
         "expect": {
-          "fail": "verification_failed"
+          "fail": "unverifiable"
         },
         "native": {
           "error": "invalid IPNS record: data decode failed: Unsupported { byte: 1 }"
@@ -9976,7 +10284,7 @@
         },
         "now": 1760000000,
         "expect": {
-          "fail": "verification_failed"
+          "fail": "unverifiable"
         },
         "native": {
           "error": "invalid IPNS record: data decode failed: Msg(\"Invalid CID\")"
@@ -9991,7 +10299,7 @@
         },
         "now": 1760000000,
         "expect": {
-          "fail": "verification_failed"
+          "fail": "unverifiable"
         },
         "native": {
           "error": "invalid IPNS record: data decode failed: Msg(\"Failed to deserialize CID: Unrecognized CID version\")"
@@ -10006,7 +10314,7 @@
         },
         "now": 1760000000,
         "expect": {
-          "fail": "verification_failed"
+          "fail": "unverifiable"
         },
         "native": {
           "error": "invalid IPNS record: data decode failed: Msg(\"Invalid CID\")"
@@ -10021,10 +10329,242 @@
         },
         "now": 1760000000,
         "expect": {
-          "fail": "verification_failed"
+          "fail": "unverifiable"
         },
         "native": {
           "error": "invalid IPNS record: data decode failed: TypeMismatch { name: \"CBOR tag\", byte: 1 }"
+        }
+      },
+      {
+        "id": "cbor-key-order",
+        "note": "Validity before Sequence: not canonical order",
+        "name": "k51qzi5uqu5dja9it0ilm72uimu8sunfn5hbu86wwb6yxrl8kif10fkruhtcwi",
+        "record": {
+          "base64": "QkDLDaHUuSNLF+zuPCfbrGgoyT4jvHkWaT07x52B2KKSaq3MNIL8x3vzaglQH2epz2zyPPlOI/ARgHsjSvw0iRgGSpgBpWNUVEwbAAAARdlkuABlVmFsdWVYQS9pcGZzL2JhZnliZWlndXdqbWRkdnI0aWlhaDZla2d2cm92YjV6ZmI2ZWc1YzZsb2lreHZ4bHh6bHdlYTVkYWJtaFZhbGlkaXR5WB4yMDk5LTAxLTAxVDAwOjAwOjAwLjAwMDAwMDAwMFpoU2VxdWVuY2UBbFZhbGlkaXR5VHlwZQA="
+        },
+        "now": 1760000000,
+        "expect": {
+          "fail": "unverifiable"
+        },
+        "native": {
+          "ok": {
+            "value": "/ipfs/bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm",
+            "sequence": 1,
+            "validity": "2099-01-01T00:00:00.000000000Z",
+            "ttl_ns": 300000000000
+          }
+        },
+        "deviation": "dag-cbor-strict"
+      },
+      {
+        "id": "cbor-key-order-nested",
+        "note": "an unknown key whose map has b before a",
+        "name": "k51qzi5uqu5dja9it0ilm72uimu8sunfn5hbu86wwb6yxrl8kif10fkruhtcwi",
+        "record": {
+          "base64": "QkBag2gjarLeaNme3QAkS7aGwu60pRN5E/QJWkkFRl8EV3kGZW1JRz0NCHEx9CNoLUCW+7tvEljRZtW9GlGetA0NSqUBpmNUVEwbAAAARdlkuABlRXh0cmGiYWIBYWEBZVZhbHVlWEEvaXBmcy9iYWZ5YmVpZ3V3am1kZHZyNGlpYWg2ZWtndnJvdmI1emZiNmVnNWM2bG9pa3h2eGx4emx3ZWE1ZGFibWhTZXF1ZW5jZQFoVmFsaWRpdHlYHjIwOTktMDEtMDFUMDA6MDA6MDAuMDAwMDAwMDAwWmxWYWxpZGl0eVR5cGUA"
+        },
+        "now": 1760000000,
+        "expect": {
+          "fail": "unverifiable"
+        },
+        "native": {
+          "ok": {
+            "value": "/ipfs/bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm",
+            "sequence": 1,
+            "validity": "2099-01-01T00:00:00.000000000Z",
+            "ttl_ns": 300000000000
+          }
+        },
+        "deviation": "dag-cbor-strict"
+      },
+      {
+        "id": "cbor-duplicate-key-nested",
+        "note": "an unknown key whose map has a twice",
+        "name": "k51qzi5uqu5dja9it0ilm72uimu8sunfn5hbu86wwb6yxrl8kif10fkruhtcwi",
+        "record": {
+          "base64": "QkBit8/Er+LSOc/pWwY+3yIJpCwJCWoKzaflqyq9LNq/duYI0mBk5y6nECYxNCJ+tJDIZTKMtVJhEeQsZtioj7ENSqUBpmNUVEwbAAAARdlkuABlRXh0cmGiYWEBYWEBZVZhbHVlWEEvaXBmcy9iYWZ5YmVpZ3V3am1kZHZyNGlpYWg2ZWtndnJvdmI1emZiNmVnNWM2bG9pa3h2eGx4emx3ZWE1ZGFibWhTZXF1ZW5jZQFoVmFsaWRpdHlYHjIwOTktMDEtMDFUMDA6MDA6MDAuMDAwMDAwMDAwWmxWYWxpZGl0eVR5cGUA"
+        },
+        "now": 1760000000,
+        "expect": {
+          "fail": "unverifiable"
+        },
+        "native": {
+          "error": "invalid IPNS record: data decode failed: Msg(\"Duplicate map key\")"
+        }
+      },
+      {
+        "id": "cbor-integer-not-minimal",
+        "note": "Sequence 1 in two bytes (0x18 0x01)",
+        "name": "k51qzi5uqu5dja9it0ilm72uimu8sunfn5hbu86wwb6yxrl8kif10fkruhtcwi",
+        "record": {
+          "base64": "QkAald63pCf99UJPsu6BMkECFtAb/fqAKebRLnIlriqcvRB1frzv28kjoFLO1QwF4RMB+NkSHXOFv11GrGvNWIoCSpkBpWNUVEwbAAAARdlkuABlVmFsdWVYQS9pcGZzL2JhZnliZWlndXdqbWRkdnI0aWlhaDZla2d2cm92YjV6ZmI2ZWc1YzZsb2lreHZ4bHh6bHdlYTVkYWJtaFNlcXVlbmNlGAFoVmFsaWRpdHlYHjIwOTktMDEtMDFUMDA6MDA6MDAuMDAwMDAwMDAwWmxWYWxpZGl0eVR5cGUA"
+        },
+        "now": 1760000000,
+        "expect": {
+          "fail": "unverifiable"
+        },
+        "native": {
+          "ok": {
+            "value": "/ipfs/bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm",
+            "sequence": 1,
+            "validity": "2099-01-01T00:00:00.000000000Z",
+            "ttl_ns": 300000000000
+          }
+        },
+        "deviation": "dag-cbor-strict"
+      },
+      {
+        "id": "cbor-length-not-minimal",
+        "note": "the key TTL with its length in two bytes (0x78 0x03)",
+        "name": "k51qzi5uqu5dja9it0ilm72uimu8sunfn5hbu86wwb6yxrl8kif10fkruhtcwi",
+        "record": {
+          "base64": "QkBZkVY+NlY8r/igq2oBIrYN5IhSSvz4WAp4MPc6fbq0J8I5/21jQ3U1t7auL8mdpUpMmyVk0pjGoHJwooOVgyoMSpkBpXgDVFRMGwAAAEXZZLgAZVZhbHVlWEEvaXBmcy9iYWZ5YmVpZ3V3am1kZHZyNGlpYWg2ZWtndnJvdmI1emZiNmVnNWM2bG9pa3h2eGx4emx3ZWE1ZGFibWhTZXF1ZW5jZQFoVmFsaWRpdHlYHjIwOTktMDEtMDFUMDA6MDA6MDAuMDAwMDAwMDAwWmxWYWxpZGl0eVR5cGUA"
+        },
+        "now": 1760000000,
+        "expect": {
+          "fail": "unverifiable"
+        },
+        "native": {
+          "ok": {
+            "value": "/ipfs/bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm",
+            "sequence": 1,
+            "validity": "2099-01-01T00:00:00.000000000Z",
+            "ttl_ns": 300000000000
+          }
+        },
+        "deviation": "dag-cbor-strict"
+      },
+      {
+        "id": "cbor-float-nan",
+        "note": "an unknown key whose value is a NaN",
+        "name": "k51qzi5uqu5dja9it0ilm72uimu8sunfn5hbu86wwb6yxrl8kif10fkruhtcwi",
+        "record": {
+          "base64": "QkDO4zOLbExINyzYvj/NWBhYwSMw+1VWACpipmNt6X4qyCLNHBbrOgZBUKd3oEhugXHufECrNZ4pZH/G7rU/xX4ASqcBpmNUVEwbAAAARdlkuABlRXh0cmH7f/gAAAAAAABlVmFsdWVYQS9pcGZzL2JhZnliZWlndXdqbWRkdnI0aWlhaDZla2d2cm92YjV6ZmI2ZWc1YzZsb2lreHZ4bHh6bHdlYTVkYWJtaFNlcXVlbmNlAWhWYWxpZGl0eVgeMjA5OS0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQA="
+        },
+        "now": 1760000000,
+        "expect": {
+          "fail": "unverifiable"
+        },
+        "native": {
+          "ok": {
+            "value": "/ipfs/bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm",
+            "sequence": 1,
+            "validity": "2099-01-01T00:00:00.000000000Z",
+            "ttl_ns": 300000000000
+          }
+        },
+        "deviation": "dag-cbor-strict"
+      },
+      {
+        "id": "cbor-float-infinity",
+        "note": "an unknown key whose value is infinity",
+        "name": "k51qzi5uqu5dja9it0ilm72uimu8sunfn5hbu86wwb6yxrl8kif10fkruhtcwi",
+        "record": {
+          "base64": "QkBQadCOkHAYwUdbU28y3oBzQpFSu85TI8OlCKScGkfiJgeA/5aY3p76SYzfDTJCoFMv7uB/HM1ugtPADF7TawsHSqcBpmNUVEwbAAAARdlkuABlRXh0cmH7f/AAAAAAAABlVmFsdWVYQS9pcGZzL2JhZnliZWlndXdqbWRkdnI0aWlhaDZla2d2cm92YjV6ZmI2ZWc1YzZsb2lreHZ4bHh6bHdlYTVkYWJtaFNlcXVlbmNlAWhWYWxpZGl0eVgeMjA5OS0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQA="
+        },
+        "now": 1760000000,
+        "expect": {
+          "fail": "unverifiable"
+        },
+        "native": {
+          "ok": {
+            "value": "/ipfs/bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm",
+            "sequence": 1,
+            "validity": "2099-01-01T00:00:00.000000000Z",
+            "ttl_ns": 300000000000
+          }
+        },
+        "deviation": "dag-cbor-strict"
+      },
+      {
+        "id": "cbor-float-32",
+        "note": "an unknown key whose value is a 32-bit float",
+        "name": "k51qzi5uqu5dja9it0ilm72uimu8sunfn5hbu86wwb6yxrl8kif10fkruhtcwi",
+        "record": {
+          "base64": "QkB3qBS6+yMOk4FBMulAIbW3ETJ2n2hiDYmA8w5qSPdjcS2k3+YywYh53pHjg6OOSu1YWDzDYzxIDfX2CJIEZocJSqMBpmNUVEwbAAAARdlkuABlRXh0cmH6P8AAAGVWYWx1ZVhBL2lwZnMvYmFmeWJlaWd1d2ptZGR2cjRpaWFoNmVrZ3Zyb3ZiNXpmYjZlZzVjNmxvaWt4dnhseHpsd2VhNWRhYm1oU2VxdWVuY2UBaFZhbGlkaXR5WB4yMDk5LTAxLTAxVDAwOjAwOjAwLjAwMDAwMDAwMFpsVmFsaWRpdHlUeXBlAA=="
+        },
+        "now": 1760000000,
+        "expect": {
+          "fail": "unverifiable"
+        },
+        "native": {
+          "ok": {
+            "value": "/ipfs/bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm",
+            "sequence": 1,
+            "validity": "2099-01-01T00:00:00.000000000Z",
+            "ttl_ns": 300000000000
+          }
+        },
+        "deviation": "dag-cbor-strict"
+      },
+      {
+        "id": "cbor-tag-42-empty",
+        "note": "an unknown key whose value is tag 42 over an empty byte string",
+        "name": "k51qzi5uqu5dja9it0ilm72uimu8sunfn5hbu86wwb6yxrl8kif10fkruhtcwi",
+        "record": {
+          "base64": "QkDYb8vuOeJ67BYU8DG8t9SG8uW9L/+FUILw+SXGLJuIrH4xgV1RW4ijuFXwHURG5CybPJVZx+wBxl5Elf5UoZUOSqEBpmNUVEwbAAAARdlkuABlRXh0cmHYKkBlVmFsdWVYQS9pcGZzL2JhZnliZWlndXdqbWRkdnI0aWlhaDZla2d2cm92YjV6ZmI2ZWc1YzZsb2lreHZ4bHh6bHdlYTVkYWJtaFNlcXVlbmNlAWhWYWxpZGl0eVgeMjA5OS0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQA="
+        },
+        "now": 1760000000,
+        "expect": {
+          "fail": "unverifiable"
+        },
+        "native": {
+          "error": "invalid IPNS record: data decode failed: Msg(\"Invalid CID\")"
+        }
+      },
+      {
+        "id": "cbor-tag-42-prefix-only",
+        "note": "an unknown key whose value is tag 42 over 0x00 alone",
+        "name": "k51qzi5uqu5dja9it0ilm72uimu8sunfn5hbu86wwb6yxrl8kif10fkruhtcwi",
+        "record": {
+          "base64": "QkAMe6F+YfRukB2etS6kvHkjdhJnhohyikYoWa8+zblTtjyDOL8ny/OELzjA082ieosPzZlB8Gh9tBQOFn6BsqEJSqIBpmNUVEwbAAAARdlkuABlRXh0cmHYKkEAZVZhbHVlWEEvaXBmcy9iYWZ5YmVpZ3V3am1kZHZyNGlpYWg2ZWtndnJvdmI1emZiNmVnNWM2bG9pa3h2eGx4emx3ZWE1ZGFibWhTZXF1ZW5jZQFoVmFsaWRpdHlYHjIwOTktMDEtMDFUMDA6MDA6MDAuMDAwMDAwMDAwWmxWYWxpZGl0eVR5cGUA"
+        },
+        "now": 1760000000,
+        "expect": {
+          "fail": "unverifiable"
+        },
+        "native": {
+          "error": "invalid IPNS record: data decode failed: Msg(\"Invalid CID\")"
+        }
+      },
+      {
+        "id": "cbor-tag-42-cid-not-minimal",
+        "note": "an unknown key whose value is a CID whose version is the varint 0x81 0x00",
+        "name": "k51qzi5uqu5dja9it0ilm72uimu8sunfn5hbu86wwb6yxrl8kif10fkruhtcwi",
+        "record": {
+          "base64": "QkCsvaOJkOCVtbJQoxWA42ETn5fE3wllw+yH96sAYgAstx+M++UgZACd3TuJKraScTuNhIkfVBvfG2abs6WbWIMPSsgBpmNUVEwbAAAARdlkuABlRXh0cmHYKlgmAIEAcBIg1LJYMdY8QgB/EUasXVD3JQ+IbovLchV63XfK7EB0YAtlVmFsdWVYQS9pcGZzL2JhZnliZWlndXdqbWRkdnI0aWlhaDZla2d2cm92YjV6ZmI2ZWc1YzZsb2lreHZ4bHh6bHdlYTVkYWJtaFNlcXVlbmNlAWhWYWxpZGl0eVgeMjA5OS0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQA="
+        },
+        "now": 1760000000,
+        "expect": {
+          "fail": "unverifiable"
+        },
+        "native": {
+          "error": "invalid IPNS record: data decode failed: Msg(\"Failed to deserialize CID: Failed to decode unsigned varint format\")"
+        }
+      },
+      {
+        "id": "cbor-float-finite",
+        "note": "an unknown key whose value is the 64-bit float 1.5: read",
+        "name": "k51qzi5uqu5dja9it0ilm72uimu8sunfn5hbu86wwb6yxrl8kif10fkruhtcwi",
+        "record": {
+          "base64": "QkCy5jmB3bneGTFVfpr408+ala66G0C7NDfwOj2D6+97Dab/XxiwZ0W1eOmiFNMOF+M3TL2GUqmUA4OBNaifZQ8CSqcBpmNUVEwbAAAARdlkuABlRXh0cmH7P/gAAAAAAABlVmFsdWVYQS9pcGZzL2JhZnliZWlndXdqbWRkdnI0aWlhaDZla2d2cm92YjV6ZmI2ZWc1YzZsb2lreHZ4bHh6bHdlYTVkYWJtaFNlcXVlbmNlAWhWYWxpZGl0eVgeMjA5OS0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQA="
+        },
+        "now": 1760000000,
+        "expect": {
+          "ok": {
+            "value": "/ipfs/bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm",
+            "sequence": 1,
+            "validity": "2099-01-01T00:00:00.000000000Z",
+            "ttl_ns": 300000000000
+          }
+        },
+        "native": {
+          "ok": {
+            "value": "/ipfs/bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm",
+            "sequence": 1,
+            "validity": "2099-01-01T00:00:00.000000000Z",
+            "ttl_ns": 300000000000
+          }
         }
       },
       {
@@ -10054,14 +10594,14 @@
       },
       {
         "id": "cbor-length-past-end",
-        "note": "signed data whose Value claims 65,535 bytes",
+        "note": "signed data whose Value claims 65,535 bytes: validly signed, so unverifiable",
         "name": "k51qzi5uqu5dja9it0ilm72uimu8sunfn5hbu86wwb6yxrl8kif10fkruhtcwi",
         "record": {
           "base64": "QkBtAyZvuvtxSW1ig1bFa/N2gzonwqbb68MTFpkX7xP/R8y5RdnRb+rJOMiwbcuYP2gutZgU0epFsjqEw8QXAY4KSpoBpWNUVEwbAAAARdlkuABlVmFsdWVZ//9BL2lwZnMvYmFmeWJlaWd1d2ptZGR2cjRpaWFoNmVrZ3Zyb3ZiNXpmYjZlZzVjNmxvaWt4dnhseHpsd2VhNWRhYm1oU2VxdWVuY2UBaFZhbGlkaXR5WB4yMDk5LTAxLTAxVDAwOjAwOjAwLjAwMDAwMDAwMFpsVmFsaWRpdHlUeXBlAA=="
         },
         "now": 1760000000,
         "expect": {
-          "fail": "verification_failed"
+          "fail": "unverifiable"
         },
         "native": {
           "error": "invalid IPNS record: data decode failed: Eof"
