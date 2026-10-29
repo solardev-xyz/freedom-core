@@ -194,16 +194,19 @@ fn hamt_lookups_follow_the_hash() {
     let cases = load("dweb-verify-cases.json");
     let doc = load("dweb-verify.json");
     let blocks = &doc["ipfs"]["blocks"];
-    let mut n = 0;
+    let (mut n, mut misplaced) = (0, 0);
     for c in cases["ipfs"]["hamt"].as_array().unwrap() {
         let name = c["name"].as_str().unwrap();
         assert_eq!(hex::encode(hamt::hash_bits(name)), c["hash_bits"], "{name}");
         let mut shard = c["root"].as_str().unwrap().to_owned();
         let mut found = None;
         for (level, expect) in c["levels"].as_array().unwrap().iter().enumerate() {
-            let block = B64
-                .decode(blocks[shard.as_str()].as_str().unwrap())
+            // A case's own shards (an entry out of its place) first.
+            let text = c["blocks"][shard.as_str()]
+                .as_str()
+                .or(blocks[shard.as_str()].as_str())
                 .unwrap();
+            let block = B64.decode(text).unwrap();
             let node = dagpb::decode(&block).unwrap();
             let data = unixfs::decode(&node).unwrap();
             assert_eq!(data.kind, unixfs::Kind::HamtShard);
@@ -226,9 +229,16 @@ fn hamt_lookups_follow_the_hash() {
             c["expect"]["ok"]["cid"].as_str(),
             "{name}"
         );
+        if c["deviation"] == "hamt-lookup" {
+            // GatewayCore finds it by name.
+            assert_eq!(c["native"]["status"], 200, "{name}");
+            assert!(c["expect"]["absent"] == true, "{name}");
+            misplaced += 1;
+        }
         n += 1;
     }
     assert!(n >= 60);
+    assert!(misplaced >= 2);
 }
 
 /// Reads a CAR, checking each section's block against its CID: the
