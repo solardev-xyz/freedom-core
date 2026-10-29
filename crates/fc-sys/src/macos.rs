@@ -489,13 +489,14 @@ mod tests {
 
     #[test]
     fn threads_are_counted() {
-        let before = thread_count().unwrap();
-        assert!(before >= 1);
+        assert!(thread_count().unwrap() >= 1);
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         let handle = std::thread::spawn(move || {
             let _ = rx.recv();
         });
-        assert!(thread_count().unwrap() > before);
+        // This test's thread and the one it holds, at least: other tests'
+        // threads come and go meanwhile, so no exact count holds.
+        assert!(thread_count().unwrap() >= 2);
         drop(tx);
         handle.join().unwrap();
     }
