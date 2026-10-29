@@ -15,6 +15,16 @@ pub const SHA2_256: u64 = 0x12;
 /// 42. Anything longer isn't a CID the walk can meet.
 pub const MAX_DIGEST: usize = 128;
 
+/// The longest binary CID read: four varints at their longest, and the
+/// longest digest.
+pub const MAX_CID: usize = 4 * varint::MAX_LEN + MAX_DIGEST;
+/// The longest text of a CID, past its multibase prefix: base32 carries 5
+/// bits a character and base36 more, and a leading `0` (base36's zero
+/// byte) carries a whole byte, so no CID of [`MAX_CID`] bytes takes more.
+/// Longer text is refused before any base conversion, which for base36 is
+/// quadratic in the text's length.
+pub const MAX_CID_TEXT: usize = (MAX_CID * 8).div_ceil(5);
+
 /// A CID as views into the bytes it was read from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cid<'a> {
@@ -90,6 +100,9 @@ const B32: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
 /// other text, or a CID that isn't version 1.
 pub fn from_base32(text: &str) -> Option<Vec<u8>> {
     let body = text.strip_prefix('b')?;
+    if body.len() > MAX_CID_TEXT {
+        return None;
+    }
     let mut out = Vec::with_capacity(body.len() * 5 / 8);
     let mut acc: u32 = 0;
     let mut bits = 0;
@@ -119,6 +132,9 @@ pub fn from_key_text(text: &str) -> Option<Vec<u8>> {
         return from_base32(text).filter(|b| parse(b).is_some_and(|c| c.codec == LIBP2P_KEY));
     }
     let body = text.strip_prefix('k')?;
+    if body.len() > MAX_CID_TEXT {
+        return None;
+    }
     const B36: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
     // Base36 is a big-endian base change, as multibase defines it: leading
     // '0's are leading zero bytes.

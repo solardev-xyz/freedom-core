@@ -81,6 +81,9 @@ struct Entry<'a> {
     sequence: Option<u64>,
     ttl: Option<u64>,
     pub_key: Option<&'a [u8]>,
+    /// Whether a non-empty `signatureV1` came: with a non-empty legacy
+    /// `value`, it asks for every legacy field to match.
+    signature_v1: bool,
     signature_v2: Option<&'a [u8]>,
     data: Option<&'a [u8]>,
 }
@@ -90,7 +93,7 @@ fn entry(record: &[u8]) -> Result<Entry<'_>, Refusal> {
     for field in pb::fields(record) {
         match field.map_err(|()| FAIL)? {
             (1, Value::Bytes(v)) => e.value = Some(v),
-            (2, Value::Bytes(_)) => {}
+            (2, Value::Bytes(v)) => e.signature_v1 = !v.is_empty(),
             (3, Value::Varint(v)) => e.validity_type = Some(v),
             (4, Value::Bytes(v)) => e.validity = Some(v),
             (5, Value::Varint(v)) => e.sequence = Some(v),
@@ -172,9 +175,12 @@ pub fn check(name: &Cid<'_>, record: &[u8], now: i64) -> Result<Record, Refusal>
     let (kind, key) = public_key(proto)?;
     let mut message = SIGNED_PREFIX.to_vec();
     message.extend_from_slice(data);
-    match kind {
-        ED25519 => verify_ed25519(key, &message, signature)?,
-        RSA if name.hash == SHA2_256 => verify_rsa(key, &message, signature)?,
+    // An Ed25519 key is inlined in its name; an RSA key, too large to
+    // inline, is hashed into it. Any other pairing, a hashed Ed25519 key
+    // included, is no name libp2p makes (0009, IPNS and DNSLink).
+    match (name.hash, kind) {
+        (IDENTITY, ED25519) => verify_ed25519(key, &message, signature)?,
+        (SHA2_256, RSA) => verify_rsa(key, &message, signature)?,
         _ => return Err(Refusal::Unverifiable),
     }
     // The signed data, then the legacy fields against it. The signature
@@ -199,11 +205,26 @@ pub fn check(name: &Cid<'_>, record: &[u8], now: i64) -> Result<Record, Refusal>
     else {
         return Err(FAIL);
     };
+    // Each legacy field present equals its signed counterpart, as the
+    // native reader checks; and once `signatureV1` or the legacy value is
+    // non-empty, all five do, an absent one read as its protobuf default,
+    // as the IPNS record specification and boxo require (deviation
+    // `ipns-legacy-fields`).
     if e.value.is_some_and(|v| v != value)
         || e.validity.is_some_and(|v| v != validity)
         || e.validity_type.is_some_and(|v| v != validity_type)
         || e.sequence.is_some_and(|v| v != sequence)
         || e.ttl.is_some_and(|v| v != ttl)
+    {
+        return Err(FAIL);
+    }
+    let legacy = e.signature_v1 || e.value.is_some_and(|v| !v.is_empty());
+    if legacy
+        && (e.value.unwrap_or_default() != value
+            || e.validity.unwrap_or_default() != validity
+            || e.validity_type.unwrap_or(0) != validity_type
+            || e.sequence.unwrap_or(0) != sequence
+            || e.ttl.unwrap_or(0) != ttl)
     {
         return Err(FAIL);
     }
