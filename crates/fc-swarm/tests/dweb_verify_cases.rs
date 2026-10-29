@@ -460,3 +460,63 @@ fn join_node(chunks: &Value, address: &[u8; 32]) -> Vec<u8> {
     }
     out
 }
+
+/// Mantaray nodes, decoded as Ant decodes them, within the core's caps:
+/// every case's forks and kept metadata, or its refusal.
+#[test]
+fn manifest_nodes() {
+    use std::collections::BTreeMap;
+
+    use fc_swarm::manifest::{NodeError, parse_node};
+    let all = cases();
+    let list = all["swarm"]["manifest_nodes"].as_array().unwrap();
+    assert!(list.len() >= 30);
+    for case in list {
+        let id = &case["id"];
+        let node = bytes(&case["node"]);
+        let got = parse_node(&node);
+        let expect = &case["expect"];
+        match (&expect["ok"], expect["fail"].as_str()) {
+            (ok, None) if ok["manifest"] == false => {
+                assert_eq!(got, Err(NodeError::NotAManifest), "{id}");
+            }
+            (ok, None) if ok.is_object() => {
+                let parsed = got.unwrap_or_else(|e| panic!("{id}: {e:?}"));
+                assert_eq!(hex::encode(&parsed.entry), ok["entry"], "{id}");
+                assert_eq!(
+                    parsed.entry.len() as u64,
+                    ok["ref_size"].as_u64().unwrap(),
+                    "{id}"
+                );
+                let forks = ok["forks"].as_array().unwrap();
+                assert_eq!(parsed.forks.len(), forks.len(), "{id}");
+                for (f, want) in parsed.forks.iter().zip(forks) {
+                    assert_eq!(u64::from(f.byte), want["byte"].as_u64().unwrap(), "{id}");
+                    assert_eq!(
+                        u64::from(f.node_type),
+                        want["type"].as_u64().unwrap(),
+                        "{id}"
+                    );
+                    assert_eq!(hex::encode(&f.prefix), want["prefix"], "{id}");
+                    assert_eq!(hex::encode(&f.child), want["child"], "{id}");
+                    let got: BTreeMap<&str, &str> = f
+                        .metadata
+                        .0
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), v.as_str()))
+                        .collect();
+                    let wanted: BTreeMap<&str, &str> = want["metadata"]
+                        .as_object()
+                        .unwrap()
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), v.as_str().unwrap()))
+                        .collect();
+                    assert_eq!(got, wanted, "{id}: fork {}", f.byte);
+                }
+            }
+            (_, Some("malformed")) => assert_eq!(got, Err(NodeError::Malformed), "{id}"),
+            (_, Some("unverifiable")) => assert_eq!(got, Err(NodeError::TooLarge), "{id}"),
+            _ => panic!("{id}: no expect"),
+        }
+    }
+}
