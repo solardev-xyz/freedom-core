@@ -177,12 +177,12 @@ pub fn check(name: &Cid<'_>, record: &[u8], now: i64) -> Result<Record, Refusal>
         RSA if name.hash == SHA2_256 => verify_rsa(key, &message, signature)?,
         _ => return Err(Refusal::Unverifiable),
     }
-    // The signed data, then the legacy fields against it.
-    let map = cbor::top_map(data).map_err(|e| match e {
-        cbor::Error::TooDeep => Refusal::Unverifiable,
-        cbor::Error::Malformed => FAIL,
-    })?;
-    let get = |k: &str| map.iter().find(|(key, _)| *key == k).map(|(_, v)| *v);
+    // The signed data, then the legacy fields against it. The signature
+    // has passed, so data the strict reader can't take (outside DAG-CBOR's
+    // strict profile, a length past the end, nesting past the bound) is
+    // the signer's: unverifiable, not a lie (0009, IPNS and DNSLink).
+    let map = cbor::top_map(data).map_err(|_| Refusal::Unverifiable)?;
+    let get = |k: &str| map.get(k);
     let (
         Some(Item::Bytes(value)),
         Some(Item::Bytes(validity)),
