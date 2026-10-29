@@ -148,6 +148,9 @@ impl Kind {
 /// The process's instances.
 pub struct Instances {
     kind: Kind,
+    /// The process's network policy (`--network`): every instance runs
+    /// under it.
+    network: network::NetworkPolicy,
     /// The process runtime: control jobs and their timers.
     runtime: Handle,
     /// The process's requests: a teardown settles its instance's.
@@ -276,6 +279,7 @@ impl Slot {
 impl Instances {
     pub fn new(
         kind: Kind,
+        network: network::NetworkPolicy,
         runtime: Handle,
         requests: Arc<Requests>,
         budgets: Arc<Budgets>,
@@ -283,6 +287,7 @@ impl Instances {
     ) -> Arc<Instances> {
         Arc::new(Instances {
             kind,
+            network,
             runtime,
             requests,
             budgets,
@@ -336,7 +341,7 @@ impl Instances {
     /// `ipfs.start`, on the reader thread: admitted or refused at once; the
     /// build runs as a control job.
     pub fn start(self: &Arc<Self>, conn: &Connection, id: u64, params: Option<&RawValue>) {
-        let start = match params::start(params) {
+        let start = match params::start(params, self.network) {
             Ok(start) => start,
             Err(message) => return refuse(conn, id, ErrorCode::InvalidArgument, message),
         };

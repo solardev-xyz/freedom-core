@@ -1719,6 +1719,53 @@ function ipnsNameKind(name) {
   return digest[1] === 1 ? 'ed25519' : 'other_key';
 }
 
+/** `readVarint`, in the minimal encoding only (multiformats). */
+function readMinimalVarint(bytes, at) {
+  const r = readVarint(bytes, at);
+  if (!r || (r[1] - at > 1 && bytes[r[1] - 1] === 0)) return null;
+  return r;
+}
+
+/**
+ * A libp2p-key or IPFS CID's four varints, each minimal, and whether the
+ * digest is exactly what is left.
+ */
+function cidParts(bytes) {
+  const version = readMinimalVarint(bytes, 0);
+  const codec = version && readMinimalVarint(bytes, version[1]);
+  const code = codec && readMinimalVarint(bytes, codec[1]);
+  const len = code && readMinimalVarint(bytes, code[1]);
+  if (!len || len[1] + len[0] !== bytes.length) return null;
+  return { version: version[0], codec: codec[0], code: code[0], digest: bytes.slice(len[1]) };
+}
+
+/**
+ * Whether a verify plan's root is in its form (0009, Verify plans, the
+ * root stage): 64 hex digits; a whole CIDv1 in canonical lowercase base32;
+ * or an IPNS name whose multihash is a sha2-256 digest, or an inlined
+ * Ed25519 key as libp2p's deterministic PublicKey writes it.
+ */
+function rootInForm(root) {
+  if (root.swarm !== undefined) return /^[0-9a-fA-F]{64}$/.test(root.swarm);
+  if (root.ipfs !== undefined) {
+    const text = root.ipfs;
+    if (!/^b[a-z2-7]+$/.test(text)) return false;
+    const bytes = base32Decode(text.slice(1));
+    if (!bytes || 'b' + packed(bytes, B32, 5) !== text) return false;
+    const cid = cidParts(bytes);
+    return Boolean(cid) && cid.version === 1;
+  }
+  const name = root.ipns;
+  const kind = ipnsNameKind(name);
+  if (kind !== 'sha256' && kind !== 'ed25519') return false;
+  const bytes = name.startsWith('k') ? baseDecode(name.slice(1), B36) : base32Decode(name.slice(1));
+  const cid = cidParts(bytes);
+  if (!cid) return false;
+  if (kind === 'sha256') return true;
+  const d = cid.digest;
+  return d.length === 36 && d[0] === 0x08 && d[1] === 0x01 && d[2] === 0x12 && d[3] === 0x20;
+}
+
 /**
  * A verify plan's IPFS root, canonical: a CIDv0 (an ENS contenthash can
  * decode to one) as the CIDv1 base32 the reference's own cidV0ToV1Base32
@@ -1810,7 +1857,9 @@ async function buildVerifyRequests(ref, table) {
       const entry = { id: `${c.scheme}-${c.id}-${suffix}`, from: `${c.scheme}-${c.id}`, request };
       if (c.resolution) entry.resolution = c.resolution;
       entry.plan = plan;
-      entry.validation = 'valid';
+      // A root not in its form (a CID host that isn't a whole CID, say)
+      // gets the verify plan all the same, which validation refuses.
+      entry.validation = plan.verify && !rootInForm(plan.verify.root) ? 'root' : 'valid';
       out.push(entry);
       todays.set(entry.id, today);
     }
@@ -1880,6 +1929,9 @@ function verifyValidationCases(requests, todays) {
     ['ipns-not-key-codec', { ipns: v1 }, 'root'],
   ]) mutate(`root-${id}`, ipnsBase, (p) => { v(p).root = root; }, expect);
   mutate('root-ipns-sha256', find('ipns-key-peer-sha256-verify'), () => {}, 'valid');
+  // In form, not only spelled so: a whole CIDv1, a whole Ed25519 key.
+  mutate('root-ipfs-not-whole-cid', ipfsNameBase, (p) => { v(p).root = { ipfs: 'ba' }; }, 'root');
+  mutate('root-ipns-key-without-ed25519', find('ipns-name-ok-ipns-verify'), (p) => { v(p).root = { ipns: 'kka1fr5kx' }; }, 'root');
   // Path: 0006's checks, on /<namespace>/<root><path>.
   for (const [id, path, expect] of [
     ['empty', '', 'valid'],
@@ -1951,6 +2003,13 @@ function verifyValidationCases(requests, todays) {
   downgrade('downgrade-fetch-bzz-hash-host', base, 'path');
   downgrade('downgrade-fetch-ipfs-cid-host', ipfsBase, 'path');
   downgrade('downgrade-fetch-ipns-key-host', ipnsBase, 'path');
+  // A name host's fetch is allowed only where 0009 keeps one: the name's
+  // result an encrypted reference, a DNSLink name or another key type.
+  // Today's fetch for a name whose result the core verifies is refused.
+  downgrade('downgrade-fetch-bzz-name-host', nameBase, 'path');
+  downgrade('downgrade-fetch-ipfs-name-host', ipfsNameBase, 'path');
+  downgrade('downgrade-fetch-ipns-name-host', find('ipns-name-ok-ipns-verify'), 'path');
+  mutate('downgrade-fetch-bzz-name-encrypted', find('bzz-name-ok-encrypted-verify'), () => {}, 'valid');
   return out;
 }
 

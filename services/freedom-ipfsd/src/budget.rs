@@ -21,7 +21,7 @@
 use fc_protocol::stream::WRITER_DATA_CAP;
 use freedom_ipfs_core::Reservation;
 use freedom_ipfs_gateway::{BudgetError, GatewayConfig, MemoryBudget, SharedLimits};
-use freedom_ipfs_store::StoreOptions;
+use freedom_ipfs_store::{StoreOptions, TempStore};
 
 use crate::instances::Kind;
 use crate::params::Store;
@@ -95,6 +95,9 @@ impl Fixed {
                     hot_cache_bytes: None,
                     max_page_count: None,
                     cache_kib: u32::try_from(DISK_PAGE_CACHE >> 10).ok(),
+                    // No temporary file: confined, the process writes only
+                    // its data directory (design 0010).
+                    temp_store: TempStore::Memory,
                 },
             ),
             Store::Memory { max_bytes } => {
@@ -107,6 +110,7 @@ impl Fixed {
                         hot_cache_bytes: Some(MEMORY_HOT_CACHE),
                         max_page_count: u32::try_from(pages).ok(),
                         cache_kib: None,
+                        temp_store: TempStore::Memory,
                     },
                 )
             }

@@ -91,6 +91,9 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
 **NAT64 prefix discovery** ([0007](0007-ipfs-service.md#network-specific-nat64-prefixes), which 0008 shares) runs in `direct` mode, at startup and at least once a minute after. So its accesses last for the process's life:
 - one AAAA query for `ipv4only.arpa`, over plain DNS on port 53, to each resolver the interfaces learned, which is often on loopback (`127.0.0.53`) or a private address (a LAN router);
 - the files that list them, on Linux. Network changes replace these files, so the grant must survive a replacement ([The recommendation](#the-recommendation));
+- on Linux, a link-local resolver's interface index, for a named zone such as `fe80::1%eth0`:
+  - **How:** the kernel's `SIOCGIFINDEX` on a datagram socket, the one `ioctl` `freedom-ipfsd`'s policy adds to the allowlist, in `direct` mode alone, where discovery runs. It reads one index, changes nothing, and finds an interface that appears after the process starts.
+  - **Not through sysfs:** `/sys/class/net/<name>/ifindex` resolves into `/sys/devices`, far more than a grant should cover, so none is given;
 - on macOS, SystemConfiguration's dynamic store (`State:/Network/Service/<id>/DNS`), a Mach lookup of `com.apple.SystemConfiguration.configd`;
 - on Windows, `GetAdaptersAddresses`, and the registry value `DhcpNameServer` under each interface's `Tcpip` parameters.
 
@@ -150,7 +153,7 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
     - mode and owner: `chmod`, `fchmod`, `fchmodat`, `fchmodat2`, `chown`, `fchown`, `lchown`, `fchownat`;
     - xattrs: `setxattr`, `lsetxattr`, `fsetxattr`, `setxattrat`, and the matching `removexattr` calls;
     - times and attributes: `utime`, `utimes`, `futimesat`, `utimensat`, `file_setattr`;
-    - **`ioctl`, by an allowlist** of the commands the services make, compared on the command's low 32 bits, as the kernel reads it: `FIONBIO`, `FIOCLEX`, `FIONCLEX`, `FIONREAD`, and the terminal queries `TCGETS` and `TIOCGWINSZ` (`isatty`). Every other command answers `ENOTTY`, as an unknown one would. A denylist can't be complete: besides the inode-flag commands (`FS_IOC_SETFLAGS`, `FS_IOC_FSSETXATTR`), `FS_IOC_ENABLE_VERITY` takes a read-only descriptor and makes a file permanently read-only, `FS_IOC_SET_ENCRYPTION_POLICY` sets an empty directory's policy, and ext4's `SETVERSION` changes the inode generation, and filesystems add more. Landlock's ioctl right (ABI 5) covers devices only.
+    - **`ioctl`, by an allowlist** of the commands the services make, compared on the command's low 32 bits, as the kernel reads it: `FIONBIO`, `FIOCLEX`, `FIONCLEX`, `FIONREAD`, and the terminal queries `TCGETS` and `TIOCGWINSZ` (`isatty`). For `freedom-ipfsd` in `direct` mode alone it adds `SIOCGIFINDEX`, an interface's index by its name, for NAT64 discovery's named zones ([What each service needs](#what-each-service-needs)). Every other command answers `ENOTTY`, as an unknown one would. A denylist can't be complete: besides the inode-flag commands (`FS_IOC_SETFLAGS`, `FS_IOC_FSSETXATTR`), `FS_IOC_ENABLE_VERITY` takes a read-only descriptor and makes a file permanently read-only, `FS_IOC_SET_ENCRYPTION_POLICY` sets an empty directory's policy, and ext4's `SETVERSION` changes the inode generation, and filesystems add more. Landlock's ioctl right (ABI 5) covers devices only.
 
     So no file's metadata changes: not one outside the grant, nor one under a read-only grant, such as the import's source. Files in the data directory keep the modes they were created with.
     - **Who makes them,** and none fails for it (the `ioctl` list is the qualification's record of the release binaries' calls; a command outside it fails CI):
@@ -386,11 +389,34 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
 
    - **seccomp's first filter:** when the kernel refuses it, a filter that allows everything is tried. If the kernel takes that one, it takes filters, so it refused the service's own: invalid policy. If it refuses that one too, its error decides: `EINVAL` or `ENOSYS` is `unavailable`, anything else `blocked`.
 
-7. **Main's check,** before it spawns a service:
+7. **Main's check,** before every spawn of a service: the first one, each restart after a crash, each new process a change of policy starts, and a start that waited for Tor's endpoint. A refusal spawns nothing.
    - **The grant:** this service's own directory: the persistent IPFS data directory, or the Radicle home with its `HOME` directory.
-   - **The protected roots:** the lock directory, and the identity directory and every other component's data directory (Bee, Ant, Myotis, Tor, the other service), for this profile and the catalog's others.
+   - **The protected roots:**
+     - the lock directory;
+     - every catalog profile's component directories as main resolves them, outside its userData directory too: each profile's Radicle home (`<appRoot>/R/<slot>`, or `<parent of appRoot>/R/<checkout>/<slot>` in a development build), and this profile's overrides (`FREEDOM_IDENTITY_DATA`, …);
+     - every other profile's whole userData directory, this profile's userData directory, and the app data root, which holds the catalog.
+     - **Whatever the profile's source:** this profile's userData directory and its browser storage are protected for a catalog profile, one started with `--profile-dir`, and a test's alike. Only the other profiles and their Radicle homes come from the catalog.
+   - **A root that holds this profile:** a directory that holds this profile's userData directory, or the service's own default directory, is never a root itself. Its entries are, recursively along that path, together with the names that may not exist yet: each component's directory and the browser's storage (`Local Storage`, `IndexedDB`, `Session Storage`, `Service Worker`, …). So the default profile, kept in the app data root, has its browser storage, identity and node directories protected, and the `Profiles` directory that holds the profile in use has every other profile in it protected. This profile's own userData directory likewise gives up only the service's own default directory (`ipfs-data`, or the Radicle home).
    - **The rule:** main refuses a grant that is, contains, or lies inside a protected root. The service's own directory is the grant, never a protected root.
-   - **Compared as canonical paths,** under 0001's rules: symlinks resolved, and case folded on case-insensitive volumes. So an override such as `FREEDOM_IPFS_DATA` can't widen the grant over the secrets.
+   - **Ownership is by layout, comparison by canonical path:** which directory holds this profile, and which is the service's own default directory, are decided on the paths main lays out, before any symlink is followed. Only the comparison with the grant follows symlinks.
+     - **What takes precedence:** so a default directory that is a symlink into another owner's data exempts nothing of it. Another owner's root stays protected.
+     - **A collision is refused outright:** if the service's own default directory resolves into a protected root, main refuses to spawn it, even when the grant is elsewhere.
+   - **Compared as canonical paths,** under 0001's rules: symlinks resolved, and case folded on case-insensitive volumes. So an override such as `FREEDOM_IPFS_DATA` can't widen the grant over the secrets. A path climbs out of another only by a whole `..` component: a name that begins with two dots, such as `..vault`, is an ordinary name.
+   - **A symlink that doesn't resolve is refused:** if a component of the grant's path, or of a protected root's, exists but doesn't resolve, main refuses. That covers a symlink to a name that doesn't exist yet, and one that loops. Its target could be created later, inside the grant: `identity` pointing at the grant's absent `future-identity`, which the confined service may make, would then put the vault in the grant.
+   - **Names that don't exist yet, on a case-insensitive volume:** the volume folds case by Unicode rules (Σ and ς name one directory there). No string comparison reproduces that, and no `realpath` resolves a name that doesn't exist yet. So main refuses an override path whose missing names aren't all ASCII. Names that exist are resolved, and these are developer overrides (`FREEDOM_*_DATA`), so refusing costs nothing in use.
+   - **Only regular files, directories and symlinks in the grants, and no hard link out of them:** before each spawn main walks all of the service's grants, with `lstat` and following no link, and refuses them if they hold anything else.
+     - **A hard link out of the grants** has the grants' path but another file's data, and Landlock and Seatbelt authorize an open by its path.
+       - **The count:** main counts each file's names inside the grants, by device and inode, across all of the service's grants, each directory once however they overlap. It refuses a file with more names (`st_nlink`) than that count.
+       - **Two names both inside pass.** libgit2 installs a loose object with `link`, then removes its temporary name with `unlink`, and `freedom-radicled`'s policy allows that (`refer`). A kill between the two calls leaves both names in the home, and the next spawn must still pass.
+     - **A special file** that is already there would otherwise be a channel outside the grant: a FIFO, a socket, a character or block device, or anything else that isn't a regular file, directory or symlink. Its other end could be held by an outside process. Landlock's and Seatbelt's rules refuse making one (`make_fifo`, `make_sock`, `make_char`, `make_block`), not opening one that is there.
+     - **Symlinks** aren't followed: the kernel resolves each at its open, against the rules.
+     - **Bounded:** the walk reads each directory one entry at a time, holding at most one name, and closes it however it ends. It stops at 100,000 entries or 32 levels, and refuses past either. It refuses an entry it can't read too.
+     - **The race model:** the check runs at spawn.
+       - The confined service can't make a link to a file outside its grant: Landlock needs rights on the source (`refer` from ABI 2; before it, no link crosses directories) and `make_reg` on the destination, and Seatbelt allows `file-link` only inside the grant.
+       - A link made later by another process running as the same user is outside the boundary, since that process could read the data directly.
+       - Bind mounts are out of scope.
+     - **Radicle:** its grant check, which comes with its browser integration, applies the same rules: no hard link and no special file. It must also show that git's local-clone hard links don't occur inside its home.
+   - **Radicle's part comes later:** main checks the IPFS grant first; the Radicle home's check, and `--network` for `freedom-radicled`, come with that service's integration in the browser.
 
 **Later:**
 - a seccomp allowlist, once the release builds' syscalls are measured, as a decision of its own;
@@ -499,6 +525,7 @@ Through the binary, in CI's job for each OS:
     - with no `dns` source, `confinement` reports `files_only`;
   - **policy changes:** `direct` → `socks5` → `direct`, and Arti's port P → Q. Each runs in a new generation with the new `--network`; the old generation's process has exited; and a private instance, recreated after each change, gets the new rules;
   - **NAT64 discovery:** a fake resolver on a loopback address, listed in a fixture resolver file, sees one AAAA query for `ipv4only.arpa` per refresh. From `freedom-ipfsd` it sees no other DNS. `freedom-radicled`'s ordinary lookups use the system resolver in `direct` mode (0008), so for it the check is that discovery sends nothing else.
+  - **NAT64's named zones,** confined with `freedom-ipfsd`'s `direct` policy: `fe80::1%lo` is looked up through `SIOCGIFINDEX`, a numeric zone needs no lookup, and an unknown name stays unaskable. Without the `ioctl` rule, the control, the named zone is unaskable, and so it is under the `socks5` policy, which has no rule;
 - **Reporting:**
   - `hello` reports the mechanism and each property's status;
   - where CI's kernel offers Landlock, the test requires the ABI it offers, so a silent downgrade fails CI.
@@ -508,8 +535,19 @@ Through the binary, in CI's job for each OS:
   - a forced invalid rule gives exit 77, and main doesn't restart the service;
   - an invalid first seccomp program, on a kernel that takes filters, gives exit 77, never `blocked`.
 - **Main:**
-  - the default directories pass: `<userData>/ipfs-data/freedom-ipfs`, and the Radicle homes `<appRoot>/R/<slot>` and `<userData>/radicle-data`;
-  - a grant equal to, inside, or containing the identity directory, the lock directory or another component's directory is refused, through overrides (`FREEDOM_IPFS_DATA`, `FREEDOM_RADICLE_DATA`), a symlink alias and, on macOS and Windows, a case alias.
+  - the default directories pass: `<userData>/ipfs-data/freedom-ipfs`, and the Radicle homes `<appRoot>/R/<slot>` and `<userData>/radicle-data`, for a named profile and for the default one;
+  - a grant equal to, inside, or containing the identity directory, the lock directory or another component's directory is refused, through overrides (`FREEDOM_IPFS_DATA`, `FREEDOM_RADICLE_DATA`), a symlink alias and, on macOS and Windows, a case alias;
+  - so is one inside another profile's Radicle home, packaged (`<appRoot>/R/<slot>`) and in a development build (`<parent of appRoot>/R/<checkout>/<slot>`), or inside the default profile's browser storage (`<appRoot>/Local Storage`), present or not yet created, and through their aliases;
+  - this profile's default IPFS directory as a symlink into another profile's directory, or into the default profile's storage, exempts nothing there. A service whose default directory resolves into a protected root is refused, even when its grant is elsewhere;
+  - a grant that holds, or lies inside, a directory whose name begins with two dots (`..vault`) is refused;
+  - a `--profile-dir` profile's and a test profile's browser storage are refused, and their IPFS directories pass;
+  - a grant holding a hard link to the vault is refused, as is one holding an entry that can't be read, or more entries or levels than the walk's bounds. A grant as the service leaves it passes;
+  - two names both inside the grants pass, across two grants of one service too, including what libgit2 leaves when it is killed between its `link` and its `unlink`. A file with a name outside them is refused, however many names it has inside, and a grant inside another is walked once;
+  - on a case-insensitive volume, an identity override under `Σ` and a grant under `ς`, neither existing yet, are refused. The ASCII control, `S` and `s`, is refused as the identity directory it aliases;
+  - a confined service can't make a hard link to a file outside its grant;
+  - a FIFO or a socket already in the grant is refused, as is a protected root that is a symlink to a name inside the grant that doesn't exist yet, or a symlink that loops;
+  - the check runs before every spawn: a crash's restart, a new policy's process and a start that waited for Tor each run it once, and a refusal there spawns nothing;
+  - the walk with a bound of 1 reads one name, and closes the directory.
 - **D5,** the import process:
   - a working copy outside the home; a linked worktree; a separate git directory; alternates; a symlink out of the source;
   - a source that contains a protected root: refused;

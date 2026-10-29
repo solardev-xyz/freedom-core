@@ -151,6 +151,48 @@ publish job that runs no repository code.
 4. **Pin it in freedom-browser**, as for the core: the tag, plus the SHA-256
    of the release's `SHA256SUMS`. The fetch script for the second asset is
    0007's step 6.
+5. **Confinement, before shipping** (design 0010, Tests, *Before shipping*).
+   CI runs one recent kernel per architecture, so it can't show the oldest
+   kernels or the missing-right cases. Run these by hand on the release
+   binaries, and note each result in the release's PR:
+   - **The Linux kernels,** one per Landlock ABI the report distinguishes,
+     on x86-64 and on AArch64 where a machine is at hand:
+     - without Landlock (before 5.13, or Landlock off at boot through
+       `lsm=`): `files` is `unavailable` and seccomp still holds;
+     - before 5.11: no `CLOSE_RANGE_CLOEXEC`, so an inherited descriptor
+       takes the entry's `fcntl` fallback, and still exactly one re-exec;
+     - ABI 1 (5.13), 2 (5.19) and 3 (6.2): `partial`, with the gaps named;
+     - ABI 4 (6.7): `socks5` refuses TCP to any port but the proxy's;
+     - ABI 6 (6.12) and later: `ipc` `enforced`;
+     - in a container whose seccomp filter refuses Landlock's calls:
+       `blocked`, and the service runs.
+   - **The release runtime:**
+     - glibc 2.25 (the oldest the browser runs on), another before 2.34, and
+       a current one;
+     - each with a first lookup after confinement and none before it, with
+       and without `resolve` and `mdns4_minimal` in `nsswitch.conf`;
+     - `confinement`'s `resolution` matches what resolves.
+   - **The network:** `socks5` mode through Arti on loopback, and through a
+     SOCKS proxy on the LAN (`--network socks5:<a private address>:<port>`).
+   - **SQLite:** the persistent process's store under the release policy:
+     its journal and WAL checkpointed, and a statement that spills past the
+     page cache completed in memory (`tests/store_confined.rs` shows the
+     sort; repeat it with a full store).
+   - **The packaged app,** started each way users start it (the desktop
+     entry, a terminal, each Linux package format, macOS's Finder and Dock).
+     The services' logs show the entry's re-exec ("re-executed once at
+     entry") seldom happens. A descriptor the app inherited without
+     close-on-exec reaches the services on Linux, and each start re-executes
+     once.
+   - **Measured:** cold start to `ipfs.hello`, IPFS over direct TCP and QUIC,
+     and `socks5` reconnects to Arti, all confined.
+   - **macOS and Windows** follow with their confinement (0010's Seatbelt
+     profile and job object); until then their reports say `unavailable`.
+
+   `freedom-radicled`'s first release (`radicled-v*`) runs the same list,
+   with libgit2's writes in place of SQLite's (a repository created, loose
+   objects and packs written, an existing object written again), and
+   Radicle's fetch, import and COB writes measured.
 
 Failed runs, immutable releases and the tag ruleset work as for the core
 (above). Verify a download's provenance with:

@@ -75,6 +75,12 @@ pub struct Policy {
     /// [`Invalid::Descriptor`], whatever its type. Empty for the ephemeral
     /// IPFS process. Unix descriptor numbers; unused on Windows.
     pub descriptors: Vec<i32>,
+    /// Whether the service looks interfaces up by name (`SIOCGIFINDEX`, the
+    /// one `ioctl` this adds to the allowlist): NAT64 discovery's link-local
+    /// resolvers with a named zone, such as `fe80::1%eth0` (design 0010).
+    /// Sysfs's `/sys/class/net/<name>` resolves into `/sys/devices`, far
+    /// more than a grant should cover, so no grant does it.
+    pub interface_index: bool,
 }
 
 /// The network policy, fixed for the process's life (0007's `--network`).
@@ -317,6 +323,37 @@ fn unconfined(why: &str) -> Report {
         gaps: Vec::new(),
         reasons,
         resolution: None,
+    }
+}
+
+/// The read-only grant for a resolver file the service reads itself, such
+/// as NAT64 discovery's (design 0010, "The recommendation", step 2): on
+/// Linux, the file alone when it sits in `/etc` itself, or else the directory
+/// that holds it after its symlinks are followed, so a replacement there
+/// stays readable. `None` if it doesn't exist, or elsewhere.
+pub fn resolver_grant(file: &Path) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        resolver::grant_in(file, Path::new(resolver::ETC))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = file;
+        None
+    }
+}
+
+/// [`resolver_grant`], with `etc` standing for `/etc`: a test seam.
+#[doc(hidden)]
+pub fn resolver_grant_in(file: &Path, etc: &Path) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        resolver::grant_in(file, etc)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (file, etc);
+        None
     }
 }
 

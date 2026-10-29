@@ -26,18 +26,32 @@ pub(crate) fn is_base58(byte: u8) -> bool {
 /// bound) decodes in milliseconds rather than the seconds a byte-at-a-time
 /// big number takes.
 pub(crate) fn base58_decode(text: &str) -> Option<Vec<u8>> {
-    let bytes = text.as_bytes();
-    if bytes.is_empty() {
+    if text.is_empty() {
         return None;
     }
+    decode_big(text, base58_digit, 58, 10, b'1')
+}
+
+/// A big number's digits in `base` to its big-endian bytes, with a zero
+/// byte per leading `zero` digit; `None` for an empty string or a digit
+/// `digit` refuses. `group` digits at a time go into 64-bit limbs
+/// (`base^group` must fit), so a long text decodes in milliseconds.
+fn decode_big(
+    text: &str,
+    digit: impl Fn(u8) -> Option<u64>,
+    base: u64,
+    group: usize,
+    zero: u8,
+) -> Option<Vec<u8>> {
+    let bytes = text.as_bytes();
     // Little-endian base-2^64 limbs.
     let mut limbs: Vec<u64> = Vec::new();
-    for group in bytes.chunks(10) {
+    for chunk in bytes.chunks(group) {
         let mut multiplier: u64 = 1;
         let mut addend: u64 = 0;
-        for &byte in group {
-            addend = addend * 58 + base58_digit(byte)?;
-            multiplier *= 58;
+        for &byte in chunk {
+            addend = addend * base + digit(byte)?;
+            multiplier *= base;
         }
         let mut carry = u128::from(addend);
         for limb in &mut limbs {
@@ -56,10 +70,46 @@ pub(crate) fn base58_decode(text: &str) -> Option<Vec<u8>> {
         .collect();
     let significant = out.iter().position(|&b| b != 0).unwrap_or(out.len());
     out.drain(..significant);
-    let leading_ones = bytes.iter().take_while(|&&b| b == b'1').count();
-    let mut result = vec![0u8; leading_ones];
+    let leading = bytes.iter().take_while(|&&b| b == zero).count();
+    let mut result = vec![0u8; leading];
     result.extend_from_slice(&out);
     Some(result)
+}
+
+/// Lowercase base36 (`0`–`9`, `a`–`z`), as the verify-plan generator's
+/// `baseDecode` reads it: a `0` per leading zero byte; `None` for another
+/// character. The empty string is no bytes.
+pub(crate) fn base36_decode(text: &str) -> Option<Vec<u8>> {
+    if text.is_empty() {
+        return Some(Vec::new());
+    }
+    let digit = |b: u8| {
+        BASE36
+            .iter()
+            .position(|&c| c == b)
+            .and_then(|d| u64::try_from(d).ok())
+    };
+    decode_big(text, digit, 36, 12, b'0')
+}
+
+/// Lowercase RFC 4648 base32 without padding, as the generator's
+/// `base32Decode` reads it: leftover bits are dropped unchecked; `None`
+/// for another character.
+pub(crate) fn base32_decode_lenient(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() * 5 / 8);
+    let mut value: u32 = 0;
+    let mut bits = 0u32;
+    for b in text.bytes() {
+        let v = BASE32.iter().position(|&c| c == b)? as u32;
+        value = (value << 5) | v;
+        bits += 5;
+        if bits >= 8 {
+            out.push((value >> (bits - 8)) as u8);
+            bits -= 8;
+            value &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
 }
 
 /// RFC 4648 base32, lowercase, no padding.

@@ -1,23 +1,28 @@
 //! The command line (design 0007, "Spawn" and "Lifetime lock").
 //!
 //! ```text
-//! freedom-ipfsd serve     --data-dir <dir> --lock-dir <dir> [--parent-pid <pid>]
-//! freedom-ipfsd serve     --ephemeral [--parent-pid <pid>]
+//! freedom-ipfsd serve     --data-dir <dir> --lock-dir <dir> --network <policy> [--parent-pid <pid>]
+//! freedom-ipfsd serve     --ephemeral --network <policy> [--parent-pid <pid>]
 //! freedom-ipfsd hold-lock --data-dir <dir> --lock-dir <dir>
 //! ```
 //!
 //! Each flag appears at most once. `--ephemeral` takes no data directory,
-//! no lock directory and no lock.
+//! no lock directory and no lock. `--network` is `direct` or
+//! `socks5:<ip>:<port>` (`fc_service::network`): every `serve` takes it, and
+//! `hold-lock` none.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-pub const USAGE: &str = "usage: freedom-ipfsd serve (--data-dir <dir> --lock-dir <dir> | --ephemeral) [--parent-pid <pid>] | freedom-ipfsd hold-lock --data-dir <dir> --lock-dir <dir>";
+use fc_service::network::NetworkPolicy;
+
+pub const USAGE: &str = "usage: freedom-ipfsd serve (--data-dir <dir> --lock-dir <dir> | --ephemeral) --network (direct | socks5:<ip>:<port>) [--parent-pid <pid>] | freedom-ipfsd hold-lock --data-dir <dir> --lock-dir <dir>";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Serve {
         mode: Mode,
+        network: NetworkPolicy,
         parent_pid: Option<u32>,
     },
     HoldLock {
@@ -46,6 +51,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Option<Command> {
     let mut data_dir = None;
     let mut lock_dir = None;
     let mut parent_pid = None;
+    let mut network = None;
     let mut ephemeral = false;
     while let Some(flag) = args.next() {
         match flag.to_str()? {
@@ -54,20 +60,25 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Option<Command> {
             "--parent-pid" if parent_pid.is_none() => {
                 parent_pid = Some(args.next()?.to_str()?.parse::<u32>().ok()?);
             }
+            "--network" if network.is_none() => {
+                network = Some(NetworkPolicy::parse(args.next()?.to_str()?)?);
+            }
             "--ephemeral" if !ephemeral => ephemeral = true,
             _ => return None,
         }
     }
-    match (command.as_str(), ephemeral, data_dir, lock_dir) {
-        ("serve", false, Some(data_dir), Some(lock_dir)) => Some(Command::Serve {
+    match (command.as_str(), ephemeral, data_dir, lock_dir, network) {
+        ("serve", false, Some(data_dir), Some(lock_dir), Some(network)) => Some(Command::Serve {
             mode: Mode::Persistent { data_dir, lock_dir },
+            network,
             parent_pid,
         }),
-        ("serve", true, None, None) => Some(Command::Serve {
+        ("serve", true, None, None, Some(network)) => Some(Command::Serve {
             mode: Mode::Ephemeral,
+            network,
             parent_pid,
         }),
-        ("hold-lock", false, Some(data_dir), Some(lock_dir)) if parent_pid.is_none() => {
+        ("hold-lock", false, Some(data_dir), Some(lock_dir), None) if parent_pid.is_none() => {
             Some(Command::HoldLock { data_dir, lock_dir })
         }
         _ => None,
@@ -91,6 +102,8 @@ mod tests {
                 "d",
                 "--lock-dir",
                 "l",
+                "--network",
+                "direct",
                 "--parent-pid",
                 "7"
             ]),
@@ -99,23 +112,43 @@ mod tests {
                     data_dir: "d".into(),
                     lock_dir: "l".into()
                 },
+                network: NetworkPolicy::Direct,
                 parent_pid: Some(7),
             })
         );
         assert_eq!(
-            parse_str(&["serve", "--ephemeral", "--parent-pid", "7"]),
+            parse_str(&[
+                "serve",
+                "--ephemeral",
+                "--network",
+                "socks5:127.0.0.1:9150",
+                "--parent-pid",
+                "7"
+            ]),
             Some(Command::Serve {
                 mode: Mode::Ephemeral,
+                network: NetworkPolicy::Socks5 {
+                    proxy: "127.0.0.1:9150".parse().unwrap()
+                },
                 parent_pid: Some(7),
             })
         );
         assert_eq!(
-            parse_str(&["serve", "--lock-dir", "l", "--data-dir", "d"]),
+            parse_str(&[
+                "serve",
+                "--network",
+                "direct",
+                "--lock-dir",
+                "l",
+                "--data-dir",
+                "d"
+            ]),
             Some(Command::Serve {
                 mode: Mode::Persistent {
                     data_dir: "d".into(),
                     lock_dir: "l".into()
                 },
+                network: NetworkPolicy::Direct,
                 parent_pid: None,
             })
         );
@@ -133,6 +166,31 @@ mod tests {
         for args in [
             &[][..],
             &["serve"],
+            // `--network` is required, once, and in its forms.
+            &["serve", "--data-dir", "d", "--lock-dir", "l"],
+            &["serve", "--ephemeral"],
+            &["serve", "--ephemeral", "--network"],
+            &["serve", "--ephemeral", "--network", "tor"],
+            &["serve", "--ephemeral", "--network", "socks5:localhost:9150"],
+            &["serve", "--ephemeral", "--network", "socks5:::1:9150"],
+            &["serve", "--ephemeral", "--network", "socks5:127.0.0.1:0"],
+            &[
+                "serve",
+                "--ephemeral",
+                "--network",
+                "direct",
+                "--network",
+                "direct",
+            ],
+            &[
+                "hold-lock",
+                "--data-dir",
+                "d",
+                "--lock-dir",
+                "l",
+                "--network",
+                "direct",
+            ],
             &["serve", "--data-dir", "d"],
             &["serve", "--lock-dir", "l"],
             &["serve", "--ephemeral", "--data-dir", "d", "--lock-dir", "l"],

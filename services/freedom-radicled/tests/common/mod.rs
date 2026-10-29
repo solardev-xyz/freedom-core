@@ -97,15 +97,21 @@ impl Drop for Radicled {
 }
 
 impl Radicled {
-    /// `serve` for `dirs`, with `extra` in its environment.
+    /// `serve` for `dirs`, `direct`, with `extra` in its environment.
     pub fn serve(dirs: &Dirs, extra: &[(&str, &str)]) -> Radicled {
+        Radicled::serve_on(dirs, "direct", extra)
+    }
+
+    /// `serve` for `dirs` under `network` (`--network`).
+    pub fn serve_on(dirs: &Dirs, network: &str, extra: &[(&str, &str)]) -> Radicled {
         let mut command = Command::new(BIN);
         command
             .arg("serve")
             .arg("--home")
             .arg(&dirs.home)
             .arg("--lock-dir")
-            .arg(&dirs.locks);
+            .arg(&dirs.locks)
+            .args(["--network", network]);
         environment(&mut command, dirs, extra);
         Radicled::spawn(command)
     }

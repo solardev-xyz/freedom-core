@@ -15,14 +15,44 @@ use serde_json::json;
 
 #[test]
 fn usage_errors_exit_64() {
-    let cases: [&[&str]; 7] = [
+    let cases: [&[&str]; 15] = [
         &[],
         &["serve"],
         &["serve", "--data-dir", "d"],
         &["serve", "--ephemeral", "--data-dir", "d", "--lock-dir", "l"],
         &["hold-lock", "--ephemeral"],
-        &["serve", "--ephemeral", "--parent-pid", "x"],
+        &[
+            "serve",
+            "--ephemeral",
+            "--network",
+            "direct",
+            "--parent-pid",
+            "x",
+        ],
         &["frobnicate", "--data-dir", "d", "--lock-dir", "l"],
+        // `--network`: required, and each form it refuses (0007, "Spawn"):
+        // a name, a zone, shorthand, IPv6 without brackets, port 0.
+        &["serve", "--ephemeral"],
+        &["serve", "--ephemeral", "--network", "socks5:localhost:9150"],
+        &[
+            "serve",
+            "--ephemeral",
+            "--network",
+            "socks5:[fe80::1%eth0]:9150",
+        ],
+        &["serve", "--ephemeral", "--network", "socks5:127.1:9150"],
+        &["serve", "--ephemeral", "--network", "socks5:::1:9150"],
+        &["serve", "--ephemeral", "--network", "socks5:127.0.0.1:0"],
+        &["serve", "--ephemeral", "--network", "tor"],
+        &[
+            "hold-lock",
+            "--data-dir",
+            "d",
+            "--lock-dir",
+            "l",
+            "--network",
+            "direct",
+        ],
     ];
     for args in cases {
         assert_eq!(status(args), Some(64), "{args:?}");
@@ -164,7 +194,9 @@ fn the_parent_s_death_ends_the_process() {
     let mut command = std::process::Command::new("sh");
     command
         .arg("-c")
-        .arg(r#"exec 3<&0; "$0" serve --ephemeral --parent-pid $$ <&3 3<&- & wait"#)
+        .arg(
+            r#"exec 3<&0; "$0" serve --ephemeral --network direct --parent-pid $$ <&3 3<&- & wait"#,
+        )
         .arg(BIN);
     let mut ipfsd = Ipfsd::spawn(command, &[]);
     ipfsd.hello();
@@ -182,7 +214,14 @@ fn the_parent_s_death_ends_the_process() {
 fn a_parent_already_gone_exits_at_once() {
     // PID 1 is never the test's child's parent.
     let mut command = std::process::Command::new(BIN);
-    command.args(["serve", "--ephemeral", "--parent-pid", "1"]);
+    command.args([
+        "serve",
+        "--ephemeral",
+        "--network",
+        "direct",
+        "--parent-pid",
+        "1",
+    ]);
     let mut ipfsd = Ipfsd::spawn(command, &[]);
     assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
 }
