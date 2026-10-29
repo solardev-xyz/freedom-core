@@ -20,10 +20,29 @@ fn varint(buf: &[u8], pos: &mut usize) -> Option<u64> {
 
 /// A CAR v1's blocks, in order, after its header. `None` when the bytes
 /// aren't a CAR the generator can read; a trailing partial section is
-/// reported by `complete: false`.
+/// reported by `complete: false`. `header` is the bytes before the first
+/// section (its length varint included), and `trailing` those after the
+/// last whole section, so the wire bytes can be rebuilt.
 pub struct Car {
+    pub header: Vec<u8>,
     pub blocks: Vec<(Cid, Vec<u8>)>,
+    pub trailing: Vec<u8>,
     pub complete: bool,
+}
+
+/// A section as a CAR writes it: the length varint, the CID, the block.
+pub fn section(cid: &Cid, block: &[u8]) -> Vec<u8> {
+    let c = cid.to_bytes();
+    let mut len = c.len() + block.len();
+    let mut out = Vec::with_capacity(len + 10);
+    while len >= 0x80 {
+        out.push((len as u8) | 0x80);
+        len >>= 7;
+    }
+    out.push(len as u8);
+    out.extend_from_slice(&c);
+    out.extend_from_slice(block);
+    out
 }
 
 pub fn read(bytes: &[u8]) -> Option<Car> {
@@ -33,36 +52,37 @@ pub fn read(bytes: &[u8]) -> Option<Car> {
     if pos > bytes.len() {
         return None;
     }
+    let header = bytes[..pos].to_vec();
     let mut blocks = Vec::new();
+    let partial = |blocks, start: usize| {
+        Some(Car {
+            header: header.clone(),
+            blocks,
+            trailing: bytes[start..].to_vec(),
+            complete: false,
+        })
+    };
     while pos < bytes.len() {
         let start = pos;
         let Some(len) = varint(bytes, &mut pos).and_then(|l| usize::try_from(l).ok()) else {
-            return Some(Car {
-                blocks,
-                complete: false,
-            });
+            return partial(blocks, start);
         };
         let Some(end) = pos.checked_add(len).filter(|&e| e <= bytes.len()) else {
-            let _ = start;
-            return Some(Car {
-                blocks,
-                complete: false,
-            });
+            return partial(blocks, start);
         };
-        let section = &bytes[pos..end];
-        let mut cur = Cursor::new(section);
+        let body = &bytes[pos..end];
+        let mut cur = Cursor::new(body);
         let Ok(cid) = Cid::read_bytes(&mut cur) else {
-            return Some(Car {
-                blocks,
-                complete: false,
-            });
+            return partial(blocks, start);
         };
         let at = usize::try_from(cur.position()).ok()?;
-        blocks.push((cid, section[at..].to_vec()));
+        blocks.push((cid, body[at..].to_vec()));
         pos = end;
     }
     Some(Car {
+        header,
         blocks,
+        trailing: Vec::new(),
         complete: true,
     })
 }
