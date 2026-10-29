@@ -377,15 +377,18 @@ fn sysctls(p: &Paths) {
         "hw.optional by prefix",
         probe::sysctl_name(c"hw.optional.floatingpoint").is_ok(),
     );
-    check(
-        "another process's arguments and environment refused",
-        probe::procargs(p.target_pid).is_err(),
-    );
+    // A known gap (design 0010, "macOS"): Seatbelt doesn't mediate
+    // KERN_PROCARGS2, so another same-user process's arguments and
+    // environment stay readable by pid. Recorded, so a macOS that closes
+    // it shows here.
     let parent = rustix::process::getppid().map_or(1, |pid| pid.as_raw_nonzero().get());
-    check(
-        "the parent's arguments and environment refused",
-        probe::procargs(parent).is_err(),
-    );
+    for (who, pid) in [("another process", p.target_pid), ("the parent", parent)] {
+        let readable = probe::procargs(pid).is_ok();
+        println!(
+            "GAP procargs2 {who}: {}",
+            if readable { "readable" } else { "refused" }
+        );
+    }
     check("the process list refused", probe::all_processes().is_err());
     check(
         "kern.proc by name refused",
@@ -758,6 +761,12 @@ fn parent() {
     failures.extend(passed("reexec", &reexec));
 
     // The Mach rights held at the confinement point, for the record.
+    // The KERN_PROCARGS2 gap, as this macOS has it.
+    let sysctl = run(&world, "sysctl");
+    for line in lines(&sysctl).lines().filter(|l| l.starts_with("GAP ")) {
+        println!("confine: {line}");
+    }
+
     let ports = run(&world, "ports");
     if let Some(line) = lines(&ports).lines().find(|l| l.starts_with("PORTS ")) {
         println!("confine: at the confinement point: {line}");
