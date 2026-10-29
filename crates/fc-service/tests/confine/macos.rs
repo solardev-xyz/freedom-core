@@ -222,7 +222,7 @@ fn files(p: &Paths) {
     );
     check(
         "a directory inside",
-        std::fs::create_dir(p.data.join("dir")).is_ok(),
+        std::fs::create_dir(p.data.join(format!("dir-{}", std::process::id()))).is_ok(),
     );
     check(
         "rename inside",
@@ -511,7 +511,11 @@ fn parent() {
                 format!("{case}: {property} {report}"),
             );
         }
-        let network = if case == "direct" { "none" } else { "enforced" };
+        let network = if matches!(case, "socks5" | "lan" | "offline") {
+            "enforced"
+        } else {
+            "none"
+        };
         expect(
             &mut failures,
             report["network"] == network,

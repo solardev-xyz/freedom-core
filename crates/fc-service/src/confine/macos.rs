@@ -290,43 +290,54 @@ const SOME_SERVICE: &std::ffi::CStr = c"com.apple.pasteboard.1";
 fn derive(policy: &Policy, grants: &Grants) -> Report {
     let mut gaps = Vec::new();
     let mut reasons = BTreeMap::new();
-    let mut status =
-        |property: &'static str, denied: &[Option<bool>], gap: &'static str| match denied {
-            d if d.iter().all(|answer| *answer == Some(false)) => Status::Enforced,
-            d if d.contains(&Some(true)) => {
-                gaps.push(gap);
-                Status::Partial
-            }
-            _ => {
-                reasons.insert(property, "the sandbox's own check didn't answer".to_owned());
-                gaps.push(gap);
-                Status::Partial
-            }
-        };
+    // `enforced` where every check answers a denial; `partial` where one
+    // allows, or none answers, with what the sandbox returned.
+    let mut status = |property: &'static str, answers: &[Result<bool, i32>]| {
+        if answers.iter().all(|answer| *answer == Ok(false)) {
+            return Status::Enforced;
+        }
+        gaps.push(property);
+        if !answers.contains(&Ok(true)) {
+            let codes: Vec<String> = answers
+                .iter()
+                .filter_map(|answer| answer.err().map(|code| code.to_string()))
+                .collect();
+            reasons.insert(
+                property,
+                format!(
+                    "the sandbox's own check didn't answer ({})",
+                    codes.join(", ")
+                ),
+            );
+        }
+        Status::Partial
+    };
     let mut file_checks = vec![
-        sys::allows(c"file-read-data", Filter::Path, OUTSIDE_READ),
-        sys::allows(c"file-write-data", Filter::Path, OUTSIDE_WRITE),
+        sys::check(c"file-read-data", Filter::Path(OUTSIDE_READ)),
+        sys::check(c"file-write-data", Filter::Path(OUTSIDE_WRITE)),
     ];
     // Metadata stays unchangeable inside the read-write grant too.
-    for dir in &grants.read_write {
-        if let Ok(dir) = CString::new(std::os::unix::ffi::OsStrExt::as_bytes(dir.as_os_str())) {
-            file_checks.push(sys::allows(c"file-write-mode", Filter::Path, &dir));
-        }
+    let dirs: Vec<CString> = grants
+        .read_write
+        .iter()
+        .filter_map(|dir| {
+            CString::new(std::os::unix::ffi::OsStrExt::as_bytes(dir.as_os_str())).ok()
+        })
+        .collect();
+    for dir in &dirs {
+        file_checks.push(sys::check(c"file-write-mode", Filter::Path(dir)));
     }
-    let files = status("files", &file_checks, "files");
+    let files = status("files", &file_checks);
     let exec = status(
         "exec",
-        &[sys::allows(c"process-exec", Filter::Path, SOME_PROGRAM)],
-        "exec",
+        &[
+            sys::check(c"process-fork", Filter::None),
+            sys::check(c"process-exec", Filter::Path(SOME_PROGRAM)),
+        ],
     );
     let ipc = status(
         "ipc",
-        &[sys::allows(
-            c"mach-lookup",
-            Filter::GlobalName,
-            SOME_SERVICE,
-        )],
-        "ipc",
+        &[sys::check(c"mach-lookup", Filter::GlobalName(SOME_SERVICE))],
     );
     // The network rule names the proxy's port (and loopback host) alone:
     // the profile holds no other, and the sandbox can't be asked about an

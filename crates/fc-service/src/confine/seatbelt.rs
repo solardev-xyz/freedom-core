@@ -90,7 +90,8 @@ pub fn profile(network: Network, refer: bool, grants: &Grants) -> Result<Profile
             .to_str()
             .ok_or("a grant's path isn't UTF-8")?
             .to_owned();
-        if value.contains('\0') || !path.is_absolute() {
+        // macOS paths, checked as text so the tests run on every OS.
+        if value.contains('\0') || !value.starts_with('/') {
             return Err("a grant's path is relative or holds a NUL".into());
         }
         let name = format!(

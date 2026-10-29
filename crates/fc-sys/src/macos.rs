@@ -40,22 +40,15 @@ unsafe extern "C" {
 /// `sandbox_filter_type`'s values: no value, a path, a global (Mach) name.
 const FILTER_NONE: c_int = 0;
 
-/// What a [`allows`] check names.
+/// What a [`check`] names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Filter {
+pub enum Filter<'a> {
+    /// No value: the operation alone, such as `process-fork`.
+    None,
     /// A file system path.
-    Path,
+    Path(&'a CStr),
     /// A Mach service's global name.
-    GlobalName,
-}
-
-impl Filter {
-    fn raw(self) -> c_int {
-        match self {
-            Filter::Path => 1,
-            Filter::GlobalName => 2,
-        }
-    }
+    GlobalName(&'a CStr),
 }
 
 /// This process's id, as libproc and Seatbelt take it.
@@ -174,21 +167,43 @@ fn no_report() -> c_int {
 }
 
 /// Whether this process's sandbox allows `operation` (an SBPL operation,
-/// such as `file-read-data`) on `value` (`sandbox_check`), without logging
-/// a denial: `Some(true)` or `Some(false)`, or `None` if the check failed.
-/// `confine` derives each status from these, once the profile is applied.
+/// such as `file-read-data`) on what `filter` names (`sandbox_check`),
+/// without logging a denial: `Ok(true)` or `Ok(false)`, or `Err` with what
+/// the call returned when it answered neither. `confine` derives each
+/// status from these, once the profile is applied.
 #[allow(unsafe_code)]
-pub fn allows(operation: &CStr, filter: Filter, value: &CStr) -> Option<bool> {
-    let filter_type = filter.raw() | no_report();
-    // SAFETY: `operation` and `value` are NUL-terminated strings borrowed
-    // for the call, and a filter type that takes a value takes exactly one
-    // pointer to such a string as its variadic argument.
-    let result =
-        unsafe { sandbox_check(own_pid(), operation.as_ptr(), filter_type, value.as_ptr()) };
+pub fn check(operation: &CStr, filter: Filter<'_>) -> Result<bool, i32> {
+    let result = match filter {
+        Filter::None => {
+            // SAFETY: `operation` is a NUL-terminated string borrowed for
+            // the call, and the filter type that takes no value takes no
+            // variadic argument.
+            unsafe { sandbox_check(own_pid(), operation.as_ptr(), FILTER_NONE | no_report()) }
+        }
+        Filter::Path(value) | Filter::GlobalName(value) => {
+            let filter_type = if matches!(filter, Filter::Path(_)) {
+                1
+            } else {
+                2
+            };
+            // SAFETY: `operation` and `value` are NUL-terminated strings
+            // borrowed for the call, and a filter type that takes a value
+            // takes exactly one pointer to such a string as its variadic
+            // argument.
+            unsafe {
+                sandbox_check(
+                    own_pid(),
+                    operation.as_ptr(),
+                    filter_type | no_report(),
+                    value.as_ptr(),
+                )
+            }
+        }
+    };
     match result {
-        0 => Some(true),
-        1 => Some(false),
-        _ => None,
+        0 => Ok(true),
+        1 => Ok(false),
+        other => Err(other),
     }
 }
 
@@ -326,8 +341,8 @@ mod tests {
         assert!(!sandboxed());
         // Unconfined, a check allows everything.
         assert_eq!(
-            allows(c"file-read-data", Filter::Path, c"/usr/lib"),
-            Some(true)
+            check(c"file-read-data", Filter::Path(c"/usr/lib")),
+            Ok(true)
         );
     }
 }
