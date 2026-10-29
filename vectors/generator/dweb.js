@@ -1719,6 +1719,18 @@ function ipnsNameKind(name) {
   return digest[1] === 1 ? 'ed25519' : 'other_key';
 }
 
+/**
+ * A verify plan's IPFS root, canonical: a CIDv0 (an ENS contenthash can
+ * decode to one) as the CIDv1 base32 the reference's own cidV0ToV1Base32
+ * makes, and base32 in either case lowercased. Both are lossless. Anything
+ * else stays as it is, and validation refuses it at `root`.
+ */
+function canonicalCid(ref, target) {
+  const v1 = ref.cids.cidV0ToV1Base32(target);
+  if (v1) return v1;
+  return /^b[a-z2-7]+$/i.test(target) ? target.toLowerCase() : target;
+}
+
 /** The verify plan for a fetch plan, or why the content stays unverified. */
 function verifyPlanOf(fetch, request, ref, jsRequest) {
   const node = fetch.node;
@@ -1734,7 +1746,7 @@ function verifyPlanOf(fetch, request, ref, jsRequest) {
     if (target.length === 128) unverified = 'encrypted';
     else root = { swarm: target };
   } else if (namespace === 'ipfs') {
-    root = { ipfs: target };
+    root = { ipfs: canonicalCid(ref, target) };
   } else {
     const kind = ipnsNameKind(target);
     if (kind === 'dnslink') unverified = 'dnslink';
@@ -1766,6 +1778,8 @@ const strictError = (cause) => ({ error: { status: 403, code: 403, message: STRI
 
 async function buildVerifyRequests(ref, table) {
   const out = [];
+  // Each request's plan today, by id, for the downgrade cases.
+  const todays = new Map();
   for (const c of [...bzzCases(), ...ipfsCases()]) {
     // Plans 0006 refuses (plan-paths, plan-headers) stay with dweb.json.
     if (c.validation) continue;
@@ -1798,12 +1812,13 @@ async function buildVerifyRequests(ref, table) {
       entry.plan = plan;
       entry.validation = 'valid';
       out.push(entry);
+      todays.set(entry.id, today);
     }
   }
-  return out;
+  return { requests: out, todays };
 }
 
-function verifyValidationCases(requests) {
+function verifyValidationCases(requests, todays) {
   const out = [];
   for (const entry of requests) out.push({ id: `plan-${entry.id}`, source: 'design', request_id: entry.id, expect: entry.validation });
   const find = (id) => {
@@ -1926,20 +1941,26 @@ function verifyValidationCases(requests) {
   mutate('strict-403-any-fixed-message', strictBase, (p) => { p.error.message = STRICT_MESSAGES.dnslink; }, 'valid');
   mutate('strict-403-code', strictBase, (p) => { p.error.code = 502; }, 'error');
   mutate('strict-verify-plan', base, () => {}, 'valid', withRequest(base, (r) => { r.backend.strict = true; }));
+  // Downgrades: today's fetch where the core verifies. A hash host's own
+  // plan is a verify plan, so no fetch target ties to it (0006, #97).
+  const downgrade = (id, from, expect) => out.push({ id, source: 'design', request: from.request, plan: todays.get(from.id), expect });
+  downgrade('downgrade-fetch-bzz-hash-host', base, 'path');
+  downgrade('downgrade-fetch-ipfs-cid-host', ipfsBase, 'path');
+  downgrade('downgrade-fetch-ipns-key-host', ipnsBase, 'path');
   return out;
 }
 
 async function buildVerifyPlans(checkout, meta) {
   const ref = loadReference(checkout);
   const table = tables(ref);
-  const requests = await buildVerifyRequests(ref, table);
+  const { requests, todays } = await buildVerifyRequests(ref, table);
   return {
     meta,
     formats: {
       source: 'design: every plan is 0009\'s, composed from the reference\'s outcome on the external backend (as dweb.json\'s requests are, from the same cases), as 0009\'s Verify plans and Strict mode state; no reference has a verified mode',
       backend: '{ ant | ipfs: mode, up }, as in dweb.json, plus verify: true when verification is on and supported, strict: true when the profile\'s strict mode is on, and unsupported: true for a gateway whose verification is on but which the probe found without raw blocks',
       requests: 'every dweb.json case whose plan 0006 accepts, on its external backend: id (the case\'s, suffixed verify, verify-strict, off-strict, or for IPFS unsupported-strict), from (dweb.json\'s request id), request, resolution, the expected plan, and validation',
-      plan: '{verify: {node, root ({swarm: 64 hex} | {ipfs: CIDv1, base32} | {ipns: a libp2p-key CID}), path (below the root, as the fetch plan sends it), query (the admitted URL\'s, with its ?, or empty), headers (only range for Ant; range and if-none-match for IPFS), retry and timers (the fetch plan\'s), response (the bundled node\'s operations), trust ({name, content: verified})}}; or the fetch plan that stays, unverified; or a redirect or error plan, unchanged; or strict mode\'s {error: {status: 403, code: 403, message}}',
+      plan: '{verify: {node, root ({swarm: 64 hex} | {ipfs: a CIDv1 in lowercase base32, canonical: a CIDv0 converted, base32 lowercased} | {ipns: a libp2p-key CID}), path (below the root, as the fetch plan sends it), query (the admitted URL\'s, with its ?, or empty), headers (only range for Ant; range and if-none-match for IPFS), retry and timers (the fetch plan\'s), response (the bundled node\'s operations), trust ({name, content: verified})}}; or the fetch plan that stays, unverified; or a redirect or error plan, unchanged; or strict mode\'s {error: {status: 403, code: 403, message}}',
       validation: 'validate_plan\'s verdict, valid or the stage that refuses (0009, Verify plans): request_id names a request above, or the case has its own request and plan',
     },
     constants: {
@@ -1948,7 +1969,7 @@ async function buildVerifyPlans(checkout, meta) {
       strict_messages: STRICT_MESSAGES,
     },
     requests,
-    validation: verifyValidationCases(requests),
+    validation: verifyValidationCases(requests, todays),
   };
 }
 

@@ -15,7 +15,7 @@
     "source": "design: every plan is 0009's, composed from the reference's outcome on the external backend (as dweb.json's requests are, from the same cases), as 0009's Verify plans and Strict mode state; no reference has a verified mode",
     "backend": "{ ant | ipfs: mode, up }, as in dweb.json, plus verify: true when verification is on and supported, strict: true when the profile's strict mode is on, and unsupported: true for a gateway whose verification is on but which the probe found without raw blocks",
     "requests": "every dweb.json case whose plan 0006 accepts, on its external backend: id (the case's, suffixed verify, verify-strict, off-strict, or for IPFS unsupported-strict), from (dweb.json's request id), request, resolution, the expected plan, and validation",
-    "plan": "{verify: {node, root ({swarm: 64 hex} | {ipfs: CIDv1, base32} | {ipns: a libp2p-key CID}), path (below the root, as the fetch plan sends it), query (the admitted URL's, with its ?, or empty), headers (only range for Ant; range and if-none-match for IPFS), retry and timers (the fetch plan's), response (the bundled node's operations), trust ({name, content: verified})}}; or the fetch plan that stays, unverified; or a redirect or error plan, unchanged; or strict mode's {error: {status: 403, code: 403, message}}",
+    "plan": "{verify: {node, root ({swarm: 64 hex} | {ipfs: a CIDv1 in lowercase base32, canonical: a CIDv0 converted, base32 lowercased} | {ipns: a libp2p-key CID}), path (below the root, as the fetch plan sends it), query (the admitted URL's, with its ?, or empty), headers (only range for Ant; range and if-none-match for IPFS), retry and timers (the fetch plan's), response (the bundled node's operations), trust ({name, content: verified})}}; or the fetch plan that stays, unverified; or a redirect or error plan, unchanged; or strict mode's {error: {status: 403, code: 403, message}}",
     "validation": "validate_plan's verdict, valid or the stage that refuses (0009, Verify plans): request_id names a request above, or the case has its own request and plan"
   },
   "constants": {
@@ -18022,7 +18022,7 @@
         "verify": {
           "node": "ipfs",
           "root": {
-            "ipfs": "BAFYBEIDON73ZKCRWDB5IAFQTIJXILDOONBWNPV7DYD6EF3QDGADS2JC4SU"
+            "ipfs": "bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su"
           },
           "path": "/",
           "query": "",
@@ -18076,7 +18076,7 @@
         "verify": {
           "node": "ipfs",
           "root": {
-            "ipfs": "BAFYBEIDON73ZKCRWDB5IAFQTIJXILDOONBWNPV7DYD6EF3QDGADS2JC4SU"
+            "ipfs": "bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su"
           },
           "path": "/",
           "query": "",
@@ -20768,7 +20768,7 @@
         "verify": {
           "node": "ipfs",
           "root": {
-            "ipfs": "BAFYBEIDON73ZKCRWDB5IAFQTIJXILDOONBWNPV7DYD6EF3QDGADS2JC4SU"
+            "ipfs": "bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su"
           },
           "path": "/",
           "query": "",
@@ -20822,7 +20822,7 @@
         "verify": {
           "node": "ipfs",
           "root": {
-            "ipfs": "BAFYBEIDON73ZKCRWDB5IAFQTIJXILDOONBWNPV7DYD6EF3QDGADS2JC4SU"
+            "ipfs": "bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su"
           },
           "path": "/",
           "query": "",
@@ -37923,7 +37923,7 @@
         "verify": {
           "node": "ipfs",
           "root": {
-            "ipfs": "QmVmkadKS2uvxyD6YJJzd3Umem6SWV7QxYnL7kbpdWAsPS"
+            "ipfs": "bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su"
           },
           "path": "/",
           "query": "",
@@ -37984,7 +37984,7 @@
         "verify": {
           "node": "ipfs",
           "root": {
-            "ipfs": "QmVmkadKS2uvxyD6YJJzd3Umem6SWV7QxYnL7kbpdWAsPS"
+            "ipfs": "bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su"
           },
           "path": "/",
           "query": "",
@@ -53854,6 +53854,204 @@
         }
       },
       "expect": "valid"
+    },
+    {
+      "id": "downgrade-fetch-bzz-hash-host",
+      "source": "design",
+      "request": {
+        "url": "bzz://c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F#frag",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "external",
+          "up": true,
+          "verify": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b.html?x=1&y=%2F",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "unverified"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "downgrade-fetch-ipfs-cid-host",
+      "source": "design",
+      "request": {
+        "url": "ipfs://bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          ]
+        ],
+        "backend": {
+          "ipfs": "gateway",
+          "up": true,
+          "verify": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/bafybeidon73zkcrwdb5iafqtijxildoonbwnpv7dyd6ef3qdgads2jc4su/file",
+          "headers": [
+            [
+              "accept",
+              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": null,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_decoded_encoding",
+            "strip_page_state",
+            "canonicalize_redirect"
+          ],
+          "trust": {
+            "name": null,
+            "content": "unverified"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "downgrade-fetch-ipns-key-host",
+      "source": "design",
+      "request": {
+        "url": "ipns://k51qzi5uqu5dlvj2baxnqndepeb86cbk3ng7n3i46uzyxzyqj2xjonzllnv0v8/x?y",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "gateway",
+          "up": true,
+          "verify": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipns/k51qzi5uqu5dlvj2baxnqndepeb86cbk3ng7n3i46uzyxzyqj2xjonzllnv0v8/x?y",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": null,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_decoded_encoding",
+            "strip_page_state",
+            "canonicalize_redirect"
+          ],
+          "trust": {
+            "name": null,
+            "content": "unverified"
+          }
+        }
+      },
+      "expect": "path"
     }
   ]
 }
