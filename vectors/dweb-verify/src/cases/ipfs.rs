@@ -417,12 +417,100 @@ fn dag_pb() -> Result<Vec<Value>, Err> {
     pb_varint(5, 7, &mut unknown);
     push(
         "unknown-field",
-        "the file node with an unknown varint field: skipped",
+        "the file node with an unknown varint field: refused, as DAG-PB's strictness rules and go-codec-dagpb (Kubo's decoder) refuse it",
         &unknown,
         bytes(&unknown),
-        decoded(&links, Some(&fdata))?,
+        fail("malformed"),
         None,
     )?;
+    // DAG-PB's strictness rules: PBNode's Links contiguous, on either side
+    // of at most one Data; PBLink's Hash, Name and Tsize in that order,
+    // each at most once. Kubo refuses each of these.
+    let fdata_field = {
+        let mut d = Vec::new();
+        pb_bytes(1, &fdata, &mut d);
+        d
+    };
+    let link_fields: Vec<Vec<u8>> = links
+        .iter()
+        .map(|l| {
+            let mut f = Vec::new();
+            pb_bytes(2, &pb_link(l), &mut f);
+            f
+        })
+        .collect();
+    let la_cid = links[0].hash.clone().ok_or("hash")?;
+    let one_link = |fields: Vec<u8>| {
+        let mut f = Vec::new();
+        pb_bytes(2, &fields, &mut f);
+        f
+    };
+    let hash_name_tsize = |order: &[u8]| {
+        let mut f = Vec::new();
+        for o in order {
+            match o {
+                b'h' => pb_bytes(1, &la_cid, &mut f),
+                b'n' => pb_bytes(2, b"a", &mut f),
+                b't' => pb_varint(3, 300, &mut f),
+                _ => pb_varint(4, 1, &mut f),
+            }
+        }
+        f
+    };
+    for (id, note, block) in [
+        (
+            "duplicate-data",
+            "two Data fields",
+            [fdata_field.clone(), fdata_field.clone()].concat(),
+        ),
+        (
+            "links-data-links",
+            "a link, Data, then another link: the Links aren't contiguous",
+            [
+                link_fields[0].clone(),
+                fdata_field.clone(),
+                link_fields[1].clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "data-links-data",
+            "Data, the links, then Data again",
+            [
+                fdata_field.clone(),
+                link_fields.concat(),
+                fdata_field.clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "link-name-before-hash",
+            "a PBLink of Name, then Hash",
+            [one_link(hash_name_tsize(b"nh")), fdata_field.clone()].concat(),
+        ),
+        (
+            "link-tsize-before-name",
+            "a PBLink of Hash, Tsize, then Name",
+            [one_link(hash_name_tsize(b"htn")), fdata_field.clone()].concat(),
+        ),
+        (
+            "link-duplicate-hash",
+            "a PBLink with Hash twice",
+            [one_link(hash_name_tsize(b"hhn")), fdata_field.clone()].concat(),
+        ),
+        (
+            "link-duplicate-name",
+            "a PBLink with Name twice",
+            [one_link(hash_name_tsize(b"hnn")), fdata_field.clone()].concat(),
+        ),
+        (
+            "link-unknown-field",
+            "a PBLink with an unknown field 4",
+            [one_link(hash_name_tsize(b"hnt4")), fdata_field.clone()].concat(),
+        ),
+    ] {
+        push(id, note, &block, bytes(&block), fail("malformed"), None)?;
+    }
     let mut group = node.clone();
     group.extend_from_slice(&[0x2b, 0x2c]);
     push(
@@ -504,10 +592,10 @@ fn dag_pb() -> Result<Vec<Value>, Err> {
     ]);
     push(
         "unknown-maximal",
-        "2 MiB of unknown varint fields (field 15), then Data: skipped in linear time, no memory",
+        "2 MiB of unknown varint fields (field 15), then Data: refused at the first, as DAG-PB allows no unknown field",
         &unk,
         unk_v,
-        decoded(&[], Some(&Unixfs::new(2).encode()))?,
+        fail("malformed"),
         None,
     )?;
     Ok(out)
@@ -642,6 +730,27 @@ fn unixfs() -> Result<Vec<Value>, Err> {
         ok(summary(&dir, 0)),
         None,
     )?;
+    // The bitfield is at most fanout / 8 bytes, as boxo's NewHamtFromDag
+    // reads it: 32 for 256, zero padding past it included.
+    for (id, len, expect) in [
+        ("hamt-bitfield-32", 32usize, true),
+        ("hamt-bitfield-33", 33, false),
+    ] {
+        dir.data = Some(vec![0x00; len]);
+        let n = pb_node(&[], Some(&dir.encode()));
+        push(
+            id,
+            &format!("a HAMT shard of fanout 256 whose bitfield is {len} zero bytes"),
+            &n,
+            bytes(&n),
+            if expect {
+                ok(summary(&dir, 0))
+            } else {
+                fail("malformed")
+            },
+            None,
+        )?;
+    }
     let mut f16 = Unixfs::new(5);
     f16.hash_type = Some(0x22);
     f16.fanout = Some(16);
@@ -1014,6 +1123,21 @@ fn car() -> Result<Vec<Value>, Err> {
         json!({ "fail": "verification_failed", "after": 1 }),
         None,
     );
+    // A section whose CID's codec (raw, 0x55) is the varint 0xd5 0x00.
+    let mut padded_cid = vec![0x01, 0xd5, 0x00];
+    padded_cid.extend_from_slice(&ca.to_bytes()[2..]);
+    let mut odd = Vec::new();
+    uvarint((padded_cid.len() + a.len()) as u64, &mut odd);
+    odd.extend_from_slice(&padded_cid);
+    odd.extend_from_slice(&a);
+    let body = [header.clone(), sections[0].clone(), odd].concat();
+    push(
+        "section-cid-not-minimal",
+        "the second section's CID with its codec as the varint 0xd5 0x00: a CID's varints are minimal",
+        &body,
+        json!({ "fail": "verification_failed", "after": 1 }),
+        None,
+    );
     let body = [
         header.clone(),
         sections[0].clone(),
@@ -1196,6 +1320,171 @@ fn car() -> Result<Vec<Value>, Err> {
             None,
         );
     }
+    // The strict profile, at every level: keys in canonical order (shorter
+    // first, then bytewise), integers and lengths in their shortest form,
+    // 64-bit floats that are finite, and a CID's varints minimal.
+    let version_key = vec![0x67, b'v', b'e', b'r', b's', b'i', b'o', b'n'];
+    let mut non_minimal_cid = vec![
+        0xd8,
+        0x2a,
+        0x58,
+        (cr.to_bytes().len() + 2) as u8,
+        0x00,
+        0x81,
+        0x00,
+    ];
+    non_minimal_cid.extend_from_slice(&cr.to_bytes()[1..]);
+    let nan = [0xfb, 0x7f, 0xf8, 0, 0, 0, 0, 0, 0];
+    let infinity = [0xfb, 0x7f, 0xf0, 0, 0, 0, 0, 0, 0];
+    let one_and_a_half = [0xfb, 0x3f, 0xf8, 0, 0, 0, 0, 0, 0];
+    for (id, note, cbor) in [
+        (
+            "header-key-order",
+            "version before roots: not canonical order",
+            [vec![0xa2], version_kv.clone(), roots_kv.clone()].concat(),
+        ),
+        (
+            "header-key-order-nested",
+            "an unknown key whose map has b before a",
+            [
+                vec![0xa3],
+                pad_key.clone(),
+                vec![0xa2, 0x61, b'b', 0x01, 0x61, b'a', 0x01],
+                roots_kv.clone(),
+                version_kv.clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "header-duplicate-key-nested",
+            "an unknown key whose map has a twice",
+            [
+                vec![0xa3],
+                pad_key.clone(),
+                vec![0xa2, 0x61, b'a', 0x01, 0x61, b'a', 0x01],
+                roots_kv.clone(),
+                version_kv.clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "header-integer-not-minimal",
+            "version 1 in two bytes (0x18 0x01)",
+            [
+                vec![0xa2],
+                roots_kv.clone(),
+                version_key.clone(),
+                vec![0x18, 0x01],
+            ]
+            .concat(),
+        ),
+        (
+            "header-length-not-minimal",
+            "the key roots with its length in two bytes (0x78 0x05)",
+            [
+                vec![0xa2, 0x78, 0x05],
+                roots_key[1..].to_vec(),
+                vec![0x81],
+                tag42(&cr),
+                version_kv.clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "header-float-nan",
+            "an unknown key whose value is a NaN",
+            [
+                vec![0xa3],
+                pad_key.clone(),
+                nan.to_vec(),
+                roots_kv.clone(),
+                version_kv.clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "header-float-infinity",
+            "an unknown key whose value is infinity",
+            [
+                vec![0xa3],
+                pad_key.clone(),
+                infinity.to_vec(),
+                roots_kv.clone(),
+                version_kv.clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "header-float-32",
+            "an unknown key whose value is a 32-bit float: DAG-CBOR has 64-bit floats only",
+            [
+                vec![0xa3],
+                pad_key.clone(),
+                vec![0xfa, 0x3f, 0xc0, 0, 0],
+                roots_kv.clone(),
+                version_kv.clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "header-tag-42-empty",
+            "a root as tag 42 over an empty byte string",
+            [
+                vec![0xa2],
+                roots_key.clone(),
+                vec![0x81, 0xd8, 0x2a, 0x40],
+                version_kv.clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "header-tag-42-prefix-only",
+            "a root as tag 42 over 0x00 alone",
+            [
+                vec![0xa2],
+                roots_key.clone(),
+                vec![0x81, 0xd8, 0x2a, 0x41, 0x00],
+                version_kv.clone(),
+            ]
+            .concat(),
+        ),
+        (
+            "header-tag-42-cid-not-minimal",
+            "a root whose CID's version is the varint 0x81 0x00, not 0x01",
+            [
+                vec![0xa2],
+                roots_key.clone(),
+                vec![0x81],
+                non_minimal_cid.clone(),
+                version_kv.clone(),
+            ]
+            .concat(),
+        ),
+    ] {
+        push(
+            id,
+            note,
+            &framed(cbor),
+            json!({ "fail": "verification_failed", "after": 0 }),
+            None,
+        );
+    }
+    push(
+        "header-float-finite",
+        "an unknown key whose value is the 64-bit float 1.5: read",
+        &framed(
+            [
+                vec![0xa3],
+                pad_key.clone(),
+                one_and_a_half.to_vec(),
+                roots_kv.clone(),
+                version_kv.clone(),
+            ]
+            .concat(),
+        ),
+        ok(json!({ "sections": ids })),
+        None,
+    );
     push(
         "header-unknown-key",
         "an unknown key with a text value: skipped, as the CBOR rules allow",
