@@ -944,7 +944,18 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
   - **a failed lookup, an empty answer, or an answer whose every address is refused** is an error. The dial fails, and the name is never sent to the proxy;
   - **only onion names** are handed to the proxy as names, through a separate, explicit route;
   - nothing falls back to a direct socket;
-  - if the pinned Arti can't `RESOLVE`, the setting waits, as 0007 decides.
+  - if the pinned Arti can't `RESOLVE`, the setting waits, as 0007 decides;
+  - **stream isolation per remote node.** This follows the principle of 0007's decision on stream isolation (its open question 11, decided 2026-10-22), applied to Radicle.
+    - Each remote node gets SOCKS5 credentials of its own (RFC 1929), so Arti keeps each peer's connections on circuits of their own, apart from every other peer's and from other users of the same Arti.
+    - **The credentials:** a fixed username, and a password derived from the remote's node ID and a per-process secret: 128 random bits from the operating system, made at start, never written or logged.
+    - **No fallback:** only username/password authentication is offered, so a proxy that won't take it fails the dial rather than sharing circuits silently.
+    - **Built upstream:** heartwood's SOCKS5 client (`socks5-client` 0.4, through cyphernet) offers no authentication, so heartwood gets an RFC 1929 state machine of its own in `Wire::dial` ([upstream](#upstream-changes)).
+    - **The check still to run:** the Arti qualification gains an `isolation` check, that distinct credentials get distinct circuits. It applies to 0007's per-instance credentials too (freedom-ipfsd v0.2.1), which were never qualified for distinct circuits.
+- **`isolated`:** the node reaches no one.
+  - Its peer set is static, with no `connect` peers, so it takes no bootstrap nodes and dials no one.
+  - Its dial gate refuses every target, so an explicit connect, `rad.connect_seeds` included, fails before any socket.
+  - It still serves `rad:` from local storage.
+  - The service sets it through libradicle's `Options::isolated` ([upstream](#upstream-changes)), for a node that is to reach no one.
 - **The setting:** a per-profile **Route Radicle through Tor**, off by default, using `tor-manager`'s endpoint. It is a switch of its own, apart from 0007's IPFS setting; a future "everything through Tor" mode would turn both on ([Open questions](#open-questions), 9).
 - **Changing the policy restarts the process.** Main passes the policy at spawn (`--network`), and a change spawns a new process with the new one, so [0010](0010-service-confinement.md)'s confinement can fix it before `rad.hello`. Nothing of the old policy survives its process, since there is no child. On a profile with a vault, the new process starts only while the vault is unlocked ([When the node can start](#when-the-node-can-start)).
 
@@ -965,12 +976,24 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
 - **Configured targets** are exempt, by exact address, so a user's LAN seed keeps working.
 - **Onion targets** are classified as in 0007: a host whose last label is `onion`, case-insensitive, with any trailing dot removed. In `direct` mode they are refused before any socket exists, as heartwood's `Drop` does.
 
+### Privacy findings (R-12)
+
+The source research for this design found four ways the node gives away more than it should. Where each stands:
+
+| Part | What | Where it stands |
+|---|---|---|
+| 1 | An onion `Forward` without a proxy leaks onion names to DNS | **Covered.** The service sets `onion` in memory, never `Forward` ([Network policy](#network-policy)), and the dial gate refuses an onion name before any socket in `direct` mode (heartwood change 11). It stays open in the shipped add-on until libradicle `main` moves to these changes |
+| 2 | Each connection gets the node's signed inventory, tied to its node ID | **The user's decision** ([Open questions](#open-questions), 12) |
+| 3 | A node meant to reach no one still takes Iris and Rosa, and dials gossip peers | **Being built:** the `isolated` mode ([Modes](#modes)), heartwood change 15 (solardev-xyz/heartwood#17) and libradicle's `Options::isolated` |
+| 4 | SOCKS has no stream isolation, so every peer shares Arti's circuits | **Decided:** isolation per remote node ([Modes](#modes)). Heartwood change 16 is to be built, after the Arti isolation check |
+
 ### Seeding and serving
 
 - **This is Radicle's model, unchanged:**
   - a seeded repository is announced in the node's signed inventory and served to peers that ask for it;
   - seeding happens only on an explicit seed, clone or sync, and on the default repository at start.
 - **Browsing through `rad:`** reads local storage and announces nothing.
+- **What peers learn:** each connection receives the node's signed inventory of the repositories it seeds, tied to its node ID, which is derived from the vault. Whether to offer a setting that announces none, while still serving on request, is the user's decision ([Open questions](#open-questions), 12).
 - **No listening socket:**
   - no inbound port;
   - after the upstream change, no control socket.
@@ -980,7 +1003,7 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
 ## Upstream changes
 
 **libradicle** (v0.8.0):
-1. **Policy in `Options`** (`lr:41`):
+1. **Policy in `Options`** (`lr:41`). This also adds `isolated: bool`: a static peer set, no `connect` peers, and a dial gate that refuses every target, around whatever gate `routing` gives ([Modes](#modes)):
    - add `control_socket: bool`, and `routing: Option<Routing>`, where `Routing` holds `proxy: Option<SocketAddr>`, `onion: AddressConfig` and the dial gate (heartwood change 11's `Gate`, which is both the resolver hook and the address policy);
    - with `Some`, `run` (`lr:757`–`793`) applies the routing to `profile.config.node` before `Runtime::init`, in memory only, overriding every routing field (`i2p` with `Drop`) and `externalAddresses`, and hands the gate to `Runtime::init`. Nothing is written to `config.json`;
    - with `None`, `config.json`'s routing applies as it does today, with heartwood's `Open` gate. The add-on and UniFFI pass `None`, so their behaviour doesn't change before the service replaces them;
@@ -1048,6 +1071,11 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
     - before serving a repository to a peer (`hw/radicle-node/src/worker.rs:243`–`258`);
     - a deferred fetch runs once its repository reopens.
     - **Each consultation holds a pass** for its purpose (mutate, serve, announce, or inventory) until the work it admits is done or queued. Closing a repository returns once the passes its new state doesn't permit have dropped. So a close that has returned is never overtaken by work admitted before it.
+15. **A static peer set takes no bootstrap nodes:** `Runtime::init` adds Iris and Rosa only for a dynamic peer set, so an `isolated` node's address book holds no one (solardev-xyz/heartwood#17).
+16. **SOCKS5 with credentials:**
+    - an RFC 1929 state machine for `Wire::dial`: a greeting offering username/password (method `0x02`) only, the subnegotiation, then `CONNECT`, with strict, length-bounded reply parsing;
+    - with a password derived per remote node ID from a per-process secret ([Modes](#modes), stream isolation);
+    - it replaces `socks5_client::Socks5`, which offers no authentication.
 
 ## Where the code lives
 
@@ -1357,3 +1385,4 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 10. **heartwood's memory:** should the service run under an OS-level limit (`RLIMIT_AS`, or a Windows job memory limit), given that heartwood's own buffers aren't bounded by the service?
     - **Still open:** [0010](0010-service-confinement.md)'s job object (D4, decided) is where a Windows limit would go. Whether to set one, and `RLIMIT_AS` on Linux and macOS, aren't decided there.
 11. **Private windows:** is read-only the right rule for private partitions, or should an explicit, user-initiated seed be allowed there?
+12. **The signed inventory** (R-12, part 2): each connection receives the node's signed inventory of the repositories it seeds, under a node ID derived from the vault. Should a setting announce none, while still serving repositories to peers that ask, at the cost that peers no longer find them through this node? (The user's decision.)
