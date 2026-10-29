@@ -949,7 +949,8 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
     - Each remote node gets SOCKS5 credentials of its own (RFC 1929), so Arti keeps each peer's connections on circuits of their own, apart from every other peer's and from other users of the same Arti.
     - **The credentials:** a fixed username, and a password derived from the remote's node ID and a per-process secret: 128 random bits from the operating system, made at start, never written or logged.
     - **No fallback:** only username/password authentication is offered, so a proxy that won't take it fails the dial rather than sharing circuits silently.
-    - **Built upstream:** heartwood's SOCKS5 client (`socks5-client` 0.4, through cyphernet) offers no authentication, so heartwood gets an RFC 1929 state machine of its own in `Wire::dial` ([upstream](#upstream-changes)).
+    - **Built upstream:** heartwood's SOCKS5 client (`socks5-client` 0.4, through cyphernet) offers no authentication, so heartwood gets an RFC 1929 state machine of its own in `Wire::dial` ([upstream](#upstream-changes), solardev-xyz/heartwood#19).
+    - **Asked for by the dial gate:** heartwood isolates only for a gate whose `isolates_streams` says so, and otherwise keeps no authentication, as upstream always has. The service's routing gate says so under `socks5`.
     - **The check still to run:** the Arti qualification gains an `isolation` check, that distinct credentials get distinct circuits. It applies to 0007's per-instance credentials too (freedom-ipfsd v0.2.1), which were never qualified for distinct circuits.
 - **`isolated`:** the node reaches no one.
   - Its peer set is static, with no `connect` peers, so it takes no bootstrap nodes and dials no one.
@@ -985,7 +986,7 @@ The source research for this design found four ways the node gives away more tha
 | 1 | An onion `Forward` without a proxy leaks onion names to DNS | **Covered.** The service sets `onion` in memory, never `Forward` ([Network policy](#network-policy)), and the dial gate refuses an onion name before any socket in `direct` mode (heartwood change 11). It stays open in the shipped add-on until libradicle `main` moves to these changes |
 | 2 | Each connection gets the node's signed inventory, tied to its node ID | **The user's decision** ([Open questions](#open-questions), 12) |
 | 3 | A node meant to reach no one still takes Iris and Rosa, and dials gossip peers | **Being built:** the `isolated` mode ([Modes](#modes)), heartwood change 15 (solardev-xyz/heartwood#17) and libradicle's `Options::isolated` |
-| 4 | SOCKS has no stream isolation, so every peer shares Arti's circuits | **Decided:** isolation per remote node ([Modes](#modes)). Heartwood change 16 is to be built, after the Arti isolation check |
+| 4 | SOCKS has no stream isolation, so every peer shares Arti's circuits | **Decided:** isolation per remote node ([Modes](#modes)). Heartwood change 16 is in review (solardev-xyz/heartwood#19). The Arti isolation check (solardev-xyz/freedom-browser#964) is still to run live |
 
 ### Seeding and serving
 
@@ -1072,9 +1073,10 @@ The source research for this design found four ways the node gives away more tha
     - a deferred fetch runs once its repository reopens.
     - **Each consultation holds a pass** for its purpose (mutate, serve, announce, or inventory) until the work it admits is done or queued. Closing a repository returns once the passes its new state doesn't permit have dropped. So a close that has returned is never overtaken by work admitted before it.
 15. **A static peer set takes no bootstrap nodes:** `Runtime::init` adds Iris and Rosa only for a dynamic peer set, so an `isolated` node's address book holds no one (solardev-xyz/heartwood#17).
-16. **SOCKS5 with credentials:**
+16. **SOCKS5 with credentials** (solardev-xyz/heartwood#19):
     - an RFC 1929 state machine for `Wire::dial`: a greeting offering username/password (method `0x02`) only, the subnegotiation, then `CONNECT`, with strict, length-bounded reply parsing;
-    - with a password derived per remote node ID from a per-process secret ([Modes](#modes), stream isolation);
+    - with a password derived per remote node ID from a per-process secret ([Modes](#modes), stream isolation): HMAC-SHA-256 of the node ID under a 128-bit secret;
+    - asked for by the dial gate's `isolates_streams`, `false` by default, which libradicle's routing gate sets under `socks5`;
     - it replaces cyphernet's `proxy::socks5::Socks5` (`socks5-client` 0.4), which offers no authentication.
 
 ## Where the code lives
