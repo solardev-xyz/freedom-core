@@ -155,10 +155,13 @@ pub fn canonical_cid(target: &str) -> String {
 }
 
 /// The verify plan for a fetch plan, or why its content stays unverified.
-fn derive(fetch: &Fetch, small_text: bool) -> Result<Verify, Unverified> {
-    let (path_part, query) = match fetch.path.find('?') {
-        Some(at) => (&fetch.path[..at], fetch.path[at..].to_owned()),
-        None => (fetch.path.as_str(), String::new()),
+/// A fetch target split as the generator splits it: the root it names,
+/// the path below it, and the query with its `?`; or why its content
+/// stays unverified.
+fn split_target(node: Node, path: &str) -> Result<(Root, String, String), Unverified> {
+    let (path_part, query) = match path.find('?') {
+        Some(at) => (&path[..at], path[at..].to_owned()),
+        None => (path, String::new()),
     };
     let mut segments = path_part.splitn(4, '/');
     let _ = segments.next();
@@ -168,7 +171,7 @@ fn derive(fetch: &Fetch, small_text: bool) -> Result<Verify, Unverified> {
         .next()
         .map(|rest| format!("/{rest}"))
         .unwrap_or_default();
-    let root = match fetch.node {
+    let root = match node {
         Node::Ant if js::utf16_len(target) == 128 => return Err(Unverified::Encrypted),
         Node::Ant => Root::Swarm(target.to_owned()),
         Node::Ipfs if namespace == "ipfs" => Root::Ipfs(canonical_cid(target)),
@@ -178,6 +181,96 @@ fn derive(fetch: &Fetch, small_text: bool) -> Result<Verify, Unverified> {
             NameKind::Ed25519 | NameKind::Sha256 => Root::Ipns(target.to_owned()),
         },
     };
+    Ok((root, below, query))
+}
+
+/// Whether a fetch's target is one 0009 keeps a fetch for when
+/// verification is on: an encrypted Swarm reference, a DNSLink name, or
+/// an IPNS name with another inlined key. Any other target the core
+/// verifies, so a fetch for it would be a downgrade.
+pub(crate) fn stays_unverified(node: Node, path: &str) -> bool {
+    split_target(node, path).is_err()
+}
+
+/// Whether a verify plan's root is in its form (0009, Verify plans):
+/// 64 hex digits; a whole CIDv1, its varints minimal, in canonical
+/// lowercase base32; or an IPNS name whose multihash is a sha2-256 digest,
+/// or an inlined Ed25519 key as libp2p's deterministic `PublicKey` writes
+/// it (`08 01 12 20` and the 32-byte key).
+pub(crate) fn root_in_form(root: &Root) -> bool {
+    match root {
+        Root::Swarm(r) => r.len() == 64 && r.bytes().all(|b| b.is_ascii_hexdigit()),
+        Root::Ipfs(r) => {
+            let Some(body) = r.strip_prefix('b') else {
+                return false;
+            };
+            if body.is_empty()
+                || !body
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
+            {
+                return false;
+            }
+            let Some(bytes) = base32_decode_lenient(body) else {
+                return false;
+            };
+            if crate::cid::base32_encode(&bytes) != body {
+                return false;
+            }
+            cid_parts(&bytes).is_some_and(|c| c.version == 1)
+        }
+        Root::Ipns(name) => {
+            let kind = ipns_name_kind(name);
+            let bytes = if let Some(rest) = name.strip_prefix('k') {
+                base36_decode(rest)
+            } else {
+                name.strip_prefix('b').and_then(base32_decode_lenient)
+            };
+            let Some(cid) = bytes.as_deref().and_then(cid_parts) else {
+                return false;
+            };
+            match kind {
+                NameKind::Sha256 => true,
+                NameKind::Ed25519 => {
+                    cid.digest.len() == 36 && cid.digest[..4] == [0x08, 0x01, 0x12, 0x20]
+                }
+                NameKind::OtherKey | NameKind::Dnslink => false,
+            }
+        }
+    }
+}
+
+/// A CID's four varints, each in its minimal form, and its digest, which
+/// must be exactly the bytes left.
+struct CidParts<'a> {
+    version: u64,
+    digest: &'a [u8],
+}
+
+fn read_minimal(bytes: &[u8], at: usize) -> Option<(u64, usize)> {
+    let (value, next) = read_varint(bytes, at)?;
+    if next - at > 1 && bytes[next - 1] == 0 {
+        return None;
+    }
+    Some((value, next))
+}
+
+fn cid_parts(bytes: &[u8]) -> Option<CidParts<'_>> {
+    let (version, at) = read_minimal(bytes, 0)?;
+    let (_codec, at) = read_minimal(bytes, at)?;
+    let (_code, at) = read_minimal(bytes, at)?;
+    let (len, at) = read_minimal(bytes, at)?;
+    if (at as u64).checked_add(len) != Some(bytes.len() as u64) {
+        return None;
+    }
+    Some(CidParts {
+        version,
+        digest: &bytes[at..],
+    })
+}
+
+fn derive(fetch: &Fetch, small_text: bool) -> Result<Verify, Unverified> {
+    let (root, below, query) = split_target(fetch.node, &fetch.path)?;
     let keep: &[&str] = match fetch.node {
         Node::Ant => &VERIFY_HEADERS_ANT,
         Node::Ipfs => &VERIFY_HEADERS_IPFS,

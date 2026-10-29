@@ -19993,7 +19993,7 @@
           }
         }
       },
-      "validation": "valid"
+      "validation": "root"
     },
     {
       "id": "ipfs-cid-base32-min-verify-strict",
@@ -20047,7 +20047,7 @@
           }
         }
       },
-      "validation": "valid"
+      "validation": "root"
     },
     {
       "id": "ipfs-cid-base32-min-off-strict",
@@ -45295,13 +45295,13 @@
       "id": "plan-ipfs-cid-base32-min-verify",
       "source": "design",
       "request_id": "ipfs-cid-base32-min-verify",
-      "expect": "valid"
+      "expect": "root"
     },
     {
       "id": "plan-ipfs-cid-base32-min-verify-strict",
       "source": "design",
       "request_id": "ipfs-cid-base32-min-verify-strict",
-      "expect": "valid"
+      "expect": "root"
     },
     {
       "id": "plan-ipfs-cid-base32-min-off-strict",
@@ -50623,6 +50623,112 @@
       "expect": "valid"
     },
     {
+      "id": "root-ipfs-not-whole-cid",
+      "source": "design",
+      "request": {
+        "url": "ipfs://site.eth/",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "gateway",
+          "up": true,
+          "verify": true
+        }
+      },
+      "plan": {
+        "verify": {
+          "node": "ipfs",
+          "root": {
+            "ipfs": "ba"
+          },
+          "path": "/",
+          "query": "",
+          "headers": [],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": null,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          }
+        }
+      },
+      "expect": "root"
+    },
+    {
+      "id": "root-ipns-key-without-ed25519",
+      "source": "design",
+      "request": {
+        "url": "ipns://site.eth/x",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "gateway",
+          "up": true,
+          "verify": true
+        }
+      },
+      "plan": {
+        "verify": {
+          "node": "ipfs",
+          "root": {
+            "ipns": "kka1fr5kx"
+          },
+          "path": "/x",
+          "query": "",
+          "headers": [],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": null,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          }
+        }
+      },
+      "expect": "root"
+    },
+    {
       "id": "path-bzz-empty",
       "source": "design",
       "request": {
@@ -54064,6 +54170,298 @@
         }
       },
       "expect": "path"
+    },
+    {
+      "id": "downgrade-fetch-bzz-name-host",
+      "source": "design",
+      "request": {
+        "url": "bzz://site.eth/a/b?q=1",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "external",
+          "up": true,
+          "verify": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeef/a/b?q=1",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "unverified"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "downgrade-fetch-ipfs-name-host",
+      "source": "design",
+      "request": {
+        "url": "ipfs://site.eth/",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "gateway",
+          "up": true,
+          "verify": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipfs/QmVmkadKS2uvxyD6YJJzd3Umem6SWV7QxYnL7kbpdWAsPS/",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": null,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_decoded_encoding",
+            "strip_page_state",
+            "canonicalize_redirect"
+          ],
+          "trust": {
+            "name": null,
+            "content": "unverified"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "downgrade-fetch-ipns-name-host",
+      "source": "design",
+      "request": {
+        "url": "ipns://site.eth/x",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ipfs": "gateway",
+          "up": true,
+          "verify": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ipfs",
+          "path": "/ipns/k51qzi5uqu5dlvj2baxnqndepeb86cbk3ng7n3i46uzyxzyqj2xjonzllnv0v8/x",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [],
+            "on_error": false,
+            "attempts": 1,
+            "delays_ms": []
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": null,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "strip_decoded_encoding",
+            "strip_page_state",
+            "canonicalize_redirect"
+          ],
+          "trust": {
+            "name": null,
+            "content": "unverified"
+          }
+        }
+      },
+      "expect": "path"
+    },
+    {
+      "id": "downgrade-fetch-bzz-name-encrypted",
+      "source": "design",
+      "request": {
+        "url": "bzz://site.eth/x",
+        "method": "GET",
+        "headers": [
+          [
+            "Accept",
+            "*/*"
+          ],
+          [
+            "User-Agent",
+            "Freedom"
+          ]
+        ],
+        "backend": {
+          "ant": "external",
+          "up": true,
+          "verify": true
+        }
+      },
+      "plan": {
+        "fetch": {
+          "node": "ant",
+          "path": "/bzz/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeebeefa1b2a1b2a1b2a1b2a1b2a1b2a1b2a1b2a1b2a1b2a1b2a1b2a1b2a1b2a1b2a1b2/x",
+          "headers": [
+            [
+              "accept",
+              "*/*"
+            ],
+            [
+              "swarm-chunk-retrieval-timeout",
+              "30s"
+            ],
+            [
+              "swarm-redundancy-fallback-mode",
+              "true"
+            ],
+            [
+              "swarm-redundancy-strategy",
+              "3"
+            ],
+            [
+              "user-agent",
+              "Freedom"
+            ]
+          ],
+          "retry": {
+            "statuses": [
+              500,
+              502,
+              503,
+              504
+            ],
+            "on_error": true,
+            "attempts": 10,
+            "delays_ms": [
+              500,
+              1000,
+              2000,
+              3000,
+              5000,
+              5000,
+              10000,
+              10000,
+              15000
+            ]
+          },
+          "timers": {
+            "queue_ms": null,
+            "headers_ms": 30000,
+            "body_idle_ms": 60000
+          },
+          "response": [
+            "canonicalize_redirect",
+            "strip_page_state"
+          ],
+          "trust": {
+            "name": null,
+            "content": "unverified"
+          }
+        }
+      },
+      "expect": "valid"
     }
   ]
 }

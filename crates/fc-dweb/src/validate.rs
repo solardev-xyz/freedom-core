@@ -11,12 +11,9 @@ use crate::ipfs::{GatewayForm, REDIRECT_HEADERS, STRIPPED_REQUEST_HEADERS, gatew
 use crate::open::{Opening, Request, open};
 use crate::plan::{
     BODY_IDLE_MS, BZZ_HEADERS_MS, BZZ_RETRY_DELAYS_MS, BZZ_RETRY_STATUSES, Backend, Ipfs,
-    NATIVE_QUEUE_MS, Plan, ResponseOp, Scheme, Verification, content_trust,
+    NATIVE_QUEUE_MS, Plan, ResponseOp, Root, Scheme, Verification, content_trust,
 };
-use crate::verify::{
-    NameKind, STRICT_MESSAGES, STRICT_STATUS, VERIFY_HEADERS_ANT, VERIFY_HEADERS_IPFS,
-    ipns_name_kind,
-};
+use crate::verify::{STRICT_MESSAGES, STRICT_STATUS, VERIFY_HEADERS_ANT, VERIFY_HEADERS_IPFS};
 use crate::{js, url};
 
 /// The longest error message, in UTF-16 code units: twice the request's
@@ -200,6 +197,14 @@ fn fetch(body: &JsValue, request: &PlanRequest<'_>, scheme: Option<Scheme>) -> R
     match &host {
         Host::Hash(expected) if path != expected => return Err(Refusal::Path),
         Host::NoFetch | Host::Verified(_) => return Err(Refusal::Path),
+        // A name's result the core verifies has no fetch either: with
+        // verification on, only 0009's three unverified forms stay one.
+        Host::Name
+            if backend.verification() == Verification::On
+                && !crate::verify::stays_unverified(node_of(scheme), path) =>
+        {
+            return Err(Refusal::Path);
+        }
         Host::Hash(_) | Host::Name => {}
     }
     check_headers(&headers, scheme)?;
@@ -271,24 +276,13 @@ fn verify(
         Host::Verified(own) => Some(own),
         _ => None,
     };
-    let in_form = match (scheme, root_key) {
-        (Scheme::Bzz, "swarm") => {
-            reference.len() == 64 && reference.bytes().all(|b| b.is_ascii_hexdigit())
-        }
-        (Scheme::Ipfs, "ipfs") => {
-            reference.len() > 1
-                && reference.starts_with('b')
-                && reference
-                    .bytes()
-                    .skip(1)
-                    .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
-        }
-        (Scheme::Ipns, "ipns") => matches!(
-            ipns_name_kind(reference),
-            NameKind::Ed25519 | NameKind::Sha256
-        ),
-        _ => false,
+    let root = match (scheme, root_key) {
+        (Scheme::Bzz, "swarm") => Some(Root::Swarm(reference.to_owned())),
+        (Scheme::Ipfs, "ipfs") => Some(Root::Ipfs(reference.to_owned())),
+        (Scheme::Ipns, "ipns") => Some(Root::Ipns(reference.to_owned())),
+        _ => None,
     };
+    let in_form = root.as_ref().is_some_and(crate::verify::root_in_form);
     let tied = own.is_none_or(|v| v.root.key() == root_key && v.root.reference() == reference);
     if !in_form || !tied || matches!(host, Host::NoFetch | Host::Hash(_)) {
         return Err(Refusal::Root);
@@ -359,6 +353,13 @@ fn check_verify_headers(headers: &[(&str, &str)], scheme: Scheme) -> Result<(), 
         }
     }
     Ok(())
+}
+
+fn node_of(scheme: Scheme) -> crate::plan::Node {
+    match scheme {
+        Scheme::Bzz => crate::plan::Node::Ant,
+        Scheme::Ipfs | Scheme::Ipns => crate::plan::Node::Ipfs,
+    }
 }
 
 /// What the request's host means for a plan.
