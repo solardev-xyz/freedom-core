@@ -1165,10 +1165,13 @@ async fn sizes(out: &mut Cases) -> Result<(), Err> {
         } else {
             error(502, IPFS_MALFORMED)
         };
-        let world_blocks: serde_json::Map<String, Value> = blocks
-            .iter()
-            .map(|(c, b)| (c.to_string(), bytes(b)))
-            .collect();
+        // In CID order: the map keeps insertion order, and a HashMap's
+        // differs from run to run.
+        let mut sorted: Vec<(String, &Vec<u8>)> =
+            blocks.iter().map(|(c, b)| (c.to_string(), b)).collect();
+        sorted.sort();
+        let world_blocks: serde_json::Map<String, Value> =
+            sorted.into_iter().map(|(c, b)| (c, bytes(b))).collect();
         for car in [true, false] {
             let id = if car {
                 id.to_string()
