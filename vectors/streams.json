@@ -11,7 +11,7 @@
     "nodeVersion": "v24.15.0",
     "generator": "vectors/generator/generate.js"
   },
-  "source": "design 0007 (Frames): every outcome is the design's, written by hand in vectors/generator/streams.js; no reference implementation exists yet",
+  "source": "design 0007 (Frames) and design 0009 (Streams in the core): every outcome is the design's, written by hand in vectors/generator/streams.js; no reference implementation exists yet",
   "constants": {
     "kinds": {
       "json": 1,
@@ -41,9 +41,10 @@
   "formats": {
     "body_bytes": "Byte k of stream id's body is ((id mod 251) + (k mod 251)) mod 251, with k counted from the body's start.",
     "bytes": "A list of parts, concatenated: {\"hex\": \"<lowercase hex>\"} or {\"fill\": [byte, count]}.",
-    "frames": "Decoding. `side` is the decoder: \"receiver\" (main, after a handshake that granted stream), \"sender\" (the service, likewise) or \"core\" (a freedom-cored connection, which never grants stream). `input` is fed whole, and in any chunking the outcome is the same. `expect.frames` lists every frame decoded, as [\"json\", text], [\"data\", id, bytes], [\"end\", id], [\"abort\", id, code, message] or [\"credit\", id, n]. `expect.truncated` means the input stops inside a frame: EOF there truncates it. `expect.error` is the first failure's category, from the header check, the ID or the payload; frames before it are not asserted.",
+    "frames": "Decoding. `side` is the decoder: \"receiver\" (main, after a handshake that granted stream), \"sender\" (the service, likewise), \"core\" (a freedom-cored connection at protocol 1, which never grants stream) or \"core_streams\" (a freedom-cored connection at protocol 2, which takes stream frames in both directions, design 0009). `input` is fed whole, and in any chunking the outcome is the same. `expect.frames` lists every frame decoded, as [\"json\", text], [\"data\", id, bytes], [\"end\", id], [\"abort\", id, code, message] or [\"credit\", id, n]. `expect.truncated` means the input stops inside a frame: EOF there truncates it. `expect.error` is the first failure's category, from the header check, the ID or the payload; frames before it are not asserted.",
     "encodings": "`frame` encodes to exactly `hex`, or is refused with `error` and nothing written. `frame` is as in `frames`.",
     "sender": "The service's side. Steps run in order. A step with `do` is an action with its `expect`ed result: [\"request\", id] main's request (ok, or a protocol error); [\"cancel\", id] main's cancel (\"cancelled\": the reply or abort is queued and the work is to stop; \"late\": nothing changes); [\"credit\", id, n] main's credit frame (\"taken\" into the stream's account, \"late\" for a stream that has ended, or a protocol error); [\"head\", id, body] the response that heads request id, opening a stream if body is true; [\"reply\", id] the request's one reply without a body (an error, or a result); [\"push\", id, n] the producer offers its next n body bytes (`taken` says how many were queued; the producer keeps the rest); [\"finish\", id] the end, after every byte queued; [\"abort\", id, code]. Producer refusals are `refused`: gone, unknown, answered, not_open, ended, too_large or closed. A step with `write` takes frames from the writer until it has none, and they must be exactly those listed; `write_some` takes exactly those listed and may leave more. Written frames are [\"head\", id], [\"reply\", id], [\"cancelled\", id] (the reply a cancel made the request's only one), [\"data\", id, offset, length] (bytes of the body from offset), [\"end\", id] and [\"abort\", id, code]. `check` compares the writer's held bytes (queued body bytes across streams) and, per ID, whether the request is live, its producer's room (the window's room within the writer's, null without a body that takes bytes) and its queued bytes (null without a body). A push takes as much as the room allows, except that one the writer's cap would cut below 4 KiB takes nothing. `repeat` runs its step that many times. `config.data_cap` replaces the writer's 16 MiB cap. After a protocol error, every main step reports the same error, every producer step is refused with `closed`, and nothing is written.",
+    "duplex": "freedom-cored's side at protocol 2 (design 0009, Streams in the core): one connection, the bodies the core sends in answer to main's requests and those main sends in answer to the core's. The two are numbered apart, each in its requester's ID space, so one number may name a stream in each; a frame's kind says which. The steps for main's requests are `sender`'s, with [\"credit\", id, n] main's credit frame through a core_streams decoder. The core's own: [\"ask\", id] the core sends request id (ok, or request_order for the core's own bug); [\"answered\", id, opens] main's reply to it, a head with body: true when opens (\"deliver\", \"retired\", or a protocol error); [\"data\", id, n] a data frame from main with its next n bytes of the core's stream id (\"data\": they go to the stream's consumer, \"dropped\", or a protocol error); [\"end\", id] (\"end\", \"dropped\", or an error); [\"aborted\", id, code] an abort frame from main (\"abort\", \"dropped\", or an error); [\"release\", id, n] the stream's consumer lets go of n bytes (\"ok\": their credit is owed while the stream is open, nothing otherwise; or refused overcredit, past what the stream holds, which changes nothing); [\"drop\", id] the core cancels its request (\"send_cancel\": what is owed for it is dropped, and its frames are dropped as they come; or \"nothing\"). `write` and `write_some` are `sender`'s, its frames with [\"credit\", id, n] among them: owed credit, merged per stream while unwritten, written before the sender's frames. `check` compares `sender`'s fields, and `inbound`, per ID: the core's record ({state: pending, retired_pending, open or retiring, received, returned}, or null), and `owed`: the streams with credit owed and unwritten. After a protocol error in either direction, every step that takes a frame or a reply reports the same error, producer steps are refused with closed, release is ok and owes nothing, and nothing is written.",
     "receiver": "Main's side. [\"request\", id] main sends request id (ok, or request_order for main's own bug); [\"reply\", id, opens] its reply arrives, a head with body: true when opens (\"deliver\", \"retired\", or a protocol error); [\"data\", id, n] a data frame with the service's next n bytes of stream id; [\"end\", id]; [\"abort\", id, code]. Frames give \"data\", \"end\" (bytes are left to pull), \"end_drained\" (nothing is left: the record and ring are gone), \"abort\", \"dropped\" (the stream is retiring), or a protocol error. [\"pull\", id, max] the consumer pulls: null without a record, else the chunk as [offset, length] of the body, the credit to send (null for none) and whether it is the last. [\"cancel\", id] a local cancel: \"send_cancel\", \"freed\" (end had arrived: nothing is sent) or \"nothing\". `check` compares, per ID, the record (null for none) with its state (pending, retired_pending, open, eof, retiring), whether its ring is allocated, the bytes in it, and received and returned bytes; and the outstanding records. After a protocol error, every frame and reply reports the same error."
   },
   "categories": [
@@ -69,7 +70,8 @@
     "not_open",
     "ended",
     "too_large",
-    "closed"
+    "closed",
+    "overcredit"
   ],
   "frames": [
     {
@@ -1239,8 +1241,198 @@
       }
     },
     {
+      "id": "core-streams-takes-data",
+      "rule": "at protocol 2 the core takes data, end and abort for its own requests",
+      "side": "core_streams",
+      "input": [
+        {
+          "hex": "0000000a02000000000000002a07"
+        }
+      ],
+      "expect": {
+        "frames": [
+          [
+            "data",
+            42,
+            {
+              "hex": "07"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "id": "core-streams-takes-end",
+      "rule": "at protocol 2 the core takes data, end and abort for its own requests",
+      "side": "core_streams",
+      "input": [
+        {
+          "hex": "0000000903000000000000002a"
+        }
+      ],
+      "expect": {
+        "frames": [
+          [
+            "end",
+            42
+          ]
+        ]
+      }
+    },
+    {
+      "id": "core-streams-takes-abort",
+      "rule": "at protocol 2 the core takes data, end and abort for its own requests",
+      "side": "core_streams",
+      "input": [
+        {
+          "hex": "0000003304000000000000002a7b22636f6465223a22626f64795f73747265616d5f6572726f72222c226d657373616765223a226d227d"
+        }
+      ],
+      "expect": {
+        "frames": [
+          [
+            "abort",
+            42,
+            "body_stream_error",
+            "m"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "core-streams-takes-credit",
+      "rule": "at protocol 2 the core takes credit for the bodies it sends",
+      "side": "core_streams",
+      "input": [
+        {
+          "hex": "0000000d05000000000000002a00001000"
+        }
+      ],
+      "expect": {
+        "frames": [
+          [
+            "credit",
+            42,
+            4096
+          ]
+        ]
+      }
+    },
+    {
+      "id": "core-streams-both-ways",
+      "rule": "one connection, both directions: one number may name a stream in each",
+      "side": "core_streams",
+      "input": [
+        {
+          "hex": "0000000d050000000000000007000000640000000b02000000000000000701020000000903000000000000000700000003017b7d"
+        }
+      ],
+      "expect": {
+        "frames": [
+          [
+            "credit",
+            7,
+            100
+          ],
+          [
+            "data",
+            7,
+            {
+              "hex": "0102"
+            }
+          ],
+          [
+            "end",
+            7
+          ],
+          [
+            "json",
+            "{}"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "core-streams-data-empty",
+      "rule": "the lengths are checked as on any stream connection",
+      "side": "core_streams",
+      "input": [
+        {
+          "hex": "0000000902000000000000002a"
+        }
+      ],
+      "expect": {
+        "error": "data_empty"
+      }
+    },
+    {
+      "id": "core-streams-end-overlong",
+      "rule": "the lengths are checked as on any stream connection",
+      "side": "core_streams",
+      "input": [
+        {
+          "hex": "0000000a03000000000000002a00"
+        }
+      ],
+      "expect": {
+        "error": "stream_length"
+      }
+    },
+    {
+      "id": "core-streams-credit-short",
+      "rule": "the lengths are checked as on any stream connection",
+      "side": "core_streams",
+      "input": [
+        {
+          "hex": "0000000c05000000000000002a000100"
+        }
+      ],
+      "expect": {
+        "error": "stream_length"
+      }
+    },
+    {
+      "id": "core-streams-credit-zero",
+      "rule": "credit: above zero",
+      "side": "core_streams",
+      "input": [
+        {
+          "hex": "0000000d05000000000000002a00000000"
+        }
+      ],
+      "expect": {
+        "error": "credit_zero"
+      }
+    },
+    {
+      "id": "core-streams-abort-payload",
+      "rule": "abort: JSON { code, message }",
+      "side": "core_streams",
+      "input": [
+        {
+          "hex": "0000001804000000000000002a7b22636f6465223a2262757379227d"
+        }
+      ],
+      "expect": {
+        "error": "abort_payload"
+      }
+    },
+    {
+      "id": "core-streams-reserved-kind",
+      "rule": "kinds 0x06 to 0x0F stay reserved",
+      "side": "core_streams",
+      "input": [
+        {
+          "hex": "00000009060000000000000001"
+        }
+      ],
+      "expect": {
+        "error": "unknown_kind"
+      }
+    },
+    {
       "id": "core-refuses-kind-2",
-      "rule": "freedom-cored's connections never grant stream",
+      "rule": "freedom-cored's connections at protocol 1 never grant stream",
       "side": "core",
       "input": [
         {
@@ -1253,7 +1445,7 @@
     },
     {
       "id": "core-refuses-kind-3",
-      "rule": "freedom-cored's connections never grant stream",
+      "rule": "freedom-cored's connections at protocol 1 never grant stream",
       "side": "core",
       "input": [
         {
@@ -1266,7 +1458,7 @@
     },
     {
       "id": "core-refuses-kind-4",
-      "rule": "freedom-cored's connections never grant stream",
+      "rule": "freedom-cored's connections at protocol 1 never grant stream",
       "side": "core",
       "input": [
         {
@@ -1279,7 +1471,7 @@
     },
     {
       "id": "core-refuses-kind-5",
-      "rule": "freedom-cored's connections never grant stream",
+      "rule": "freedom-cored's connections at protocol 1 never grant stream",
       "side": "core",
       "input": [
         {
@@ -11918,6 +12110,1326 @@
           "check": {
             "streams": {},
             "outstanding": 2
+          }
+        }
+      ]
+    }
+  ],
+  "duplex": [
+    {
+      "id": "one-number-both-ways",
+      "rule": "main's request 7 and the core's request 7 are different streams: data names the core's, credit main's",
+      "steps": [
+        {
+          "do": [
+            "request",
+            7
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "ask",
+            7
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            7,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            7,
+            100
+          ],
+          "expect": {
+            "taken": 100
+          }
+        },
+        {
+          "write": [
+            [
+              "head",
+              7
+            ],
+            [
+              "data",
+              7,
+              0,
+              100
+            ]
+          ]
+        },
+        {
+          "do": [
+            "answered",
+            7,
+            true
+          ],
+          "expect": "deliver"
+        },
+        {
+          "do": [
+            "data",
+            7,
+            60
+          ],
+          "expect": "data"
+        },
+        {
+          "do": [
+            "credit",
+            7,
+            100
+          ],
+          "expect": "taken"
+        },
+        {
+          "do": [
+            "release",
+            7,
+            60
+          ],
+          "expect": "ok"
+        },
+        {
+          "write": [
+            [
+              "credit",
+              7,
+              60
+            ]
+          ]
+        },
+        {
+          "check": {
+            "streams": {
+              "7": {
+                "live": true,
+                "room": 131072,
+                "queued": 0
+              }
+            },
+            "inbound": {
+              "7": {
+                "state": "open",
+                "received": 60,
+                "returned": 60
+              }
+            },
+            "owed": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "credit-goes-first",
+      "rule": "credit the core owes is written before the sender's frames, heads included",
+      "steps": [
+        {
+          "do": [
+            "request",
+            1
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            1,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            1,
+            10
+          ],
+          "expect": {
+            "taken": 10
+          }
+        },
+        {
+          "do": [
+            "ask",
+            2
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "answered",
+            2,
+            true
+          ],
+          "expect": "deliver"
+        },
+        {
+          "do": [
+            "data",
+            2,
+            100
+          ],
+          "expect": "data"
+        },
+        {
+          "do": [
+            "release",
+            2,
+            100
+          ],
+          "expect": "ok"
+        },
+        {
+          "write": [
+            [
+              "credit",
+              2,
+              100
+            ],
+            [
+              "head",
+              1
+            ],
+            [
+              "data",
+              1,
+              0,
+              10
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "credit-merged-while-unwritten",
+      "rule": "credit owed for a stream is one frame while unwritten",
+      "steps": [
+        {
+          "do": [
+            "ask",
+            3
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "answered",
+            3,
+            true
+          ],
+          "expect": "deliver"
+        },
+        {
+          "do": [
+            "data",
+            3,
+            100
+          ],
+          "expect": "data"
+        },
+        {
+          "do": [
+            "release",
+            3,
+            40
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "release",
+            3,
+            60
+          ],
+          "expect": "ok"
+        },
+        {
+          "check": {
+            "streams": {},
+            "inbound": {
+              "3": {
+                "state": "open",
+                "received": 100,
+                "returned": 100
+              }
+            },
+            "owed": 1
+          }
+        },
+        {
+          "write": [
+            [
+              "credit",
+              3,
+              100
+            ]
+          ]
+        },
+        {
+          "check": {
+            "streams": {},
+            "inbound": {
+              "3": {
+                "state": "open",
+                "received": 100,
+                "returned": 100
+              }
+            },
+            "owed": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "credit-in-the-order-owed",
+      "rule": "owed credit is written in the order it came, a frame per stream",
+      "steps": [
+        {
+          "do": [
+            "ask",
+            4
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "answered",
+            4,
+            true
+          ],
+          "expect": "deliver"
+        },
+        {
+          "do": [
+            "ask",
+            5
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "answered",
+            5,
+            true
+          ],
+          "expect": "deliver"
+        },
+        {
+          "do": [
+            "data",
+            4,
+            10
+          ],
+          "expect": "data"
+        },
+        {
+          "do": [
+            "data",
+            5,
+            10
+          ],
+          "expect": "data"
+        },
+        {
+          "do": [
+            "release",
+            5,
+            10
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "release",
+            4,
+            10
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "release",
+            5,
+            0
+          ],
+          "expect": "ok"
+        },
+        {
+          "write": [
+            [
+              "credit",
+              5,
+              10
+            ],
+            [
+              "credit",
+              4,
+              10
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "inbound-window",
+      "rule": "data beyond the window (received - returned > 128 KiB) is a protocol error, here too",
+      "steps": [
+        {
+          "do": [
+            "ask",
+            4
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "answered",
+            4,
+            true
+          ],
+          "expect": "deliver"
+        },
+        {
+          "do": [
+            "data",
+            4,
+            65536
+          ],
+          "expect": "data"
+        },
+        {
+          "do": [
+            "data",
+            4,
+            65536
+          ],
+          "expect": "data"
+        },
+        {
+          "do": [
+            "data",
+            4,
+            1
+          ],
+          "expect": {
+            "error": "window_overrun"
+          }
+        },
+        {
+          "do": [
+            "request",
+            9
+          ],
+          "expect": {
+            "error": "window_overrun"
+          }
+        },
+        {
+          "do": [
+            "push",
+            9,
+            1
+          ],
+          "expect": {
+            "refused": "closed"
+          }
+        },
+        {
+          "do": [
+            "release",
+            4,
+            1
+          ],
+          "expect": "ok"
+        },
+        {
+          "write": []
+        }
+      ]
+    },
+    {
+      "id": "release-restores-the-window",
+      "rule": "the window counts what the consumer let go of",
+      "steps": [
+        {
+          "do": [
+            "ask",
+            4
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "answered",
+            4,
+            true
+          ],
+          "expect": "deliver"
+        },
+        {
+          "do": [
+            "data",
+            4,
+            65536
+          ],
+          "expect": "data"
+        },
+        {
+          "do": [
+            "data",
+            4,
+            65536
+          ],
+          "expect": "data"
+        },
+        {
+          "do": [
+            "release",
+            4,
+            1000
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "data",
+            4,
+            1000
+          ],
+          "expect": "data"
+        },
+        {
+          "do": [
+            "data",
+            4,
+            1
+          ],
+          "expect": {
+            "error": "window_overrun"
+          }
+        }
+      ]
+    },
+    {
+      "id": "the-consumer-holds-what-it-is-given",
+      "rule": "the core holds no ring: what is not released counts against the window however it arrived",
+      "steps": [
+        {
+          "do": [
+            "ask",
+            4
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "answered",
+            4,
+            true
+          ],
+          "expect": "deliver"
+        },
+        {
+          "repeat": 131072,
+          "do": [
+            "data",
+            4,
+            1
+          ],
+          "expect": "data"
+        },
+        {
+          "check": {
+            "streams": {},
+            "inbound": {
+              "4": {
+                "state": "open",
+                "received": 131072,
+                "returned": 0
+              }
+            }
+          }
+        },
+        {
+          "do": [
+            "data",
+            4,
+            1
+          ],
+          "expect": {
+            "error": "window_overrun"
+          }
+        }
+      ]
+    },
+    {
+      "id": "overcredit-refused",
+      "rule": "releasing more than the stream holds is the core's own bug: refused, and nothing changes",
+      "steps": [
+        {
+          "do": [
+            "ask",
+            6
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "answered",
+            6,
+            true
+          ],
+          "expect": "deliver"
+        },
+        {
+          "do": [
+            "data",
+            6,
+            100
+          ],
+          "expect": "data"
+        },
+        {
+          "do": [
+            "release",
+            6,
+            101
+          ],
+          "expect": {
+            "refused": "overcredit"
+          }
+        },
+        {
+          "check": {
+            "streams": {},
+            "inbound": {
+              "6": {
+                "state": "open",
+                "received": 100,
+                "returned": 0
+              }
+            },
+            "owed": 0
+          }
+        },
+        {
+          "do": [
+            "release",
+            6,
+            100
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "data",
+            6,
+            1
+          ],
+          "expect": "data"
+        },
+        {
+          "write": [
+            [
+              "credit",
+              6,
+              100
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "no-credit-after-end",
+      "rule": "after end nothing more can come: releasing owes no credit",
+      "steps": [
+        {
+          "do": [
+            "ask",
+            6
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "answered",
+            6,
+            true
+          ],
+          "expect": "deliver"
+        },
+        {
+          "do": [
+            "data",
+            6,
+            50
+          ],
+          "expect": "data"
+        },
+        {
+          "do": [
+            "end",
+            6
+          ],
+          "expect": "end"
+        },
+        {
+          "do": [
+            "release",
+            6,
+            50
+          ],
+          "expect": "ok"
+        },
+        {
+          "write": []
+        },
+        {
+          "check": {
+            "streams": {},
+            "inbound": {
+              "6": null
+            },
+            "owed": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "owed-credit-goes-at-the-terminal",
+      "rule": "credit still owed when the stream's end or abort arrives would cross it: it is dropped",
+      "steps": [
+        {
+          "do": [
+            "ask",
+            6
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "answered",
+            6,
+            true
+          ],
+          "expect": "deliver"
+        },
+        {
+          "do": [
+            "data",
+            6,
+            50
+          ],
+          "expect": "data"
+        },
+        {
+          "do": [
+            "release",
+            6,
+            50
+          ],
+          "expect": "ok"
+        },
+        {
+          "check": {
+            "streams": {},
+            "inbound": {},
+            "owed": 1
+          }
+        },
+        {
+          "do": [
+            "end",
+            6
+          ],
+          "expect": "end"
+        },
+        {
+          "check": {
+            "streams": {},
+            "inbound": {
+              "6": null
+            },
+            "owed": 0
+          }
+        },
+        {
+          "write": []
+        },
+        {
+          "do": [
+            "ask",
+            7
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "answered",
+            7,
+            true
+          ],
+          "expect": "deliver"
+        },
+        {
+          "do": [
+            "data",
+            7,
+            50
+          ],
+          "expect": "data"
+        },
+        {
+          "do": [
+            "release",
+            7,
+            50
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "aborted",
+            7,
+            "internal"
+          ],
+          "expect": "abort"
+        },
+        {
+          "check": {
+            "streams": {},
+            "inbound": {
+              "7": null
+            },
+            "owed": 0
+          }
+        },
+        {
+          "write": []
+        }
+      ]
+    },
+    {
+      "id": "no-credit-after-abort",
+      "rule": "after an abort nothing more can come",
+      "steps": [
+        {
+          "do": [
+            "ask",
+            6
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "answered",
+            6,
+            true
+          ],
+          "expect": "deliver"
+        },
+        {
+          "do": [
+            "data",
+            6,
+            50
+          ],
+          "expect": "data"
+        },
+        {
+          "do": [
+            "aborted",
+            6,
+            "body_stream_error"
+          ],
+          "expect": "abort"
+        },
+        {
+          "do": [
+            "release",
+            6,
+            50
+          ],
+          "expect": "ok"
+        },
+        {
+          "write": []
+        }
+      ]
+    },
+    {
+      "id": "drop-an-open-stream",
+      "rule": "the core's cancel drops what is owed and the stream's frames until its terminal",
+      "steps": [
+        {
+          "do": [
+            "ask",
+            5
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "answered",
+            5,
+            true
+          ],
+          "expect": "deliver"
+        },
+        {
+          "do": [
+            "data",
+            5,
+            50
+          ],
+          "expect": "data"
+        },
+        {
+          "do": [
+            "release",
+            5,
+            50
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "drop",
+            5
+          ],
+          "expect": "send_cancel"
+        },
+        {
+          "check": {
+            "streams": {},
+            "inbound": {
+              "5": {
+                "state": "retiring",
+                "received": 0,
+                "returned": 0
+              }
+            },
+            "owed": 0
+          }
+        },
+        {
+          "write": []
+        },
+        {
+          "do": [
+            "data",
+            5,
+            10
+          ],
+          "expect": "dropped"
+        },
+        {
+          "do": [
+            "release",
+            5,
+            10
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "end",
+            5
+          ],
+          "expect": "dropped"
+        },
+        {
+          "check": {
+            "streams": {},
+            "inbound": {
+              "5": null
+            },
+            "owed": 0
+          }
+        },
+        {
+          "do": [
+            "data",
+            5,
+            1
+          ],
+          "expect": {
+            "error": "stream_not_open"
+          }
+        }
+      ]
+    },
+    {
+      "id": "drop-before-the-reply",
+      "rule": "a head that crossed the cancel opens a retiring stream",
+      "steps": [
+        {
+          "do": [
+            "ask",
+            10
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "drop",
+            10
+          ],
+          "expect": "send_cancel"
+        },
+        {
+          "do": [
+            "answered",
+            10,
+            true
+          ],
+          "expect": "retired"
+        },
+        {
+          "do": [
+            "data",
+            10,
+            5
+          ],
+          "expect": "dropped"
+        },
+        {
+          "do": [
+            "aborted",
+            10,
+            "cancelled"
+          ],
+          "expect": "dropped"
+        },
+        {
+          "check": {
+            "streams": {},
+            "inbound": {
+              "10": null
+            }
+          }
+        },
+        {
+          "do": [
+            "ask",
+            11
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "drop",
+            11
+          ],
+          "expect": "send_cancel"
+        },
+        {
+          "do": [
+            "answered",
+            11,
+            false
+          ],
+          "expect": "retired"
+        },
+        {
+          "check": {
+            "streams": {},
+            "inbound": {
+              "11": null
+            }
+          }
+        },
+        {
+          "do": [
+            "drop",
+            12
+          ],
+          "expect": "nothing"
+        }
+      ]
+    },
+    {
+      "id": "the-cores-ids-increase",
+      "rule": "the core's request IDs strictly increase, apart from main's",
+      "steps": [
+        {
+          "do": [
+            "request",
+            5
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "ask",
+            3
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "ask",
+            3
+          ],
+          "expect": {
+            "error": "request_order"
+          }
+        },
+        {
+          "do": [
+            "ask",
+            2
+          ],
+          "expect": {
+            "error": "request_order"
+          }
+        },
+        {
+          "do": [
+            "ask",
+            5
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "request",
+            6
+          ],
+          "expect": "ok"
+        }
+      ]
+    },
+    {
+      "id": "data-for-a-request-the-core-never-sent",
+      "rule": "a frame above the core's highest request is a protocol error, whatever main's requests are",
+      "steps": [
+        {
+          "do": [
+            "request",
+            8
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "ask",
+            3
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "data",
+            8,
+            1
+          ],
+          "expect": {
+            "error": "stream_unknown"
+          }
+        },
+        {
+          "do": [
+            "head",
+            8,
+            true
+          ],
+          "expect": {
+            "refused": "closed"
+          }
+        },
+        {
+          "do": [
+            "answered",
+            3,
+            true
+          ],
+          "expect": {
+            "error": "stream_unknown"
+          }
+        },
+        {
+          "write": []
+        }
+      ]
+    },
+    {
+      "id": "data-before-the-reply",
+      "rule": "no data before the core's request has its head",
+      "steps": [
+        {
+          "do": [
+            "ask",
+            6
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "data",
+            6,
+            1
+          ],
+          "expect": {
+            "error": "stream_not_open"
+          }
+        }
+      ]
+    },
+    {
+      "id": "credit-for-a-stream-the-core-never-opened",
+      "rule": "credit names a request the core answered with a body: one of its own requests is no such stream",
+      "steps": [
+        {
+          "do": [
+            "ask",
+            9
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "answered",
+            9,
+            true
+          ],
+          "expect": "deliver"
+        },
+        {
+          "do": [
+            "credit",
+            9,
+            1
+          ],
+          "expect": {
+            "error": "stream_unknown"
+          }
+        },
+        {
+          "do": [
+            "data",
+            9,
+            1
+          ],
+          "expect": {
+            "error": "stream_unknown"
+          }
+        }
+      ]
+    },
+    {
+      "id": "credit-beyond-what-was-sent",
+      "rule": "credit beyond the bytes sent is a protocol error: the connection fails both ways",
+      "steps": [
+        {
+          "do": [
+            "request",
+            1
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "head",
+            1,
+            true
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "push",
+            1,
+            10
+          ],
+          "expect": {
+            "taken": 10
+          }
+        },
+        {
+          "do": [
+            "ask",
+            2
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "answered",
+            2,
+            true
+          ],
+          "expect": "deliver"
+        },
+        {
+          "do": [
+            "data",
+            2,
+            10
+          ],
+          "expect": "data"
+        },
+        {
+          "do": [
+            "credit",
+            1,
+            11
+          ],
+          "expect": {
+            "error": "credit_overgrant"
+          }
+        },
+        {
+          "do": [
+            "data",
+            2,
+            1
+          ],
+          "expect": {
+            "error": "credit_overgrant"
+          }
+        },
+        {
+          "do": [
+            "release",
+            2,
+            10
+          ],
+          "expect": "ok"
+        },
+        {
+          "write": []
+        }
+      ]
+    },
+    {
+      "id": "unsolicited-reply",
+      "rule": "a reply to no pending request of the core's is a protocol error",
+      "steps": [
+        {
+          "do": [
+            "ask",
+            1
+          ],
+          "expect": "ok"
+        },
+        {
+          "do": [
+            "answered",
+            2,
+            false
+          ],
+          "expect": {
+            "error": "unsolicited_response"
           }
         }
       ]
