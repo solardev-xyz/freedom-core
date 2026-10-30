@@ -33,6 +33,7 @@ use crate::build_info;
 use crate::confine::Grant;
 use crate::identity::{self, Identity};
 use crate::reconcile;
+use crate::units;
 
 /// How the process ends after a start step it answered with an error
 /// (0008: "the service answers with the error and then exits"). Main read
@@ -182,9 +183,11 @@ impl RadicleService {
                 };
                 // A panic here ends the process (70): a crash, which main
                 // restarts, and whose next start reconciles again.
+                // Each unit's time limit, from outside the worker.
+                let watch = units::UnitWatch::new(crate::testhooks::unit_limit(units::UNIT_LIMIT));
                 let outcome = fc_service::panic::with_kind(
                     fc_service::panic::TaskKind::named("reconcile"),
-                    || reconcile::run(&run, &()),
+                    || reconcile::run(&run, &watch),
                 );
                 drop(signer);
                 match outcome {

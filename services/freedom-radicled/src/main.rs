@@ -53,6 +53,7 @@ mod marker;
 mod reconcile;
 mod service;
 mod testhooks;
+mod units;
 
 use std::process::ExitCode;
 use std::sync::Arc;
