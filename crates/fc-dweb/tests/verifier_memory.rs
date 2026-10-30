@@ -1,9 +1,9 @@
-//! The IPFS walk's memory, measured by the allocator (design 0009,
-//! Bounds: a request's memory is reserved before it is allocated).
-//! Requests whose decoded structure would far exceed their budget (a
-//! directory's entries, a HAMT's shards and entries, a file node's
-//! children, a listing's page) end `unverifiable` without allocating past
-//! it, and those that fit are answered.
+//! The verifier's memory, measured by the allocator (design 0009, Bounds:
+//! a request's memory is reserved before it is allocated). Requests whose
+//! decoded structure would far exceed their budget (a directory's entries,
+//! a HAMT's shards and entries, a file node's children, a listing's page,
+//! a Swarm lookup's parsed manifest nodes) end `unverifiable` without
+//! allocating past it, and those that fit are answered.
 //!
 //! A counting global allocator caps the process, for each request, at what
 //! it held before plus the request's budget plus a small allowance for the
@@ -38,6 +38,8 @@ const CAR_TYPE: &str = "application/vnd.ipld.car; version=1; order=dfs; dups=y";
 const RAW_TYPE: &str = "application/vnd.ipld.raw";
 const UNVERIFIABLE: &str =
     "error 502 This content can't be verified with the external IPFS gateway";
+const SWARM_UNVERIFIABLE: &str =
+    "error 502 This content can't be verified with the external Swarm node";
 
 fn varint(mut v: u64, out: &mut Vec<u8>) {
     while v >= 0x80 {
@@ -255,8 +257,12 @@ fn bounded(
     budget: usize,
     slow_pool: bool,
 ) -> (Option<u16>, usize, String) {
+    capped(case, &plan(root), budget, |v| drive(v, world, slow_pool))
+}
+
+/// `drive` on a request for `p` under the allocator's cap.
+fn capped<R>(case: &str, p: &Verify, budget: usize, drive: impl FnOnce(&mut Verifier) -> R) -> R {
     use std::io::Write;
-    let p = plan(root);
     let _ = writeln!(std::io::stderr(), "dense case: {case}, budget {budget}");
     PEAK.store(0, Ordering::Relaxed);
     let before = ALLOC.allocated();
@@ -264,7 +270,7 @@ fn bounded(
     let got = {
         let mut v = Verifier::new(
             1,
-            &p,
+            p,
             Method::Get,
             None,
             false,
@@ -274,10 +280,170 @@ fn bounded(
             },
         )
         .unwrap();
-        drive(&mut v, world, slow_pool)
+        drive(&mut v)
     };
     ALLOC.set_limit(usize::MAX).unwrap();
     got
+}
+
+// ---------------------------------------------------------------------------
+// Swarm manifests.
+
+/// A mantaray v0.2 node as Bee writes it, unobfuscated: its entry, then its
+/// forks of (prefix, child, metadata JSON).
+fn mantaray(entry: &[u8; 32], forks: &[(Vec<u8>, [u8; 32], Option<String>)]) -> Vec<u8> {
+    use sha3::Digest as _;
+    let mut p = vec![0u8; 32];
+    p.extend_from_slice(&sha3::Keccak256::digest(b"mantaray:0.2")[..31]);
+    p.push(32);
+    p.extend_from_slice(entry);
+    let mut bitmap = [0u8; 32];
+    for (prefix, _, _) in forks {
+        bitmap[usize::from(prefix[0] / 8)] |= 1 << (prefix[0] % 8);
+    }
+    p.extend_from_slice(&bitmap);
+    let mut sorted = forks.to_vec();
+    sorted.sort_by_key(|f| f.0[0]);
+    for (prefix, child, meta) in sorted {
+        p.push(if meta.is_some() { 2 | 16 } else { 2 });
+        p.push(prefix.len() as u8);
+        p.extend_from_slice(&prefix);
+        p.resize(p.len() + 30 - prefix.len(), 0);
+        p.extend_from_slice(&child);
+        if let Some(m) = meta {
+            let mut padded = m.into_bytes();
+            while (padded.len() + 2) % 32 != 0 {
+                padded.push(b'\n');
+            }
+            p.extend_from_slice(&(padded.len() as u16).to_be_bytes());
+            p.extend_from_slice(&padded);
+        }
+    }
+    p
+}
+
+/// A Swarm file's chunk tree, each chunk added to `chunks` under its
+/// `/chunks` path: its root's address.
+fn swarm_file(data: &[u8], chunks: &mut World) -> [u8; 32] {
+    let mut put = |span: u64, payload: &[u8]| {
+        let address = fc_swarm::chunk_address(span, payload).unwrap();
+        let mut wire = span.to_le_bytes().to_vec();
+        wire.extend_from_slice(payload);
+        chunks.insert(format!("/chunks/{}", hex::encode(address)), Arc::new(wire));
+        (address, span)
+    };
+    let mut level: Vec<([u8; 32], u64)> = data
+        .chunks(4096)
+        .map(|leaf| put(leaf.len() as u64, leaf))
+        .collect();
+    while level.len() > 1 {
+        level = level
+            .chunks(128)
+            .map(|group| {
+                let span = group.iter().map(|(_, s)| s).sum();
+                let payload: Vec<u8> = group.iter().flat_map(|(a, _)| a.to_vec()).collect();
+                put(span, &payload)
+            })
+            .collect();
+    }
+    level[0].0
+}
+
+/// A manifest whose two nodes are mostly metadata the lookup keeps: seven
+/// forks each with a 60,000-byte `Filename`, about 420 KB a node. The root's
+/// fork `a/` leads to the other node, which has no fork `q`, so `/a/q`
+/// loads it twice and is a 404. Its root, Ant's chunks, what the parsed
+/// root holds, and the other node's length.
+fn big_manifest() -> (String, World, usize, usize) {
+    let meta = |c: u8| {
+        let name = char::from(c).to_string().repeat(60_000);
+        Some(format!(r#"{{"Filename":"{name}"}}"#))
+    };
+    let mut chunks = HashMap::new();
+    let forks: Vec<_> = (b'b'..=b'h')
+        .map(|c| (vec![c], [0x11; 32], meta(c)))
+        .collect();
+    let child = mantaray(&[0; 32], &forks);
+    let child_address = swarm_file(&child, &mut chunks);
+    let mut root_forks = forks[..6].to_vec();
+    root_forks.push((b"a/".to_vec(), child_address, meta(b'a')));
+    let root = mantaray(&[0; 32], &root_forks);
+    let root_cost = fc_swarm::manifest::parse_node(&root).unwrap().cost();
+    let address = swarm_file(&root, &mut chunks);
+    (hex::encode(address), chunks, root_cost, child.len())
+}
+
+fn swarm_plan(root: &str, path: &str) -> Verify {
+    let backend = Backend::ant(fc_dweb::Ant::External, true);
+    Verify {
+        node: Node::Ant,
+        root: Root::Swarm(root.to_owned()),
+        path: path.to_owned(),
+        query: String::new(),
+        headers: vec![],
+        retry: retry(backend),
+        timers: timers(backend),
+        response: vec![ResponseOp::CanonicalizeRedirect, ResponseOp::StripPageState],
+        trust: Trust {
+            name: None,
+            content: ContentTrust::Verified,
+        },
+    }
+}
+
+/// A Swarm request through main, the hashing pool and a page that reads at
+/// once, against an Ant that answers `/chunks` from `chunks`: as `drive`.
+fn swarm_drive(v: &mut Verifier, chunks: &World) -> (Option<u16>, usize, String) {
+    let mut jobs = VecDeque::new();
+    let mut asked = VecDeque::new();
+    let (mut head, mut body) = (None, 0);
+    loop {
+        PEAK.fetch_max(v.reserved(), Ordering::Relaxed);
+        while let Some(o) = v.poll() {
+            match o {
+                Output::Piece(r) => asked.push_back(r),
+                Output::Hash(job) => jobs.push_back(job),
+                Output::Head(h) => head = Some(h.status),
+                Output::Body(b) => {
+                    body += b.len();
+                    let n = b.len();
+                    drop(b);
+                    v.body_credit(n).unwrap();
+                }
+                Output::End => return (head, body, "end".to_owned()),
+                Output::Error(e) => {
+                    return (head, body, format!("error {} {}", e.status, e.message));
+                }
+                Output::Abort { code, message } => {
+                    return (head, body, format!("abort {} {message}", code.as_str()));
+                }
+                Output::Cancelled => return (head, body, "cancelled".to_owned()),
+                Output::CancelPiece(_)
+                | Output::Credit { .. }
+                | Output::Remember { .. }
+                | Output::Floor { .. } => {}
+            }
+        }
+        if let Some(job) = jobs.pop_front() {
+            v.hashed(job.run()).unwrap();
+            continue;
+        }
+        let Some(r) = asked.pop_front() else {
+            return (head, body, "stalled".to_owned());
+        };
+        assert!(!r.stream, "{}", r.path);
+        match chunks.get(&r.path) {
+            Some(wire) => v.piece_whole(r.id, 200, vec![], wire.to_vec()).unwrap(),
+            None => v
+                .piece_whole(
+                    r.id,
+                    404,
+                    vec![],
+                    br#"{"code":404,"message":"Not Found"}"#.to_vec(),
+                )
+                .unwrap(),
+        }
+    }
 }
 
 /// The entity CAR's path for a root.
@@ -458,4 +624,29 @@ fn dense_structure_stays_within_the_budget() {
     );
     let peak = PEAK.load(Ordering::Relaxed);
     assert!(peak < 5 << 20, "{peak}");
+    // A Swarm lookup holds its root parsed beside the next node's join, and
+    // both count: the reservation's peak covers them.
+    let (root, chunks, root_cost, child_len) = big_manifest();
+    let p = swarm_plan(&root, "/a/q");
+    let got = capped("manifest, nodes of 420 KB", &p, REQUEST_BUDGET, |v| {
+        swarm_drive(v, &chunks)
+    });
+    assert_eq!((got.0, got.2.as_str()), (Some(404), "end"), "{got:?}");
+    let peak = PEAK.load(Ordering::Relaxed);
+    assert!(
+        peak >= root_cost + child_len,
+        "{peak} < {root_cost} + {child_len}"
+    );
+    // A Swarm request's 2 MiB fits them.
+    let got = capped("manifest, nodes of 420 KB", &p, 2 << 20, |v| {
+        swarm_drive(v, &chunks)
+    });
+    assert_eq!((got.0, got.2.as_str()), (Some(404), "end"), "{got:?}");
+    // 1 MiB has room for the root and one node's join, not for the root
+    // parsed beside the join and its parse: unverifiable, without
+    // allocating past it.
+    let got = capped("manifest, nodes of 420 KB", &p, 1 << 20, |v| {
+        swarm_drive(v, &chunks)
+    });
+    assert_eq!(got.2, SWARM_UNVERIFIABLE, "{got:?}");
 }

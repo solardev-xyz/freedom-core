@@ -6,9 +6,19 @@
 //!
 //! A node is a Swarm file: the caller joins its chunk tree and checks every
 //! chunk before handing the bytes over (at most [`MAX_NODE`], which it has
-//! reserved). Parsing copies the node once, to de-obfuscate it, and keeps
-//! at most 256 forks (one per bitmap bit) and the metadata keys the walk
-//! reads.
+//! reserved). Parsing keeps at most 256 forks (one per bitmap bit) and the
+//! metadata keys the walk reads.
+//!
+//! **Memory,** for a caller that reserves it first (fc-dweb's verifier):
+//! - a parsed node holds no more of its bytes than its input had, and
+//!   [`Node::cost`] is what it holds; [`parse_room`] bounds what a parse
+//!   allocates, the input being taken over and de-obfuscated in place
+//!   ([`parse_node_owned`]);
+//! - a lookup holds its root, the node it is at, and its phases
+//!   ([`Lookup::held`]). While it waits for the next node it holds no other:
+//!   of the last one it keeps only the followed fork's metadata.
+//!   [`lookup_room`] and [`STEP_ROOM`] bound what its steps allocate beside
+//!   the nodes they parse.
 
 use fc_evm::keccak256;
 
@@ -17,6 +27,22 @@ pub const MAX_NODE: usize = 1 << 20;
 /// The most manifest nodes one lookup loads, the root included, across
 /// all its phases (0009, Bounds).
 pub const MAX_LOOKUP_NODES: usize = 64;
+/// A fork's metadata on the wire: its length is two bytes.
+pub const MAX_METADATA: usize = u16::MAX as usize;
+/// The most forks a node has: one per bitmap bit.
+const MAX_FORKS: usize = 256;
+/// Slots a metadata's entries take at most: at most 7 kept keys, in a
+/// vector grown to 8.
+const METADATA_SLOTS: usize = 8 * std::mem::size_of::<(String, String)>();
+/// What a parsed node holds beside the bytes it copies from its input, at
+/// most: each fork's record and its metadata's slots, and its own.
+const NODE_RECORDS: usize =
+    MAX_FORKS * (std::mem::size_of::<Fork>() + METADATA_SLOTS) + METADATA_SLOTS;
+/// What one lookup step allocates beside the node it parses and its paths,
+/// at most: the metadata it copies (a followed fork's, merged into the next
+/// node, and an outcome's, twice), each within one fork's
+/// [`MAX_METADATA`], their slots, and references.
+pub const STEP_ROOM: usize = 3 * (MAX_METADATA + METADATA_SLOTS) + 1024;
 const KEY: usize = 32;
 const VERSION: usize = 31;
 const HEADER: usize = KEY + VERSION + 1;
@@ -69,6 +95,16 @@ pub struct Fork {
 pub struct Metadata(pub Vec<(String, String)>);
 
 impl Metadata {
+    /// The heap the metadata holds: its slots and its strings.
+    pub fn cost(&self) -> usize {
+        self.0.capacity() * std::mem::size_of::<(String, String)>()
+            + self
+                .0
+                .iter()
+                .map(|(k, v)| k.capacity() + v.capacity())
+                .sum::<usize>()
+    }
+
     pub fn get(&self, key: &str) -> Option<&str> {
         self.0
             .iter()
@@ -120,6 +156,40 @@ impl Node {
     fn fork(&self, byte: u8) -> Option<&Fork> {
         self.forks.iter().find(|f| f.byte == byte)
     }
+
+    /// The heap the node holds: its entry, its forks' records, prefixes,
+    /// references and metadata, and its own metadata.
+    pub fn cost(&self) -> usize {
+        self.entry.capacity()
+            + self.forks.capacity() * std::mem::size_of::<Fork>()
+            + self
+                .forks
+                .iter()
+                .map(|f| f.prefix.capacity() + f.child.capacity() + f.metadata.cost())
+                .sum::<usize>()
+            + self.metadata.cost()
+    }
+}
+
+/// The most [`parse_node_owned`] allocates for an input of `len` bytes: the
+/// node's copies of the input's bytes (its entry, prefixes, references and
+/// kept metadata, each at most its own length on the wire, so together at
+/// most `len`), and its records. Metadata it reads and doesn't keep comes
+/// from the same bytes, and goes before more is read.
+pub fn parse_room(len: usize) -> usize {
+    len.min(MAX_NODE) + NODE_RECORDS
+}
+
+/// The most [`Lookup::new`] allocates for `path`: the lookup itself, its
+/// phases (the path, the path and `/`, the path joined with the index
+/// document, the error document: each document within the root's `/`
+/// fork's metadata), and its first step.
+pub fn lookup_room(path: &str) -> usize {
+    std::mem::size_of::<Lookup>()
+        + 3 * (path.len() + 1)
+        + MAX_METADATA
+        + 4 * std::mem::size_of::<Phase>()
+        + STEP_ROOM
 }
 
 /// Whether a node's first bytes carry a mantaray version hash (Ant's header
@@ -135,15 +205,23 @@ pub fn has_manifest_header(data: &[u8]) -> bool {
     v == version_hash(b"mantaray:0.2") || v == version_hash(b"mantaray:0.1")
 }
 
-/// Parses a node's joined bytes (Ant `Node::unmarshal`).
+/// Parses a node's joined bytes (Ant `Node::unmarshal`), on a copy.
 pub fn parse_node(input: &[u8]) -> Result<Node, NodeError> {
     if input.len() > MAX_NODE {
         return Err(NodeError::TooLarge);
     }
-    if input.len() < HEADER {
+    parse_node_owned(input.to_vec())
+}
+
+/// [`parse_node`], de-obfuscating `data` in place: what it allocates is the
+/// node alone ([`parse_room`]).
+pub fn parse_node_owned(mut data: Vec<u8>) -> Result<Node, NodeError> {
+    if data.len() > MAX_NODE {
+        return Err(NodeError::TooLarge);
+    }
+    if data.len() < HEADER {
         return Err(NodeError::Malformed);
     }
-    let mut data = input.to_vec();
     let mut key = [0u8; KEY];
     key.copy_from_slice(&data[..KEY]);
     for (i, b) in data[KEY..].iter_mut().enumerate() {
@@ -172,7 +250,8 @@ pub fn parse_node(input: &[u8]) -> Result<Node, NodeError> {
         .try_into()
         .map_err(|_| NodeError::Malformed)?;
     at += 32;
-    let mut forks = Vec::new();
+    let count = index.iter().map(|b| b.count_ones() as usize).sum();
+    let mut forks = Vec::with_capacity(count);
     for byte in 0..=255u8 {
         if (index[usize::from(byte / 8)] >> (byte % 8)) & 1 == 0 {
             continue;
@@ -274,7 +353,9 @@ fn json_string(s: &str, i: &mut usize) -> Result<String, NodeError> {
         return Err(NodeError::Malformed);
     }
     *i += 1;
-    let mut out = String::new();
+    // Decoded, a string is never longer than its text on the wire: room for
+    // that, once.
+    let mut out = String::with_capacity(raw_len(&b[*i..]));
     while *i < b.len() {
         match b[*i] {
             b'"' => {
@@ -316,6 +397,19 @@ fn json_string(s: &str, i: &mut usize) -> Result<String, NodeError> {
         }
     }
     Err(NodeError::Malformed)
+}
+
+/// A JSON string's text up to its closing quote, or to the end without one.
+fn raw_len(b: &[u8]) -> usize {
+    let mut j = 0;
+    while j < b.len() {
+        match b[j] {
+            b'"' => return j,
+            b'\\' => j += 2,
+            _ => j += 1,
+        }
+    }
+    b.len()
 }
 
 /// What a lookup found.
@@ -365,13 +459,41 @@ enum Phase {
     Done(Outcome),
 }
 
+impl Outcome {
+    fn cost(&self) -> usize {
+        match self {
+            Outcome::Found { data_ref, metadata } => data_ref.capacity() + metadata.cost(),
+            Outcome::NotFound { .. } | Outcome::Directory => 0,
+        }
+    }
+}
+
+impl Phase {
+    /// The heap the phase holds: its path, the next phase and its box.
+    fn cost(&self) -> usize {
+        match self {
+            Phase::Walk { path, then, .. } | Phase::Prefix { path, then, .. } => {
+                path.capacity() + std::mem::size_of::<Phase>() + then.cost()
+            }
+            Phase::Done(o) => o.cost(),
+        }
+    }
+}
+
 /// Ant's `lookup_path` on a manifest whose root node the caller holds.
 /// Feeds are the caller's: a root whose `/` fork names a feed is resolved
 /// first, and this machine starts at the feed's root.
 #[derive(Debug, Clone)]
 pub struct Lookup {
     root: Node,
-    node: Node,
+    /// The node the lookup is at, when that isn't the root; none, too,
+    /// while it waits for the next node, which needs no more of the last
+    /// than `followed`.
+    node: Option<Node>,
+    /// While a node is asked for: the metadata of the fork that names it,
+    /// merged into it as Ant merges it, and the length of that fork's
+    /// prefix, which the walk moves past.
+    followed: Option<(Metadata, usize)>,
     phase: Phase,
     /// The nodes loaded so far, the root included; never reset when a
     /// phase starts again from the root, which is held.
@@ -386,18 +508,24 @@ fn walk(path: &str, then: Phase) -> Phase {
     }
 }
 
+/// `a`, `/` and `b`, in a string of exactly that length.
+fn joined(a: &str, b: &str) -> String {
+    let mut out = String::with_capacity(a.len() + 1 + b.len());
+    out.push_str(a);
+    out.push('/');
+    out.push_str(b);
+    out
+}
+
 impl Lookup {
     pub fn new(root: Node, path: &str) -> (Self, Step) {
         let path = path.trim_start_matches('/');
-        let slash = root
-            .fork(b'/')
-            .map(|f| f.metadata.clone())
-            .unwrap_or_default();
-        let index = slash.get(INDEX_DOCUMENT).map(str::to_owned);
-        let error = slash.get(ERROR_DOCUMENT).map(str::to_owned);
+        let slash = root.fork(b'/').map(|f| &f.metadata);
+        let index = slash.and_then(|m| m.get(INDEX_DOCUMENT));
+        let error = slash.and_then(|m| m.get(ERROR_DOCUMENT));
         let not_found = |root| Phase::Done(Outcome::NotFound { root });
         let phase = if path.is_empty() {
-            match &index {
+            match index {
                 Some(idx) => walk(idx, not_found(true)),
                 None => not_found(true),
             }
@@ -405,32 +533,32 @@ impl Lookup {
             // The literal path; then the directory redirect; then the path
             // joined with the index document; then the error document.
             let mut tail = not_found(false);
-            if let Some(err) = &error
+            if let Some(err) = error
                 && path != err
             {
                 tail = walk(err, tail);
             }
-            if let Some(idx) = &index
-                && !path.ends_with(idx.as_str())
+            if let Some(idx) = index
+                && !path.ends_with(idx)
             {
                 let base = path.trim_end_matches('/');
-                let joined = if base.is_empty() {
-                    idx.clone()
+                tail = if base.is_empty() {
+                    walk(idx, tail)
                 } else {
-                    format!("{base}/{idx}")
+                    walk(&joined(base, idx), tail)
                 };
-                tail = walk(&joined, tail);
             }
             let prefix = Phase::Prefix {
-                path: format!("{path}/").into_bytes(),
+                path: joined(path, "").into_bytes(),
                 at: 0,
                 then: Box::new(tail),
             };
             walk(path, prefix)
         };
         let mut l = Self {
-            node: root.clone(),
             root,
+            node: None,
+            followed: None,
             phase,
             loaded: 1,
         };
@@ -438,35 +566,41 @@ impl Lookup {
         (l, step)
     }
 
-    /// Hands over the node the last [`Step::Need`] asked for. Its metadata
-    /// is merged from the fork that named it, as Ant merges it. A node that
-    /// can't be read fails a walk, but only ends a directory-prefix check,
-    /// which Ant answers "no" and moves on.
-    pub fn node(&mut self, bytes: &[u8]) -> Step {
-        let mut child = match parse_node(bytes) {
+    /// What the lookup holds: its root, the node it is at, the followed
+    /// fork's metadata, and its phases.
+    pub fn held(&self) -> usize {
+        self.root.cost()
+            + self.node.as_ref().map_or(0, Node::cost)
+            + self.followed.as_ref().map_or(0, |(m, _)| m.cost())
+            + self.phase.cost()
+    }
+
+    /// The node the lookup is at.
+    fn at(&self) -> &Node {
+        self.node.as_ref().unwrap_or(&self.root)
+    }
+
+    /// Hands over the node the last [`Step::Need`] asked for, its bytes
+    /// parsed in place ([`parse_node_owned`]). Its metadata is merged from
+    /// the fork that named it, as Ant merges it. A node that can't be read
+    /// fails a walk, but only ends a directory-prefix check, which Ant
+    /// answers "no" and moves on.
+    pub fn node(&mut self, bytes: Vec<u8>) -> Step {
+        let (fork_meta, len) = self.followed.take().unwrap_or_default();
+        let mut child = match parse_node_owned(bytes) {
             Ok(n) => n,
             Err(e) => return self.refused(e),
-        };
-        let fork_meta = match &self.phase {
-            Phase::Walk { path, at, .. } | Phase::Prefix { path, at, .. } => self
-                .node
-                .fork(path[*at])
-                .map(|f| f.metadata.clone())
-                .unwrap_or_default(),
-            Phase::Done(_) => Metadata::default(),
         };
         if let Phase::Walk { .. } = self.phase {
             child.metadata.merge_under(&fork_meta);
         }
+        drop(fork_meta);
         // Advance past the fork just followed.
         match &mut self.phase {
-            Phase::Walk { path, at, .. } | Phase::Prefix { path, at, .. } => {
-                let len = self.node.fork(path[*at]).map_or(0, |f| f.prefix.len());
-                *at += len;
-            }
+            Phase::Walk { at, .. } | Phase::Prefix { at, .. } => *at += len,
             Phase::Done(_) => {}
         }
-        self.node = child;
+        self.node = Some(child);
         self.run()
     }
 
@@ -475,6 +609,7 @@ impl Lookup {
     /// data chunk saw no version hash. It is handled as a node that fails
     /// to parse.
     pub fn refused(&mut self, error: NodeError) -> Step {
+        self.followed = None;
         if let Phase::Prefix { then, .. } = std::mem::replace(
             &mut self.phase,
             Phase::Done(Outcome::NotFound { root: false }),
@@ -497,14 +632,15 @@ impl Lookup {
                 }
                 Phase::Walk { path, at, then } => {
                     if at == path.len() {
-                        let e = &self.node.entry;
+                        let node = self.at();
+                        let e = &node.entry;
                         if e.len() != 32 && e.len() != 64 {
                             return Step::Failed(NodeError::Malformed);
                         }
                         if e.iter().any(|&b| b != 0) {
                             let o = Outcome::Found {
                                 data_ref: e.clone(),
-                                metadata: self.node.metadata.clone(),
+                                metadata: node.metadata.clone(),
                             };
                             self.phase = Phase::Done(o.clone());
                             return Step::Done(o);
@@ -513,7 +649,7 @@ impl Lookup {
                         self.restart(*then);
                         continue;
                     }
-                    let Some(fork) = self.node.fork(path[at]) else {
+                    let Some(fork) = self.at().fork(path[at]) else {
                         self.restart(*then);
                         continue;
                     };
@@ -524,7 +660,7 @@ impl Lookup {
                         self.restart(*then);
                         continue;
                     }
-                    let need = fork.child.clone();
+                    let need = (fork.child.clone(), fork.metadata.clone(), fork.prefix.len());
                     self.phase = Phase::Walk { path, at, then };
                     return self.need(need);
                 }
@@ -533,7 +669,7 @@ impl Lookup {
                         self.phase = Phase::Done(Outcome::Directory);
                         return Step::Done(Outcome::Directory);
                     }
-                    let Some(fork) = self.node.fork(path[at]) else {
+                    let Some(fork) = self.at().fork(path[at]) else {
                         self.restart(*then);
                         continue;
                     };
@@ -556,7 +692,8 @@ impl Lookup {
                         self.phase = Phase::Done(Outcome::Directory);
                         return Step::Done(Outcome::Directory);
                     }
-                    let need = fork.child.clone();
+                    // A directory check merges no metadata.
+                    let need = (fork.child.clone(), Metadata::default(), fork.prefix.len());
                     self.phase = Phase::Prefix { path, at, then };
                     return self.need(need);
                 }
@@ -565,19 +702,22 @@ impl Lookup {
     }
 
     /// Asks for one more node, unless that would pass the bound; past it
-    /// the lookup is over.
-    fn need(&mut self, reference: Vec<u8>) -> Step {
+    /// the lookup is over. Of the node it is at, it keeps only what the
+    /// next one takes: the followed fork's metadata and prefix length.
+    fn need(&mut self, (reference, metadata, prefix): (Vec<u8>, Metadata, usize)) -> Step {
         if self.loaded >= MAX_LOOKUP_NODES {
             self.phase = Phase::Done(Outcome::NotFound { root: false });
             return Step::TooManyNodes;
         }
         self.loaded += 1;
+        self.node = None;
+        self.followed = Some((metadata, prefix));
         Step::Need(reference)
     }
 
     /// The next phase starts again from the root.
     fn restart(&mut self, next: Phase) {
-        self.node = self.root.clone();
+        self.node = None;
         self.phase = next;
     }
 }
@@ -701,7 +841,10 @@ mod tests {
         let root = parse_node(&node(&[0; 32], &[(b"dir/x", &[2; 32], None)])).unwrap();
         let (mut l, step) = Lookup::new(root.clone(), "dir/x");
         assert_eq!(step, Step::Need(vec![2; 32]));
-        assert_eq!(l.node(&[0x41; 100]), Step::Failed(NodeError::NotAManifest));
+        assert_eq!(
+            l.node(vec![0x41; 100]),
+            Step::Failed(NodeError::NotAManifest)
+        );
         // "dir" misses literally, then the prefix check walks "dir/":
         // the fork's prefix "dir/x" begins with it, so it is a directory
         // without loading anything.
@@ -716,7 +859,7 @@ mod tests {
         let root = parse_node(&node(&[0; 32], &[(b"a", &[3; 32], None)])).unwrap();
         let (mut l, step) = Lookup::new(root, "a");
         assert_eq!(step, Step::Need(vec![3; 32]));
-        assert_eq!(l.node(&child), Step::Failed(NodeError::Malformed));
+        assert_eq!(l.node(child), Step::Failed(NodeError::Malformed));
     }
 
     /// A chain of nodes, each with one fork `a` to the next: node `d`'s
@@ -740,9 +883,69 @@ mod tests {
         while let Step::Need(r) = &step {
             loaded += 1;
             let d = r[0];
-            step = lookup.node(&link(d));
+            step = lookup.node(link(d));
         }
         (step, loaded)
+    }
+
+    /// A node of `forks` forks, each with a `Filename` of `len` bytes (some
+    /// escaped), and the node's bytes.
+    fn heavy(forks: u8, len: usize) -> Vec<u8> {
+        // Built at run time: a backslash-u escape, as Bee writes non-ASCII.
+        let name = format!("{}{}u00e9", "n".repeat(len), '\\');
+        let metas: Vec<String> = (0..forks)
+            .map(|_| format!(r#"{{"Filename":"{name}","Other":"{name}"}}"#))
+            .collect();
+        let refs: Vec<[u8; 32]> = (0..forks).map(|i| [i; 32]).collect();
+        let prefixes: Vec<[u8; 1]> = (0..forks).map(|i| [b'a' + i]).collect();
+        let list: Vec<(&[u8], &[u8], Option<&str>)> = (0..usize::from(forks))
+            .map(|i| (&prefixes[i][..], &refs[i][..], Some(metas[i].as_str())))
+            .collect();
+        node(&[0; 32], &list)
+    }
+
+    #[test]
+    fn a_parsed_node_holds_no_more_than_its_room() {
+        for (forks, len) in [(1, 0), (1, 10), (7, 9_000), (20, 1_000), (26, 100)] {
+            let bytes = heavy(forks, len);
+            let n = parse_node(&bytes).unwrap();
+            let cost = n.cost();
+            assert!(cost <= parse_room(bytes.len()), "{forks} {len}");
+            // It holds what it keeps: each fork's Filename, not Other.
+            assert!(cost >= usize::from(forks) * (len + 2), "{forks} {len}");
+            for f in &n.forks {
+                let (k, v) = &f.metadata.0[0];
+                assert_eq!((k.as_str(), v.len()), (FILENAME, len + 2));
+                // Room for the text on the wire, no more.
+                assert!(v.capacity() <= len + 6);
+            }
+        }
+        // The cost counts every byte held: a clone holds the same.
+        let n = parse_node(&heavy(7, 9_000)).unwrap();
+        assert!(n.clone().cost() <= n.cost());
+    }
+
+    #[test]
+    fn a_lookup_holds_its_root_once_and_no_node_while_waiting() {
+        // The root's fork `a` leads to a node as heavy as the root.
+        let root = heavy(7, 9_000);
+        let child = heavy(7, 9_000);
+        let root_node = parse_node(&root).unwrap();
+        let root_cost = root_node.cost();
+        let (mut l, step) = Lookup::new(root_node, "a/zzz");
+        assert_eq!(step, Step::Need(vec![0; 32]));
+        // The root once, the followed fork's metadata, and the phases.
+        let held = l.held();
+        let followed = l.followed.as_ref().unwrap().0.cost();
+        assert!(held >= root_cost + followed);
+        assert!(held < root_cost + followed + 1024, "{held} {root_cost}");
+        assert!(l.node.is_none());
+        // At the child: the root and the child, nothing of the fork's
+        // metadata but what merged into the child.
+        let child_cost = parse_node(&child).unwrap().cost();
+        let step = l.node(child);
+        assert!(matches!(step, Step::Need(_) | Step::Done(_)), "{step:?}");
+        assert!(l.held() <= root_cost + child_cost + 2 * STEP_ROOM);
     }
 
     #[test]

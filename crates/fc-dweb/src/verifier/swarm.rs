@@ -1374,6 +1374,10 @@ pub(crate) struct Walk {
     /// A raw root's chunks the sniff checked, for its body.
     known: Vec<([u8; 32], Vec<u8>)>,
     stage: Stage,
+    /// What the lookup held when it was last charged: its root, the node
+    /// it is at, the followed fork's metadata and its phases, while it waits
+    /// for a node ([`Lookup::held`]).
+    lookup_held: usize,
 }
 
 impl Walk {
@@ -1401,6 +1405,7 @@ impl Walk {
             feed: None,
             known: Vec::new(),
             stage: Stage::Done,
+            lookup_held: 0,
         };
         if decoded.is_err() {
             core.fail(Failure::InvalidPath);
@@ -1432,15 +1437,45 @@ impl Walk {
 
     fn end(&mut self, core: &mut Core, failure: Failure) {
         self.drop_stage(core);
+        self.charge_lookup(core, 0);
         core.fail(failure);
     }
 
     fn drop_stage(&mut self, core: &mut Core) {
         match std::mem::replace(&mut self.stage, Stage::Done) {
-            Stage::Load { mut load, .. } => load.release(core),
+            Stage::Load { mut load, then } => {
+                load.release(core);
+                if let Then::Child(lookup) = then {
+                    drop(lookup);
+                    self.charge_lookup(core, 0);
+                }
+            }
+            Stage::FileRoot { entry } => core.unhold(entry_cost(&entry)),
             Stage::Body(mut body) => body.release_all(core),
             _ => {}
         }
+    }
+
+    /// The lookup's charge from now on: what it holds, or 0 once dropped.
+    fn charge_lookup(&mut self, core: &mut Core, held: usize) {
+        core.unhold(self.lookup_held);
+        core.hold(held);
+        self.lookup_held = held;
+    }
+
+    /// A lookup for the path below `node`, a parsed node whose cost the
+    /// walk holds: room for its phases is reserved first.
+    fn start_lookup(&mut self, core: &mut Core, node: manifest::Node) {
+        let cost = node.cost();
+        let room = manifest::lookup_room(&self.path);
+        if !core.fits(room) {
+            core.unhold(cost);
+            return self.end(core, Failure::Unverifiable);
+        }
+        core.hold(room);
+        let (lookup, step) = Lookup::new(node, &self.path);
+        core.unhold(room + cost);
+        self.step(core, Box::new(lookup), step);
     }
 
     /// A proven answer with a fixed body: a 404, a 308 or a 416.
@@ -1535,12 +1570,12 @@ impl Walk {
                     Loaded::NotAManifest => self.raw_fallback(core),
                     Loaded::TooLarge => self.end(core, Failure::Unverifiable),
                     Loaded::Node(bytes) => {
-                        core.unhold(bytes.len());
-                        match manifest::parse_node(&bytes) {
-                            Ok(node) => {
-                                let (lookup, step) = Lookup::new(node, &self.path);
-                                self.step(core, Box::new(lookup), step);
-                            }
+                        let parsed = match parse(core, bytes) {
+                            Ok(p) => p,
+                            Err(f) => return self.end(core, f),
+                        };
+                        match parsed {
+                            Ok(node) => self.start_lookup(core, node),
                             Err(NodeError::NotAManifest) => self.raw_fallback(core),
                             Err(NodeError::Malformed) => {
                                 let label = self.label();
@@ -1555,14 +1590,29 @@ impl Walk {
                 if let Some(w) = root_wire {
                     core.unhold(w.len());
                 }
+                // The lookup's step, within room reserved for what it
+                // parses and copies.
+                let (room, held) = match &loaded {
+                    Loaded::Node(bytes) => (
+                        manifest::parse_room(bytes.len()) + manifest::STEP_ROOM,
+                        bytes.len(),
+                    ),
+                    _ => (manifest::STEP_ROOM, 0),
+                };
+                if !core.fits(room) {
+                    core.unhold(held);
+                    return self.end(core, Failure::Unverifiable);
+                }
+                core.hold(room);
                 let step = match loaded {
                     Loaded::NotAManifest => lookup.refused(NodeError::NotAManifest),
-                    Loaded::TooLarge => return self.end(core, Failure::Unverifiable),
-                    Loaded::Node(bytes) => {
-                        core.unhold(bytes.len());
-                        lookup.node(&bytes)
+                    Loaded::TooLarge => {
+                        core.unhold(room);
+                        return self.end(core, Failure::Unverifiable);
                     }
+                    Loaded::Node(bytes) => lookup.node(bytes),
                 };
+                core.unhold(room + held);
                 self.step(core, lookup, step);
             }
         }
@@ -1570,8 +1620,11 @@ impl Walk {
 
     /// The URL root's node: a feed, or the manifest to look the path up in.
     fn root_node(&mut self, core: &mut Core, bytes: Vec<u8>) {
-        core.unhold(bytes.len());
-        let node = match manifest::parse_node(&bytes) {
+        let parsed = match parse(core, bytes) {
+            Ok(p) => p,
+            Err(f) => return self.end(core, f),
+        };
+        let node = match parsed {
             Ok(n) => n,
             Err(NodeError::NotAManifest) => {
                 return self.loaded(core, Then::Root, Loaded::NotAManifest, None);
@@ -1581,13 +1634,18 @@ impl Walk {
             }
             Err(NodeError::TooLarge) => return self.end(core, Failure::Unverifiable),
         };
-        let slash = node
+        let feed = node
             .forks
             .iter()
             .find(|f| f.byte == b'/')
-            .map(|f| f.metadata.clone())
-            .unwrap_or_default();
-        match feed_of(&slash) {
+            .map_or(Ok(None), |f| feed_of(&f.metadata));
+        if matches!(feed, Ok(None)) {
+            return self.start_lookup(core, node);
+        }
+        // A feed, or metadata Ant refuses: the node isn't needed any more.
+        core.unhold(node.cost());
+        drop(node);
+        match feed {
             Ok(Some((owner, topic))) => {
                 let mut headers = chunk_headers();
                 headers.push(("swarm-only-root-chunk".to_owned(), "true".to_owned()));
@@ -1600,33 +1658,50 @@ impl Walk {
                 }
                 self.stage = Stage::FeedIndex { owner, topic };
             }
-            Ok(None) => {
-                let (lookup, step) = Lookup::new(node, &self.path);
-                self.step(core, Box::new(lookup), step);
-            }
+            // Looked up above.
+            Ok(None) => {}
             // Feed metadata Ant refuses: its lookup error is a bare 404.
             Err(()) => self.not_found(core, NotFound::Plain, ContentTrust::Verified),
         }
     }
 
+    /// The lookup's next step. Waiting for a node, the lookup is charged
+    /// what it holds; otherwise it is dropped, and so is its charge.
     fn step(&mut self, core: &mut Core, lookup: Box<Lookup>, step: Step) {
         let label = self.label();
-        match step {
-            Step::Need(reference) => {
-                let Ok(address) = <[u8; 32]>::try_from(reference.as_slice()) else {
-                    // A 64-byte reference: an encrypted node.
-                    return self.end(core, Failure::Unverifiable);
-                };
-                match Load::start(core, address) {
-                    Ok(load) => {
-                        self.stage = Stage::Load {
-                            load,
-                            then: Then::Child(lookup),
-                        }
-                    }
-                    Err(f) => self.end(core, f),
+        let reference = match step {
+            Step::Need(reference) => reference,
+            other => {
+                drop(lookup);
+                self.charge_lookup(core, 0);
+                return self.outcome(core, other, label);
+            }
+        };
+        self.charge_lookup(core, std::mem::size_of::<Lookup>() + lookup.held());
+        let Ok(address) = <[u8; 32]>::try_from(reference.as_slice()) else {
+            // A 64-byte reference: an encrypted node.
+            drop(lookup);
+            return self.end(core, Failure::Unverifiable);
+        };
+        match Load::start(core, address) {
+            Ok(load) => {
+                self.stage = Stage::Load {
+                    load,
+                    then: Then::Child(lookup),
                 }
             }
+            Err(f) => {
+                drop(lookup);
+                self.end(core, f);
+            }
+        }
+    }
+
+    /// Where a lookup ended, its charge released.
+    fn outcome(&mut self, core: &mut Core, step: Step, label: ContentTrust) {
+        match step {
+            // A step that asks for a node isn't an outcome.
+            Step::Need(_) => self.end(core, Failure::Unverifiable),
             Step::Done(Outcome::Found { data_ref, metadata }) => {
                 let Ok(reference) = <[u8; 32]>::try_from(data_ref.as_slice()) else {
                     return self.end(core, Failure::Unverifiable);
@@ -1641,9 +1716,14 @@ impl Walk {
                     reference,
                     feed: self.feed,
                 };
-                if fetch_chunk(core, Tag::FileRoot, &reference).is_none() {
+                drop(metadata);
+                // The entry waits for the file's root chunk: its strings
+                // count against the request.
+                let cost = entry_cost(&entry);
+                if !core.fits(cost) || fetch_chunk(core, Tag::FileRoot, &reference).is_none() {
                     return self.end(core, Failure::Unverifiable);
                 }
+                core.hold(cost);
                 self.stage = Stage::FileRoot { entry };
             }
             Step::Done(Outcome::NotFound { root }) => {
@@ -1975,6 +2055,7 @@ impl Walk {
                 else {
                     return;
                 };
+                core.unhold(entry_cost(&entry));
                 self.file_rooted(core, entry, wire);
             }
             Stage::Body(b) => {
@@ -2025,6 +2106,32 @@ impl Walk {
 /// `Err` for feed metadata it refuses.
 /// A feed's owner and topic.
 type FeedKey = ([u8; 20], [u8; 32]);
+
+/// Parses a loaded node's bytes, which the walk holds, within the request's
+/// memory: room for the node is reserved first; once it is parsed, the
+/// bytes are released and the node's cost is held in their place. Without
+/// the room, the walk is past its memory.
+fn parse(core: &mut Core, bytes: Vec<u8>) -> Result<Result<manifest::Node, NodeError>, Failure> {
+    let n = bytes.len();
+    let room = manifest::parse_room(n);
+    if !core.fits(room) {
+        core.unhold(n);
+        return Err(Failure::Unverifiable);
+    }
+    core.hold(room);
+    let parsed = manifest::parse_node_owned(bytes);
+    core.unhold(room + n);
+    if let Ok(node) = &parsed {
+        core.hold(node.cost());
+    }
+    Ok(parsed)
+}
+
+/// What an entry's strings hold.
+fn entry_cost(e: &Entry) -> usize {
+    e.content_type.as_ref().map_or(0, String::capacity)
+        + e.filename.as_ref().map_or(0, String::capacity)
+}
 
 fn feed_of(meta: &manifest::Metadata) -> Result<Option<FeedKey>, ()> {
     let Some(owner) = meta.get(manifest::FEED_OWNER) else {
