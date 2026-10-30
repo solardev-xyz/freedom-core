@@ -26,6 +26,7 @@ use base64::Engine as _;
 use serde_json::{Value, json};
 
 pub mod fixture;
+pub mod hermetic;
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_freedom-radicled");
 /// A hang guard, never a timing assertion.

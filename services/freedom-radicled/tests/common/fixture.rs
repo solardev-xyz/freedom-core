@@ -28,7 +28,7 @@ fn working_copy(dir: &Path) {
 }
 
 /// Runs a node on `home` as `seed`'s identity, reaching no one, and hands
-/// it to `f`.
+/// it to `f`: isolated, and through the hermetic gate.
 pub fn with_node<R>(
     home: &Path,
     seed: &[u8; 32],
@@ -42,7 +42,11 @@ pub fn with_node<R>(
             alias: "fixture".into(),
             listen: vec![],
             control_socket: false,
-            routing: None,
+            routing: Some(libradicle::Routing {
+                proxy: None,
+                onion: radicle::node::config::AddressConfig::Drop,
+                gate: super::hermetic::gate(),
+            }),
             isolated: true,
         },
         key,
