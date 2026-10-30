@@ -25,11 +25,12 @@
 //! 7. only then logging's writer, the connection's threads and the
 //!    watchdogs: the handshake, `rad.hello`, and what follows.
 //!
-//! **This build** answers `rad.hello` and `rad.identity` (0008, "The sealed
-//! release" and "Profiles without a vault"). The node itself, its
-//! reconciliation and every read and write come with later steps; until
-//! then the process never reaches `RUNNING`, so every other method 0008
-//! lists answers `stopped`, as 0008 says of a process before `RUNNING`.
+//! **This build** answers `rad.hello`, `rad.identity` (0008, "The sealed
+//! release" and "Profiles without a vault") and `rad.reconcile` (0008,
+//! "Reconciliation"). The node itself and every read and write come with
+//! later steps; until then the process never reaches `RUNNING`, so every
+//! other method 0008 lists answers `stopped`, as 0008 says of a process
+//! before `RUNNING`.
 //!
 //! **No child processes:** libradicle is built with `no-spawn`, and the
 //! service starts none.
@@ -48,6 +49,8 @@ mod build_info;
 mod confine;
 mod env;
 mod identity;
+mod marker;
+mod reconcile;
 mod service;
 mod testhooks;
 

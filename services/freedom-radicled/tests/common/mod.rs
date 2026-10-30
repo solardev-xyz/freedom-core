@@ -22,7 +22,10 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
 use serde_json::{Value, json};
+
+pub mod fixture;
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_freedom-radicled");
 /// A hang guard, never a timing assertion.
@@ -306,4 +309,47 @@ fn wait(child: &mut Child, timeout: Duration) -> Option<i32> {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// RFC 8032's first Ed25519 test key, and the node ID of its public key.
+pub const SEED: [u8; 32] = [
+    0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
+    0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60,
+];
+pub const NID: &str = "z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw";
+
+pub struct OsRng;
+
+impl rand_core::TryRng for OsRng {
+    type Error = getrandom::Error;
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        let mut b = [0u8; 4];
+        self.try_fill_bytes(&mut b)?;
+        Ok(u32::from_le_bytes(b))
+    }
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        let mut b = [0u8; 8];
+        self.try_fill_bytes(&mut b)?;
+        Ok(u64::from_le_bytes(b))
+    }
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+        getrandom::fill(dst)
+    }
+}
+
+impl rand_core::TryCryptoRng for OsRng {}
+
+/// What the core's `nodes.seal_radicle_key` returns for `key`, sealed to
+/// the recipient `rad.hello` named.
+pub fn sealed_to(hello: &Value, key: &[u8; 32]) -> Value {
+    let recipient: [u8; 32] = base64::engine::general_purpose::STANDARD
+        .decode(hello["result"]["recipient"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let sealed = fc_seal::seal(&recipient, key, &mut OsRng).unwrap();
+    json!({ "sealed": {
+        "enc": base64::engine::general_purpose::STANDARD.encode(sealed.enc),
+        "ciphertext": base64::engine::general_purpose::STANDARD.encode(sealed.ciphertext),
+    } })
 }

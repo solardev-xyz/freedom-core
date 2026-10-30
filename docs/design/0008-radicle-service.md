@@ -219,9 +219,9 @@ Each ref is renamed into place atomically, but the steps together aren't. So bef
 **The dirty marker** (`node/dirty`) records that the home may hold a partial mutation:
 - **It is set before any mutation can run.** `rad.reconcile` writes it durably (the file, then its directory, flushed) before it changes anything. It stays present for the whole run, and every mutation of the home happens while it is present: COB writes, `unseed`, the import, clones, and heartwood's own fetches.
 - **It names the writers.** It holds the node IDs (public keys, so public data) of every identity that may have left a partial mutation:
-  - `rad.reconcile` adds the running identity's before it changes anything;
+  - `rad.reconcile` adds the running identity's before it changes anything. A throwaway key's isn't added: it owns no namespace and signs nothing ([Profiles without a vault](#profiles-without-a-vault)), so a check of it would find nothing, and successive throwaway starts that each reach the deadline would only grow the marker;
   - an earlier identity stays named until its namespace has been checked, whatever key later processes run with. Its vault may have been deleted or replaced since. The [switch](#the-switch) names the identity whose key file it removes in the same way;
-  - once every earlier identity's namespace is checked or its repository quarantined, `rad.reconcile` rewrites the marker durably to name only the running identity, before it replies.
+  - once every earlier identity's namespace is checked or its repository quarantined, `rad.reconcile` rewrites the marker durably to name only the running identity (none, for a throwaway key), before it replies.
 - **It is kept after anything that may be partial:** a write that ends `outcome_unknown`, or a clone or fetch that is cancelled or cut off.
 - **It is cleared only after a proven clean stop.** At `rad.shutdown`, it is removed (durably) only when all of these hold:
   - the write queue is empty, and the executing writer, if any, has returned;
