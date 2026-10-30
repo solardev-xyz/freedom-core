@@ -14,6 +14,10 @@ pub const MAX_HEADER: usize = 64 * 1024;
 /// A section's most bytes: a block and its CID (four varints and a digest).
 pub const MAX_SECTION: usize = MAX_BLOCK + 4 * varint::MAX_LEN + cid::MAX_DIGEST;
 /// What boxo appends to a CAR that fails partway (ipfs/boxo#1197).
+/// The fewest bytes a section takes on the wire: its length varint and
+/// the shortest CID (version, codec, hash and an empty identity digest),
+/// with an empty block.
+pub const MIN_SECTION: usize = 5;
 pub const BOXO_MARKER: &[u8] = b"\n\n[Gateway Error: CAR stream truncated, response is incomplete]";
 
 /// A section, whole: its CID's bytes, then its block, in the one buffer the
@@ -38,6 +42,12 @@ impl Section {
     /// and the section itself.
     pub fn held(&self) -> usize {
         self.bytes.capacity() + std::mem::size_of::<Self>()
+    }
+
+    /// Its buffer, the CID then the block, and the CID's length: for a
+    /// caller that keeps the bytes without copying them.
+    pub fn into_parts(self) -> (Vec<u8>, usize) {
+        (self.bytes, self.cid_len)
     }
 }
 
@@ -118,6 +128,16 @@ impl Reader {
         match self.state {
             State::Header(n) => n,
             State::Section(n) => n + std::mem::size_of::<Section>(),
+            _ => 0,
+        }
+    }
+
+    /// The bytes the item being read still needs, or none between items.
+    /// So `n` bytes pushed complete at most one section with the first of
+    /// these, and one more for each [`MIN_SECTION`] bytes past them.
+    pub fn wanting(&self) -> usize {
+        match self.state {
+            State::Header(n) | State::Section(n) => n.saturating_sub(self.buf.len()),
             _ => 0,
         }
     }
@@ -294,6 +314,28 @@ mod tests {
         assert_eq!(read(&[&cut]).2, Ok(End::Early));
         let after = [HEADER, BOXO_MARKER, b"x"].concat();
         assert_eq!(read(&[&after]).1, Some(Refusal::VerificationFailed));
+    }
+
+    #[test]
+    fn what_the_item_being_read_wants() {
+        let mut r = Reader::new();
+        assert_eq!(r.wanting(), 0);
+        // The header's length, then four of its 17 bytes.
+        r.push(&HEADER[..5]);
+        assert_eq!(r.wanting(), 13);
+        r.push(&HEADER[5..]);
+        assert_eq!(r.wanting(), 0);
+        // The ten-byte section's length and three of its bytes; then the
+        // rest completes it.
+        r.push(&TEN[..4]);
+        assert_eq!(r.wanting(), 7);
+        let p = r.push(&TEN[4..]);
+        assert_eq!((p.sections.len(), r.wanting()), (1, 0));
+        // The fewest bytes a section takes: a length and an empty
+        // identity CID.
+        let p = r.push(&[0x04, 0x01, 0x55, 0x00, 0x00]);
+        assert_eq!(p.sections.len(), 1);
+        assert_eq!(MIN_SECTION, 5);
     }
 
     #[test]

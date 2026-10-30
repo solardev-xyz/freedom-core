@@ -949,14 +949,14 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
     - Each remote node gets SOCKS5 credentials of its own (RFC 1929), so Arti keeps each peer's connections on circuits of their own, apart from every other peer's and from other users of the same Arti.
     - **The credentials:** a fixed username, and a password derived from the remote's node ID and a per-process secret: 128 random bits from the operating system, made at start, never written or logged.
     - **No fallback:** only username/password authentication is offered, so a proxy that won't take it fails the dial rather than sharing circuits silently.
-    - **Upstream, in review:** heartwood's SOCKS5 client (`socks5-client` 0.4, through cyphernet) offers no authentication, so heartwood is to get an RFC 1929 state machine of its own in `Wire::dial` ([upstream](#upstream-changes)). It is in review as solardev-xyz/heartwood#19, not yet merged.
-    - **Asked for by the dial gate:** in that change, heartwood isolates only for a gate whose `isolates_streams` says so, and otherwise keeps no authentication, as upstream always has. The service's routing gate is to say so under `socks5`, in libradicle, once #19 merges.
-    - **The check still to run:** the Arti qualification gains an `isolation` check, that distinct credentials get distinct circuits. It applies to 0007's per-instance credentials too (freedom-ipfsd v0.2.1), which were never qualified for distinct circuits.
+    - **Built upstream:** heartwood's SOCKS5 client (`socks5-client` 0.4, through cyphernet) offers no authentication, so heartwood has an RFC 1929 state machine of its own in `Wire::dial` ([upstream](#upstream-changes)): solardev-xyz/heartwood#19, merged.
+    - **Asked for by the dial gate:** in that change, heartwood isolates only for a gate whose `isolates_streams` says so, and otherwise keeps no authentication, as upstream always has. The service's routing gate is to say so under `socks5`, in libradicle, which is still to come.
+    - **The Arti check:** the Arti qualification gains an `isolation` check, that distinct credentials get distinct circuits (solardev-xyz/freedom-browser#964, merged into the browser's integration branch). A proxy that ignores credentials is exceedingly unlikely to pass it by chance: at most (1/12) × (1/24)^5, under one in 90 million. That bound assumes the proxy picks each connection's exit without knowing which credentials it carries, and can't predict the order the check draws at random from the operating system's generator. Against the pinned Arti 2.7.0, on the live Tor network, three runs of three qualified. It applies to 0007's per-instance credentials too (freedom-ipfsd v0.2.1), which had never been qualified for distinct circuits.
 - **`isolated`:** the node reaches no one.
   - Its peer set is static, with no `connect` peers, so it takes no bootstrap nodes and dials no one.
   - Its dial gate refuses every target, so an explicit connect, `rad.connect_seeds` included, fails before any socket.
   - It still serves `rad:` from local storage.
-  - The service sets it through libradicle's `Options::isolated` ([upstream](#upstream-changes)), for a node that is to reach no one.
+  - The service sets it through libradicle's `Options::isolated` ([upstream](#upstream-changes); built: solardev-xyz/libradicle#18, merged), for a node that is to reach no one.
 - **The setting:** a per-profile **Route Radicle through Tor**, off by default, using `tor-manager`'s endpoint. It is a switch of its own, apart from 0007's IPFS setting; a future "everything through Tor" mode would turn both on ([Open questions](#open-questions), 9).
 - **Changing the policy restarts the process.** Main passes the policy at spawn (`--network`), and a change spawns a new process with the new one, so [0010](0010-service-confinement.md)'s confinement can fix it before `rad.hello`. Nothing of the old policy survives its process, since there is no child. On a profile with a vault, the new process starts only while the vault is unlocked ([When the node can start](#when-the-node-can-start)).
 
@@ -985,8 +985,8 @@ The source research for this design found four ways the node gives away more tha
 |---|---|---|
 | 1 | An onion `Forward` without a proxy leaks onion names to DNS | **Covered.** The service sets `onion` in memory, never `Forward` ([Network policy](#network-policy)), and the dial gate refuses an onion name before any socket in `direct` mode (heartwood change 11). It stays open in the shipped add-on until libradicle `main` moves to these changes |
 | 2 | Each connection gets the node's signed inventory, tied to its node ID | **The user's decision** ([Open questions](#open-questions), 12) |
-| 3 | A node meant to reach no one still takes Iris and Rosa, and dials gossip peers | **Partly built:** the `isolated` mode ([Modes](#modes)). Heartwood change 15 is built upstream (solardev-xyz/heartwood#17, merged). libradicle's `Options::isolated`, and the service's use of it, are still to come |
-| 4 | SOCKS has no stream isolation, so every peer shares Arti's circuits | **Decided:** isolation per remote node ([Modes](#modes)). Heartwood change 16 is in review (solardev-xyz/heartwood#19). The Arti isolation check (solardev-xyz/freedom-browser#964) is still to run live |
+| 3 | A node meant to reach no one still takes Iris and Rosa, and dials gossip peers | **Built upstream:** the `isolated` mode ([Modes](#modes)). Heartwood change 15 (solardev-xyz/heartwood#17) and libradicle's `Options::isolated` (solardev-xyz/libradicle#18) are both merged. The service's use of it is still to come |
+| 4 | SOCKS has no stream isolation, so every peer shares Arti's circuits | **Decided, and partly built:** isolation per remote node ([Modes](#modes)). Heartwood change 16 is built upstream (solardev-xyz/heartwood#19, merged). The Arti isolation check (solardev-xyz/freedom-browser#964, merged into the browser's integration branch) qualified the pinned Arti live. libradicle's routing gate under `socks5`, and the service, are still to come |
 
 ### Seeding and serving
 
@@ -1073,7 +1073,7 @@ The source research for this design found four ways the node gives away more tha
     - a deferred fetch runs once its repository reopens.
     - **Each consultation holds a pass** for its purpose (mutate, serve, announce, or inventory) until the work it admits is done or queued. Closing a repository returns once the passes its new state doesn't permit have dropped. So a close that has returned is never overtaken by work admitted before it.
 15. **A static peer set takes no bootstrap nodes:** `Runtime::init` adds Iris and Rosa only for a dynamic peer set, so an `isolated` node's address book holds no one (built: solardev-xyz/heartwood#17, merged).
-16. **SOCKS5 with credentials** (in review: solardev-xyz/heartwood#19):
+16. **SOCKS5 with credentials** (built: solardev-xyz/heartwood#19, merged):
     - an RFC 1929 state machine for `Wire::dial`: a greeting offering username/password (method `0x02`) only, the subnegotiation, then `CONNECT`, with strict, length-bounded reply parsing;
     - with a password derived per remote node ID from a per-process secret ([Modes](#modes), stream isolation): HMAC-SHA-256 of the node ID under a 128-bit secret;
     - asked for by the dial gate's `isolates_streams`, `false` by default, which libradicle's routing gate sets under `socks5`;

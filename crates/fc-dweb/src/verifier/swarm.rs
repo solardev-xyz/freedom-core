@@ -31,7 +31,10 @@ use fc_swarm::verify::{Chunk, FeedUpdate, MAX_CHUNK_WIRE, Refusal, SPAN_SIZE};
 
 use super::ant::{self, Entry, Feed, NotFound, Ranges};
 use super::jobs::{Verdict, Work};
-use super::{Core, Failure, MAX_CHUNK_PIECES, PieceFailure, PieceId};
+use super::{Ask, Failure, MAX_CHUNK_PIECES, PieceFailure, PieceId};
+
+/// The machine's bookkeeping, with the Swarm walk's tags.
+type Core = super::Core<Tag>;
 use crate::bzz::SWARM_HEADERS;
 use crate::plan::ContentTrust;
 use crate::validate::Refusal as PlanRefusal;
@@ -88,6 +91,22 @@ fn span_of(wire: &[u8]) -> u64 {
     chunk_view(wire).map_or(0, |c| tree::decode_span(&c.span).1)
 }
 
+/// A verified chunk the walk reads as structure goes back for the
+/// partition's cache (0009, The structure cache): an intermediate chunk,
+/// and, where `node` (a manifest node's own chunk), a leaf that starts with
+/// a manifest's header. Data leaves and single-owner chunks never do.
+fn remember(core: &mut Core, address: &[u8; 32], wire: &[u8], node: bool) {
+    let payload = wire.get(SPAN_SIZE..).unwrap_or(&[]);
+    let structure = if span_of(wire) > CHUNK_SIZE as u64 {
+        true
+    } else {
+        node && payload.len() >= NODE_HEADER && manifest::has_manifest_header(payload)
+    };
+    if structure {
+        core.remember(*address, wire);
+    }
+}
+
 fn chunk_headers() -> Vec<(String, String)> {
     SWARM_HEADERS
         .iter()
@@ -131,8 +150,7 @@ fn fetch_chunk(core: &mut Core, tag: Tag, address: &[u8; 32]) -> Option<PieceId>
         tag,
         format!("/chunks/{}", ant::hex(address)),
         chunk_headers(),
-        false,
-        SOC_MAX,
+        Ask::Whole(SOC_MAX),
     )
 }
 
@@ -718,6 +736,7 @@ impl Load {
         match tag {
             Tag::NodeRoot => {
                 core.unhold(wire.len());
+                remember(core, &address, &wire, true);
                 self.rooted(core, wire)
             }
             Tag::Sniff => {
@@ -725,6 +744,7 @@ impl Load {
                     core.unhold(wire.len());
                     return Progress::Pending;
                 };
+                remember(core, &address, &wire, true);
                 // Kept for the join, which reads the same chunks.
                 self.known.push((address, wire.clone()));
                 self.state = LoadState::Root;
@@ -735,6 +755,8 @@ impl Load {
                 let LoadState::Join(join) = &mut self.state else {
                     return Progress::Pending;
                 };
+                // A manifest node's own bytes.
+                core.remember(address, &wire);
                 let Some((_, len)) = join.leaves.remove(&start) else {
                     return Progress::Pending;
                 };
@@ -748,6 +770,7 @@ impl Load {
                 let LoadState::Join(join) = &mut self.state else {
                     return Progress::Pending;
                 };
+                remember(core, &address, &wire, false);
                 join.tree.settle(core, start, depth, Ok(&wire));
                 self.pump(core)
             }
@@ -907,8 +930,7 @@ impl Body {
                 Tag::Bytes,
                 format!("/bytes/{}", ant::hex(&self.reference)),
                 headers,
-                true,
-                0,
+                Ask::Stream(None),
             )
             .ok_or(Failure::Unverifiable)?;
         self.stream = Some(ByteStream {
@@ -1258,8 +1280,11 @@ impl Body {
         work: Work,
     ) -> Result<(), Failure> {
         match (tag, verdict, work) {
-            (Tag::Inter(start, depth), Verdict::Chunk(r), Work::Chunk { wire, .. }) => {
+            (Tag::Inter(start, depth), Verdict::Chunk(r), Work::Chunk { address, wire }) => {
                 core.unhold(wire.len());
+                if r.is_ok() {
+                    remember(core, &address, &wire, false);
+                }
                 self.tree.settle(
                     core,
                     start,
@@ -1568,7 +1593,7 @@ impl Walk {
                 headers.push(("swarm-only-root-chunk".to_owned(), "true".to_owned()));
                 let path = format!("/feeds/{}/{}", ant::hex(&owner), ant::hex(&topic));
                 if core
-                    .fetch(Tag::Feed, path, headers, false, super::MAX_WHOLE)
+                    .fetch(Tag::Feed, path, headers, Ask::Whole(super::MAX_WHOLE))
                     .is_none()
                 {
                     return self.end(core, Failure::Unverifiable);
@@ -1936,13 +1961,16 @@ impl Walk {
                 }
             }
             Stage::FileRoot { .. } if tag == Tag::FileRoot => {
-                let (Verdict::Chunk(result), Work::Chunk { wire, .. }) = (verdict, work) else {
+                let (Verdict::Chunk(result), Work::Chunk { address, wire }) = (verdict, work)
+                else {
                     return self.end(core, Failure::Unverifiable);
                 };
                 if let Err(r) = result {
                     core.unhold(wire.len());
                     return self.end(core, refusal(r));
                 }
+                // A file's root is structure when it is intermediate.
+                remember(core, &address, &wire, false);
                 let Stage::FileRoot { entry } = std::mem::replace(&mut self.stage, Stage::Done)
                 else {
                     return;
@@ -2030,4 +2058,44 @@ fn feed_index(value: &str) -> Option<u64> {
         return None;
     }
     u64::from_str_radix(value, 16).ok()
+}
+
+impl super::Events<Tag> for Walk {
+    fn whole(
+        &mut self,
+        core: &mut Core,
+        tag: Tag,
+        status: u16,
+        headers: &[(String, String)],
+        body: Vec<u8>,
+    ) {
+        Walk::whole(self, core, tag, status, headers, body);
+    }
+
+    fn stream_head(
+        &mut self,
+        core: &mut Core,
+        tag: Tag,
+        id: PieceId,
+        status: u16,
+        headers: &[(String, String)],
+    ) {
+        Walk::stream_head(self, core, tag, id, status, headers);
+    }
+
+    fn stream_data(&mut self, core: &mut Core, tag: Tag, id: PieceId, bytes: Vec<u8>) {
+        Walk::stream_data(self, core, tag, id, bytes);
+    }
+
+    fn stream_end(&mut self, core: &mut Core, tag: Tag, id: PieceId) {
+        Walk::stream_end(self, core, tag, id);
+    }
+
+    fn failed(&mut self, core: &mut Core, tag: Tag, failure: PieceFailure) {
+        Walk::failed(self, core, tag, failure);
+    }
+
+    fn hashed(&mut self, core: &mut Core, tag: Tag, verdict: Verdict, work: Work) {
+        Walk::hashed(self, core, tag, verdict, work);
+    }
 }
