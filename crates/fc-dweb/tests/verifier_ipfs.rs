@@ -50,6 +50,7 @@ fn canonical(text: &str) -> String {
 }
 
 /// The vectors' blocks and records.
+#[derive(Clone)]
 struct Blocks {
     blocks: HashMap<Key, Vec<u8>>,
     /// Each name's record, as the native resolver held it, and its value.
@@ -150,7 +151,8 @@ fn kind(cid: &[u8], block: &[u8]) -> fc_ipfs::unixfs::Kind {
         return fc_ipfs::unixfs::Kind::Raw;
     }
     let node = fc_ipfs::dagpb::decode(block).unwrap();
-    fc_ipfs::unixfs::decode(&node).unwrap().kind
+    // A node the core's reader refuses: sent alone, as a file's root.
+    fc_ipfs::unixfs::decode(&node).map_or(fc_ipfs::unixfs::Kind::Raw, |d| d.kind)
 }
 
 /// The blocks a conforming trustless gateway sends for `root`'s `path` with
@@ -242,10 +244,7 @@ fn file_size(b: &Blocks, cid: &[u8]) -> u64 {
         return block.len() as u64;
     }
     let node = fc_ipfs::dagpb::decode(&block).unwrap();
-    fc_ipfs::unixfs::decode(&node)
-        .unwrap()
-        .filesize
-        .unwrap_or(0)
+    fc_ipfs::unixfs::decode(&node).map_or(0, |d| d.filesize.unwrap_or(0))
 }
 
 /// A file node's blocks covering `from..=to` of its content at `start`.
@@ -258,7 +257,9 @@ fn file_blocks(b: &Blocks, cid: &[u8], start: u64, from: u64, to: u64, out: &mut
     }
     let block = b.get(cid).unwrap();
     let node = fc_ipfs::dagpb::decode(&block).unwrap();
-    let data = fc_ipfs::unixfs::decode(&node).unwrap();
+    let Ok(data) = fc_ipfs::unixfs::decode(&node) else {
+        return;
+    };
     let mut at = start + data.data.map_or(0, |d| d.len() as u64);
     for (l, size) in node.links().zip(data.blocksizes()) {
         let s = at;
@@ -882,8 +883,17 @@ fn check_case(blocks: &Blocks, id: &str, c: &Json, order: Order) {
     } else {
         Method::Get
     };
+    // The case's own blocks, which the gateway holds beside the vectors'.
+    let mut own = None;
+    if let Some(extra) = c["world"]["blocks"].as_object() {
+        let mut b = blocks.clone();
+        for (cid, block) in extra {
+            b.blocks.insert(key(&cid_bytes(cid)), b64(&block["base64"]));
+        }
+        own = Some(b);
+    }
     let world = Gateway {
-        blocks,
+        blocks: own.as_ref().unwrap_or(blocks),
         changes: c["world"]["changes"]
             .as_array()
             .cloned()
@@ -951,7 +961,7 @@ fn every_ipfs_request_case() {
         check_case(&blocks, id, c, Order::Lifo);
         n += 1;
     }
-    assert_eq!(n, 29, "{n}");
+    assert_eq!(n, 38, "{n}");
 }
 
 // ---------------------------------------------------------------------------
