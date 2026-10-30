@@ -23,8 +23,9 @@ mod serve;
 mod signing;
 mod storage;
 mod testhooks;
-// Debug builds only: release builds carry no test methods at all.
-#[cfg(debug_assertions)]
+// The `testhooks` feature only (build.rs refuses it in a release build):
+// otherwise no test method is compiled at all.
+#[cfg(feature = "testhooks")]
 mod testmethods;
 mod transport;
 mod vault;

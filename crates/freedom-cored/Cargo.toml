@@ -17,6 +17,52 @@ workspace = true
 name = "freedom-cored"
 path = "src/main.rs"
 
+[features]
+# Fault injection and the `test.*` methods for the integration tests, read
+# from FREEDOM_CORED_TEST_* variables: see src/testhooks.rs. Without the
+# feature every hook is a no-op, no variable is read, and no test method is
+# compiled. build.rs refuses it in any release-profile or optimized build,
+# and CI checks that it does. The tests that need it require it (below).
+testhooks = []
+
+# The integration tests that drive the hooks or the test methods: they build
+# with `--all-features`, as CI's do, and are skipped without it.
+[[test]]
+name = "chain"
+required-features = ["testhooks"]
+
+[[test]]
+name = "dweb"
+required-features = ["testhooks"]
+
+[[test]]
+name = "fragments"
+required-features = ["testhooks"]
+
+[[test]]
+name = "naming"
+required-features = ["testhooks"]
+
+[[test]]
+name = "nodes"
+required-features = ["testhooks"]
+
+[[test]]
+name = "radicle_custody"
+required-features = ["testhooks"]
+
+[[test]]
+name = "seal"
+required-features = ["testhooks"]
+
+[[test]]
+name = "serve"
+required-features = ["testhooks"]
+
+[[test]]
+name = "vault"
+required-features = ["testhooks"]
+
 [dependencies]
 # Response bodies from main's shell.* executors travel as base64.
 base64 = "0.22.1"
