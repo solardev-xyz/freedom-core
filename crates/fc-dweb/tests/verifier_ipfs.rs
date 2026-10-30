@@ -52,6 +52,7 @@ fn canonical(text: &str) -> String {
 }
 
 /// The vectors' blocks and records.
+#[derive(Clone)]
 struct Blocks {
     blocks: HashMap<Key, Vec<u8>>,
     /// Each name's record, as the native resolver held it, and its value.
@@ -152,7 +153,8 @@ fn kind(cid: &[u8], block: &[u8]) -> fc_ipfs::unixfs::Kind {
         return fc_ipfs::unixfs::Kind::Raw;
     }
     let node = fc_ipfs::dagpb::decode(block).unwrap();
-    fc_ipfs::unixfs::decode(&node).unwrap().kind
+    // A node the core's reader refuses: sent alone, as a file's root.
+    fc_ipfs::unixfs::decode(&node).map_or(fc_ipfs::unixfs::Kind::Raw, |d| d.kind)
 }
 
 /// The blocks a conforming trustless gateway sends for `root`'s `path` with
@@ -244,10 +246,7 @@ fn file_size(b: &Blocks, cid: &[u8]) -> u64 {
         return block.len() as u64;
     }
     let node = fc_ipfs::dagpb::decode(&block).unwrap();
-    fc_ipfs::unixfs::decode(&node)
-        .unwrap()
-        .filesize
-        .unwrap_or(0)
+    fc_ipfs::unixfs::decode(&node).map_or(0, |d| d.filesize.unwrap_or(0))
 }
 
 /// A file node's blocks covering `from..=to` of its content at `start`.
@@ -260,7 +259,9 @@ fn file_blocks(b: &Blocks, cid: &[u8], start: u64, from: u64, to: u64, out: &mut
     }
     let block = b.get(cid).unwrap();
     let node = fc_ipfs::dagpb::decode(&block).unwrap();
-    let data = fc_ipfs::unixfs::decode(&node).unwrap();
+    let Ok(data) = fc_ipfs::unixfs::decode(&node) else {
+        return;
+    };
     let mut at = start + data.data.map_or(0, |d| d.len() as u64);
     for (l, size) in node.links().zip(data.blocksizes()) {
         let s = at;
@@ -896,8 +897,17 @@ fn check_step(
     } else {
         Method::Get
     };
+    // The case's own blocks, which the gateway holds beside the vectors'.
+    let mut own = None;
+    if let Some(extra) = c["world"]["blocks"].as_object() {
+        let mut b = blocks.clone();
+        for (cid, block) in extra {
+            b.blocks.insert(key(&cid_bytes(cid)), b64(&block["base64"]));
+        }
+        own = Some(b);
+    }
     let world = Gateway {
-        blocks,
+        blocks: own.as_ref().unwrap_or(blocks),
         changes: c["world"]["changes"]
             .as_array()
             .cloned()
@@ -981,7 +991,7 @@ fn every_ipfs_request_case() {
         }
         n += 1;
     }
-    assert_eq!(n, 30, "{n}");
+    assert_eq!(n, 39, "{n}");
 }
 
 // ---------------------------------------------------------------------------
@@ -1286,57 +1296,6 @@ fn text(cid: &[u8]) -> String {
     ipfs_cid::to_text(&ipfs_cid::parse(cid).unwrap())
 }
 
-/// A file whose child disagrees with its `blocksizes` entry (deviation
-/// `unixfs-sizes`): a raw leaf longer than its entry, and a node whose
-/// `filesize` isn't its entry. The bytes before it are released, then the
-/// body is cut as malformed, through the CAR and raw.
-#[test]
-fn sizes_that_disagree_cut_the_body_as_malformed() {
-    let mut blocks = Blocks::new(&load("dweb-verify.json"));
-    let a = content("sizes-a", 1000);
-    let b = content("sizes-b", 1000);
-    let (la, lb) = (raw_cid(&a), raw_cid(&b));
-    // The second leaf's entry says 999.
-    let leaf_root = file_node(&[(&la, 1000), (&lb, 1000)], 1999, &[1000, 999]);
-    // The second child, a node of 999 bytes where its entry says 1000.
-    let inner = file_node(&[(&lb, 1000)], 999, &[999]);
-    let li = cid_of(0x70, &inner, false);
-    let node_root = file_node(&[(&la, 1000), (&li, 1100)], 2000, &[1000, 1000]);
-    let roots = [
-        cid_of(0x70, &leaf_root, false),
-        cid_of(0x70, &node_root, false),
-    ];
-    for (cid, block) in [
-        (&la, &a),
-        (&lb, &b),
-        (&li, &inner),
-        (&roots[0], &leaf_root),
-        (&roots[1], &node_root),
-    ] {
-        blocks.blocks.insert(key(cid), block.clone());
-    }
-    let world = Gateway {
-        blocks: &blocks,
-        changes: vec![],
-    };
-    for root in &roots {
-        for car in [true, false] {
-            let p = ranged(&text(root), "/", None);
-            let got = run("sizes", &p, Method::Get, &world, opts(car, 0));
-            assert_eq!(got.head.as_ref().map(|h| h.status), Some(200), "{car}");
-            assert_eq!(
-                got.ending,
-                Some(Ending::Abort(
-                    "malformed".to_owned(),
-                    fc_dweb::verifier::IPFS_MALFORMED.to_owned()
-                )),
-                "{car}"
-            );
-            assert_eq!(got.body, a, "{car}");
-        }
-    }
-}
-
 /// A raw block longer than the room it was reserved at (a raw leaf at its
 /// entry): its bytes past that room need room of their own, and a request
 /// without it is `unverifiable` rather than past its budget. With room, the
@@ -1447,54 +1406,6 @@ fn ipns_record_at(key: &ed25519_dalek::SigningKey, value: &str, sequence: u64) -
     varint(data.len() as u64, &mut out);
     out.extend_from_slice(&data);
     out
-}
-
-/// Names that name names: `GatewayCore` follows three, resolves a fourth
-/// and answers 400 whatever it names, and asks for no fifth. So does the
-/// core, its records verified.
-#[test]
-fn a_fourth_record_is_refused_whatever_it_names() {
-    let mut blocks = Blocks::new(&load("dweb-verify.json"));
-    let style = "/ipfs/bafkreiaeicvgt6kx3ml6fw6t6r2gkenzrn2zajqbxm3dp2mgpbyl2ibnye";
-    let mut first = Vec::new();
-    for n in 1..=5u8 {
-        let keys: Vec<_> = (0..n).map(|i| ipns_key(n * 16 + i)).collect();
-        for (i, (key, name)) in keys.iter().enumerate() {
-            let value = match keys.get(i + 1) {
-                Some((_, next)) => format!("/ipns/{next}"),
-                None => style.to_owned(),
-            };
-            blocks
-                .records
-                .insert(name.clone(), ipns_record(key, &value));
-        }
-        first.push(keys[0].1.clone());
-    }
-    let world = Gateway {
-        blocks: &blocks,
-        changes: vec![],
-    };
-    for (n, name) in (1..=5).zip(&first) {
-        let p = plan(Root::Ipns(name.clone()), "", vec![]);
-        let got = run("chain", &p, Method::Get, &world, opts(true, 0));
-        let records = got
-            .pieces
-            .iter()
-            .filter(|r| r.path.starts_with("/ipns/"))
-            .count();
-        assert_eq!(records, n.min(4), "{n}");
-        assert_eq!(got.ending, Some(Ending::End), "{n}");
-        let head = got.head.as_ref().unwrap();
-        if n <= 3 {
-            assert_eq!(head.status, 200, "{n}");
-            assert_eq!(head.trust.content, ContentTrust::LatestAsserted);
-            assert_eq!(got.body, content("ipfs-site-style", 3000), "{n}");
-        } else {
-            assert_eq!(head.status, 400, "{n}");
-            let body = String::from_utf8(got.body.clone()).unwrap();
-            assert!(body.contains("dnslink recursion limit exceeded"), "{body}");
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
