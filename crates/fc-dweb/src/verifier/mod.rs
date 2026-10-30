@@ -54,11 +54,11 @@ pub const MAX_WHOLE: usize = 64 << 10;
 /// Chunk requests a Swarm walk has open at once (0009, Leaves).
 pub const MAX_CHUNK_PIECES: usize = 4;
 
-/// The request's method, as main read it. HEAD comes with ranges, in
-/// 0009's step 3b-1's second part.
+/// The request's method, as main read it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     Get,
+    Head,
 }
 
 /// A piece's number within its request.
@@ -100,7 +100,7 @@ pub enum PieceFailure {
 pub struct Head {
     pub status: u16,
     pub headers: Vec<(String, String)>,
-    /// Whether a body stream follows.
+    /// Whether a body stream follows: false for a HEAD.
     pub body: bool,
     /// The plan's name trust, and the final content label.
     pub trust: Trust,
@@ -310,6 +310,7 @@ struct Queued {
 #[derive(Debug)]
 pub(crate) struct Core {
     request: u64,
+    pub(crate) head_only: bool,
     trust_name: Option<String>,
     limit: usize,
     outputs: VecDeque<Output>,
@@ -330,9 +331,10 @@ pub(crate) struct Core {
 }
 
 impl Core {
-    fn new(request: u64, trust_name: Option<String>, limit: usize) -> Self {
+    fn new(request: u64, head_only: bool, trust_name: Option<String>, limit: usize) -> Self {
         Self {
             request,
+            head_only,
             trust_name,
             limit,
             outputs: VecDeque::new(),
@@ -484,7 +486,7 @@ impl Core {
         }
     }
 
-    /// Sends the head; the body follows.
+    /// Sends the head. For a HEAD, or a GET with no body, nothing follows.
     pub(crate) fn head(
         &mut self,
         status: u16,
@@ -494,14 +496,18 @@ impl Core {
         if self.phase != Phase::Walking {
             return;
         }
+        let body = !self.head_only;
         let trust = self.trust(content);
         self.outputs.push_back(Output::Head(Head {
             status,
             headers,
-            body: true,
+            body,
             trust,
         }));
         self.phase = Phase::Headed;
+        if !body {
+            self.close();
+        }
     }
 
     /// Verified bytes for the body, from the walk's holding; `from` is the
@@ -663,13 +669,18 @@ impl Verifier {
             // The IPFS walk is 0009's step 3b-2.
             return Err(Refusal::Node);
         };
-        // Ranges, with HEAD, are step 3b-1's second part.
-        if plan.headers.iter().any(|(n, _)| n == "range") {
-            return Err(Refusal::Header);
-        }
-        let Method::Get = method;
-        let mut core = Core::new(request, plan.trust.name.clone(), budget);
-        let walk = swarm::Walk::start(&mut core, root, &plan.path, &plan.query)?;
+        let range = plan
+            .headers
+            .iter()
+            .find(|(n, _)| n == "range")
+            .map(|(_, v)| v.clone());
+        let mut core = Core::new(
+            request,
+            method == Method::Head,
+            plan.trust.name.clone(),
+            budget,
+        );
+        let walk = swarm::Walk::start(&mut core, root, &plan.path, &plan.query, range)?;
         let mut v = Self {
             core,
             walk: Some(walk),
