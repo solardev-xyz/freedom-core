@@ -15,7 +15,7 @@
 //!    308 come from verified nodes.
 //! 4. **The file:** its root chunk, then the head; then its intermediate
 //!    chunks, at most two level-1 chunks ahead and four chunk requests at
-//!    once, and one `/bytes` stream for the leaves the body needs, each
+//!    once, and one `/bytes` stream for the leaves the range needs, each
 //!    checked before its bytes go out, with `/chunks` as the fallback.
 //!
 //! Every chunk is a content-addressed one at its reference, except the feed
@@ -29,7 +29,7 @@ use fc_swarm::manifest::{self, Lookup, NodeError, Outcome, Step};
 use fc_swarm::tree;
 use fc_swarm::verify::{Chunk, FeedUpdate, MAX_CHUNK_WIRE, Refusal, SPAN_SIZE};
 
-use super::ant::{self, Entry, Feed, NotFound};
+use super::ant::{self, Entry, Feed, NotFound, Ranges};
 use super::jobs::{Verdict, Work};
 use super::{Core, Failure, MAX_CHUNK_PIECES, PieceFailure, PieceId};
 use crate::bzz::SWARM_HEADERS;
@@ -1341,6 +1341,7 @@ pub(crate) struct Walk {
     /// The path below the root, decoded as Ant's router decodes it.
     path: String,
     query: String,
+    range: Option<String>,
     /// The URL root's chunk, once checked: a raw root's file root.
     url_root: Option<Vec<u8>>,
     /// The feed the walk crossed.
@@ -1356,6 +1357,7 @@ impl Walk {
         root: &str,
         path: &str,
         query: &str,
+        range: Option<String>,
     ) -> Result<Self, PlanRefusal> {
         let mut address = [0u8; 32];
         for (i, slot) in address.iter_mut().enumerate() {
@@ -1369,6 +1371,7 @@ impl Walk {
             root_text: root.to_owned(),
             path: decoded.clone().unwrap_or_default(),
             query: query.to_owned(),
+            range,
             url_root: None,
             feed: None,
             known: Vec::new(),
@@ -1623,7 +1626,8 @@ impl Walk {
                 self.not_found(core, kind, label);
             }
             Step::Done(Outcome::Directory) => {
-                let (h, body) = ant::redirect(&self.root_text, &self.path, &self.query);
+                let (h, body) =
+                    ant::redirect(&self.root_text, &self.path, &self.query, core.head_only);
                 self.answer(core, 308, h, body, label);
             }
             Step::Failed(NodeError::NotAManifest) => self.raw_fallback(core),
@@ -1675,14 +1679,50 @@ impl Walk {
             core.unhold(wire.len());
             return self.end(core, Failure::Unverifiable);
         }
-        core.head(200, ant::whole(&entry, total), content);
-        if total == 0 {
+        let ranges = if core.head_only {
+            Ranges::Full
+        } else {
+            ant::parse_ranges(self.range.as_deref(), total)
+        };
+        let (a, b) = match ranges {
+            Ranges::Invalid | Ranges::NoOverlap => {
+                core.unhold(wire.len());
+                let t = (ranges == Ranges::NoOverlap).then_some(total);
+                let (h, body) = ant::not_satisfiable(t, entry.filename.as_deref());
+                return self.answer(core, 416, h, body.to_vec(), content);
+            }
+            Ranges::Single { start, length: 0 } => {
+                core.unhold(wire.len());
+                core.head(206, ant::zero_length(&entry, total, start), content);
+                core.finish();
+                self.stage = Stage::Done;
+                return;
+            }
+            Ranges::Single { start, length } => {
+                core.head(
+                    206,
+                    ant::partial(&entry, total, start, start + length - 1),
+                    content,
+                );
+                (start, start + length - 1)
+            }
+            Ranges::Full | Ranges::Multi => {
+                core.head(200, ant::whole(&entry, total, core.head_only), content);
+                if total == 0 {
+                    core.unhold(wire.len());
+                    core.finish();
+                    self.stage = Stage::Done;
+                    return;
+                }
+                (0, total - 1)
+            }
+        };
+        if core.ended() {
+            // A HEAD: nothing past the file's root is read.
             core.unhold(wire.len());
-            core.finish();
             self.stage = Stage::Done;
             return;
         }
-        let (a, b) = (0, total - 1);
         if leaf {
             let s = usize::try_from(a).unwrap_or(0);
             let e = usize::try_from(b).unwrap_or(0) + 1;
