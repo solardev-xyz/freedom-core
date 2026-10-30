@@ -906,7 +906,7 @@ dependencies = [
 
 [[package]]
 name = "fc-protocol"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -917,7 +917,7 @@ dependencies = [
 
 [[package]]
 name = "fc-service"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "fc-protocol",
  "fc-sys",
@@ -932,7 +932,7 @@ dependencies = [
 
 [[package]]
 name = "fc-sys"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",

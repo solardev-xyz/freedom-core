@@ -123,7 +123,8 @@ publish job that runs no repository code.
    `services/freedom-ipfsd/Cargo.toml`, and its own `Cargo.lock`
    (`cargo check` in `services/freedom-ipfsd`). `ipfs.hello` reports it as
    `service_version`, and it is independent of the core's version.
-2. **Tag the merged commit on `main`** once its CI is green:
+2. **Tag the merged commit on `main`** once its CI is green and the bump PR
+   records a result for every item in step 5a:
    `git tag ipfsd-vX.Y.Z <commit> && git push origin ipfsd-vX.Y.Z`. Only a
    tag equal to `ipfsd-v` + that version publishes.
 3. **The workflow** builds every target, smoke-tests the four native builds
@@ -152,45 +153,75 @@ publish job that runs no repository code.
    of the release's `SHA256SUMS`. The fetch script for the second asset is
    0007's step 6.
 5. **Confinement, before shipping** (design 0010, Tests, *Before shipping*).
-   CI runs one recent kernel per architecture, so it can't show the oldest
-   kernels or the missing-right cases. Run these by hand on the release
-   binaries, and note each result in the release's PR:
-   - **The Linux kernels,** one per Landlock ABI the report distinguishes,
-     on x86-64 and on AArch64 where a machine is at hand:
-     - without Landlock (before 5.13, or Landlock off at boot through
-       `lsm=`): `files` is `unavailable` and seccomp still holds;
-     - before 5.11: no `CLOSE_RANGE_CLOEXEC`, so an inherited descriptor
-       takes the entry's `fcntl` fallback, and still exactly one re-exec;
-     - ABI 1 (5.13), 2 (5.19) and 3 (6.2): `partial`, with the gaps named;
-     - ABI 4 (6.7): `socks5` refuses TCP to any port but the proxy's;
-     - ABI 6 (6.12) and later: `ipc` `enforced`;
-     - in a container whose seccomp filter refuses Landlock's calls:
-       `blocked`, and the service runs.
-   - **The release runtime:**
-     - glibc 2.25 (the oldest the browser runs on), another before 2.34, and
-       a current one;
+   CI runs source builds on one recent kernel per architecture. It can't
+   show the release binaries, the oldest kernels or the missing-right
+   cases. Two lists follow: what must have a result before the tag, and what
+   must have one before a signed browser release ships the tag. Note each
+   item with its result, "not run" and why, or a finding.
+
+   **5a. Before the tag.** Run these on the release binaries from a manual
+   run of `release-ipfsd.yml` on the bump PR's branch, which builds every
+   target without publishing. Record the results in the bump PR; step 2
+   waits for them. Everything here runs on one Linux x86-64 host and in CI:
+   - **The kernel cases,** on the host's kernel and in containers on it. A
+     case the host's kernel can't show is simulated by a container's seccomp
+     profile, and its result says it is a simulation:
+     - without Landlock, simulated by `ENOSYS` for Landlock's calls: `files`
+       is `unavailable` and seccomp still holds;
+     - before 5.11, simulated by `ENOSYS` for `close_range`, with one
+       inherited descriptor: the entry's `fcntl` fallback, and exactly one
+       re-exec;
+     - in a container whose seccomp filter refuses Landlock's calls
+       (`EPERM`): `blocked`, and the service runs;
+     - the host's ABI, with its statuses and gaps. From ABI 4, `socks5`
+       refuses TCP to any port but the proxy's;
+     - ABI 1, 2 and 3: `partial`, with the gaps named, from CI's harness,
+       which caps the ABI on a source build.
+   - **The release runtime,** in containers: glibc 2.17 (the oldest the
+     asset table claims), 2.25 (the oldest the browser runs on), another
+     before 2.34, and a current one:
      - each with a first lookup after confinement and none before it, with
        and without `resolve` and `mdns4_minimal` in `nsswitch.conf`;
-     - `confinement`'s `resolution` matches what resolves: `resolv_conf`
-       for `freedom-ipfsd`, whose resolver reads `/etc/resolv.conf` itself;
-     - glibc 2.17 (CentOS 7), the oldest the asset table claims: a load
-       completes confined. Below 2.25 glibc has no `getrandom`, so the
-       getrandom crate reads `/dev/random` and `/dev/urandom`, which the
-       policy grants.
-   - **The network:** `socks5` mode through Arti on loopback, and through a
-     SOCKS proxy on the LAN (`--network socks5:<a private address>:<port>`).
-   - **SQLite:** the persistent process's store under the release policy:
-     its journal and WAL checkpointed, and a statement that spills past the
-     page cache completed in memory (`tests/store_confined.rs` shows the
-     sort; repeat it with a full store).
-   - **The packaged app,** started each way users start it (the desktop
-     entry, a terminal, each Linux package format, macOS's Finder and Dock).
-     The services' logs show the entry's re-exec ("re-executed once at
-     entry") seldom happens. A descriptor the app inherited without
-     close-on-exec reaches the services on Linux, and each start re-executes
-     once.
-   - **Measured:** cold start to `ipfs.hello`, IPFS over direct TCP and QUIC,
-     and `socks5` reconnects to Arti, all confined.
+     - `confinement`'s `resolution` matches what resolves, for every lookup
+       the service makes: the gateway's HTTP requests and libp2p's `/dns*`
+       dials;
+     - on glibc 2.17, a load completes confined. Below 2.25 glibc has no
+       `getrandom`, so the getrandom crate reads `/dev/random` and
+       `/dev/urandom`, which the policy grants.
+   - **The network:**
+     - `socks5` through Arti on loopback, with a reconnect: Arti restarts
+       under a running process, and loads resume;
+     - `socks5` through a SOCKS proxy on the LAN
+       (`--network socks5:<a private address>:<port>`);
+     - **direct libp2p TCP and QUIC** to a controlled local peer (an offline
+       Kubo, or a second `freedom-ipfsd`), announced by a local delegated
+       router, one transport at a time, and checked from the peer's side.
+       Public providers often answer over HTTPS, which shows neither
+       transport.
+   - **SQLite:** the persistent process's store under the release policy,
+     with its journal and WAL checkpointed. Also a full store, at the
+     browser's 256 MiB target, whose eviction scan spills past the page
+     cache and completes in memory (`tests/store_confined.rs` shows the
+     control).
+   - **An inherited descriptor** without close-on-exec: one re-exec at entry
+     ("re-executed once at entry"), and the service serves.
+   - **Measured,** all confined: cold start to `ipfs.hello`; a load over TCP
+     and one over QUIC from the local peer; a `socks5` load through Arti,
+     and how long loads take to resume after Arti restarts.
+   - **macOS and Windows, in CI at the bump PR's head,** on source builds:
+     - macOS's hello report;
+     - fc-service's confinement test, which prints the `KERN_PROCARGS2`
+       result and the Mach rights held at the confinement point;
+     - Windows's report, which says `unavailable` until its job object
+       lands.
+
+     The dry run's native macOS and Windows builds pass the workflow's smoke
+     test.
+
+   **5b. Before a signed browser release ships the tag.** Run these on the
+   signed, packaged browser that pins the tag, and record the results in
+   that browser release's PR. A failure here blocks that browser release,
+   and its fix ships as a new tag:
    - **macOS,** on the signed release build, by hand on every supported
      version CI doesn't run (from macOS 12, the browser's floor, to the
      newest; CI runs only `macos-latest`):
@@ -209,11 +240,25 @@ publish job that runs no repository code.
        answer for the signed, hardened build;
      - Seatbelt's calls are private: a version where the profile no longer
        applies exits 77, and that release waits for a fix.
-   - **Windows** follows with its job object; until then its report says
-     `unavailable`.
+   - **The packaged app on each OS,** started each way users start it (the
+     desktop entry, a terminal, each Linux package format, macOS's Finder
+     and Dock):
+     - the services' logs show that the entry's re-exec ("re-executed once
+       at entry") seldom happens;
+     - on Linux, a descriptor the app inherited without close-on-exec
+       reaches the services, and each start re-executes once.
+   - **Real kernels,** one per Landlock ABI the report distinguishes, on
+     x86-64 and on AArch64 where a machine is at hand. They cover what 5a
+     simulated or couldn't reach:
+     - without Landlock (before 5.13, or Landlock off at boot through
+       `lsm=`): `files` is `unavailable` and seccomp still holds;
+     - before 5.11: an inherited descriptor takes the entry's `fcntl`
+       fallback, and still exactly one re-exec;
+     - ABI 1 (5.13), 2 (5.19) and 3 (6.2): `partial`, with the gaps named;
+     - ABI 6 (6.12) and later: `ipc` `enforced`.
 
-   `freedom-radicled`'s first release (`radicled-v*`) runs the same list,
-   with libgit2's writes in place of SQLite's (a repository created, loose
+   `freedom-radicled`'s first release (`radicled-v*`) runs both lists, with
+   libgit2's writes in place of SQLite's (a repository created, loose
    objects and packs written, an existing object written again), and
    Radicle's fetch, import and COB writes measured.
 
