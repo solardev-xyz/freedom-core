@@ -341,7 +341,10 @@ fn admitted_query(url_text: &str) -> String {
 
 /// A verify plan's headers: only those the bundled node reads, each at most
 /// once, lowercase, with 0006's value rules.
-fn check_verify_headers(headers: &[(&str, &str)], scheme: Scheme) -> Result<(), Refusal> {
+pub(crate) fn check_verify_headers(
+    headers: &[(&str, &str)],
+    scheme: Scheme,
+) -> Result<(), Refusal> {
     let allowed: &[&str] = match scheme {
         Scheme::Bzz => &VERIFY_HEADERS_ANT,
         Scheme::Ipfs | Scheme::Ipns => &VERIFY_HEADERS_IPFS,
@@ -394,7 +397,7 @@ fn request_target(request: &PlanRequest<'_>) -> Host {
 }
 
 /// The target: normalized, in the request's namespace, with a reference.
-fn check_path(path: &str, scheme: Scheme) -> Result<(), Refusal> {
+pub(crate) fn check_path(path: &str, scheme: Scheme) -> Result<(), Refusal> {
     if url::normalize_target(path).as_deref() != Some(path) {
         return Err(Refusal::Path);
     }
