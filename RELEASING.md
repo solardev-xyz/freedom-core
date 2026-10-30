@@ -212,7 +212,8 @@ publish job that runs no repository code.
      - Windows's report, which says `unavailable` until its job object
        lands.
 
-     The dry run's macOS and Windows builds pass the workflow's smoke test.
+     The dry run's native macOS and Windows builds pass the workflow's smoke
+     test.
 
    **5b. Before a signed browser release ships the tag.** Run these on the
    signed, packaged browser that pins the tag, and record the results in
