@@ -32,7 +32,10 @@
 //!   discovery's dynamic store, `.DNSConfiguration` for the resolver's
 //!   servers) and mDNSResponder's socket, which resolves names. Nothing in
 //!   `socks5` or offline mode, where neither runs.
-//! - **Network:** `direct`, any outbound address and a local UDP bind;
+//! - **Network:** `direct`, any outbound address, a local UDP bind, and
+//!   datagrams arriving at the service's UDP sockets: a reply to an
+//!   unconnected socket (hickory's DNS queries, QUIC) is checked as inbound,
+//!   and without the rule it never arrives;
 //!   `socks5`, TCP to the proxy's port, at `localhost` where the proxy is on
 //!   loopback, or on any host (the compiler refuses an address literal);
 //!   offline, none.
@@ -225,6 +228,7 @@ pub fn profile(network: Network, refer: bool, grants: &Grants) -> Result<Profile
             text.push_str(INTERFACE_SYSCTLS);
             text.push_str("(allow network-outbound (remote ip \"*:*\"))\n");
             text.push_str("(allow network-bind (local udp \"*:*\"))\n");
+            text.push_str("(allow network-inbound (local udp \"*:*\"))\n");
         }
         Network::Socks5 { port, loopback } => {
             let host = if loopback { "localhost" } else { "*" };
@@ -289,6 +293,7 @@ SYSCTLS(allow file-read*
 (allow sysctl-read (sysctl-name-prefix "net.route"))
 (allow network-outbound (remote ip "*:*"))
 (allow network-bind (local udp "*:*"))
+(allow network-inbound (local udp "*:*"))
 "#;
 
     #[test]

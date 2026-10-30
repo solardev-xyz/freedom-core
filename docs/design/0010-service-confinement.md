@@ -275,7 +275,9 @@ The rest of this section is about glibc's resolver, `confine::Resolver::System`.
       - **What it exposes:** the services' own environment is scrubbed by main, but main's environment is the user's at launch, and every other same-user process can be read by guessing its pid. Linux has no such gap: only `/proc/self` is granted.
       - **The report says so:** on macOS, `ipc` is `partial`, with the gap `process_args`, since the report never claims more than holds. If the signed, hardened build turns out to close the gap, `ipc` can go back to `enforced` there, on that evidence.
       - **The release gate checks** whether the signed app's hardened runtime keeps main's environment from being read this way.
-    - **Network:** in `socks5` mode, TCP alone: no UDP and no bind.
+    - **Network:**
+      - in `direct` mode, any outbound address, a UDP bind, and inbound UDP to the service's own sockets. Seatbelt checks a datagram that reaches an unconnected socket as inbound. Without that rule, no reply reaches hickory's DNS queries or QUIC: CI's harness shows a connected socket's reply arriving and an unconnected one's dropped. No TCP listens: there is no TCP bind or inbound rule;
+      - in `socks5` mode, TCP alone: no UDP and no bind.
   - **Mach rights held before `confine` stay usable, and no descriptor check can see them.** Seatbelt filters lookups, not rights already held, and libSystem's initializers may take some before `main`. This is a macOS limitation without a Linux counterpart. The services' setup before `confine` makes no lookup of its own. The confinement test lists the task's port names at the confinement point on CI, for the record.
 - **A qualification gate:** Linux tests can't show what a profile must allow. Before a release ships, its signed build runs the contract suite confined on every supported macOS version: DNS, TLS, the file operations in the data directory, NAT64 discovery, and `socks5` mode through Arti on loopback and through a SOCKS proxy on the LAN.
 
