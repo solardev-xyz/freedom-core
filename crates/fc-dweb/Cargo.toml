@@ -12,11 +12,14 @@ workspace = true
 
 [dependencies]
 fc-json = { path = "../fc-json" }
+fc-swarm = { path = "../fc-swarm" }
 sha3 = "0.12"
 thiserror = "2"
 # The WHATWG URL parser the handlers' `new URL` follows; fc-naming links it already.
 url = "2"
 
 [dev-dependencies]
+base64 = "0.22"
 hex = "0.4"
 serde_json = "1"
+sha2 = "0.11"

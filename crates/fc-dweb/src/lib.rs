@@ -50,6 +50,7 @@ mod plan;
 mod response;
 mod url;
 mod validate;
+pub mod verifier;
 mod verify;
 
 pub use bzz::{
