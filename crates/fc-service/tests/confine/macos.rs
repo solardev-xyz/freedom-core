@@ -256,7 +256,7 @@ fn policy(p: &Paths, network: Network, descriptors: Vec<i32>) -> Policy {
         refer: false,
         min_abi: 1,
         network,
-        system_resolver: true,
+        resolver: confine::Resolver::System,
         descriptors,
         interface_index: false,
     }
