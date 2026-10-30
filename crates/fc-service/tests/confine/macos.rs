@@ -188,6 +188,31 @@ fn child(case: &str) {
             refused(confine::confine(&policy(&p, network, registered)));
             return;
         }
+        "resolv-conf" => {
+            // A service's own resolver (freedom-ipfsd's): resolv.conf and
+            // /etc/hosts open by the names it uses, through their links
+            // (/etc, and resolv.conf's own), and nothing else of /etc.
+            let present: Vec<&str> = ["/etc/resolv.conf", "/etc/hosts"]
+                .into_iter()
+                .filter(|file| std::fs::read(file).is_ok())
+                .collect();
+            let other = std::fs::read("/etc/services").is_ok();
+            let mut own = policy(&p, network, registered);
+            own.resolver = confine::Resolver::ResolvConf;
+            let report = confine::confine(&own).unwrap();
+            println!("REPORT {}", report.to_json());
+            for file in present {
+                check(&format!("{file} readable"), std::fs::read(file).is_ok());
+            }
+            if other {
+                check(
+                    "/etc/services refused",
+                    std::fs::read("/etc/services").is_err(),
+                );
+            }
+            drop(held);
+            return;
+        }
         "ephemeral" => {
             let mut ephemeral = policy(&p, network, Vec::new());
             ephemeral.read_write.clear();
@@ -681,6 +706,7 @@ fn parent() {
         "refer",
         "sysctl",
         "exec-direct",
+        "resolv-conf",
     ] {
         let output = run(&world, case);
         let report = report_json(&output);
