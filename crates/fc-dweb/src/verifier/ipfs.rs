@@ -291,6 +291,11 @@ enum Stage {
         name: String,
         hop: usize,
     },
+    /// The record passed; its value waits for the partition's floor.
+    Floor {
+        hop: usize,
+        value: String,
+    },
     Dag,
     Done,
 }
@@ -1901,6 +1906,25 @@ impl super::Events<Tag> for Walk {
         }
     }
 
+    fn floor(&mut self, core: &mut Core, check: crate::store::FloorCheck) -> bool {
+        let Stage::Floor { .. } = self.stage else {
+            return false;
+        };
+        let Stage::Floor { hop, value } = std::mem::replace(&mut self.stage, Stage::Done) else {
+            return false;
+        };
+        match check {
+            crate::store::FloorCheck::Refused => self.end(core, Failure::VerificationFailed),
+            // `GatewayCore` resolves a fourth name, then refuses whatever it
+            // names.
+            crate::store::FloorCheck::Accepted if hop > MAX_RESOLUTIONS => {
+                self.page(core, 400, "dnslink recursion limit exceeded");
+            }
+            crate::store::FloorCheck::Accepted => self.record_value(core, &value, hop),
+        }
+        true
+    }
+
     fn room(&mut self, core: &mut Core) {
         self.read_car(core);
         self.pump(core);
@@ -1940,12 +1964,19 @@ impl super::Events<Tag> for Walk {
                     return;
                 };
                 match result {
-                    // `GatewayCore` resolves a fourth name, then refuses
-                    // whatever it names.
-                    Ok(_) if hop > MAX_RESOLUTIONS => {
-                        self.page(core, 400, "dnslink recursion limit exceeded");
+                    // Held to the partition's floor before its value is
+                    // followed (0009, IPNS and DNSLink).
+                    Ok(r) => {
+                        let Some((secs, nanos)) = fc_ipfs::rfc3339::parse(&r.validity) else {
+                            return self.end(core, Failure::Unverifiable);
+                        };
+                        let valid_until = secs.saturating_add(i64::from(nanos > 0));
+                        self.stage = Stage::Floor {
+                            hop,
+                            value: r.value,
+                        };
+                        core.ask_floor(name, r.sequence, valid_until);
                     }
-                    Ok(r) => self.record_value(core, &r.value, hop),
                     Err(e) => self.end(core, refusal(e)),
                 }
             }

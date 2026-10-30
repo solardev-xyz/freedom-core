@@ -167,6 +167,8 @@ fn drive(v: &mut Verifier, world: &World, slow_pool: bool) -> (Option<u16>, usiz
                     }
                 }
                 Output::Hash(job) => jobs.push_back(job),
+                Output::Remember { .. } => {}
+                Output::Floor { .. } => v.floor(fc_dweb::store::FloorCheck::Accepted).unwrap(),
                 Output::Head(h) => head = Some(h.status),
                 Output::Body(b) => {
                     body += b.len();

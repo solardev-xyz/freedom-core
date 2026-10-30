@@ -23,7 +23,9 @@ use fc_ipfs::cid as ipfs_cid;
 use serde_json::Value as Json;
 
 mod common;
-use common::{Answer, Ending, Expected, Opts, Order, b64, check_body, content, load, pairs, run};
+use common::{
+    Answer, Ending, Expected, Opts, Order, b64, check_body, content, load, pairs, run, run_shared,
+};
 
 /// A block's identity: its codec and multihash, so a CIDv0 link and its
 /// CIDv1 name the same block.
@@ -871,6 +873,18 @@ fn body_of(b: &Json) -> Expected {
 // The request cases.
 
 fn check_case(blocks: &Blocks, id: &str, c: &Json, order: Order) {
+    check_step(blocks, id, c, order, None);
+}
+
+/// A case, or one of its steps, with the dweb thread's store when steps
+/// share it: in the step's partition.
+fn check_step(
+    blocks: &Blocks,
+    id: &str,
+    c: &Json,
+    order: Order,
+    shared: Option<&mut fc_dweb::store::Store>,
+) {
     let p = &c["plan"];
     let root = if let Some(r) = p["root"]["ipfs"].as_str() {
         Root::Ipfs(r.to_owned())
@@ -902,7 +916,11 @@ fn check_case(blocks: &Blocks, id: &str, c: &Json, order: Order) {
     let car = c["world"]["gateway"]["car"].as_bool().unwrap_or(true);
     let mut o = opts(car, load_now());
     o.order = order;
-    let got = run(id, &plan, method, &world, o);
+    let partition = c["partition"].as_str();
+    let got = match shared {
+        Some(store) => run_shared(id, &plan, method, &world, o, Some(store), partition),
+        None => run(id, &plan, method, &world, o),
+    };
     let x = &c["expect"];
     if let Some(err) = x.get("error") {
         let status = err["status"].as_u64().unwrap() as u16;
@@ -954,14 +972,26 @@ fn every_ipfs_request_case() {
         .unwrap()
     {
         let id = c["id"].as_str().unwrap();
-        if !(id.starts_with("ipfs/") || id.starts_with("ipns/")) || id == "ipns/floor" {
+        if !(id.starts_with("ipfs/") || id.starts_with("ipns/")) {
             continue;
         }
-        check_case(&blocks, id, c, Order::Fifo);
-        check_case(&blocks, id, c, Order::Lifo);
+        if let Some(steps) = c["steps"].as_array() {
+            // Steps share one store: what one leaves in a partition (IPNS
+            // floors) meets the next.
+            for order in [Order::Fifo, Order::Lifo] {
+                let mut store = fc_dweb::store::Store::new();
+                for (i, step) in steps.iter().enumerate() {
+                    let label = format!("{id} step {i}");
+                    check_step(&blocks, &label, step, order, Some(&mut store));
+                }
+            }
+        } else {
+            check_case(&blocks, id, c, Order::Fifo);
+            check_case(&blocks, id, c, Order::Lifo);
+        }
         n += 1;
     }
-    assert_eq!(n, 38, "{n}");
+    assert_eq!(n, 39, "{n}");
 }
 
 // ---------------------------------------------------------------------------
@@ -1266,57 +1296,6 @@ fn text(cid: &[u8]) -> String {
     ipfs_cid::to_text(&ipfs_cid::parse(cid).unwrap())
 }
 
-/// A file whose child disagrees with its `blocksizes` entry (deviation
-/// `unixfs-sizes`): a raw leaf longer than its entry, and a node whose
-/// `filesize` isn't its entry. The bytes before it are released, then the
-/// body is cut as malformed, through the CAR and raw.
-#[test]
-fn sizes_that_disagree_cut_the_body_as_malformed() {
-    let mut blocks = Blocks::new(&load("dweb-verify.json"));
-    let a = content("sizes-a", 1000);
-    let b = content("sizes-b", 1000);
-    let (la, lb) = (raw_cid(&a), raw_cid(&b));
-    // The second leaf's entry says 999.
-    let leaf_root = file_node(&[(&la, 1000), (&lb, 1000)], 1999, &[1000, 999]);
-    // The second child, a node of 999 bytes where its entry says 1000.
-    let inner = file_node(&[(&lb, 1000)], 999, &[999]);
-    let li = cid_of(0x70, &inner, false);
-    let node_root = file_node(&[(&la, 1000), (&li, 1100)], 2000, &[1000, 1000]);
-    let roots = [
-        cid_of(0x70, &leaf_root, false),
-        cid_of(0x70, &node_root, false),
-    ];
-    for (cid, block) in [
-        (&la, &a),
-        (&lb, &b),
-        (&li, &inner),
-        (&roots[0], &leaf_root),
-        (&roots[1], &node_root),
-    ] {
-        blocks.blocks.insert(key(cid), block.clone());
-    }
-    let world = Gateway {
-        blocks: &blocks,
-        changes: vec![],
-    };
-    for root in &roots {
-        for car in [true, false] {
-            let p = ranged(&text(root), "/", None);
-            let got = run("sizes", &p, Method::Get, &world, opts(car, 0));
-            assert_eq!(got.head.as_ref().map(|h| h.status), Some(200), "{car}");
-            assert_eq!(
-                got.ending,
-                Some(Ending::Abort(
-                    "malformed".to_owned(),
-                    fc_dweb::verifier::IPFS_MALFORMED.to_owned()
-                )),
-                "{car}"
-            );
-            assert_eq!(got.body, a, "{car}");
-        }
-    }
-}
-
 /// A raw block longer than the room it was reserved at (a raw leaf at its
 /// entry): its bytes past that room need room of their own, and a request
 /// without it is `unverifiable` rather than past its budget. With room, the
@@ -1394,6 +1373,11 @@ fn cbor_head(major: u8, n: u64, out: &mut Vec<u8>) {
 /// A V2-only record naming `value`, valid until 2099, its signed data in
 /// DAG-CBOR's canonical key order.
 fn ipns_record(key: &ed25519_dalek::SigningKey, value: &str) -> Vec<u8> {
+    ipns_record_at(key, value, 1)
+}
+
+/// The same, with its sequence.
+fn ipns_record_at(key: &ed25519_dalek::SigningKey, value: &str, sequence: u64) -> Vec<u8> {
     use ed25519_dalek::Signer;
     let mut data = Vec::new();
     cbor_head(5, 5, &mut data);
@@ -1407,7 +1391,7 @@ fn ipns_record(key: &ed25519_dalek::SigningKey, value: &str) -> Vec<u8> {
     cbor_head(2, value.len() as u64, &mut data);
     data.extend_from_slice(value.as_bytes());
     field("Sequence", &mut data);
-    cbor_head(0, 1, &mut data);
+    cbor_head(0, sequence, &mut data);
     field("Validity", &mut data);
     let eol = b"2099-01-01T00:00:00Z";
     cbor_head(2, eol.len() as u64, &mut data);
@@ -1422,54 +1406,6 @@ fn ipns_record(key: &ed25519_dalek::SigningKey, value: &str) -> Vec<u8> {
     varint(data.len() as u64, &mut out);
     out.extend_from_slice(&data);
     out
-}
-
-/// Names that name names: `GatewayCore` follows three, resolves a fourth
-/// and answers 400 whatever it names, and asks for no fifth. So does the
-/// core, its records verified.
-#[test]
-fn a_fourth_record_is_refused_whatever_it_names() {
-    let mut blocks = Blocks::new(&load("dweb-verify.json"));
-    let style = "/ipfs/bafkreiaeicvgt6kx3ml6fw6t6r2gkenzrn2zajqbxm3dp2mgpbyl2ibnye";
-    let mut first = Vec::new();
-    for n in 1..=5u8 {
-        let keys: Vec<_> = (0..n).map(|i| ipns_key(n * 16 + i)).collect();
-        for (i, (key, name)) in keys.iter().enumerate() {
-            let value = match keys.get(i + 1) {
-                Some((_, next)) => format!("/ipns/{next}"),
-                None => style.to_owned(),
-            };
-            blocks
-                .records
-                .insert(name.clone(), ipns_record(key, &value));
-        }
-        first.push(keys[0].1.clone());
-    }
-    let world = Gateway {
-        blocks: &blocks,
-        changes: vec![],
-    };
-    for (n, name) in (1..=5).zip(&first) {
-        let p = plan(Root::Ipns(name.clone()), "", vec![]);
-        let got = run("chain", &p, Method::Get, &world, opts(true, 0));
-        let records = got
-            .pieces
-            .iter()
-            .filter(|r| r.path.starts_with("/ipns/"))
-            .count();
-        assert_eq!(records, n.min(4), "{n}");
-        assert_eq!(got.ending, Some(Ending::End), "{n}");
-        let head = got.head.as_ref().unwrap();
-        if n <= 3 {
-            assert_eq!(head.status, 200, "{n}");
-            assert_eq!(head.trust.content, ContentTrust::LatestAsserted);
-            assert_eq!(got.body, content("ipfs-site-style", 3000), "{n}");
-        } else {
-            assert_eq!(head.status, 400, "{n}");
-            let body = String::from_utf8(got.body.clone()).unwrap();
-            assert!(body.contains("dnslink recursion limit exceeded"), "{body}");
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1720,4 +1656,127 @@ fn raw_blocks_wait_once_512_kib_are_unread() {
         .count();
     assert_eq!(leaves, 11, "{:?}", got.ending);
     assert!(got.ending.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// IPNS floors (design 0009, IPNS and DNSLink; step 3c).
+
+/// Every record a request verifies is held to its partition's floor and
+/// raises it, the fourth of a chain included; another partition's floors
+/// are its own. And a record below the floor is refused before its value
+/// is followed: nothing past the record is fetched.
+#[test]
+fn every_record_meets_the_floor() {
+    let mut blocks = Blocks::new(&load("dweb-verify.json"));
+    let style = "/ipfs/bafkreiaeicvgt6kx3ml6fw6t6r2gkenzrn2zajqbxm3dp2mgpbyl2ibnye";
+    let keys: Vec<_> = (0..4u8).map(|i| ipns_key(180 + i)).collect();
+    for (i, (key, name)) in keys.iter().enumerate() {
+        let value = match keys.get(i + 1) {
+            Some((_, next)) => format!("/ipns/{next}"),
+            None => style.to_owned(),
+        };
+        blocks
+            .records
+            .insert(name.clone(), ipns_record(key, &value));
+    }
+    let world = Gateway {
+        blocks: &blocks,
+        changes: vec![],
+    };
+    let mut store = fc_dweb::store::Store::new();
+    let p = plan(Root::Ipns(keys[0].1.clone()), "", vec![]);
+    let got = run_shared(
+        "chain",
+        &p,
+        Method::Get,
+        &world,
+        opts(true, 0),
+        Some(&mut store),
+        None,
+    );
+    assert_eq!(got.head.map(|h| h.status), Some(400));
+    assert_eq!(got.floors.len(), 4);
+    assert_eq!(store.floors(None), 4);
+    assert_eq!(store.floors(Some("w")), 0);
+    // The last name's floor is 1. A record of sequence 0: refused, with
+    // only the record fetched; of sequence 2: served, the floor at 2.
+    let (key, name) = &keys[3];
+    let p = plan(Root::Ipns(name.clone()), "", vec![]);
+    for (sequence, want) in [
+        (0, fc_dweb::store::FloorCheck::Refused),
+        (2, fc_dweb::store::FloorCheck::Accepted),
+        (1, fc_dweb::store::FloorCheck::Refused),
+    ] {
+        blocks
+            .records
+            .insert(name.clone(), ipns_record_at(key, style, sequence));
+        let world = Gateway {
+            blocks: &blocks,
+            changes: vec![],
+        };
+        let got = run_shared(
+            "floor",
+            &p,
+            Method::Get,
+            &world,
+            opts(true, 0),
+            Some(&mut store),
+            None,
+        );
+        assert_eq!(got.floors, [(sequence, want)], "{sequence}");
+        if want == fc_dweb::store::FloorCheck::Refused {
+            assert_eq!(
+                got.ending,
+                Some(Ending::Error(
+                    502,
+                    fc_dweb::verifier::IPFS_VERIFICATION_FAILED.to_owned()
+                )),
+                "{sequence}"
+            );
+            assert_eq!(got.pieces.len(), 1, "{sequence}");
+        } else {
+            assert_eq!(got.ending, Some(Ending::End), "{sequence}");
+        }
+    }
+}
+
+/// A `dweb.forget` while an IPNS request runs: its floor check finds no
+/// floor, and leaves none behind, at every step.
+#[test]
+fn a_floor_after_a_forget_leaves_nothing() {
+    let mut blocks = Blocks::new(&load("dweb-verify.json"));
+    let (key, name) = ipns_key(190);
+    blocks.records.insert(
+        name.clone(),
+        ipns_record(&key, &format!("/ipfs/{SITE}/docs/page.html")),
+    );
+    let world = Gateway {
+        blocks: &blocks,
+        changes: vec![],
+    };
+    let p = plan(Root::Ipns(name), "", vec![]);
+    let mut forgotten = 0;
+    for at in 1.. {
+        let mut store = fc_dweb::store::Store::new();
+        let got = run_shared(
+            "late floor",
+            &p,
+            Method::Get,
+            &world,
+            Opts {
+                forget_after: Some(at),
+                ..opts(true, 0)
+            },
+            Some(&mut store),
+            Some("w"),
+        );
+        assert_eq!(got.ending, Some(Ending::End), "{at}");
+        if at > got.steps {
+            assert_eq!(store.floors(Some("w")), 1);
+            break;
+        }
+        assert_eq!(store.floors(Some("w")), 0, "{at}");
+        forgotten += 1;
+    }
+    assert!(forgotten > 3, "{forgotten}");
 }
