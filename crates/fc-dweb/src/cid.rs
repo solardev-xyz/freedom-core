@@ -76,12 +76,24 @@ fn decode_big(
     Some(result)
 }
 
+/// The longest text of a CID past its multibase prefix, as
+/// `fc_ipfs::cid::MAX_CID_TEXT` counts it: the longest binary CID is four
+/// varints of 10 bytes and a 128-byte digest, 168 bytes, and base32 carries
+/// 5 bits a character, base36 more, and base36's leading `0` a whole byte.
+/// Longer text is no CID the core reads, so it is refused before any
+/// conversion, whose cost grows with the square of the text for base36.
+pub(crate) const MAX_CID_TEXT: usize = ((4 * 10 + 128) * 8usize).div_ceil(5);
+
 /// Lowercase base36 (`0`–`9`, `a`–`z`), as the verify-plan generator's
 /// `baseDecode` reads it: a `0` per leading zero byte; `None` for another
-/// character. The empty string is no bytes.
+/// character, or for text past [`MAX_CID_TEXT`]. The empty string is no
+/// bytes.
 pub(crate) fn base36_decode(text: &str) -> Option<Vec<u8>> {
     if text.is_empty() {
         return Some(Vec::new());
+    }
+    if text.len() > MAX_CID_TEXT {
+        return None;
     }
     let digit = |b: u8| {
         BASE36
@@ -94,8 +106,11 @@ pub(crate) fn base36_decode(text: &str) -> Option<Vec<u8>> {
 
 /// Lowercase RFC 4648 base32 without padding, as the generator's
 /// `base32Decode` reads it: leftover bits are dropped unchecked; `None`
-/// for another character.
+/// for another character, or for text past [`MAX_CID_TEXT`].
 pub(crate) fn base32_decode_lenient(text: &str) -> Option<Vec<u8>> {
+    if text.len() > MAX_CID_TEXT {
+        return None;
+    }
     let mut out = Vec::with_capacity(text.len() * 5 / 8);
     let mut value: u32 = 0;
     let mut bits = 0u32;
@@ -257,6 +272,50 @@ pub fn cid_v1_b58btc_to_base32(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_past_the_longest_cid_is_not_decoded() {
+        // A libp2p-key CID with an inlined Ed25519-typed digest long enough
+        // that its base36 text passes the bound: it decodes, whole, without
+        // the bound, so its kind would be read from it.
+        let digest_len = 170;
+        let mut cid = vec![
+            0x01,
+            0x72,
+            0x00,
+            0x80 | (digest_len & 0x7f) as u8,
+            (digest_len >> 7) as u8,
+        ];
+        cid.extend_from_slice(&[0x08, 0x01]);
+        cid.resize(5 + digest_len, 0x42);
+        let text = base36_encode(&cid);
+        assert!(text.len() > MAX_CID_TEXT, "{}", text.len());
+        let digit = |b: u8| BASE36.iter().position(|&c| c == b).map(|d| d as u64);
+        assert_eq!(
+            decode_big(&text, digit, 36, 12, b'0').as_deref(),
+            Some(&cid[..])
+        );
+        assert_eq!(base36_decode(&text), None);
+        assert_eq!(
+            crate::verify::ipns_name_kind(&format!("k{text}")),
+            crate::verify::NameKind::Dnslink
+        );
+        let b = base32_encode(&cid);
+        assert!(b.len() > MAX_CID_TEXT);
+        assert_eq!(base32_decode_lenient(&b), None);
+        // Within the bound, the longest key CID the core reads still
+        // decodes: a 128-byte digest.
+        let mut cid = vec![0x01, 0x72, 0x00, 0x80, 0x01, 0x08, 0x01];
+        cid.resize(5 + 128, 0x42);
+        let text = base36_encode(&cid);
+        assert!(text.len() <= MAX_CID_TEXT);
+        assert_eq!(base36_decode(&text).as_deref(), Some(&cid[..]));
+        assert_eq!(
+            crate::verify::ipns_name_kind(&format!("k{text}")),
+            crate::verify::NameKind::Ed25519
+        );
+        assert_eq!(MAX_CID_TEXT, 269);
+    }
 
     #[test]
     fn base58_matches_a_byte_at_a_time_decode() {

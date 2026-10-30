@@ -32,6 +32,11 @@ landlock = "=0.4.7"
 libc = "0.2"
 seccompiler = { version = "=0.5.0", default-features = false }
 
+# Seatbelt, libproc's thread count and executable path (design 0010,
+# "macOS"): fc-sys's.
+[target.'cfg(target_os = "macos")'.dependencies]
+fc-sys = { path = "../fc-sys" }
+
 [target.'cfg(windows)'.dependencies]
 # GetDriveTypeW for storage qualification; SetErrorMode and WerSetFlags for
 # hardening.
@@ -46,6 +51,12 @@ fc-sys = { path = "../fc-sys", features = ["test-abis"] }
 # The confinement tests' descriptors: inherited pipes and socket pairs,
 # and an eventfd and an epoll descriptor to inject.
 rustix = { version = "1.1", default-features = false, features = ["event", "net", "pipe", "std"] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+# The confinement tests' Mach service lookups and port names, and an
+# inherited pipe.
+fc-sys = { path = "../fc-sys", features = ["test-macos"] }
+rustix = { version = "1.1", default-features = false, features = ["pipe", "process", "std"] }
 
 # The confinement tests run each case in a child of their own: a process
 # confines itself once, and the default harness's threads would refuse it.
