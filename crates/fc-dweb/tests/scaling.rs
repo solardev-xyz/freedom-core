@@ -117,3 +117,32 @@ fn grouped_headers_keep_fetch_semantics() {
     assert_eq!(find("set-cookie"), ["a=1", "b=2"]);
     assert!(entries.windows(2).all(|pair| pair[0].0 <= pair[1].0));
 }
+
+/// An IPNS name's kind (0009, IPNS and DNSLink) costs the same for a name
+/// of 64 Ki characters, the longest a request carries, as for one of 8 Ki:
+/// text past the longest CID's isn't decoded, where a base36 decode costs
+/// the square of its length.
+#[test]
+fn an_ipns_names_kind_costs_no_more_for_a_longer_name() {
+    for prefix in ["k", "b"] {
+        let cost = |n: usize| {
+            let name = format!("{prefix}{}", "z".repeat(n - 1));
+            let start = cpu_ns();
+            let mut runs = 0u32;
+            loop {
+                assert_eq!(fc_dweb::ipns_name_kind(&name), fc_dweb::NameKind::Dnslink);
+                runs += 1;
+                let spent = cpu_ns() - start;
+                if spent >= 200_000_000 {
+                    return spent as f64 / f64::from(runs);
+                }
+            }
+        };
+        let (n, eight_n) = (cost(8 * 1024), cost(64 * 1024));
+        let ratio = eight_n / n;
+        assert!(
+            ratio < 4.0,
+            "{prefix}: 8 Ki characters cost {n:.0} ns, 64 Ki cost {eight_n:.0} ns: {ratio:.1} times as much"
+        );
+    }
+}

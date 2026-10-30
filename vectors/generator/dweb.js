@@ -1701,8 +1701,14 @@ function readVarint(bytes, at) {
  * Ed25519 key), `sha256` (a hashed key, RSA if it verifies), `other_key`
  * (another inlined key type), or `dnslink` (not a libp2p-key CID).
  */
+// The longest text of a CID past its multibase prefix (fc-dweb's and
+// fc-ipfs's MAX_CID_TEXT): four 10-byte varints and a 128-byte digest, in
+// base32. A longer name is no key CID, and isn't decoded.
+const MAX_CID_TEXT = Math.ceil(((4 * 10 + 128) * 8) / 5);
+
 function ipnsNameKind(name) {
   let bytes = null;
+  if (name.length - 1 > MAX_CID_TEXT) return 'dnslink';
   if (name.startsWith('k')) bytes = baseDecode(name.slice(1), B36);
   else if (name.startsWith('b')) bytes = base32Decode(name.slice(1));
   if (!bytes) return 'dnslink';
@@ -1749,7 +1755,7 @@ function rootInForm(root) {
   if (root.swarm !== undefined) return /^[0-9a-fA-F]{64}$/.test(root.swarm);
   if (root.ipfs !== undefined) {
     const text = root.ipfs;
-    if (!/^b[a-z2-7]+$/.test(text)) return false;
+    if (!/^b[a-z2-7]+$/.test(text) || text.length - 1 > MAX_CID_TEXT) return false;
     const bytes = base32Decode(text.slice(1));
     if (!bytes || 'b' + packed(bytes, B32, 5) !== text) return false;
     const cid = cidParts(bytes);

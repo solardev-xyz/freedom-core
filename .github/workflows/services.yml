@@ -134,15 +134,15 @@ jobs:
       # --all-features: the test hooks (`testhooks`) the binary's tests use.
       # --workspace includes fc-nat64 (services/nat64). The runners have
       # resolvers, so NAT64 discovery's per-OS lists must find them
-      # (services/nat64/src/resolvers.rs). On Linux with stdio alone, as main
-      # spawns the service: the runner leaks a pipe into each step, which
-      # every confined process would inherit (design 0010).
+      # (services/nat64/src/resolvers.rs). On Linux and macOS with stdio
+      # alone, as main spawns the service: the runner leaks a pipe into each
+      # step, which every confined process would inherit (design 0010).
       - run: cargo test --locked --workspace --all-features
-        if: runner.os != 'Linux'
+        if: runner.os == 'Windows'
         env:
           FC_NAT64_TEST_OS_RESOLVERS: required
       - run: python3 ../../scripts/stdio-only.py cargo test --locked --workspace --all-features
-        if: runner.os == 'Linux'
+        if: runner.os != 'Windows'
         env:
           FC_NAT64_TEST_OS_RESOLVERS: required
 
@@ -212,11 +212,12 @@ jobs:
         with:
           workspaces: services/freedom-radicled -> target
       # --all-features: the test hooks (`testhooks`) the binary's tests use.
-      # On Linux with stdio alone, as main spawns the service (above).
+      # On Linux and macOS with stdio alone, as main spawns the service
+      # (above).
       - run: cargo test --locked --workspace --all-features
-        if: runner.os != 'Linux'
+        if: runner.os == 'Windows'
       - run: python3 ../../scripts/stdio-only.py cargo test --locked --workspace --all-features
-        if: runner.os == 'Linux'
+        if: runner.os != 'Windows'
 
   radicled-deny:
     name: freedom-radicled cargo-deny
