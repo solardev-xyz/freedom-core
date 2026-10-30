@@ -21,13 +21,13 @@ const RESOLVER_FILES: &[&str] = &[
 /// tables among it) and the cgroup tree, for the CPU count.
 const PROCESS_FILES: &[&str] = &["/proc/self", "/sys/fs/cgroup"];
 
-/// The read-only grants, each where it really lives.
+/// The read-only grants, each where it really lives ([`grant_in`]).
 ///
 /// - **A file in `/etc` itself** is granted alone. One replaced by a rename
 ///   while the service runs is unreadable until the next process.
-/// - **A file that resolves elsewhere** (`/etc/resolv.conf` to
-///   `/run/systemd/resolve/stub-resolv.conf`) is granted by the directory
-///   that holds it, so a replacement stays readable.
+/// - **Any other file** (`/etc/resolv.conf` resolving to
+///   `/run/systemd/resolve/stub-resolv.conf`, say) is granted by the
+///   directory that holds it, so a replacement stays readable.
 /// - **The C library's directory,** from `/proc/self/maps`: glibc before
 ///   2.34 loads its `files` and `dns` sources from there at the first lookup
 ///   that reaches them, and every glibc loads its other sources from there.
@@ -36,7 +36,7 @@ const PROCESS_FILES: &[&str] = &["/proc/self", "/sys/fs/cgroup"];
 pub(super) fn system_read_only() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for file in RESOLVER_FILES {
-        if let Some(path) = grant_for(Path::new(file)) {
+        if let Some(path) = grant_in(Path::new(file), Path::new(ETC)) {
             push_unique(&mut paths, path);
         }
     }
@@ -57,14 +57,21 @@ fn push_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
     }
 }
 
-/// The grant for `file`: itself when it is where it is named, or else the
-/// directory its real location sits in.
-fn grant_for(file: &Path) -> Option<PathBuf> {
+/// The directory whose files are granted alone.
+pub(super) const ETC: &str = "/etc";
+
+/// The read-only grant for a resolver file (0010, "The recommendation",
+/// step 2), after its symlinks are followed: the file itself when it sits in
+/// `etc` itself, or else the directory that holds it, so a file replaced
+/// there by a rename stays readable. `None` if it doesn't exist.
+pub(super) fn grant_in(file: &Path, etc: &Path) -> Option<PathBuf> {
     let real = std::fs::canonicalize(file).ok()?;
-    if real == file {
-        return Some(real);
+    let dir = real.parent()?;
+    if dir == etc {
+        Some(real)
+    } else {
+        Some(dir.to_path_buf())
     }
-    real.parent().map(Path::to_path_buf)
 }
 
 /// The directory of the C library the process runs on, from its own
@@ -194,6 +201,31 @@ fn returns_on_unavailable(actions: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file in `/etc` itself alone; anything else by its directory, after
+    /// symlinks, so a replacement there stays readable.
+    #[test]
+    fn a_file_in_etc_is_granted_alone_and_any_other_by_its_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        let etc = root.join("etc");
+        let resolve = root.join("run").join("resolve");
+        std::fs::create_dir_all(&etc).unwrap();
+        std::fs::create_dir_all(&resolve).unwrap();
+        std::fs::write(etc.join("hosts"), b"").unwrap();
+        std::fs::write(resolve.join("stub-resolv.conf"), b"").unwrap();
+        std::fs::write(resolve.join("resolv.conf"), b"").unwrap();
+        std::os::unix::fs::symlink(resolve.join("stub-resolv.conf"), etc.join("resolv.conf"))
+            .unwrap();
+        assert_eq!(grant_in(&etc.join("hosts"), &etc), Some(etc.join("hosts")));
+        assert_eq!(
+            grant_in(&etc.join("resolv.conf"), &etc),
+            Some(resolve.clone())
+        );
+        // Named where it lives, but not in /etc itself: its directory.
+        assert_eq!(grant_in(&resolve.join("resolv.conf"), &etc), Some(resolve));
+        assert_eq!(grant_in(&etc.join("missing"), &etc), None);
+    }
 
     #[test]
     fn common_configurations_reach_dns() {

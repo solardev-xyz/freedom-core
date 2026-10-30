@@ -1,17 +1,21 @@
-//! Records vectors/dweb-verify.json (design 0009, Tests first).
+//! Records vectors/dweb-verify.json and vectors/dweb-verify-cases.json
+//! (design 0009, Tests first).
 //!
-//! `generate` writes the file; `check` records it again in memory and fails
-//! unless it equals the committed one byte for byte. Run optimized:
-//! `cargo run --release -- generate`.
+//! `generate` writes both files; `check` records them again in memory and
+//! fails unless each equals the committed one byte for byte; `cases`
+//! rewrites only the cases file, from the committed dweb-verify.json, with
+//! no node running. Run optimized: `cargo run --release -- generate`.
 
 mod bee;
 mod car;
+mod cases;
 mod content;
 mod gateway;
 mod ipfs;
 mod ipns;
 mod kubo;
 mod mantaray;
+mod murmur3;
 mod node;
 mod replay;
 mod store;
@@ -20,13 +24,18 @@ mod swarm;
 use serde_json::{Value, json};
 
 const OUT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../dweb-verify.json");
+const CASES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../dweb-verify-cases.json");
 const BEE_CHECK: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/bee-check/result.json");
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = std::env::args().nth(1).unwrap_or_default();
-    if mode != "generate" && mode != "check" {
-        return Err("usage: dweb-verify-vectors generate | check".into());
+    if mode != "generate" && mode != "check" && mode != "cases" {
+        return Err("usage: dweb-verify-vectors generate | check | cases".into());
+    }
+    if mode == "cases" {
+        std::fs::write(CASES, cases_text().await?)?;
+        return Ok(());
     }
     let doc = json!({
         "meta": meta()?,
@@ -38,13 +47,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     text.push('\n');
     if mode == "generate" {
         std::fs::write(OUT, text)?;
+        std::fs::write(CASES, cases_text().await?)?;
         return Ok(());
     }
     let committed = std::fs::read_to_string(OUT)?;
     if committed != text {
         return Err("vectors/dweb-verify.json differs from what the generator records".into());
     }
+    // The cases read the committed dweb-verify.json, now known to be current.
+    if std::fs::read_to_string(CASES)? != cases_text().await? {
+        return Err("vectors/dweb-verify-cases.json differs from what the generator writes".into());
+    }
     Ok(())
+}
+
+async fn cases_text() -> Result<String, Box<dyn std::error::Error>> {
+    let mut text = serde_json::to_string_pretty(&cases::build().await?)?;
+    text.push('\n');
+    Ok(text)
 }
 
 fn meta() -> Result<Value, Box<dyn std::error::Error>> {

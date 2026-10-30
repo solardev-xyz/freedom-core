@@ -14,8 +14,12 @@
 //! - **Linux:** Landlock at the kernel's ABI, with every right that ABI
 //!   knows handled, and a seccomp denylist behind an ABI guard
 //!   ([`linux`], [`seccomp`]).
+//! - **macOS:** a Seatbelt profile generated from the policy
+//!   ([`seatbelt`]), self-applied through Seatbelt's private calls, each
+//!   status derived from the sandbox's own checks once it is applied
+//!   ([`macos`]).
 //! - **Elsewhere,** for now: nothing is applied, and every property is
-//!   `unavailable` (macOS and Windows follow).
+//!   `unavailable` (Windows follows).
 //!
 //! **The order** (0010, "The recommendation", step 1):
 //! 1. at entry, the panic hook, then [`clean_entry`]: if anything is open
@@ -40,8 +44,12 @@ use serde::Serialize;
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(target_os = "linux")]
 mod resolver;
+// Generated and tested on every OS; applied on macOS.
+pub mod seatbelt;
 #[cfg(target_os = "linux")]
 pub mod seccomp;
 
@@ -75,6 +83,12 @@ pub struct Policy {
     /// [`Invalid::Descriptor`], whatever its type. Empty for the ephemeral
     /// IPFS process. Unix descriptor numbers; unused on Windows.
     pub descriptors: Vec<i32>,
+    /// Whether the service looks interfaces up by name (`SIOCGIFINDEX`, the
+    /// one `ioctl` this adds to the allowlist): NAT64 discovery's link-local
+    /// resolvers with a named zone, such as `fe80::1%eth0` (design 0010).
+    /// Sysfs's `/sys/class/net/<name>` resolves into `/sys/devices`, far
+    /// more than a grant should cover, so no grant does it.
+    pub interface_index: bool,
 }
 
 /// The network policy, fixed for the process's life (0007's `--network`).
@@ -82,8 +96,9 @@ pub struct Policy {
 pub enum Network {
     /// Outbound TCP and UDP to any port.
     Direct,
-    /// TCP to the proxy's port only.
-    Socks5 { port: u16 },
+    /// TCP to the proxy's port only. Seatbelt names the host too where the
+    /// proxy is on loopback (`localhost`); Landlock names ports only.
+    Socks5 { port: u16, loopback: bool },
     /// No network at all: the import process.
     Offline,
 }
@@ -166,6 +181,9 @@ pub enum Invalid {
     Unreadable(&'static str),
     /// The mechanism refused the service's own rules, or stopped halfway.
     Rules(String),
+    /// The entry's re-exec ran another file than the one recorded before
+    /// it (macOS, where an exec runs a path, not the running image).
+    Replaced,
 }
 
 impl std::fmt::Display for Invalid {
@@ -178,6 +196,7 @@ impl std::fmt::Display for Invalid {
             ),
             Invalid::Unreadable(what) => write!(f, "the {what} can't be read before confinement"),
             Invalid::Rules(why) => f.write_str(why),
+            Invalid::Replaced => f.write_str("the re-executed file is not the one that ran"),
         }
     }
 }
@@ -196,6 +215,12 @@ pub struct Options {
     /// Install, as the first seccomp filter, a program the kernel's checker
     /// rejects (an invalid opcode): the service's own rules refused.
     pub seccomp_invalid: bool,
+    /// Append text Seatbelt can't compile to the profile: the service's own
+    /// rules refused.
+    pub seatbelt_invalid: bool,
+    /// Append these rules to the profile: the confinement test's inverse
+    /// controls (an exec the probe must then perform).
+    pub seatbelt_extra: Option<String>,
 }
 
 /// The environment variable the entry's re-exec sets ([`clean_entry`]), to
@@ -215,6 +240,9 @@ pub enum Entry {
     Clean,
     /// This image is the re-exec, and nothing is left above stderr.
     Reexeced,
+    /// This image is the re-exec, but of another file than the one recorded
+    /// before it: [`confine`] refuses it ([`Invalid::Replaced`]). macOS.
+    Replaced,
     /// Something is left above stderr, which [`confine`] refuses: after the
     /// re-exec (`reexeced`), because the re-exec failed (`error`), or
     /// because the descriptor table can't be read.
@@ -230,6 +258,7 @@ impl Entry {
         match self {
             Entry::Clean => "clean",
             Entry::Reexeced => "reexeced",
+            Entry::Replaced => "replaced",
             Entry::Left { .. } => "left",
         }
     }
@@ -255,13 +284,25 @@ impl Entry {
 ///   failed one leaves only close-on-exec set, and every owner valid.
 /// - **The backstop:** [`confine`] still refuses whatever is left.
 ///
-/// Elsewhere, for now, it does nothing (macOS follows).
+/// **On macOS** it lists `/dev/fd`, marks each descriptor above stderr
+/// close-on-exec (there is no `close_range`), and executes the file
+/// `proc_pidpath` names. An exec there runs a path, not the running image,
+/// so the marker also carries that file's identity, `<pid>:<dev>:<ino>`
+/// from an `fstat` of it, and the re-executed image compares it with its
+/// own file's: another file is [`Entry::Replaced`], which [`confine`]
+/// refuses (exit 77).
+///
+/// Elsewhere, for now, it does nothing (Windows follows).
 pub fn clean_entry() -> Entry {
     #[cfg(target_os = "linux")]
     {
         linux::clean_entry(Path::new("/proc/self/exe"), false)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        macos::clean_entry(None)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         Entry::Clean
     }
@@ -275,7 +316,12 @@ pub fn clean_entry_with(exe: &Path, one_at_a_time: bool) -> Entry {
     {
         linux::clean_entry(exe, one_at_a_time)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = one_at_a_time;
+        macos::clean_entry(Some(exe))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (exe, one_at_a_time);
         Entry::Clean
@@ -294,7 +340,11 @@ pub fn confine_with(policy: &Policy, options: &Options) -> Result<Report, Invali
     {
         linux::confine(policy, options)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        macos::confine(policy, options)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (policy, options);
         Ok(unconfined("not yet confined on this OS"))
@@ -302,7 +352,7 @@ pub fn confine_with(policy: &Policy, options: &Options) -> Result<Report, Invali
 }
 
 /// A report with every property `unavailable` for `why`.
-#[cfg_attr(target_os = "linux", allow(dead_code))]
+#[cfg_attr(any(target_os = "linux", target_os = "macos"), allow(dead_code))]
 fn unconfined(why: &str) -> Report {
     let mut reasons = BTreeMap::new();
     for property in ["files", "exec", "ipc", "network"] {
@@ -317,6 +367,44 @@ fn unconfined(why: &str) -> Report {
         gaps: Vec::new(),
         reasons,
         resolution: None,
+    }
+}
+
+/// The read-only grant for a resolver file the service reads itself, such
+/// as NAT64 discovery's (design 0010, "The recommendation", step 2): on
+/// Linux, the file alone when it sits in `/etc` itself, or else the directory
+/// that holds it after its symlinks are followed, so a replacement there
+/// stays readable. `None` if it doesn't exist, or elsewhere.
+///
+/// On macOS, the file itself where it really lives: Seatbelt matches paths
+/// when a file is opened, so a replacement at that path stays readable.
+pub fn resolver_grant(file: &Path) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        resolver::grant_in(file, Path::new(resolver::ETC))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::fs::canonicalize(file).ok()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = file;
+        None
+    }
+}
+
+/// [`resolver_grant`], with `etc` standing for `/etc`: a test seam.
+#[doc(hidden)]
+pub fn resolver_grant_in(file: &Path, etc: &Path) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        resolver::grant_in(file, etc)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (file, etc);
+        None
     }
 }
 

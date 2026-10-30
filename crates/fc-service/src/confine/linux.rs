@@ -48,7 +48,8 @@ pub(super) fn confine(policy: &Policy, options: &Options) -> Result<Report, Inva
     let seccomp = match seccomp::target() {
         None => Installed::Unavailable("no seccomp filter for this architecture".into()),
         Some(arch) => {
-            let mut programs = seccomp::programs(policy.network, arch).map_err(Invalid::Rules)?;
+            let mut programs = seccomp::programs(policy.network, arch, policy.interface_index)
+                .map_err(Invalid::Rules)?;
             if options.seccomp_invalid {
                 programs.insert(0, seccomp::invalid_program());
             }
@@ -137,7 +138,7 @@ fn reexec(exe: &Path, open: &[i32], one_at_a_time: bool) -> std::io::Error {
     if one_at_a_time || fc_sys::linux::cloexec_from(3).is_err() {
         // Before Linux 5.11: one at a time.
         for &fd in open {
-            let _ = fc_sys::linux::set_cloexec(fd);
+            let _ = fc_sys::unix::set_cloexec(fd);
         }
     }
     let mut args = std::env::args_os();
@@ -343,7 +344,7 @@ fn restrict(policy: &Policy, abi: ABI) -> Result<(), Refused> {
             ))
             .map_err(rules)?;
     }
-    if let (Network::Socks5 { port }, true) = (policy.network, abi >= ABI::V4) {
+    if let (Network::Socks5 { port, .. }, true) = (policy.network, abi >= ABI::V4) {
         created = created
             .add_rule(NetPort::new(port, AccessNet::ConnectTcp))
             .map_err(rules)?;
@@ -529,6 +530,7 @@ mod tests {
             network,
             system_resolver: false,
             descriptors: Vec::new(),
+            interface_index: false,
         }
     }
 
@@ -561,7 +563,10 @@ mod tests {
     #[test]
     fn everything_installed_is_enforced() {
         let report = derive(
-            &policy(Network::Socks5 { port: 9150 }),
+            &policy(Network::Socks5 {
+                port: 9150,
+                loopback: true,
+            }),
             &Landlock::Applied(6),
             &Installed::All,
         );
@@ -581,7 +586,10 @@ mod tests {
     #[test]
     fn older_abis_leave_named_gaps() {
         let report = derive(
-            &policy(Network::Socks5 { port: 9150 }),
+            &policy(Network::Socks5 {
+                port: 9150,
+                loopback: true,
+            }),
             &Landlock::Applied(3),
             &Installed::All,
         );

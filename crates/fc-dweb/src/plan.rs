@@ -62,18 +62,63 @@ impl Ipfs {
     }
 }
 
+/// Whether an external backend's content is verified (design 0009,
+/// Verify plans): on and supported, off, or on for a gateway the probe
+/// found without raw blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Verification {
+    #[default]
+    Off,
+    On,
+    Unsupported,
+}
+
 /// The backend main names in `dweb.open`, as a reference with no URL: its
 /// mode, and whether it is up. A backend that isn't up keeps its mode, so
-/// the answer names what isn't running.
+/// the answer names what isn't running. An external backend also carries
+/// its verification and the profile's strict mode (0009).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
-    Ant { mode: Ant, up: bool },
-    Ipfs { mode: Ipfs, up: bool },
+    Ant {
+        mode: Ant,
+        up: bool,
+        verify: Verification,
+        strict: bool,
+    },
+    Ipfs {
+        mode: Ipfs,
+        up: bool,
+        verify: Verification,
+        strict: bool,
+    },
 }
 
 impl Backend {
+    /// An Ant backend without verification or strict mode.
+    pub const fn ant(mode: Ant, up: bool) -> Self {
+        Self::Ant {
+            mode,
+            up,
+            verify: Verification::Off,
+            strict: false,
+        }
+    }
+
+    /// An IPFS backend without verification or strict mode.
+    pub const fn ipfs(mode: Ipfs, up: bool) -> Self {
+        Self::Ipfs {
+            mode,
+            up,
+            verify: Verification::Off,
+            strict: false,
+        }
+    }
+
     /// `{ ant: "bundled" | "external", up }` or `{ ipfs: "native" |
-    /// "gateway", up }`, as `dweb.open` carries it: exactly those two keys.
+    /// "gateway", up }`, as `dweb.open` carries it, and, for an external
+    /// backend, the members 0009 adds, each present only as `true`:
+    /// `verify`, `unsupported` (a gateway's only, never with `verify`) and
+    /// `strict`. No other key.
     pub fn from_value(value: &JsValue) -> Option<Self> {
         let JsValue::Object(props) = value else {
             return None;
@@ -82,51 +127,129 @@ impl Backend {
             Some(JsValue::Bool(up)) => *up,
             _ => return None,
         };
-        if props.len() != 2 {
+        let flag = |key: &str| match value.get(key) {
+            None => Some(false),
+            Some(JsValue::Bool(true)) => Some(true),
+            Some(_) => None,
+        };
+        let (verify, unsupported, strict) =
+            (flag("verify")?, flag("unsupported")?, flag("strict")?);
+        if props.len() != 2 + usize::from(verify) + usize::from(unsupported) + usize::from(strict) {
             return None;
         }
-        if let Some(mode) = value.get("ant") {
-            return match mode.as_str()? {
-                "bundled" => Some(Self::Ant {
-                    mode: Ant::Bundled,
-                    up,
-                }),
-                "external" => Some(Self::Ant {
-                    mode: Ant::External,
-                    up,
-                }),
-                _ => None,
+        let verification = match (verify, unsupported) {
+            (false, false) => Verification::Off,
+            (true, false) => Verification::On,
+            (false, true) => Verification::Unsupported,
+            (true, true) => return None,
+        };
+        let backend = if let Some(mode) = value.get("ant") {
+            let mode = match mode.as_str()? {
+                "bundled" => Ant::Bundled,
+                "external" => Ant::External,
+                _ => return None,
             };
-        }
-        match value.get("ipfs")?.as_str()? {
-            "native" => Some(Self::Ipfs {
-                mode: Ipfs::Native,
+            if unsupported || ((verify || strict) && mode != Ant::External) {
+                return None;
+            }
+            Self::Ant {
+                mode,
                 up,
-            }),
-            "gateway" => Some(Self::Ipfs {
-                mode: Ipfs::Gateway,
+                verify: verification,
+                strict,
+            }
+        } else {
+            let mode = match value.get("ipfs")?.as_str()? {
+                "native" => Ipfs::Native,
+                "gateway" => Ipfs::Gateway,
+                _ => return None,
+            };
+            if (verify || unsupported || strict) && mode != Ipfs::Gateway {
+                return None;
+            }
+            Self::Ipfs {
+                mode,
                 up,
-            }),
-            _ => None,
-        }
+                verify: verification,
+                strict,
+            }
+        };
+        Some(backend)
     }
 
-    /// The backend as `dweb.open` carries it.
+    /// The backend as `dweb.open` carries it: the node, `up`, then
+    /// `verify`, `unsupported` and `strict` where they are true.
     pub fn to_value(self) -> JsValue {
-        let (node, mode, up) = match self {
-            Self::Ant { mode, up } => ("ant", mode.as_str(), up),
-            Self::Ipfs { mode, up } => ("ipfs", mode.as_str(), up),
+        let (node, mode, up, verify, strict) = match self {
+            Self::Ant {
+                mode,
+                up,
+                verify,
+                strict,
+            } => ("ant", mode.as_str(), up, verify, strict),
+            Self::Ipfs {
+                mode,
+                up,
+                verify,
+                strict,
+            } => ("ipfs", mode.as_str(), up, verify, strict),
         };
-        object(vec![
+        let mut props = vec![
             (node, JsValue::string(mode.to_owned())),
             ("up", JsValue::Bool(up)),
-        ])
+        ];
+        match verify {
+            Verification::On => props.push(("verify", JsValue::Bool(true))),
+            Verification::Unsupported => props.push(("unsupported", JsValue::Bool(true))),
+            Verification::Off => {}
+        }
+        if strict {
+            props.push(("strict", JsValue::Bool(true)));
+        }
+        object(props)
     }
 
     /// Whether main can dial it now.
     pub fn up(self) -> bool {
         match self {
             Self::Ant { up, .. } | Self::Ipfs { up, .. } => up,
+        }
+    }
+
+    /// Whether its content is verified (0009).
+    pub fn verification(self) -> Verification {
+        match self {
+            Self::Ant { verify, .. } | Self::Ipfs { verify, .. } => verify,
+        }
+    }
+
+    /// Whether the profile's strict mode is on (0009, Strict mode).
+    pub fn strict(self) -> bool {
+        match self {
+            Self::Ant { strict, .. } | Self::Ipfs { strict, .. } => strict,
+        }
+    }
+
+    /// The same backend with strict mode off: what validation ties a
+    /// plan's target to, strict mode being checked on its own.
+    pub(crate) fn without_strict(self) -> Self {
+        match self {
+            Self::Ant {
+                mode, up, verify, ..
+            } => Self::Ant {
+                mode,
+                up,
+                verify,
+                strict: false,
+            },
+            Self::Ipfs {
+                mode, up, verify, ..
+            } => Self::Ipfs {
+                mode,
+                up,
+                verify,
+                strict: false,
+            },
         }
     }
 
@@ -228,6 +351,12 @@ pub enum ContentTrust {
     NodeAsserted,
     /// An external Ant, or an IPFS path gateway.
     Unverified,
+    /// Every byte checked against the root (0009, Labels): a verify plan's
+    /// promise.
+    Verified,
+    /// Checked, from a root an IPNS record or a feed's node asserts is the
+    /// latest (0009, Labels).
+    LatestAsserted,
 }
 
 impl ContentTrust {
@@ -235,6 +364,8 @@ impl ContentTrust {
         match self {
             Self::NodeAsserted => "node_asserted",
             Self::Unverified => "unverified",
+            Self::Verified => "verified",
+            Self::LatestAsserted => "latest_asserted",
         }
     }
 }
@@ -253,6 +384,53 @@ pub struct Fetch {
     /// The node-relative request target, as an HTTP client sends it.
     pub path: String,
     /// Lowercase names, sorted, as `Headers` iterates them.
+    pub headers: Vec<(String, String)>,
+    pub retry: Retry,
+    pub timers: Timers,
+    pub response: Vec<ResponseOp>,
+    pub trust: Trust,
+}
+
+/// The reference a verify plan's walk starts from (0009, Verify plans).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Root {
+    /// 64 hex digits.
+    Swarm(String),
+    /// A CIDv1 in lowercase base32.
+    Ipfs(String),
+    /// A libp2p-key name with an inlined Ed25519 key or a sha2-256
+    /// multihash.
+    Ipns(String),
+}
+
+impl Root {
+    /// The key the plan writes it under.
+    pub fn key(&self) -> &'static str {
+        match self {
+            Self::Swarm(_) => "swarm",
+            Self::Ipfs(_) => "ipfs",
+            Self::Ipns(_) => "ipns",
+        }
+    }
+
+    pub fn reference(&self) -> &str {
+        match self {
+            Self::Swarm(r) | Self::Ipfs(r) | Self::Ipns(r) => r,
+        }
+    }
+}
+
+/// A verified fetch (0009, Verify plans): the root, the path below it, the
+/// request's query, the headers the bundled node reads, and the backend's
+/// tables, applied to each piece.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verify {
+    pub node: Node,
+    pub root: Root,
+    /// Below the root: empty, or starting with `/`.
+    pub path: String,
+    /// The request URL's query, with its `?`, or empty.
+    pub query: String,
     pub headers: Vec<(String, String)>,
     pub retry: Retry,
     pub timers: Timers,
@@ -297,6 +475,8 @@ impl ErrorPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Plan {
     Fetch(Fetch),
+    /// 0009's verified fetch, for `dweb.verify`.
+    Verify(Verify),
     Redirect(Redirect),
     Error(ErrorPlan),
 }
@@ -324,6 +504,51 @@ fn optional(value: Option<u32>) -> JsValue {
     value.map_or(JsValue::Null, number)
 }
 
+fn retry_value(retry: &Retry) -> JsValue {
+    object(vec![
+        (
+            "statuses",
+            JsValue::Array(retry.statuses.iter().map(|&s| number(s)).collect()),
+        ),
+        ("on_error", JsValue::Bool(retry.on_error)),
+        ("attempts", number(retry.attempts)),
+        (
+            "delays_ms",
+            JsValue::Array(retry.delays_ms.iter().map(|&d| number(d)).collect()),
+        ),
+    ])
+}
+
+fn timers_value(timers: &Timers) -> JsValue {
+    object(vec![
+        ("queue_ms", optional(timers.queue_ms)),
+        ("headers_ms", optional(timers.headers_ms)),
+        ("body_idle_ms", number(timers.body_idle_ms)),
+    ])
+}
+
+fn response_value(response: &[ResponseOp]) -> JsValue {
+    JsValue::Array(
+        response
+            .iter()
+            .map(|op| JsValue::string(op.as_str().to_owned()))
+            .collect(),
+    )
+}
+
+fn trust_value(trust: &Trust) -> JsValue {
+    object(vec![
+        (
+            "name",
+            trust.name.clone().map_or(JsValue::Null, JsValue::string),
+        ),
+        (
+            "content",
+            JsValue::string(trust.content.as_str().to_owned()),
+        ),
+    ])
+}
+
 impl Plan {
     /// The plan as `dweb.open` returns it (design 0006, "Plans").
     pub fn to_value(&self) -> JsValue {
@@ -334,60 +559,30 @@ impl Plan {
                     ("node", JsValue::string(fetch.node.as_str().to_owned())),
                     ("path", JsValue::string(fetch.path.clone())),
                     ("headers", pairs(&fetch.headers)),
+                    ("retry", retry_value(&fetch.retry)),
+                    ("timers", timers_value(&fetch.timers)),
+                    ("response", response_value(&fetch.response)),
+                    ("trust", trust_value(&fetch.trust)),
+                ]),
+            )]),
+            Self::Verify(verify) => object(vec![(
+                "verify",
+                object(vec![
+                    ("node", JsValue::string(verify.node.as_str().to_owned())),
                     (
-                        "retry",
-                        object(vec![
-                            (
-                                "statuses",
-                                JsValue::Array(
-                                    fetch.retry.statuses.iter().map(|&s| number(s)).collect(),
-                                ),
-                            ),
-                            ("on_error", JsValue::Bool(fetch.retry.on_error)),
-                            ("attempts", number(fetch.retry.attempts)),
-                            (
-                                "delays_ms",
-                                JsValue::Array(
-                                    fetch.retry.delays_ms.iter().map(|&d| number(d)).collect(),
-                                ),
-                            ),
-                        ]),
+                        "root",
+                        object(vec![(
+                            verify.root.key(),
+                            JsValue::string(verify.root.reference().to_owned()),
+                        )]),
                     ),
-                    (
-                        "timers",
-                        object(vec![
-                            ("queue_ms", optional(fetch.timers.queue_ms)),
-                            ("headers_ms", optional(fetch.timers.headers_ms)),
-                            ("body_idle_ms", number(fetch.timers.body_idle_ms)),
-                        ]),
-                    ),
-                    (
-                        "response",
-                        JsValue::Array(
-                            fetch
-                                .response
-                                .iter()
-                                .map(|op| JsValue::string(op.as_str().to_owned()))
-                                .collect(),
-                        ),
-                    ),
-                    (
-                        "trust",
-                        object(vec![
-                            (
-                                "name",
-                                fetch
-                                    .trust
-                                    .name
-                                    .clone()
-                                    .map_or(JsValue::Null, JsValue::string),
-                            ),
-                            (
-                                "content",
-                                JsValue::string(fetch.trust.content.as_str().to_owned()),
-                            ),
-                        ]),
-                    ),
+                    ("path", JsValue::string(verify.path.clone())),
+                    ("query", JsValue::string(verify.query.clone())),
+                    ("headers", pairs(&verify.headers)),
+                    ("retry", retry_value(&verify.retry)),
+                    ("timers", timers_value(&verify.timers)),
+                    ("response", response_value(&verify.response)),
+                    ("trust", trust_value(&verify.trust)),
                 ]),
             )]),
             Self::Redirect(redirect) => object(vec![(
@@ -508,17 +703,31 @@ mod tests {
     fn backends_read_strictly() {
         assert_eq!(
             backend(r#"{"ipfs":"gateway","up":false}"#),
-            Some(Backend::Ipfs {
-                mode: Ipfs::Gateway,
-                up: false
-            })
+            Some(Backend::ipfs(Ipfs::Gateway, false))
         );
         assert_eq!(
             backend(r#"{"up":true,"ant":"external"}"#),
+            Some(Backend::ant(Ant::External, true))
+        );
+        assert_eq!(
+            backend(r#"{"ant":"external","up":true,"verify":true,"strict":true}"#),
             Some(Backend::Ant {
                 mode: Ant::External,
-                up: true
+                up: true,
+                verify: Verification::On,
+                strict: true
             })
+        );
+        assert_eq!(
+            backend(r#"{"ipfs":"gateway","up":true,"unsupported":true}"#)
+                .map(Backend::verification),
+            Some(Verification::Unsupported)
+        );
+        // Written in the order 0009 gives: the node, up, then the flags.
+        let text = r#"{"ipfs":"gateway","up":true,"unsupported":true,"strict":true}"#;
+        assert_eq!(
+            backend(text).map(|b| b.to_value().stringify()).as_deref(),
+            Some(text)
         );
         for text in [
             r#"{"ant":"absent","up":false}"#,
@@ -528,6 +737,14 @@ mod tests {
             r#"{"ipfs":"Native","up":true}"#,
             r#"{"node":"ant","up":true}"#,
             r#"["ant","bundled"]"#,
+            // 0009's members: only true, only on an external backend,
+            // unsupported only on a gateway and never with verify.
+            r#"{"ant":"external","up":true,"verify":false}"#,
+            r#"{"ant":"bundled","up":true,"verify":true}"#,
+            r#"{"ipfs":"native","up":true,"strict":true}"#,
+            r#"{"ant":"external","up":true,"unsupported":true}"#,
+            r#"{"ipfs":"gateway","up":true,"verify":true,"unsupported":true}"#,
+            r#"{"ipfs":"gateway","up":true,"verify":true,"extra":true}"#,
         ] {
             assert_eq!(backend(text), None, "{text}");
         }
