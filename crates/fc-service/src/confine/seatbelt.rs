@@ -32,7 +32,10 @@
 //!   discovery's dynamic store, `.DNSConfiguration` for the resolver's
 //!   servers) and mDNSResponder's socket, which resolves names. Nothing in
 //!   `socks5` or offline mode, where neither runs.
-//! - **Network:** `direct`, any outbound address and a local UDP bind;
+//! - **Network:** `direct`, any outbound address, a local UDP bind, and
+//!   datagrams arriving at the service's UDP sockets: a reply to an
+//!   unconnected socket (hickory's DNS queries, QUIC) is checked as inbound,
+//!   and without the rule it never arrives;
 //!   `socks5`, TCP to the proxy's port, at `localhost` where the proxy is on
 //!   loopback, or on any host (the compiler refuses an address literal);
 //!   offline, none.
@@ -53,6 +56,11 @@ pub struct Grants {
     pub read_only_dirs: Vec<PathBuf>,
     /// Files only read.
     pub read_only_files: Vec<PathBuf>,
+    /// The symlinks a read-only grant's path crosses, each where it really
+    /// lives (`/private/etc/resolv.conf`, for `/etc/resolv.conf`): metadata
+    /// alone, which Seatbelt asks for each link it resolves, so a service
+    /// can open the path it was given.
+    pub links: Vec<PathBuf>,
 }
 
 /// A profile and the parameters it names.
@@ -162,20 +170,28 @@ pub fn profile(network: Network, refer: bool, grants: &Grants) -> Result<Profile
     text.push_str(SYSCTLS);
     text.push_str(SYSTEM_READ);
 
-    // Metadata on each grant's ancestors, so its path resolves; none on
+    // Metadata on each grant's ancestors, and on each link a read-only
+    // grant's path crosses and its ancestors, so its path resolves; none on
     // anything else.
     let mut ancestors: Vec<PathBuf> = ROOT_LINKS.iter().map(PathBuf::from).collect();
+    let known = |path: &Path, ancestors: &mut Vec<PathBuf>| {
+        if !ancestors.iter().any(|known| known == path) {
+            ancestors.push(path.to_path_buf());
+        }
+    };
     for path in grants
         .read_write
         .iter()
         .chain(&grants.read_only_dirs)
         .chain(&grants.read_only_files)
+        .chain(&grants.links)
     {
         for ancestor in path.ancestors().skip(1) {
-            if !ancestors.iter().any(|known| known == ancestor) {
-                ancestors.push(ancestor.to_path_buf());
-            }
+            known(ancestor, &mut ancestors);
         }
+    }
+    for link in &grants.links {
+        known(link, &mut ancestors);
     }
     text.push_str("(allow file-read-metadata");
     for ancestor in &ancestors {
@@ -212,6 +228,7 @@ pub fn profile(network: Network, refer: bool, grants: &Grants) -> Result<Profile
             text.push_str(INTERFACE_SYSCTLS);
             text.push_str("(allow network-outbound (remote ip \"*:*\"))\n");
             text.push_str("(allow network-bind (local udp \"*:*\"))\n");
+            text.push_str("(allow network-inbound (local udp \"*:*\"))\n");
         }
         Network::Socks5 { port, loopback } => {
             let host = if loopback { "localhost" } else { "*" };
@@ -233,6 +250,7 @@ mod tests {
             read_write: vec!["/Users/u/Library/Freedom/ipfs-data/freedom-ipfs".into()],
             read_only_dirs: Vec::new(),
             read_only_files: vec!["/private/var/run/resolv.conf".into()],
+            links: Vec::new(),
         }
     }
 
@@ -275,6 +293,7 @@ SYSCTLS(allow file-read*
 (allow sysctl-read (sysctl-name-prefix "net.route"))
 (allow network-outbound (remote ip "*:*"))
 (allow network-bind (local udp "*:*"))
+(allow network-inbound (local udp "*:*"))
 "#;
 
     #[test]
@@ -316,6 +335,37 @@ SYSCTLS(allow file-read*
                 "/private/var",
                 "/private",
             ]
+        );
+    }
+
+    #[test]
+    fn a_link_a_read_only_path_crosses_gets_metadata_alone() {
+        let mut linked = grants();
+        linked.links.push("/private/etc/resolv.conf".into());
+        let profile = profile(Network::Direct, false, &linked).unwrap();
+        let name_of = |path: &str| {
+            profile
+                .params
+                .iter()
+                .find(|(_, v)| v == path)
+                .map(|(n, _)| n.clone())
+                .unwrap()
+        };
+        // The link and its directory get metadata, so the path resolves.
+        for path in ["/private/etc/resolv.conf", "/private/etc"] {
+            assert!(name_of(path).starts_with("UP_"), "{path}");
+        }
+        // And nothing else: no read rule names the link.
+        let link = name_of("/private/etc/resolv.conf");
+        assert!(
+            !profile
+                .text
+                .contains(&format!("(allow file-read* (literal (param \"{link}\")))"))
+        );
+        let unlinked = super::profile(Network::Direct, false, &grants()).unwrap();
+        assert_eq!(
+            profile.text.matches("(allow file-read* ").count(),
+            unlinked.text.matches("(allow file-read* ").count()
         );
     }
 

@@ -187,6 +187,29 @@ mod linux {
             ));
             return;
         }
+        if case == "resolv-conf" {
+            // The service's own resolver (freedom-ipfsd's): resolv.conf and
+            // /etc/hosts readable, nothing of glibc's NSS configuration.
+            let mut own = policy(&p, network, min_abi, Vec::new());
+            own.read_write.clear();
+            own.resolver = confine::Resolver::ResolvConf;
+            let report = confine::confine(&own).unwrap();
+            println!("REPORT {}", report.to_json());
+            check(
+                "resolv.conf readable",
+                std::fs::read("/etc/resolv.conf").is_ok(),
+            );
+            check("/etc/hosts readable", std::fs::read("/etc/hosts").is_ok());
+            // glibc's own configuration isn't granted (where it sits in /etc
+            // itself, granted alone under the C library's resolver).
+            let nsswitch = std::path::Path::new("/etc/nsswitch.conf");
+            if std::fs::canonicalize(nsswitch)
+                .is_ok_and(|real| real.parent() == Some(std::path::Path::new("/etc")))
+            {
+                check("nsswitch.conf refused", std::fs::read(nsswitch).is_err());
+            }
+            return;
+        }
         if case == "ephemeral" {
             // No lock and no data directory: nothing registered, nothing
             // writable.
@@ -367,7 +390,7 @@ mod linux {
             network,
             // No lookup comes before confinement: the first needs the
             // read grants alone.
-            system_resolver: true,
+            resolver: confine::Resolver::System,
             descriptors,
             interface_index: false,
         }
@@ -435,6 +458,17 @@ mod linux {
             )
             .is_err(),
         );
+        // The random devices, getrandom's fallback below glibc 2.25.
+        for device in ["/dev/urandom", "/dev/random"] {
+            use std::io::Read;
+            let mut bytes = [0u8; 16];
+            check(
+                &format!("read {device}"),
+                std::fs::File::open(device)
+                    .and_then(|mut f| f.read_exact(&mut bytes))
+                    .is_ok(),
+            );
+        }
         // A read-only grant: readable, and its descriptor changes nothing.
         let ro = p.read_only.join("file");
         check("read the read-only grant", std::fs::read(&ro).is_ok());
@@ -867,6 +901,22 @@ mod linux {
         for case in ["processes", "ipc", "threads", "resolver"] {
             failures.extend(passed(case, &run(&world, case)));
         }
+        // The service's own resolver: its files granted, and no
+        // `resolution` from `confine`, which the service reports itself
+        // once it has read its configuration.
+        let own = run(&world, "resolv-conf");
+        failures.extend(passed("resolv-conf", &own));
+        let own_json = lines(&own)
+            .lines()
+            .find_map(|line| line.strip_prefix("REPORT "))
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok());
+        expect(
+            &mut failures,
+            own_json.as_ref().is_some_and(|r| {
+                r.get("resolution").is_none() && r["reasons"].get("resolution").is_none()
+            }),
+            format!("resolv-conf: {}", lines(&own)),
+        );
 
         // The network: direct reaches any port and binds nothing; socks5
         // only the proxy's port, from ABI 4; offline nothing.

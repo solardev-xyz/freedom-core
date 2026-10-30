@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::Resolution;
+use super::{Resolution, Resolver};
 
 /// glibc's resolver configuration, read at each lookup, and the loader's
 /// cache, read to load an NSS source.
@@ -17,9 +17,21 @@ const RESOLVER_FILES: &[&str] = &[
     "/etc/ld.so.cache",
 ];
 
+/// What the service's own resolver reads ([`Resolver::ResolvConf`]):
+/// hickory's servers and its hosts file.
+const RESOLV_CONF_FILES: &[&str] = &["/etc/resolv.conf", "/etc/hosts"];
+
 /// What the standard library reads: `/proc/self` (its cgroup and mount
-/// tables among it) and the cgroup tree, for the CPU count.
-const PROCESS_FILES: &[&str] = &["/proc/self", "/sys/fs/cgroup"];
+/// tables among it) and the cgroup tree, for the CPU count; and the random
+/// devices, which the getrandom crate reads where glibc has no `getrandom`
+/// (before 2.25: the release builds run on 2.17), polling `/dev/random`
+/// once until the pool is ready, then reading `/dev/urandom`.
+const PROCESS_FILES: &[&str] = &[
+    "/proc/self",
+    "/sys/fs/cgroup",
+    "/dev/random",
+    "/dev/urandom",
+];
 
 /// The read-only grants, each where it really lives ([`grant_in`]).
 ///
@@ -32,15 +44,24 @@ const PROCESS_FILES: &[&str] = &["/proc/self", "/sys/fs/cgroup"];
 ///   2.34 loads its `files` and `dns` sources from there at the first lookup
 ///   that reaches them, and every glibc loads its other sources from there.
 ///
-/// What doesn't exist is left out.
-pub(super) fn system_read_only() -> Vec<PathBuf> {
+/// What doesn't exist is left out. The resolver's files are its own: glibc's
+/// for [`Resolver::System`], `resolv.conf` and `/etc/hosts` alone for
+/// [`Resolver::ResolvConf`], none for [`Resolver::None`].
+pub(super) fn system_read_only(resolver: Resolver) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    for file in RESOLVER_FILES {
+    let files: &[&str] = match resolver {
+        Resolver::System => RESOLVER_FILES,
+        Resolver::ResolvConf => RESOLV_CONF_FILES,
+        Resolver::None => &[],
+    };
+    for file in files {
         if let Some(path) = grant_in(Path::new(file), Path::new(ETC)) {
             push_unique(&mut paths, path);
         }
     }
-    if let Some(dir) = libc_directory() {
+    if resolver == Resolver::System
+        && let Some(dir) = libc_directory()
+    {
         push_unique(&mut paths, dir);
     }
     for path in PROCESS_FILES {
@@ -264,8 +285,41 @@ mod tests {
     }
 
     #[test]
+    fn each_resolver_is_granted_its_own_files_alone() {
+        let real = |file: &str| std::fs::canonicalize(file).ok();
+        let system = system_read_only(Resolver::System);
+        let resolv_conf = system_read_only(Resolver::ResolvConf);
+        let none = system_read_only(Resolver::None);
+        // The random devices and the process's own files, whatever the
+        // resolver: getrandom's fallback reads them below glibc 2.25.
+        for grants in [&system, &resolv_conf, &none] {
+            for device in ["/dev/random", "/dev/urandom"] {
+                assert!(grants.contains(&real(device).unwrap()), "{device}");
+            }
+        }
+        // glibc's configuration, the loader's cache and the C library for
+        // the C library's resolver alone.
+        for file in ["/etc/nsswitch.conf", "/etc/ld.so.cache"] {
+            if let Some(path) = real(file).filter(|p| p.parent() == Some(Path::new(ETC))) {
+                assert!(system.contains(&path), "{file}");
+                assert!(!resolv_conf.contains(&path), "{file}");
+                assert!(!none.contains(&path), "{file}");
+            }
+        }
+        if let Some(dir) = libc_directory() {
+            assert!(system.contains(&dir));
+            assert!(!resolv_conf.contains(&dir));
+        }
+        // resolv.conf (or the directory it really lives in) for both.
+        if let Some(conf) = grant_in(Path::new("/etc/resolv.conf"), Path::new(ETC)) {
+            assert!(system.contains(&conf) && resolv_conf.contains(&conf));
+            assert!(!none.contains(&conf));
+        }
+    }
+
+    #[test]
     fn the_system_grants_exist_and_name_the_c_library() {
-        let grants = system_read_only();
+        let grants = system_read_only(Resolver::System);
         assert!(grants.iter().all(|path| path.exists()));
         assert!(
             grants

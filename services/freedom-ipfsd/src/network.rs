@@ -23,7 +23,7 @@
 //! by #158).
 
 use freedom_ipfs_gateway::net::gate::{ConfiguredTargets, Target, parse_url};
-use freedom_ipfs_gateway::net::{Addresses, Nat64Handle, Network};
+use freedom_ipfs_gateway::net::{Addresses, DnsConfig, Nat64Handle, Network};
 
 use crate::testhooks;
 
@@ -68,11 +68,17 @@ pub fn is_onion(endpoint: &str) -> bool {
 /// No address is exempt for being on a local network: providers there are
 /// refused unless configured (design 0007's open question 5). An opt-in
 /// would be one more `Addresses` choice here.
+///
+/// Under `direct`, its own lookups (the gate's HTTP resolver's, libp2p's
+/// DNS layer's and `/dnsaddr`'s) ask `dns`, the process's configuration
+/// (`dns.rs`), which `confinement.resolution` reports; without one, the
+/// system's, read now.
 pub fn network(
     policy: NetworkPolicy,
     routers: &[String],
     doh_endpoint: &str,
     nat64: Nat64Handle,
+    dns: Option<&DnsConfig>,
 ) -> Result<Network, &'static str> {
     let mut configured = ConfiguredTargets::new();
     for router in routers {
@@ -93,7 +99,11 @@ pub fn network(
         }
     }
     .map_err(|_| "the network policy can't be built")?;
-    Network::new(upstream).map_err(|_| "the network can't be built")
+    match dns {
+        Some(dns) => Network::with_dns(upstream, dns.clone()),
+        None => Network::new(upstream),
+    }
+    .map_err(|_| "the network can't be built")
 }
 
 #[cfg(test)]
@@ -139,7 +149,7 @@ mod tests {
         let routers = ["https://delegated-ipfs.dev/routing/v1".to_string()];
         let doh = "https://cloudflare-dns.com/dns-query";
         let nat64 = || Nat64Handle::fixed(freedom_ipfs_gateway::net::gate::Nat64State::NONE);
-        let direct = network(NetworkPolicy::Direct, &routers, doh, nat64()).unwrap();
+        let direct = network(NetworkPolicy::Direct, &routers, doh, nat64(), None).unwrap();
         // Untrusted addresses are checked against the address table, with
         // what NAT64 discovery knows.
         assert!(matches!(
@@ -153,7 +163,14 @@ mod tests {
         assert!(configured.contains(&Target::Name("cloudflare-dns.com".into()), 443));
 
         let proxy: SocketAddr = "127.0.0.1:9150".parse().unwrap();
-        let socks5 = network(NetworkPolicy::Socks5 { proxy }, &routers, doh, nat64()).unwrap();
+        let socks5 = network(
+            NetworkPolicy::Socks5 { proxy },
+            &routers,
+            doh,
+            nat64(),
+            None,
+        )
+        .unwrap();
         assert!(matches!(
             socks5.policy().mode(),
             freedom_ipfs_gateway::net::Mode::Socks5(_)
