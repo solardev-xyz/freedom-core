@@ -39,6 +39,12 @@ impl Section {
     pub fn held(&self) -> usize {
         self.bytes.capacity() + std::mem::size_of::<Self>()
     }
+
+    /// Its buffer, the CID then the block, and the CID's length: for a
+    /// caller that keeps the bytes without copying them.
+    pub fn into_parts(self) -> (Vec<u8>, usize) {
+        (self.bytes, self.cid_len)
+    }
 }
 
 /// What a [`Reader::push`] gave.

@@ -126,10 +126,12 @@ impl Job {
                 Some(cid) => fc_ipfs::block::check(&cid, block),
                 None => Err(BlockRefusal::VerificationFailed),
             }),
-            Work::Record { name, record, now } => Verdict::Record(match fc_ipfs::cid::parse(name) {
-                Some(name) => fc_ipfs::ipns::check(&name, record, *now),
-                None => Err(BlockRefusal::Unverifiable),
-            }),
+            Work::Record { name, record, now } => {
+                Verdict::Record(match fc_ipfs::cid::parse(name) {
+                    Some(name) => fc_ipfs::ipns::check(&name, record, *now),
+                    None => Err(BlockRefusal::Unverifiable),
+                })
+            }
         };
         Hashed {
             id: self.id,

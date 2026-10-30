@@ -322,6 +322,9 @@ enum Phase {
     Walking,
     /// The head is out; the body follows.
     Headed,
+    /// The body failed after the head: what was verified before the failure
+    /// goes out, as main's credit allows, then this abort.
+    Draining(AbortCode, &'static str),
     /// The terminal output is queued: nothing more but cancels and credit.
     Ended,
 }
@@ -433,8 +436,15 @@ impl<T: Copy> Core<T> {
         self.reserved().saturating_add(n) <= self.limit
     }
 
+    /// Verified body waiting for main's credit.
+    pub(crate) fn queued(&self) -> usize {
+        self.queued
+    }
+
+    /// The walk is over: the terminal output is out, or follows what is
+    /// queued.
     pub(crate) fn ended(&self) -> bool {
-        self.phase == Phase::Ended
+        matches!(self.phase, Phase::Draining(..) | Phase::Ended)
     }
 
     /// Chunk pieces open: whole pieces not yet answered.
@@ -609,10 +619,19 @@ impl<T: Copy> Core<T> {
                 .outputs
                 .push_back(Output::Error(failure.before_head(self.node))),
             Phase::Headed => {
+                // The verified bytes before the failure are the page's: they
+                // go out first. Nothing more is fetched.
                 let (code, message) = failure.after_head(self.node);
-                self.outputs.push_back(Output::Abort { code, message });
+                self.phase = Phase::Draining(code, message);
+                let open: Vec<PieceId> = self.pieces.keys().copied().collect();
+                for id in open {
+                    self.cancel_piece(id);
+                }
+                self.walk_held = 0;
+                self.pump();
+                return;
             }
-            Phase::Ended => return,
+            Phase::Draining(..) | Phase::Ended => return,
         }
         self.close();
     }
@@ -636,10 +655,13 @@ impl<T: Copy> Core<T> {
 
     /// Sends what main's credit allows.
     fn pump(&mut self) {
-        while self.phase == Phase::Headed {
+        while matches!(self.phase, Phase::Headed | Phase::Draining(..)) {
             let room = BODY_WINDOW - (self.sent - self.credited);
             let Some(front) = self.queue.front_mut() else {
-                if self.end_after_queue {
+                if let Phase::Draining(code, message) = self.phase {
+                    self.outputs.push_back(Output::Abort { code, message });
+                    self.close();
+                } else if self.end_after_queue {
                     self.outputs.push_back(Output::End);
                     self.close();
                 }
@@ -720,6 +742,8 @@ pub(crate) trait Events<T> {
     fn stream_end(&mut self, core: &mut Core<T>, tag: T, id: PieceId);
     fn failed(&mut self, core: &mut Core<T>, tag: T, failure: PieceFailure);
     fn hashed(&mut self, core: &mut Core<T>, tag: T, verdict: jobs::Verdict, work: jobs::Work);
+    /// Main's credit made room in the body's queue.
+    fn room(&mut self, _core: &mut Core<T>) {}
 }
 
 /// A core and the walk it drives.
@@ -844,6 +868,9 @@ impl<T: Copy, W: Events<T>> Machine<T, W> {
         }
         self.core.credited += bytes;
         self.core.pump();
+        if let Some(walk) = self.walk.as_mut() {
+            walk.room(&mut self.core);
+        }
         self.settle();
         Ok(())
     }
@@ -854,7 +881,8 @@ impl<T: Copy, W: Events<T>> Machine<T, W> {
                 self.core.outputs.push_back(Output::Cancelled);
                 self.core.close();
             }
-            Phase::Headed => {
+            Phase::Headed | Phase::Draining(..) => {
+                // The page is gone: what is queued is dropped.
                 self.core.outputs.push_back(Output::Abort {
                     code: AbortCode::Cancelled,
                     message: CANCELLED,
@@ -884,7 +912,7 @@ impl<T: Copy, W: Events<T>> Machine<T, W> {
     }
 
     fn finished(&self) -> bool {
-        self.core.ended()
+        self.core.phase == Phase::Ended
             && self.core.pieces.is_empty()
             && self.core.jobs.is_empty()
             && self.core.outputs.is_empty()
@@ -893,8 +921,8 @@ impl<T: Copy, W: Events<T>> Machine<T, W> {
 
 #[derive(Debug)]
 enum Inner {
-    Swarm(Machine<swarm::Tag, swarm::Walk>),
-    Ipfs(Machine<ipfs::Tag, ipfs::Walk>),
+    Swarm(Box<Machine<swarm::Tag, swarm::Walk>>),
+    Ipfs(Box<Machine<ipfs::Tag, ipfs::Walk>>),
 }
 
 /// The same call on whichever machine the request has.
@@ -965,10 +993,10 @@ impl Verifier {
                 let mut core = Core::new(request, Node::Ant, head_only, name, options.budget);
                 let walk =
                     swarm::Walk::start(&mut core, root, &plan.path, &plan.query, header("range"))?;
-                Inner::Swarm(Machine {
+                Inner::Swarm(Box::new(Machine {
                     core,
                     walk: Some(walk),
-                })
+                }))
             }
             Root::Ipfs(_) | Root::Ipns(_) => {
                 let mut core = Core::new(request, Node::Ipfs, head_only, name, options.budget);
@@ -983,10 +1011,10 @@ impl Verifier {
                         car: options.car,
                     },
                 )?;
-                Inner::Ipfs(Machine {
+                Inner::Ipfs(Box::new(Machine {
                     core,
                     walk: Some(walk),
-                })
+                }))
             }
         };
         let mut v = Self {

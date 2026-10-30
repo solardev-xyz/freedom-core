@@ -437,6 +437,7 @@ name = "fc-dweb"
 version = "0.8.0"
 dependencies = [
  "base64",
+ "ed25519-dalek",
  "fc-ipfs",
  "fc-json",
  "fc-swarm",
