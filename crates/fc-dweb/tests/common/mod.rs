@@ -98,7 +98,8 @@ pub enum Order {
 pub struct Opts {
     pub budget: usize,
     pub order: Order,
-    /// The page's credit per step, or all at once.
+    /// The page's credit per step, or all at once; `Some(0)`: a page that
+    /// never reads, so the request stalls once the gateway is held back.
     pub page: Option<usize>,
     /// Cancel the request after this many steps.
     pub cancel_after: Option<usize>,
@@ -370,7 +371,7 @@ pub fn run(label: &str, plan: &Verify, method: Method, world: &dyn World, opts: 
                 v.piece_failed(id, PieceFailure::Aborted).unwrap();
             }
             Action::Page => {
-                if owed_page > 0 {
+                if owed_page > 0 && opts.page != Some(0) {
                     let n = owed_page.min(opts.page.unwrap());
                     owed_page -= n;
                     v.body_credit(n).unwrap();
@@ -380,6 +381,10 @@ pub fn run(label: &str, plan: &Verify, method: Method, world: &dyn World, opts: 
                 }
             }
         }
+    }
+    if opts.page == Some(0) {
+        // Stalled on the page: what it asked for is the test's question.
+        return out;
     }
     assert!(
         out.ending.is_some() || out.head.as_ref().is_some_and(|h| !h.body),

@@ -20,6 +20,7 @@
 //! next; one that isn't ends the CAR, and the walk fetches the rest as raw
 //! blocks. So does a gateway without ordered CARs, from the start.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
 
 use fc_ipfs::Refusal as BlockRefusal;
@@ -44,8 +45,9 @@ const MAX_SEGMENTS: usize = 256;
 /// The IPNS resolutions `GatewayCore` serves from: it makes a fourth,
 /// then answers 400.
 const MAX_RESOLUTIONS: usize = 3;
-/// Verified body waiting for main's credit past which no more stream
-/// bytes are read: the page holds the gateway back.
+/// Verified body waiting for the page (queued, or sent and not yet
+/// credited) at which no more stream bytes are read and no raw block is
+/// asked for: the page holds the gateway back.
 const QUEUE_LIMIT: usize = 512 << 10;
 const CAR_ACCEPT: &str = "application/vnd.ipld.car; version=1; order=dfs; dups=y";
 const RAW_ACCEPT: &str = "application/vnd.ipld.raw";
@@ -55,6 +57,11 @@ const RECORD_ACCEPT: &str = "application/vnd.ipfs.ipns-record";
 const PENDING_LIMIT: usize = 2 << 20;
 /// A CAR's reading room: one section and the header.
 const CAR_ROOM: usize = car::MAX_SECTION + car::MAX_HEADER;
+/// What a CAR section's hash job holds beside its bytes, until its verdict
+/// is used: the job and its output, the result, and their map entries.
+const SECTION_COST: usize = 512;
+/// A held shard's map entry, beside its CID and block.
+const MAP_ENTRY: usize = 128;
 
 /// What a piece or a job is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +146,45 @@ fn cid_from_text(text: &str) -> Option<Vec<u8>> {
 /// A CID as `GatewayCore` shows it: a CIDv0 in base58, a CIDv1 in base32.
 fn display(cid: &[u8]) -> String {
     ipfs_cid::parse(cid).map_or_else(String::new, |c| ipfs_cid::to_text(&c))
+}
+
+/// `GatewayCore`'s `is_traversal_segment`: `.` or `..`, as written or
+/// with each `%XX` decoded once.
+fn traversal(segment: &str) -> bool {
+    if matches!(segment, "." | "..") {
+        return true;
+    }
+    if !segment.contains('%') {
+        return false;
+    }
+    let hex = |c: Option<&u8>| c.and_then(|&c| char::from(c).to_digit(16));
+    let b = segment.as_bytes();
+    let (mut out, mut n, mut i) = ([0u8; 2], 0, 0);
+    while i < b.len() {
+        let byte = if b[i] == b'%' {
+            let (Some(h), Some(l)) = (hex(b.get(i + 1)), hex(b.get(i + 2))) else {
+                return false;
+            };
+            i += 3;
+            (h * 16 + l) as u8
+        } else {
+            i += 1;
+            b[i - 1]
+        };
+        // Past two bytes it can't be `.` or `..`.
+        let Some(slot) = out.get_mut(n) else {
+            return false;
+        };
+        *slot = byte;
+        n += 1;
+    }
+    matches!(&out[..n], b"." | b"..")
+}
+
+/// What strings hold on the heap: their bytes and the vector's slots.
+#[allow(clippy::ptr_arg)]
+fn strings_cost(v: &Vec<String>) -> usize {
+    v.iter().map(String::capacity).sum::<usize>() + v.capacity() * std::mem::size_of::<String>()
 }
 
 /// A path's segments, each decoded once; `None` when one is refused.
@@ -250,12 +296,13 @@ enum Stage {
 }
 
 /// The directory reached, when it is a HAMT: its shards, for the
-/// `index.html` lookup by hash, and its entries.
+/// `index.html` lookup by hash, then the listing.
 #[derive(Debug, Default)]
 struct Hamt {
     root: Vec<u8>,
     shards: BTreeMap<Vec<u8>, Vec<u8>>,
-    entries: Vec<gateway::Entry>,
+    /// What the shards hold of the request's memory.
+    held: usize,
 }
 
 /// The request's IPFS walk.
@@ -276,7 +323,12 @@ pub(crate) struct Walk {
     cache: Cache,
     label: ContentTrust,
     needs: VecDeque<Need>,
+    /// The needs' buffer, held: its capacity in slots.
+    needs_slots: usize,
     next_seq: u64,
+    /// What the path's strings hold (the request's, the records', the
+    /// served path's).
+    path_held: usize,
     /// Blocks checked, waiting for their turn: by need.
     arrived: BTreeMap<u64, Vec<u8>>,
     raw: BTreeMap<u64, RawPiece>,
@@ -309,7 +361,9 @@ impl Walk {
             cache: Cache::Immutable,
             label: ContentTrust::Verified,
             needs: VecDeque::new(),
+            needs_slots: 0,
             next_seq: 0,
+            path_held: 0,
             arrived: BTreeMap::new(),
             raw: BTreeMap::new(),
             raw_only,
@@ -318,14 +372,16 @@ impl Walk {
             file: None,
             served: Vec::new(),
         };
+        // The request's segments: their room held before they are built.
+        let n = path.split('/').filter(|s| !s.is_empty()).count();
+        if n > MAX_SEGMENTS || !walk.reserve_path(core, n, path.len()) {
+            core.fail(Failure::Unverifiable);
+            return Ok(walk);
+        }
         let Some(rest) = segments(path) else {
             walk.page(core, 400, "path traversal segments are not allowed");
             return Ok(walk);
         };
-        if rest.len() > MAX_SEGMENTS {
-            core.fail(Failure::Unverifiable);
-            return Ok(walk);
-        }
         match root {
             Root::Ipfs(text) => {
                 let cid = ipfs_cid::from_base32(text).ok_or(PlanRefusal::Root)?;
@@ -334,6 +390,7 @@ impl Walk {
             Root::Ipns(name) => {
                 walk.ipns = Some(name.clone());
                 walk.rest = rest;
+                walk.settle_path(core);
                 walk.cache = Cache::Mutable;
                 walk.label = ContentTrust::LatestAsserted;
                 walk.ask_record(core, name.clone(), 1);
@@ -375,7 +432,10 @@ impl Walk {
     /// Drops every source and what it holds.
     fn stop(&mut self, core: &mut Core) {
         self.stage = Stage::Done;
-        self.needs.clear();
+        let cids: usize = self.needs.iter().map(|n| n.cid.len()).sum();
+        core.unhold(cids + self.needs_slots);
+        self.needs = VecDeque::new();
+        self.needs_slots = 0;
         for (_, b) in std::mem::take(&mut self.arrived) {
             core.unhold(b.len());
         }
@@ -387,7 +447,7 @@ impl Walk {
         }
         self.close_car(core);
         if let Some(h) = self.hamt.take() {
-            core.unhold(h.shards.values().map(Vec::len).sum());
+            core.unhold(h.held);
         }
         if let Some(f) = self.file.take() {
             core.unhold(f.early.len());
@@ -401,8 +461,17 @@ impl Walk {
             }
             core.unhold(CAR_ROOM);
             core.unhold(c.stash.iter().map(Vec::len).sum());
+            // Sections still hashing: their jobs' bytes come back with
+            // their results, and are dropped then; their costs go now.
+            let judged = c.verdicts.len() as u64;
+            let hashing = c.sent.saturating_sub(c.done).saturating_sub(judged);
+            core.unhold(
+                usize::try_from(hashing)
+                    .unwrap_or(usize::MAX)
+                    .saturating_mul(SECTION_COST),
+            );
             for (_, (cid, block, _)) in c.verdicts {
-                core.unhold(cid.len() + block.len());
+                core.unhold(cid.len() + block.len() + SECTION_COST);
             }
         }
     }
@@ -432,20 +501,40 @@ impl Walk {
             return self.end(core, Failure::VerificationFailed);
         };
         let below = parts.next().unwrap_or("");
-        let mut inner: Vec<String> = below
-            .split('/')
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
-            .collect();
-        match ns {
-            "ipfs" => {
-                let Some(cid) = cid_from_text(target) else {
-                    return self.end(core, Failure::Unverifiable);
-                };
-                inner.append(&mut self.rest.clone());
-                self.resolved(core, cid, inner);
-            }
-            "ipns" => {
+        let cid = match ns {
+            "ipfs" => match cid_from_text(target) {
+                Some(cid) => Some(cid),
+                None => return self.end(core, Failure::Unverifiable),
+            },
+            "ipns" => None,
+            _ => return self.end(core, Failure::VerificationFailed),
+        };
+        // `GatewayCore` matches a value's segments as written, decoding
+        // none, and refuses one that is `.` or `..`, as written or
+        // percent-encoded, with its 400; a name's too (split_name_path).
+        if (cid.is_none() && traversal(target)) || below.split('/').any(traversal) {
+            return self.page(core, 400, "path traversal segments are not allowed");
+        }
+        // The value's segments ahead of the request's: at most 256 in all,
+        // their room held before they are built.
+        let n = below.split('/').filter(|s| !s.is_empty()).count();
+        let total = n + self.rest.len();
+        if total > MAX_SEGMENTS || !self.reserve_path(core, total, below.len()) {
+            return self.end(core, Failure::Unverifiable);
+        }
+        let mut inner = Vec::with_capacity(total);
+        inner.extend(
+            below
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+        );
+        let mut old = std::mem::take(&mut self.rest);
+        inner.append(&mut old);
+        drop(old);
+        match cid {
+            Some(cid) => self.resolved(core, cid, inner),
+            None => {
                 // A name with a key the core verifies is followed; DNSLink,
                 // or another key, can't be.
                 if !matches!(
@@ -454,12 +543,10 @@ impl Walk {
                 ) {
                     return self.end(core, Failure::Unverifiable);
                 }
-                let mut rest = inner;
-                rest.append(&mut self.rest);
-                self.rest = rest;
+                self.rest = inner;
+                self.settle_path(core);
                 self.ask_record(core, target.to_owned(), hop + 1);
             }
-            _ => self.end(core, Failure::VerificationFailed),
         }
     }
 
@@ -478,26 +565,72 @@ impl Walk {
             return self.end(core, Failure::Unverifiable);
         }
         self.root_text = display(&root);
-        self.root = root.clone();
-        self.segments = inner.into_iter().filter(|s| !s.is_empty()).collect();
+        let mut inner = inner;
+        inner.retain(|s| !s.is_empty());
+        self.segments = inner;
+        self.settle_path(core);
         self.stage = Stage::Dag;
-        self.push_back(root, What::Path(0));
+        if !self.needs_room(core, 1, root.len()) {
+            return self.end(core, Failure::Unverifiable);
+        }
+        self.add_need(&root, What::Path(0));
+        self.root = root;
         self.pump(core);
     }
 
-    fn push_back(&mut self, cid: Vec<u8>, what: What) {
-        let seq = self.next_seq;
-        self.next_seq += 1;
-        self.needs.push_back(Need { seq, cid, what });
+    /// Room for `n` more needs whose CIDs hold `cids` bytes, reserved
+    /// before the deque grows (its new buffer beside the old one while it
+    /// moves); false when the request can't hold them.
+    fn needs_room(&mut self, core: &mut Core, n: usize, cids: usize) -> bool {
+        let slot = std::mem::size_of::<Need>();
+        let cap = self.needs.capacity();
+        let want = self.needs.len().saturating_add(n);
+        let grown = if want > cap {
+            want.saturating_mul(slot)
+        } else {
+            0
+        };
+        if !core.fits(grown.saturating_add(cids)) {
+            return false;
+        }
+        core.hold(grown + cids);
+        if want > cap {
+            self.needs.reserve_exact(n);
+            let now = self.needs.capacity().saturating_mul(slot);
+            // What the allocator gave past the ask; then the old buffer,
+            // freed.
+            core.hold(now.saturating_sub(grown));
+            core.unhold(self.needs_slots);
+            self.needs_slots = now;
+        }
+        true
     }
 
-    /// The children of the node just read, ahead of what follows it.
-    fn push_front(&mut self, children: Vec<(Vec<u8>, What)>) {
-        for (cid, what) in children.into_iter().rev() {
-            let seq = self.next_seq;
-            self.next_seq += 1;
-            self.needs.push_front(Need { seq, cid, what });
+    /// A need at the back, its room made ([`Walk::needs_room`]).
+    fn add_need(&mut self, cid: &[u8], what: What) {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        self.needs.push_back(Need {
+            seq,
+            cid: cid.to_vec(),
+            what,
+        });
+    }
+
+    /// One need ahead of the rest; false when it can't be held.
+    fn push_first(&mut self, core: &mut Core, cid: &[u8], what: What) -> bool {
+        if !self.needs_room(core, 1, cid.len()) {
+            return false;
         }
+        self.add_need(cid, what);
+        self.needs.rotate_right(1);
+        true
+    }
+
+    /// The need at the front, taken; its CID's hold goes once the caller
+    /// has used it.
+    fn take_need(&mut self) -> Option<Need> {
+        self.needs.pop_front()
     }
 
     /// Moves the walk on: identity blocks resolved in place, blocks that
@@ -507,7 +640,7 @@ impl Walk {
             if !matches!(self.stage, Stage::Dag) || core.ended() {
                 return;
             }
-            let Some(front) = self.needs.front().cloned() else {
+            let Some(front) = self.needs.front() else {
                 if self.hamt.is_some() {
                     self.hamt_done(core);
                     continue;
@@ -515,18 +648,24 @@ impl Walk {
                 return self.done(core);
             };
             // An identity CID carries its block.
-            if let Some(cid) = ipfs_cid::parse(&front.cid)
-                && cid.hash == IDENTITY
-            {
-                let block = cid.digest.to_vec();
-                self.needs.pop_front();
-                self.consume(core, front, block);
+            let identity = ipfs_cid::parse(&front.cid)
+                .filter(|c| c.hash == IDENTITY)
+                .map(|c| c.digest.to_vec());
+            let seq = front.seq;
+            if let Some(block) = identity {
+                if let Some(need) = self.take_need() {
+                    let n = need.cid.len();
+                    self.consume(core, need, block);
+                    core.unhold(n);
+                }
                 continue;
             }
-            if let Some(block) = self.arrived.remove(&front.seq) {
-                self.needs.pop_front();
-                core.unhold(block.len());
-                self.consume(core, front, block);
+            if let Some(block) = self.arrived.remove(&seq) {
+                if let Some(need) = self.take_need() {
+                    let n = need.cid.len() + block.len();
+                    self.consume(core, need, block);
+                    core.unhold(n);
+                }
                 continue;
             }
             if self.car_verdicts(core) {
@@ -549,28 +688,33 @@ impl Walk {
             return false;
         };
         c.done += 1;
-        c.pending = c.pending.saturating_sub(cid.len() + block.len());
-        core.unhold(cid.len() + block.len());
+        let held = cid.len() + block.len() + SECTION_COST;
+        c.pending = c.pending.saturating_sub(held);
         if let Err(r) = verdict {
+            core.unhold(held);
             self.end(core, refusal(r));
             return true;
         }
-        let Some(front) = self.needs.front().cloned() else {
-            return true;
-        };
-        let same = match (ipfs_cid::parse(&cid), ipfs_cid::parse(&front.cid)) {
-            (Some(a), Some(b)) => a.same_block(&b),
-            _ => false,
-        };
+        let same = self.needs.front().is_some_and(|front| {
+            match (ipfs_cid::parse(&cid), ipfs_cid::parse(&front.cid)) {
+                (Some(a), Some(b)) => a.same_block(&b),
+                _ => false,
+            }
+        });
         if !same {
             // Not the block the walk needs next: the CAR stops being
             // useful, and the rest comes as raw blocks.
+            core.unhold(held);
             self.close_car(core);
             self.raw_only = true;
             return true;
         }
-        self.needs.pop_front();
-        self.consume(core, front, block);
+        if let Some(need) = self.take_need() {
+            let n = need.cid.len();
+            self.consume(core, need, block);
+            core.unhold(n);
+        }
+        core.unhold(held);
         true
     }
 
@@ -586,7 +730,7 @@ impl Walk {
         // Raw blocks for the needs ahead, within the bound and the memory,
         // and none while the body waits for the page: it holds the gateway
         // back, as it holds the CAR.
-        if core.queued() > QUEUE_LIMIT {
+        if core.awaiting() >= QUEUE_LIMIT {
             return;
         }
         let pending: Vec<Need> = self
@@ -793,7 +937,9 @@ impl Walk {
             match data.kind {
                 Kind::Directory => match node.links().find(|l| l.name == Some(name.as_str())) {
                     Some(link) => {
-                        self.push_front(vec![(link.cid.bytes.to_vec(), What::Path(seg + 1))]);
+                        if !self.push_first(core, link.cid.bytes, What::Path(seg + 1)) {
+                            return Err(Failure::Unverifiable);
+                        }
                     }
                     None => self.page(core, 404, "not found"),
                 },
@@ -813,47 +959,61 @@ impl Walk {
         }
         // The entity.
         if c.codec == ipfs_cid::RAW {
-            self.served = self.segments.clone();
+            self.serve_path(core, None)?;
             return self.start_file(core, block, None);
         }
         let node = dagpb::decode(block).map_err(refusal)?;
         let data = unixfs::decode(&node).map_err(refusal)?;
         match data.kind {
             Kind::File | Kind::Raw => {
-                self.served = self.segments.clone();
+                self.serve_path(core, None)?;
                 self.start_file(core, block, Some((&node, &data)))
             }
             Kind::Directory => {
                 if let Some(link) = node.links().find(|l| l.name == Some("index.html")) {
-                    self.push_front(vec![(link.cid.bytes.to_vec(), What::Index)]);
+                    if !self.push_first(core, link.cid.bytes, What::Index) {
+                        return Err(Failure::Unverifiable);
+                    }
                     return Ok(());
                 }
-                let entries = node
-                    .links()
-                    .filter_map(|l| {
-                        let name = l.name.filter(|n| !n.is_empty())?;
-                        Some(gateway::Entry {
-                            name: name.to_owned(),
+                // The entries, borrowed from the block: their slots held
+                // before they are taken.
+                let named = |l: &dagpb::Link<'_>| l.name.is_some_and(|n| !n.is_empty());
+                let n = node.links().filter(named).count();
+                let held = n.saturating_mul(std::mem::size_of::<gateway::Entry<'_>>());
+                if !core.fits(held) {
+                    return Err(Failure::Unverifiable);
+                }
+                core.hold(held);
+                let mut entries = Vec::with_capacity(n);
+                for (at, l) in node.links().enumerate() {
+                    if let Some(name) = l.name.filter(|n| !n.is_empty()) {
+                        entries.push(gateway::Entry {
+                            name: Cow::Borrowed(name),
                             size: l.tsize,
-                        })
-                    })
-                    .collect();
-                self.listing(core, entries);
+                            at,
+                        });
+                    }
+                }
+                self.listing(core, entries, held);
                 Ok(())
             }
             Kind::HamtShard => {
-                if !core.fits(block.len()) {
+                let held = block.len() + cid.len() + MAP_ENTRY;
+                if !core.fits(held) {
                     return Err(Failure::Unverifiable);
                 }
-                core.hold(block.len());
+                core.hold(held);
                 let mut h = Hamt {
                     root: cid.to_vec(),
+                    held,
                     ..Hamt::default()
                 };
                 h.shards.insert(cid.to_vec(), block.to_vec());
-                let children = Self::shard_entries(&node, &mut h.entries, 1);
                 self.hamt = Some(h);
-                self.push_front(children);
+                if !self.push_shards(core, &node, 1) {
+                    return Err(Failure::Unverifiable);
+                }
                 Ok(())
             }
             Kind::Symlink | Kind::Metadata => {
@@ -872,26 +1032,51 @@ impl Walk {
         );
     }
 
-    /// A shard's entries (links named past the bucket's two digits), and
-    /// its sub-shards to read, in link order.
-    fn shard_entries(
-        node: &dagpb::Node<'_>,
-        entries: &mut Vec<gateway::Entry>,
-        level: usize,
-    ) -> Vec<(Vec<u8>, What)> {
-        let mut children = Vec::new();
+    /// A shard's sub-shards (links named by the bucket's two digits alone),
+    /// in link order, ahead of the rest: each read whole for the listing.
+    /// False when they can't be held.
+    fn push_shards(&mut self, core: &mut Core, node: &dagpb::Node<'_>, level: usize) -> bool {
+        let sub = |l: &dagpb::Link<'_>| l.name.is_some_and(|n| n.len() == 2);
+        let (mut n, mut cids) = (0, 0);
+        for l in node.links().filter(sub) {
+            n += 1;
+            cids += l.cid.bytes.len();
+        }
+        if !self.needs_room(core, n, cids) {
+            return false;
+        }
+        for l in node.links().filter(sub) {
+            self.add_need(l.cid.bytes, What::EntityShard { level });
+        }
+        self.needs.rotate_right(n);
+        true
+    }
+
+    /// The listing's entries in every shard below `cid`, depth-first in
+    /// link order: each link named past its bucket's two digits.
+    fn hamt_entries<'a>(
+        shards: &'a BTreeMap<Vec<u8>, Vec<u8>>,
+        cid: &[u8],
+        depth: usize,
+        f: &mut dyn FnMut(&'a [u8], Option<u64>),
+    ) {
+        if depth >= hamt::MAX_LEVELS {
+            return;
+        }
+        let Some(block) = shards.get(cid) else {
+            return;
+        };
+        let Ok(node) = dagpb::decode(block) else {
+            return;
+        };
         for l in node.links() {
-            let name = l.name.unwrap_or("");
-            if name.len() == 2 {
-                children.push((l.cid.bytes.to_vec(), What::EntityShard { level }));
-            } else if name.len() > 2 {
-                entries.push(gateway::Entry {
-                    name: String::from_utf8_lossy(&name.as_bytes()[2..]).into_owned(),
-                    size: l.tsize,
-                });
+            let label = l.name.unwrap_or("").as_bytes();
+            if label.len() == 2 {
+                Self::hamt_entries(shards, l.cid.bytes, depth + 1, f);
+            } else if let Some(name) = label.get(2..).filter(|n| !n.is_empty()) {
+                f(name, l.tsize);
             }
         }
-        children
     }
 
     fn hamt_step(
@@ -906,20 +1091,23 @@ impl Walk {
         if level >= hamt::MAX_LEVELS {
             return self.end(core, Failure::Unverifiable);
         }
-        match hamt::step(node, bitfield, name, level) {
-            Step::Entry(link) => {
-                self.push_front(vec![(link.cid.bytes.to_vec(), What::Path(seg + 1))]);
+        let pushed = match hamt::step(node, bitfield, name, level) {
+            Step::Entry(link) => self.push_first(core, link.cid.bytes, What::Path(seg + 1)),
+            Step::Shard(link) => self.push_first(
+                core,
+                link.cid.bytes,
+                What::PathShard {
+                    seg,
+                    level: level + 1,
+                },
+            ),
+            Step::Absent => {
+                self.page(core, 404, "not found");
+                true
             }
-            Step::Shard(link) => {
-                self.push_front(vec![(
-                    link.cid.bytes.to_vec(),
-                    What::PathShard {
-                        seg,
-                        level: level + 1,
-                    },
-                )]);
-            }
-            Step::Absent => self.page(core, 404, "not found"),
+        };
+        if !pushed {
+            self.end(core, Failure::Unverifiable);
         }
     }
 
@@ -965,16 +1153,22 @@ impl Walk {
             );
             return Ok(());
         }
-        if !core.fits(block.len()) {
-            return Err(Failure::Unverifiable);
-        }
-        core.hold(block.len());
         let Some(h) = self.hamt.as_mut() else {
             return Err(Failure::Unverifiable);
         };
-        h.shards.insert(cid.to_vec(), block.to_vec());
-        let children = Self::shard_entries(&node, &mut h.entries, level + 1);
-        self.push_front(children);
+        // A shard linked twice is held once.
+        if !h.shards.contains_key(cid) {
+            let held = block.len() + cid.len() + MAP_ENTRY;
+            if !core.fits(held) {
+                return Err(Failure::Unverifiable);
+            }
+            core.hold(held);
+            h.held += held;
+            h.shards.insert(cid.to_vec(), block.to_vec());
+        }
+        if !self.push_shards(core, &node, level + 1) {
+            return Err(Failure::Unverifiable);
+        }
         Ok(())
     }
 
@@ -1004,17 +1198,88 @@ impl Walk {
                 Step::Absent => break,
             }
         }
-        core.unhold(h.shards.values().map(Vec::len).sum());
-        match found {
-            Some(cid) => self.push_front(vec![(cid, What::Index)]),
-            None => self.listing(core, h.entries),
+        if let Some(cid) = found {
+            core.unhold(h.held);
+            if !self.push_first(core, &cid, What::Index) {
+                self.end(core, Failure::Unverifiable);
+            }
+            return;
         }
+        // The entries, borrowed from the shards: their slots, and any name
+        // that must be made valid UTF-8, held before they are taken.
+        let (mut n, mut owned) = (0usize, 0usize);
+        Self::hamt_entries(&h.shards, &h.root, 0, &mut |name, _| {
+            n += 1;
+            if std::str::from_utf8(name).is_err() {
+                owned += name
+                    .utf8_chunks()
+                    .map(|c| c.valid().len() + if c.invalid().is_empty() { 0 } else { 3 })
+                    .sum::<usize>();
+            }
+        });
+        let held = n
+            .saturating_mul(std::mem::size_of::<gateway::Entry<'_>>())
+            .saturating_add(owned);
+        if !core.fits(held) {
+            core.unhold(h.held);
+            return self.end(core, Failure::Unverifiable);
+        }
+        core.hold(held);
+        let mut entries = Vec::with_capacity(n);
+        Self::hamt_entries(&h.shards, &h.root, 0, &mut |name, size| {
+            let name = match std::str::from_utf8(name) {
+                Ok(s) => Cow::Borrowed(s),
+                Err(_) => Cow::Owned(String::from_utf8_lossy(name).into_owned()),
+            };
+            let at = entries.len();
+            entries.push(gateway::Entry { name, size, at });
+        });
+        self.listing(core, entries, held);
+        core.unhold(h.held);
+    }
+
+    /// Room for path strings of at most `bytes` in `n` segments, held
+    /// before they are built; false when the request can't hold them.
+    fn reserve_path(&mut self, core: &mut Core, n: usize, bytes: usize) -> bool {
+        let need = bytes.saturating_add(n.saturating_mul(std::mem::size_of::<String>()));
+        if !core.fits(need) {
+            return false;
+        }
+        core.hold(need);
+        self.path_held += need;
+        true
+    }
+
+    /// The path strings' hold, brought to what they hold now.
+    fn settle_path(&mut self, core: &mut Core) {
+        let now =
+            strings_cost(&self.rest) + strings_cost(&self.segments) + strings_cost(&self.served);
+        if now < self.path_held {
+            core.unhold(self.path_held - now);
+        } else {
+            core.hold(now - self.path_held);
+        }
+        self.path_held = now;
+    }
+
+    /// The served path: the walked segments, and the index document's name
+    /// for a directory.
+    fn serve_path(&mut self, core: &mut Core, last: Option<&str>) -> Result<(), Failure> {
+        let n = self.segments.len() + usize::from(last.is_some());
+        let bytes = self.segments.iter().map(String::len).sum::<usize>() + last.map_or(0, str::len);
+        if !self.reserve_path(core, n, bytes) {
+            return Err(Failure::Unverifiable);
+        }
+        let mut served = Vec::with_capacity(n);
+        served.extend(self.segments.iter().cloned());
+        served.extend(last.map(str::to_owned));
+        self.served = served;
+        self.settle_path(core);
+        Ok(())
     }
 
     fn index(&mut self, core: &mut Core, cid: &[u8], block: &[u8]) -> Result<(), Failure> {
-        let mut served = self.segments.clone();
-        served.push("index.html".to_owned());
-        self.served = served;
+        self.serve_path(core, Some("index.html"))?;
         if ipfs_cid::parse(cid).is_some_and(|c| c.codec == ipfs_cid::RAW) {
             return self.start_file(core, block, None);
         }
@@ -1033,9 +1298,13 @@ impl Walk {
         }
     }
 
-    /// `GatewayCore`'s listing of the directory reached.
-    fn listing(&mut self, core: &mut Core, mut entries: Vec<gateway::Entry>) {
+    /// `GatewayCore`'s listing of the directory reached, from its entries,
+    /// which hold `held` bytes of the request's memory. The page is counted,
+    /// its room held, then written into a buffer of exactly that length.
+    fn listing(&mut self, core: &mut Core, mut entries: Vec<gateway::Entry<'_>>, held: usize) {
         if self.asked.range.is_some() {
+            drop(entries);
+            core.unhold(held);
             return self.page(
                 core,
                 400,
@@ -1070,8 +1339,21 @@ impl Walk {
                 (title, format!("/ipns/{}", gateway::encode_path(&segs)))
             }
         };
-        let (h, body) = gateway::listing(&title, &base, &mut entries);
-        self.answer(core, 200, h, body);
+        gateway::sort_listing(&mut entries);
+        let len = gateway::listing_len(&title, &base, &entries);
+        if !core.fits(len) {
+            drop(entries);
+            core.unhold(held);
+            return self.end(core, Failure::Unverifiable);
+        }
+        core.hold(len);
+        let (h, body) = gateway::listing(&title, &base, &entries, len);
+        drop(entries);
+        core.unhold(held);
+        self.stop(core);
+        core.head(200, h, self.label);
+        core.body(body, None);
+        core.finish();
     }
 
     /// The request's path as written, each segment decoded.
@@ -1232,27 +1514,41 @@ impl Walk {
             return Ok(());
         };
         let (a, b) = (f.a, f.b);
-        let mut at = start + inline.len() as u64;
-        let mut children = Vec::new();
-        for (link, size) in node.links().zip(data.blocksizes()) {
-            let child_start = at;
-            at += size;
-            if size == 0 || child_start + size <= a || child_start > b {
-                continue;
-            }
-            if depth + 1 >= MAX_FILE_DEPTH {
-                return Err(Failure::Unverifiable);
-            }
-            children.push((
-                link.cid.bytes.to_vec(),
+        let first = start + inline.len() as u64;
+        // The children within the body, each with its offset: counted and
+        // their room held, then queued ahead of what follows the node.
+        let within = || {
+            let mut at = first;
+            node.links()
+                .zip(data.blocksizes())
+                .filter_map(move |(link, size)| {
+                    let child = at;
+                    at += size;
+                    (size != 0 && child + size > a && child <= b).then_some((link, child, size))
+                })
+        };
+        let (mut n, mut cids) = (0, 0);
+        for (link, _, _) in within() {
+            n += 1;
+            cids += link.cid.bytes.len();
+        }
+        if n > 0 && depth + 1 >= MAX_FILE_DEPTH {
+            return Err(Failure::Unverifiable);
+        }
+        if !self.needs_room(core, n, cids) {
+            return Err(Failure::Unverifiable);
+        }
+        for (link, child, size) in within() {
+            self.add_need(
+                link.cid.bytes,
                 What::File {
-                    start: child_start,
+                    start: child,
                     len: size,
                     depth: depth + 1,
                 },
-            ));
+            );
         }
-        self.push_front(children);
+        self.needs.rotate_right(n);
         Ok(())
     }
 
@@ -1280,13 +1576,26 @@ impl Walk {
             return;
         };
         if !f.headed {
+            // Only bytes 0 to the sniff's end are kept for the type, as
+            // `GatewayCore` reads no more; the head goes once they're in.
             let end = f.sniff.unwrap_or(0);
             if start <= end {
-                core.hold(bytes.len());
-                f.early.extend_from_slice(bytes);
+                let keep = usize::try_from(end + 1 - start)
+                    .unwrap_or(usize::MAX)
+                    .min(bytes.len());
+                core.hold(keep);
+                f.early.extend_from_slice(&bytes[..keep]);
             }
-            if start + bytes.len() as u64 > end {
+            let past = end + 1;
+            if start + bytes.len() as u64 >= past {
                 self.head_file(core);
+                // The rest of this slice, past the sniffed bytes.
+                if self.file.as_ref().is_some_and(|f| f.headed) && !core.ended() {
+                    let from = usize::try_from(past.saturating_sub(start)).unwrap_or(usize::MAX);
+                    if let Some(tail) = bytes.get(from..).filter(|t| !t.is_empty()) {
+                        self.release(core, tail, start.max(past));
+                    }
+                }
             }
             return;
         }
@@ -1362,31 +1671,47 @@ impl Walk {
         c.broken.get_or_insert(failure);
     }
 
-    /// Frames into the reader while the body and the sections waiting have
-    /// room (any once the stream has ended: nothing is held back then), and
-    /// while the request has room for what the next frame can complete:
-    /// the section being read and the frame's own bytes.
+    /// Frames into the reader while the body the page hasn't read has room
+    /// (any once the stream has ended: nothing is held back then), as much
+    /// of each as can complete no more sections than may still wait, each
+    /// counted with its job's structures; and only while the request has
+    /// room for what those bytes can complete: the section being read and
+    /// the bytes themselves.
     fn push_frames(c: &mut CarStream, core: &mut Core) -> Result<(), Failure> {
-        while c.finished || (core.queued() <= QUEUE_LIMIT && c.pending <= PENDING_LIMIT) {
-            let Some(frame) = c.stash.front() else {
+        while c.finished || core.awaiting() < QUEUE_LIMIT {
+            let starts = PENDING_LIMIT.saturating_sub(c.pending) / SECTION_COST;
+            if starts == 0 {
+                // The sections waiting free room as their verdicts are used.
+                return Ok(());
+            }
+            let Some(frame) = c.stash.front_mut() else {
                 return Ok(());
             };
-            if !core.fits(c.reader.holding() + frame.len()) {
+            // The item being read completes with the bytes it wants; each
+            // further section takes at least MIN_SECTION.
+            let wanting = c.reader.wanting();
+            let further = if wanting > 0 { starts - 1 } else { starts };
+            let most = wanting
+                .saturating_add(further.saturating_mul(car::MIN_SECTION))
+                .saturating_add(car::MIN_SECTION - 1);
+            let take = frame.len().min(most);
+            if !core.fits(c.reader.holding() + take) {
                 // Room comes back as sections are used and the body is
                 // read; with neither waiting, it never will.
-                if c.pending == 0 && core.queued() == 0 {
+                if c.pending == 0 && core.awaiting() == 0 {
                     return Err(Failure::Unverifiable);
                 }
                 return Ok(());
             }
-            let Some(frame) = c.stash.pop_front() else {
-                return Ok(());
-            };
-            let pushed = c.reader.push(&frame);
-            // The frame's bytes are the reader's now, within its room.
-            core.unhold(frame.len());
+            let pushed = c.reader.push(&frame[..take]);
+            frame.drain(..take);
+            if frame.is_empty() {
+                c.stash.pop_front();
+            }
+            // The bytes are the reader's now, within its room.
+            core.unhold(take);
             if c.open {
-                core.consumed(c.id, frame.len());
+                core.consumed(c.id, take);
             }
             for section in pushed.sections {
                 let n = c.sent;
@@ -1395,8 +1720,13 @@ impl Walk {
                 let (mut block, cid_len) = section.into_parts();
                 let cid = block.drain(..cid_len).collect::<Vec<u8>>();
                 let size = cid.len() + block.len();
-                c.pending += size;
-                core.hold(size);
+                // The section's bytes were in the reader's room and the
+                // frame's; its job's own structures need room of their own.
+                if !core.fits(SECTION_COST) {
+                    return Err(Failure::Unverifiable);
+                }
+                c.pending += size + SECTION_COST;
+                core.hold(size + SECTION_COST);
                 core.hash(Tag::Section(n), Work::Block { cid, block });
             }
             if let Some(r) = pushed.error {

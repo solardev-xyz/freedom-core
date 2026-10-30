@@ -260,39 +260,139 @@ fn sized(content_type: &str, body: &[u8]) -> Headers {
     h
 }
 
-/// A listing's entry: its name and its link's `Tsize`.
+/// A listing's entry: its name and its link's `Tsize`, borrowed from the
+/// block it was read from, and its place among the links, so equal names
+/// keep their order as a stable sort keeps them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Entry {
-    pub name: String,
+pub(crate) struct Entry<'a> {
+    pub name: std::borrow::Cow<'a, str>,
     pub size: Option<u64>,
+    pub at: usize,
+}
+
+/// Where a page is written: counted first, then into a buffer of exactly
+/// that length.
+trait Out {
+    fn put(&mut self, s: &[u8]);
+}
+
+struct Count(usize);
+
+impl Out for Count {
+    fn put(&mut self, s: &[u8]) {
+        self.0 = self.0.saturating_add(s.len());
+    }
+}
+
+impl Out for Vec<u8> {
+    fn put(&mut self, s: &[u8]) {
+        self.extend_from_slice(s);
+    }
+}
+
+/// `escape`, written out.
+fn put_escaped(out: &mut impl Out, s: &str) {
+    let mut from = 0;
+    for (i, b) in s.bytes().enumerate() {
+        let rep: &[u8] = match b {
+            b'&' => b"&amp;",
+            b'<' => b"&lt;",
+            b'>' => b"&gt;",
+            b'"' => b"&quot;",
+            b'\'' => b"&#39;",
+            _ => continue,
+        };
+        out.put(&s.as_bytes()[from..i]);
+        out.put(rep);
+        from = i + 1;
+    }
+    out.put(&s.as_bytes()[from..]);
+}
+
+/// `encode_segment`, written out (its output needs no escaping).
+fn put_encoded(out: &mut impl Out, s: &str) {
+    const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+    for &b in s.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.put(&[b]);
+        } else {
+            out.put(&[
+                b'%',
+                DIGITS[usize::from(b >> 4)],
+                DIGITS[usize::from(b & 15)],
+            ]);
+        }
+    }
+}
+
+fn put_u64(out: &mut impl Out, mut v: u64) {
+    let mut digits = [0u8; 20];
+    let mut i = digits.len();
+    loop {
+        i -= 1;
+        digits[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    out.put(&digits[i..]);
+}
+
+fn put_listing(out: &mut impl Out, title: &str, href_base: &str, entries: &[Entry<'_>]) {
+    out.put(b"<!doctype html><html><head><meta charset=\"utf-8\"><title>Index of ");
+    put_escaped(out, title);
+    out.put(b"</title><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"></head><body><main><h1>Index of ");
+    put_escaped(out, title);
+    out.put(b"</h1><ul>");
+    let base = href_base.trim_end_matches('/');
+    for e in entries {
+        out.put(b"<li><a href=\"");
+        put_escaped(out, base);
+        out.put(b"/");
+        put_encoded(out, &e.name);
+        out.put(b"\">");
+        put_escaped(out, &e.name);
+        out.put(b"</a>");
+        if let Some(size) = e.size {
+            out.put(b" <small>");
+            put_u64(out, size);
+            out.put(b" bytes</small>");
+        }
+        out.put(b"</li>");
+    }
+    out.put(b"</ul></main></body></html>");
+}
+
+/// `directory_listing_response`'s order: by name, bytewise, equal names
+/// in link order. Sorted in place, without allocating.
+pub(crate) fn sort_listing(entries: &mut [Entry<'_>]) {
+    entries.sort_unstable_by(|a, b| {
+        a.name
+            .as_bytes()
+            .cmp(b.name.as_bytes())
+            .then(a.at.cmp(&b.at))
+    });
+}
+
+/// The listing page's length, to reserve before it is written.
+pub(crate) fn listing_len(title: &str, href_base: &str, entries: &[Entry<'_>]) -> usize {
+    let mut n = Count(0);
+    put_listing(&mut n, title, href_base, entries);
+    n.0
 }
 
 /// `directory_listing_response`: the page `title` names, each entry linked
-/// below `href_base`, by name.
-pub(crate) fn listing(title: &str, href_base: &str, entries: &mut [Entry]) -> (Headers, Vec<u8>) {
-    entries.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
-    let title = escape(title);
-    let mut body = format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Index of {title}</title><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"></head><body><main><h1>Index of {title}</h1><ul>"
-    );
-    for e in entries.iter() {
-        let href = format!(
-            "{}/{}",
-            href_base.trim_end_matches('/'),
-            encode_segment(&e.name)
-        );
-        let size = e
-            .size
-            .map(|s| format!(" <small>{s} bytes</small>"))
-            .unwrap_or_default();
-        body.push_str(&format!(
-            "<li><a href=\"{}\">{}</a>{size}</li>",
-            escape(&href),
-            escape(&e.name)
-        ));
-    }
-    body.push_str("</ul></main></body></html>");
-    let body = body.into_bytes();
+/// below `href_base`, the entries already sorted ([`sort_listing`]),
+/// written into a buffer of exactly `len` bytes ([`listing_len`]).
+pub(crate) fn listing(
+    title: &str,
+    href_base: &str,
+    entries: &[Entry<'_>],
+    len: usize,
+) -> (Headers, Vec<u8>) {
+    let mut body = Vec::with_capacity(len);
+    put_listing(&mut body, title, href_base, entries);
     (sized(HTML, &body), body)
 }
 

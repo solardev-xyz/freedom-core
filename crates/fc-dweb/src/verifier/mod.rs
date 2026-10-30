@@ -436,9 +436,10 @@ impl<T: Copy> Core<T> {
         self.reserved().saturating_add(n) <= self.limit
     }
 
-    /// Verified body waiting for main's credit.
-    pub(crate) fn queued(&self) -> usize {
-        self.queued
+    /// Verified body the page hasn't read: queued, or sent and not yet
+    /// credited.
+    pub(crate) fn awaiting(&self) -> usize {
+        self.queued + self.sent.saturating_sub(self.credited)
     }
 
     /// The walk is over: the terminal output is out, or follows what is
@@ -600,7 +601,13 @@ impl<T: Copy> Core<T> {
             return;
         }
         self.queued += n;
-        self.queue.push_back(Queued { bytes, at: 0, from });
+        // Small pieces without a stream to credit join the queue's tail.
+        match self.queue.back_mut() {
+            Some(t) if from.is_none() && t.from.is_none() && t.bytes.len() + n <= MAX_FRAME => {
+                t.bytes.extend_from_slice(&bytes);
+            }
+            _ => self.queue.push_back(Queued { bytes, at: 0, from }),
+        }
         self.pump();
     }
 
@@ -672,7 +679,16 @@ impl<T: Copy> Core<T> {
             }
             let left = front.bytes.len() - front.at;
             let n = left.min(room).min(MAX_FRAME);
-            let frame = front.bytes[front.at..front.at + n].to_vec();
+            let part = &front.bytes[front.at..front.at + n];
+            // Small pieces of body coalesce into the frame main hasn't
+            // taken yet, so a walk that releases many small slices sends
+            // few frames.
+            match self.outputs.back_mut() {
+                Some(Output::Body(last)) if last.len() + n <= MAX_FRAME => {
+                    last.extend_from_slice(part);
+                }
+                _ => self.outputs.push_back(Output::Body(part.to_vec())),
+            }
             front.at += n;
             let from = front.from;
             if front.at == front.bytes.len() {
@@ -680,7 +696,6 @@ impl<T: Copy> Core<T> {
             }
             self.queued -= n;
             self.sent += n;
-            self.outputs.push_back(Output::Body(frame));
             if let Some(id) = from {
                 self.consumed(id, n);
             }

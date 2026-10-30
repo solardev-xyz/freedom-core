@@ -1369,6 +1369,9 @@ fn cbor_head(major: u8, n: u64, out: &mut Vec<u8>) {
         out.push(m | n as u8);
     } else if n <= 0xff {
         out.extend_from_slice(&[m | 24, n as u8]);
+    } else if n <= 0xffff {
+        out.push(m | 25);
+        out.extend_from_slice(&(n as u16).to_be_bytes());
     } else if n <= 0xffff_ffff {
         out.push(m | 26);
         out.extend_from_slice(&(n as u32).to_be_bytes());
@@ -1457,4 +1460,254 @@ fn a_fourth_record_is_refused_whatever_it_names() {
             assert!(body.contains("dnslink recursion limit exceeded"), "{body}");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Review round 1: the sniff's window, record-value paths, the page's hold.
+
+fn header_of<'h>(head: &'h fc_dweb::verifier::Head, name: &str) -> Option<&'h str> {
+    head.headers
+        .iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, v)| v.as_str())
+}
+
+/// The type is sniffed from bytes 0 to 512 only, as `GatewayCore` reads
+/// them: `<html` ending at byte 512 is HTML, one byte later it isn't, and a
+/// range ending sooner sniffs only its own bytes. Each expectation is
+/// `GatewayCore`'s own answer over the same blocks, through CARs and raw
+/// blocks, for a raw block and for a file whose marker is in its second
+/// leaf.
+#[test]
+fn the_type_is_sniffed_from_bytes_0_to_512() {
+    const HTML: &str = "text/html";
+    const BIN: &str = "application/octet-stream";
+    let mut blocks = Blocks::new(&load("dweb-verify.json"));
+    let mut roots = Vec::new();
+    for spaces in [507usize, 508, 509, 600] {
+        let mut body = vec![b' '; spaces];
+        body.extend_from_slice(b"<html>");
+        body.resize(1000, b'x');
+        let leaf = raw_cid(&body);
+        blocks.blocks.insert(key(&leaf), body.clone());
+        let (l1, l2) = (raw_cid(&body[..300]), raw_cid(&body[300..]));
+        blocks.blocks.insert(key(&l1), body[..300].to_vec());
+        blocks.blocks.insert(key(&l2), body[300..].to_vec());
+        let node = file_node(&[(&l1, 300), (&l2, 700)], 1000, &[300, 700]);
+        let file = cid_of(0x70, &node, false);
+        blocks.blocks.insert(key(&file), node);
+        roots.push((spaces, body, leaf, file));
+    }
+    let world = Gateway {
+        blocks: &blocks,
+        changes: vec![],
+    };
+    for (spaces, body, leaf, file) in &roots {
+        let html = *spaces <= 508;
+        let cases: [(Method, Option<&str>, &str); 6] = [
+            (Method::Get, None, if html { HTML } else { BIN }),
+            (Method::Head, None, if html { HTML } else { BIN }),
+            (Method::Get, Some("bytes=0-510"), BIN),
+            (
+                Method::Get,
+                Some("bytes=0-511"),
+                if *spaces <= 507 { HTML } else { BIN },
+            ),
+            (
+                Method::Get,
+                Some("bytes=0-700"),
+                if html { HTML } else { BIN },
+            ),
+            (Method::Get, Some("bytes=5-700"), BIN),
+        ];
+        for (method, range, want) in cases {
+            for root in [leaf, file] {
+                for car in [true, false] {
+                    let p = ranged(&text(root), "", range);
+                    let label = format!("{spaces} {method:?} {range:?} car={car}");
+                    let got = run(&label, &p, method, &world, opts(car, 0));
+                    let head = got.head.as_ref().unwrap_or_else(|| panic!("{label}"));
+                    assert_eq!(header_of(head, "content-type"), Some(want), "{label}");
+                    let (a, b) = match range {
+                        None => (0, 999),
+                        Some(r) => {
+                            let (a, b) = r[6..].split_once('-').unwrap();
+                            (a.parse::<usize>().unwrap(), b.parse::<usize>().unwrap())
+                        }
+                    };
+                    if method == Method::Get {
+                        assert_eq!(got.ending, Some(Ending::End), "{label}");
+                        assert!(got.body == body[a..=b], "{label}");
+                    } else {
+                        assert!(got.body.is_empty(), "{label}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A record's value path as `GatewayCore` reads it: its segments matched
+/// as written (an encoded name isn't decoded, so isn't found), a `.` or
+/// `..`, written or percent-encoded, refused with the 400 before anything
+/// else is asked, in a value naming another name too; and the value's
+/// segments and the request's together at most 256, across every record.
+/// Each expectation is `GatewayCore`'s own answer over the same blocks and
+/// records, but past 256 segments, which is the core's bound alone.
+#[test]
+fn record_values_are_paths_as_gatewaycore_reads_them() {
+    let mut blocks = Blocks::new(&load("dweb-verify.json"));
+    let style = content("ipfs-site-docs-page", 1200);
+    let traversal = "path traversal segments are not allowed";
+    // (value suffix after /ipfs/<site>, request path, expectation).
+    enum Want {
+        Page(u16, &'static str),
+        Body(Vec<u8>),
+        Unverifiable,
+    }
+    let deep = |n: usize| "/a".repeat(n);
+    let cases: Vec<(String, &str, Want)> = vec![
+        ("/..".into(), "/", Want::Page(400, traversal)),
+        ("/docs/..".into(), "/", Want::Page(400, traversal)),
+        ("/%2e%2e".into(), "/", Want::Page(400, traversal)),
+        ("/docs/%2E%2e".into(), "/", Want::Page(400, traversal)),
+        ("/.".into(), "/", Want::Page(400, traversal)),
+        ("/./index.html".into(), "/", Want::Page(400, traversal)),
+        ("/docs/page.html".into(), "/", Want::Body(style.clone())),
+        ("//docs//page.html".into(), "/", Want::Body(style.clone())),
+        ("/docs".into(), "/page.html", Want::Body(style.clone())),
+        (
+            "/docs%2fpage.html".into(),
+            "/",
+            Want::Page(404, "not found"),
+        ),
+        (
+            "/%C3%BCn%C3%AF/%C3%A7%C3%B8d%C3%A9.txt".into(),
+            "/",
+            Want::Page(404, "not found"),
+        ),
+        ("/%2e%2".into(), "/", Want::Page(404, "not found")),
+        (deep(255), "/b", Want::Page(404, "not found")),
+        (deep(256), "/b", Want::Unverifiable),
+    ];
+    let mut names = Vec::new();
+    for (i, (suffix, _, _)) in cases.iter().enumerate() {
+        let (key, name) = ipns_key(200 + i as u8);
+        let value = format!("/ipfs/{SITE}{suffix}");
+        blocks
+            .records
+            .insert(name.clone(), ipns_record(&key, &value));
+        names.push(name);
+    }
+    // Across two records: a name whose value names another name.
+    let chain = |seed: u8, first: &str, second: &str, blocks: &mut Blocks| {
+        let (k1, n1) = ipns_key(seed);
+        let (k2, n2) = ipns_key(seed + 1);
+        blocks
+            .records
+            .insert(n1.clone(), ipns_record(&k1, &format!("/ipns/{n2}{first}")));
+        blocks
+            .records
+            .insert(n2, ipns_record(&k2, &format!("/ipfs/{SITE}{second}")));
+        n1
+    };
+    let up = chain(240, "/..", "/docs", &mut blocks);
+    let fits = chain(242, &deep(200), &deep(56), &mut blocks);
+    let over = chain(244, &deep(200), &deep(57), &mut blocks);
+    let world = Gateway {
+        blocks: &blocks,
+        changes: vec![],
+    };
+    let check = |name: &str, path: &str, want: &Want, records: Option<usize>| {
+        let p = plan(Root::Ipns(name.to_owned()), path, vec![]);
+        let label = format!("{name} {path}");
+        let got = run(&label, &p, Method::Get, &world, opts(true, 0));
+        match want {
+            Want::Page(status, detail) => {
+                let head = got
+                    .head
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("{label}: {:?}", got.ending));
+                assert_eq!(head.status, *status, "{label}");
+                let body = String::from_utf8(got.body.clone()).unwrap();
+                assert!(
+                    body.contains(&format!("<p>{detail}</p>")),
+                    "{label}: {body}"
+                );
+            }
+            Want::Body(b) => {
+                assert_eq!(got.ending, Some(Ending::End), "{label}");
+                assert!(got.body == *b, "{label}");
+            }
+            Want::Unverifiable => assert_eq!(
+                got.ending,
+                Some(Ending::Error(
+                    502,
+                    fc_dweb::verifier::IPFS_UNVERIFIABLE.to_owned()
+                )),
+                "{label}"
+            ),
+        }
+        if let Some(n) = records {
+            let asked = got
+                .pieces
+                .iter()
+                .filter(|r| r.path.starts_with("/ipns/"))
+                .count();
+            assert_eq!(asked, n, "{label}");
+        }
+    };
+    for ((_, path, want), name) in cases.iter().zip(&names) {
+        check(name, path, want, None);
+    }
+    // The `..` in the first value: refused before the second record.
+    check(&up, "/", &Want::Page(400, traversal), Some(1));
+    check(&fits, "/", &Want::Page(404, "not found"), Some(2));
+    check(&over, "/", &Want::Unverifiable, Some(2));
+}
+
+/// The page holds raw blocks back counting what it hasn't read: the body
+/// queued and what was sent without credit, up to and including 512 KiB.
+/// A file of 13 raw leaves of 128 KiB, and a page that never reads: the
+/// first 8 are asked at once, then one more after each of the first three
+/// leaves goes out (128, 256 and 384 KiB unread), and none once 512 KiB
+/// wait.
+#[test]
+fn raw_blocks_wait_once_512_kib_are_unread() {
+    let mut blocks = Blocks::new(&load("dweb-verify.json"));
+    let leaf = 128 << 10;
+    let content = content("checks-unread", 13 * leaf);
+    let mut links = Vec::new();
+    for i in 0..13 {
+        let part = &content[i * leaf..(i + 1) * leaf];
+        let c = raw_cid(part);
+        blocks.blocks.insert(key(&c), part.to_vec());
+        links.push(c);
+    }
+    let refs: Vec<(&[u8], u64)> = links.iter().map(|c| (&c[..], leaf as u64)).collect();
+    let node = file_node(&refs, 13 * leaf as u64, &[leaf as u64; 13]);
+    let root = cid_of(0x70, &node, false);
+    blocks.blocks.insert(key(&root), node);
+    let world = Gateway {
+        blocks: &blocks,
+        changes: vec![],
+    };
+    let p = ranged(&text(&root), "", None);
+    let got = run(
+        "unread",
+        &p,
+        Method::Get,
+        &world,
+        Opts {
+            page: Some(0),
+            ..opts(false, 0)
+        },
+    );
+    let leaves = got
+        .pieces
+        .iter()
+        .filter(|r| r.path != format!("/ipfs/{}?format=raw", text(&root)))
+        .count();
+    assert_eq!(leaves, 11, "{:?}", got.ending);
+    assert!(got.ending.is_none());
 }
