@@ -171,7 +171,12 @@ publish job that runs no repository code.
        a current one;
      - each with a first lookup after confinement and none before it, with
        and without `resolve` and `mdns4_minimal` in `nsswitch.conf`;
-     - `confinement`'s `resolution` matches what resolves.
+     - `confinement`'s `resolution` matches what resolves: `resolv_conf`
+       for `freedom-ipfsd`, whose resolver reads `/etc/resolv.conf` itself;
+     - glibc 2.17 (CentOS 7), the oldest the asset table claims: a load
+       completes confined. Below 2.25 glibc has no `getrandom`, so the
+       getrandom crate reads `/dev/random` and `/dev/urandom`, which the
+       policy grants.
    - **The network:** `socks5` mode through Arti on loopback, and through a
      SOCKS proxy on the LAN (`--network socks5:<a private address>:<port>`).
    - **SQLite:** the persistent process's store under the release policy:

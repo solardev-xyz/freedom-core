@@ -408,7 +408,7 @@ mod tests {
             refer: false,
             min_abi: 1,
             network: Network::Offline,
-            system_resolver: false,
+            resolver: crate::confine::Resolver::None,
             descriptors: Vec::new(),
             interface_index: false,
         };

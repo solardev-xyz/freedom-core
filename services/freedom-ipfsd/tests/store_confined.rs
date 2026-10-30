@@ -45,7 +45,7 @@ fn child(case: &str) {
         refer: false,
         min_abi: 1,
         network: Network::Offline,
-        system_resolver: false,
+        resolver: confine::Resolver::None,
         descriptors: Vec::new(),
         interface_index: false,
     })
