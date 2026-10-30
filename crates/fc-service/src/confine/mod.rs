@@ -71,12 +71,10 @@ pub struct Policy {
     /// it no Landlock rules are applied, and `files` is `unavailable`.
     pub min_abi: u32,
     pub network: Network,
-    /// Whether the service resolves names through the C library in
-    /// `direct` mode (0010, "Name resolution through glibc"): then the
-    /// report says whether it can reach DNS while confined. No lookup is
-    /// made before the rules: glibc loads its sources at the first one
-    /// after, from the read grants.
-    pub system_resolver: bool,
+    /// How the service resolves names in `direct` mode (0010, "Name
+    /// resolution through glibc"): what is granted for it, and what the
+    /// report's `resolution` says.
+    pub resolver: Resolver,
     /// The descriptors above stderr the service opened before `confine`
     /// and keeps: the lock ([`crate::gate::Gate::descriptors`]), and any
     /// directory it holds open. Every other descriptor above stderr is
@@ -118,15 +116,38 @@ pub enum Status {
     None,
 }
 
-/// Whether the C library's resolver reaches DNS while confined.
+/// How a service resolves names (0010, "Name resolution through glibc").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolver {
+    /// The C library's resolver, `getaddrinfo` through `nsswitch.conf`
+    /// (`freedom-radicled`): glibc's resolver configuration, the loader's
+    /// cache and the C library's directory are granted, for its NSS
+    /// sources. No lookup is made before the rules: glibc loads its
+    /// sources at the first one after, from the read grants.
+    System,
+    /// The service's own resolver over `/etc/resolv.conf`'s servers
+    /// (`freedom-ipfsd`'s hickory), never `getaddrinfo`: `resolv.conf` and
+    /// `/etc/hosts` alone are granted, nothing of `nsswitch.conf` or the
+    /// NSS sources.
+    ResolvConf,
+    /// No name resolution.
+    None,
+}
+
+/// What resolves names while confined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Resolution {
-    /// `nsswitch.conf` reaches its `dns` source once the sources that need
-    /// a local socket answer that they are unavailable.
+    /// The C library's: `nsswitch.conf` reaches its `dns` source once the
+    /// sources that need a local socket answer that they are unavailable.
     System,
-    /// It doesn't: names outside `/etc/hosts` don't resolve while confined.
+    /// The C library's doesn't: names outside `/etc/hosts` don't resolve
+    /// while confined.
     FilesOnly,
+    /// The service's own resolver, over `/etc/resolv.conf`'s servers, which
+    /// it can read confined; `nsswitch.conf` doesn't apply. When it can't
+    /// read the file, the reason says what it falls back to.
+    ResolvConf,
 }
 
 /// What confinement the process got: `hello`'s `confinement`.
@@ -409,17 +430,20 @@ pub fn resolver_grant_in(file: &Path, etc: &Path) -> Option<PathBuf> {
 }
 
 /// The system files a confined service reads (design 0010, "What each
-/// service needs"): on Linux, glibc's resolver configuration,
-/// `ld.so.cache`, the C library's own directory, `/proc/self` and the
-/// cgroup tree. Each is named where it really lives, after its symlinks.
-/// Empty elsewhere.
-pub fn system_read_only() -> Vec<PathBuf> {
+/// service needs"): on Linux, `/proc/self`, the cgroup tree and the random
+/// devices, and for `resolver` its files: glibc's resolver configuration,
+/// `ld.so.cache` and the C library's own directory for
+/// [`Resolver::System`], `resolv.conf` and `/etc/hosts` for
+/// [`Resolver::ResolvConf`]. Each is named where it really lives, after its
+/// symlinks. Empty elsewhere.
+pub fn system_read_only(resolver: Resolver) -> Vec<PathBuf> {
     #[cfg(target_os = "linux")]
     {
-        resolver::system_read_only()
+        resolver::system_read_only(resolver)
     }
     #[cfg(not(target_os = "linux"))]
     {
+        let _ = resolver;
         Vec::new()
     }
 }

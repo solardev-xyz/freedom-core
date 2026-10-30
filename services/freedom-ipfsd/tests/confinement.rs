@@ -55,12 +55,11 @@ fn hello_reports_the_policy_and_the_confinement_the_kernel_offers() {
             assert_eq!(confinement["files"], "enforced", "{confinement}");
             assert_eq!(confinement["exec"], "enforced", "{confinement}");
             assert_eq!(confinement["network"], "none", "{confinement}");
-            // freedom-ipfs-net resolves through the C library.
+            // freedom-ipfs-net resolves with hickory over resolv.conf,
+            // which it reads confined: nsswitch.conf doesn't apply.
+            assert_eq!(confinement["resolution"], "resolv_conf", "{confinement}");
             assert!(
-                matches!(
-                    confinement["resolution"].as_str(),
-                    Some("system" | "files_only")
-                ),
+                confinement["reasons"].get("resolution").is_none(),
                 "{confinement}"
             );
         }
