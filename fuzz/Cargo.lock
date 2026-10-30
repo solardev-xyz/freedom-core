@@ -408,7 +408,7 @@ dependencies = [
 
 [[package]]
 name = "fc-ipfs"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "ed25519-dalek",
  "rsa",
