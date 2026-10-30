@@ -31,7 +31,10 @@ use fc_swarm::verify::{Chunk, FeedUpdate, MAX_CHUNK_WIRE, Refusal, SPAN_SIZE};
 
 use super::ant::{self, Entry, Feed, NotFound, Ranges};
 use super::jobs::{Verdict, Work};
-use super::{Core, Failure, MAX_CHUNK_PIECES, PieceFailure, PieceId};
+use super::{Ask, Failure, MAX_CHUNK_PIECES, PieceFailure, PieceId};
+
+/// The machine's bookkeeping, with the Swarm walk's tags.
+type Core = super::Core<Tag>;
 use crate::bzz::SWARM_HEADERS;
 use crate::plan::ContentTrust;
 use crate::validate::Refusal as PlanRefusal;
@@ -131,8 +134,7 @@ fn fetch_chunk(core: &mut Core, tag: Tag, address: &[u8; 32]) -> Option<PieceId>
         tag,
         format!("/chunks/{}", ant::hex(address)),
         chunk_headers(),
-        false,
-        SOC_MAX,
+        Ask::Whole(SOC_MAX),
     )
 }
 
@@ -907,8 +909,7 @@ impl Body {
                 Tag::Bytes,
                 format!("/bytes/{}", ant::hex(&self.reference)),
                 headers,
-                true,
-                0,
+                Ask::Stream(None),
             )
             .ok_or(Failure::Unverifiable)?;
         self.stream = Some(ByteStream {
@@ -1568,7 +1569,7 @@ impl Walk {
                 headers.push(("swarm-only-root-chunk".to_owned(), "true".to_owned()));
                 let path = format!("/feeds/{}/{}", ant::hex(&owner), ant::hex(&topic));
                 if core
-                    .fetch(Tag::Feed, path, headers, false, super::MAX_WHOLE)
+                    .fetch(Tag::Feed, path, headers, Ask::Whole(super::MAX_WHOLE))
                     .is_none()
                 {
                     return self.end(core, Failure::Unverifiable);
@@ -2030,4 +2031,44 @@ fn feed_index(value: &str) -> Option<u64> {
         return None;
     }
     u64::from_str_radix(value, 16).ok()
+}
+
+impl super::Events<Tag> for Walk {
+    fn whole(
+        &mut self,
+        core: &mut Core,
+        tag: Tag,
+        status: u16,
+        headers: &[(String, String)],
+        body: Vec<u8>,
+    ) {
+        Walk::whole(self, core, tag, status, headers, body);
+    }
+
+    fn stream_head(
+        &mut self,
+        core: &mut Core,
+        tag: Tag,
+        id: PieceId,
+        status: u16,
+        headers: &[(String, String)],
+    ) {
+        Walk::stream_head(self, core, tag, id, status, headers);
+    }
+
+    fn stream_data(&mut self, core: &mut Core, tag: Tag, id: PieceId, bytes: Vec<u8>) {
+        Walk::stream_data(self, core, tag, id, bytes);
+    }
+
+    fn stream_end(&mut self, core: &mut Core, tag: Tag, id: PieceId) {
+        Walk::stream_end(self, core, tag, id);
+    }
+
+    fn failed(&mut self, core: &mut Core, tag: Tag, failure: PieceFailure) {
+        Walk::failed(self, core, tag, failure);
+    }
+
+    fn hashed(&mut self, core: &mut Core, tag: Tag, verdict: Verdict, work: Work) {
+        Walk::hashed(self, core, tag, verdict, work);
+    }
 }

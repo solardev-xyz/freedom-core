@@ -16,51 +16,24 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use base64::Engine as _;
 use fc_dweb::verifier::{
-    Head, Method, Misuse, Output, PieceFailure, PieceId, PieceRequest, REQUEST_BUDGET,
-    STREAM_WINDOW, Verifier,
+    Method, Misuse, Options, Output, PieceId, PieceRequest, STREAM_WINDOW, Verifier,
 };
 use fc_dweb::{
     Ant, Backend, ContentTrust, ErrorPlan, Node, ResponseOp, Root, Trust, Verify, retry, timers,
 };
 use fc_swarm::tree;
 use serde_json::Value as Json;
-use sha2::{Digest, Sha256};
 
-fn load(name: &str) -> Json {
-    let path = format!("{}/../../vectors/{name}", env!("CARGO_MANIFEST_DIR"));
-    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
-}
-
-fn b64(v: &Json) -> Vec<u8> {
-    base64::engine::general_purpose::STANDARD
-        .decode(v.as_str().unwrap())
-        .unwrap()
-}
+mod common;
+use common::{
+    Answer, Ending, Expected, Opts, Order, Run, b64, check_body, content, load, pairs, run,
+};
 
 fn hex32(s: &str) -> [u8; 32] {
     hex::decode(s).unwrap().try_into().unwrap()
-}
-
-/// content(seed, n): SHA-256(seed ‖ u64_be(i)), concatenated and cut.
-fn content(seed: &str, n: usize) -> Vec<u8> {
-    if let Some(text) = seed.strip_prefix("literal:") {
-        return text.as_bytes()[..n].to_vec();
-    }
-    let mut out = Vec::with_capacity(n + 32);
-    let mut i = 0u64;
-    while out.len() < n {
-        let mut h = Sha256::new();
-        h.update(seed.as_bytes());
-        h.update(i.to_be_bytes());
-        out.extend_from_slice(&h.finalize());
-        i += 1;
-    }
-    out.truncate(n);
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -306,30 +279,14 @@ fn header<'a>(headers: &'a Json, name: &str) -> Option<&'a str> {
         .and_then(|h| h[1].as_str())
 }
 
-/// What a piece's request gets.
-enum Answer {
-    Whole {
-        status: u16,
-        headers: Vec<(String, String)>,
-        body: Vec<u8>,
-    },
-    Stream {
-        status: u16,
-        headers: Vec<(String, String)>,
-        body: Vec<u8>,
-        /// Bytes sent before the stream goes silent.
-        stall_after: Option<usize>,
-    },
-}
-
-/// The honest node with one case's chunks and changes.
-struct World<'s> {
+/// The honest Ant with one case's chunks and changes.
+struct Antd<'s> {
     store: &'s Store,
     extra: HashMap<[u8; 32], Vec<u8>>,
     changes: Vec<Json>,
 }
 
-impl<'s> World<'s> {
+impl<'s> Antd<'s> {
     fn honest(store: &'s Store) -> Self {
         Self {
             store,
@@ -500,324 +457,10 @@ impl<'s> World<'s> {
 // ---------------------------------------------------------------------------
 // The driver: main, the hashing pool and the page.
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Ending {
-    End,
-    Abort(String, String),
-    Error(u16, String),
-    Cancelled,
-}
-
-#[derive(Debug, Default)]
-struct Run {
-    head: Option<Head>,
-    body: Vec<u8>,
-    ending: Option<Ending>,
-    pieces: Vec<PieceRequest>,
-    jobs: usize,
-    /// The most the request held or had reserved at once.
-    peak: usize,
-    /// For each answer held back: the streams open when it went out.
-    held_after: Vec<usize>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Order {
-    /// Each action in the order it was asked for.
-    Fifo,
-    /// The newest first: replies and results out of order.
-    Lifo,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Opts {
-    budget: usize,
-    order: Order,
-    /// The page's credit per step, or all at once.
-    page: Option<usize>,
-    /// Cancel the request after this many steps.
-    cancel_after: Option<usize>,
-    /// A chunk whose answer main holds back until nothing else moves.
-    hold: Option<[u8; 32]>,
-}
-
-impl Default for Opts {
-    fn default() -> Self {
-        Self {
-            budget: REQUEST_BUDGET,
-            order: Order::Fifo,
-            page: None,
-            cancel_after: None,
-            hold: None,
-        }
+impl common::World for Antd<'_> {
+    fn answer(&self, req: &PieceRequest) -> Answer {
+        Antd::answer(self, req)
     }
-}
-
-enum Action {
-    Answer(PieceRequest),
-    Job(fc_dweb::verifier::Job),
-    More(PieceId),
-    Terminal(PieceId),
-    Page,
-}
-
-struct SimStream {
-    body: Vec<u8>,
-    at: usize,
-    sent: usize,
-    credited: usize,
-    stall_after: Option<usize>,
-    cancelled: bool,
-    done: bool,
-}
-
-fn run(label: &str, plan: &Verify, method: Method, world: &World<'_>, opts: Opts) -> Run {
-    let mut v = Verifier::with_budget(7, plan, method, None, false, opts.budget)
-        .unwrap_or_else(|e| panic!("plan refused at {e}: {plan:?}"));
-    let mut out = Run::default();
-    let mut queue: VecDeque<Action> = VecDeque::new();
-    let mut streams: BTreeMap<PieceId, SimStream> = BTreeMap::new();
-    let mut cancelled_wholes: BTreeSet<PieceId> = BTreeSet::new();
-    let mut owed_page = 0usize;
-    let mut steps = 0usize;
-    let mut held: Vec<Action> = Vec::new();
-    let held_path = opts.hold.map(|a| format!("/chunks/{}", hex::encode(a)));
-    loop {
-        while let Some(o) = v.poll() {
-            match o {
-                Output::Piece(req) => {
-                    assert!(out.ending.is_none(), "a piece after the end");
-                    out.pieces.push(req.clone());
-                    queue.push_back(Action::Answer(req));
-                }
-                Output::CancelPiece(id) => {
-                    if let Some(s) = streams.get_mut(&id) {
-                        assert!(!s.cancelled);
-                        s.cancelled = true;
-                        queue.push_back(Action::Terminal(id));
-                    } else {
-                        cancelled_wholes.insert(id);
-                    }
-                }
-                Output::Credit { piece, bytes } => {
-                    let s = streams.get_mut(&piece).expect("credit for a stream");
-                    assert!(!s.cancelled, "credit after a cancel");
-                    assert!(bytes > 0);
-                    s.credited += bytes;
-                    assert!(
-                        s.credited <= s.sent,
-                        "credit for bytes never received: {} of {}",
-                        s.credited,
-                        s.sent
-                    );
-                    queue.push_back(Action::More(piece));
-                }
-                Output::Hash(job) => {
-                    out.jobs += 1;
-                    queue.push_back(Action::Job(job));
-                }
-                Output::Head(h) => {
-                    assert!(out.head.is_none() && out.ending.is_none());
-                    out.head = Some(h);
-                }
-                Output::Body(b) => {
-                    assert!(
-                        out.head.as_ref().is_some_and(|h| h.body),
-                        "a body without its head"
-                    );
-                    assert!(out.ending.is_none());
-                    assert!(!b.is_empty() && b.len() <= fc_dweb::verifier::MAX_FRAME);
-                    owed_page += b.len();
-                    out.body.extend_from_slice(&b);
-                    if opts.page.is_none() {
-                        v.body_credit(owed_page).unwrap();
-                        owed_page = 0;
-                    } else {
-                        queue.push_back(Action::Page);
-                    }
-                }
-                Output::End => end(&mut out, Ending::End),
-                Output::Abort { code, message } => {
-                    end(
-                        &mut out,
-                        Ending::Abort(code.as_str().to_owned(), message.to_owned()),
-                    );
-                }
-                Output::Error(e) => end(&mut out, Ending::Error(e.status, e.message.clone())),
-                Output::Cancelled => end(&mut out, Ending::Cancelled),
-            }
-        }
-        assert!(
-            v.reserved() <= opts.budget,
-            "reserved {} past the budget",
-            v.reserved()
-        );
-        out.peak = out.peak.max(v.reserved());
-        // Credit never runs past the reservation: the room main may still
-        // fill on every open stream is room the machine holds reserved.
-        let mut room = 0;
-        for s in streams.values() {
-            assert!(s.sent - s.credited <= STREAM_WINDOW);
-            if !s.done {
-                room += STREAM_WINDOW - (s.sent - s.credited);
-            }
-        }
-        assert!(
-            room <= v.reserved(),
-            "{label}: open credit {room} past the reservation {}",
-            v.reserved()
-        );
-        assert!(
-            owed_page <= fc_dweb::verifier::BODY_WINDOW,
-            "{label}: the body ran past main's window"
-        );
-        steps += 1;
-        if opts.cancel_after == Some(steps) {
-            v.cancel();
-            continue;
-        }
-        let action = match opts.order {
-            Order::Fifo => queue.pop_front(),
-            Order::Lifo => queue.pop_back(),
-        };
-        let action = match action {
-            Some(Action::Answer(req)) if held_path.as_deref() == Some(req.path.as_str()) => {
-                held.push(Action::Answer(req));
-                continue;
-            }
-            None if !held.is_empty() => {
-                out.held_after.push(streams.len());
-                held.pop()
-            }
-            a => a,
-        };
-        let Some(action) = action else {
-            // Nothing moves: main's body idle timer ends a silent stream
-            // the core still waits on.
-            let stalled = streams
-                .iter()
-                .find(|(_, s)| !s.done && !s.cancelled)
-                .map(|(id, _)| *id);
-            if let Some(id) = stalled {
-                streams.get_mut(&id).unwrap().done = true;
-                v.piece_failed(id, PieceFailure::Stalled).unwrap();
-                continue;
-            }
-            break;
-        };
-        match action {
-            Action::Answer(req) => {
-                if cancelled_wholes.contains(&req.id) {
-                    v.piece_failed(req.id, PieceFailure::Aborted).unwrap();
-                    continue;
-                }
-                match world.answer(&req) {
-                    Answer::Whole {
-                        status,
-                        headers,
-                        body,
-                    } => {
-                        if body.len() > req.max_bytes.unwrap() {
-                            v.piece_failed(req.id, PieceFailure::TooLarge).unwrap();
-                        } else {
-                            v.piece_whole(req.id, status, headers, body).unwrap();
-                        }
-                    }
-                    Answer::Stream {
-                        status,
-                        headers,
-                        body,
-                        stall_after,
-                    } => {
-                        v.piece_head(req.id, status, headers).unwrap();
-                        streams.insert(
-                            req.id,
-                            SimStream {
-                                body,
-                                at: 0,
-                                sent: 0,
-                                credited: 0,
-                                stall_after,
-                                cancelled: false,
-                                done: false,
-                            },
-                        );
-                        queue.push_back(Action::More(req.id));
-                    }
-                }
-            }
-            Action::Job(job) => v.hashed(job.run()).unwrap(),
-            Action::More(id) => {
-                let s = streams.get_mut(&id).unwrap();
-                if s.done || s.cancelled {
-                    continue;
-                }
-                let limit = s.stall_after.unwrap_or(s.body.len()).min(s.body.len());
-                if s.at < limit {
-                    let room = STREAM_WINDOW - (s.sent - s.credited);
-                    if room == 0 {
-                        continue;
-                    }
-                    let n = room.min(fc_dweb::verifier::MAX_FRAME).min(limit - s.at);
-                    let frame = s.body[s.at..s.at + n].to_vec();
-                    s.at += n;
-                    s.sent += n;
-                    v.piece_data(id, frame).unwrap();
-                    queue.push_back(Action::More(id));
-                } else if s.stall_after.is_none() {
-                    s.done = true;
-                    v.piece_end(id).unwrap();
-                }
-            }
-            Action::Terminal(id) => {
-                let s = streams.get_mut(&id).unwrap();
-                if s.done {
-                    continue;
-                }
-                // A frame that crossed the cancel, within the window, then
-                // main's abort.
-                let room = STREAM_WINDOW - (s.sent - s.credited);
-                if s.at < s.body.len() && room > 0 && s.stall_after.is_none_or(|n| s.at < n) {
-                    let n = (s.body.len() - s.at).min(1000).min(room);
-                    let frame = s.body[s.at..s.at + n].to_vec();
-                    s.at += n;
-                    s.sent += n;
-                    v.piece_data(id, frame).unwrap();
-                }
-                s.done = true;
-                v.piece_failed(id, PieceFailure::Aborted).unwrap();
-            }
-            Action::Page => {
-                if owed_page > 0 {
-                    let n = owed_page.min(opts.page.unwrap());
-                    owed_page -= n;
-                    v.body_credit(n).unwrap();
-                    if owed_page > 0 {
-                        queue.push_back(Action::Page);
-                    }
-                }
-            }
-        }
-    }
-    assert!(
-        out.ending.is_some() || out.head.as_ref().is_some_and(|h| !h.body),
-        "{label}: no terminal: {:?} {} bytes, pieces {:?}",
-        out.head,
-        out.body.len(),
-        out.pieces.iter().map(|p| &p.path).collect::<Vec<_>>()
-    );
-    assert_eq!(v.reserved(), 0, "{label}: reservations left");
-    assert!(v.finished(), "{label}: not finished");
-    out
-}
-
-fn end(out: &mut Run, e: Ending) {
-    assert!(
-        out.ending.is_none(),
-        "two terminals: {:?} then {e:?}",
-        out.ending
-    );
-    out.ending = Some(e);
 }
 
 fn plan(root: &str, path: &str, query: &str, headers: Vec<(String, String)>) -> Verify {
@@ -863,37 +506,6 @@ fn body_of(store: &Store, b: &Json) -> Expected {
     }
     assert_eq!(b["length"], 0, "{b}");
     Expected::Bytes(vec![])
-}
-
-enum Expected {
-    Bytes(Vec<u8>),
-    Digest(usize, String),
-}
-
-fn check_body(id: &str, got: &[u8], want: &Expected) {
-    match want {
-        Expected::Bytes(b) => {
-            assert_eq!(got.len(), b.len(), "{id}: body length");
-            assert!(got == b.as_slice(), "{id}: body bytes");
-        }
-        Expected::Digest(n, h) => {
-            assert_eq!(got.len(), *n, "{id}: body length");
-            assert_eq!(hex::encode(Sha256::digest(got)), *h, "{id}: body digest");
-        }
-    }
-}
-
-fn pairs(v: &Json) -> Vec<(String, String)> {
-    v.as_array()
-        .unwrap()
-        .iter()
-        .map(|p| {
-            (
-                p[0].as_str().unwrap().to_owned(),
-                p[1].as_str().unwrap().to_owned(),
-            )
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -989,7 +601,7 @@ struct Replayed {
 fn replay(choose: impl Fn(&str, &str) -> bool) -> Replayed {
     let doc = load("dweb-verify.json");
     let store = Store::new(&doc);
-    let world = World::honest(&store);
+    let world = Antd::honest(&store);
     let node_headers: Vec<String> = doc["meta"]["ant"]["node_headers"]["names"]
         .as_array()
         .unwrap()
@@ -1030,7 +642,7 @@ fn replay(choose: impl Fn(&str, &str) -> bool) -> Replayed {
             Method::Get
         };
         let p = plan(root, path, query, headers);
-        if Verifier::new(1, &p, method, None, false).is_err() {
+        if Verifier::new(1, &p, method, None, false, Options::default()).is_err() {
             // No verify plan reaches it: main's validation refuses an
             // encoded separator, as the core does.
             unplanned.push(id.to_owned());
@@ -1159,7 +771,7 @@ fn check_case(store: &Store, id: &str, step: &Json, opts: Opts) {
     } else {
         Method::Get
     };
-    let world = World::of(store, &step["world"]);
+    let world = Antd::of(store, &step["world"]);
     let got = run(id, &plan, method, &world, opts);
     let x = &step["expect"];
     if let Some(err) = x.get("error") {
@@ -1302,10 +914,10 @@ const FILE_512K: &str = "d5bc5564ebcbeee060f251c1b4befe69514a801fb2a363635657fbe
 fn hash_results_it_did_not_ask_for_are_refused() {
     let doc = load("dweb-verify.json");
     let store = Store::new(&doc);
-    let world = World::honest(&store);
+    let world = Antd::honest(&store);
     let p = plan(SITE_A, "/style.css", "", vec![]);
-    let mut v = Verifier::new(3, &p, Method::Get, None, false).unwrap();
-    let mut other = Verifier::new(4, &p, Method::Get, None, false).unwrap();
+    let mut v = Verifier::new(3, &p, Method::Get, None, false, Options::default()).unwrap();
+    let mut other = Verifier::new(4, &p, Method::Get, None, false, Options::default()).unwrap();
     let Some(Output::Piece(req)) = v.poll() else {
         panic!("the root first")
     };
@@ -1350,9 +962,9 @@ fn hash_results_it_did_not_ask_for_are_refused() {
 fn stream_protocol_errors() {
     let doc = load("dweb-verify.json");
     let store = Store::new(&doc);
-    let world = World::honest(&store);
+    let world = Antd::honest(&store);
     let p = plan(FILE_512K, "/", "", vec![]);
-    let mut v = Verifier::new(5, &p, Method::Get, None, false).unwrap();
+    let mut v = Verifier::new(5, &p, Method::Get, None, false, Options::default()).unwrap();
     let mut queue = VecDeque::new();
     let stream = loop {
         while let Some(o) = v.poll() {
@@ -1415,7 +1027,7 @@ fn stream_protocol_errors() {
 #[test]
 fn budgets_exhausted_at_each_reservation() {
     let store = Store::new(&load("dweb-verify.json"));
-    let world = World::honest(&store);
+    let world = Antd::honest(&store);
     let style = plan(SITE_A, "/style.css", "", vec![]);
     let big = plan(
         FILE_512K,
@@ -1467,7 +1079,7 @@ fn budgets_exhausted_at_each_reservation() {
 #[test]
 fn cancel_at_every_step() {
     let store = Store::new(&load("dweb-verify.json"));
-    let world = World::honest(&store);
+    let world = Antd::honest(&store);
     let p = plan(
         FILE_512K,
         "/",
@@ -1509,7 +1121,7 @@ fn cancel_at_every_step() {
 #[test]
 fn ranges_at_leaf_boundaries() {
     let store = Store::new(&load("dweb-verify.json"));
-    let world = World::honest(&store);
+    let world = Antd::honest(&store);
     let want = content("file-524288", 524_288);
     for (a, b) in [
         (0u64, 0u64),
@@ -1541,7 +1153,7 @@ fn ranges_at_leaf_boundaries() {
 #[test]
 fn head_reads_only_to_the_file_root() {
     let store = Store::new(&load("dweb-verify.json"));
-    let world = World::honest(&store);
+    let world = Antd::honest(&store);
     let p = plan(SITE_A, "/style.css", "", vec![]);
     let got = run("head", &p, Method::Head, &world, Opts::default());
     assert!(!got.head.as_ref().unwrap().body);
@@ -1557,7 +1169,7 @@ fn head_reads_only_to_the_file_root() {
 #[test]
 fn credit_within_the_reservation_on_a_range_and_an_abort() {
     let store = Store::new(&load("dweb-verify.json"));
-    let honest = World::honest(&store);
+    let honest = Antd::honest(&store);
     let want = content("file-524288", 524_288);
     let slow = Opts {
         page: Some(4096),
@@ -1574,7 +1186,7 @@ fn credit_within_the_reservation_on_a_range_and_an_abort() {
     assert_eq!(got.ending, Some(Ending::End));
     assert_eq!(got.body, want[5000..=400_000]);
     // An abort: the sixth leaf flipped in the stream and in /chunks.
-    let flipped = World {
+    let flipped = Antd {
         store: &store,
         extra: HashMap::new(),
         changes: vec![
@@ -1616,7 +1228,7 @@ fn credit_within_the_reservation_on_a_range_and_an_abort() {
 #[test]
 fn a_slow_page_backpressures_the_stream() {
     let store = Store::new(&load("dweb-verify.json"));
-    let honest = World::honest(&store);
+    let honest = Antd::honest(&store);
     let p = plan(FILE_512K, "/", "", vec![]);
     let got = run(
         "slow",
@@ -1657,7 +1269,7 @@ fn bytes_stashed_before_an_early_end_are_still_used() {
     };
     let (l2, l2_len) = child(hex32(root), 67_108_865, 0);
     let (l1, _) = child(l2, l2_len, 1);
-    let world = World {
+    let world = Antd {
         store: &store,
         extra: HashMap::new(),
         changes: vec![
