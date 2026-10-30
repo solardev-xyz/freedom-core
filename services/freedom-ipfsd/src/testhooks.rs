@@ -66,10 +66,9 @@
 // The hooks are for debug and test builds only: some take a `direct`
 // instance's address table away (FREEDOM_IPFSD_TEST_DIRECT_UNCHECKED), or
 // choose who discovery asks (FREEDOM_IPFSD_TEST_NAT64_RESOLVERS), and others
-// let a request's own headers hold or panic its work. A release build with
-// the feature doesn't compile (CI checks it doesn't).
-#[cfg(all(feature = "testhooks", not(debug_assertions)))]
-compile_error!("the `testhooks` feature is for debug and test builds only, never a release build");
+// let a request's own headers hold or panic its work. build.rs refuses the
+// feature in any release-profile or optimized build, by Cargo's profile, not
+// by `debug_assertions` (CI checks both ways in).
 
 use std::time::Duration;
 

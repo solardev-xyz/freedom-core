@@ -25,8 +25,8 @@ members = [".", "../nat64"]
 [features]
 # Fault injection for the integration tests (design 0007, Testing), read from
 # FREEDOM_IPFSD_TEST_* variables: see src/testhooks.rs. Without the feature
-# every hook is a no-op and no variable is read. A release build with it
-# doesn't compile (src/testhooks.rs), and CI checks that it doesn't.
+# every hook is a no-op and no variable is read. build.rs refuses it in any
+# release-profile or optimized build, and CI checks that it does.
 testhooks = ["dep:hickory-resolver"]
 
 [dependencies]
@@ -66,8 +66,10 @@ freedom-ipfs-store = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev
 futures-core = "0.3"
 # The `testhooks` feature's fixture DNS configuration (src/testhooks.rs:
 # a parsed resolv.conf's servers on a test's port), with the types
-# freedom-ipfs-net's `DnsConfig::custom` takes; already in its graph, the
-# same version. Never in a release build.
+# freedom-ipfs-net's `DnsConfig::custom` takes. Only this direct edge, and
+# the hook that uses it, are test-only: the crate itself is the real
+# resolver, a normal dependency of every build through freedom-ipfs-net and
+# libp2p-dns, at the same version.
 hickory-resolver = { version = "0.25", default-features = false, optional = true }
 # NAT64 discovery (0007, "Network-specific NAT64 prefixes"), shared with
 # the other services: a member of this workspace (see [workspace]).
