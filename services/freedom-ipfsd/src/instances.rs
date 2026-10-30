@@ -160,6 +160,9 @@ pub struct Instances {
     /// The process's NAT64 discovery: every `direct` instance's address
     /// table reads it, and holds it running while it lives.
     discovery: Discovery,
+    /// The process's DNS configuration, in `direct` mode: every instance's
+    /// network asks it (`dns.rs`).
+    dns: Option<crate::dns::Dns>,
     table: Mutex<Table>,
     /// An instance left the table, or a teardown failed.
     changed: Condvar,
@@ -284,6 +287,7 @@ impl Instances {
         requests: Arc<Requests>,
         budgets: Arc<Budgets>,
         discovery: Discovery,
+        dns: Option<crate::dns::Dns>,
     ) -> Arc<Instances> {
         Arc::new(Instances {
             kind,
@@ -292,6 +296,7 @@ impl Instances {
             requests,
             budgets,
             discovery,
+            dns,
             table: Mutex::new(Table::default()),
             changed: Condvar::new(),
         })
@@ -580,6 +585,7 @@ impl Instances {
             &start.routing.delegated_routers,
             &start.routing.doh_endpoint,
             self.discovery.handle(),
+            self.dns.as_ref().map(|dns| &dns.config),
         ) {
             Ok(network) => network,
             Err(message) => {

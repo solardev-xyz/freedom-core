@@ -55,8 +55,9 @@ fn hello_reports_the_policy_and_the_confinement_the_kernel_offers() {
             assert_eq!(confinement["files"], "enforced", "{confinement}");
             assert_eq!(confinement["exec"], "enforced", "{confinement}");
             assert_eq!(confinement["network"], "none", "{confinement}");
-            // freedom-ipfs-net resolves with hickory over resolv.conf,
-            // which it reads confined: nsswitch.conf doesn't apply.
+            // The process's one DNS configuration: the host's
+            // resolv.conf, read and parsed confined (nsswitch.conf doesn't
+            // apply). tests/dns.rs shows every lookup asks it.
             assert_eq!(confinement["resolution"], "resolv_conf", "{confinement}");
             assert!(
                 confinement["reasons"].get("resolution").is_none(),
@@ -79,6 +80,12 @@ fn hello_reports_the_policy_and_the_confinement_the_kernel_offers() {
                 "{confinement}"
             );
             assert_eq!(confinement["network"], "none", "{confinement}");
+            // resolv.conf, read and parsed under the profile.
+            assert_eq!(confinement["resolution"], "resolv_conf", "{confinement}");
+            assert!(
+                confinement["reasons"].get("resolution").is_none(),
+                "{confinement}"
+            );
         }
         _ => assert!(confinement.is_object(), "{confinement}"),
     }
@@ -102,6 +109,8 @@ fn hello_reports_the_policy_and_the_confinement_the_kernel_offers() {
     if cfg!(target_os = "macos") {
         assert_eq!(result["confinement"]["network"], "enforced", "{hello}");
     }
+    // Its names go to the proxy: no DNS configuration is read.
+    assert!(result["confinement"].get("resolution").is_none(), "{hello}");
     ipfsd.shutdown();
     assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
 }

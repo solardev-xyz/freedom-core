@@ -128,7 +128,9 @@ pub enum Resolver {
     /// The service's own resolver over `/etc/resolv.conf`'s servers
     /// (`freedom-ipfsd`'s hickory), never `getaddrinfo`: `resolv.conf` and
     /// `/etc/hosts` alone are granted, nothing of `nsswitch.conf` or the
-    /// NSS sources.
+    /// NSS sources. `confine` reports no `resolution` for it: the service
+    /// reads its configuration once confined and reports what it got
+    /// ([`Resolution::ResolvConf`] or [`Resolution::Fallback`]).
     ResolvConf,
     /// No name resolution.
     None,
@@ -144,10 +146,13 @@ pub enum Resolution {
     /// The C library's doesn't: names outside `/etc/hosts` don't resolve
     /// while confined.
     FilesOnly,
-    /// The service's own resolver, over `/etc/resolv.conf`'s servers, which
-    /// it can read confined; `nsswitch.conf` doesn't apply. When it can't
-    /// read the file, the reason says what it falls back to.
+    /// The service's own resolver, over the servers of the `/etc/resolv.conf`
+    /// it read and parsed confined; `nsswitch.conf` doesn't apply.
     ResolvConf,
+    /// The service's own resolver, over its built-in servers, because it
+    /// couldn't read or parse `/etc/resolv.conf` confined: the reason says
+    /// which, and why.
+    Fallback,
 }
 
 /// What confinement the process got: `hello`'s `confinement`.
@@ -171,10 +176,11 @@ pub struct Report {
     /// What a `partial` property leaves open.
     pub gaps: Vec<&'static str>,
     /// Why a property is `unavailable` or `blocked`, and why resolution is
-    /// `files_only`.
+    /// `files_only` or `fallback`.
     pub reasons: BTreeMap<&'static str, String>,
-    /// On Linux in `direct` mode, for a service that resolves through the C
-    /// library.
+    /// In `direct` mode: on Linux for a service that resolves through the C
+    /// library, set here; for a service with its own resolver, set by the
+    /// service once it has read its configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolution: Option<Resolution>,
 }

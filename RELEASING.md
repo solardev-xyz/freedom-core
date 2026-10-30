@@ -183,8 +183,9 @@ publish job that runs no repository code.
      - each with a first lookup after confinement and none before it, with
        and without `resolve` and `mdns4_minimal` in `nsswitch.conf`;
      - `confinement`'s `resolution` matches what resolves, for every lookup
-       the service makes: the gateway's HTTP requests and libp2p's `/dns*`
-       dials;
+       through the system's configuration: the gateway's HTTP requests and
+       libp2p's `/dns*` dials. DNSLink and Bitswap's expansion of provider
+       names ask the DoH endpoint `ipfs.start` configures;
      - on glibc 2.17, a load completes confined. Below 2.25 glibc has no
        `getrandom`, so the getrandom crate reads `/dev/random` and
        `/dev/urandom`, which the policy grants.

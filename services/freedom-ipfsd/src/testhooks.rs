@@ -56,6 +56,12 @@
 //! - `FREEDOM_IPFSD_TEST_EXEC=1` tries to run `/bin/sh` once confined.
 //! - `FREEDOM_IPFSD_TEST_CONNECT=<port>` tries TCP to `127.0.0.1:<port>`
 //!   once confined.
+//! - `FREEDOM_IPFSD_TEST_RESOLV_CONF=<path>` reads the process's DNS
+//!   configuration from that file, once confined, as `/etc/resolv.conf` is
+//!   read (Unix). With `FREEDOM_IPFSD_TEST_DNS_PORT=<port>`, a parsed
+//!   file's nameservers are asked on that port, which a resolv.conf can't
+//!   name, so a fixture server needs no privileged port; the report still
+//!   says what the parse gave.
 
 // The hooks are for debug and test builds only: some take a `direct`
 // instance's address table away (FREEDOM_IPFSD_TEST_DIRECT_UNCHECKED), or
@@ -248,6 +254,42 @@ pub fn direct_addresses(
         return freedom_ipfs_gateway::net::Addresses::Unchecked;
     }
     checked
+}
+
+/// The process's DNS configuration from a fixture resolv.conf
+/// (`FREEDOM_IPFSD_TEST_RESOLV_CONF`), its parsed nameservers asked on
+/// `FREEDOM_IPFSD_TEST_DNS_PORT` when that is set; `None` for the system's.
+pub fn dns() -> Option<crate::dns::Dns> {
+    #[cfg(all(feature = "testhooks", unix))]
+    if let Some(path) = std::env::var_os("FREEDOM_IPFSD_TEST_RESOLV_CONF") {
+        use freedom_ipfs_gateway::net::{DnsConfig, DnsSource};
+        let parsed = DnsConfig::from_resolv_conf(std::path::Path::new(&path));
+        let source = parsed.source().clone();
+        let port = std::env::var("FREEDOM_IPFSD_TEST_DNS_PORT")
+            .ok()
+            .and_then(|port| port.parse::<u16>().ok());
+        let config = match port {
+            Some(port) if source == DnsSource::System => {
+                let servers: Vec<_> = parsed
+                    .config()
+                    .name_servers()
+                    .iter()
+                    .cloned()
+                    .map(|mut server| {
+                        server.socket_addr.set_port(port);
+                        server
+                    })
+                    .collect();
+                DnsConfig::custom(
+                    hickory_resolver::config::ResolverConfig::from_parts(None, Vec::new(), servers),
+                    parsed.options().clone(),
+                )
+            }
+            _ => parsed,
+        };
+        return Some(crate::dns::Dns { config, source });
+    }
+    None
 }
 
 /// The process's memory budget: `default`, unless a test replaces it.

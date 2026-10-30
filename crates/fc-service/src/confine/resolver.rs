@@ -81,9 +81,6 @@ fn push_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
 /// The directory whose files are granted alone.
 pub(super) const ETC: &str = "/etc";
 
-/// The file the service's own resolver reads its servers from.
-pub(super) const RESOLV_CONF: &str = "/etc/resolv.conf";
-
 /// The read-only grant for a resolver file (0010, "The recommendation",
 /// step 2), after its symlinks are followed: the file itself when it sits in
 /// `etc` itself, or else the directory that holds it, so a file replaced

@@ -177,9 +177,17 @@ On Windows, the first step (a job object and mitigation policies) refuses child 
 0007's Linux release builds link glibc dynamically, built against 2.17 and running on it and every newer glibc. `freedom-radicled` resolves host names as the host's glibc does: every name it resolves in `direct` mode (0008) goes through `getaddrinfo`. In `socks5` mode names go to the proxy.
 
 **`freedom-ipfsd` doesn't use glibc's resolver.**
-- freedom-ipfs-net resolves with hickory, which reads `/etc/resolv.conf`'s servers and `/etc/hosts` itself, never through `getaddrinfo`. If it can't read `resolv.conf`, it falls back to its built-in servers.
-- **Its grant:** those two files alone. Nothing of `nsswitch.conf`, `ld.so.cache` or the C library's directory is granted: `confine::Resolver::ResolvConf`.
-- **Its report:** `"resolution": "resolv_conf"`, asked under the rules: whether `resolv.conf` is readable confined, with a reason when it isn't. `nsswitch.conf` doesn't apply, so a `hosts: files` line no longer makes the report say `files_only` while names resolve.
+- **One DNS configuration per process** (freedom-ipfs #82). In `direct` mode the process reads `/etc/resolv.conf` once, confined, before `ipfs.hello`, and every instance's network asks it. That covers the gate's HTTP resolver and libp2p's DNS layer: `/dns*` dials, WebSocket providers dialed by name, and `/dnsaddr`. freedom-ipfs-net resolves with hickory, never through `getaddrinfo`:
+  - it uses the first three nameservers, as glibc's `MAXNS` does, and keeps link-local zones;
+  - it looks every name up as written, with no search list and `ndots` 0;
+  - if the file can't be read or parsed, it uses its built-in servers, Cloudflare's.
+- **Its grant:** `resolv.conf` and `/etc/hosts` alone. Nothing of `nsswitch.conf`, `ld.so.cache` or the C library's directory is granted: `confine::Resolver::ResolvConf`.
+- **Its report,** on Linux and macOS: `confine` leaves `resolution` to the service, which reports what it read.
+  - `"resolution": "resolv_conf"`: the file parsed.
+  - `"fallback"`: it couldn't be read or parsed, with the reason.
+
+  `nsswitch.conf` doesn't apply, so a `hosts: files` line no longer makes the report say `files_only` while names resolve. The file isn't read again: a later change reaches the next process, as a replaced file does under confinement anyway.
+- **Not described by `resolution`:** DNSLink, and the names in Bitswap providers' TCP and QUIC addresses and `/dnsaddr` records, which Bitswap expands before it dials. They go to the DoH endpoint that `ipfs.start` configures (0007, "The gate"). That endpoint's own name resolves through the process's configuration.
 
 The rest of this section is about glibc's resolver, `confine::Resolver::System`.
 
@@ -401,7 +409,7 @@ The rest of this section is about glibc's resolver, `confine::Resolver::System`.
      "files": "enforced", "exec": "enforced", "ipc": "partial", "network": "enforced",
      "gaps": ["signals"],                 // what "partial" leaves open
      "reasons": {},                       // per property: why it is "unavailable" or "blocked"
-     "resolution": "system"               // Linux, `direct` mode: "files_only" with its reason, or "resolv_conf" for a service's own resolver
+     "resolution": "system"               // `direct` mode. Through glibc (Linux): "system", or "files_only" with its reason. A service's own resolver (Linux, macOS): "resolv_conf", or "fallback" with its reason
    }
    ```
 
@@ -560,7 +568,11 @@ Through the binary, in CI's job for each OS:
       - a first lookup after confinement, with no lookup before it, resolves a name in `/etc/hosts` and one through DNS;
       - with `resolve` before `dns` in a fixture `nsswitch.conf`, the lookup falls back to `dns`;
       - with no `dns` source, `confinement` reports `files_only`.
-    - **A service's own resolver** (`freedom-ipfsd`): `resolution` is `resolv_conf`. `resolv.conf` and `/etc/hosts` are readable confined, `nsswitch.conf` isn't, and loads resolve under every `nsswitch.conf`.
+    - **A service's own resolver** (`freedom-ipfsd`):
+      - `resolv.conf` and `/etc/hosts` are readable confined, `nsswitch.conf` isn't, and `resolution` is `resolv_conf`;
+      - **`tests/dns.rs`:** a fixture DNS server named in a fixture resolv.conf answers both the delegated router's name, through the gate's HTTP resolver, and a WebSocket provider's `/dns4` name, through libp2p's DNS layer. Its search domain is never appended.
+      - A malformed resolv.conf and a missing one each report `fallback` with the reason, and the fixture is never asked;
+      - loads resolve under every `nsswitch.conf`.
     - **The random devices:** readable confined;
   - **policy changes:** `direct` → `socks5` → `direct`, and Arti's port P → Q. Each runs in a new generation with the new `--network`; the old generation's process has exited; and a private instance, recreated after each change, gets the new rules;
   - **NAT64 discovery:** a fake resolver on a loopback address, listed in a fixture resolver file, sees one AAAA query for `ipv4only.arpa` per refresh. From `freedom-ipfsd` it sees no other DNS. `freedom-radicled`'s ordinary lookups use the system resolver in `direct` mode (0008), so for it the check is that discovery sends nothing else.
