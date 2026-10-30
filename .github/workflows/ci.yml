@@ -34,6 +34,19 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
+  clippy-macos:
+    # Confinement's macOS code (design 0010): fc-sys's Seatbelt and libproc
+    # calls and fc-service's profile, which Linux's Clippy doesn't compile.
+    name: clippy (macOS confinement)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo clippy --locked -p fc-sys -p fc-service --all-targets --all-features -- -D warnings
+
   test:
     name: test (${{ matrix.os }})
     strategy:
@@ -48,12 +61,12 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo test --locked --workspace --all-features
-        if: runner.os != 'Linux'
-      # With stdio alone, as main spawns a service: the runner leaks a pipe
-      # into each step, which confinement's tests would inherit and refuse
-      # (design 0010).
+        if: runner.os == 'Windows'
+      # On Linux and macOS with stdio alone, as main spawns a service: the
+      # runner leaks a pipe into each step, which confinement's tests would
+      # inherit and refuse (design 0010).
       - run: python3 scripts/stdio-only.py cargo test --locked --workspace --all-features
-        if: runner.os == 'Linux'
+        if: runner.os != 'Windows'
 
   confine-aarch64:
     # Confinement's seccomp filters name syscalls by number, which differ on
