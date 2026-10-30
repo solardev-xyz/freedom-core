@@ -84,7 +84,10 @@ impl Dns {
                 for question in query.queries() {
                     let name = question.name().to_ascii();
                     let name = name.trim_end_matches('.').to_ascii_lowercase();
-                    recorded.lock().unwrap().push(name.clone());
+                    recorded
+                        .lock()
+                        .unwrap()
+                        .push(format!("{name} {}", question.query_type()));
                     reply.add_query(question.clone());
                     if name != ROUTER && name != PEER_NAME {
                         reply.set_response_code(ResponseCode::NXDomain);
@@ -107,7 +110,9 @@ impl Dns {
     }
 
     fn asked(&self, name: &str) -> bool {
-        self.queries().iter().any(|query| query == name)
+        self.queries()
+            .iter()
+            .any(|query| query.split(' ').next() == Some(name))
     }
 }
 
@@ -243,24 +248,49 @@ fn every_lookup_asks_the_resolv_conf_the_report_names() {
     let id = ipfsd.request("ipfs.request", request("p-1"));
     // The router's name, through the gate's HTTP resolver; then the
     // provider's `/dns4` name, through libp2p's DNS layer.
-    wait_for(Duration::from_secs(10), || {
+    let reached = wait_for(Duration::from_secs(10), || {
         dns.asked(ROUTER) && router.accepted() > 0 && dns.asked(PEER_NAME)
     });
     let queries = dns.queries();
+    // On a failure, what the instance did: its progress events' phases and
+    // errors.
+    let progress = if reached {
+        String::new()
+    } else {
+        let stats = ipfsd.call("ipfs.stats", json!({ "instance": "p-1" }));
+        stats["result"]["progress"]["events"]
+            .as_array()
+            .map(|events| {
+                events
+                    .iter()
+                    .map(|e| {
+                        format!(
+                            "{} {} {}",
+                            e["raw_phase"], e["last_error_code"], e["last_error_message"]
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_else(|| stats.to_string())
+    };
     assert!(
         dns.asked(ROUTER),
-        "the router's name wasn't asked: {queries:?}"
+        "the router's name wasn't asked: {queries:?}\n{progress}"
     );
-    assert!(router.accepted() > 0, "the router wasn't reached");
+    assert!(
+        router.accepted() > 0,
+        "the router wasn't reached: {queries:?}\n{progress}"
+    );
     assert!(
         dns.asked(PEER_NAME),
-        "the /dns4 name wasn't asked: {queries:?}"
+        "the /dns4 name wasn't asked: {queries:?}\n{progress}"
     );
     // Its answer is loopback, which the address table refuses.
     assert_eq!(canary.accepted(), 0, "a loopback provider was dialed");
     // Every name as written: none with the search domain.
     assert!(
-        queries.iter().all(|query| !query.ends_with(SEARCH)),
+        queries.iter().all(|query| !query.contains(SEARCH)),
         "{queries:?}"
     );
     ipfsd.cancel(id);
