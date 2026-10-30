@@ -1,7 +1,7 @@
 //! `freedom-radicled`: the libradicle service process (design 0008).
 //!
 //! ```text
-//! freedom-radicled serve     --home <dir> --lock-dir <dir> [--parent-pid <pid>]
+//! freedom-radicled serve     --home <dir> --lock-dir <dir> --network <policy> [--parent-pid <pid>]
 //! freedom-radicled hold-lock --home <dir> --lock-dir <dir>
 //! ```
 //!
@@ -10,16 +10,18 @@
 //! - **`hold-lock`** holds the home's gate until stdin closes: the alias
 //!   rewrite, profile delete and reset, and `radicle:reset` run under it.
 //!
-//! **`serve`, in order** (0008, "Spawn and lock"; the order design 0010
-//! needs, without depending on it):
-//! 1. the panic hook, before any other work, and hardening;
-//! 2. the arguments;
+//! **`serve`, in order** (0008, "Spawn and lock"; design 0010, "The
+//! recommendation", step 1):
+//! 1. the panic hook, before any other work, and the entry's one re-exec if
+//!    a descriptor is inherited (`fc_service::confine::clean_entry`);
+//! 2. hardening, and the arguments, `--network` among them;
 //! 3. the environment main cleared, checked ([`env`]);
 //! 4. the gate, `<lock-dir>/radicle-<sha256(canonical home)>.lock`, before
 //!    anything opens the home;
 //! 5. the home and the service's own `HOME` directory, opened;
-//! 6. **the confinement point** ([`confine`]): the process still has one
-//!    thread here;
+//! 6. **confinement** ([`confine`]), while the process has one thread: the
+//!    two directories read-write, with `refer`; the network policy; the lock
+//!    as the one descriptor it keeps;
 //! 7. only then logging's writer, the connection's threads and the
 //!    watchdogs: the handshake, `rad.hello`, and what follows.
 //!
@@ -37,7 +39,9 @@
 //! including an environment main should have cleared; 70 for a panic
 //! outside a request; 74 for storage; 75 when the gate is held; 76 for a
 //! protocol error, the handshake's deadline, `rad.identity`'s deadline or
-//! the writer stall.
+//! the writer stall; 77 when confinement refuses the process
+//! (`confinement`: a thread or descriptor it didn't expect, or its own rules
+//! refused).
 
 mod args;
 mod build_info;
@@ -52,8 +56,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fc_service::conn::{self, Options};
+use fc_service::network::NetworkPolicy;
 use fc_service::{Exit, gate, log};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::args::Command;
 use crate::service::RadicleService;
@@ -70,8 +75,11 @@ fn main() -> ExitCode {
     let started = Instant::now();
     // First, before any other work (0008, "Crashes and restarts").
     fc_service::panic::install();
+    // Before anything opens a descriptor (0010, step 1): returns only when
+    // nothing needed dropping, or this is the one re-exec, or it failed.
+    let entry = fc_service::confine::clean_entry();
     fc_service::hardening::harden();
-    let exit = run(started);
+    let exit = run(started, &entry);
     // The process's exit is this thread's from here, unless a hook's or a
     // watchdog's has begun: that one ends the process first.
     fc_service::exit::claim();
@@ -79,11 +87,29 @@ fn main() -> ExitCode {
     ExitCode::from(exit.code())
 }
 
-fn run(started: Instant) -> Exit {
+fn run(started: Instant, entry: &fc_service::confine::Entry) -> Exit {
     let Some(command) = args::parse(std::env::args_os().skip(1)) else {
         log::error(args::USAGE, json!({}));
         return Exit::Usage;
     };
+    match entry {
+        fc_service::confine::Entry::Clean => {}
+        fc_service::confine::Entry::Reexeced => log::info(
+            "re-executed once at entry: descriptors were inherited",
+            json!({}),
+        ),
+        fc_service::confine::Entry::Replaced => log::error(
+            "re-executed at entry, but not from the file that ran: confinement refuses it",
+            json!({}),
+        ),
+        fc_service::confine::Entry::Left { reexeced, error } => log::error(
+            "descriptors inherited at entry are left",
+            json!({
+                "reexeced": reexeced,
+                "error": error.as_ref().map(|e| e.kind().to_string()),
+            }),
+        ),
+    }
     match command {
         Command::HoldLock { home, lock_dir } => gate::hold_lock(
             &home,
@@ -95,6 +121,7 @@ fn run(started: Instant) -> Exit {
         Command::Serve {
             home,
             lock_dir,
+            network,
             parent_pid,
         } => {
             let own_home = match env::check(std::env::vars_os()) {
@@ -117,10 +144,16 @@ fn run(started: Instant) -> Exit {
                 }
             };
             let exit = match confine::Grant::open(&gate.data_dir, &own_home) {
-                Ok(grant) => {
-                    confine::confine(&grant);
-                    serve(grant, parent_pid, started)
-                }
+                Ok(grant) => match confine::confine(&grant, &network, gate.descriptors()) {
+                    Ok(report) => serve(grant, network, report.to_json(), parent_pid, started),
+                    Err(invalid) => {
+                        log::error(
+                            "confinement refused the process",
+                            json!({ "reason": invalid.to_string() }),
+                        );
+                        Exit::Confinement
+                    }
+                },
                 Err(e) => {
                     log::error(
                         "cannot open the home",
@@ -136,12 +169,20 @@ fn run(started: Instant) -> Exit {
 }
 
 /// Runs the connection with main until it ends. Every thread the process
-/// starts, logging's writer included, starts here, after the confinement
-/// point.
-fn serve(grant: confine::Grant, parent_pid: Option<u32>, started: Instant) -> Exit {
+/// starts, logging's writer included, starts here, after confinement.
+fn serve(
+    grant: confine::Grant,
+    network: NetworkPolicy,
+    confinement: Value,
+    parent_pid: Option<u32>,
+    started: Instant,
+) -> Exit {
     log::init();
-    log::info("serving", json!({}));
-    let service = match RadicleService::new(grant) {
+    log::info(
+        "serving",
+        json!({ "network": network.to_json(), "confinement": confinement }),
+    );
+    let service = match RadicleService::new(grant, &network, confinement) {
         Some(service) => Arc::new(service),
         None => {
             log::error("the OS random number generator failed", json!({}));

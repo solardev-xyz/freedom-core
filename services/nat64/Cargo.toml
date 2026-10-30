@@ -27,7 +27,7 @@ fc-service = { path = "../../crates/fc-service" }
 # `Nat64Prefix`): freedom-ipfs-addr, the gate's pure half with no network
 # stack (freedom-ipfs #55), at the commit freedom-ipfsd pins, so both resolve
 # to one package, which freedom-ipfs-net re-exports as its gate.
-freedom-ipfs-addr = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "e7dcc6f60b2a30932e6f95a58e30cbf5fdc9f353" }
+freedom-ipfs-addr = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "df5b69446c6d252cfaafd35ae618f62963d2e231" }
 # Discovery's one query and its answers (src/query.rs): DNS messages, already
 # in every platform's graph (freedom-ipfs-net's resolver, libp2p-dns). It
 # encodes only its own one-question query, and decodes the answers, as
@@ -49,6 +49,13 @@ if-addrs = "0.15"
 [target.'cfg(windows)'.dependencies]
 ipconfig = "0.3"
 windows-registry = "0.6"
+
+# Linux: a link-local resolver's interface index by its name, through the
+# kernel's SIOCGIFINDEX on a datagram socket (rustix's `netdevice`, a safe
+# call), which confinement allows; sysfs's /sys/class/net isn't granted
+# (design 0010). rustix is already in the graph, through fc-service.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1", default-features = false, features = ["net", "std"] }
 
 # freedom-ipfsd's lints, copied: it defines no workspace lints to inherit.
 [lints.rust]

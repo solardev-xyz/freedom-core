@@ -45,6 +45,17 @@
 //!     the gateway, and `body` once its head is queued, with a payload that
 //!     names a path: as a fault inside freedom-ipfs on a request's task
 //!     would.
+//!
+//! Confinement (design 0010, Tests):
+//! - `FREEDOM_IPFSD_TEST_CONFINEMENT_POINT=1` logs, at the confinement
+//!   point, the process's thread count and what each descriptor above stderr
+//!   is (its `/proc/self/fd` link: a test may log a path).
+//! - `FREEDOM_IPFSD_TEST_CANARY=<path>` reads the file once confined, from
+//!   the main thread, a runtime worker and a blocking-pool thread, and logs
+//!   whether each read it.
+//! - `FREEDOM_IPFSD_TEST_EXEC=1` tries to run `/bin/sh` once confined.
+//! - `FREEDOM_IPFSD_TEST_CONNECT=<port>` tries TCP to `127.0.0.1:<port>`
+//!   once confined.
 
 // The hooks are for debug and test builds only: some take a `direct`
 // instance's address table away (FREEDOM_IPFSD_TEST_DIRECT_UNCHECKED), or
@@ -61,6 +72,90 @@ use freedom_ipfs_gateway::{GatewayCoreRequest, Instance};
 #[cfg(feature = "testhooks")]
 fn millis(name: &str) -> Option<u64> {
     std::env::var(name).ok().and_then(|v| v.parse().ok())
+}
+
+/// At the confinement point: logs the thread count and the descriptors
+/// above stderr, when asked (`FREEDOM_IPFSD_TEST_CONFINEMENT_POINT`).
+pub fn at_confinement_point() {
+    #[cfg(all(feature = "testhooks", target_os = "linux"))]
+    if std::env::var_os("FREEDOM_IPFSD_TEST_CONFINEMENT_POINT").is_some() {
+        let threads = std::fs::read_dir("/proc/self/task").map_or(0, Iterator::count);
+        let listing = format!("/proc/{}/fd", std::process::id());
+        let descriptors: Vec<String> = std::fs::read_dir("/proc/self/fd")
+            .map(|dir| {
+                dir.filter_map(Result::ok)
+                    .filter(|entry| {
+                        entry
+                            .file_name()
+                            .to_str()
+                            .and_then(|name| name.parse::<i32>().ok())
+                            .is_some_and(|fd| fd > 2)
+                    })
+                    .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+                    .map(|target| target.to_string_lossy().into_owned())
+                    // The listing's own descriptor.
+                    .filter(|target| *target != listing)
+                    .collect()
+            })
+            .unwrap_or_default();
+        fc_service::log::info(
+            "confinement point",
+            serde_json::json!({ "threads": threads, "descriptors": descriptors }),
+        );
+    }
+}
+
+/// Once confined, with the runtime built: the canary, exec and connect
+/// probes the variables ask for, each result logged.
+pub fn after_confinement(runtime: &tokio::runtime::Handle) {
+    #[cfg(feature = "testhooks")]
+    {
+        use serde_json::json;
+        if let Some(canary) = std::env::var_os("FREEDOM_IPFSD_TEST_CANARY") {
+            let canary = std::path::PathBuf::from(canary);
+            let read = |path: &std::path::Path| std::fs::read(path).is_ok();
+            let (sent, results) = std::sync::mpsc::channel();
+            sent.send(("main", read(&canary))).ok();
+            let (worker, blocking) = (sent.clone(), sent.clone());
+            let path = canary.clone();
+            drop(runtime.spawn(async move {
+                worker.send(("runtime worker", read(&path))).ok();
+            }));
+            let path = canary.clone();
+            drop(runtime.spawn_blocking(move || {
+                blocking.send(("blocking pool", read(&path))).ok();
+            }));
+            drop(sent);
+            for _ in 0..3 {
+                if let Ok((thread, read)) = results.recv_timeout(Duration::from_secs(10)) {
+                    fc_service::log::info("canary", json!({ "thread": thread, "read": read }));
+                }
+            }
+        }
+        if std::env::var_os("FREEDOM_IPFSD_TEST_EXEC").is_some() {
+            let ran = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg("exit 0")
+                .status()
+                .is_ok();
+            fc_service::log::info("exec probe", json!({ "ran": ran }));
+        }
+        if let Some(port) = std::env::var("FREEDOM_IPFSD_TEST_CONNECT")
+            .ok()
+            .and_then(|port| port.parse::<u16>().ok())
+        {
+            let connected = std::net::TcpStream::connect_timeout(
+                &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+                Duration::from_secs(5),
+            )
+            .is_ok();
+            fc_service::log::info(
+                "connect probe",
+                json!({ "port": port, "connected": connected }),
+            );
+        }
+    }
+    let _ = runtime;
 }
 
 /// Holds the instance's teardown, as `FREEDOM_IPFSD_TEST_HOLD_TEARDOWN_MS`

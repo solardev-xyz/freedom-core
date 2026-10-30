@@ -33,6 +33,11 @@ pub enum Learned {
     /// A link-local IPv6 resolver whose interface can't be found (its
     /// address, as listed).
     Unaskable(String),
+    /// A file that lists resolvers exists but can't be read: confinement
+    /// refuses one that was replaced while the process runs (design 0010).
+    /// What it lists is unknown, so discovery counts it as a failure, and
+    /// the state can't be known.
+    Unreadable,
 }
 
 /// The resolvers the OS lists now, each once, in the order found, read as
@@ -136,39 +141,90 @@ pub fn server_addresses(plist: &str) -> Vec<(IpAddr, Option<String>)> {
         .collect()
 }
 
+/// The files Linux lists resolvers in, read in this order: the effective
+/// list, and what systemd-resolved exports when it runs. A confined service
+/// grants them read-only (design 0010).
+pub const LINUX_FILES: [&str; 2] = ["/etc/resolv.conf", "/run/systemd/resolve/resolv.conf"];
+
+/// The file macOS lists resolvers in beside the dynamic store: configd
+/// writes it (`/etc/resolv.conf`, a link into `/var/run`). A confined
+/// service grants it read-only (design 0010).
+pub const MACOS_FILES: [&str; 1] = ["/etc/resolv.conf"];
+
+/// The resolvers `files` list, in order, with `index` naming interfaces. A
+/// file that doesn't exist lists none. One that exists but can't be read is
+/// [`Learned::Unreadable`], never taken as listing none.
+pub fn from_files<P: AsRef<std::path::Path>>(
+    files: &[P],
+    index: impl Fn(&str) -> Option<u32>,
+) -> Vec<Learned> {
+    let mut found = Vec::new();
+    for file in files {
+        match std::fs::read_to_string(file) {
+            Ok(text) => found.extend(
+                resolv_conf(&text)
+                    .into_iter()
+                    .map(|(ip, zone)| learn(ip, zone.as_deref(), &index)),
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => found.push(Learned::Unreadable),
+        }
+    }
+    found
+}
+
+/// An interface's index, by its name: the kernel's `SIOCGIFINDEX`, on a
+/// datagram socket of its own, through rustix's safe call.
+///
+/// - **Confined:** design 0010 allows freedom-ipfsd this one `ioctl`, and
+///   `AF_INET` sockets. Sysfs's `/sys/class/net/<name>/ifindex` isn't read:
+///   it resolves into `/sys/devices`, which no grant covers.
+/// - **An interface that appears later** is found too: the kernel answers
+///   for whatever exists at the call.
+///
+/// `None` for a name the kernel doesn't know, or if it can't be asked.
+#[cfg(target_os = "linux")]
+pub fn interface_index(name: &str) -> Option<u32> {
+    use rustix::net::{AddressFamily, SocketFlags, SocketType};
+    if name.is_empty() {
+        return None;
+    }
+    let socket = rustix::net::socket_with(
+        AddressFamily::INET,
+        SocketType::DGRAM,
+        SocketFlags::CLOEXEC,
+        None,
+    )
+    .ok()?;
+    rustix::net::netdevice::name_to_index(&socket, name)
+        .ok()
+        .filter(|index| *index != 0)
+}
+
 #[cfg(not(any(target_os = "macos", windows)))]
 mod os {
-    use super::{Learned, learn, resolv_conf};
-
-    /// The files read: the effective list, and what systemd-resolved
-    /// exports when it runs.
-    const FILES: [&str; 2] = ["/etc/resolv.conf", "/run/systemd/resolve/resolv.conf"];
+    use super::{LINUX_FILES, Learned, from_files};
 
     pub fn learned(_client: &'static str) -> Vec<Learned> {
-        FILES
-            .iter()
-            .filter_map(|path| std::fs::read_to_string(path).ok())
-            .flat_map(|text| resolv_conf(&text))
-            .map(|(ip, zone)| learn(ip, zone.as_deref(), index))
-            .collect()
+        from_files(&LINUX_FILES, index)
     }
 
-    /// An interface's index, by its name, from sysfs.
+    /// An interface's index, by its name ([`super::interface_index`]).
+    #[cfg(target_os = "linux")]
     fn index(name: &str) -> Option<u32> {
-        if name.is_empty() || name.contains('/') || name.starts_with('.') {
-            return None;
-        }
-        std::fs::read_to_string(format!("/sys/class/net/{name}/ifindex"))
-            .ok()?
-            .trim()
-            .parse()
-            .ok()
+        super::interface_index(name)
+    }
+
+    /// Elsewhere, none: a named zone is unaskable.
+    #[cfg(not(target_os = "linux"))]
+    fn index(_name: &str) -> Option<u32> {
+        None
     }
 }
 
 #[cfg(target_os = "macos")]
 mod os {
-    use super::{Learned, learn, resolv_conf, server_addresses};
+    use super::{Learned, MACOS_FILES, from_files, learn, server_addresses};
     use system_configuration::core_foundation::propertylist::{
         create_data, kCFPropertyListXMLFormat_v1_0,
     };
@@ -186,13 +242,7 @@ mod os {
                 .and_then(|interface| interface.index)
         };
         let mut found = dynamic_store(client, index);
-        if let Ok(text) = std::fs::read_to_string("/etc/resolv.conf") {
-            found.extend(
-                resolv_conf(&text)
-                    .into_iter()
-                    .map(|(ip, zone)| learn(ip, zone.as_deref(), index)),
-            );
-        }
+        found.extend(from_files(&MACOS_FILES, index));
         found
     }
 
@@ -276,6 +326,45 @@ mod tests {
 
     fn ip(text: &str) -> IpAddr {
         text.parse().unwrap()
+    }
+
+    /// The kernel names `lo`, and no interface `nosuch0`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interfaces_are_looked_up_by_the_kernel() {
+        assert!(super::interface_index("lo").is_some_and(|index| index > 0));
+        assert_eq!(super::interface_index("nosuch0"), None);
+        assert_eq!(super::interface_index(""), None);
+        assert_eq!(
+            super::interface_index("a-name-far-too-long-for-ifnamsiz"),
+            None
+        );
+    }
+
+    /// A missing file lists none; one that exists but can't be read is
+    /// unreadable, never none.
+    #[test]
+    fn files_list_their_resolvers_and_an_unreadable_one_says_so() {
+        let dir = std::env::temp_dir().join(format!("fc-nat64-files-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let listed = dir.join("resolv.conf");
+        std::fs::write(&listed, "nameserver 192.0.2.53\n").unwrap();
+        // A directory can't be read as a file, even by root.
+        let unreadable = dir.join("unreadable");
+        std::fs::create_dir_all(&unreadable).unwrap();
+        let none = |_: &str| None;
+        assert_eq!(
+            super::from_files(&[&listed, &dir.join("missing")], none),
+            vec![Learned::Ask("192.0.2.53:53".parse().unwrap())]
+        );
+        assert_eq!(
+            super::from_files(&[&unreadable, &listed], none),
+            vec![
+                Learned::Unreadable,
+                Learned::Ask("192.0.2.53:53".parse().unwrap())
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -413,6 +502,8 @@ nameserver 9.9.9.9;comment
             match resolver {
                 Learned::Ask(addr) => assert_eq!(addr.port(), PORT),
                 Learned::Unaskable(text) => assert!(!text.is_empty()),
+                // Unconfined, the OS's files are readable.
+                Learned::Unreadable => panic!("an OS resolver file can't be read"),
             }
         }
         if std::env::var_os("FC_NAT64_TEST_OS_RESOLVERS").is_some() {

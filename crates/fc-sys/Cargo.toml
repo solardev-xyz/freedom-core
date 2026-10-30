@@ -34,10 +34,14 @@ multiple_unsafe_ops_per_block = "deny"
 # reach (design 0010, Tests: seccomp's ABI guard). Each makes `getpid`, so
 # none touches memory or descriptors.
 test-abis = []
+# Test-only Mach calls on macOS (design 0010, Tests): a service lookup, and
+# the task's port names.
+test-macos = []
 
-[target.'cfg(target_os = "linux")'.dependencies]
-# The raw calls std and rustix lack: Landlock's version query, and the
-# close-on-exec marks before the entry's re-exec (design 0010).
+[target.'cfg(unix)'.dependencies]
+# The raw calls std and rustix lack: Landlock's version query, the
+# close-on-exec marks before the entry's re-exec, and on macOS libproc's
+# and Seatbelt's (design 0010).
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]

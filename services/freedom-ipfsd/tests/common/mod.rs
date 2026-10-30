@@ -103,22 +103,33 @@ impl Ipfsd {
 }
 
 impl Ipfsd {
-    /// The persistent process for `dirs`.
+    /// The persistent process for `dirs`, `direct`.
     pub fn persistent(dirs: &Dirs, env: &[(&str, &str)]) -> Ipfsd {
+        Ipfsd::persistent_on(dirs, "direct", env)
+    }
+
+    /// The persistent process for `dirs`, under `network` (`--network`).
+    pub fn persistent_on(dirs: &Dirs, network: &str, env: &[(&str, &str)]) -> Ipfsd {
         let mut command = Command::new(BIN);
         command
             .arg("serve")
             .arg("--data-dir")
             .arg(&dirs.data)
             .arg("--lock-dir")
-            .arg(&dirs.locks);
+            .arg(&dirs.locks)
+            .args(["--network", network]);
         Ipfsd::spawn(command, env)
     }
 
-    /// The ephemeral process.
+    /// The ephemeral process, `direct`.
     pub fn ephemeral(env: &[(&str, &str)]) -> Ipfsd {
+        Ipfsd::ephemeral_on("direct", env)
+    }
+
+    /// The ephemeral process under `network` (`--network`).
+    pub fn ephemeral_on(network: &str, env: &[(&str, &str)]) -> Ipfsd {
         let mut command = Command::new(BIN);
-        command.args(["serve", "--ephemeral"]);
+        command.args(["serve", "--ephemeral", "--network", network]);
         Ipfsd::spawn(command, env)
     }
 
@@ -550,9 +561,13 @@ pub fn start_params(instance: &str, store: Value) -> Value {
             "delegated_routers": ["https://delegated-ipfs.dev/routing/v1", "https://cid.contact/routing/v1"],
             "doh_endpoint": "https://cloudflare-dns.com/dns-query",
             "dht_query_timeout_s": 3, "dht_max_providers": 32 },
-        "gateway": { "max_concurrent_requests": 8, "request_queue_timeout_ms": 15000 },
-        "network": { "mode": "direct" }
+        "gateway": { "max_concurrent_requests": 8, "request_queue_timeout_ms": 15000 }
     })
+}
+
+/// `--network` for a SOCKS5 proxy at `proxy`.
+pub fn socks5(proxy: std::net::SocketAddr) -> String {
+    format!("socks5:{proxy}")
 }
 
 /// A stream frame as a message: `{ stream, stream_id, … }`, with a data

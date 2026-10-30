@@ -8,9 +8,10 @@
 //! the lines, and checks from outside what the child must not have
 //! changed.
 //!
-//! On other platforms it does nothing yet (macOS and Windows follow).
+//! Linux and macOS; on Windows it does nothing yet.
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[allow(clippy::print_stderr)]
 fn main() {
     eprintln!("confine: nothing to test on this platform yet");
 }
@@ -19,6 +20,15 @@ fn main() {
 fn main() {
     linux::main();
 }
+
+#[cfg(target_os = "macos")]
+fn main() {
+    macos::main();
+}
+
+#[cfg(target_os = "macos")]
+#[path = "confine/macos.rs"]
+mod macos;
 
 #[cfg(target_os = "linux")]
 #[allow(
@@ -105,6 +115,7 @@ mod linux {
         let network = match case {
             "socks5" => Network::Socks5 {
                 port: p.allowed_port,
+                loopback: true,
             },
             "offline" => Network::Offline,
             _ => Network::Direct,
@@ -358,6 +369,7 @@ mod linux {
             // read grants alone.
             system_resolver: true,
             descriptors,
+            interface_index: false,
         }
     }
 
@@ -382,6 +394,12 @@ mod linux {
         check(
             "create outside refused",
             std::fs::write(p.outside.join("new"), b"x").is_err(),
+        );
+        // A hard link to a file outside the grant would give it the
+        // grant's path (design 0010, step 7): refused.
+        check(
+            "a hard link to a file outside refused",
+            std::fs::hard_link(&canary, p.data.join("linked-canary")).is_err(),
         );
         check("stat outside allowed", std::fs::metadata(&canary).is_ok());
         check(
@@ -813,6 +831,11 @@ mod linux {
             &mut failures,
             after.mode() == before.mode(),
             "the canary's mode changed".into(),
+        );
+        expect(
+            &mut failures,
+            after.nlink() == 1,
+            "the canary gained a hard link".into(),
         );
         expect(
             &mut failures,

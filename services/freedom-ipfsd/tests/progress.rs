@@ -174,7 +174,8 @@ fn a_snapshot_past_a_frame_is_cut_to_fit() {
 #[test]
 fn a_main_that_stops_reading_holds_at_most_4_stats_replies() {
     let dirs = Dirs::new();
-    let handled = dirs.data.with_file_name("handled");
+    // Inside the data directory: the one place the confined process writes.
+    let handled = dirs.data.join("handled");
     let mut ipfsd = Ipfsd::persistent(
         &dirs,
         &[("FREEDOM_IPFSD_TEST_HANDLED_FILE", handled.to_str().unwrap())],

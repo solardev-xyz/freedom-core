@@ -83,12 +83,12 @@ fn wait_for(timeout: Duration, done: impl Fn() -> bool) -> bool {
     true
 }
 
-/// A private instance with delegated routing to `router`, under `network`.
-fn instance(id: &str, router: &Listener, network: Value) -> Value {
+/// A private instance with delegated routing to `router`, under its
+/// process's policy.
+fn instance(id: &str, router: &Listener) -> Value {
     let mut params = memory(id);
     params["routing"]["mode"] = json!("delegated");
     params["routing"]["delegated_routers"] = json!([format!("http://{}/routing/v1", router.addr)]);
-    params["network"] = network;
     params
 }
 
@@ -111,7 +111,7 @@ fn direct_ignores_the_environments_proxy() {
         ("no_proxy", ""),
     ]);
     ipfsd.hello();
-    let started = ipfsd.start(instance("e-1", &router, json!({ "mode": "direct" })));
+    let started = ipfsd.start(instance("e-1", &router));
     assert_eq!(started["result"]["instance"], "e-1", "{started}");
     let id = ipfsd.request("ipfs.request", get("e-1", ABSENT));
     let reply = ipfsd.reply(id);
@@ -126,13 +126,9 @@ fn direct_ignores_the_environments_proxy() {
 fn socks5_sends_everything_through_the_proxy() {
     let router = Listener::start(true);
     let proxy = Listener::start(false);
-    let mut ipfsd = Ipfsd::ephemeral(&[]);
+    let mut ipfsd = Ipfsd::ephemeral_on(&socks5(proxy.addr), &[]);
     ipfsd.hello();
-    let started = ipfsd.start(instance(
-        "e-1",
-        &router,
-        json!({ "mode": "socks5", "ip": "127.0.0.1", "port": proxy.addr.port() }),
-    ));
+    let started = ipfsd.start(instance("e-1", &router));
     assert_eq!(started["result"]["instance"], "e-1", "{started}");
     let id = ipfsd.request("ipfs.request", get("e-1", ABSENT));
     let reply = ipfsd.reply(id);

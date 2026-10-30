@@ -1,7 +1,8 @@
 //! IPFS content as verified mode reads it from an external gateway (design
 //! 0009, IPFS): CIDs and the native node's block check, the bounded
 //! protobuf and DAG-CBOR readers, dag-pb and UnixFS with the stricter size
-//! rules, HAMT lookup by hash, and a streaming CAR reader.
+//! rules, HAMT lookup by hash, a streaming CAR reader, and IPNS records
+//! with Ed25519 and RSA keys.
 //!
 //! A logic crate: no I/O, and no decoder allocates from a count it hasn't
 //! checked (AGENTS.md rule 2; 0009, Bounded decoding). It owns its CID and
@@ -15,10 +16,13 @@ pub mod car;
 pub mod cbor;
 pub mod cid;
 pub mod dagpb;
+mod der;
 pub mod hamt;
+pub mod ipns;
 mod murmur3;
 pub mod path;
 pub mod pb;
+mod rfc3339;
 pub mod unixfs;
 pub mod varint;
 

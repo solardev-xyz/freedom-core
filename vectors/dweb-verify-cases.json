@@ -23,6 +23,10 @@
     "ipfs_unixfs": "a dag-pb node's Data decoded as UnixFS, checked against its links where it is a file: cid, block, expect {ok: {type, filesize, blocksizes, data_length}} or {fail}",
     "ipfs_hamt": "a name's lookup in dweb-verify.json's HAMT (ipfs.directories, hamt-v1; its shards are in ipfs.blocks): root, name, hash_bits (the first 64 bits of MurmurHash3 x64 128 of the name, seed 0, big-endian; a byte per level), levels (per shard: depth, bucket, and the link named by the bucket's two uppercase hex digits, alone for a sub-shard or followed by the name for an entry, or null), expect {ok: {cid}} or {absent: true}. The generator checks every name against Kubo's own layout. A case with blocks carries its own root shard (cid → base64), rebuilt from hamt-v1's with an entry out of its place (deviation hamt-lookup), and native is GatewayCore's answer for /ipfs/<root>/<name>",
     "ipfs_car": "a CAR body: car, expect {ok: {sections: [cid]}} when it reads to its end at a section boundary; {fail, after: k}, k the sections read whole before the failure; or {ended: {after: k}} when the stream ends inside a section, an early end the walk takes as a piece failure. Whether the walk then has what it needs is the walk's question, not the reader's",
+    "requests": "whole requests through the verifier: id, note, plan (the verify plan's node, root, path, query and headers; its retry, timers, response and trust are the backend's, as dweb.open writes them), method, partition (null: the profile's), world, expect, and deviation where the design differs from the bundled node. A case with steps runs each step ({partition, plan, method, world, expect}) in order on one verifier, so what one step leaves in a partition (the structure cache, IPNS floors) meets the next",
+    "requests_world": "the node the verifier's pieces reach: the honest node of dweb-verify.json, with the case's own chunks (chunks: address → bytes), and changes applied to the pieces they name. The honest Ant answers /chunks/<address> with 200 and the chunk's wire (dweb-verify.json's swarm.chunks, the case's chunks, or a data leaf rebuilt from its content), or 404; /bytes/<reference> with the file's bytes, as Ant's joiner reads them, 206 with exactly the requested single range and Content-Range bytes a-b/size, or 200 whole without one; /feeds/<owner>/<topic> with 200 and swarm-feed-index, the latest update's index in 16 hex digits. The honest gateway (gateway.car: whether the probe found CARs; false means every block is fetched raw) answers a CAR request as a conforming trustless gateway does (the path's blocks root first, then the entity, depth-first with duplicates, only the blocks covering entity-bytes; ipfs.kubo holds Kubo's answers, which it must reproduce), a raw block request with the block, a record request with the change's record. Retries happen in main: a status in a world is the piece's final answer",
+    "requests_changes": "a world's changes: each names its piece and what differs. chunk {address}: flip (wire offset, the byte XORed with 1), wire (bytes answered instead), or status and body. bytes {reference}: flip (file offset, in whatever the stream carries), answer whole (200 with the whole file, Range ignored), answer at_zero (200 holding the range's bytes at offset 0, and nothing else), end_after (the body ends after n bytes), content_range (the 206 names this instead), stall_after (n bytes, then nothing: main's body idle timer ends the piece), body (bytes answered as an exact 206). car: flip {cid, offset} (that block, wherever a CAR carries it), answer whole_dag (the whole DAG, entity-bytes ignored), no_dups (each block once, its Content-Type saying dups=n), no_dups_unannounced (each block once, its Content-Type still saying dups=y), reversed (the blocks in reverse order), {path_as} (the path resolved as another), end_after_sections (n whole sections, then the end, with boxo's marker when marker is true, or end_inside bytes of the next section), header_version (the header's version), after_sections and insert (bytes inserted after n sections), or status and body. raw {cid}: as (another block's bytes), or status and body. record {name}: record (the bytes answered)",
+    "requests_expect": "a request's expect, what the page gets. {head, body}: the head (status, headers, and trust {name, content}; from names the bundled node's answer it copies, less meta.ant.node_headers) and the whole body. {error: {status, body}}: before the head, the core's {code, message} with that status. {head, truncated: {released, abort: {code, message}}}: the head, then exactly the released bytes, then the core's abort. Bodies are as dweb-verify.json's exchanges write them. Every case also ends with the request's reservations back at zero",
     "ipns_records": "an IPNS record as /ipns/<name>?format=ipns-record answers it: name, record, now (unix seconds), expect {ok: {value, sequence, validity, ttl_ns}} or {fail}"
   },
   "swarm": {
@@ -10207,6 +10211,42 @@
         }
       },
       {
+        "id": "ed25519-signature-v1-alone",
+        "note": "the honest V2-only record with a one-byte signatureV1 and none of the legacy fields",
+        "name": "k51qzi5uqu5dja9it0ilm72uimu8sunfn5hbu86wwb6yxrl8kif10fkruhtcwi",
+        "record": {
+          "base64": "QkBANodKRivqsPYQu52ef3V/Wd35rbyfgtApdWiN89ikJTWdmSt8TEDURNr4RX1Q1GLCLoiR31EdmWp+2aRkxGILSpgBpWNUVEwbAAAARdlkuABlVmFsdWVYQS9pcGZzL2JhZnliZWlndXdqbWRkdnI0aWlhaDZla2d2cm92YjV6ZmI2ZWc1YzZsb2lreHZ4bHh6bHdlYTVkYWJtaFNlcXVlbmNlAWhWYWxpZGl0eVgeMjA5OS0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQASAQE="
+        },
+        "now": 1760000000,
+        "expect": {
+          "fail": "verification_failed"
+        },
+        "native": {
+          "ok": {
+            "value": "/ipfs/bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm",
+            "sequence": 1,
+            "validity": "2099-01-01T00:00:00.000000000Z",
+            "ttl_ns": 300000000000
+          }
+        },
+        "deviation": "ipns-legacy-fields"
+      },
+      {
+        "id": "ed25519-hashed-name",
+        "note": "a sha2-256 name over an Ed25519 key's protobuf, with the key in pubKey and the honest signature",
+        "name": "k2k4r8kng5gj1vpuyjjyso24vx9fgrflajrsq5yhy23bizeu9q4tocsl",
+        "record": {
+          "base64": "OiQIARIgfHZXYvdrfDu2GnmxxmHuZjoBRo/NJiRnNl71FxwKf5JCQEA2h0pGK+qw9hC7nZ5/dX9Z3fmtvJ+C0Cl1aI3z2KQlNZ2ZK3xMQNRE2vhFfVDUYsIuiJHfUR2Zan7ZpGTEYgtKmAGlY1RUTBsAAABF2WS4AGVWYWx1ZVhBL2lwZnMvYmFmeWJlaWd1d2ptZGR2cjRpaWFoNmVrZ3Zyb3ZiNXpmYjZlZzVjNmxvaWt4dnhseHpsd2VhNWRhYm1oU2VxdWVuY2UBaFZhbGlkaXR5WB4yMDk5LTAxLTAxVDAwOjAwOjAwLjAwMDAwMDAwMFpsVmFsaWRpdHlUeXBlAA=="
+        },
+        "now": 1760000000,
+        "expect": {
+          "fail": "unverifiable"
+        },
+        "native": {
+          "error": "invalid IPNS record: public key does not match IPNS name"
+        }
+      },
+      {
         "id": "ed25519-s-not-canonical",
         "note": "the honest signature with L added to S",
         "name": "k51qzi5uqu5dja9it0ilm72uimu8sunfn5hbu86wwb6yxrl8kif10fkruhtcwi",
@@ -10802,5 +10842,3496 @@
         }
       }
     ]
-  }
+  },
+  "requests": [
+    {
+      "id": "swarm/honest",
+      "note": "style.css from site-a, nothing changed: the bundled Ant's answer",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "3c8b9184787f719e7184f51b5c595a950d8cec49c765dc0e5a8f1c253e54591c"
+        },
+        "path": "/style.css",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "changes": []
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "text/css"
+            ],
+            [
+              "content-length",
+              "5000"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-disposition",
+              "inline; filename=\"style.css\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ],
+            [
+              "etag",
+              "\"d4b4800a1f6a3d4cc8fb5d100e04f9ddf6bc0f15c3d38591669f81e5da62da6b\""
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "site-a#8"
+        },
+        "body": {
+          "content": {
+            "seed": "site-style",
+            "from": 0,
+            "length": 5000
+          }
+        }
+      }
+    },
+    {
+      "id": "swarm/leaf-1-flipped",
+      "note": "the /bytes stream's byte 4106 (in the second leaf) flipped: the first leaf is released, the second fails its check, its /chunks fallback is honest",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "3c8b9184787f719e7184f51b5c595a950d8cec49c765dc0e5a8f1c253e54591c"
+        },
+        "path": "/style.css",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "changes": [
+          {
+            "piece": "bytes",
+            "reference": "d4b4800a1f6a3d4cc8fb5d100e04f9ddf6bc0f15c3d38591669f81e5da62da6b",
+            "flip": 4106
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "text/css"
+            ],
+            [
+              "content-length",
+              "5000"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-disposition",
+              "inline; filename=\"style.css\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ],
+            [
+              "etag",
+              "\"d4b4800a1f6a3d4cc8fb5d100e04f9ddf6bc0f15c3d38591669f81e5da62da6b\""
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "site-a#8"
+        },
+        "truncated": {
+          "released": {
+            "content": {
+              "seed": "site-style",
+              "from": 0,
+              "length": 4096
+            }
+          },
+          "abort": {
+            "code": "verification_failed",
+            "message": "Swarm content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "swarm/leaf-0-flipped",
+      "note": "the stream's byte 10 flipped: nothing is released",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "3c8b9184787f719e7184f51b5c595a950d8cec49c765dc0e5a8f1c253e54591c"
+        },
+        "path": "/style.css",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "changes": [
+          {
+            "piece": "bytes",
+            "reference": "d4b4800a1f6a3d4cc8fb5d100e04f9ddf6bc0f15c3d38591669f81e5da62da6b",
+            "flip": 10
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "text/css"
+            ],
+            [
+              "content-length",
+              "5000"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-disposition",
+              "inline; filename=\"style.css\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ],
+            [
+              "etag",
+              "\"d4b4800a1f6a3d4cc8fb5d100e04f9ddf6bc0f15c3d38591669f81e5da62da6b\""
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "site-a#8"
+        },
+        "truncated": {
+          "released": {
+            "length": 0
+          },
+          "abort": {
+            "code": "verification_failed",
+            "message": "Swarm content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "swarm/leaf-flipped-in-both",
+      "note": "the stream's byte 10 and the same byte of the leaf /chunks answers flipped",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "3c8b9184787f719e7184f51b5c595a950d8cec49c765dc0e5a8f1c253e54591c"
+        },
+        "path": "/style.css",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "changes": [
+          {
+            "piece": "bytes",
+            "reference": "d4b4800a1f6a3d4cc8fb5d100e04f9ddf6bc0f15c3d38591669f81e5da62da6b",
+            "flip": 10
+          },
+          {
+            "piece": "chunk",
+            "address": "b1f9db35452a2f4193cf2f6f520fc7cd05c90e160fd6d94beb591efe2f9a2a8b",
+            "flip": 18
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "text/css"
+            ],
+            [
+              "content-length",
+              "5000"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-disposition",
+              "inline; filename=\"style.css\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ],
+            [
+              "etag",
+              "\"d4b4800a1f6a3d4cc8fb5d100e04f9ddf6bc0f15c3d38591669f81e5da62da6b\""
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "site-a#8"
+        },
+        "truncated": {
+          "released": {
+            "length": 0
+          },
+          "abort": {
+            "code": "verification_failed",
+            "message": "Swarm content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "swarm/file-root-flipped",
+      "note": "the file's root chunk with a byte flipped: before the head",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "3c8b9184787f719e7184f51b5c595a950d8cec49c765dc0e5a8f1c253e54591c"
+        },
+        "path": "/style.css",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "changes": [
+          {
+            "piece": "chunk",
+            "address": "d4b4800a1f6a3d4cc8fb5d100e04f9ddf6bc0f15c3d38591669f81e5da62da6b",
+            "flip": 13
+          }
+        ]
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "Swarm content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "swarm/manifest-flipped",
+      "note": "the manifest's root node with a byte flipped",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "3c8b9184787f719e7184f51b5c595a950d8cec49c765dc0e5a8f1c253e54591c"
+        },
+        "path": "/style.css",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "changes": [
+          {
+            "piece": "chunk",
+            "address": "3c8b9184787f719e7184f51b5c595a950d8cec49c765dc0e5a8f1c253e54591c",
+            "flip": 100
+          }
+        ]
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "Swarm content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "swarm/root-over-chunk-size",
+      "note": "the file's root answered with its payload zero-extended to 4,097 bytes: past the chunk size",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "3c8b9184787f719e7184f51b5c595a950d8cec49c765dc0e5a8f1c253e54591c"
+        },
+        "path": "/style.css",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "changes": [
+          {
+            "piece": "chunk",
+            "address": "d4b4800a1f6a3d4cc8fb5d100e04f9ddf6bc0f15c3d38591669f81e5da62da6b",
+            "wire": {
+              "base64": "iBMAAAAAAACx+ds1RSovQZPPL29SD8fNBckOFg/W2UvrWR7+L5oqi1LzkFG0eTNluB7l61SpzIFcGTEsJVIWKv8pSGYlzxmkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+            }
+          }
+        ]
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "Swarm content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "swarm/head-reads-no-leaf",
+      "note": "HEAD with a leaf flipped: a HEAD stops after the file's root, so it isn't read",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "3c8b9184787f719e7184f51b5c595a950d8cec49c765dc0e5a8f1c253e54591c"
+        },
+        "path": "/style.css",
+        "query": "",
+        "headers": []
+      },
+      "method": "HEAD",
+      "partition": null,
+      "world": {
+        "changes": [
+          {
+            "piece": "bytes",
+            "reference": "d4b4800a1f6a3d4cc8fb5d100e04f9ddf6bc0f15c3d38591669f81e5da62da6b",
+            "flip": 10
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "text/css"
+            ],
+            [
+              "content-length",
+              "5000"
+            ],
+            [
+              "content-disposition",
+              "inline; filename=\"style.css\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ],
+            [
+              "etag",
+              "\"d4b4800a1f6a3d4cc8fb5d100e04f9ddf6bc0f15c3d38591669f81e5da62da6b\""
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "site-a#9"
+        },
+        "body": {
+          "length": 0
+        }
+      }
+    },
+    {
+      "id": "swarm/range-200-whole",
+      "note": "the node ignores Range and answers 200 with the whole file: the first leaf is skipped unread, the second checked",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "3c8b9184787f719e7184f51b5c595a950d8cec49c765dc0e5a8f1c253e54591c"
+        },
+        "path": "/style.css",
+        "query": "",
+        "headers": [
+          [
+            "range",
+            "bytes=4096-"
+          ]
+        ]
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "changes": [
+          {
+            "piece": "bytes",
+            "reference": "d4b4800a1f6a3d4cc8fb5d100e04f9ddf6bc0f15c3d38591669f81e5da62da6b",
+            "answer": "whole"
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 206,
+          "headers": [
+            [
+              "content-type",
+              "text/css"
+            ],
+            [
+              "content-length",
+              "904"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-range",
+              "bytes 4096-4999/5000"
+            ],
+            [
+              "content-disposition",
+              "inline; filename=\"style.css\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ],
+            [
+              "etag",
+              "\"d4b4800a1f6a3d4cc8fb5d100e04f9ddf6bc0f15c3d38591669f81e5da62da6b\""
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "site-a#37"
+        },
+        "body": {
+          "content": {
+            "seed": "site-style",
+            "from": 4096,
+            "length": 904
+          }
+        }
+      }
+    },
+    {
+      "id": "swarm/range-200-at-zero",
+      "note": "a 200 holding the range's bytes at offset 0: it ends before the needed leaf",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "3c8b9184787f719e7184f51b5c595a950d8cec49c765dc0e5a8f1c253e54591c"
+        },
+        "path": "/style.css",
+        "query": "",
+        "headers": [
+          [
+            "range",
+            "bytes=4096-"
+          ]
+        ]
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "changes": [
+          {
+            "piece": "bytes",
+            "reference": "d4b4800a1f6a3d4cc8fb5d100e04f9ddf6bc0f15c3d38591669f81e5da62da6b",
+            "answer": "at_zero"
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 206,
+          "headers": [
+            [
+              "content-type",
+              "text/css"
+            ],
+            [
+              "content-length",
+              "904"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-range",
+              "bytes 4096-4999/5000"
+            ],
+            [
+              "content-disposition",
+              "inline; filename=\"style.css\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ],
+            [
+              "etag",
+              "\"d4b4800a1f6a3d4cc8fb5d100e04f9ddf6bc0f15c3d38591669f81e5da62da6b\""
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "site-a#37"
+        },
+        "truncated": {
+          "released": {
+            "length": 0
+          },
+          "abort": {
+            "code": "piece_failed",
+            "message": "The external Swarm node stopped sending"
+          }
+        }
+      }
+    },
+    {
+      "id": "swarm/range-200-short",
+      "note": "a 200 with the whole file that ends after 4,500 bytes, inside the needed leaf",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "3c8b9184787f719e7184f51b5c595a950d8cec49c765dc0e5a8f1c253e54591c"
+        },
+        "path": "/style.css",
+        "query": "",
+        "headers": [
+          [
+            "range",
+            "bytes=4096-"
+          ]
+        ]
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "changes": [
+          {
+            "piece": "bytes",
+            "reference": "d4b4800a1f6a3d4cc8fb5d100e04f9ddf6bc0f15c3d38591669f81e5da62da6b",
+            "answer": "whole",
+            "end_after": 4500
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 206,
+          "headers": [
+            [
+              "content-type",
+              "text/css"
+            ],
+            [
+              "content-length",
+              "904"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-range",
+              "bytes 4096-4999/5000"
+            ],
+            [
+              "content-disposition",
+              "inline; filename=\"style.css\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ],
+            [
+              "etag",
+              "\"d4b4800a1f6a3d4cc8fb5d100e04f9ddf6bc0f15c3d38591669f81e5da62da6b\""
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "site-a#37"
+        },
+        "truncated": {
+          "released": {
+            "length": 0
+          },
+          "abort": {
+            "code": "piece_failed",
+            "message": "The external Swarm node stopped sending"
+          }
+        }
+      }
+    },
+    {
+      "id": "swarm/206-short",
+      "note": "an exact 206 that ends after 4,900 bytes: the first leaf is released",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "3c8b9184787f719e7184f51b5c595a950d8cec49c765dc0e5a8f1c253e54591c"
+        },
+        "path": "/style.css",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "changes": [
+          {
+            "piece": "bytes",
+            "reference": "d4b4800a1f6a3d4cc8fb5d100e04f9ddf6bc0f15c3d38591669f81e5da62da6b",
+            "end_after": 4900
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "text/css"
+            ],
+            [
+              "content-length",
+              "5000"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-disposition",
+              "inline; filename=\"style.css\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ],
+            [
+              "etag",
+              "\"d4b4800a1f6a3d4cc8fb5d100e04f9ddf6bc0f15c3d38591669f81e5da62da6b\""
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "site-a#8"
+        },
+        "truncated": {
+          "released": {
+            "content": {
+              "seed": "site-style",
+              "from": 0,
+              "length": 4096
+            }
+          },
+          "abort": {
+            "code": "piece_failed",
+            "message": "The external Swarm node stopped sending"
+          }
+        }
+      }
+    },
+    {
+      "id": "swarm/206-other-interval",
+      "note": "a 206 whose Content-Range names another interval: no byte of it is used",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "3c8b9184787f719e7184f51b5c595a950d8cec49c765dc0e5a8f1c253e54591c"
+        },
+        "path": "/style.css",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "changes": [
+          {
+            "piece": "bytes",
+            "reference": "d4b4800a1f6a3d4cc8fb5d100e04f9ddf6bc0f15c3d38591669f81e5da62da6b",
+            "content_range": "bytes 0-4999/5001"
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "text/css"
+            ],
+            [
+              "content-length",
+              "5000"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-disposition",
+              "inline; filename=\"style.css\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ],
+            [
+              "etag",
+              "\"d4b4800a1f6a3d4cc8fb5d100e04f9ddf6bc0f15c3d38591669f81e5da62da6b\""
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "site-a#8"
+        },
+        "truncated": {
+          "released": {
+            "length": 0
+          },
+          "abort": {
+            "code": "piece_failed",
+            "message": "The external Swarm node stopped sending"
+          }
+        }
+      }
+    },
+    {
+      "id": "swarm/stall-after-needed",
+      "note": "a 200 with the whole file that stalls after 8,192 bytes, once the needed leaf has arrived: the core has already cancelled it",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "d5bc5564ebcbeee060f251c1b4befe69514a801fb2a363635657fbee6d3c610f"
+        },
+        "path": "/",
+        "query": "",
+        "headers": [
+          [
+            "range",
+            "bytes=4096-8191"
+          ]
+        ]
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "changes": [
+          {
+            "piece": "bytes",
+            "reference": "d5bc5564ebcbeee060f251c1b4befe69514a801fb2a363635657fbee6d3c610f",
+            "answer": "whole",
+            "stall_after": 8192
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 206,
+          "headers": [
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "content-length",
+              "4096"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-range",
+              "bytes 4096-8191/524288"
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ],
+            [
+              "etag",
+              "\"d5bc5564ebcbeee060f251c1b4befe69514a801fb2a363635657fbee6d3c610f\""
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "file-524288-rs0#30"
+        },
+        "body": {
+          "content": {
+            "seed": "file-524288",
+            "from": 4096,
+            "length": 4096
+          }
+        }
+      }
+    },
+    {
+      "id": "swarm/stall-before-needed",
+      "note": "an exact 206 that stalls after 1,000 bytes: main's body idle timer ends the piece",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "d5bc5564ebcbeee060f251c1b4befe69514a801fb2a363635657fbee6d3c610f"
+        },
+        "path": "/",
+        "query": "",
+        "headers": [
+          [
+            "range",
+            "bytes=4096-8191"
+          ]
+        ]
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "changes": [
+          {
+            "piece": "bytes",
+            "reference": "d5bc5564ebcbeee060f251c1b4befe69514a801fb2a363635657fbee6d3c610f",
+            "stall_after": 1000
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 206,
+          "headers": [
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "content-length",
+              "4096"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-range",
+              "bytes 4096-8191/524288"
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ],
+            [
+              "etag",
+              "\"d5bc5564ebcbeee060f251c1b4befe69514a801fb2a363635657fbee6d3c610f\""
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "file-524288-rs0#30"
+        },
+        "truncated": {
+          "released": {
+            "length": 0
+          },
+          "abort": {
+            "code": "piece_failed",
+            "message": "The external Swarm node stopped sending"
+          }
+        }
+      }
+    },
+    {
+      "id": "swarm/leaf-5-flipped",
+      "note": "a byte of the sixth leaf flipped: five leaves are released",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "d5bc5564ebcbeee060f251c1b4befe69514a801fb2a363635657fbee6d3c610f"
+        },
+        "path": "/",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "changes": [
+          {
+            "piece": "bytes",
+            "reference": "d5bc5564ebcbeee060f251c1b4befe69514a801fb2a363635657fbee6d3c610f",
+            "flip": 20487
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "content-length",
+              "524288"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ],
+            [
+              "etag",
+              "\"d5bc5564ebcbeee060f251c1b4befe69514a801fb2a363635657fbee6d3c610f\""
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "file-524288-rs0#3"
+        },
+        "truncated": {
+          "released": {
+            "content": {
+              "seed": "file-524288",
+              "from": 0,
+              "length": 20480
+            }
+          },
+          "abort": {
+            "code": "verification_failed",
+            "message": "Swarm content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "swarm/multi-range",
+      "note": "two ranges: Ant answers multipart/byteranges, the core the whole body with 200",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "d5bc5564ebcbeee060f251c1b4befe69514a801fb2a363635657fbee6d3c610f"
+        },
+        "path": "/",
+        "query": "",
+        "headers": [
+          [
+            "range",
+            "bytes=0-0,2-3"
+          ]
+        ]
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "changes": []
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "content-length",
+              "524288"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ],
+            [
+              "etag",
+              "\"d5bc5564ebcbeee060f251c1b4befe69514a801fb2a363635657fbee6d3c610f\""
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "file-524288-rs0#3"
+        },
+        "body": {
+          "content": {
+            "seed": "file-524288",
+            "from": 0,
+            "length": 524288
+          }
+        }
+      },
+      "deviation": "multi-range"
+    },
+    {
+      "id": "swarm/piece-404",
+      "note": "the file's root answered 404, with a body of the node's own, which the page never gets",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "3c8b9184787f719e7184f51b5c595a950d8cec49c765dc0e5a8f1c253e54591c"
+        },
+        "path": "/style.css",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "changes": [
+          {
+            "piece": "chunk",
+            "address": "d4b4800a1f6a3d4cc8fb5d100e04f9ddf6bc0f15c3d38591669f81e5da62da6b",
+            "status": 404,
+            "body": {
+              "base64": "dGhlIG5vZGUncyBvd24gd29yZHM="
+            }
+          }
+        ]
+      },
+      "expect": {
+        "error": {
+          "status": 404,
+          "body": {
+            "code": 404,
+            "message": "Not found on the external Swarm node"
+          }
+        }
+      }
+    },
+    {
+      "id": "swarm/piece-500",
+      "note": "the file's root answered 500 at every attempt",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "3c8b9184787f719e7184f51b5c595a950d8cec49c765dc0e5a8f1c253e54591c"
+        },
+        "path": "/style.css",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "changes": [
+          {
+            "piece": "chunk",
+            "address": "d4b4800a1f6a3d4cc8fb5d100e04f9ddf6bc0f15c3d38591669f81e5da62da6b",
+            "status": 500,
+            "body": {
+              "base64": "dGhlIG5vZGUncyBvd24gd29yZHM="
+            }
+          }
+        ]
+      },
+      "expect": {
+        "error": {
+          "status": 500,
+          "body": {
+            "code": 500,
+            "message": "The external Swarm node answered 500"
+          }
+        }
+      }
+    },
+    {
+      "id": "swarm/path-not-found",
+      "note": "a path the verified manifest doesn't hold: Ant's 404, proven",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "3c8b9184787f719e7184f51b5c595a950d8cec49c765dc0e5a8f1c253e54591c"
+        },
+        "path": "/missing",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "changes": []
+      },
+      "expect": {
+        "head": {
+          "status": 404,
+          "headers": [
+            [
+              "content-type",
+              "application/json; charset=utf-8"
+            ],
+            [
+              "content-length",
+              "47"
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "site-a#34"
+        },
+        "body": {
+          "base64": "eyJjb2RlIjo0MDQsIm1lc3NhZ2UiOiJwYXRoIGFkZHJlc3Mgbm90IGZvdW5kIn0="
+        }
+      }
+    },
+    {
+      "id": "swarm/leaf-payload-shorter",
+      "note": "a root of span 4,156 over a full leaf and a 40-byte leaf: the second leaf's payload is shorter than the 60 bytes its parent gives it",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "0584a9c0741a936ad0781622f6f530d71ca806757db4a1ea0662ac26641e39c7"
+        },
+        "path": "/",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "chunks": {
+          "0584a9c0741a936ad0781622f6f530d71ca806757db4a1ea0662ac26641e39c7": {
+            "base64": "PBAAAAAAAACt+isju/blsUOM50KhOGnCLMXPmDzNMFzJes5P219uMuUKTjuNuTaoiqrkNzVtqVRL+NK71C9qfM4XAO8fWAZp"
+          },
+          "adfa2b23bbf6e5b1438ce742a13869c22cc5cf983ccd305cc97ace4fdb5f6e32": {
+            "base64": "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"
+          },
+          "e50a4e3b8db936a88aaae437356da9544bf8d2bbd42f6a7cce1700ef1f580669": {
+            "base64": "KAAAAAAAAADPPPbogtq0SaAN3aW5JQw/ErwLPzrYb874CITqWlvQjJB6Jlb2p25z"
+          }
+        },
+        "changes": [
+          {
+            "piece": "bytes",
+            "reference": "0584a9c0741a936ad0781622f6f530d71ca806757db4a1ea0662ac26641e39c7",
+            "body": {
+              "base64": "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"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "content-length",
+              "4156"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ],
+            [
+              "etag",
+              "\"0584a9c0741a936ad0781622f6f530d71ca806757db4a1ea0662ac26641e39c7\""
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "Ant's head for a reference that isn't a manifest, as file-524288-rs0#3"
+        },
+        "truncated": {
+          "released": {
+            "content": {
+              "seed": "requests-short-head",
+              "from": 0,
+              "length": 4096
+            }
+          },
+          "abort": {
+            "code": "unverifiable",
+            "message": "This content can't be verified with the external Swarm node"
+          }
+        }
+      }
+    },
+    {
+      "id": "swarm/soc-as-root",
+      "note": "the URL's reference is a valid single-owner chunk's address",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "fc4880a74eb3739661b2a343883e48c59d7eef54e317fa8fa7b84350133580c3"
+        },
+        "path": "/",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "chunks": {
+          "fc4880a74eb3739661b2a343883e48c59d7eef54e317fa8fa7b84350133580c3": {
+            "base64": "Vs9mTsWZX+vWviW4ioR5vy0yCigrMWxh8+gGY3LKmpzKhvkyjHdBeuTUUuenZsbQFH1s/1QFdq+D8oPWbgwVsTJO0ubjVhIOHyLpUT85NzD13H1xNOkTdsvGYGcy6OSUHGQAAAAAAAAAGebjki/S3ux0+i5FIJG0Xt7mLFnUio5dce+fPvgmujUNscMUIW22kAdrTKMEjDOES8L/CHc6jW9UeEukFIwIyIGgBqBnNStHB7m43APGX5m1rIbViGDhaTWr2T08EieqxBDu/g=="
+          },
+          "f9a80d2d82f536a6606f6abbdf4d34cc13f2d0f665ee031e0d9eb31de2b310ef": {
+            "base64": "ZAAAAAAAAAAZ5uOSL9Le7HT6LkUgkbRe3uYsWdSKjl1x758++Ca6NQ2xwxQhbbaQB2tMowSMM4RLwv8IdzqNb1R4S6QUjAjIgaAGoGc1K0cHubjcA8ZfmbWshtWIYOFpNavZPTwSJ6rEEO7+"
+          }
+        },
+        "changes": []
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "This content can't be verified with the external Swarm node"
+          }
+        }
+      },
+      "deviation": "soc-references"
+    },
+    {
+      "id": "swarm/soc-as-manifest-child",
+      "note": "a manifest whose fork for file.bin names a single-owner chunk",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "1b287651066362e058f94e67e3295ddae5834380a4bc8cd74e962bfd7a6d233e"
+        },
+        "path": "/file.bin",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "chunks": {
+          "1b287651066362e058f94e67e3295ddae5834380a4bc8cd74e962bfd7a6d233e": {
+            "base64": "IAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFdos7an21bSHRq/9A1Bzr/INEj+2NfpsG7A07Bz8o8gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAABIIZmlsZS5iaW4AAAAAAAAAAAAAAAAAAAAAAAAAAAAA/EiAp06zc5ZhsqNDiD5IxZ1+71TjF/qPp7hDUBM1gMMAXnsiQ29udGVudC1UeXBlIjoiYXBwbGljYXRpb24vb2N0ZXQtc3RyZWFtIiwiRmlsZW5hbWUiOiJmaWxlLmJpbiJ9CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo="
+          },
+          "fc4880a74eb3739661b2a343883e48c59d7eef54e317fa8fa7b84350133580c3": {
+            "base64": "Vs9mTsWZX+vWviW4ioR5vy0yCigrMWxh8+gGY3LKmpzKhvkyjHdBeuTUUuenZsbQFH1s/1QFdq+D8oPWbgwVsTJO0ubjVhIOHyLpUT85NzD13H1xNOkTdsvGYGcy6OSUHGQAAAAAAAAAGebjki/S3ux0+i5FIJG0Xt7mLFnUio5dce+fPvgmujUNscMUIW22kAdrTKMEjDOES8L/CHc6jW9UeEukFIwIyIGgBqBnNStHB7m43APGX5m1rIbViGDhaTWr2T08EieqxBDu/g=="
+          },
+          "f9a80d2d82f536a6606f6abbdf4d34cc13f2d0f665ee031e0d9eb31de2b310ef": {
+            "base64": "ZAAAAAAAAAAZ5uOSL9Le7HT6LkUgkbRe3uYsWdSKjl1x758++Ca6NQ2xwxQhbbaQB2tMowSMM4RLwv8IdzqNb1R4S6QUjAjIgaAGoGc1K0cHubjcA8ZfmbWshtWIYOFpNavZPTwSJ6rEEO7+"
+          }
+        },
+        "changes": []
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "This content can't be verified with the external Swarm node"
+          }
+        }
+      },
+      "deviation": "soc-references"
+    },
+    {
+      "id": "swarm/soc-as-intermediate",
+      "note": "the URL's reference is a root of span 528,384 whose first child, an intermediate chunk's place, is a single-owner chunk: telling a raw file from a manifest reads down to the first data chunk, so the refusal comes before the head",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "7ed67154a5c1a4e7e65210f9cfab68084275cf5f3a723ea9455446d7ed5fd33e"
+        },
+        "path": "/",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "chunks": {
+          "7ed67154a5c1a4e7e65210f9cfab68084275cf5f3a723ea9455446d7ed5fd33e": {
+            "base64": "ABAIAAAAAAD8SICnTrNzlmGyo0OIPkjFnX7vVOMX+o+nuENQEzWAwxvdkzpCMx4uaAHhkmbntFl6hlx0jxzQW1f0Z9bAdfj/"
+          },
+          "fc4880a74eb3739661b2a343883e48c59d7eef54e317fa8fa7b84350133580c3": {
+            "base64": "Vs9mTsWZX+vWviW4ioR5vy0yCigrMWxh8+gGY3LKmpzKhvkyjHdBeuTUUuenZsbQFH1s/1QFdq+D8oPWbgwVsTJO0ubjVhIOHyLpUT85NzD13H1xNOkTdsvGYGcy6OSUHGQAAAAAAAAAGebjki/S3ux0+i5FIJG0Xt7mLFnUio5dce+fPvgmujUNscMUIW22kAdrTKMEjDOES8L/CHc6jW9UeEukFIwIyIGgBqBnNStHB7m43APGX5m1rIbViGDhaTWr2T08EieqxBDu/g=="
+          },
+          "1bdd933a42331e2e6801e19266e7b4597a865c748f1cd05b57f467d6c075f8ff": {
+            "base64": "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"
+          }
+        },
+        "changes": []
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "This content can't be verified with the external Swarm node"
+          }
+        }
+      },
+      "deviation": "soc-references"
+    },
+    {
+      "id": "swarm/soc-as-intermediate-in-manifest",
+      "note": "the same file as the entry file.bin of a manifest: the head goes out once the file's root chunk has passed, and its first child, a single-owner chunk, is refused after it, with nothing released",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "f680375d1c4e6840a2d9c8fdb5ec21ea221687a3fcf38443e9254812d244e315"
+        },
+        "path": "/file.bin",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "chunks": {
+          "f680375d1c4e6840a2d9c8fdb5ec21ea221687a3fcf38443e9254812d244e315": {
+            "base64": "IAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFdos7an21bSHRq/9A1Bzr/INEj+2NfpsG7A07Bz8o8gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAABIIZmlsZS5iaW4AAAAAAAAAAAAAAAAAAAAAAAAAAAAA8YyJz5lO8cmHIozL2K/Du2apKnDN/0bi97/YqnNkIVoAXnsiQ29udGVudC1UeXBlIjoiYXBwbGljYXRpb24vb2N0ZXQtc3RyZWFtIiwiRmlsZW5hbWUiOiJmaWxlLmJpbiJ9CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo="
+          },
+          "f18c89cf994ef1c987228ccbd8afc3bb66a92a70cdff46e2f7bfd8aa7364215a": {
+            "base64": "gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFdos7an21bSHRq/9A1Bzr/INEj+2NfpsG7A07Bz8o8gftZxVKXBpOfmUhD5z6toCEJ1z186cj6pRVRG1+1f0z4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+          },
+          "7ed67154a5c1a4e7e65210f9cfab68084275cf5f3a723ea9455446d7ed5fd33e": {
+            "base64": "ABAIAAAAAAD8SICnTrNzlmGyo0OIPkjFnX7vVOMX+o+nuENQEzWAwxvdkzpCMx4uaAHhkmbntFl6hlx0jxzQW1f0Z9bAdfj/"
+          },
+          "fc4880a74eb3739661b2a343883e48c59d7eef54e317fa8fa7b84350133580c3": {
+            "base64": "Vs9mTsWZX+vWviW4ioR5vy0yCigrMWxh8+gGY3LKmpzKhvkyjHdBeuTUUuenZsbQFH1s/1QFdq+D8oPWbgwVsTJO0ubjVhIOHyLpUT85NzD13H1xNOkTdsvGYGcy6OSUHGQAAAAAAAAAGebjki/S3ux0+i5FIJG0Xt7mLFnUio5dce+fPvgmujUNscMUIW22kAdrTKMEjDOES8L/CHc6jW9UeEukFIwIyIGgBqBnNStHB7m43APGX5m1rIbViGDhaTWr2T08EieqxBDu/g=="
+          },
+          "1bdd933a42331e2e6801e19266e7b4597a865c748f1cd05b57f467d6c075f8ff": {
+            "base64": "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"
+          }
+        },
+        "changes": []
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "content-length",
+              "528384"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-disposition",
+              "inline; filename=\"file.bin\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ],
+            [
+              "etag",
+              "\"7ed67154a5c1a4e7e65210f9cfab68084275cf5f3a723ea9455446d7ed5fd33e\""
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "Ant's head for a manifest entry, as site-a#8"
+        },
+        "truncated": {
+          "released": {
+            "length": 0
+          },
+          "abort": {
+            "code": "unverifiable",
+            "message": "This content can't be verified with the external Swarm node"
+          }
+        }
+      },
+      "deviation": "soc-references"
+    },
+    {
+      "id": "swarm/soc-two-payloads",
+      "note": "one owner's two SOCs at one address, served one after the other in one partition: each request is unverifiable, and nothing of the first is cached for the second",
+      "partition": "requests-soc",
+      "deviation": "soc-references",
+      "steps": [
+        {
+          "plan": {
+            "node": "ant",
+            "root": {
+              "swarm": "fc4880a74eb3739661b2a343883e48c59d7eef54e317fa8fa7b84350133580c3"
+            },
+            "path": "/",
+            "query": "",
+            "headers": []
+          },
+          "method": "GET",
+          "world": {
+            "chunks": {
+              "fc4880a74eb3739661b2a343883e48c59d7eef54e317fa8fa7b84350133580c3": {
+                "base64": "Vs9mTsWZX+vWviW4ioR5vy0yCigrMWxh8+gGY3LKmpzKhvkyjHdBeuTUUuenZsbQFH1s/1QFdq+D8oPWbgwVsTJO0ubjVhIOHyLpUT85NzD13H1xNOkTdsvGYGcy6OSUHGQAAAAAAAAAGebjki/S3ux0+i5FIJG0Xt7mLFnUio5dce+fPvgmujUNscMUIW22kAdrTKMEjDOES8L/CHc6jW9UeEukFIwIyIGgBqBnNStHB7m43APGX5m1rIbViGDhaTWr2T08EieqxBDu/g=="
+              }
+            },
+            "changes": []
+          },
+          "expect": {
+            "error": {
+              "status": 502,
+              "body": {
+                "code": 502,
+                "message": "This content can't be verified with the external Swarm node"
+              }
+            }
+          }
+        },
+        {
+          "plan": {
+            "node": "ant",
+            "root": {
+              "swarm": "fc4880a74eb3739661b2a343883e48c59d7eef54e317fa8fa7b84350133580c3"
+            },
+            "path": "/",
+            "query": "",
+            "headers": []
+          },
+          "method": "GET",
+          "world": {
+            "chunks": {
+              "fc4880a74eb3739661b2a343883e48c59d7eef54e317fa8fa7b84350133580c3": {
+                "base64": "Vs9mTsWZX+vWviW4ioR5vy0yCigrMWxh8+gGY3LKmpw7GCoss/8QX+yODEn3MSc9hmGyXr2RGgUAV86tZ1hh60y9S0kYZ0Rkz9ont0O5qnZe1Acet/m0qeLfpwKrNj7RHGQAAAAAAAAACrITTmqgYqI+WUCt1PMz47MeRO0ESogiwjaxgclNbLkBekRDSWic6rs6B4oTe2BFVYDltTsFlFsJS5CPnuNCUYtTGXt+hCVXBLRJoYbBsoVTOgS891PsbndYx1ACHdSinFe1yw=="
+              }
+            },
+            "changes": []
+          },
+          "expect": {
+            "error": {
+              "status": 502,
+              "body": {
+                "code": 502,
+                "message": "This content can't be verified with the external Swarm node"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "swarm/feed",
+      "note": "feed-v1, nothing changed: the latest update is accepted, latest_asserted",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "2143c9c1146d0c034f6a8774a68a42b8919e66cb5849add3624995030b17290c"
+        },
+        "path": "/",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "changes": []
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "text/html; charset=utf-8"
+            ],
+            [
+              "content-length",
+              "300"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-disposition",
+              "inline; filename=\"index.html\""
+            ],
+            [
+              "cache-control",
+              "no-cache"
+            ],
+            [
+              "etag",
+              "\"52a3c62442679a25d7691901cc2d14eef0ffd8430fe15acb9a59714ec13724ca\""
+            ],
+            [
+              "swarm-feed-index",
+              "0000000000000002"
+            ],
+            [
+              "swarm-feed-resolved-version",
+              "v1"
+            ],
+            [
+              "access-control-expose-headers",
+              "Swarm-Feed-Index"
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "latest_asserted"
+          },
+          "from": "feed-v1#1"
+        },
+        "body": {
+          "base64": "3226DIoB4pQenwb8/4yzl/WlHQCBolDIQ5XwQNb4mvrbErJ+iu30NxvD9W5fRSgw9Lifbqj/FYvRzClKnTLG8eIDVwfQcWLLzD1vqwN7WdbzHCxIt3aI+jIJLl4Cbap6ggwVoah8yXufDojb1mVqzylhrCV2gLSM4AJJmLTcvZtSyjgyphVH4BjTNavbG1NyCUlMyLGEbTdNpWPBl8j0QpFmbFnIiQY33G3rC9y2NrutRVWCJK4bqeg53mumGjPKEEBLNTEmfV3hYexXCM+/rhYC9XCtWCVtUJLGLe/uIBCqoAUWIKDydznt5R0FQbv8FtMoGqk+5IWCE+xg+k992ytzqBJh3Wd8xD9X4tmrvJJxin7Gze9dPJ0VhQoVMh+8ku8s/jhRlufF1Al7"
+        }
+      }
+    },
+    {
+      "id": "swarm/feed-other-owner",
+      "note": "the latest update re-signed by another key, served at its address",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "2143c9c1146d0c034f6a8774a68a42b8919e66cb5849add3624995030b17290c"
+        },
+        "path": "/",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "changes": [
+          {
+            "piece": "chunk",
+            "address": "1b5d864379f4bc07b170275fcca49bfbf05cb35986fa2fc2b479c33addc8f036",
+            "wire": {
+              "base64": "qlT8SR+ZVODJ2lUU1yO/anm8NBu5CJWMeExbV0IXSnbZyzhRxNDjrFB3HvDcwAuuoOqxig6itTpOXmxQEef+Y3WoFC8m0ItIwAlC0m8CVKeVnHO04WkiWG99g4RSsuBZGygAAAAAAAAAAAAAAGjneAI8i5GEeH9xnnGE9RtcWVqVDYzsScdl3A5ajxwlPlRZHA=="
+            }
+          }
+        ]
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "Swarm content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "swarm/feed-other-index",
+      "note": "the previous update's chunk served at the latest update's address",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "2143c9c1146d0c034f6a8774a68a42b8919e66cb5849add3624995030b17290c"
+        },
+        "path": "/",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "changes": [
+          {
+            "piece": "chunk",
+            "address": "1b5d864379f4bc07b170275fcca49bfbf05cb35986fa2fc2b479c33addc8f036",
+            "wire": {
+              "base64": "qJ/0VTQltyBrG/IJtE76UKwC5GipOzcYU5rJxjxpeThmQq9sJBtAl2EXbSYn7QFyfpvKgsg5wNVowI8ksh2UP37b7OzZSXMflyhJ18i7dgue3ZYy5rrvZFwTrZsNvOpVGygAAAAAAAAAAAAAAGjneAGnls3OOLDFfyNEGiyJ5oDaHy6SO0OeP/JRFEIScl0QAQ=="
+            }
+          }
+        ]
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "Swarm content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "swarm/feed-update-flipped",
+      "note": "the latest update with a byte of its wrapped chunk flipped",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "2143c9c1146d0c034f6a8774a68a42b8919e66cb5849add3624995030b17290c"
+        },
+        "path": "/",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "changes": [
+          {
+            "piece": "chunk",
+            "address": "1b5d864379f4bc07b170275fcca49bfbf05cb35986fa2fc2b479c33addc8f036",
+            "flip": 108
+          }
+        ]
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "Swarm content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "swarm/encrypted-in-manifest",
+      "note": "a plain root whose node below holds 64-byte references: Ant serves the file, the walk refuses",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "42b7f54da02b678ec7be8aa4880411ed10c59bf8d207d0ddeea141c7a9466745"
+        },
+        "path": "/enc/secret.bin",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "changes": []
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "This content can't be verified with the external Swarm node"
+          }
+        }
+      },
+      "deviation": "encrypted-in-walk"
+    },
+    {
+      "id": "swarm/encrypted-feed-update",
+      "note": "a feed whose latest v1 update is 80 bytes: Ant answers the manifest's own node, the walk refuses",
+      "plan": {
+        "node": "ant",
+        "root": {
+          "swarm": "00ff777c48d0d108dfeb6c517c17a087b0595e2f584d749eb42d3f64a5c07974"
+        },
+        "path": "/",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "changes": []
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "This content can't be verified with the external Swarm node"
+          }
+        }
+      },
+      "deviation": "encrypted-in-walk"
+    },
+    {
+      "id": "ipfs/honest",
+      "note": "img/photo.jpg from site-v1 through a CAR, nothing changed: GatewayCore's answer",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm"
+        },
+        "path": "/img/photo.jpg",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": []
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "image/jpeg"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-length",
+              "300000"
+            ],
+            [
+              "etag",
+              "\"fi1:bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm:img/photo.jpg:300000\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "site-v1#12"
+        },
+        "body": {
+          "content": {
+            "seed": "ipfs-site-photo",
+            "from": 0,
+            "length": 300000
+          }
+        }
+      }
+    },
+    {
+      "id": "ipfs/honest-raw",
+      "note": "the same through raw blocks, from a gateway the probe found without CARs",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm"
+        },
+        "path": "/img/photo.jpg",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": false
+        },
+        "changes": []
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "image/jpeg"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-length",
+              "300000"
+            ],
+            [
+              "etag",
+              "\"fi1:bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm:img/photo.jpg:300000\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "site-v1#12"
+        },
+        "body": {
+          "content": {
+            "seed": "ipfs-site-photo",
+            "from": 0,
+            "length": 300000
+          }
+        }
+      }
+    },
+    {
+      "id": "ipfs/leaf-1-flipped",
+      "note": "the second leaf's byte 100 flipped in the CAR: the first leaf is released",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm"
+        },
+        "path": "/img/photo.jpg",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "car",
+            "flip": {
+              "cid": "bafkreiafjeczmeathjz4p4adx6vxgo3aajr7shxadmrrv5fcr2uypcpffi",
+              "offset": 100
+            }
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "image/jpeg"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-length",
+              "300000"
+            ],
+            [
+              "etag",
+              "\"fi1:bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm:img/photo.jpg:300000\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "site-v1#12"
+        },
+        "truncated": {
+          "released": {
+            "content": {
+              "seed": "ipfs-site-photo",
+              "from": 0,
+              "length": 262144
+            }
+          },
+          "abort": {
+            "code": "verification_failed",
+            "message": "IPFS content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "ipfs/leaf-0-flipped",
+      "note": "the first leaf flipped: nothing released",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm"
+        },
+        "path": "/img/photo.jpg",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "car",
+            "flip": {
+              "cid": "bafkreifs4s6iyfnvumsyqxodhwm7dfdasavkhugm32f7n5j2ycxipsspju",
+              "offset": 100
+            }
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "image/jpeg"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-length",
+              "300000"
+            ],
+            [
+              "etag",
+              "\"fi1:bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm:img/photo.jpg:300000\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "site-v1#12"
+        },
+        "truncated": {
+          "released": {
+            "length": 0
+          },
+          "abort": {
+            "code": "verification_failed",
+            "message": "IPFS content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "ipfs/file-node-flipped",
+      "note": "the file's root node flipped: before the head",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm"
+        },
+        "path": "/img/photo.jpg",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "car",
+            "flip": {
+              "cid": "bafybeidqxi6n2kplfv2tvhsbu2jt6o7x645qblr27ojokherctrsent47i",
+              "offset": 10
+            }
+          }
+        ]
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "IPFS content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "ipfs/directory-flipped",
+      "note": "the site's root directory flipped",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm"
+        },
+        "path": "/img/photo.jpg",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "car",
+            "flip": {
+              "cid": "bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm",
+              "offset": 10
+            }
+          }
+        ]
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "IPFS content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "ipfs/raw-block-not-its-cid",
+      "note": "raw blocks only, the first leaf answered with the second's bytes",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm"
+        },
+        "path": "/img/photo.jpg",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": false
+        },
+        "changes": [
+          {
+            "piece": "raw",
+            "cid": "bafkreifs4s6iyfnvumsyqxodhwm7dfdasavkhugm32f7n5j2ycxipsspju",
+            "as": "bafkreiafjeczmeathjz4p4adx6vxgo3aajr7shxadmrrv5fcr2uypcpffi"
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "image/jpeg"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-length",
+              "300000"
+            ],
+            [
+              "etag",
+              "\"fi1:bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm:img/photo.jpg:300000\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "site-v1#12"
+        },
+        "truncated": {
+          "released": {
+            "length": 0
+          },
+          "abort": {
+            "code": "verification_failed",
+            "message": "IPFS content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "ipfs/hamt-root-flipped",
+      "note": "the HAMT's root shard flipped",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeici5ieuuuekpr6eknkq2dkfgj4oxoqe5bnwp5hgs7xvdvllmbydca"
+        },
+        "path": "/entry-007.txt",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "car",
+            "flip": {
+              "cid": "bafybeici5ieuuuekpr6eknkq2dkfgj4oxoqe5bnwp5hgs7xvdvllmbydca",
+              "offset": 10
+            }
+          }
+        ]
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "IPFS content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "ipfs/hamt-shard-flipped",
+      "note": "the sub-shard on the name's path flipped",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeici5ieuuuekpr6eknkq2dkfgj4oxoqe5bnwp5hgs7xvdvllmbydca"
+        },
+        "path": "/entry-007.txt",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "car",
+            "flip": {
+              "cid": "bafybeieb3dnnl6ctoh3gihwiaivmwcawmd64vljfcrwuvgri4i4oeqhvem",
+              "offset": 10
+            }
+          }
+        ]
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "IPFS content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "ipfs/car-ignores-entity-bytes",
+      "note": "a range from the second leaf; the CAR is the whole DAG: the first leaf isn't the block needed next, so the core cancels the CAR and fetches the rest raw",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeicts2tssv6avpna26sql26mlrowdhxwjpskl35ibnxdf7tf7cgo5a"
+        },
+        "path": "",
+        "query": "",
+        "headers": [
+          [
+            "range",
+            "bytes=262144-"
+          ]
+        ]
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "car",
+            "answer": "whole_dag"
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 206,
+          "headers": [
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-range",
+              "bytes 262144-10485759/10485760"
+            ],
+            [
+              "content-length",
+              "10223616"
+            ],
+            [
+              "etag",
+              "\"fi1:bafybeicts2tssv6avpna26sql26mlrowdhxwjpskl35ibnxdf7tf7cgo5a:.:10485760\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "file-10485760-v1-balanced#13"
+        },
+        "body": {
+          "content": {
+            "seed": "ipfs-file-10485760",
+            "from": 262144,
+            "length": 10223616
+          }
+        }
+      }
+    },
+    {
+      "id": "ipfs/car-no-duplicates",
+      "note": "a file whose one leaf is linked four times; the CAR sends it once and says dups=n, which the core doesn't take: every block is fetched raw",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeiaw4srkelv2eyvj7r6x36d375tsptrlfzsvlxhidyj5me5huasve4"
+        },
+        "path": "",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "car",
+            "answer": "no_dups"
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-length",
+              "1048576"
+            ],
+            [
+              "etag",
+              "\"fi1:bafybeiaw4srkelv2eyvj7r6x36d375tsptrlfzsvlxhidyj5me5huasve4:.:1048576\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "file-repeat-v1#1"
+        },
+        "body": {
+          "length": 1048576,
+          "sha256": "9fd57d99c6599b69f5ebb198173fd8f438661ed1164f3865dd97729a930c62ab"
+        }
+      }
+    },
+    {
+      "id": "ipfs/car-no-duplicates-raw-leaf-wrong",
+      "note": "the dups=n CAR, honest, and the raw answer for the leaf another block's bytes: the core takes no block from the CAR, so the leaf the type's sniffing needs fails before the head. A core that read the CAR would answer 200",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeiaw4srkelv2eyvj7r6x36d375tsptrlfzsvlxhidyj5me5huasve4"
+        },
+        "path": "",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "car",
+            "answer": "no_dups"
+          },
+          {
+            "piece": "raw",
+            "cid": "bafkreiaediwvfaybu3walxpbful7vqemyuqrqhr3uhndtg5zox7aw6fypq",
+            "as": "bafybeiaw4srkelv2eyvj7r6x36d375tsptrlfzsvlxhidyj5me5huasve4"
+          }
+        ]
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "IPFS content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "ipfs/car-no-duplicates-unannounced",
+      "note": "the same, its Content-Type still saying dups=y: the CAR ends cleanly before the walk does, which fetches the rest raw",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeiaw4srkelv2eyvj7r6x36d375tsptrlfzsvlxhidyj5me5huasve4"
+        },
+        "path": "",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "car",
+            "answer": "no_dups_unannounced"
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-length",
+              "1048576"
+            ],
+            [
+              "etag",
+              "\"fi1:bafybeiaw4srkelv2eyvj7r6x36d375tsptrlfzsvlxhidyj5me5huasve4:.:1048576\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "file-repeat-v1#1"
+        },
+        "body": {
+          "length": 1048576,
+          "sha256": "9fd57d99c6599b69f5ebb198173fd8f438661ed1164f3865dd97729a930c62ab"
+        }
+      }
+    },
+    {
+      "id": "ipfs/car-reversed",
+      "note": "a CAR whose blocks come in reverse order",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm"
+        },
+        "path": "/docs/page.html",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "car",
+            "answer": "reversed"
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "text/html"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-length",
+              "1200"
+            ],
+            [
+              "etag",
+              "\"fi1:bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm:docs/page.html:1200\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "site-v1#8"
+        },
+        "body": {
+          "content": {
+            "seed": "ipfs-site-docs-page",
+            "from": 0,
+            "length": 1200
+          }
+        }
+      }
+    },
+    {
+      "id": "ipfs/car-other-path",
+      "note": "a CAR that resolves the path to style.css instead of docs/page.html",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm"
+        },
+        "path": "/docs/page.html",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "car",
+            "answer": {
+              "path_as": "/style.css"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "text/html"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-length",
+              "1200"
+            ],
+            [
+              "etag",
+              "\"fi1:bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm:docs/page.html:1200\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "site-v1#8"
+        },
+        "body": {
+          "content": {
+            "seed": "ipfs-site-docs-page",
+            "from": 0,
+            "length": 1200
+          }
+        }
+      }
+    },
+    {
+      "id": "ipfs/car-early-end-marker",
+      "note": "the 10 MiB file's CAR ends after its root and four leaves, with boxo's truncation marker",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeicts2tssv6avpna26sql26mlrowdhxwjpskl35ibnxdf7tf7cgo5a"
+        },
+        "path": "",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "car",
+            "end_after_sections": 5,
+            "marker": true
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-length",
+              "10485760"
+            ],
+            [
+              "etag",
+              "\"fi1:bafybeicts2tssv6avpna26sql26mlrowdhxwjpskl35ibnxdf7tf7cgo5a:.:10485760\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "file-10485760-v1-balanced#1"
+        },
+        "truncated": {
+          "released": {
+            "content": {
+              "seed": "ipfs-file-10485760",
+              "from": 0,
+              "length": 1048576
+            }
+          },
+          "abort": {
+            "code": "piece_failed",
+            "message": "The external IPFS gateway stopped sending"
+          }
+        }
+      }
+    },
+    {
+      "id": "ipfs/car-early-end",
+      "note": "the CAR ends inside its sixth section",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeicts2tssv6avpna26sql26mlrowdhxwjpskl35ibnxdf7tf7cgo5a"
+        },
+        "path": "",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "car",
+            "end_after_sections": 5,
+            "end_inside": 100
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-length",
+              "10485760"
+            ],
+            [
+              "etag",
+              "\"fi1:bafybeicts2tssv6avpna26sql26mlrowdhxwjpskl35ibnxdf7tf7cgo5a:.:10485760\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "file-10485760-v1-balanced#1"
+        },
+        "truncated": {
+          "released": {
+            "content": {
+              "seed": "ipfs-file-10485760",
+              "from": 0,
+              "length": 1048576
+            }
+          },
+          "abort": {
+            "code": "piece_failed",
+            "message": "The external IPFS gateway stopped sending"
+          }
+        }
+      }
+    },
+    {
+      "id": "ipfs/car-bad-header",
+      "note": "a CAR header with version 2",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeicts2tssv6avpna26sql26mlrowdhxwjpskl35ibnxdf7tf7cgo5a"
+        },
+        "path": "",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "car",
+            "header_version": 2
+          }
+        ]
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "IPFS content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "ipfs/car-long-varint",
+      "note": "after the root's section, a section length in 11 bytes: before the first leaf, which the type's sniffing needs, so before the head",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeicts2tssv6avpna26sql26mlrowdhxwjpskl35ibnxdf7tf7cgo5a"
+        },
+        "path": "",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "car",
+            "after_sections": 1,
+            "insert": {
+              "base64": "gICAgICAgICAgAA="
+            }
+          }
+        ]
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "IPFS content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "ipfs/car-section-past-limit",
+      "note": "after the root's section, a section length of 3 MiB: before the head, as car-long-varint",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeicts2tssv6avpna26sql26mlrowdhxwjpskl35ibnxdf7tf7cgo5a"
+        },
+        "path": "",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "car",
+            "after_sections": 1,
+            "insert": {
+              "base64": "gIDAAQ=="
+            }
+          }
+        ]
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "IPFS content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "ipfs/car-long-varint-after-sniff",
+      "note": "the 11-byte section length after the first leaf's section: the head went out on the first leaf's bytes, which are released, then the body is cut",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeicts2tssv6avpna26sql26mlrowdhxwjpskl35ibnxdf7tf7cgo5a"
+        },
+        "path": "",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "car",
+            "after_sections": 2,
+            "insert": {
+              "base64": "gICAgICAgICAgAA="
+            }
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-length",
+              "10485760"
+            ],
+            [
+              "etag",
+              "\"fi1:bafybeicts2tssv6avpna26sql26mlrowdhxwjpskl35ibnxdf7tf7cgo5a:.:10485760\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "file-10485760-v1-balanced#1"
+        },
+        "truncated": {
+          "released": {
+            "content": {
+              "seed": "ipfs-file-10485760",
+              "from": 0,
+              "length": 262144
+            }
+          },
+          "abort": {
+            "code": "verification_failed",
+            "message": "IPFS content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "ipfs/car-section-past-limit-after-sniff",
+      "note": "the 3 MiB section length after the first leaf's section: the first leaf released, then the body is cut",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeicts2tssv6avpna26sql26mlrowdhxwjpskl35ibnxdf7tf7cgo5a"
+        },
+        "path": "",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "car",
+            "after_sections": 2,
+            "insert": {
+              "base64": "gIDAAQ=="
+            }
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-length",
+              "10485760"
+            ],
+            [
+              "etag",
+              "\"fi1:bafybeicts2tssv6avpna26sql26mlrowdhxwjpskl35ibnxdf7tf7cgo5a:.:10485760\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "file-10485760-v1-balanced#1"
+        },
+        "truncated": {
+          "released": {
+            "content": {
+              "seed": "ipfs-file-10485760",
+              "from": 0,
+              "length": 262144
+            }
+          },
+          "abort": {
+            "code": "verification_failed",
+            "message": "IPFS content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "ipfs/blake3-root",
+      "note": "a blake3 CID: unverifiable before anything is fetched",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafkr4iaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "path": "",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": []
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "This content can't be verified with the external IPFS gateway"
+          }
+        }
+      }
+    },
+    {
+      "id": "ipfs/piece-404",
+      "note": "the CAR answered 404 with a body of the gateway's own",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm"
+        },
+        "path": "/img/photo.jpg",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "car",
+            "status": 404,
+            "body": {
+              "base64": "dGhlIGdhdGV3YXkncyBvd24gd29yZHM="
+            }
+          }
+        ]
+      },
+      "expect": {
+        "error": {
+          "status": 404,
+          "body": {
+            "code": 404,
+            "message": "Not found on the external IPFS gateway"
+          }
+        }
+      }
+    },
+    {
+      "id": "ipfs/name-not-found",
+      "note": "a name the verified directory doesn't hold: GatewayCore's 404, proven from the directory",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm"
+        },
+        "path": "/missing",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": []
+      },
+      "expect": {
+        "head": {
+          "status": 404,
+          "headers": [
+            [
+              "content-type",
+              "text/html; charset=utf-8"
+            ],
+            [
+              "content-length",
+              "218"
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          },
+          "from": "site-v1#29"
+        },
+        "body": {
+          "base64": "PCFkb2N0eXBlIGh0bWw+PGh0bWw+PGhlYWQ+PG1ldGEgY2hhcnNldD0idXRmLTgiPjx0aXRsZT40MDQgTm90IEZvdW5kPC90aXRsZT48bWV0YSBuYW1lPSJ2aWV3cG9ydCIgY29udGVudD0id2lkdGg9ZGV2aWNlLXdpZHRoLGluaXRpYWwtc2NhbGU9MSI+PC9oZWFkPjxib2R5PjxtYWluPjxoMT5Ob3QgRm91bmQ8L2gxPjxwPm5vdCBmb3VuZDwvcD48L21haW4+PC9ib2R5PjwvaHRtbD4="
+        }
+      }
+    },
+    {
+      "id": "ipns/honest",
+      "note": "an Ed25519-keyed name, its record of sequence 3",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipns": "k51qzi5uqu5dgyzs7wc9fb3dpul2l0yq1x1w2pi7ef703292ycquyorqqukz56"
+        },
+        "path": "/",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "record",
+            "name": "k51qzi5uqu5dgyzs7wc9fb3dpul2l0yq1x1w2pi7ef703292ycquyorqqukz56",
+            "record": {
+              "base64": "QkA3wjc5391pxQSkOGUEY2mFnnGRzjg9wP+9Ad1ka2uLP0gH4tn4Ht/Foeacs13RBigDXBGqQODr9jsYxsHiDZoDSpgBpWNUVEwbAAAARdlkuABlVmFsdWVYQS9pcGZzL2JhZnliZWlndXdqbWRkdnI0aWlhaDZla2d2cm92YjV6ZmI2ZWc1YzZsb2lreHZ4bHh6bHdlYTVkYWJtaFNlcXVlbmNlA2hWYWxpZGl0eVgeMjA5OS0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQA="
+            }
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "text/html"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-length",
+              "47"
+            ],
+            [
+              "etag",
+              "\"fi1:bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm:index.html:47\""
+            ],
+            [
+              "cache-control",
+              "no-cache"
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "latest_asserted"
+          },
+          "from": "ipns-ipns-ed25519-a#1"
+        },
+        "body": {
+          "base64": "PCFkb2N0eXBlIGh0bWw+PHRpdGxlPnNpdGU8L3RpdGxlPjxwPmluZGV4PC9wPgo="
+        }
+      }
+    },
+    {
+      "id": "ipns/other-key",
+      "note": "a record signed by another key",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipns": "k51qzi5uqu5dgyzs7wc9fb3dpul2l0yq1x1w2pi7ef703292ycquyorqqukz56"
+        },
+        "path": "/",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "record",
+            "name": "k51qzi5uqu5dgyzs7wc9fb3dpul2l0yq1x1w2pi7ef703292ycquyorqqukz56",
+            "record": {
+              "base64": "QkBtkRQDgKv1YajM5DBBdVMrGiLYr2kNE4q56kCeb7NxjUUUnoSYPGRBeqn6OF37mVRphxWvdZTYbuEFRy/jM6UFSpgBpWNUVEwbAAAARdlkuABlVmFsdWVYQS9pcGZzL2JhZnliZWlndXdqbWRkdnI0aWlhaDZla2d2cm92YjV6ZmI2ZWc1YzZsb2lreHZ4bHh6bHdlYTVkYWJtaFNlcXVlbmNlB2hWYWxpZGl0eVgeMjA5OS0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQA="
+            }
+          }
+        ]
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "IPFS content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "ipns/expired",
+      "note": "an expired record",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipns": "k51qzi5uqu5dgyzs7wc9fb3dpul2l0yq1x1w2pi7ef703292ycquyorqqukz56"
+        },
+        "path": "/",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "record",
+            "name": "k51qzi5uqu5dgyzs7wc9fb3dpul2l0yq1x1w2pi7ef703292ycquyorqqukz56",
+            "record": {
+              "base64": "QkAD4igpfOoKUs2HmDh19/tFXBU3RAxw6prJtR72ty7DGLdiVXIyxkTLdL1w5Cvi0vuD1NdtLg4ErSnsVALdhdYGSpgBpWNUVEwbAAAARdlkuABlVmFsdWVYQS9pcGZzL2JhZnliZWlndXdqbWRkdnI0aWlhaDZla2d2cm92YjV6ZmI2ZWc1YzZsb2lreHZ4bHh6bHdlYTVkYWJtaFNlcXVlbmNlBmhWYWxpZGl0eVgeMjAwMC0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQA="
+            }
+          }
+        ]
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "IPFS content verification failed"
+          }
+        }
+      }
+    },
+    {
+      "id": "ipns/value-names-dnslink",
+      "note": "a valid record whose value names a DNSLink name (/ipns/example.com): the walk can't follow it, and never falls back to an unverified fetch",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipns": "k51qzi5uqu5dm4byyvx1rm820bmhg9pb9mbauoya4h97fj7y3281b68piobf5u"
+        },
+        "path": "/",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "record",
+            "name": "k51qzi5uqu5dm4byyvx1rm820bmhg9pb9mbauoya4h97fj7y3281b68piobf5u",
+            "record": {
+              "base64": "QkAKRGy1PQs3YyWq/o0sPN5/coIp7wNp9r5RZK+oH25m/aupW0O70017Vc8TjhJZbYtXMrxc7VTlwUbBvSQtKL0JSmelY1RUTBsAAABF2WS4AGVWYWx1ZVEvaXBucy9leGFtcGxlLmNvbWhTZXF1ZW5jZQFoVmFsaWRpdHlYHjIwOTktMDEtMDFUMDA6MDA6MDAuMDAwMDAwMDAwWmxWYWxpZGl0eVR5cGUA"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "This content can't be verified with the external IPFS gateway"
+          }
+        }
+      }
+    },
+    {
+      "id": "ipns/floor",
+      "note": "one partition verifies sequence 5, then is served sequence 3, still valid: refused below the floor; another partition takes sequence 3",
+      "deviation": "ipns-floor",
+      "steps": [
+        {
+          "partition": "requests-floor",
+          "plan": {
+            "node": "ipfs",
+            "root": {
+              "ipns": "k51qzi5uqu5dgyzs7wc9fb3dpul2l0yq1x1w2pi7ef703292ycquyorqqukz56"
+            },
+            "path": "/",
+            "query": "",
+            "headers": []
+          },
+          "method": "GET",
+          "world": {
+            "gateway": {
+              "car": true
+            },
+            "changes": [
+              {
+                "piece": "record",
+                "name": "k51qzi5uqu5dgyzs7wc9fb3dpul2l0yq1x1w2pi7ef703292ycquyorqqukz56",
+                "record": {
+                  "base64": "QkBwf0HT30Saq56GEb844PW94ZpsCRCKTA2o/r+xxTbkeMBApeDKIfGBceSI/TIoFG/bzD3zHd2TVsdOs8fOjJsFSq0BpmNUVEwbAAAARdlkuABlRXh0cmFuYW4gdW5rbm93biBrZXllVmFsdWVYQS9pcGZzL2JhZnliZWlndXdqbWRkdnI0aWlhaDZla2d2cm92YjV6ZmI2ZWc1YzZsb2lreHZ4bHh6bHdlYTVkYWJtaFNlcXVlbmNlBWhWYWxpZGl0eVgeMjA5OS0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQB4B6IBEGFuIHVua25vd24gZmllbGQ="
+                }
+              }
+            ]
+          },
+          "expect": {
+            "head": {
+              "status": 200,
+              "headers": [
+                [
+                  "content-type",
+                  "text/html"
+                ],
+                [
+                  "accept-ranges",
+                  "bytes"
+                ],
+                [
+                  "content-length",
+                  "47"
+                ],
+                [
+                  "etag",
+                  "\"fi1:bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm:index.html:47\""
+                ],
+                [
+                  "cache-control",
+                  "no-cache"
+                ]
+              ],
+              "trust": {
+                "name": null,
+                "content": "latest_asserted"
+              },
+              "from": "ipns-ipns-ed25519-a#1"
+            },
+            "body": {
+              "base64": "PCFkb2N0eXBlIGh0bWw+PHRpdGxlPnNpdGU8L3RpdGxlPjxwPmluZGV4PC9wPgo="
+            }
+          }
+        },
+        {
+          "partition": "requests-floor",
+          "plan": {
+            "node": "ipfs",
+            "root": {
+              "ipns": "k51qzi5uqu5dgyzs7wc9fb3dpul2l0yq1x1w2pi7ef703292ycquyorqqukz56"
+            },
+            "path": "/",
+            "query": "",
+            "headers": []
+          },
+          "method": "GET",
+          "world": {
+            "gateway": {
+              "car": true
+            },
+            "changes": [
+              {
+                "piece": "record",
+                "name": "k51qzi5uqu5dgyzs7wc9fb3dpul2l0yq1x1w2pi7ef703292ycquyorqqukz56",
+                "record": {
+                  "base64": "QkA3wjc5391pxQSkOGUEY2mFnnGRzjg9wP+9Ad1ka2uLP0gH4tn4Ht/Foeacs13RBigDXBGqQODr9jsYxsHiDZoDSpgBpWNUVEwbAAAARdlkuABlVmFsdWVYQS9pcGZzL2JhZnliZWlndXdqbWRkdnI0aWlhaDZla2d2cm92YjV6ZmI2ZWc1YzZsb2lreHZ4bHh6bHdlYTVkYWJtaFNlcXVlbmNlA2hWYWxpZGl0eVgeMjA5OS0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQA="
+                }
+              }
+            ]
+          },
+          "expect": {
+            "error": {
+              "status": 502,
+              "body": {
+                "code": 502,
+                "message": "IPFS content verification failed"
+              }
+            }
+          }
+        },
+        {
+          "partition": "requests-floor-other",
+          "plan": {
+            "node": "ipfs",
+            "root": {
+              "ipns": "k51qzi5uqu5dgyzs7wc9fb3dpul2l0yq1x1w2pi7ef703292ycquyorqqukz56"
+            },
+            "path": "/",
+            "query": "",
+            "headers": []
+          },
+          "method": "GET",
+          "world": {
+            "gateway": {
+              "car": true
+            },
+            "changes": [
+              {
+                "piece": "record",
+                "name": "k51qzi5uqu5dgyzs7wc9fb3dpul2l0yq1x1w2pi7ef703292ycquyorqqukz56",
+                "record": {
+                  "base64": "QkA3wjc5391pxQSkOGUEY2mFnnGRzjg9wP+9Ad1ka2uLP0gH4tn4Ht/Foeacs13RBigDXBGqQODr9jsYxsHiDZoDSpgBpWNUVEwbAAAARdlkuABlVmFsdWVYQS9pcGZzL2JhZnliZWlndXdqbWRkdnI0aWlhaDZla2d2cm92YjV6ZmI2ZWc1YzZsb2lreHZ4bHh6bHdlYTVkYWJtaFNlcXVlbmNlA2hWYWxpZGl0eVgeMjA5OS0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQA="
+                }
+              }
+            ]
+          },
+          "expect": {
+            "head": {
+              "status": 200,
+              "headers": [
+                [
+                  "content-type",
+                  "text/html"
+                ],
+                [
+                  "accept-ranges",
+                  "bytes"
+                ],
+                [
+                  "content-length",
+                  "47"
+                ],
+                [
+                  "etag",
+                  "\"fi1:bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm:index.html:47\""
+                ],
+                [
+                  "cache-control",
+                  "no-cache"
+                ]
+              ],
+              "trust": {
+                "name": null,
+                "content": "latest_asserted"
+              },
+              "from": "ipns-ipns-ed25519-a#1"
+            },
+            "body": {
+              "base64": "PCFkb2N0eXBlIGh0bWw+PHRpdGxlPnNpdGU8L3RpdGxlPjxwPmluZGV4PC9wPgo="
+            }
+          }
+        }
+      ]
+    }
+  ]
 }

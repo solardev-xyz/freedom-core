@@ -49,6 +49,10 @@ const NEED_IDENTITY: &[&str] = &["rad.reconcile", "rad.start"];
 
 pub struct RadicleService {
     identity: Identity,
+    /// `rad.hello`'s `network`: the process's policy (`--network`).
+    network: Value,
+    /// `rad.hello`'s `confinement`: what `confine` reported (design 0010).
+    confinement: Value,
     /// `rad.identity`'s deadline, armed by `rad.hello`'s reply.
     deadline: Mutex<Option<Watchdog>>,
 }
@@ -56,10 +60,16 @@ pub struct RadicleService {
 impl RadicleService {
     /// The service for `grant`'s home, with the key for this start; `None`
     /// if the OS's randomness fails.
-    pub fn new(grant: Grant) -> Option<Self> {
+    pub fn new(
+        grant: Grant,
+        network: &fc_service::network::NetworkPolicy,
+        confinement: Value,
+    ) -> Option<Self> {
         let identity = Identity::new(&grant.home)?;
         Some(Self {
             identity,
+            network: network.to_json(),
+            confinement,
             deadline: Mutex::new(None),
         })
     }
@@ -98,6 +108,8 @@ impl Service for RadicleService {
             }),
         );
         members.insert("recipient".into(), self.identity.recipient().into());
+        members.insert("network".into(), self.network.clone());
+        members.insert("confinement".into(), self.confinement.clone());
         // `rad.identity` within 30 s of this reply, or the process ends.
         let deadline = Watchdog::arm(
             "identity_deadline",
