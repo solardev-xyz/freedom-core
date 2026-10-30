@@ -23,9 +23,9 @@
     "ipfs_unixfs": "a dag-pb node's Data decoded as UnixFS, checked against its links where it is a file: cid, block, expect {ok: {type, filesize, blocksizes, data_length}} or {fail}",
     "ipfs_hamt": "a name's lookup in dweb-verify.json's HAMT (ipfs.directories, hamt-v1; its shards are in ipfs.blocks): root, name, hash_bits (the first 64 bits of MurmurHash3 x64 128 of the name, seed 0, big-endian; a byte per level), levels (per shard: depth, bucket, and the link named by the bucket's two uppercase hex digits, alone for a sub-shard or followed by the name for an entry, or null), expect {ok: {cid}} or {absent: true}. The generator checks every name against Kubo's own layout. A case with blocks carries its own root shard (cid → base64), rebuilt from hamt-v1's with an entry out of its place (deviation hamt-lookup), and native is GatewayCore's answer for /ipfs/<root>/<name>",
     "ipfs_car": "a CAR body: car, expect {ok: {sections: [cid]}} when it reads to its end at a section boundary; {fail, after: k}, k the sections read whole before the failure; or {ended: {after: k}} when the stream ends inside a section, an early end the walk takes as a piece failure. Whether the walk then has what it needs is the walk's question, not the reader's",
-    "requests": "whole requests through the verifier: id, note, plan (the verify plan's node, root, path, query and headers; its retry, timers, response and trust are the backend's, as dweb.open writes them), method, partition (null: the profile's), world, expect, and deviation where the design differs from the bundled node. A case with steps runs each step ({partition, plan, method, world, expect}) in order on one verifier, so what one step leaves in a partition (the structure cache, IPNS floors) meets the next",
-    "requests_world": "the node the verifier's pieces reach: the honest node of dweb-verify.json, with the case's own chunks (chunks: address → bytes), and changes applied to the pieces they name. The honest Ant answers /chunks/<address> with 200 and the chunk's wire (dweb-verify.json's swarm.chunks, the case's chunks, or a data leaf rebuilt from its content), or 404; /bytes/<reference> with the file's bytes, as Ant's joiner reads them, 206 with exactly the requested single range and Content-Range bytes a-b/size, or 200 whole without one; /feeds/<owner>/<topic> with 200 and swarm-feed-index, the latest update's index in 16 hex digits. The honest gateway (gateway.car: whether the probe found CARs; false means every block is fetched raw) answers a CAR request as a conforming trustless gateway does (the path's blocks root first, then the entity, depth-first with duplicates, only the blocks covering entity-bytes; ipfs.kubo holds Kubo's answers, which it must reproduce), a raw block request with the block, a record request with the change's record. Retries happen in main: a status in a world is the piece's final answer",
-    "requests_changes": "a world's changes: each names its piece and what differs. chunk {address}: flip (wire offset, the byte XORed with 1), wire (bytes answered instead), or status and body. bytes {reference}: flip (file offset, in whatever the stream carries), answer whole (200 with the whole file, Range ignored), answer at_zero (200 holding the range's bytes at offset 0, and nothing else), end_after (the body ends after n bytes), content_range (the 206 names this instead), stall_after (n bytes, then nothing: main's body idle timer ends the piece), body (bytes answered as an exact 206). car: flip {cid, offset} (that block, wherever a CAR carries it), answer whole_dag (the whole DAG, entity-bytes ignored), no_dups (each block once, its Content-Type saying dups=n), no_dups_unannounced (each block once, its Content-Type still saying dups=y), reversed (the blocks in reverse order), {path_as} (the path resolved as another), end_after_sections (n whole sections, then the end, with boxo's marker when marker is true, or end_inside bytes of the next section), header_version (the header's version), after_sections and insert (bytes inserted after n sections), or status and body. raw {cid}: as (another block's bytes), or status and body. record {name}: record (the bytes answered)",
+    "requests": "whole requests through the verifier: id, note, plan (the verify plan's node, root, path, query and headers; its retry, timers, response and trust are the backend's, as dweb.open writes them), method, partition (null: the profile's), world, expect, and deviation where the design differs from the bundled node; native, beside the unixfs-sizes cases and the IPNS chains, is GatewayCore's own answer over the same blocks and names, {status, length, sha256}. A case with steps runs each step ({partition, plan, method, world, expect}) in order on one verifier, so what one step leaves in a partition (the structure cache, IPNS floors) meets the next",
+    "requests_world": "the node the verifier's pieces reach: the honest node of dweb-verify.json, with the case's own chunks (chunks: address → bytes) or blocks (blocks: CID → bytes, which the honest gateway holds beside dweb-verify.json's), and changes applied to the pieces they name. The honest Ant answers /chunks/<address> with 200 and the chunk's wire (dweb-verify.json's swarm.chunks, the case's chunks, or a data leaf rebuilt from its content), or 404; /bytes/<reference> with the file's bytes, as Ant's joiner reads them, 206 with exactly the requested single range and Content-Range bytes a-b/size, or 200 whole without one; /feeds/<owner>/<topic> with 200 and swarm-feed-index, the latest update's index in 16 hex digits. The honest gateway (gateway.car: whether the probe found CARs; false means every block is fetched raw) answers a CAR request as a conforming trustless gateway does (the path's blocks root first, then the entity, depth-first with duplicates, only the blocks covering entity-bytes; ipfs.kubo holds Kubo's answers, which it must reproduce), a raw block request with the block, a record request with the change's record. Retries happen in main: a status in a world is the piece's final answer",
+    "requests_changes": "a world's changes: each names its piece and what differs. chunk {address}: flip (wire offset, the byte XORed with 1), wire (bytes answered instead), or status and body. bytes {reference}: flip (file offset, in whatever the stream carries), answer whole (200 with the whole file, Range ignored), answer at_zero (200 holding the range's bytes at offset 0, and nothing else), end_after (the body ends after n bytes), content_range (the 206 names this instead), stall_after (n bytes, then nothing: main's body idle timer ends the piece), body (bytes answered as an exact 206). car: flip {cid, offset} (that block, wherever a CAR carries it), answer whole_dag (the whole DAG, entity-bytes ignored), no_dups (each block once, its Content-Type saying dups=n), no_dups_unannounced (each block once, its Content-Type still saying dups=y), reversed (the blocks in reverse order), {path_as} (the path resolved as another), end_after_sections (n whole sections, then the end, with boxo's marker when marker is true, or end_inside bytes of the next section), header_version (the header's version), after_sections and insert (bytes inserted after n sections), or status and body. raw {cid}: as (another block's bytes), or status and body. record {name}: record (the bytes answered; a world may serve several names)",
     "requests_expect": "a request's expect, what the page gets. {head, body}: the head (status, headers, and trust {name, content}; from names the bundled node's answer it copies, less meta.ant.node_headers) and the whole body. {error: {status, body}}: before the head, the core's {code, message} with that status. {head, truncated: {released, abort: {code, message}}}: the head, then exactly the released bytes, then the core's abort. Bodies are as dweb-verify.json's exchanges write them. Every case also ends with the request's reservations back at zero",
     "ipns_records": "an IPNS record as /ipns/<name>?format=ipns-record answers it: name, record, now (unix seconds), expect {ok: {value, sequence, validity, ttl_ns}} or {fail}"
   },
@@ -14332,6 +14332,701 @@
           }
         }
       ]
+    },
+    {
+      "id": "ipfs/sizes-leaf-longer-than-entry",
+      "note": "a file over two raw leaves of 1,000 bytes whose blocksizes say 1,000 and 999: the first leaf is released, then the body is cut as malformed; through a CAR",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeigilnpf5t5mvmzyaoth6y6lgzhq3tr6aff5dmusde6rv6ypqe6bxm"
+        },
+        "path": "",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "blocks": {
+          "bafkreibwhqm4x43cf5r3tywsb5didtty2yowchk56o4u7xel4yg4i64zv4": {
+            "base64": "Q9MNIqKLP/QAANnvJSAgcpMCanrWDUTbO4tvvy39w1gyYo4fbRFR3uQ2aLA7To1W04ae2rXOKHJ7gVYCAwrzTdEj7ez5NGi5CYMj65KDHXtuzkfdGflqs0md8Lvl2BTEBkRYYwfXm+/RglTxhEEc+VePeEpGlInFzGSXLPcRXoSUIphfeCaJUCMKvBymEDn+kO0fWfK8tLdBMh+/Smqp0FJdSKEfdDqTS9jlq3hdGv5Ehj402ZnmwJxdfMBEdtGJHUxeRrC10A7sIjXD+lY7PnDfx0ebO02iDQRAwe1rX8okpsyxjO+NzF5tEebdNJdVAIXcZQ3gbd8OPsJ7LY9f2UsJ6G5LGLgDSQDKZn5QPp5PyIX7AyUKKmnccwT5pwsyktgI8AN2bPdOHSoTslj8Iws4BHntjAYlJNEriNuz5qkjQm9RyBzjjjHWHkAUDOHag9qhFxxKi0BZ/cQha6UOD/OL8wGz6PQuFu/5dv2oBeuOMbO6yik/W/yJOBM/k+WPMMF1cQN1I3cBBM52jDskYeuqnyQ8xBUlQ9fYtOecpUPDnyuWWgDypG6V0tK/S7RHi+EKHyTGFNOqkuL99qw9Ms4OQ/PgRPhWl7qAum8aNxsWnyuAhOleU6mS6xFcU+suSRh3QDM8DvP+z+oX2ZdhyVsr0AT44Ol+gLHWFHygYc4MUYjxW1fQA4NjrauOApUw+Z+vn59p855OJadSE0Ugh3I4JdCtxX8j84ts3eGxEkBeFS/Fj2OFr3oMYzR5fzsWJ5ctmhknyTokQZWm0M4qAoH36QkM2a8kk9DJWo/xwAsTKCywqCa2AeChRnVnOQWfKP3bHACNN7jGTQe+CqzTf6BMQRFsObl0p9HXCL0hmtP0tAX+jG90lafJG61cB8CdXeb+obZA6IXuVExG+yW2MhsrJhzfFd97qwQpNA+xRH8arZ6876zs8LlEKFCbMqzRht7KIe2cyRxQjsdpt3pSXRHWiFKBqgZzGPTfLquIQNbS5lEVDkfUAT+qcpp/6Mjm5SnYz+b3zB3hlOJIdHYy31g3rdLb33WnZ+ik0+VkGqxrvUgTfbH3oeQlbaeZKskciq+gVe7cRvHC6PjZ03iRNdL/MT32s8CZYMojidVvbx+Tq4AnAsLbTeyjOHJIdaXTx1NHsnZtXqoDRIaFXSSE5R4PRW/c8KpgcOwYDq9znlkWcYjbgxytqQsh43rqiv3Lg90tioq7B/AmN8BK2J/FC0oh+35tAphNylRmTR4h/H5OWOdzkwK1kIgVKnjX5rSBChKs8sxN/qHpR2PfoRocC2wq75RV5jQL74J3fbb99SEv46Tdo3v9"
+          },
+          "bafkreidywy5czqpjexu6dy4baniavdyouxuzfwturlsoc4j3w3xswjr7ve": {
+            "base64": "rjDLrtcV8ph5I64u2XEKq4BDE7QFthFSdmGrf9h8d4+no2gW08Q/8SVNdOWaXZbgkxkRb+uC7uYSSZ80gRHMmfymvVdEvanQqKwcEMu3Fv0mLZMmjWX/xpX8aElEua6BnwNLJodP2cNdEVUAS2sNiRV3y4yI32bf2+QjwpAedhZHodsBvHOn6u1O2DUKqmyh1wW86xFVayYPPH17zJKS8ZXbEey0d16jHuVc60JDPoNfNNrHDY9UoqkLSV/1ahqSPbNwEI6uY6EhLqANgeJ2QslnZkfjF+EBAJu52YueC0e/5m9j5iBj13P3qcFB92yobCrmvVG+OKLiFLnUIdPNGQHucrZLLkxup27pb3umxBeC06FicfYXZr1b+Y3vyAhnj2QsJ76j9swIbPL/O1bm3jcughG1TcH0MD0szZ+41djay/ScQ8sjkaMEGJLj6gzv9E6bkosRED6GM/VbuEa7RUHMphBKaVNo57ERe1x3pDJnZvpNFJ0dIzuDyBgkbTrbNYd8XdM+UyxIW9LqKSwsNKB9LlMPxP8P76LKRj54aY0hGUaZAJNocqULA1/JFU+iR8Y6v1nnVq8aW/S3I3Sr42P61DxCp1YQ8I7/nYyO8hpbmPySvM2mi0INyhyCJkEqcOMflDJftkApJuBr3SGTu9tlq/iyZFq+V2zlrzmUq+yGG7fIkNiSIT3yuKpglRL8YCKInSgj4OMKyAw4BKwf2siKDbayUfljDxmA+10S9YNWqlVf44+JsSZCT/FKH2nRJ8MR2FEhp4aAJ3ALm/VLr/txQIbHTvcBSQzIVdDcKBQQnSshYNpPnlpfR0rPTuV/YnCADVA35jxgqj80ahxrkysislz7cOFceDGGwK+p+tTBigAwsEAVfacYvPDk2tY8LGngzTpe9oJVz71Hn4ErMzbyMD5Tg6RFAVfRjZuPbKxKkizqt4oKWGb5z16ev8rm9bnLvAfKiIxG5hcUBFvaYbZ34/7M0etWufIxsHsRhKzRzZE3fC2aIWov2qZD2vFFgLgxEZUOT4bxboI3u1WAY0WypXLdLoSZB37bmWVWw6VCzL2qkJMLaWbSgfH9jWkBrD6qDvz+uf17NV7FGxQ+xxf1D+U3oqymUYRmrUrlVriKF+xS57A41ZVUGobwSBdAyhbkFN5GaCRTwlehtKLHSBiVQ1IXMBvkvZYu+UH7IyUyG34BEyyOtr5MyugfUWaY6KB8H/MRs5BF31BHnFcHEgUf2nU+dZeeQAp/yyxhS+TlwyWqQSbjtyIgo3FMghnp6Q6cyd046C4XKx7ZsQ4ZD1/ERpWkR4cnp7P1fdXwylc1UYk7l16CmQ=="
+          },
+          "bafybeibhi76a6xldciw4uonem25miyfz6ww2yh3be2cj4bh7oixrg6jrjy": {
+            "base64": "EisKJAFVEiA2PBnL82IvY7ni0g9Ggc541h1hHV3zuU/ci+YNxHuZrxIAGOcHCggIAhjnByDnBw=="
+          },
+          "bafybeigilnpf5t5mvmzyaoth6y6lgzhq3tr6aff5dmusde6rv6ypqe6bxm": {
+            "base64": "EisKJAFVEiB4tjoswekl6eHjgQNQCo8OpemS2nSK5OFxO7bvKyY/qRIAGOgHEisKJAFVEiDWsYRnZK3iiDoLoNMw1fn5Rx1jx124wClJzjjIWDgqIhIAGOgHCgsIAhjPDyDoByDnBw=="
+          },
+          "bafkreigwwgcgozfn4keduc5a2mynl6pzi4owhr25xdacssoohdefqobkei": {
+            "base64": "xK1MUICs6NsrL1cb3I2ebqZMUoOg41n1gLe0ZZqsI9ZsET1wQNbNjQXHFU5KbHABsWlxbzLW3rhgxZPaVqfkVVwrBhGyJG1YT0M5sLibdd6jlmSdLov88WBamvHxmtlFoyhEaxJCw/5RNiAMipGItKyBWkTC7/9M3165TLWjwFoQ8RmHqez2/2WakKoqDddJPp6LydRkswH2839N1bc36uAcYkJHSmar0kgzOm1InlZaB+d/ZAHrWXZ8wYtgaKxDDkjo/1xD22thYOhU0+3y/xdv8PtOcmdmY0ytYCn3I5WaCFPUeKWLjmNIDS4QqIx2IR8kdvEwtXZU1UtMRFtAlGnA3Ofc+Y37+n24JSSbaUe3OKQLHvkxIcDfKxAExsOj7yhnalTYu66qyC4ONM4ct5SvMs391ytMAOfp0G7rPq5rvYLIx4VJf1ncwcLqEkzvPn5kU+tE5rNgzxuv8u5oC7el91JE6YKzy1wbM3HRL9rjEYzybdOt6NHwirkFrJW0mmbdOfbkRg6g573WzfivtOmqoi1Y6mlQVFU/qwRZ3afAAGE7uI2TcCrT3lyPJqzXvHFYhIJBG45E79ChDnmxaMa492sbyTAKP42iYq0fKOKVjVgnbacuosvd3bxnRzHUodXf0O9AEibxdh7oSHq/0WJZDOEMSWEFV0idj1gtlJwWl46uiah3OBIqZQ2vWBndSvh8ZfbVnILOsKKRqsLCRB48SCLCmhojCQJfg/rTeUlkuXm5lMZAyKqMNjiygbBIh5iqkO0BVIjfa4lb1fwg2Ee0NPt+U8920UaYuiuKtpRaz1yBDzOvlsIAnQzMgl/qVcb/bh3njgbCvELLjEdKPwRGR11p7grEfsWRykgX9DiSI3IgEkAHAOPBXCbFcEYDWYkef2bckvoS2HYr94b6573xO5ikRaFaNvZB40aYVcvaMcG03QmnPzLfWC7CyQROazIesNr/5/+lRXbQIAgVQCubjPiqFtStAHNMxo0+FsHXT/eyCZ26j4emwuuQfam2EwrghEeDCs4NvPB0JanPPctXR5ptZ8MdtD8gQjTEfk8kUv3NWI12HnwQQ1FDp6wYUSkicGmaG+TjnSlWsVeGW3q7hnBVb7WN2M6M5j9z3W0tbJyWChGvoL0lcuuwDnYOBAiLwTzCoxZ7LtDkOtea/s1TuqpFv4hGW2SnH9njhG6u4C+4SCOadoFw3i4R+7GKOeCvS3Pk5plqMKieHW7YLrSVJSoWgMG3srTvP3+bdN3LUXFkTSubog5dNLYgs9k7d62Kv5xO5Qu0nb8jCpZ3KECF48o4dmAw3fqFDPUJtAarBRphs6zUyw=="
+          }
+        },
+        "changes": []
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-length",
+              "1999"
+            ],
+            [
+              "etag",
+              "\"fi1:bafybeigilnpf5t5mvmzyaoth6y6lgzhq3tr6aff5dmusde6rv6ypqe6bxm:.:1999\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          }
+        },
+        "truncated": {
+          "released": {
+            "content": {
+              "seed": "checks-sizes-a",
+              "from": 0,
+              "length": 1000
+            }
+          },
+          "abort": {
+            "code": "malformed",
+            "message": "This IPFS content is malformed"
+          }
+        }
+      },
+      "deviation": "unixfs-sizes",
+      "native": {
+        "status": 200,
+        "length": 1999,
+        "sha256": "c84651e2424648f3767f01f7ca2ae604ae579eb5d0450e713221512918b5aed9"
+      }
+    },
+    {
+      "id": "ipfs/sizes-leaf-longer-than-entry-raw",
+      "note": "a file over two raw leaves of 1,000 bytes whose blocksizes say 1,000 and 999: the first leaf is released, then the body is cut as malformed; through raw blocks",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeigilnpf5t5mvmzyaoth6y6lgzhq3tr6aff5dmusde6rv6ypqe6bxm"
+        },
+        "path": "",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": false
+        },
+        "blocks": {
+          "bafkreibwhqm4x43cf5r3tywsb5didtty2yowchk56o4u7xel4yg4i64zv4": {
+            "base64": "Q9MNIqKLP/QAANnvJSAgcpMCanrWDUTbO4tvvy39w1gyYo4fbRFR3uQ2aLA7To1W04ae2rXOKHJ7gVYCAwrzTdEj7ez5NGi5CYMj65KDHXtuzkfdGflqs0md8Lvl2BTEBkRYYwfXm+/RglTxhEEc+VePeEpGlInFzGSXLPcRXoSUIphfeCaJUCMKvBymEDn+kO0fWfK8tLdBMh+/Smqp0FJdSKEfdDqTS9jlq3hdGv5Ehj402ZnmwJxdfMBEdtGJHUxeRrC10A7sIjXD+lY7PnDfx0ebO02iDQRAwe1rX8okpsyxjO+NzF5tEebdNJdVAIXcZQ3gbd8OPsJ7LY9f2UsJ6G5LGLgDSQDKZn5QPp5PyIX7AyUKKmnccwT5pwsyktgI8AN2bPdOHSoTslj8Iws4BHntjAYlJNEriNuz5qkjQm9RyBzjjjHWHkAUDOHag9qhFxxKi0BZ/cQha6UOD/OL8wGz6PQuFu/5dv2oBeuOMbO6yik/W/yJOBM/k+WPMMF1cQN1I3cBBM52jDskYeuqnyQ8xBUlQ9fYtOecpUPDnyuWWgDypG6V0tK/S7RHi+EKHyTGFNOqkuL99qw9Ms4OQ/PgRPhWl7qAum8aNxsWnyuAhOleU6mS6xFcU+suSRh3QDM8DvP+z+oX2ZdhyVsr0AT44Ol+gLHWFHygYc4MUYjxW1fQA4NjrauOApUw+Z+vn59p855OJadSE0Ugh3I4JdCtxX8j84ts3eGxEkBeFS/Fj2OFr3oMYzR5fzsWJ5ctmhknyTokQZWm0M4qAoH36QkM2a8kk9DJWo/xwAsTKCywqCa2AeChRnVnOQWfKP3bHACNN7jGTQe+CqzTf6BMQRFsObl0p9HXCL0hmtP0tAX+jG90lafJG61cB8CdXeb+obZA6IXuVExG+yW2MhsrJhzfFd97qwQpNA+xRH8arZ6876zs8LlEKFCbMqzRht7KIe2cyRxQjsdpt3pSXRHWiFKBqgZzGPTfLquIQNbS5lEVDkfUAT+qcpp/6Mjm5SnYz+b3zB3hlOJIdHYy31g3rdLb33WnZ+ik0+VkGqxrvUgTfbH3oeQlbaeZKskciq+gVe7cRvHC6PjZ03iRNdL/MT32s8CZYMojidVvbx+Tq4AnAsLbTeyjOHJIdaXTx1NHsnZtXqoDRIaFXSSE5R4PRW/c8KpgcOwYDq9znlkWcYjbgxytqQsh43rqiv3Lg90tioq7B/AmN8BK2J/FC0oh+35tAphNylRmTR4h/H5OWOdzkwK1kIgVKnjX5rSBChKs8sxN/qHpR2PfoRocC2wq75RV5jQL74J3fbb99SEv46Tdo3v9"
+          },
+          "bafkreidywy5czqpjexu6dy4baniavdyouxuzfwturlsoc4j3w3xswjr7ve": {
+            "base64": "rjDLrtcV8ph5I64u2XEKq4BDE7QFthFSdmGrf9h8d4+no2gW08Q/8SVNdOWaXZbgkxkRb+uC7uYSSZ80gRHMmfymvVdEvanQqKwcEMu3Fv0mLZMmjWX/xpX8aElEua6BnwNLJodP2cNdEVUAS2sNiRV3y4yI32bf2+QjwpAedhZHodsBvHOn6u1O2DUKqmyh1wW86xFVayYPPH17zJKS8ZXbEey0d16jHuVc60JDPoNfNNrHDY9UoqkLSV/1ahqSPbNwEI6uY6EhLqANgeJ2QslnZkfjF+EBAJu52YueC0e/5m9j5iBj13P3qcFB92yobCrmvVG+OKLiFLnUIdPNGQHucrZLLkxup27pb3umxBeC06FicfYXZr1b+Y3vyAhnj2QsJ76j9swIbPL/O1bm3jcughG1TcH0MD0szZ+41djay/ScQ8sjkaMEGJLj6gzv9E6bkosRED6GM/VbuEa7RUHMphBKaVNo57ERe1x3pDJnZvpNFJ0dIzuDyBgkbTrbNYd8XdM+UyxIW9LqKSwsNKB9LlMPxP8P76LKRj54aY0hGUaZAJNocqULA1/JFU+iR8Y6v1nnVq8aW/S3I3Sr42P61DxCp1YQ8I7/nYyO8hpbmPySvM2mi0INyhyCJkEqcOMflDJftkApJuBr3SGTu9tlq/iyZFq+V2zlrzmUq+yGG7fIkNiSIT3yuKpglRL8YCKInSgj4OMKyAw4BKwf2siKDbayUfljDxmA+10S9YNWqlVf44+JsSZCT/FKH2nRJ8MR2FEhp4aAJ3ALm/VLr/txQIbHTvcBSQzIVdDcKBQQnSshYNpPnlpfR0rPTuV/YnCADVA35jxgqj80ahxrkysislz7cOFceDGGwK+p+tTBigAwsEAVfacYvPDk2tY8LGngzTpe9oJVz71Hn4ErMzbyMD5Tg6RFAVfRjZuPbKxKkizqt4oKWGb5z16ev8rm9bnLvAfKiIxG5hcUBFvaYbZ34/7M0etWufIxsHsRhKzRzZE3fC2aIWov2qZD2vFFgLgxEZUOT4bxboI3u1WAY0WypXLdLoSZB37bmWVWw6VCzL2qkJMLaWbSgfH9jWkBrD6qDvz+uf17NV7FGxQ+xxf1D+U3oqymUYRmrUrlVriKF+xS57A41ZVUGobwSBdAyhbkFN5GaCRTwlehtKLHSBiVQ1IXMBvkvZYu+UH7IyUyG34BEyyOtr5MyugfUWaY6KB8H/MRs5BF31BHnFcHEgUf2nU+dZeeQAp/yyxhS+TlwyWqQSbjtyIgo3FMghnp6Q6cyd046C4XKx7ZsQ4ZD1/ERpWkR4cnp7P1fdXwylc1UYk7l16CmQ=="
+          },
+          "bafybeibhi76a6xldciw4uonem25miyfz6ww2yh3be2cj4bh7oixrg6jrjy": {
+            "base64": "EisKJAFVEiA2PBnL82IvY7ni0g9Ggc541h1hHV3zuU/ci+YNxHuZrxIAGOcHCggIAhjnByDnBw=="
+          },
+          "bafybeigilnpf5t5mvmzyaoth6y6lgzhq3tr6aff5dmusde6rv6ypqe6bxm": {
+            "base64": "EisKJAFVEiB4tjoswekl6eHjgQNQCo8OpemS2nSK5OFxO7bvKyY/qRIAGOgHEisKJAFVEiDWsYRnZK3iiDoLoNMw1fn5Rx1jx124wClJzjjIWDgqIhIAGOgHCgsIAhjPDyDoByDnBw=="
+          },
+          "bafkreigwwgcgozfn4keduc5a2mynl6pzi4owhr25xdacssoohdefqobkei": {
+            "base64": "xK1MUICs6NsrL1cb3I2ebqZMUoOg41n1gLe0ZZqsI9ZsET1wQNbNjQXHFU5KbHABsWlxbzLW3rhgxZPaVqfkVVwrBhGyJG1YT0M5sLibdd6jlmSdLov88WBamvHxmtlFoyhEaxJCw/5RNiAMipGItKyBWkTC7/9M3165TLWjwFoQ8RmHqez2/2WakKoqDddJPp6LydRkswH2839N1bc36uAcYkJHSmar0kgzOm1InlZaB+d/ZAHrWXZ8wYtgaKxDDkjo/1xD22thYOhU0+3y/xdv8PtOcmdmY0ytYCn3I5WaCFPUeKWLjmNIDS4QqIx2IR8kdvEwtXZU1UtMRFtAlGnA3Ofc+Y37+n24JSSbaUe3OKQLHvkxIcDfKxAExsOj7yhnalTYu66qyC4ONM4ct5SvMs391ytMAOfp0G7rPq5rvYLIx4VJf1ncwcLqEkzvPn5kU+tE5rNgzxuv8u5oC7el91JE6YKzy1wbM3HRL9rjEYzybdOt6NHwirkFrJW0mmbdOfbkRg6g573WzfivtOmqoi1Y6mlQVFU/qwRZ3afAAGE7uI2TcCrT3lyPJqzXvHFYhIJBG45E79ChDnmxaMa492sbyTAKP42iYq0fKOKVjVgnbacuosvd3bxnRzHUodXf0O9AEibxdh7oSHq/0WJZDOEMSWEFV0idj1gtlJwWl46uiah3OBIqZQ2vWBndSvh8ZfbVnILOsKKRqsLCRB48SCLCmhojCQJfg/rTeUlkuXm5lMZAyKqMNjiygbBIh5iqkO0BVIjfa4lb1fwg2Ee0NPt+U8920UaYuiuKtpRaz1yBDzOvlsIAnQzMgl/qVcb/bh3njgbCvELLjEdKPwRGR11p7grEfsWRykgX9DiSI3IgEkAHAOPBXCbFcEYDWYkef2bckvoS2HYr94b6573xO5ikRaFaNvZB40aYVcvaMcG03QmnPzLfWC7CyQROazIesNr/5/+lRXbQIAgVQCubjPiqFtStAHNMxo0+FsHXT/eyCZ26j4emwuuQfam2EwrghEeDCs4NvPB0JanPPctXR5ptZ8MdtD8gQjTEfk8kUv3NWI12HnwQQ1FDp6wYUSkicGmaG+TjnSlWsVeGW3q7hnBVb7WN2M6M5j9z3W0tbJyWChGvoL0lcuuwDnYOBAiLwTzCoxZ7LtDkOtea/s1TuqpFv4hGW2SnH9njhG6u4C+4SCOadoFw3i4R+7GKOeCvS3Pk5plqMKieHW7YLrSVJSoWgMG3srTvP3+bdN3LUXFkTSubog5dNLYgs9k7d62Kv5xO5Qu0nb8jCpZ3KECF48o4dmAw3fqFDPUJtAarBRphs6zUyw=="
+          }
+        },
+        "changes": []
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-length",
+              "1999"
+            ],
+            [
+              "etag",
+              "\"fi1:bafybeigilnpf5t5mvmzyaoth6y6lgzhq3tr6aff5dmusde6rv6ypqe6bxm:.:1999\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          }
+        },
+        "truncated": {
+          "released": {
+            "content": {
+              "seed": "checks-sizes-a",
+              "from": 0,
+              "length": 1000
+            }
+          },
+          "abort": {
+            "code": "malformed",
+            "message": "This IPFS content is malformed"
+          }
+        }
+      },
+      "deviation": "unixfs-sizes",
+      "native": {
+        "status": 200,
+        "length": 1999,
+        "sha256": "c84651e2424648f3767f01f7ca2ae604ae579eb5d0450e713221512918b5aed9"
+      }
+    },
+    {
+      "id": "ipfs/sizes-node-not-its-entry",
+      "note": "a file whose second child is a node of 999 bytes where its entry says 1,000: the first leaf is released, then the body is cut as malformed; through a CAR",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeid6qhqxvlrslh2a2xskirhba5gmvcipeggnmbnemmyzl4ysvb6mzy"
+        },
+        "path": "",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "blocks": {
+          "bafkreibwhqm4x43cf5r3tywsb5didtty2yowchk56o4u7xel4yg4i64zv4": {
+            "base64": "Q9MNIqKLP/QAANnvJSAgcpMCanrWDUTbO4tvvy39w1gyYo4fbRFR3uQ2aLA7To1W04ae2rXOKHJ7gVYCAwrzTdEj7ez5NGi5CYMj65KDHXtuzkfdGflqs0md8Lvl2BTEBkRYYwfXm+/RglTxhEEc+VePeEpGlInFzGSXLPcRXoSUIphfeCaJUCMKvBymEDn+kO0fWfK8tLdBMh+/Smqp0FJdSKEfdDqTS9jlq3hdGv5Ehj402ZnmwJxdfMBEdtGJHUxeRrC10A7sIjXD+lY7PnDfx0ebO02iDQRAwe1rX8okpsyxjO+NzF5tEebdNJdVAIXcZQ3gbd8OPsJ7LY9f2UsJ6G5LGLgDSQDKZn5QPp5PyIX7AyUKKmnccwT5pwsyktgI8AN2bPdOHSoTslj8Iws4BHntjAYlJNEriNuz5qkjQm9RyBzjjjHWHkAUDOHag9qhFxxKi0BZ/cQha6UOD/OL8wGz6PQuFu/5dv2oBeuOMbO6yik/W/yJOBM/k+WPMMF1cQN1I3cBBM52jDskYeuqnyQ8xBUlQ9fYtOecpUPDnyuWWgDypG6V0tK/S7RHi+EKHyTGFNOqkuL99qw9Ms4OQ/PgRPhWl7qAum8aNxsWnyuAhOleU6mS6xFcU+suSRh3QDM8DvP+z+oX2ZdhyVsr0AT44Ol+gLHWFHygYc4MUYjxW1fQA4NjrauOApUw+Z+vn59p855OJadSE0Ugh3I4JdCtxX8j84ts3eGxEkBeFS/Fj2OFr3oMYzR5fzsWJ5ctmhknyTokQZWm0M4qAoH36QkM2a8kk9DJWo/xwAsTKCywqCa2AeChRnVnOQWfKP3bHACNN7jGTQe+CqzTf6BMQRFsObl0p9HXCL0hmtP0tAX+jG90lafJG61cB8CdXeb+obZA6IXuVExG+yW2MhsrJhzfFd97qwQpNA+xRH8arZ6876zs8LlEKFCbMqzRht7KIe2cyRxQjsdpt3pSXRHWiFKBqgZzGPTfLquIQNbS5lEVDkfUAT+qcpp/6Mjm5SnYz+b3zB3hlOJIdHYy31g3rdLb33WnZ+ik0+VkGqxrvUgTfbH3oeQlbaeZKskciq+gVe7cRvHC6PjZ03iRNdL/MT32s8CZYMojidVvbx+Tq4AnAsLbTeyjOHJIdaXTx1NHsnZtXqoDRIaFXSSE5R4PRW/c8KpgcOwYDq9znlkWcYjbgxytqQsh43rqiv3Lg90tioq7B/AmN8BK2J/FC0oh+35tAphNylRmTR4h/H5OWOdzkwK1kIgVKnjX5rSBChKs8sxN/qHpR2PfoRocC2wq75RV5jQL74J3fbb99SEv46Tdo3v9"
+          },
+          "bafkreidywy5czqpjexu6dy4baniavdyouxuzfwturlsoc4j3w3xswjr7ve": {
+            "base64": "rjDLrtcV8ph5I64u2XEKq4BDE7QFthFSdmGrf9h8d4+no2gW08Q/8SVNdOWaXZbgkxkRb+uC7uYSSZ80gRHMmfymvVdEvanQqKwcEMu3Fv0mLZMmjWX/xpX8aElEua6BnwNLJodP2cNdEVUAS2sNiRV3y4yI32bf2+QjwpAedhZHodsBvHOn6u1O2DUKqmyh1wW86xFVayYPPH17zJKS8ZXbEey0d16jHuVc60JDPoNfNNrHDY9UoqkLSV/1ahqSPbNwEI6uY6EhLqANgeJ2QslnZkfjF+EBAJu52YueC0e/5m9j5iBj13P3qcFB92yobCrmvVG+OKLiFLnUIdPNGQHucrZLLkxup27pb3umxBeC06FicfYXZr1b+Y3vyAhnj2QsJ76j9swIbPL/O1bm3jcughG1TcH0MD0szZ+41djay/ScQ8sjkaMEGJLj6gzv9E6bkosRED6GM/VbuEa7RUHMphBKaVNo57ERe1x3pDJnZvpNFJ0dIzuDyBgkbTrbNYd8XdM+UyxIW9LqKSwsNKB9LlMPxP8P76LKRj54aY0hGUaZAJNocqULA1/JFU+iR8Y6v1nnVq8aW/S3I3Sr42P61DxCp1YQ8I7/nYyO8hpbmPySvM2mi0INyhyCJkEqcOMflDJftkApJuBr3SGTu9tlq/iyZFq+V2zlrzmUq+yGG7fIkNiSIT3yuKpglRL8YCKInSgj4OMKyAw4BKwf2siKDbayUfljDxmA+10S9YNWqlVf44+JsSZCT/FKH2nRJ8MR2FEhp4aAJ3ALm/VLr/txQIbHTvcBSQzIVdDcKBQQnSshYNpPnlpfR0rPTuV/YnCADVA35jxgqj80ahxrkysislz7cOFceDGGwK+p+tTBigAwsEAVfacYvPDk2tY8LGngzTpe9oJVz71Hn4ErMzbyMD5Tg6RFAVfRjZuPbKxKkizqt4oKWGb5z16ev8rm9bnLvAfKiIxG5hcUBFvaYbZ34/7M0etWufIxsHsRhKzRzZE3fC2aIWov2qZD2vFFgLgxEZUOT4bxboI3u1WAY0WypXLdLoSZB37bmWVWw6VCzL2qkJMLaWbSgfH9jWkBrD6qDvz+uf17NV7FGxQ+xxf1D+U3oqymUYRmrUrlVriKF+xS57A41ZVUGobwSBdAyhbkFN5GaCRTwlehtKLHSBiVQ1IXMBvkvZYu+UH7IyUyG34BEyyOtr5MyugfUWaY6KB8H/MRs5BF31BHnFcHEgUf2nU+dZeeQAp/yyxhS+TlwyWqQSbjtyIgo3FMghnp6Q6cyd046C4XKx7ZsQ4ZD1/ERpWkR4cnp7P1fdXwylc1UYk7l16CmQ=="
+          },
+          "bafybeibhi76a6xldciw4uonem25miyfz6ww2yh3be2cj4bh7oixrg6jrjy": {
+            "base64": "EisKJAFVEiA2PBnL82IvY7ni0g9Ggc541h1hHV3zuU/ci+YNxHuZrxIAGOcHCggIAhjnByDnBw=="
+          },
+          "bafybeid6qhqxvlrslh2a2xskirhba5gmvcipeggnmbnemmyzl4ysvb6mzy": {
+            "base64": "EisKJAFVEiB4tjoswekl6eHjgQNQCo8OpemS2nSK5OFxO7bvKyY/qRIAGOgHEisKJAFwEiAnR/wPXWMSLco5pGa6xGC59a2sH2EmhJ4E/3IvE3kxThIAGMwICgsIAhjQDyDoByDoBw=="
+          },
+          "bafkreigwwgcgozfn4keduc5a2mynl6pzi4owhr25xdacssoohdefqobkei": {
+            "base64": "xK1MUICs6NsrL1cb3I2ebqZMUoOg41n1gLe0ZZqsI9ZsET1wQNbNjQXHFU5KbHABsWlxbzLW3rhgxZPaVqfkVVwrBhGyJG1YT0M5sLibdd6jlmSdLov88WBamvHxmtlFoyhEaxJCw/5RNiAMipGItKyBWkTC7/9M3165TLWjwFoQ8RmHqez2/2WakKoqDddJPp6LydRkswH2839N1bc36uAcYkJHSmar0kgzOm1InlZaB+d/ZAHrWXZ8wYtgaKxDDkjo/1xD22thYOhU0+3y/xdv8PtOcmdmY0ytYCn3I5WaCFPUeKWLjmNIDS4QqIx2IR8kdvEwtXZU1UtMRFtAlGnA3Ofc+Y37+n24JSSbaUe3OKQLHvkxIcDfKxAExsOj7yhnalTYu66qyC4ONM4ct5SvMs391ytMAOfp0G7rPq5rvYLIx4VJf1ncwcLqEkzvPn5kU+tE5rNgzxuv8u5oC7el91JE6YKzy1wbM3HRL9rjEYzybdOt6NHwirkFrJW0mmbdOfbkRg6g573WzfivtOmqoi1Y6mlQVFU/qwRZ3afAAGE7uI2TcCrT3lyPJqzXvHFYhIJBG45E79ChDnmxaMa492sbyTAKP42iYq0fKOKVjVgnbacuosvd3bxnRzHUodXf0O9AEibxdh7oSHq/0WJZDOEMSWEFV0idj1gtlJwWl46uiah3OBIqZQ2vWBndSvh8ZfbVnILOsKKRqsLCRB48SCLCmhojCQJfg/rTeUlkuXm5lMZAyKqMNjiygbBIh5iqkO0BVIjfa4lb1fwg2Ee0NPt+U8920UaYuiuKtpRaz1yBDzOvlsIAnQzMgl/qVcb/bh3njgbCvELLjEdKPwRGR11p7grEfsWRykgX9DiSI3IgEkAHAOPBXCbFcEYDWYkef2bckvoS2HYr94b6573xO5ikRaFaNvZB40aYVcvaMcG03QmnPzLfWC7CyQROazIesNr/5/+lRXbQIAgVQCubjPiqFtStAHNMxo0+FsHXT/eyCZ26j4emwuuQfam2EwrghEeDCs4NvPB0JanPPctXR5ptZ8MdtD8gQjTEfk8kUv3NWI12HnwQQ1FDp6wYUSkicGmaG+TjnSlWsVeGW3q7hnBVb7WN2M6M5j9z3W0tbJyWChGvoL0lcuuwDnYOBAiLwTzCoxZ7LtDkOtea/s1TuqpFv4hGW2SnH9njhG6u4C+4SCOadoFw3i4R+7GKOeCvS3Pk5plqMKieHW7YLrSVJSoWgMG3srTvP3+bdN3LUXFkTSubog5dNLYgs9k7d62Kv5xO5Qu0nb8jCpZ3KECF48o4dmAw3fqFDPUJtAarBRphs6zUyw=="
+          }
+        },
+        "changes": []
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-length",
+              "2000"
+            ],
+            [
+              "etag",
+              "\"fi1:bafybeid6qhqxvlrslh2a2xskirhba5gmvcipeggnmbnemmyzl4ysvb6mzy:.:2000\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          }
+        },
+        "truncated": {
+          "released": {
+            "content": {
+              "seed": "checks-sizes-a",
+              "from": 0,
+              "length": 1000
+            }
+          },
+          "abort": {
+            "code": "malformed",
+            "message": "This IPFS content is malformed"
+          }
+        }
+      },
+      "deviation": "unixfs-sizes",
+      "native": {
+        "status": 200,
+        "length": 1999,
+        "sha256": "819a62780678cf63ab33847c2b4a5b4b37e011c6002afd0e7de9f657129c3a5c"
+      }
+    },
+    {
+      "id": "ipfs/sizes-node-not-its-entry-raw",
+      "note": "a file whose second child is a node of 999 bytes where its entry says 1,000: the first leaf is released, then the body is cut as malformed; through raw blocks",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeid6qhqxvlrslh2a2xskirhba5gmvcipeggnmbnemmyzl4ysvb6mzy"
+        },
+        "path": "",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": false
+        },
+        "blocks": {
+          "bafkreibwhqm4x43cf5r3tywsb5didtty2yowchk56o4u7xel4yg4i64zv4": {
+            "base64": "Q9MNIqKLP/QAANnvJSAgcpMCanrWDUTbO4tvvy39w1gyYo4fbRFR3uQ2aLA7To1W04ae2rXOKHJ7gVYCAwrzTdEj7ez5NGi5CYMj65KDHXtuzkfdGflqs0md8Lvl2BTEBkRYYwfXm+/RglTxhEEc+VePeEpGlInFzGSXLPcRXoSUIphfeCaJUCMKvBymEDn+kO0fWfK8tLdBMh+/Smqp0FJdSKEfdDqTS9jlq3hdGv5Ehj402ZnmwJxdfMBEdtGJHUxeRrC10A7sIjXD+lY7PnDfx0ebO02iDQRAwe1rX8okpsyxjO+NzF5tEebdNJdVAIXcZQ3gbd8OPsJ7LY9f2UsJ6G5LGLgDSQDKZn5QPp5PyIX7AyUKKmnccwT5pwsyktgI8AN2bPdOHSoTslj8Iws4BHntjAYlJNEriNuz5qkjQm9RyBzjjjHWHkAUDOHag9qhFxxKi0BZ/cQha6UOD/OL8wGz6PQuFu/5dv2oBeuOMbO6yik/W/yJOBM/k+WPMMF1cQN1I3cBBM52jDskYeuqnyQ8xBUlQ9fYtOecpUPDnyuWWgDypG6V0tK/S7RHi+EKHyTGFNOqkuL99qw9Ms4OQ/PgRPhWl7qAum8aNxsWnyuAhOleU6mS6xFcU+suSRh3QDM8DvP+z+oX2ZdhyVsr0AT44Ol+gLHWFHygYc4MUYjxW1fQA4NjrauOApUw+Z+vn59p855OJadSE0Ugh3I4JdCtxX8j84ts3eGxEkBeFS/Fj2OFr3oMYzR5fzsWJ5ctmhknyTokQZWm0M4qAoH36QkM2a8kk9DJWo/xwAsTKCywqCa2AeChRnVnOQWfKP3bHACNN7jGTQe+CqzTf6BMQRFsObl0p9HXCL0hmtP0tAX+jG90lafJG61cB8CdXeb+obZA6IXuVExG+yW2MhsrJhzfFd97qwQpNA+xRH8arZ6876zs8LlEKFCbMqzRht7KIe2cyRxQjsdpt3pSXRHWiFKBqgZzGPTfLquIQNbS5lEVDkfUAT+qcpp/6Mjm5SnYz+b3zB3hlOJIdHYy31g3rdLb33WnZ+ik0+VkGqxrvUgTfbH3oeQlbaeZKskciq+gVe7cRvHC6PjZ03iRNdL/MT32s8CZYMojidVvbx+Tq4AnAsLbTeyjOHJIdaXTx1NHsnZtXqoDRIaFXSSE5R4PRW/c8KpgcOwYDq9znlkWcYjbgxytqQsh43rqiv3Lg90tioq7B/AmN8BK2J/FC0oh+35tAphNylRmTR4h/H5OWOdzkwK1kIgVKnjX5rSBChKs8sxN/qHpR2PfoRocC2wq75RV5jQL74J3fbb99SEv46Tdo3v9"
+          },
+          "bafkreidywy5czqpjexu6dy4baniavdyouxuzfwturlsoc4j3w3xswjr7ve": {
+            "base64": "rjDLrtcV8ph5I64u2XEKq4BDE7QFthFSdmGrf9h8d4+no2gW08Q/8SVNdOWaXZbgkxkRb+uC7uYSSZ80gRHMmfymvVdEvanQqKwcEMu3Fv0mLZMmjWX/xpX8aElEua6BnwNLJodP2cNdEVUAS2sNiRV3y4yI32bf2+QjwpAedhZHodsBvHOn6u1O2DUKqmyh1wW86xFVayYPPH17zJKS8ZXbEey0d16jHuVc60JDPoNfNNrHDY9UoqkLSV/1ahqSPbNwEI6uY6EhLqANgeJ2QslnZkfjF+EBAJu52YueC0e/5m9j5iBj13P3qcFB92yobCrmvVG+OKLiFLnUIdPNGQHucrZLLkxup27pb3umxBeC06FicfYXZr1b+Y3vyAhnj2QsJ76j9swIbPL/O1bm3jcughG1TcH0MD0szZ+41djay/ScQ8sjkaMEGJLj6gzv9E6bkosRED6GM/VbuEa7RUHMphBKaVNo57ERe1x3pDJnZvpNFJ0dIzuDyBgkbTrbNYd8XdM+UyxIW9LqKSwsNKB9LlMPxP8P76LKRj54aY0hGUaZAJNocqULA1/JFU+iR8Y6v1nnVq8aW/S3I3Sr42P61DxCp1YQ8I7/nYyO8hpbmPySvM2mi0INyhyCJkEqcOMflDJftkApJuBr3SGTu9tlq/iyZFq+V2zlrzmUq+yGG7fIkNiSIT3yuKpglRL8YCKInSgj4OMKyAw4BKwf2siKDbayUfljDxmA+10S9YNWqlVf44+JsSZCT/FKH2nRJ8MR2FEhp4aAJ3ALm/VLr/txQIbHTvcBSQzIVdDcKBQQnSshYNpPnlpfR0rPTuV/YnCADVA35jxgqj80ahxrkysislz7cOFceDGGwK+p+tTBigAwsEAVfacYvPDk2tY8LGngzTpe9oJVz71Hn4ErMzbyMD5Tg6RFAVfRjZuPbKxKkizqt4oKWGb5z16ev8rm9bnLvAfKiIxG5hcUBFvaYbZ34/7M0etWufIxsHsRhKzRzZE3fC2aIWov2qZD2vFFgLgxEZUOT4bxboI3u1WAY0WypXLdLoSZB37bmWVWw6VCzL2qkJMLaWbSgfH9jWkBrD6qDvz+uf17NV7FGxQ+xxf1D+U3oqymUYRmrUrlVriKF+xS57A41ZVUGobwSBdAyhbkFN5GaCRTwlehtKLHSBiVQ1IXMBvkvZYu+UH7IyUyG34BEyyOtr5MyugfUWaY6KB8H/MRs5BF31BHnFcHEgUf2nU+dZeeQAp/yyxhS+TlwyWqQSbjtyIgo3FMghnp6Q6cyd046C4XKx7ZsQ4ZD1/ERpWkR4cnp7P1fdXwylc1UYk7l16CmQ=="
+          },
+          "bafybeibhi76a6xldciw4uonem25miyfz6ww2yh3be2cj4bh7oixrg6jrjy": {
+            "base64": "EisKJAFVEiA2PBnL82IvY7ni0g9Ggc541h1hHV3zuU/ci+YNxHuZrxIAGOcHCggIAhjnByDnBw=="
+          },
+          "bafybeid6qhqxvlrslh2a2xskirhba5gmvcipeggnmbnemmyzl4ysvb6mzy": {
+            "base64": "EisKJAFVEiB4tjoswekl6eHjgQNQCo8OpemS2nSK5OFxO7bvKyY/qRIAGOgHEisKJAFwEiAnR/wPXWMSLco5pGa6xGC59a2sH2EmhJ4E/3IvE3kxThIAGMwICgsIAhjQDyDoByDoBw=="
+          },
+          "bafkreigwwgcgozfn4keduc5a2mynl6pzi4owhr25xdacssoohdefqobkei": {
+            "base64": "xK1MUICs6NsrL1cb3I2ebqZMUoOg41n1gLe0ZZqsI9ZsET1wQNbNjQXHFU5KbHABsWlxbzLW3rhgxZPaVqfkVVwrBhGyJG1YT0M5sLibdd6jlmSdLov88WBamvHxmtlFoyhEaxJCw/5RNiAMipGItKyBWkTC7/9M3165TLWjwFoQ8RmHqez2/2WakKoqDddJPp6LydRkswH2839N1bc36uAcYkJHSmar0kgzOm1InlZaB+d/ZAHrWXZ8wYtgaKxDDkjo/1xD22thYOhU0+3y/xdv8PtOcmdmY0ytYCn3I5WaCFPUeKWLjmNIDS4QqIx2IR8kdvEwtXZU1UtMRFtAlGnA3Ofc+Y37+n24JSSbaUe3OKQLHvkxIcDfKxAExsOj7yhnalTYu66qyC4ONM4ct5SvMs391ytMAOfp0G7rPq5rvYLIx4VJf1ncwcLqEkzvPn5kU+tE5rNgzxuv8u5oC7el91JE6YKzy1wbM3HRL9rjEYzybdOt6NHwirkFrJW0mmbdOfbkRg6g573WzfivtOmqoi1Y6mlQVFU/qwRZ3afAAGE7uI2TcCrT3lyPJqzXvHFYhIJBG45E79ChDnmxaMa492sbyTAKP42iYq0fKOKVjVgnbacuosvd3bxnRzHUodXf0O9AEibxdh7oSHq/0WJZDOEMSWEFV0idj1gtlJwWl46uiah3OBIqZQ2vWBndSvh8ZfbVnILOsKKRqsLCRB48SCLCmhojCQJfg/rTeUlkuXm5lMZAyKqMNjiygbBIh5iqkO0BVIjfa4lb1fwg2Ee0NPt+U8920UaYuiuKtpRaz1yBDzOvlsIAnQzMgl/qVcb/bh3njgbCvELLjEdKPwRGR11p7grEfsWRykgX9DiSI3IgEkAHAOPBXCbFcEYDWYkef2bckvoS2HYr94b6573xO5ikRaFaNvZB40aYVcvaMcG03QmnPzLfWC7CyQROazIesNr/5/+lRXbQIAgVQCubjPiqFtStAHNMxo0+FsHXT/eyCZ26j4emwuuQfam2EwrghEeDCs4NvPB0JanPPctXR5ptZ8MdtD8gQjTEfk8kUv3NWI12HnwQQ1FDp6wYUSkicGmaG+TjnSlWsVeGW3q7hnBVb7WN2M6M5j9z3W0tbJyWChGvoL0lcuuwDnYOBAiLwTzCoxZ7LtDkOtea/s1TuqpFv4hGW2SnH9njhG6u4C+4SCOadoFw3i4R+7GKOeCvS3Pk5plqMKieHW7YLrSVJSoWgMG3srTvP3+bdN3LUXFkTSubog5dNLYgs9k7d62Kv5xO5Qu0nb8jCpZ3KECF48o4dmAw3fqFDPUJtAarBRphs6zUyw=="
+          }
+        },
+        "changes": []
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-length",
+              "2000"
+            ],
+            [
+              "etag",
+              "\"fi1:bafybeid6qhqxvlrslh2a2xskirhba5gmvcipeggnmbnemmyzl4ysvb6mzy:.:2000\""
+            ],
+            [
+              "cache-control",
+              "public, max-age=31536000, immutable"
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "verified"
+          }
+        },
+        "truncated": {
+          "released": {
+            "content": {
+              "seed": "checks-sizes-a",
+              "from": 0,
+              "length": 1000
+            }
+          },
+          "abort": {
+            "code": "malformed",
+            "message": "This IPFS content is malformed"
+          }
+        }
+      },
+      "deviation": "unixfs-sizes",
+      "native": {
+        "status": 200,
+        "length": 1999,
+        "sha256": "819a62780678cf63ab33847c2b4a5b4b37e011c6002afd0e7de9f657129c3a5c"
+      }
+    },
+    {
+      "id": "ipfs/sizes-filesize-not-the-sum",
+      "note": "a file whose filesize, 2,001, isn't its blocksizes' sum, 2,000: malformed before the head; through a CAR",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeibp5dawyz4zwctinrdzjnlhh2d64zl3xw6664pi5ym6p3b3vkmrpi"
+        },
+        "path": "",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "blocks": {
+          "bafkreibwhqm4x43cf5r3tywsb5didtty2yowchk56o4u7xel4yg4i64zv4": {
+            "base64": "Q9MNIqKLP/QAANnvJSAgcpMCanrWDUTbO4tvvy39w1gyYo4fbRFR3uQ2aLA7To1W04ae2rXOKHJ7gVYCAwrzTdEj7ez5NGi5CYMj65KDHXtuzkfdGflqs0md8Lvl2BTEBkRYYwfXm+/RglTxhEEc+VePeEpGlInFzGSXLPcRXoSUIphfeCaJUCMKvBymEDn+kO0fWfK8tLdBMh+/Smqp0FJdSKEfdDqTS9jlq3hdGv5Ehj402ZnmwJxdfMBEdtGJHUxeRrC10A7sIjXD+lY7PnDfx0ebO02iDQRAwe1rX8okpsyxjO+NzF5tEebdNJdVAIXcZQ3gbd8OPsJ7LY9f2UsJ6G5LGLgDSQDKZn5QPp5PyIX7AyUKKmnccwT5pwsyktgI8AN2bPdOHSoTslj8Iws4BHntjAYlJNEriNuz5qkjQm9RyBzjjjHWHkAUDOHag9qhFxxKi0BZ/cQha6UOD/OL8wGz6PQuFu/5dv2oBeuOMbO6yik/W/yJOBM/k+WPMMF1cQN1I3cBBM52jDskYeuqnyQ8xBUlQ9fYtOecpUPDnyuWWgDypG6V0tK/S7RHi+EKHyTGFNOqkuL99qw9Ms4OQ/PgRPhWl7qAum8aNxsWnyuAhOleU6mS6xFcU+suSRh3QDM8DvP+z+oX2ZdhyVsr0AT44Ol+gLHWFHygYc4MUYjxW1fQA4NjrauOApUw+Z+vn59p855OJadSE0Ugh3I4JdCtxX8j84ts3eGxEkBeFS/Fj2OFr3oMYzR5fzsWJ5ctmhknyTokQZWm0M4qAoH36QkM2a8kk9DJWo/xwAsTKCywqCa2AeChRnVnOQWfKP3bHACNN7jGTQe+CqzTf6BMQRFsObl0p9HXCL0hmtP0tAX+jG90lafJG61cB8CdXeb+obZA6IXuVExG+yW2MhsrJhzfFd97qwQpNA+xRH8arZ6876zs8LlEKFCbMqzRht7KIe2cyRxQjsdpt3pSXRHWiFKBqgZzGPTfLquIQNbS5lEVDkfUAT+qcpp/6Mjm5SnYz+b3zB3hlOJIdHYy31g3rdLb33WnZ+ik0+VkGqxrvUgTfbH3oeQlbaeZKskciq+gVe7cRvHC6PjZ03iRNdL/MT32s8CZYMojidVvbx+Tq4AnAsLbTeyjOHJIdaXTx1NHsnZtXqoDRIaFXSSE5R4PRW/c8KpgcOwYDq9znlkWcYjbgxytqQsh43rqiv3Lg90tioq7B/AmN8BK2J/FC0oh+35tAphNylRmTR4h/H5OWOdzkwK1kIgVKnjX5rSBChKs8sxN/qHpR2PfoRocC2wq75RV5jQL74J3fbb99SEv46Tdo3v9"
+          },
+          "bafkreidywy5czqpjexu6dy4baniavdyouxuzfwturlsoc4j3w3xswjr7ve": {
+            "base64": "rjDLrtcV8ph5I64u2XEKq4BDE7QFthFSdmGrf9h8d4+no2gW08Q/8SVNdOWaXZbgkxkRb+uC7uYSSZ80gRHMmfymvVdEvanQqKwcEMu3Fv0mLZMmjWX/xpX8aElEua6BnwNLJodP2cNdEVUAS2sNiRV3y4yI32bf2+QjwpAedhZHodsBvHOn6u1O2DUKqmyh1wW86xFVayYPPH17zJKS8ZXbEey0d16jHuVc60JDPoNfNNrHDY9UoqkLSV/1ahqSPbNwEI6uY6EhLqANgeJ2QslnZkfjF+EBAJu52YueC0e/5m9j5iBj13P3qcFB92yobCrmvVG+OKLiFLnUIdPNGQHucrZLLkxup27pb3umxBeC06FicfYXZr1b+Y3vyAhnj2QsJ76j9swIbPL/O1bm3jcughG1TcH0MD0szZ+41djay/ScQ8sjkaMEGJLj6gzv9E6bkosRED6GM/VbuEa7RUHMphBKaVNo57ERe1x3pDJnZvpNFJ0dIzuDyBgkbTrbNYd8XdM+UyxIW9LqKSwsNKB9LlMPxP8P76LKRj54aY0hGUaZAJNocqULA1/JFU+iR8Y6v1nnVq8aW/S3I3Sr42P61DxCp1YQ8I7/nYyO8hpbmPySvM2mi0INyhyCJkEqcOMflDJftkApJuBr3SGTu9tlq/iyZFq+V2zlrzmUq+yGG7fIkNiSIT3yuKpglRL8YCKInSgj4OMKyAw4BKwf2siKDbayUfljDxmA+10S9YNWqlVf44+JsSZCT/FKH2nRJ8MR2FEhp4aAJ3ALm/VLr/txQIbHTvcBSQzIVdDcKBQQnSshYNpPnlpfR0rPTuV/YnCADVA35jxgqj80ahxrkysislz7cOFceDGGwK+p+tTBigAwsEAVfacYvPDk2tY8LGngzTpe9oJVz71Hn4ErMzbyMD5Tg6RFAVfRjZuPbKxKkizqt4oKWGb5z16ev8rm9bnLvAfKiIxG5hcUBFvaYbZ34/7M0etWufIxsHsRhKzRzZE3fC2aIWov2qZD2vFFgLgxEZUOT4bxboI3u1WAY0WypXLdLoSZB37bmWVWw6VCzL2qkJMLaWbSgfH9jWkBrD6qDvz+uf17NV7FGxQ+xxf1D+U3oqymUYRmrUrlVriKF+xS57A41ZVUGobwSBdAyhbkFN5GaCRTwlehtKLHSBiVQ1IXMBvkvZYu+UH7IyUyG34BEyyOtr5MyugfUWaY6KB8H/MRs5BF31BHnFcHEgUf2nU+dZeeQAp/yyxhS+TlwyWqQSbjtyIgo3FMghnp6Q6cyd046C4XKx7ZsQ4ZD1/ERpWkR4cnp7P1fdXwylc1UYk7l16CmQ=="
+          },
+          "bafybeibp5dawyz4zwctinrdzjnlhh2d64zl3xw6664pi5ym6p3b3vkmrpi": {
+            "base64": "EisKJAFVEiB4tjoswekl6eHjgQNQCo8OpemS2nSK5OFxO7bvKyY/qRIAGOgHEisKJAFVEiDWsYRnZK3iiDoLoNMw1fn5Rx1jx124wClJzjjIWDgqIhIAGOgHCgsIAhjRDyDoByDoBw=="
+          },
+          "bafybeibhi76a6xldciw4uonem25miyfz6ww2yh3be2cj4bh7oixrg6jrjy": {
+            "base64": "EisKJAFVEiA2PBnL82IvY7ni0g9Ggc541h1hHV3zuU/ci+YNxHuZrxIAGOcHCggIAhjnByDnBw=="
+          },
+          "bafkreigwwgcgozfn4keduc5a2mynl6pzi4owhr25xdacssoohdefqobkei": {
+            "base64": "xK1MUICs6NsrL1cb3I2ebqZMUoOg41n1gLe0ZZqsI9ZsET1wQNbNjQXHFU5KbHABsWlxbzLW3rhgxZPaVqfkVVwrBhGyJG1YT0M5sLibdd6jlmSdLov88WBamvHxmtlFoyhEaxJCw/5RNiAMipGItKyBWkTC7/9M3165TLWjwFoQ8RmHqez2/2WakKoqDddJPp6LydRkswH2839N1bc36uAcYkJHSmar0kgzOm1InlZaB+d/ZAHrWXZ8wYtgaKxDDkjo/1xD22thYOhU0+3y/xdv8PtOcmdmY0ytYCn3I5WaCFPUeKWLjmNIDS4QqIx2IR8kdvEwtXZU1UtMRFtAlGnA3Ofc+Y37+n24JSSbaUe3OKQLHvkxIcDfKxAExsOj7yhnalTYu66qyC4ONM4ct5SvMs391ytMAOfp0G7rPq5rvYLIx4VJf1ncwcLqEkzvPn5kU+tE5rNgzxuv8u5oC7el91JE6YKzy1wbM3HRL9rjEYzybdOt6NHwirkFrJW0mmbdOfbkRg6g573WzfivtOmqoi1Y6mlQVFU/qwRZ3afAAGE7uI2TcCrT3lyPJqzXvHFYhIJBG45E79ChDnmxaMa492sbyTAKP42iYq0fKOKVjVgnbacuosvd3bxnRzHUodXf0O9AEibxdh7oSHq/0WJZDOEMSWEFV0idj1gtlJwWl46uiah3OBIqZQ2vWBndSvh8ZfbVnILOsKKRqsLCRB48SCLCmhojCQJfg/rTeUlkuXm5lMZAyKqMNjiygbBIh5iqkO0BVIjfa4lb1fwg2Ee0NPt+U8920UaYuiuKtpRaz1yBDzOvlsIAnQzMgl/qVcb/bh3njgbCvELLjEdKPwRGR11p7grEfsWRykgX9DiSI3IgEkAHAOPBXCbFcEYDWYkef2bckvoS2HYr94b6573xO5ikRaFaNvZB40aYVcvaMcG03QmnPzLfWC7CyQROazIesNr/5/+lRXbQIAgVQCubjPiqFtStAHNMxo0+FsHXT/eyCZ26j4emwuuQfam2EwrghEeDCs4NvPB0JanPPctXR5ptZ8MdtD8gQjTEfk8kUv3NWI12HnwQQ1FDp6wYUSkicGmaG+TjnSlWsVeGW3q7hnBVb7WN2M6M5j9z3W0tbJyWChGvoL0lcuuwDnYOBAiLwTzCoxZ7LtDkOtea/s1TuqpFv4hGW2SnH9njhG6u4C+4SCOadoFw3i4R+7GKOeCvS3Pk5plqMKieHW7YLrSVJSoWgMG3srTvP3+bdN3LUXFkTSubog5dNLYgs9k7d62Kv5xO5Qu0nb8jCpZ3KECF48o4dmAw3fqFDPUJtAarBRphs6zUyw=="
+          }
+        },
+        "changes": []
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "This IPFS content is malformed"
+          }
+        }
+      },
+      "deviation": "unixfs-sizes",
+      "native": {
+        "status": 200,
+        "length": 2000,
+        "sha256": "8c072976524da75f18c3509afbf4be6a1391e9bf4afb3deff7f6fe9a2fddd526"
+      }
+    },
+    {
+      "id": "ipfs/sizes-filesize-not-the-sum-raw",
+      "note": "a file whose filesize, 2,001, isn't its blocksizes' sum, 2,000: malformed before the head; through raw blocks",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipfs": "bafybeibp5dawyz4zwctinrdzjnlhh2d64zl3xw6664pi5ym6p3b3vkmrpi"
+        },
+        "path": "",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": false
+        },
+        "blocks": {
+          "bafkreibwhqm4x43cf5r3tywsb5didtty2yowchk56o4u7xel4yg4i64zv4": {
+            "base64": "Q9MNIqKLP/QAANnvJSAgcpMCanrWDUTbO4tvvy39w1gyYo4fbRFR3uQ2aLA7To1W04ae2rXOKHJ7gVYCAwrzTdEj7ez5NGi5CYMj65KDHXtuzkfdGflqs0md8Lvl2BTEBkRYYwfXm+/RglTxhEEc+VePeEpGlInFzGSXLPcRXoSUIphfeCaJUCMKvBymEDn+kO0fWfK8tLdBMh+/Smqp0FJdSKEfdDqTS9jlq3hdGv5Ehj402ZnmwJxdfMBEdtGJHUxeRrC10A7sIjXD+lY7PnDfx0ebO02iDQRAwe1rX8okpsyxjO+NzF5tEebdNJdVAIXcZQ3gbd8OPsJ7LY9f2UsJ6G5LGLgDSQDKZn5QPp5PyIX7AyUKKmnccwT5pwsyktgI8AN2bPdOHSoTslj8Iws4BHntjAYlJNEriNuz5qkjQm9RyBzjjjHWHkAUDOHag9qhFxxKi0BZ/cQha6UOD/OL8wGz6PQuFu/5dv2oBeuOMbO6yik/W/yJOBM/k+WPMMF1cQN1I3cBBM52jDskYeuqnyQ8xBUlQ9fYtOecpUPDnyuWWgDypG6V0tK/S7RHi+EKHyTGFNOqkuL99qw9Ms4OQ/PgRPhWl7qAum8aNxsWnyuAhOleU6mS6xFcU+suSRh3QDM8DvP+z+oX2ZdhyVsr0AT44Ol+gLHWFHygYc4MUYjxW1fQA4NjrauOApUw+Z+vn59p855OJadSE0Ugh3I4JdCtxX8j84ts3eGxEkBeFS/Fj2OFr3oMYzR5fzsWJ5ctmhknyTokQZWm0M4qAoH36QkM2a8kk9DJWo/xwAsTKCywqCa2AeChRnVnOQWfKP3bHACNN7jGTQe+CqzTf6BMQRFsObl0p9HXCL0hmtP0tAX+jG90lafJG61cB8CdXeb+obZA6IXuVExG+yW2MhsrJhzfFd97qwQpNA+xRH8arZ6876zs8LlEKFCbMqzRht7KIe2cyRxQjsdpt3pSXRHWiFKBqgZzGPTfLquIQNbS5lEVDkfUAT+qcpp/6Mjm5SnYz+b3zB3hlOJIdHYy31g3rdLb33WnZ+ik0+VkGqxrvUgTfbH3oeQlbaeZKskciq+gVe7cRvHC6PjZ03iRNdL/MT32s8CZYMojidVvbx+Tq4AnAsLbTeyjOHJIdaXTx1NHsnZtXqoDRIaFXSSE5R4PRW/c8KpgcOwYDq9znlkWcYjbgxytqQsh43rqiv3Lg90tioq7B/AmN8BK2J/FC0oh+35tAphNylRmTR4h/H5OWOdzkwK1kIgVKnjX5rSBChKs8sxN/qHpR2PfoRocC2wq75RV5jQL74J3fbb99SEv46Tdo3v9"
+          },
+          "bafkreidywy5czqpjexu6dy4baniavdyouxuzfwturlsoc4j3w3xswjr7ve": {
+            "base64": "rjDLrtcV8ph5I64u2XEKq4BDE7QFthFSdmGrf9h8d4+no2gW08Q/8SVNdOWaXZbgkxkRb+uC7uYSSZ80gRHMmfymvVdEvanQqKwcEMu3Fv0mLZMmjWX/xpX8aElEua6BnwNLJodP2cNdEVUAS2sNiRV3y4yI32bf2+QjwpAedhZHodsBvHOn6u1O2DUKqmyh1wW86xFVayYPPH17zJKS8ZXbEey0d16jHuVc60JDPoNfNNrHDY9UoqkLSV/1ahqSPbNwEI6uY6EhLqANgeJ2QslnZkfjF+EBAJu52YueC0e/5m9j5iBj13P3qcFB92yobCrmvVG+OKLiFLnUIdPNGQHucrZLLkxup27pb3umxBeC06FicfYXZr1b+Y3vyAhnj2QsJ76j9swIbPL/O1bm3jcughG1TcH0MD0szZ+41djay/ScQ8sjkaMEGJLj6gzv9E6bkosRED6GM/VbuEa7RUHMphBKaVNo57ERe1x3pDJnZvpNFJ0dIzuDyBgkbTrbNYd8XdM+UyxIW9LqKSwsNKB9LlMPxP8P76LKRj54aY0hGUaZAJNocqULA1/JFU+iR8Y6v1nnVq8aW/S3I3Sr42P61DxCp1YQ8I7/nYyO8hpbmPySvM2mi0INyhyCJkEqcOMflDJftkApJuBr3SGTu9tlq/iyZFq+V2zlrzmUq+yGG7fIkNiSIT3yuKpglRL8YCKInSgj4OMKyAw4BKwf2siKDbayUfljDxmA+10S9YNWqlVf44+JsSZCT/FKH2nRJ8MR2FEhp4aAJ3ALm/VLr/txQIbHTvcBSQzIVdDcKBQQnSshYNpPnlpfR0rPTuV/YnCADVA35jxgqj80ahxrkysislz7cOFceDGGwK+p+tTBigAwsEAVfacYvPDk2tY8LGngzTpe9oJVz71Hn4ErMzbyMD5Tg6RFAVfRjZuPbKxKkizqt4oKWGb5z16ev8rm9bnLvAfKiIxG5hcUBFvaYbZ34/7M0etWufIxsHsRhKzRzZE3fC2aIWov2qZD2vFFgLgxEZUOT4bxboI3u1WAY0WypXLdLoSZB37bmWVWw6VCzL2qkJMLaWbSgfH9jWkBrD6qDvz+uf17NV7FGxQ+xxf1D+U3oqymUYRmrUrlVriKF+xS57A41ZVUGobwSBdAyhbkFN5GaCRTwlehtKLHSBiVQ1IXMBvkvZYu+UH7IyUyG34BEyyOtr5MyugfUWaY6KB8H/MRs5BF31BHnFcHEgUf2nU+dZeeQAp/yyxhS+TlwyWqQSbjtyIgo3FMghnp6Q6cyd046C4XKx7ZsQ4ZD1/ERpWkR4cnp7P1fdXwylc1UYk7l16CmQ=="
+          },
+          "bafybeibp5dawyz4zwctinrdzjnlhh2d64zl3xw6664pi5ym6p3b3vkmrpi": {
+            "base64": "EisKJAFVEiB4tjoswekl6eHjgQNQCo8OpemS2nSK5OFxO7bvKyY/qRIAGOgHEisKJAFVEiDWsYRnZK3iiDoLoNMw1fn5Rx1jx124wClJzjjIWDgqIhIAGOgHCgsIAhjRDyDoByDoBw=="
+          },
+          "bafybeibhi76a6xldciw4uonem25miyfz6ww2yh3be2cj4bh7oixrg6jrjy": {
+            "base64": "EisKJAFVEiA2PBnL82IvY7ni0g9Ggc541h1hHV3zuU/ci+YNxHuZrxIAGOcHCggIAhjnByDnBw=="
+          },
+          "bafkreigwwgcgozfn4keduc5a2mynl6pzi4owhr25xdacssoohdefqobkei": {
+            "base64": "xK1MUICs6NsrL1cb3I2ebqZMUoOg41n1gLe0ZZqsI9ZsET1wQNbNjQXHFU5KbHABsWlxbzLW3rhgxZPaVqfkVVwrBhGyJG1YT0M5sLibdd6jlmSdLov88WBamvHxmtlFoyhEaxJCw/5RNiAMipGItKyBWkTC7/9M3165TLWjwFoQ8RmHqez2/2WakKoqDddJPp6LydRkswH2839N1bc36uAcYkJHSmar0kgzOm1InlZaB+d/ZAHrWXZ8wYtgaKxDDkjo/1xD22thYOhU0+3y/xdv8PtOcmdmY0ytYCn3I5WaCFPUeKWLjmNIDS4QqIx2IR8kdvEwtXZU1UtMRFtAlGnA3Ofc+Y37+n24JSSbaUe3OKQLHvkxIcDfKxAExsOj7yhnalTYu66qyC4ONM4ct5SvMs391ytMAOfp0G7rPq5rvYLIx4VJf1ncwcLqEkzvPn5kU+tE5rNgzxuv8u5oC7el91JE6YKzy1wbM3HRL9rjEYzybdOt6NHwirkFrJW0mmbdOfbkRg6g573WzfivtOmqoi1Y6mlQVFU/qwRZ3afAAGE7uI2TcCrT3lyPJqzXvHFYhIJBG45E79ChDnmxaMa492sbyTAKP42iYq0fKOKVjVgnbacuosvd3bxnRzHUodXf0O9AEibxdh7oSHq/0WJZDOEMSWEFV0idj1gtlJwWl46uiah3OBIqZQ2vWBndSvh8ZfbVnILOsKKRqsLCRB48SCLCmhojCQJfg/rTeUlkuXm5lMZAyKqMNjiygbBIh5iqkO0BVIjfa4lb1fwg2Ee0NPt+U8920UaYuiuKtpRaz1yBDzOvlsIAnQzMgl/qVcb/bh3njgbCvELLjEdKPwRGR11p7grEfsWRykgX9DiSI3IgEkAHAOPBXCbFcEYDWYkef2bckvoS2HYr94b6573xO5ikRaFaNvZB40aYVcvaMcG03QmnPzLfWC7CyQROazIesNr/5/+lRXbQIAgVQCubjPiqFtStAHNMxo0+FsHXT/eyCZ26j4emwuuQfam2EwrghEeDCs4NvPB0JanPPctXR5ptZ8MdtD8gQjTEfk8kUv3NWI12HnwQQ1FDp6wYUSkicGmaG+TjnSlWsVeGW3q7hnBVb7WN2M6M5j9z3W0tbJyWChGvoL0lcuuwDnYOBAiLwTzCoxZ7LtDkOtea/s1TuqpFv4hGW2SnH9njhG6u4C+4SCOadoFw3i4R+7GKOeCvS3Pk5plqMKieHW7YLrSVJSoWgMG3srTvP3+bdN3LUXFkTSubog5dNLYgs9k7d62Kv5xO5Qu0nb8jCpZ3KECF48o4dmAw3fqFDPUJtAarBRphs6zUyw=="
+          }
+        },
+        "changes": []
+      },
+      "expect": {
+        "error": {
+          "status": 502,
+          "body": {
+            "code": 502,
+            "message": "This IPFS content is malformed"
+          }
+        }
+      },
+      "deviation": "unixfs-sizes",
+      "native": {
+        "status": 200,
+        "length": 2000,
+        "sha256": "8c072976524da75f18c3509afbf4be6a1391e9bf4afb3deff7f6fe9a2fddd526"
+      }
+    },
+    {
+      "id": "ipns/chain-3",
+      "note": "three names, each record naming the next, the last site-v1: served, as GatewayCore serves three resolutions",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipns": "k51qzi5uqu5dklgdxrkay7jysaqldirqdk1lbx2kbsu1kfkrle698qxugej93r"
+        },
+        "path": "/",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "record",
+            "name": "k51qzi5uqu5dklgdxrkay7jysaqldirqdk1lbx2kbsu1kfkrle698qxugej93r",
+            "record": {
+              "base64": "QkDYP0/KV/lp1OBCNMdSnSwT16WHM1R9HBGvQTC8cPyH2KOUxxtb1FjnWcF6rPE+/vI3UhYraHMWCY4jh6LmECMFSpsBpWNUVEwbAAAARdlkuABlVmFsdWVYRC9pcG5zL2s1MXF6aTV1cXU1ZGdtajl1c3dqczR5NWNpN3dhcHUwMXk5bXZzcDl3eXFsYXgxYWV1OWwza2lueHA5cDU4aFNlcXVlbmNlAWhWYWxpZGl0eVgeMjA5OS0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQA="
+            }
+          },
+          {
+            "piece": "record",
+            "name": "k51qzi5uqu5dgmj9uswjs4y5ci7wapu01y9mvsp9wyqlax1aeu9l3kinxp9p58",
+            "record": {
+              "base64": "QkC9QH0OiD/wwf6Zfs6VYEMfPlm7+3ugoxr38YdgaBdEKRZXpETUKQ1BQPZdXz0rpFmmrIuwV9F8IVDBS6qeMhoKSpsBpWNUVEwbAAAARdlkuABlVmFsdWVYRC9pcG5zL2s1MXF6aTV1cXU1ZGhqcGoxaDMxNW9qa2p6amVzNThiNWZnMTk4enB3dTc3dmtpOXJ1YnptNjc4MjhhN2J0aFNlcXVlbmNlAWhWYWxpZGl0eVgeMjA5OS0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQA="
+            }
+          },
+          {
+            "piece": "record",
+            "name": "k51qzi5uqu5dhjpj1h315ojkjzjes58b5fg198zpwu77vki9rubzm67828a7bt",
+            "record": {
+              "base64": "QkCYn4S23XAmoEH1R4O9jucyMlPEYchPVRphSYFnSP091TFTUqASN2nVV6+ATjYhlOZpWsc0KwCqDw+61kinsx8NSpgBpWNUVEwbAAAARdlkuABlVmFsdWVYQS9pcGZzL2JhZnliZWlndXdqbWRkdnI0aWlhaDZla2d2cm92YjV6ZmI2ZWc1YzZsb2lreHZ4bHh6bHdlYTVkYWJtaFNlcXVlbmNlAWhWYWxpZGl0eVgeMjA5OS0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQA="
+            }
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 200,
+          "headers": [
+            [
+              "content-type",
+              "text/html"
+            ],
+            [
+              "accept-ranges",
+              "bytes"
+            ],
+            [
+              "content-length",
+              "47"
+            ],
+            [
+              "etag",
+              "\"fi1:bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm:index.html:47\""
+            ],
+            [
+              "cache-control",
+              "no-cache"
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "latest_asserted"
+          },
+          "from": "ipns-ipns-ed25519-a#1"
+        },
+        "body": {
+          "base64": "PCFkb2N0eXBlIGh0bWw+PHRpdGxlPnNpdGU8L3RpdGxlPjxwPmluZGV4PC9wPgo="
+        }
+      },
+      "native": {
+        "status": 200,
+        "length": 47,
+        "sha256": "2b5de419a48c9fdb59a3e85dcb180f0c5fda4fb89c07e1c2c7104f6aaaf4e840"
+      }
+    },
+    {
+      "id": "ipns/chain-4",
+      "note": "four names: GatewayCore resolves the fourth, then answers 400 whatever it names; the core does once the fourth record passes",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipns": "k51qzi5uqu5dmdvip4twhfqymrgyhdzd98pi8vhfhsz4ia3oq8pyuph9vlrmgk"
+        },
+        "path": "/",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "record",
+            "name": "k51qzi5uqu5dmdvip4twhfqymrgyhdzd98pi8vhfhsz4ia3oq8pyuph9vlrmgk",
+            "record": {
+              "base64": "QkAQI4JAxcxOq2rIzIsah0r17aWLap+CXhto7FGY3XJUnD+ApUIkz4gMzT8vj+b3dALzNMPCxr8lD4wBqirqyE8NSpsBpWNUVEwbAAAARdlkuABlVmFsdWVYRC9pcG5zL2s1MXF6aTV1cXU1ZGsxdG4yNXYxZGo0enp4czdpb3Zma3RwdzN4bDNtaWN3cjllZTBrbmgxYWM5eHZreDVlaFNlcXVlbmNlAWhWYWxpZGl0eVgeMjA5OS0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQA="
+            }
+          },
+          {
+            "piece": "record",
+            "name": "k51qzi5uqu5dk1tn25v1dj4zzxs7iovfktpw3xl3micwr9ee0knh1ac9xvkx5e",
+            "record": {
+              "base64": "QkAWb8FMxWwHZ6KbjK3iYFRQqq3PQT/8Jdf/rwy5lmg4Ln3LxySpv74PJrH6xNKctOyt63D2CHGb4BmdSFezPjkMSpsBpWNUVEwbAAAARdlkuABlVmFsdWVYRC9pcG5zL2s1MXF6aTV1cXU1ZGlndzRwZWE2c2o1Y2lqZmgweTltNHduaXJvbnJvdWg1Nm8yZTE1aHlodnFrNnlneDg2aFNlcXVlbmNlAWhWYWxpZGl0eVgeMjA5OS0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQA="
+            }
+          },
+          {
+            "piece": "record",
+            "name": "k51qzi5uqu5digw4pea6sj5cijfh0y9m4wnironrouh56o2e15hyhvqk6ygx86",
+            "record": {
+              "base64": "QkBFYGHs6mz/83QX3GyS9FgpdDOM+SiB/oZHNanx4ZLE8GznVoPQ8ENUGHB8byq/JfH5n4vzxhnaIXXMqyb0qD8ESpsBpWNUVEwbAAAARdlkuABlVmFsdWVYRC9pcG5zL2s1MXF6aTV1cXU1ZGlpMXB2eDZ2YmJ6dHIwY3dkM3Zlcjg4cWhiY3FiaTNuNWd2dWNsdHRhaWx5cW81YTNvaFNlcXVlbmNlAWhWYWxpZGl0eVgeMjA5OS0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQA="
+            }
+          },
+          {
+            "piece": "record",
+            "name": "k51qzi5uqu5dii1pvx6vbbztr0cwd3ver88qhbcqbi3n5gvuclttailyqo5a3o",
+            "record": {
+              "base64": "QkCnOqepAWyNgk/DUmQyMq1qRKJzU9Ww1kjdNGoYkYIrfaenUq0N33jBdqvYQ4t6d8z4aZDh36WMtLR+TYkFyB0DSpgBpWNUVEwbAAAARdlkuABlVmFsdWVYQS9pcGZzL2JhZnliZWlndXdqbWRkdnI0aWlhaDZla2d2cm92YjV6ZmI2ZWc1YzZsb2lreHZ4bHh6bHdlYTVkYWJtaFNlcXVlbmNlAWhWYWxpZGl0eVgeMjA5OS0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQA="
+            }
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 400,
+          "headers": [
+            [
+              "content-type",
+              "text/html; charset=utf-8"
+            ],
+            [
+              "content-length",
+              "245"
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "latest_asserted"
+          }
+        },
+        "body": {
+          "base64": "PCFkb2N0eXBlIGh0bWw+PGh0bWw+PGhlYWQ+PG1ldGEgY2hhcnNldD0idXRmLTgiPjx0aXRsZT40MDAgQmFkIFJlcXVlc3Q8L3RpdGxlPjxtZXRhIG5hbWU9InZpZXdwb3J0IiBjb250ZW50PSJ3aWR0aD1kZXZpY2Utd2lkdGgsaW5pdGlhbC1zY2FsZT0xIj48L2hlYWQ+PGJvZHk+PG1haW4+PGgxPkJhZCBSZXF1ZXN0PC9oMT48cD5kbnNsaW5rIHJlY3Vyc2lvbiBsaW1pdCBleGNlZWRlZDwvcD48L21haW4+PC9ib2R5PjwvaHRtbD4="
+        }
+      },
+      "native": {
+        "status": 400,
+        "length": 245,
+        "sha256": "1b929cd10946efa4dc6e02cde0b2a6bb30a8573865948b9630d08a740f4306cf"
+      }
+    },
+    {
+      "id": "ipns/chain-5",
+      "note": "five names, the fifth without a record: the same 400, the fifth never asked for",
+      "plan": {
+        "node": "ipfs",
+        "root": {
+          "ipns": "k51qzi5uqu5diu4qfko7itrv0rj3a62bnfsun6cr3izu1mgkqq0dwa4y5o3x5q"
+        },
+        "path": "/",
+        "query": "",
+        "headers": []
+      },
+      "method": "GET",
+      "partition": null,
+      "world": {
+        "gateway": {
+          "car": true
+        },
+        "changes": [
+          {
+            "piece": "record",
+            "name": "k51qzi5uqu5diu4qfko7itrv0rj3a62bnfsun6cr3izu1mgkqq0dwa4y5o3x5q",
+            "record": {
+              "base64": "QkCSUmv74Yyb9yUAqZ0vUIWQkQolEeYtm6JTLmDljnOhY2LO+GUvmHK3q+vgSNKLKER+Ao2Zr8eToodFKQ/acNwOSpsBpWNUVEwbAAAARdlkuABlVmFsdWVYRC9pcG5zL2s1MXF6aTV1cXU1ZGx0NHE4NnRvdHRtdGMyNHE5bWsxaHI1ZG02ODYya28yaWp0cjh3MDQyMDQzY3VmYjQ2aFNlcXVlbmNlAWhWYWxpZGl0eVgeMjA5OS0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQA="
+            }
+          },
+          {
+            "piece": "record",
+            "name": "k51qzi5uqu5dlt4q86tottmtc24q9mk1hr5dm6862ko2ijtr8w042043cufb46",
+            "record": {
+              "base64": "QkDEdszUXJ2/IzCD8BSvz5rFNApp3KUcQc3uZ+v4l+6VmZRe/u/htSLgBGnYzFmMI6O+q8aEI9ev/lfe1+uHZpYBSpsBpWNUVEwbAAAARdlkuABlVmFsdWVYRC9pcG5zL2s1MXF6aTV1cXU1ZG0xMmZzNjQ4bzZndnJ2aWl2cWk2azMzOTUxZHoyejdmZDhqYjgyY2Q1eWthdDVzejMxaFNlcXVlbmNlAWhWYWxpZGl0eVgeMjA5OS0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQA="
+            }
+          },
+          {
+            "piece": "record",
+            "name": "k51qzi5uqu5dm12fs648o6gvrviivqi6k33951dz2z7fd8jb82cd5ykat5sz31",
+            "record": {
+              "base64": "QkBxTSPSRjJhRxEEceHhyWyu76WgfJNb4uWUylz7wXFtjBRexMS97nOPRQhorQf7CKznBxlZHfKZB+xXCRuEls8ESpsBpWNUVEwbAAAARdlkuABlVmFsdWVYRC9pcG5zL2s1MXF6aTV1cXU1ZGprMzJld2c4MmM1cXN1Z3ZjZ3J3OGo3djhzeGRneHRlcDdjMW83MGFnbTcxYnpxazg5aFNlcXVlbmNlAWhWYWxpZGl0eVgeMjA5OS0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQA="
+            }
+          },
+          {
+            "piece": "record",
+            "name": "k51qzi5uqu5djk32ewg82c5qsugvcgrw8j7v8sxdgxtep7c1o70agm71bzqk89",
+            "record": {
+              "base64": "QkDrjZME8OxpxuZvyUl1GgMFoAq4MibkfODOKFBfEpFCoi6+QGYfJ8SW1kAWt+FXyqxfB5FKMuOsof04ofyes6wFSpsBpWNUVEwbAAAARdlkuABlVmFsdWVYRC9pcG5zL2s1MXF6aTV1cXU1ZGszNHRrbGxwcjR4YjFidWV0dnp2enhjbGtxZmpsODJwd3gxYXRpc250ZWM1MmJwcnBkaFNlcXVlbmNlAWhWYWxpZGl0eVgeMjA5OS0wMS0wMVQwMDowMDowMC4wMDAwMDAwMDBabFZhbGlkaXR5VHlwZQA="
+            }
+          }
+        ]
+      },
+      "expect": {
+        "head": {
+          "status": 400,
+          "headers": [
+            [
+              "content-type",
+              "text/html; charset=utf-8"
+            ],
+            [
+              "content-length",
+              "245"
+            ]
+          ],
+          "trust": {
+            "name": null,
+            "content": "latest_asserted"
+          }
+        },
+        "body": {
+          "base64": "PCFkb2N0eXBlIGh0bWw+PGh0bWw+PGhlYWQ+PG1ldGEgY2hhcnNldD0idXRmLTgiPjx0aXRsZT40MDAgQmFkIFJlcXVlc3Q8L3RpdGxlPjxtZXRhIG5hbWU9InZpZXdwb3J0IiBjb250ZW50PSJ3aWR0aD1kZXZpY2Utd2lkdGgsaW5pdGlhbC1zY2FsZT0xIj48L2hlYWQ+PGJvZHk+PG1haW4+PGgxPkJhZCBSZXF1ZXN0PC9oMT48cD5kbnNsaW5rIHJlY3Vyc2lvbiBsaW1pdCBleGNlZWRlZDwvcD48L21haW4+PC9ib2R5PjwvaHRtbD4="
+        }
+      },
+      "native": {
+        "status": 400,
+        "length": 245,
+        "sha256": "1b929cd10946efa4dc6e02cde0b2a6bb30a8573865948b9630d08a740f4306cf"
+      }
     }
   ]
 }
