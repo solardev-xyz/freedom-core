@@ -1381,6 +1381,86 @@ fn a_second_request_reads_the_cache() {
     );
 }
 
+/// A manifest node past one chunk: its intermediate chunk and its leaves
+/// come back for the cache too, so the second request for an entry below
+/// it reads them all from there, and only the entry's own data again.
+#[test]
+fn a_node_past_one_chunk_is_cached_whole() {
+    let store = Store::new(&load("dweb-verify.json"));
+    let world = Antd::honest(&store);
+    let mut cache = fc_dweb::store::Store::new();
+    let root = "201d05969fe85940faad3f79c8e68f6040fd1dedac497004ff75ad8826114751";
+    let p = plan(root, "/%21-entry-000", "", vec![]);
+    let cold = run_shared(
+        "cold",
+        &p,
+        Method::Get,
+        &world,
+        Opts::default(),
+        Some(&mut cache),
+        None,
+    );
+    assert_eq!(cold.ending, Some(Ending::End));
+    let warm = run_shared(
+        "warm",
+        &p,
+        Method::Get,
+        &world,
+        Opts::default(),
+        Some(&mut cache),
+        None,
+    );
+    assert_eq!((warm.head, warm.body), (cold.head, cold.body));
+    // All but the entry itself, a one-chunk file: its root is its data.
+    let chunks = warm.pieces.iter().filter(|r| !r.stream).count();
+    assert!(chunks > 2, "{:?}", warm.pieces);
+    assert_eq!(warm.cached, chunks - 1, "{:?}", warm.pieces);
+}
+
+/// A file's tree two levels deep: a range far into Bee's 67,108,865-byte
+/// file reads its root and the intermediates below it as whole chunks,
+/// which come back for the cache; the same range again reads them all from
+/// there, and only data again: the header sniff's leaf, and its own leaves
+/// through the stream.
+#[test]
+fn a_files_intermediates_are_cached() {
+    let store = Store::new(&load("dweb-verify.json"));
+    let world = Antd::honest(&store);
+    let mut cache = fc_dweb::store::Store::new();
+    let root = "d9c55a1a8dda7402193768ba15520a913290fd67788df01bf9b116f7e11e6452";
+    let p = plan(
+        root,
+        "/",
+        "",
+        vec![("range".to_owned(), "bytes=40000000-40010000".to_owned())],
+    );
+    let cold = run_shared(
+        "cold",
+        &p,
+        Method::Get,
+        &world,
+        Opts::default(),
+        Some(&mut cache),
+        None,
+    );
+    assert_eq!(cold.ending, Some(Ending::End));
+    assert!(cold.remembered >= 3, "{}", cold.remembered);
+    let warm = run_shared(
+        "warm",
+        &p,
+        Method::Get,
+        &world,
+        Opts::default(),
+        Some(&mut cache),
+        None,
+    );
+    assert_eq!((warm.head, warm.body), (cold.head, cold.body));
+    // All but the header sniff's leaf, the file's first data chunk.
+    let chunks = warm.pieces.iter().filter(|r| !r.stream).count();
+    assert!(chunks >= 4, "{:?}", warm.pieces);
+    assert_eq!(warm.cached, chunks - 1, "{:?}", warm.pieces);
+}
+
 /// A private partition never reads the profile's entries or another's,
 /// and has its own; a ninth private partition has none, and fetches every
 /// chunk; `dweb.forget` leaves none of the partition's own.

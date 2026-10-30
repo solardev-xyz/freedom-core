@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use base64::Engine as _;
 use fc_dweb::Verify;
-use fc_dweb::store::{Store, Ticket};
+use fc_dweb::store::{FloorCheck, Store, Ticket};
 use fc_dweb::verifier::{
     Head, Method, Options, Output, PieceFailure, PieceId, PieceRequest, REQUEST_BUDGET,
     STREAM_WINDOW, Verifier,
@@ -90,6 +90,8 @@ pub struct Run {
     pub remembered: usize,
     /// The driver's steps.
     pub steps: usize,
+    /// The records held to the floor: their sequence, and the verdict.
+    pub floors: Vec<(u64, FloorCheck)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,6 +211,19 @@ pub fn run_shared(
                         }
                         None => queue.push_back(Action::Answer(req)),
                     }
+                }
+                Output::Floor {
+                    name,
+                    sequence,
+                    valid_until,
+                } => {
+                    // The dweb thread checks and raises the floor in one step.
+                    let check = match (store.as_deref_mut(), &ticket) {
+                        (Some(s), Some(t)) => s.floor(t, &name, sequence, valid_until, opts.now),
+                        _ => FloorCheck::Accepted,
+                    };
+                    out.floors.push((sequence, check));
+                    v.floor(check).unwrap();
                 }
                 Output::Remember { address, wire } => {
                     // Only a verified content-addressed chunk: never a

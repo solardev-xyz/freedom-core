@@ -376,6 +376,7 @@ Ant's `/bytes` supports a single range on 64-hex references (206 with `Content-R
   - A private window never reads the profile's entries or another window's, and its loads can't evict theirs, nor theirs its own. So it can't time another session's loads through the cache.
 - **Late results:** `dweb.forget` advances the partition's epoch. A cache insert or a floor update carries the epoch its request started under, and one from an older epoch is dropped, so a piece reply or hashing result that arrives after the forget leaves nothing behind.
 - **Why:** a site's subresources share the upper manifest nodes, and a video's seeks share the file's root and upper intermediates. With the cache, a later request costs one or two chunks before its stream.
+- **How the verifier meets it** (`fc_dweb::store`): the verifier holds no cache itself. The dweb thread answers a request's `/chunks/<address>` pieces from the request's partition before they reach main, and the verifier checks those answers as it checks any piece. A chunk the walk verified and reads as structure (an intermediate chunk, a manifest node's chunk) comes back as an output, which the dweb thread keeps with the request's epoch.
 
 ## IPFS
 
@@ -495,7 +496,9 @@ For `ipfs://<cid><path>`, with `GatewayCore`'s rules:
   - the value's path, then the request's path, are walked as above, except that the value's segments are matched as written, as `GatewayCore` matches them: it decodes none, so an encoded name in a record isn't found, and a segment that is `.` or `..`, as written or percent-encoded, is its 400 `path traversal segments are not allowed`. The segments of every value and the request's are at most 256 in all. A value naming another name with an Ed25519 or RSA key is followed the same way, with at most 4 records in all (`GatewayCore`'s limit on DNSLink chains): `GatewayCore` resolves a fourth name, then answers 400 `dnslink recursion limit exceeded` whatever it names, and so does the core once the fourth record passes. A value naming a DNSLink name, or a name with another inlined key, is `unverifiable`.
   - The label is `latest_asserted`: a gateway can serve an older record that hasn't expired yet.
   - **The core keeps a floor in memory:** the highest sequence it has verified per name and partition. A record below the floor is refused while the floor's record is still valid.
-    - **Bounds:** at most 1,024 names, least recently used out first. An evicted name has no floor until its next record, so the protection is best-effort, and lost on a restart.
+    - **Every record a request verifies** is held to it, each of a chain's included, before its value is followed. The verifier asks, and the dweb thread checks and raises the floor in one step (`fc_dweb::store`).
+    - **Bounds:** at most 1,024 names per partition, each partition with its own least-recently-used order: the profile's, and each private window's while it has a cache (at most 8, as [The structure cache](#the-structure-cache) bounds them). A ninth private window keeps no floors. An evicted name has no floor until its next record, so the protection is best-effort, and lost on a restart.
+    - **Changed in step 3c** from one bound of 1,024 names across partitions. With one bound, a private page that loaded 1,024 names could have evicted the floors that protect the profile, and then had an old record served there. Per partition, no partition's names evict another's floors, as no partition's loads evict another's cache.
     - **Concurrent requests:** the floor only rises, atomically, to the highest sequence verified. A request that verified its record before a higher one arrived keeps the record it verified; only records checked after the rise are held to it.
     - This narrows rollback within a session; it proves nothing across restarts.
   - **"Now"** is the core's wall clock, passed into the logic crates as a parameter (AGENTS.md rule 2).
@@ -878,7 +881,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 | decoded structure | 65,536 links, and as many `blocksizes` entries, per dag-pb node; CBOR nested 8 levels; 256 forks per mantaray node | `unverifiable` |
 | an IPNS record | 10 KiB | `verification_failed` |
 | an IPNS record's RSA key | a modulus of 2,048 to 8,192 bits; an odd exponent from 3 to 2^33 − 1; one signature check per record | `verification_failed` |
-| IPNS sequence floors | 1,024 names, in memory | least recently used first |
+| IPNS sequence floors | 1,024 names per partition, in memory: the profile's, and each of at most 8 private windows' | least recently used first, within the partition only; a ninth private window keeps none; `dweb.forget` drops a partition's |
 | hashing pool | 2 threads | jobs queue in the dweb thread, under the request's memory |
 
 ## Upstream

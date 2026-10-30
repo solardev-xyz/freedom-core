@@ -166,12 +166,24 @@ pub enum Output {
         address: [u8; 32],
         wire: Vec<u8>,
     },
+    /// A record the walk verified: check it against the partition's floor
+    /// and raise the floor, in one step ([`crate::store::Store::floor`]),
+    /// and give the verdict to [`Verifier::floor`]. The walk waits for it.
+    Floor {
+        /// The name's CID bytes.
+        name: Vec<u8>,
+        sequence: u64,
+        /// When the record's validity ends, in Unix seconds, rounded up.
+        valid_until: i64,
+    },
 }
 
 /// An input the machine can't take: a protocol error by its caller. The
 /// machine is unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum Misuse {
+    #[error("no floor check was asked for")]
+    Floor,
     #[error("no piece with this id was asked for")]
     UnknownPiece,
     #[error("the piece has ended")]
@@ -551,6 +563,15 @@ impl<T: Copy> Core<T> {
     /// Sends work to the hashing pool; its bytes leave the walk's holding
     /// and count as the job's.
     /// A verified structure chunk, given back for the partition's cache.
+    /// A verified record, for the partition's floor ([`Output::Floor`]).
+    pub(crate) fn ask_floor(&mut self, name: Vec<u8>, sequence: u64, valid_until: i64) {
+        self.outputs.push_back(Output::Floor {
+            name,
+            sequence,
+            valid_until,
+        });
+    }
+
     pub(crate) fn remember(&mut self, address: [u8; 32], wire: &[u8]) {
         self.outputs.push_back(Output::Remember {
             address,
@@ -774,6 +795,11 @@ pub(crate) trait Events<T> {
     fn hashed(&mut self, core: &mut Core<T>, tag: T, verdict: jobs::Verdict, work: jobs::Work);
     /// Main's credit made room in the body's queue.
     fn room(&mut self, _core: &mut Core<T>) {}
+    /// The floor's verdict on the record the walk asked about; false when
+    /// it asked about none.
+    fn floor(&mut self, _core: &mut Core<T>, _check: crate::store::FloorCheck) -> bool {
+        false
+    }
 }
 
 /// A core and the walk it drives.
@@ -890,6 +916,15 @@ impl<T: Copy, W: Events<T>> Machine<T, W> {
         }
         self.settle();
         Ok(())
+    }
+
+    fn floor(&mut self, check: crate::store::FloorCheck) -> Result<(), Misuse> {
+        let asked = match self.walk.as_mut() {
+            Some(walk) => walk.floor(&mut self.core, check),
+            None => false,
+        };
+        self.settle();
+        if asked { Ok(()) } else { Err(Misuse::Floor) }
     }
 
     fn body_credit(&mut self, bytes: usize) -> Result<(), Misuse> {
@@ -1138,6 +1173,11 @@ impl Verifier {
     /// Main's credit for the verified body: bytes it has handed on.
     pub fn body_credit(&mut self, bytes: usize) -> Result<(), Misuse> {
         machine!(self, m => m.body_credit(bytes))
+    }
+
+    /// The floor's verdict on the record of [`Output::Floor`].
+    pub fn floor(&mut self, check: crate::store::FloorCheck) -> Result<(), Misuse> {
+        machine!(self, m => m.floor(check))
     }
 
     /// The page went away: every piece is cancelled, and the request ends
