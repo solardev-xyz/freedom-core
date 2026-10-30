@@ -94,7 +94,9 @@ fn read_varint(bytes: &[u8], at: usize) -> Option<(u64, usize)> {
 /// decoded to a CIDv1 of the libp2p-key codec whose multihash is a
 /// sha2-256 digest of 32 bytes, or an identity holding a `PublicKey`
 /// protobuf whose type is Ed25519 (`08 01`). Anything else that decodes
-/// as a libp2p-key CID is another key; anything that doesn't is DNSLink.
+/// as a libp2p-key CID is another key; anything that doesn't is DNSLink,
+/// text longer than any CID's (`MAX_CID_TEXT`) included, which isn't
+/// decoded at all.
 pub fn ipns_name_kind(name: &str) -> NameKind {
     let bytes = if let Some(rest) = name.strip_prefix('k') {
         base36_decode(rest)
