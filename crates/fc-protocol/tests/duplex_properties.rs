@@ -13,7 +13,8 @@
 //!   in order, in both directions;
 //! - the core holds no ring: its consumers hold what they are given, and
 //!   what they haven't released stays within the window;
-//! - credit the core owes is one entry per stream at most;
+//! - credit the core owes is one record per open stream at most, also while
+//!   its writer isn't polled and streams end with credit unwritten;
 //! - once everything runs freely, both sides settle and hold nothing.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -103,6 +104,9 @@ struct Pipe {
     to_main: VecDeque<u8>,
     core_decoder: Decoder,
     main_decoder: Decoder,
+    /// Steps taken, and how many of the first the core's writer sits out.
+    steps: usize,
+    writer_held: usize,
 }
 
 impl Pipe {
@@ -141,6 +145,8 @@ impl Pipe {
             to_main: VecDeque::new(),
             core_decoder: Decoder::with_kinds(Kinds::CORE_STREAMS),
             main_decoder: Decoder::with_kinds(Kinds::CORE_STREAMS),
+            steps: 0,
+            writer_held: 0,
         }
     }
 
@@ -433,7 +439,9 @@ impl Pipe {
                 self.produce(false, max);
             }
             6 => {
-                self.core_writes(frames);
+                if self.steps >= self.writer_held {
+                    self.core_writes(frames);
+                }
             }
             7 => {
                 self.main_writes(frames);
@@ -451,6 +459,7 @@ impl Pipe {
                 self.core_releases(max);
             }
         }
+        self.steps += 1;
         self.check_bounds();
     }
 
@@ -490,6 +499,9 @@ fn honest_peers_both_ways_through_one_connection() {
     for seed in 1..=96 {
         let mut pipe = Pipe::new(seed);
         let steps = 200 + pipe.rng.below(3000);
+        // Every other run, the core's writer isn't polled until the end:
+        // credit it owes piles up, and its streams end with it unwritten.
+        pipe.writer_held = if seed % 2 == 0 { steps } else { 0 };
         for _ in 0..steps {
             pipe.step();
         }

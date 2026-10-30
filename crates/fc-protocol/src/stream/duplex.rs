@@ -18,10 +18,11 @@
 //! **The writer.** Credit the core owes main for what its consumers let go
 //! of is control, written ahead of the sender's frames, merged per stream
 //! while unwritten, and dropped when the core cancels the request or the
-//! stream's terminal arrives. So what waits to be written of it is bounded
-//! by the open streams.
+//! stream's terminal arrives: its amount and its place in the writer's
+//! order together, in one step. So what waits to be written of it, every
+//! record included, is bounded by the open streams.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 
 use super::{
     Arrived, Cancel, Credited, Inbound, Overcredit, Replied, Retire, Sender, StreamError,
@@ -52,9 +53,15 @@ pub enum Wrote {
 pub struct Duplex {
     sender: Sender,
     inbound: Inbound,
-    /// Credit owed and unwritten, per stream, and the order it came in.
-    owed: BTreeMap<u64, u32>,
-    order: VecDeque<u64>,
+    /// Credit owed and unwritten, per stream: its place in `order`, and the
+    /// bytes.
+    owed: BTreeMap<u64, (u64, u32)>,
+    /// The streams owed credit, by when their credit came. Each entry is a
+    /// stream in `owed`, and each stream in `owed` has one: both change
+    /// together ([`Duplex::owe`], [`Duplex::drop_owed`],
+    /// [`Duplex::next_credit`]).
+    order: BTreeMap<u64, u64>,
+    next_place: u64,
     failed: Option<StreamError>,
 }
 
@@ -134,7 +141,7 @@ impl Duplex {
         // Credit owed for a stream whose terminal came would cross it: it
         // goes, so what is owed is bounded by the open streams.
         if let Ok(Received::Arrived(Arrived::End { id } | Arrived::Abort { id, .. })) = &result {
-            self.owed.remove(id);
+            self.drop_owed(*id);
         }
         result.map_err(|error| self.fail(error))
     }
@@ -149,21 +156,36 @@ impl Duplex {
         let Some(credit) = self.inbound.credit(id, n)? else {
             return Ok(());
         };
+        self.owe(id, credit);
+        Ok(())
+    }
+
+    /// Adds `credit` to what is owed for stream `id`, in its place, or at
+    /// the end of the order when nothing was owed.
+    fn owe(&mut self, id: u64, credit: u32) {
         match self.owed.get_mut(&id) {
             // Within the window, so the sum fits.
-            Some(owed) => *owed = owed.saturating_add(credit),
+            Some((_, owed)) => *owed = owed.saturating_add(credit),
             None => {
-                self.owed.insert(id, credit);
-                self.order.push_back(id);
+                let place = self.next_place;
+                self.next_place = place.wrapping_add(1);
+                self.owed.insert(id, (place, credit));
+                self.order.insert(place, id);
             }
         }
-        Ok(())
+    }
+
+    /// Drops what is owed for stream `id`, and its place in the order.
+    fn drop_owed(&mut self, id: u64) {
+        if let Some((place, _)) = self.owed.remove(&id) {
+            self.order.remove(&place);
+        }
     }
 
     /// The core cancels its own request `id`: what is owed for it is
     /// dropped, and its frames are dropped as they come.
     pub fn withdraw(&mut self, id: u64) -> Retire {
-        self.owed.remove(&id);
+        self.drop_owed(id);
         self.inbound.cancel(id)
     }
 
@@ -196,20 +218,18 @@ impl Duplex {
 
     /// The oldest credit owed, written.
     fn next_credit(&mut self, out: &mut Vec<u8>) -> Option<Wrote> {
-        while let Some(id) = self.order.pop_front() {
-            // None when a withdrawal dropped it.
-            if let Some(n) = self.owed.remove(&id) {
-                put_header(out, KIND_STREAM_CREDIT, id, 4);
-                out.extend_from_slice(&n.to_be_bytes());
-                return Some(Wrote::Credit { id, n });
-            }
-        }
-        None
+        let (_, id) = self.order.pop_first()?;
+        let (_, n) = self.owed.remove(&id)?;
+        put_header(out, KIND_STREAM_CREDIT, id, 4);
+        out.extend_from_slice(&n.to_be_bytes());
+        Some(Wrote::Credit { id, n })
     }
 
-    /// Credit owed and unwritten: one entry per stream at most.
+    /// Streams owed credit that isn't written yet: the records the writer's
+    /// order holds, one per stream at most, and none for a stream that has
+    /// ended or been withdrawn.
     pub fn owed(&self) -> usize {
-        self.owed.len()
+        self.order.len()
     }
 
     /// The protocol error the connection failed with, if it did.
@@ -230,5 +250,100 @@ impl Duplex {
         self.owed.clear();
         self.order.clear();
         error
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stream::{Abort, AbortCode};
+
+    /// Both records of owed credit move together.
+    fn check(d: &Duplex) {
+        assert_eq!(d.owed.len(), d.order.len());
+        assert!(d.order.len() <= d.inbound.outstanding());
+        for (place, id) in &d.order {
+            assert_eq!(d.owed.get(id).map(|(p, _)| p), Some(place), "{id}");
+        }
+    }
+
+    /// A stream whose credit is owed, unwritten, when it goes: by its end,
+    /// its abort, or the core's withdrawal. The writer is never polled, so
+    /// nothing is taken off the order by writing it.
+    #[test]
+    fn owed_credit_leaves_no_record_behind_its_stream() {
+        let mut d = Duplex::new();
+        for id in 1..=30_000u64 {
+            d.ask(id).unwrap();
+            check(&d);
+            d.answered(id, true).unwrap();
+            d.receive(StreamFrame::Data { id, bytes: &[7] }).unwrap();
+            d.release(id, 1).unwrap();
+            assert_eq!(d.owed(), 1);
+            check(&d);
+            match id % 3 {
+                0 => {
+                    d.receive(StreamFrame::End { id }).unwrap();
+                }
+                1 => {
+                    d.receive(StreamFrame::Abort {
+                        id,
+                        abort: Abort::new(AbortCode::Stopped, "stopped"),
+                    })
+                    .unwrap();
+                }
+                _ => {
+                    assert_eq!(d.withdraw(id), Retire::SendCancel);
+                    check(&d);
+                    d.receive(StreamFrame::End { id }).unwrap();
+                }
+            }
+            check(&d);
+            assert_eq!((d.owed(), d.order.len(), d.owed.len()), (0, 0, 0), "{id}");
+        }
+        assert_eq!(d.inbound.outstanding(), 0);
+        let mut out = Vec::new();
+        assert_eq!(d.next_frame(&mut out), None);
+    }
+
+    /// Many streams owed at once, some gone before the writer runs: what it
+    /// writes is the rest, in the order their credit came, merged.
+    #[test]
+    fn the_writer_takes_the_rest_in_order() {
+        let mut d = Duplex::new();
+        for id in 1..=100u64 {
+            d.ask(id).unwrap();
+            d.answered(id, true).unwrap();
+            d.receive(StreamFrame::Data { id, bytes: &[1, 2] }).unwrap();
+        }
+        // Credit comes newest stream first, each stream twice.
+        for id in (1..=100u64).rev() {
+            d.release(id, 1).unwrap();
+        }
+        for id in (1..=100u64).rev() {
+            d.release(id, 1).unwrap();
+        }
+        check(&d);
+        for id in (1..=100u64).filter(|id| id % 4 == 0) {
+            d.receive(StreamFrame::End { id }).unwrap();
+        }
+        for id in (1..=100u64).filter(|id| id % 4 == 1) {
+            d.withdraw(id);
+        }
+        check(&d);
+        assert_eq!(d.owed(), 50);
+        let mut wrote = Vec::new();
+        let mut out = Vec::new();
+        while let Some(w) = d.next_frame(&mut out) {
+            wrote.push(w);
+            check(&d);
+        }
+        let want: Vec<Wrote> = (1..=100u64)
+            .rev()
+            .filter(|id| id % 4 > 1)
+            .map(|id| Wrote::Credit { id, n: 2 })
+            .collect();
+        assert_eq!(wrote, want);
+        assert_eq!((d.owed(), d.order.len(), d.owed.len()), (0, 0, 0));
     }
 }
