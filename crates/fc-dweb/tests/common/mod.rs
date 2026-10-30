@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use base64::Engine as _;
 use fc_dweb::Verify;
+use fc_dweb::store::{Store, Ticket};
 use fc_dweb::verifier::{
     Head, Method, Options, Output, PieceFailure, PieceId, PieceRequest, REQUEST_BUDGET,
     STREAM_WINDOW, Verifier,
@@ -84,6 +85,11 @@ pub struct Run {
     pub peak: usize,
     /// For each answer held back: the streams open when it went out.
     pub held_after: Vec<usize>,
+    /// Pieces the partition's cache answered, and chunks given back for it.
+    pub cached: usize,
+    pub remembered: usize,
+    /// The driver's steps.
+    pub steps: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +109,8 @@ pub struct Opts {
     pub page: Option<usize>,
     /// Cancel the request after this many steps.
     pub cancel_after: Option<usize>,
+    /// Forget the request's partition after this many steps (with a store).
+    pub forget_after: Option<usize>,
     /// A chunk whose answer main holds back until nothing else moves.
     pub hold: Option<[u8; 32]>,
     /// Whether the gateway serves ordered CARs.
@@ -118,6 +126,7 @@ impl Default for Opts {
             order: Order::Fifo,
             page: None,
             cancel_after: None,
+            forget_after: None,
             hold: None,
             car: true,
             now: 0,
@@ -127,6 +136,8 @@ impl Default for Opts {
 
 enum Action {
     Answer(PieceRequest),
+    /// A whole piece the partition's cache answers.
+    Cached(PieceId, Vec<u8>),
     Job(fc_dweb::verifier::Job),
     More(PieceId),
     Terminal(PieceId),
@@ -144,12 +155,28 @@ struct SimStream {
 }
 
 pub fn run(label: &str, plan: &Verify, method: Method, world: &dyn World, opts: Opts) -> Run {
+    run_shared(label, plan, method, world, opts, None, None)
+}
+
+/// A request in `partition` (none: the profile's) with the dweb thread's
+/// `store`: its `/chunks` pieces answered from the partition's cache when
+/// it holds them, and the chunks its walk gives back kept there.
+pub fn run_shared(
+    label: &str,
+    plan: &Verify,
+    method: Method,
+    world: &dyn World,
+    opts: Opts,
+    mut store: Option<&mut Store>,
+    partition: Option<&str>,
+) -> Run {
+    let ticket: Option<Ticket> = store.as_deref_mut().map(|s| s.begin(partition));
     let mut v = Verifier::new(
         7,
         plan,
         method,
-        None,
-        false,
+        partition,
+        partition.is_some(),
         Options {
             budget: opts.budget,
             now: opts.now,
@@ -171,7 +198,29 @@ pub fn run(label: &str, plan: &Verify, method: Method, world: &dyn World, opts: 
                 Output::Piece(req) => {
                     assert!(out.ending.is_none(), "a piece after the end");
                     out.pieces.push(req.clone());
-                    queue.push_back(Action::Answer(req));
+                    let hit = match (store.as_deref_mut(), &ticket) {
+                        (Some(s), Some(t)) => s.answer(t, &req),
+                        _ => None,
+                    };
+                    match hit {
+                        Some(wire) => {
+                            out.cached += 1;
+                            queue.push_back(Action::Cached(req.id, wire));
+                        }
+                        None => queue.push_back(Action::Answer(req)),
+                    }
+                }
+                Output::Remember { address, wire } => {
+                    // Only a verified content-addressed chunk: never a
+                    // single-owner one.
+                    assert!(
+                        fc_swarm::verify::check_chunk(&address, &wire).is_ok(),
+                        "{label}: remembered a chunk that isn't its address's"
+                    );
+                    out.remembered += 1;
+                    if let (Some(s), Some(t)) = (store.as_deref_mut(), &ticket) {
+                        s.remember(t, address, wire);
+                    }
                 }
                 Output::CancelPiece(id) => {
                     if let Some(s) = streams.get_mut(&id) {
@@ -255,9 +304,15 @@ pub fn run(label: &str, plan: &Verify, method: Method, world: &dyn World, opts: 
             "{label}: the body ran past main's window"
         );
         steps += 1;
+        out.steps = steps;
         if opts.cancel_after == Some(steps) {
             v.cancel();
             continue;
+        }
+        if opts.forget_after == Some(steps)
+            && let Some(s) = store.as_deref_mut()
+        {
+            s.forget(partition);
         }
         let action = match opts.order {
             Order::Fifo => queue.pop_front(),
@@ -289,6 +344,13 @@ pub fn run(label: &str, plan: &Verify, method: Method, world: &dyn World, opts: 
             break;
         };
         match action {
+            Action::Cached(id, wire) => {
+                if cancelled_wholes.contains(&id) {
+                    v.piece_failed(id, PieceFailure::Aborted).unwrap();
+                    continue;
+                }
+                v.piece_whole(id, 200, vec![], wire).unwrap();
+            }
             Action::Answer(req) => {
                 if cancelled_wholes.contains(&req.id) {
                     v.piece_failed(req.id, PieceFailure::Aborted).unwrap();

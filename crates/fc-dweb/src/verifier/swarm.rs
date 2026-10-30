@@ -91,6 +91,22 @@ fn span_of(wire: &[u8]) -> u64 {
     chunk_view(wire).map_or(0, |c| tree::decode_span(&c.span).1)
 }
 
+/// A verified chunk the walk reads as structure goes back for the
+/// partition's cache (0009, The structure cache): an intermediate chunk,
+/// and, where `node` (a manifest node's own chunk), a leaf that starts with
+/// a manifest's header. Data leaves and single-owner chunks never do.
+fn remember(core: &mut Core, address: &[u8; 32], wire: &[u8], node: bool) {
+    let payload = wire.get(SPAN_SIZE..).unwrap_or(&[]);
+    let structure = if span_of(wire) > CHUNK_SIZE as u64 {
+        true
+    } else {
+        node && payload.len() >= NODE_HEADER && manifest::has_manifest_header(payload)
+    };
+    if structure {
+        core.remember(*address, wire);
+    }
+}
+
 fn chunk_headers() -> Vec<(String, String)> {
     SWARM_HEADERS
         .iter()
@@ -720,6 +736,7 @@ impl Load {
         match tag {
             Tag::NodeRoot => {
                 core.unhold(wire.len());
+                remember(core, &address, &wire, true);
                 self.rooted(core, wire)
             }
             Tag::Sniff => {
@@ -727,6 +744,7 @@ impl Load {
                     core.unhold(wire.len());
                     return Progress::Pending;
                 };
+                remember(core, &address, &wire, true);
                 // Kept for the join, which reads the same chunks.
                 self.known.push((address, wire.clone()));
                 self.state = LoadState::Root;
@@ -737,6 +755,8 @@ impl Load {
                 let LoadState::Join(join) = &mut self.state else {
                     return Progress::Pending;
                 };
+                // A manifest node's own bytes.
+                core.remember(address, &wire);
                 let Some((_, len)) = join.leaves.remove(&start) else {
                     return Progress::Pending;
                 };
@@ -750,6 +770,7 @@ impl Load {
                 let LoadState::Join(join) = &mut self.state else {
                     return Progress::Pending;
                 };
+                remember(core, &address, &wire, false);
                 join.tree.settle(core, start, depth, Ok(&wire));
                 self.pump(core)
             }
@@ -1259,8 +1280,11 @@ impl Body {
         work: Work,
     ) -> Result<(), Failure> {
         match (tag, verdict, work) {
-            (Tag::Inter(start, depth), Verdict::Chunk(r), Work::Chunk { wire, .. }) => {
+            (Tag::Inter(start, depth), Verdict::Chunk(r), Work::Chunk { address, wire }) => {
                 core.unhold(wire.len());
+                if r.is_ok() {
+                    remember(core, &address, &wire, false);
+                }
                 self.tree.settle(
                     core,
                     start,
@@ -1937,13 +1961,16 @@ impl Walk {
                 }
             }
             Stage::FileRoot { .. } if tag == Tag::FileRoot => {
-                let (Verdict::Chunk(result), Work::Chunk { wire, .. }) = (verdict, work) else {
+                let (Verdict::Chunk(result), Work::Chunk { address, wire }) = (verdict, work)
+                else {
                     return self.end(core, Failure::Unverifiable);
                 };
                 if let Err(r) = result {
                     core.unhold(wire.len());
                     return self.end(core, refusal(r));
                 }
+                // A file's root is structure when it is intermediate.
+                remember(core, &address, &wire, false);
                 let Stage::FileRoot { entry } = std::mem::replace(&mut self.stage, Stage::Done)
                 else {
                     return;

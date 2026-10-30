@@ -167,6 +167,7 @@ fn drive(v: &mut Verifier, world: &World, slow_pool: bool) -> (Option<u16>, usiz
                     }
                 }
                 Output::Hash(job) => jobs.push_back(job),
+                Output::Remember { .. } => {}
                 Output::Head(h) => head = Some(h.status),
                 Output::Body(b) => {
                     body += b.len();

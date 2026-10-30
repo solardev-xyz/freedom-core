@@ -30,6 +30,7 @@ use serde_json::Value as Json;
 mod common;
 use common::{
     Answer, Ending, Expected, Opts, Order, Run, b64, check_body, content, load, pairs, run,
+    run_shared,
 };
 
 fn hex32(s: &str) -> [u8; 32] {
@@ -596,9 +597,19 @@ struct Replayed {
     unplanned: usize,
     kinds: BTreeMap<Kind, usize>,
     runs: usize,
+    /// Pieces the profile's structure cache answered, with `warm`.
+    cached: usize,
 }
 
 fn replay(choose: impl Fn(&str, &str) -> bool) -> Replayed {
+    replay_warm(choose, false)
+}
+
+/// The replay; with `warm`, every run in the profile's partition of one
+/// store, so later runs read the structure earlier ones cached.
+fn replay_warm(choose: impl Fn(&str, &str) -> bool, warm: bool) -> Replayed {
+    let mut cache = fc_dweb::store::Store::new();
+    let mut cached = 0;
     let doc = load("dweb-verify.json");
     let store = Store::new(&doc);
     let world = Antd::honest(&store);
@@ -657,9 +668,19 @@ fn replay(choose: impl Fn(&str, &str) -> bool) -> Replayed {
             p.headers.clone(),
             method == Method::Get,
         );
-        let got = runs
-            .entry(key)
-            .or_insert_with(|| run(id, &p, method, &world, Opts::default()));
+        let got = runs.entry(key).or_insert_with(|| {
+            let r = run_shared(
+                id,
+                &p,
+                method,
+                &world,
+                Opts::default(),
+                warm.then_some(&mut cache),
+                None,
+            );
+            cached += r.cached;
+            r
+        });
         let kind = kind_of(e);
         *kinds.entry(kind).or_default() += 1;
         match kind {
@@ -752,6 +773,7 @@ fn replay(choose: impl Fn(&str, &str) -> bool) -> Replayed {
         unplanned: unplanned.len(),
         kinds,
         runs: runs.len(),
+        cached,
     }
 }
 
@@ -1299,4 +1321,182 @@ fn bytes_stashed_before_an_early_end_are_still_used() {
     assert_eq!(got.held_after, [1]);
     assert_eq!(got.body.len(), 524_288 + 4_096);
     assert!(content("file-67108865", 528_384) == got.body);
+}
+
+// ---------------------------------------------------------------------------
+// The structure cache (design 0009, The structure cache; step 3c).
+
+/// Every exchange replayed with one profile cache: each answer is the same
+/// as with none, and later requests read the structure earlier ones
+/// cached. The driver checks that each chunk given back is content
+/// addressed and structure (an intermediate chunk or a manifest node's
+/// leaf): never a data leaf, never a single-owner chunk.
+#[test]
+fn bzz_exchanges_with_a_warm_cache() {
+    let n = replay_warm(|case, _| !case.starts_with("file-67108865-"), true);
+    assert_eq!(n.total, 675, "{n:?}");
+    assert!(n.cached > 100, "{n:?}");
+}
+
+/// A site's second request costs fewer chunks: its manifest's nodes and
+/// the file's root come from the partition's cache, and the body is the
+/// same.
+#[test]
+fn a_second_request_reads_the_cache() {
+    let store = Store::new(&load("dweb-verify.json"));
+    let world = Antd::honest(&store);
+    let mut cache = fc_dweb::store::Store::new();
+    let p = plan(SITE_A, "/style.css", "", vec![]);
+    let cold = run_shared(
+        "cold",
+        &p,
+        Method::Get,
+        &world,
+        Opts::default(),
+        Some(&mut cache),
+        None,
+    );
+    assert_eq!(cold.ending, Some(Ending::End));
+    assert_eq!(cold.cached, 0);
+    assert!(cold.remembered > 0);
+    let warm = run_shared(
+        "warm",
+        &p,
+        Method::Get,
+        &world,
+        Opts::default(),
+        Some(&mut cache),
+        None,
+    );
+    assert_eq!(warm.ending, Some(Ending::End));
+    assert_eq!((warm.head, warm.body), (cold.head, cold.body));
+    // Every chunk piece the warm request asked came from the cache: only
+    // the body's stream reached the node.
+    let chunks = warm.pieces.iter().filter(|r| !r.stream).count();
+    assert_eq!(warm.cached, chunks, "{:?}", warm.pieces);
+    assert!(
+        warm.pieces
+            .iter()
+            .all(|r| !r.stream || r.path.starts_with("/bytes/"))
+    );
+}
+
+/// A private partition never reads the profile's entries or another's,
+/// and has its own; a ninth private partition has none, and fetches every
+/// chunk; `dweb.forget` leaves none of the partition's own.
+#[test]
+fn each_partition_reads_only_its_own() {
+    let store = Store::new(&load("dweb-verify.json"));
+    let world = Antd::honest(&store);
+    let mut cache = fc_dweb::store::Store::new();
+    let p = plan(SITE_A, "/style.css", "", vec![]);
+    let go = |partition: Option<&str>, cache: &mut fc_dweb::store::Store| {
+        run_shared(
+            "partition",
+            &p,
+            Method::Get,
+            &world,
+            Opts::default(),
+            Some(cache),
+            partition,
+        )
+    };
+    go(None, &mut cache);
+    assert!(cache.chunks(None) > 0);
+    // The profile's entries aren't the private window's.
+    assert_eq!(go(Some("w0"), &mut cache).cached, 0);
+    assert!(go(Some("w0"), &mut cache).cached > 0);
+    for i in 1..8 {
+        let w = format!("w{i}");
+        assert_eq!(go(Some(&w), &mut cache).cached, 0, "{w}");
+    }
+    // A ninth: no cache, twice.
+    assert_eq!(go(Some("w8"), &mut cache).cached, 0);
+    assert_eq!(go(Some("w8"), &mut cache).cached, 0);
+    assert_eq!(cache.chunks(Some("w8")), 0);
+    // A forget leaves none; the partition starts again cold.
+    cache.forget(Some("w0"));
+    assert_eq!(cache.chunks(Some("w0")), 0);
+    assert_eq!(go(Some("w0"), &mut cache).cached, 0);
+    assert!(cache.chunks(None) > 0);
+}
+
+/// A `dweb.forget` while a request runs: whatever the request's pieces
+/// and hashing results bring after it leaves no entry behind, at every
+/// step.
+#[test]
+fn late_results_after_a_forget_leave_nothing() {
+    let store = Store::new(&load("dweb-verify.json"));
+    let world = Antd::honest(&store);
+    let p = plan(SITE_A, "/style.css", "", vec![]);
+    let mut forgotten = 0;
+    for at in 1.. {
+        let mut cache = fc_dweb::store::Store::new();
+        let got = run_shared(
+            "late",
+            &p,
+            Method::Get,
+            &world,
+            Opts {
+                forget_after: Some(at),
+                ..Opts::default()
+            },
+            Some(&mut cache),
+            Some("w"),
+        );
+        assert_eq!(got.ending, Some(Ending::End), "{at}");
+        if at > got.steps {
+            // The request ended first: what it gave back stayed.
+            assert!(cache.chunks(Some("w")) > 0);
+            break;
+        }
+        assert_eq!(cache.chunks(Some("w")), 0, "{at}");
+        assert_eq!(cache.cached(), 0, "{at}");
+        forgotten += 1;
+    }
+    assert!(forgotten > 10, "{forgotten}");
+}
+
+/// A file's data leaves never enter the cache: a raw 512 KiB file leaves
+/// only its root, which is intermediate; under a manifest, the chunks a
+/// request asks whole (the manifest's nodes and the file's root) and not
+/// the leaves its stream reads.
+#[test]
+fn data_leaves_are_never_cached() {
+    let store = Store::new(&load("dweb-verify.json"));
+    let world = Antd::honest(&store);
+    let mut cache = fc_dweb::store::Store::new();
+    let p = plan(FILE_512K, "/", "", vec![]);
+    let got = run_shared(
+        "raw",
+        &p,
+        Method::Get,
+        &world,
+        Opts::default(),
+        Some(&mut cache),
+        None,
+    );
+    assert_eq!(got.ending, Some(Ending::End));
+    assert_eq!((got.remembered, cache.chunks(None)), (1, 1));
+    // Under a manifest, the leaves aren't kept: what the next request
+    // asks as whole chunks all comes from the cache, and its leaves come
+    // through its stream again.
+    let mut cache = fc_dweb::store::Store::new();
+    let p = plan(SITE_A, "/style.css", "", vec![]);
+    let cold = run_shared(
+        "site",
+        &p,
+        Method::Get,
+        &world,
+        Opts::default(),
+        Some(&mut cache),
+        None,
+    );
+    let chunks = cold.pieces.iter().filter(|r| !r.stream).count();
+    assert_eq!(cache.chunks(None), chunks, "{:?}", cold.pieces);
+    assert!(
+        cold.pieces
+            .iter()
+            .all(|r| r.stream || r.path.starts_with("/chunks/"))
+    );
 }

@@ -159,6 +159,13 @@ pub enum Output {
         code: AbortCode,
         message: &'static str,
     },
+    /// A chunk the walk verified that is structure (a manifest node's
+    /// chunk, an intermediate chunk), for the partition's structure cache
+    /// ([`crate::store::Store::remember`]). Main never sees it.
+    Remember {
+        address: [u8; 32],
+        wire: Vec<u8>,
+    },
 }
 
 /// An input the machine can't take: a protocol error by its caller. The
@@ -543,6 +550,14 @@ impl<T: Copy> Core<T> {
 
     /// Sends work to the hashing pool; its bytes leave the walk's holding
     /// and count as the job's.
+    /// A verified structure chunk, given back for the partition's cache.
+    pub(crate) fn remember(&mut self, address: [u8; 32], wire: &[u8]) {
+        self.outputs.push_back(Output::Remember {
+            address,
+            wire: wire.to_vec(),
+        });
+    }
+
     pub(crate) fn hash(&mut self, tag: T, work: jobs::Work) {
         let size = work.size();
         self.walk_held = self.walk_held.saturating_sub(size);
