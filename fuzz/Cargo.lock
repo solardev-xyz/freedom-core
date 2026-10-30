@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "fc-chain"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "fc-dweb",
  "fc-json",
@@ -384,7 +384,7 @@ dependencies = [
 
 [[package]]
 name = "fc-dweb"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "fc-ipfs",
  "fc-json",
@@ -397,7 +397,7 @@ dependencies = [
 
 [[package]]
 name = "fc-evm"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "fc-json",
  "k256",
@@ -417,14 +417,14 @@ dependencies = [
 
 [[package]]
 name = "fc-json"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "fc-keys"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "aes",
  "base64",
@@ -445,7 +445,7 @@ dependencies = [
 
 [[package]]
 name = "fc-naming"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "blake2",
  "ens-normalize",
@@ -458,7 +458,7 @@ dependencies = [
 
 [[package]]
 name = "fc-protocol"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "base64",
  "serde",
@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "fc-seal"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "aes-gcm",
  "hpke",
@@ -480,7 +480,7 @@ dependencies = [
 
 [[package]]
 name = "fc-swarm"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "fc-evm",
  "k256",
@@ -489,7 +489,7 @@ dependencies = [
 
 [[package]]
 name = "fc-vault"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "aes-gcm",
  "base64",
