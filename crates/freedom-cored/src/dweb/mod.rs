@@ -11,3 +11,5 @@
 pub mod engine;
 #[allow(dead_code)]
 pub mod pool;
+#[allow(dead_code)]
+pub mod wire;

@@ -654,6 +654,7 @@ dependencies = [
  "fc-chain",
  "fc-dweb",
  "fc-evm",
+ "fc-json",
  "fc-keys",
  "fc-naming",
  "fc-protocol",
