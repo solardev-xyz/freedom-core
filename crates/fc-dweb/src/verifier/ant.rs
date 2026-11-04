@@ -124,8 +124,17 @@ fn header_value_ok(value: &str) -> bool {
 /// the value isn't a header value.
 pub(crate) fn content_disposition(filename: &str) -> Option<String> {
     let base = filename.rsplit('/').next().unwrap_or(filename);
-    let escaped = base.replace('\\', "\\\\").replace('"', "\\\"");
-    let value = format!("inline; filename=\"{escaped}\"");
+    // `\` and `"` escaped, in one string of at most twice the name and the
+    // frame: the walk holds room for it while the head is made.
+    let mut value = String::with_capacity(2 * base.len() + 20);
+    value.push_str("inline; filename=\"");
+    for c in base.chars() {
+        if c == '\\' || c == '"' {
+            value.push('\\');
+        }
+        value.push(c);
+    }
+    value.push('"');
     header_value_ok(&value).then_some(value)
 }
 

@@ -25,7 +25,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use fc_swarm::CHUNK_SIZE;
-use fc_swarm::manifest::{self, Lookup, NodeError, Outcome, Step};
+use fc_swarm::manifest::{self, Lookup, Metadata, NodeError, Outcome, Step};
 use fc_swarm::tree;
 use fc_swarm::verify::{Chunk, FeedUpdate, MAX_CHUNK_WIRE, Refusal, SPAN_SIZE};
 
@@ -49,6 +49,9 @@ const SNIFF_DEPTH: usize = 8;
 const NODE_HEADER: usize = 64;
 /// A parsed child reference's cost: its address and length.
 const CHILD_COST: usize = 40;
+/// A head's headers beside the entry's strings: their names, the fixed
+/// values, the ETag, the lengths and the vector that holds them.
+const HEAD_ROOM: usize = 1024;
 
 /// What a piece or a job is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1463,18 +1466,20 @@ impl Walk {
     }
 
     /// A lookup for the path below `node`, a parsed node whose cost the
-    /// walk holds: room for its phases is reserved first.
+    /// walk holds: room for the lookup, its box and its first step is
+    /// reserved first, and with the node's cost covers them until the step
+    /// is taken ([`Walk::step`]).
     fn start_lookup(&mut self, core: &mut Core, node: manifest::Node) {
         let cost = node.cost();
         let room = manifest::lookup_room(&self.path);
         if !core.fits(room) {
+            drop(node);
             core.unhold(cost);
             return self.end(core, Failure::Memory);
         }
         core.hold(room);
         let (lookup, step) = Lookup::new(node, &self.path);
-        core.unhold(room + cost);
-        self.step(core, Box::new(lookup), step);
+        self.step(core, Box::new(lookup), step, room + cost);
     }
 
     /// A proven answer with a fixed body: a 404, a 308 or a 416.
@@ -1531,7 +1536,8 @@ impl Walk {
         };
         // Those bytes are the URL reference's own: verified.
         self.feed = None;
-        self.file_rooted(core, entry, wire);
+        // A bare path: the entry has no strings of its own.
+        self.root_passed(core, entry, wire, 0);
     }
 
     fn loaded(&mut self, core: &mut Core, then: Then, loaded: Loaded, root_wire: Option<Vec<u8>>) {
@@ -1555,7 +1561,8 @@ impl Walk {
                             reference: self.root,
                             feed: None,
                         };
-                        self.file_rooted(core, entry, wire);
+                        // A bare path: the entry has no strings of its own.
+                        self.root_passed(core, entry, wire, 0);
                     }
                     Loaded::TooLarge => self.end(core, Failure::Unverifiable),
                     Loaded::Node(bytes) => self.root_node(core, bytes),
@@ -1611,8 +1618,9 @@ impl Walk {
                     }
                     Loaded::Node(bytes) => lookup.node(bytes),
                 };
-                core.unhold(room + held);
-                self.step(core, lookup, step);
+                // The room and the node's bytes cover the step until it is
+                // taken.
+                self.step(core, lookup, step, room + held);
             }
         }
     }
@@ -1664,20 +1672,36 @@ impl Walk {
         }
     }
 
-    /// The lookup's next step. Waiting for a node, the lookup is charged
-    /// what it holds; otherwise it is dropped, and so is its charge.
-    fn step(&mut self, core: &mut Core, lookup: Box<Lookup>, step: Step) {
+    /// The lookup's next step. `covered` is what the walk holds, beside the
+    /// lookup's last charge, for what the step allocated: the parsed node,
+    /// the lookup's growth and the step itself. Each charge goes only once
+    /// the memory it covers has gone, or has moved to the charge that
+    /// lasts: the boxed lookup while it waits for a node, or the entry
+    /// while the file's root chunk is fetched.
+    fn step(&mut self, core: &mut Core, lookup: Box<Lookup>, step: Step, covered: usize) {
         let label = self.label();
+        let charged = std::mem::take(&mut self.lookup_held) + covered;
         let reference = match step {
             Step::Need(reference) => reference,
+            Step::Done(Outcome::Found { data_ref, metadata }) => {
+                drop(lookup);
+                return self.found(core, &data_ref, metadata, charged);
+            }
+            // The other outcomes hold nothing of their own.
             other => {
                 drop(lookup);
-                self.charge_lookup(core, 0);
+                core.unhold(charged);
                 return self.outcome(core, other, label);
             }
         };
-        self.charge_lookup(core, std::mem::size_of::<Lookup>() + lookup.held());
-        let Ok(address) = <[u8; 32]>::try_from(reference.as_slice()) else {
+        let address = <[u8; 32]>::try_from(reference.as_slice());
+        drop(reference);
+        // What lasts while the next node loads: the boxed lookup.
+        let lasting = std::mem::size_of::<Lookup>() + lookup.held();
+        core.unhold(charged);
+        core.hold(lasting);
+        self.lookup_held = lasting;
+        let Ok(address) = address else {
             // A 64-byte reference: an encrypted node.
             drop(lookup);
             return self.end(core, Failure::Unverifiable);
@@ -1696,34 +1720,50 @@ impl Walk {
         }
     }
 
-    /// Where a lookup ended, its charge released.
+    /// The lookup found the entry: its metadata's strings move into the
+    /// entry (a filename from the path, when it has none, within room
+    /// reserved first), and the entry's charge takes over from `charged`
+    /// while the file's root chunk is fetched.
+    fn found(&mut self, core: &mut Core, data_ref: &[u8], mut metadata: Metadata, charged: usize) {
+        let Ok(reference) = <[u8; 32]>::try_from(data_ref) else {
+            drop(metadata);
+            core.unhold(charged);
+            return self.end(core, Failure::Unverifiable);
+        };
+        let room = self.path.len();
+        if !core.fits(room) {
+            drop(metadata);
+            core.unhold(charged);
+            return self.end(core, Failure::Memory);
+        }
+        core.hold(room);
+        let content_type = take(&mut metadata, manifest::CONTENT_TYPE);
+        let filename =
+            take(&mut metadata, manifest::FILENAME).or_else(|| ant::filename_from_path(&self.path));
+        drop(metadata);
+        let entry = Entry {
+            content_type,
+            filename,
+            reference,
+            feed: self.feed,
+        };
+        let cost = entry_cost(&entry);
+        core.unhold(charged + room);
+        core.hold(cost);
+        self.release_url_root(core);
+        // Staged first, so an end from here releases the entry's charge.
+        self.stage = Stage::FileRoot { entry };
+        if fetch_chunk(core, Tag::FileRoot, &reference).is_none() {
+            self.end(core, Failure::Memory);
+        }
+    }
+
+    /// Where a lookup ended without an entry, its charge released.
     fn outcome(&mut self, core: &mut Core, step: Step, label: ContentTrust) {
         match step {
-            // A step that asks for a node isn't an outcome.
-            Step::Need(_) => self.end(core, Failure::Unverifiable),
-            Step::Done(Outcome::Found { data_ref, metadata }) => {
-                let Ok(reference) = <[u8; 32]>::try_from(data_ref.as_slice()) else {
-                    return self.end(core, Failure::Unverifiable);
-                };
-                self.release_url_root(core);
-                let entry = Entry {
-                    content_type: metadata.get(manifest::CONTENT_TYPE).map(str::to_owned),
-                    filename: metadata
-                        .get(manifest::FILENAME)
-                        .map(str::to_owned)
-                        .or_else(|| ant::filename_from_path(&self.path)),
-                    reference,
-                    feed: self.feed,
-                };
-                drop(metadata);
-                // The entry waits for the file's root chunk: its strings
-                // count against the request.
-                let cost = entry_cost(&entry);
-                if !core.fits(cost) || fetch_chunk(core, Tag::FileRoot, &reference).is_none() {
-                    return self.end(core, Failure::Memory);
-                }
-                core.hold(cost);
-                self.stage = Stage::FileRoot { entry };
+            // Taken by `step` and `found`.
+            Step::Need(_) | Step::Done(Outcome::Found { .. }) => {
+                self.end(core, Failure::Unverifiable);
             }
             Step::Done(Outcome::NotFound { root }) => {
                 let kind = if root { NotFound::Root } else { NotFound::Path };
@@ -1740,6 +1780,22 @@ impl Walk {
                 self.end(core, Failure::Unverifiable);
             }
         }
+    }
+
+    /// The file's root chunk passed for `entry`, whose strings' cost the
+    /// walk holds (`held`). The head copies them, a filename escaped to at
+    /// most twice its length: room for that is held while the head is made,
+    /// then the room and the entry's charge go.
+    fn root_passed(&mut self, core: &mut Core, entry: Entry, wire: Vec<u8>, held: usize) {
+        let room = 2 * entry_cost(&entry) + HEAD_ROOM;
+        if !core.fits(room) {
+            drop(entry);
+            core.unhold(held + wire.len());
+            return self.end(core, Failure::Memory);
+        }
+        core.hold(room);
+        self.file_rooted(core, entry, wire);
+        core.unhold(held + room);
     }
 
     /// The file's root chunk passed: the head, then the body.
@@ -2054,8 +2110,8 @@ impl Walk {
                 else {
                     return;
                 };
-                core.unhold(entry_cost(&entry));
-                self.file_rooted(core, entry, wire);
+                let held = entry_cost(&entry);
+                self.root_passed(core, entry, wire, held);
             }
             Stage::Body(b) => {
                 let r = b.hashed(core, tag, verdict, work);
@@ -2141,21 +2197,30 @@ fn feed_of(meta: &manifest::Metadata) -> Result<Option<FeedKey>, ()> {
         None | Some("Sequence" | "sequence") => {}
         Some(_) => return Err(()),
     }
-    let owner = hex_bytes(owner.trim_start_matches("0x")).ok_or(())?;
-    let topic = hex_bytes(topic.trim_start_matches("0x")).ok_or(())?;
-    Ok(Some((
-        owner.try_into().map_err(|_| ())?,
-        topic.try_into().map_err(|_| ())?,
-    )))
+    let owner = hex_array(owner.trim_start_matches("0x")).ok_or(())?;
+    let topic = hex_array(topic.trim_start_matches("0x")).ok_or(())?;
+    Ok(Some((owner, topic)))
 }
 
-fn hex_bytes(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
+/// `s` as exactly `N` bytes of hex, decoded into place: no allocation.
+fn hex_array<const N: usize>(s: &str) -> Option<[u8; N]> {
+    if s.len() != 2 * N {
         return None;
     }
-    (0..s.len() / 2)
-        .map(|i| u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok())
-        .collect()
+    let mut out = [0u8; N];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
+/// A metadata key's value, moved out: its string, not a copy.
+fn take(metadata: &mut Metadata, key: &str) -> Option<String> {
+    metadata
+        .0
+        .iter_mut()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| std::mem::take(v))
 }
 
 /// `swarm-feed-index`: the update's index as 16 hex digits.
