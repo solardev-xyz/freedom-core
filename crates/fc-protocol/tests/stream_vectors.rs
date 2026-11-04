@@ -1,5 +1,6 @@
 //! Replays vectors/streams.json: design 0007's stream frames, their order,
-//! credit and coalescing. Every outcome there is the design's, written by
+//! credit and coalescing, and design 0009's two directions on the core's
+//! connection. Every outcome there is the design's, written by
 //! hand in vectors/generator/streams.js; main's frame.js runs the same
 //! cases. The formats are in the file's `formats` member.
 
@@ -10,9 +11,9 @@ use std::collections::BTreeMap;
 use fc_protocol::frame::{Decoder, Frame, KIND_JSON, Kinds, MAX_PAYLOAD};
 use fc_protocol::message::Message;
 use fc_protocol::stream::{
-    Abort, AbortCode, CREDIT_LEN, Cancel, Credited, Delivery, ID_LEN, MAX_ABORT, MAX_DATA,
-    MAX_PULL, Receiver, Replied, Retire, SMALL_FRAME, Sender, Side, StreamFrame, StreamState,
-    WINDOW, WRITER_DATA_CAP, credit_frame,
+    Abort, AbortCode, Arrived, CREDIT_LEN, Cancel, Credited, Delivery, Duplex, ID_LEN,
+    InboundState, MAX_ABORT, MAX_DATA, MAX_PULL, Received, Receiver, Replied, Retire, SMALL_FRAME,
+    Side, StreamFrame, StreamState, WINDOW, WRITER_DATA_CAP, Wrote, credit_frame,
 };
 use serde_json::{Value as Json, json};
 
@@ -68,6 +69,7 @@ fn kinds(side: &str) -> Kinds {
         "receiver" => Kinds::service(Side::Receiver),
         "sender" => Kinds::service(Side::Sender),
         "core" => Kinds::CORE,
+        "core_streams" => Kinds::CORE_STREAMS,
         other => panic!("side {other}"),
     }
 }
@@ -224,11 +226,18 @@ fn encodings() {
 
 // ---- the service's side ------------------------------------------------------
 
-/// Plays the service against a [`Sender`]: the producers offer the body
-/// bytes of `formats.body_bytes`, and every written frame is decoded as main
-/// would decode it.
+/// Plays the side that sends bodies: the service against a sender (the
+/// `sender` cases), or the core against both its directions (the `duplex`
+/// cases). The producers offer the body bytes of `formats.body_bytes`,
+/// every frame main sends goes through the codec, and every written frame
+/// is decoded as main would decode it. A [`Duplex`] whose own requests
+/// stay empty is a sender, so both run through one.
 struct Service {
-    sender: Sender,
+    d: Duplex,
+    /// The core's connection at protocol 2, rather than a service's.
+    core: bool,
+    /// The next body byte main sends on each of the core's own streams.
+    inbound: BTreeMap<u64, u64>,
     /// The next body byte each producer offers.
     offered: BTreeMap<u64, u64>,
     /// The next body byte each stream writes.
@@ -267,34 +276,123 @@ fn protocol<T>(
 }
 
 impl Service {
+    fn new(core: bool, data_cap: usize) -> Self {
+        Self {
+            d: Duplex::with_data_cap(data_cap),
+            core,
+            inbound: BTreeMap::new(),
+            offered: BTreeMap::new(),
+            written: BTreeMap::new(),
+            heads: BTreeMap::new(),
+            replies: BTreeMap::new(),
+        }
+    }
+
+    /// The kinds this side reads.
+    fn reads(&self) -> Kinds {
+        if self.core {
+            Kinds::CORE_STREAMS
+        } else {
+            Kinds::service(Side::Sender)
+        }
+    }
+
+    /// A stream frame from main, through the codec as this side reads it.
+    fn main_sends(&mut self, frame: &[u8]) -> Result<Received, fc_protocol::stream::StreamError> {
+        let mut decoder = Decoder::with_kinds(self.reads());
+        assert_eq!(decoder.push(frame).unwrap(), frame.len());
+        let frame = decoder.pop().unwrap();
+        self.d.receive(StreamFrame::from_frame(&frame).unwrap())
+    }
+
     fn act(&mut self, action: &[Json]) -> Json {
         let id = u(&action[1]);
         match action[0].as_str().unwrap() {
-            "request" => protocol(self.sender.request(id), |()| json!("ok")),
-            "cancel" => protocol(self.sender.cancel(id), |cancel| match cancel {
+            "request" => protocol(self.d.request(id), |()| json!("ok")),
+            "cancel" => protocol(self.d.cancel(id), |cancel| match cancel {
                 Cancel::Cancelled => json!("cancelled"),
                 Cancel::Late => json!("late"),
             }),
             "credit" => {
-                // Through the codec, as main sends it.
                 let frame = credit_frame(id, u32::try_from(u(&action[2])).unwrap()).unwrap();
-                let mut decoder = Decoder::with_kinds(Kinds::service(Side::Sender));
-                assert_eq!(decoder.push(&frame).unwrap(), frame.len());
-                let frame = decoder.pop().unwrap();
-                let credit = StreamFrame::from_frame(&frame).unwrap();
-                protocol(self.sender.receive(credit), |credited| match credited {
-                    Credited::Taken(taken) => {
+                protocol(self.main_sends(&frame), |received| match received {
+                    Received::Credited(Credited::Taken(taken)) => {
                         assert_eq!(taken, id);
                         json!("taken")
                     }
-                    Credited::Late => json!("late"),
+                    Received::Credited(Credited::Late) => json!("late"),
+                    other => panic!("{other:?}"),
                 })
             }
+            // The core's own requests, which main answers.
+            "ask" => protocol(self.d.ask(id), |()| json!("ok")),
+            "answered" => protocol(
+                self.d.answered(id, action[2].as_bool().unwrap()),
+                |replied| match replied {
+                    Replied::Deliver => json!("deliver"),
+                    Replied::Retired => json!("retired"),
+                },
+            ),
+            "data" => {
+                let len = n(&action[2]);
+                let at = self.inbound.get(&id).copied().unwrap_or(0);
+                let mut frame = Vec::new();
+                let bytes = body(id, at, len);
+                StreamFrame::Data { id, bytes: &bytes }
+                    .encode(&mut frame)
+                    .unwrap();
+                let got = self.main_sends(&frame);
+                if got.is_ok() {
+                    *self.inbound.entry(id).or_default() += len as u64;
+                }
+                protocol(got, |received| match received {
+                    Received::Arrived(Arrived::Data { id: got, len: n }) => {
+                        assert_eq!((got, n), (id, len));
+                        json!("data")
+                    }
+                    Received::Arrived(Arrived::Dropped { .. }) => json!("dropped"),
+                    other => panic!("{other:?}"),
+                })
+            }
+            "end" | "aborted" => {
+                let mut frame = Vec::new();
+                let sent = if action[0] == "end" {
+                    StreamFrame::End { id }
+                } else {
+                    StreamFrame::Abort {
+                        id,
+                        abort: Abort::new(code(&action[2]), "aborted"),
+                    }
+                };
+                sent.encode(&mut frame).unwrap();
+                protocol(self.main_sends(&frame), |received| match received {
+                    Received::Arrived(Arrived::End { id: got }) => {
+                        assert_eq!(got, id);
+                        json!("end")
+                    }
+                    Received::Arrived(Arrived::Abort { id: got, abort }) => {
+                        assert_eq!((got, abort.code), (id, code(&action[2])));
+                        json!("abort")
+                    }
+                    Received::Arrived(Arrived::Dropped { .. }) => json!("dropped"),
+                    other => panic!("{other:?}"),
+                })
+            }
+            "release" => match self.d.release(id, n(&action[2])) {
+                Ok(()) => json!("ok"),
+                Err(_) => json!({ "refused": "overcredit" }),
+            },
+            "drop" => match self.d.withdraw(id) {
+                Retire::SendCancel => json!("send_cancel"),
+                Retire::Freed => json!("freed"),
+                Retire::Nothing => json!("nothing"),
+            },
             "head" => {
                 let json = head_json(id, action[2].as_bool().unwrap());
-                let result = self
-                    .sender
-                    .head(id, json.clone(), action[2].as_bool().unwrap());
+                let result =
+                    self.d
+                        .sender_mut()
+                        .head(id, json.clone(), action[2].as_bool().unwrap());
                 if result.is_ok() {
                     self.heads.insert(id, json);
                 }
@@ -302,7 +400,7 @@ impl Service {
             }
             "reply" => {
                 let json = reply_json(id);
-                let result = self.sender.reply(id, json.clone());
+                let result = self.d.sender_mut().reply(id, json.clone());
                 if result.is_ok() {
                     self.replies.insert(id, json);
                 }
@@ -311,7 +409,7 @@ impl Service {
             "push" => {
                 let offered = self.offered.entry(id).or_default();
                 let bytes = body(id, *offered, n(&action[2]));
-                match self.sender.push(id, &bytes) {
+                match self.d.sender_mut().push(id, &bytes) {
                     Ok(taken) => {
                         *offered += taken as u64;
                         json!({ "taken": taken })
@@ -319,10 +417,10 @@ impl Service {
                     Err(error) => json!({ "refused": error.name() }),
                 }
             }
-            "finish" => refusal(self.sender.finish(id)),
+            "finish" => refusal(self.d.sender_mut().finish(id)),
             "abort" => {
                 let abort = Abort::new(code(&action[2]), "aborted");
-                refusal(self.sender.abort(id, &abort))
+                refusal(self.d.sender_mut().abort(id, &abort))
             }
             other => panic!("action {other}"),
         }
@@ -331,11 +429,17 @@ impl Service {
     /// Takes one frame from the writer and checks it is `expected`.
     fn write(&mut self, expected: &Json, at: &str) {
         let mut out = Vec::new();
-        let written = self
-            .sender
+        let wrote = self
+            .d
             .next_frame(&mut out)
             .unwrap_or_else(|| panic!("{at}: nothing written, expected {expected}"));
-        let mut decoder = Decoder::with_kinds(Kinds::service(Side::Receiver));
+        // As main reads it.
+        let kinds = if self.core {
+            Kinds::CORE_STREAMS
+        } else {
+            Kinds::service(Side::Receiver)
+        };
+        let mut decoder = Decoder::with_kinds(kinds);
         assert_eq!(decoder.push(&out).unwrap(), out.len(), "{at}");
         let frame = decoder.pop().unwrap();
         assert!(
@@ -345,6 +449,19 @@ impl Service {
         let e = expected.as_array().unwrap();
         let id = u(&e[1]);
         use fc_protocol::stream::Written;
+        let written = match wrote {
+            Wrote::Credit { id: got, n } => {
+                assert_eq!(e[0], "credit", "{at}: wrote credit for {got}");
+                assert_eq!((got, u64::from(n)), (id, u(&e[2])), "{at}");
+                assert_eq!(
+                    StreamFrame::from_frame(&frame).unwrap(),
+                    StreamFrame::Credit { id, bytes: n },
+                    "{at}"
+                );
+                return;
+            }
+            Wrote::Sent(written) => written,
+        };
         match e[0].as_str().unwrap() {
             "head" => {
                 assert_eq!(written, Written::Head { id }, "{at}");
@@ -414,23 +531,84 @@ impl Service {
     }
 
     fn check(&self, check: &Json, at: &str) {
+        let sender = self.d.sender();
         if let Some(held) = check.get("held") {
-            assert_eq!(self.sender.held(), n(held), "{at}: held");
+            assert_eq!(sender.held(), n(held), "{at}: held");
         }
         for (id, expected) in check["streams"].as_object().unwrap() {
             let id: u64 = id.parse().unwrap();
             let got = json!({
-                "live": self.sender.is_live(id),
-                "room": self.sender.room(id),
-                "queued": self.sender.queued(id),
+                "live": sender.is_live(id),
+                "room": sender.room(id),
+                "queued": sender.queued(id),
             });
             assert_eq!(&got, expected, "{at}: stream {id}");
+        }
+        if let Some(inbound) = check.get("inbound") {
+            for (id, expected) in inbound.as_object().unwrap() {
+                let id: u64 = id.parse().unwrap();
+                let got = self.d.inbound().info(id).map(|info| {
+                    let state = match info.state {
+                        InboundState::Pending => "pending",
+                        InboundState::RetiredPending => "retired_pending",
+                        InboundState::Open => "open",
+                        InboundState::Retiring => "retiring",
+                    };
+                    json!({ "state": state, "received": info.received, "returned": info.returned })
+                });
+                assert_eq!(&got.unwrap_or(Json::Null), expected, "{at}: inbound {id}");
+            }
+        }
+        if let Some(owed) = check.get("owed") {
+            assert_eq!(self.d.owed(), n(owed), "{at}: owed");
         }
         // The storage follows the queued bytes: at most two 4 KiB blocks
         // more per stream.
         assert!(
-            self.sender.held_capacity() <= self.sender.held() + self.sender.live() * (8 << 10),
+            sender.held_capacity() <= sender.held() + sender.live() * (8 << 10),
             "{at}"
+        );
+    }
+}
+
+/// Runs a `sender` or `duplex` case.
+fn play(case: &Json, core: bool) {
+    let id = case["id"].as_str().unwrap();
+    let cap = case["config"]["data_cap"]
+        .as_u64()
+        .map_or(WRITER_DATA_CAP, |cap| usize::try_from(cap).unwrap());
+    let mut service = Service::new(core, cap);
+    for (i, step) in case["steps"].as_array().unwrap().iter().enumerate() {
+        let at = format!("{id} step {i}");
+        if let Some(frames) = step.get("write").or_else(|| step.get("write_some")) {
+            for frame in frames.as_array().unwrap() {
+                service.write(frame, &at);
+            }
+            if step.get("write").is_some() {
+                let mut out = Vec::new();
+                assert_eq!(service.d.next_frame(&mut out), None, "{at}: idle");
+                assert!(out.is_empty(), "{at}");
+            }
+        } else if let Some(check) = step.get("check") {
+            service.check(check, &at);
+        } else {
+            let action = step["do"].as_array().unwrap();
+            for _ in 0..step["repeat"].as_u64().unwrap_or(1) {
+                assert_eq!(service.act(action), step["expect"], "{at}: {action:?}");
+            }
+        }
+        let sender = service.d.sender();
+        assert!(
+            sender.control_entries() <= 3 * sender.live(),
+            "{at}: the control queue is bounded by the live requests"
+        );
+        assert!(
+            sender.rotation_entries() <= sender.live(),
+            "{at}: the writer's rotation is bounded by the live requests"
+        );
+        assert!(
+            service.d.owed() <= service.d.inbound().outstanding(),
+            "{at}: credit owed is bounded by the core's open streams"
         );
     }
 }
@@ -439,45 +617,21 @@ impl Service {
 fn sender() {
     let v = vectors();
     for case in cases(&v, "sender") {
-        let id = case["id"].as_str().unwrap();
-        let cap = case["config"]["data_cap"]
-            .as_u64()
-            .map_or(WRITER_DATA_CAP, |cap| usize::try_from(cap).unwrap());
-        let mut service = Service {
-            sender: Sender::with_data_cap(cap),
-            offered: BTreeMap::new(),
-            written: BTreeMap::new(),
-            heads: BTreeMap::new(),
-            replies: BTreeMap::new(),
-        };
-        for (i, step) in case["steps"].as_array().unwrap().iter().enumerate() {
-            let at = format!("{id} step {i}");
-            if let Some(frames) = step.get("write").or_else(|| step.get("write_some")) {
-                for frame in frames.as_array().unwrap() {
-                    service.write(frame, &at);
-                }
-                if step.get("write").is_some() {
-                    let mut out = Vec::new();
-                    assert_eq!(service.sender.next_frame(&mut out), None, "{at}: idle");
-                    assert!(out.is_empty(), "{at}");
-                }
-            } else if let Some(check) = step.get("check") {
-                service.check(check, &at);
-            } else {
-                let action = step["do"].as_array().unwrap();
-                for _ in 0..step["repeat"].as_u64().unwrap_or(1) {
-                    assert_eq!(service.act(action), step["expect"], "{at}: {action:?}");
-                }
-            }
-            assert!(
-                service.sender.control_entries() <= 3 * service.sender.live(),
-                "{at}: the control queue is bounded by the live requests"
-            );
-            assert!(
-                service.sender.rotation_entries() <= service.sender.live(),
-                "{at}: the writer's rotation is bounded by the live requests"
-            );
-        }
+        play(case, false);
+    }
+}
+
+#[test]
+fn duplex() {
+    let v = vectors();
+    let duplex = cases(&v, "duplex");
+    assert!(duplex.len() >= 18);
+    for case in duplex {
+        play(case, true);
+    }
+    // The sender's cases hold on the core's connection too.
+    for case in cases(&v, "sender") {
+        play(case, true);
     }
 }
 
