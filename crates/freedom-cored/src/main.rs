@@ -9,6 +9,7 @@
 mod anchor;
 mod chain;
 mod clock;
+mod dweb;
 mod exit;
 mod fsx;
 mod gate;
