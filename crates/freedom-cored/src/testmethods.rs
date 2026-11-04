@@ -1,5 +1,6 @@
-//! The `test.*` methods, for the integration tests. Only debug builds
-//! compile them, and they answer only when `testhooks::test_methods()` says
+//! The `test.*` methods, for the integration tests. Only builds with the
+//! `testhooks` feature compile them, which build.rs refuses outside debug
+//! and test builds, and they answer only when `testhooks::test_methods()` says
 //! so (`FREEDOM_CORED_TEST_METHODS` set); otherwise they are unknown
 //! methods.
 //!

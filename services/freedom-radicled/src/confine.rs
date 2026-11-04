@@ -55,8 +55,8 @@ impl Grant {
 
     /// The policy for this grant, under `network`, keeping `descriptors`
     /// (the gate's lock). The Radicle node resolves names through the C
-    /// library in `direct` mode (0008), so the report says whether that
-    /// reaches DNS.
+    /// library in `direct` mode (0008: std's `to_socket_addrs`, glibc's
+    /// `getaddrinfo`), so the report says whether that reaches DNS.
     pub fn policy(&self, network: &NetworkPolicy, descriptors: Vec<i32>) -> Policy {
         Policy {
             read_write: vec![self.home.clone(), self.own_home.clone()],
@@ -64,7 +64,7 @@ impl Grant {
             refer: true,
             min_abi: MIN_ABI,
             network: network.confinement(),
-            system_resolver: true,
+            resolver: confine::Resolver::System,
             descriptors,
             // No NAT64 discovery here yet, so no interface lookups.
             interface_index: false,
