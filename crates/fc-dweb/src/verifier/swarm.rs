@@ -30,11 +30,19 @@ use fc_swarm::tree;
 use fc_swarm::verify::{Chunk, FeedUpdate, MAX_CHUNK_WIRE, Refusal, SPAN_SIZE};
 
 use super::ant::{self, Entry, Feed, NotFound, Ranges};
+use super::charged::Charged;
 use super::jobs::{Verdict, Work};
 use super::{Ask, Failure, MAX_CHUNK_PIECES, PieceFailure, PieceId};
 
-/// The machine's bookkeeping, with the Swarm walk's tags.
+/// The machine's bookkeeping, with the Swarm walk's tags. The walk holds
+/// its memory only as [`Charged`] values, and doesn't import the raw hold
+/// and release ([`super::Holding`]): a charge can't go while what it covers
+/// is live.
 type Core = super::Core<Tag>;
+/// Bytes the walk holds, under their charge.
+type Bytes = Charged<Vec<u8>>;
+/// Chunks a sniff checked, by address, which the join or the body reuses.
+type Known = Vec<([u8; 32], Bytes)>;
 use crate::bzz::SWARM_HEADERS;
 use crate::plan::ContentTrust;
 use crate::validate::Refusal as PlanRefusal;
@@ -166,6 +174,50 @@ fn ok_status(status: u16) -> Result<(), Failure> {
     }
 }
 
+/// Each of `known`'s chunks goes, then its charge.
+fn release_known(core: &mut Core, known: Known) {
+    for (_, wire) in known {
+        wire.release(core);
+    }
+}
+
+fn chunk_address(work: &Work) -> Option<[u8; 32]> {
+    match work {
+        Work::Chunk { address, .. } => Some(*address),
+        _ => None,
+    }
+}
+
+/// A chunk job's work, back: its address, and its wire under the work's
+/// charge. Other work goes, with its charge.
+fn chunk_work(core: &mut Core, work: Charged<Work>) -> Option<([u8; 32], Bytes)> {
+    let Some(address) = chunk_address(&work) else {
+        work.release(core);
+        return None;
+    };
+    let wire = work.try_map(core, |w| match w {
+        Work::Chunk { wire, .. } => Some(wire),
+        _ => None,
+    })?;
+    Some((address, wire))
+}
+
+/// A leaf job's streamed bytes, back under the work's charge; a
+/// fallback's chunk beside them goes first, then its part of the charge.
+fn leaf_work(core: &mut Core, work: Charged<Work>) -> Option<Bytes> {
+    let mut bytes = work.try_map(core, |w| match w {
+        Work::Leaf { bytes, .. } => Some(bytes),
+        Work::LeafChunk { bytes, wire, .. } => {
+            drop(wire);
+            Some(bytes)
+        }
+        _ => None,
+    })?;
+    let n = bytes.len();
+    bytes.recharge(core, n);
+    Some(bytes)
+}
+
 // ---------------------------------------------------------------------------
 // A file's chunk tree, read in order.
 
@@ -198,8 +250,16 @@ impl Frame {
         })
     }
 
-    fn cost(&self) -> usize {
-        self.children.len() * CHILD_COST
+    /// The frame under its charge: its children's.
+    fn charged(self, core: &mut Core) -> Charged<Self> {
+        let cost = self.children.len() * CHILD_COST;
+        Charged::new(core, self, cost)
+    }
+
+    /// Moves past the next child, of `len` bytes.
+    fn skip(&mut self, len: u64) {
+        self.next += 1;
+        self.pos += len;
     }
 }
 
@@ -210,7 +270,7 @@ enum Ahead {
         address: [u8; 32],
         len: u64,
     },
-    Ready(Frame),
+    Ready(Charged<Frame>),
     Failed(Failure),
 }
 
@@ -243,7 +303,7 @@ enum Next {
 struct Tree {
     from: u64,
     to: u64,
-    stack: Vec<Frame>,
+    stack: Vec<Charged<Frame>>,
     ahead: BTreeMap<(u64, u8), Ahead>,
     /// How far past the cursor intermediate chunks are fetched.
     lookahead: u64,
@@ -258,8 +318,7 @@ impl Tree {
         to: u64,
         lookahead: u64,
     ) -> Result<Self, Failure> {
-        let frame = Frame::parse(root, 0, len, 0)?;
-        core.hold(frame.cost());
+        let frame = Frame::parse(root, 0, len, 0)?.charged(core);
         Ok(Self {
             from,
             to,
@@ -276,7 +335,7 @@ impl Tree {
             };
             if top.next >= top.children.len() || top.pos >= self.to {
                 if let Some(f) = self.stack.pop() {
-                    core.unhold(f.cost());
+                    f.release(core);
                 }
                 continue;
             }
@@ -284,13 +343,11 @@ impl Tree {
             let start = top.pos;
             let depth = top.depth + 1;
             if len == 0 || start + len <= self.from {
-                top.next += 1;
-                top.pos += len;
+                top.get_mut().skip(len);
                 continue;
             }
             if tree::is_leaf(len) {
-                top.next += 1;
-                top.pos += len;
+                top.get_mut().skip(len);
                 return Ok(Next::Leaf {
                     address,
                     start,
@@ -302,8 +359,7 @@ impl Tree {
             }
             match self.ahead.remove(&(start, depth)) {
                 Some(Ahead::Ready(frame)) => {
-                    top.next += 1;
-                    top.pos += len;
+                    top.get_mut().skip(len);
                     self.stack.push(frame);
                 }
                 Some(Ahead::Failed(f)) => return Err(f),
@@ -367,18 +423,23 @@ impl Tree {
         out
     }
 
+    /// `a` in place of what the tree had at `key`: a frame it replaces
+    /// goes with its charge.
+    fn put(&mut self, core: &mut Core, key: (u64, u8), a: Ahead) {
+        if let Some(Ahead::Ready(old)) = self.ahead.insert(key, a) {
+            old.release(core);
+        }
+    }
+
     /// Asks for what [`Tree::wants`], within the chunk requests' bound,
-    /// taking chunks already checked from `known` (each used once, and its
-    /// holding released); the one the cursor waits for must fit the
-    /// request's memory.
-    fn fetch(
-        &mut self,
-        core: &mut Core,
-        known: &mut Vec<([u8; 32], Vec<u8>)>,
-    ) -> Result<(), Failure> {
+    /// taking chunks already checked from `known` (each used once, then
+    /// released); the one the cursor waits for must fit the request's
+    /// memory.
+    fn fetch(&mut self, core: &mut Core, known: &mut Known) -> Result<(), Failure> {
         for w in self.wants() {
             let (start, depth) = (w.start, w.depth);
-            self.ahead.insert(
+            self.put(
+                core,
                 (start, depth),
                 Ahead::Fetching {
                     address: w.address,
@@ -388,7 +449,7 @@ impl Tree {
             if let Some(i) = known.iter().position(|(a, _)| *a == w.address) {
                 let (_, wire) = known.swap_remove(i);
                 self.settle(core, start, depth, Ok(&wire));
-                core.unhold(wire.len());
+                wire.release(core);
                 continue;
             }
             if core.whole_pieces() >= MAX_CHUNK_PIECES {
@@ -426,22 +487,20 @@ impl Tree {
             return;
         };
         let entry = match result.and_then(|wire| Frame::parse(wire, start, len, depth)) {
-            Ok(frame) => {
-                core.hold(frame.cost());
-                Ahead::Ready(frame)
-            }
+            Ok(frame) => Ahead::Ready(frame.charged(core)),
             Err(f) => Ahead::Failed(f),
         };
-        self.ahead.insert((start, depth), entry);
+        self.put(core, (start, depth), entry);
     }
 
-    fn release(&mut self, core: &mut Core) {
-        for f in self.stack.drain(..) {
-            core.unhold(f.cost());
+    /// The tree goes, each frame before its charge.
+    fn release(self, core: &mut Core) {
+        for f in self.stack {
+            f.release(core);
         }
-        for (_, a) in std::mem::take(&mut self.ahead) {
+        for (_, a) in self.ahead {
             if let Ahead::Ready(f) = a {
-                core.unhold(f.cost());
+                f.release(core);
             }
         }
     }
@@ -454,17 +513,25 @@ impl Tree {
 #[derive(Debug)]
 enum Loaded {
     /// The node's joined bytes.
-    Node(Vec<u8>),
+    Node(Bytes),
     /// Ant's sniff found its first data chunk without a version hash.
     NotAManifest,
     /// A manifest node past the core's 1 MiB.
     TooLarge,
 }
 
+impl Loaded {
+    fn release(self, core: &mut Core) {
+        if let Loaded::Node(bytes) = self {
+            bytes.release(core);
+        }
+    }
+}
+
 #[derive(Debug)]
 enum LoadState {
     Root,
-    /// Descending the leftmost references: `at` is the chunk in hand.
+    /// Descending the leftmost references: `child` is the chunk asked for.
     Sniff {
         depth: usize,
         child: [u8; 32],
@@ -474,7 +541,8 @@ enum LoadState {
 
 #[derive(Debug)]
 struct Join {
-    buf: Vec<u8>,
+    /// The node's bytes, made at its size within room reserved first.
+    buf: Bytes,
     tree: Tree,
     /// Leaves asked for or hashing, by offset: their address and length.
     leaves: BTreeMap<u64, ([u8; 32], u64)>,
@@ -487,9 +555,9 @@ struct Load {
     address: [u8; 32],
     state: LoadState,
     /// The node's root chunk, once checked.
-    root: Option<Vec<u8>>,
+    root: Option<Bytes>,
     /// Chunks the sniff checked, which the join reuses.
-    known: Vec<([u8; 32], Vec<u8>)>,
+    known: Known,
 }
 
 enum Progress {
@@ -510,7 +578,7 @@ impl Load {
     }
 
     /// A load whose root chunk is in hand and checked: a v2 feed update's.
-    fn with_root(core: &mut Core, address: [u8; 32], wire: Vec<u8>) -> (Self, Progress) {
+    fn with_root(core: &mut Core, address: [u8; 32], wire: Bytes) -> (Self, Progress) {
         let mut load = Self {
             address,
             state: LoadState::Root,
@@ -521,44 +589,41 @@ impl Load {
         (load, p)
     }
 
-    fn held(&self) -> usize {
-        let join = match &self.state {
-            LoadState::Join(j) => j.buf.len(),
-            _ => 0,
-        };
-        self.root.as_ref().map_or(0, Vec::len)
-            + self.known.iter().map(|(_, w)| w.len()).sum::<usize>()
-            + join
-    }
-
-    /// Drops what the load holds, and its tree's frames.
-    fn release(&mut self, core: &mut Core) {
-        core.unhold(self.held());
-        if let LoadState::Join(j) = &mut self.state {
+    /// The load goes: each of its buffers and its tree's frames, then
+    /// their charges.
+    fn release(self, core: &mut Core) {
+        if let LoadState::Join(j) = self.state {
+            j.buf.release(core);
             j.tree.release(core);
         }
-        self.root = None;
-        self.known.clear();
-        self.state = LoadState::Root;
+        if let Some(root) = self.root {
+            root.release(core);
+        }
+        release_known(core, self.known);
     }
 
-    /// The root chunk passed.
-    fn rooted(&mut self, core: &mut Core, wire: Vec<u8>) -> Progress {
-        self.root = Some(wire.clone());
-        core.hold(wire.len());
-        self.sniff_from(core, wire, 0)
+    /// The root chunk passed: the load keeps it.
+    fn rooted(&mut self, core: &mut Core, wire: Bytes) -> Progress {
+        if let Some(old) = self.root.replace(wire) {
+            old.release(core);
+        }
+        self.sniff_from(core, None, 0)
     }
 
-    /// Ant's `leftmost_leaf_is_not_a_manifest`, from the chunk in hand.
-    fn sniff_from(&mut self, core: &mut Core, wire: Vec<u8>, depth: usize) -> Progress {
-        let mut chunk = wire;
-        let mut depth = depth;
+    /// Ant's `leftmost_leaf_is_not_a_manifest`, from the chunk in hand: the
+    /// root (`at` none) or the sniff's `at`th.
+    fn sniff_from(&mut self, core: &mut Core, at: Option<usize>, depth: usize) -> Progress {
+        let (mut at, mut depth) = (at, depth);
         loop {
             if depth >= SNIFF_DEPTH {
                 return self.join(core);
             }
+            let chunk: &[u8] = match at {
+                None => self.root.as_deref().map_or(&[], Vec::as_slice),
+                Some(i) => self.known.get(i).map_or(&[], |(_, w)| w.as_slice()),
+            };
             let payload = &chunk[SPAN_SIZE.min(chunk.len())..];
-            if span_of(&chunk) <= CHUNK_SIZE as u64 {
+            if span_of(chunk) <= CHUNK_SIZE as u64 {
                 let raw = payload.len() < NODE_HEADER || !manifest::has_manifest_header(payload);
                 if raw {
                     return Progress::Loaded(Loaded::NotAManifest);
@@ -568,8 +633,8 @@ impl Load {
             let Some(child) = payload.get(..32).and_then(|c| <[u8; 32]>::try_from(c).ok()) else {
                 return self.join(core);
             };
-            if let Some((_, w)) = self.known.iter().find(|(a, _)| *a == child) {
-                chunk = w.clone();
+            if let Some(i) = self.known.iter().position(|(a, _)| *a == child) {
+                at = Some(i);
                 depth += 1;
                 continue;
             }
@@ -583,10 +648,10 @@ impl Load {
 
     /// The node is a manifest, or may be one: join it, within 1 MiB.
     fn join(&mut self, core: &mut Core) -> Progress {
-        let Some(root) = self.root.clone() else {
+        let Some(root) = self.root.as_deref() else {
             return Progress::Failed(Failure::Unverifiable);
         };
-        let len = span_of(&root);
+        let len = span_of(root);
         let Ok(size) = usize::try_from(len) else {
             return Progress::Loaded(Loaded::TooLarge);
         };
@@ -594,28 +659,27 @@ impl Load {
             return Progress::Loaded(Loaded::TooLarge);
         }
         if tree::is_leaf(len) {
-            let payload = &root[SPAN_SIZE..];
-            return match payload.get(..size) {
-                Some(bytes) => {
-                    core.hold(size);
-                    Progress::Loaded(Loaded::Node(bytes.to_vec()))
-                }
+            let Some(bytes) = root.get(SPAN_SIZE..).and_then(|p| p.get(..size)) else {
+                return Progress::Failed(Failure::Unverifiable);
+            };
+            // The node's bytes, copied within room reserved for them.
+            return match Charged::make(core, size, || bytes.to_vec()) {
+                Some(bytes) => Progress::Loaded(Loaded::Node(bytes)),
                 None => Progress::Failed(Failure::Unverifiable),
             };
         }
-        if !core.fits(size) {
+        let Some(buf) = Charged::make(core, size, || vec![0; size]) else {
             return Progress::Failed(Failure::Unverifiable);
-        }
-        core.hold(size);
-        let tree = match Tree::new(core, &root, len, 0, len, u64::MAX) {
+        };
+        let tree = match Tree::new(core, root, len, 0, len, u64::MAX) {
             Ok(t) => t,
             Err(f) => {
-                core.unhold(size);
+                buf.release(core);
                 return Progress::Failed(f);
             }
         };
         self.state = LoadState::Join(Join {
-            buf: vec![0; size],
+            buf,
             tree,
             leaves: BTreeMap::new(),
             done: false,
@@ -645,8 +709,7 @@ impl Load {
                     }) => {
                         moved = true;
                         if let Some((_, w)) = self.known.iter().find(|(a, _)| *a == address) {
-                            let w = w.clone();
-                            if let Err(f) = Self::place(join, start, len, &w) {
+                            if let Err(f) = Self::place(join, start, len, w) {
                                 return Progress::Failed(f);
                             }
                             continue;
@@ -663,11 +726,13 @@ impl Load {
                 return Progress::Failed(f);
             }
             if join.done && join.leaves.is_empty() {
-                let bytes = std::mem::take(&mut join.buf);
+                let LoadState::Join(join) = std::mem::replace(&mut self.state, LoadState::Root)
+                else {
+                    return Progress::Pending;
+                };
                 join.tree.release(core);
-                // The buffer's holding moves to the caller with the bytes.
-                self.state = LoadState::Root;
-                return Progress::Loaded(Loaded::Node(bytes));
+                // The buffer goes to the caller with its charge.
+                return Progress::Loaded(Loaded::Node(join.buf));
             }
             if !moved {
                 return Progress::Pending;
@@ -684,101 +749,98 @@ impl Load {
         );
         let bytes = payload.get(..n).ok_or(Failure::Unverifiable)?;
         join.buf
+            .bytes_mut()
             .get_mut(s..s + n)
             .ok_or(Failure::Unverifiable)?
             .copy_from_slice(bytes);
         Ok(())
     }
 
-    fn whole(&mut self, core: &mut Core, tag: Tag, status: u16, body: Vec<u8>) -> Progress {
+    fn whole(&mut self, core: &mut Core, tag: Tag, status: u16, body: Bytes) -> Progress {
         if let Err(f) = ok_status(status) {
-            core.unhold(body.len());
+            body.release(core);
             return Progress::Failed(f);
         }
         let address = match (tag, &self.state) {
-            (Tag::NodeRoot, LoadState::Root) => self.address,
-            (Tag::Sniff, LoadState::Sniff { child, .. }) => *child,
-            (Tag::JoinLeaf(start), LoadState::Join(j)) => match j.leaves.get(&start) {
-                Some((a, _)) => *a,
-                None => {
-                    core.unhold(body.len());
-                    return Progress::Pending;
-                }
-            },
-            (Tag::Inter(start, depth), LoadState::Join(j)) => match j.tree.address_of(start, depth)
-            {
-                Some((a, _)) => a,
-                None => {
-                    core.unhold(body.len());
-                    return Progress::Pending;
-                }
-            },
-            _ => {
-                core.unhold(body.len());
-                return Progress::Pending;
+            (Tag::NodeRoot, LoadState::Root) => Some(self.address),
+            (Tag::Sniff, LoadState::Sniff { child, .. }) => Some(*child),
+            (Tag::JoinLeaf(start), LoadState::Join(j)) => j.leaves.get(&start).map(|(a, _)| *a),
+            (Tag::Inter(start, depth), LoadState::Join(j)) => {
+                j.tree.address_of(start, depth).map(|(a, _)| a)
             }
+            _ => None,
         };
-        core.hash(
-            tag,
-            Work::Chunk {
-                address,
-                wire: body,
-            },
-        );
+        match address {
+            Some(address) => core.hash_charged(tag, body.map(|wire| Work::Chunk { address, wire })),
+            None => body.release(core),
+        }
         Progress::Pending
     }
 
-    fn hashed(&mut self, core: &mut Core, tag: Tag, verdict: Verdict, work: Work) -> Progress {
-        let (Verdict::Chunk(result), Work::Chunk { address, wire }) = (verdict, work) else {
+    fn hashed(
+        &mut self,
+        core: &mut Core,
+        tag: Tag,
+        verdict: Verdict,
+        work: Charged<Work>,
+    ) -> Progress {
+        let Verdict::Chunk(result) = verdict else {
+            work.release(core);
+            return Progress::Failed(Failure::Unverifiable);
+        };
+        let Some((address, wire)) = chunk_work(core, work) else {
             return Progress::Failed(Failure::Unverifiable);
         };
         if let Err(r) = result {
-            core.unhold(wire.len());
+            wire.release(core);
             return Progress::Failed(refusal(r));
         }
         match tag {
             Tag::NodeRoot => {
-                core.unhold(wire.len());
                 remember(core, &address, &wire, true);
                 self.rooted(core, wire)
             }
             Tag::Sniff => {
                 let LoadState::Sniff { depth, .. } = self.state else {
-                    core.unhold(wire.len());
+                    wire.release(core);
                     return Progress::Pending;
                 };
                 remember(core, &address, &wire, true);
                 // Kept for the join, which reads the same chunks.
-                self.known.push((address, wire.clone()));
+                self.known.push((address, wire));
                 self.state = LoadState::Root;
-                self.sniff_from(core, wire, depth + 1)
+                self.sniff_from(core, Some(self.known.len() - 1), depth + 1)
             }
             Tag::JoinLeaf(start) => {
-                core.unhold(wire.len());
                 let LoadState::Join(join) = &mut self.state else {
+                    wire.release(core);
                     return Progress::Pending;
                 };
                 // A manifest node's own bytes.
                 core.remember(address, &wire);
-                let Some((_, len)) = join.leaves.remove(&start) else {
-                    return Progress::Pending;
-                };
-                if let Err(f) = Self::place(join, start, len, &wire) {
-                    return Progress::Failed(f);
+                let placed = join
+                    .leaves
+                    .remove(&start)
+                    .map(|(_, len)| Self::place(join, start, len, &wire));
+                wire.release(core);
+                match placed {
+                    Some(Ok(())) => self.pump(core),
+                    Some(Err(f)) => Progress::Failed(f),
+                    None => Progress::Pending,
                 }
-                self.pump(core)
             }
             Tag::Inter(start, depth) => {
-                core.unhold(wire.len());
                 let LoadState::Join(join) = &mut self.state else {
+                    wire.release(core);
                     return Progress::Pending;
                 };
                 remember(core, &address, &wire, false);
                 join.tree.settle(core, start, depth, Ok(&wire));
+                wire.release(core);
                 self.pump(core)
             }
             _ => {
-                core.unhold(wire.len());
+                wire.release(core);
                 Progress::Pending
             }
         }
@@ -804,7 +866,9 @@ struct Leaf {
     start: u64,
     address: [u8; 32],
     len: usize,
-    bytes: Vec<u8>,
+    /// Its bytes, made at its length when it starts filling; none while a
+    /// job has them.
+    bytes: Option<Bytes>,
     state: LeafState,
 }
 
@@ -813,12 +877,35 @@ struct ByteStream {
     id: PieceId,
     /// The file offset of the stream's next byte.
     pos: u64,
-    stash: VecDeque<Vec<u8>>,
+    /// The frames as they came, each whole under its charge until all its
+    /// bytes are used.
+    stash: VecDeque<Bytes>,
     /// How much of the stash's first frame is used.
     front_at: usize,
+    /// Of those, the bytes skipped, not given to a leaf: their credit goes
+    /// back with the frame.
+    front_skipped: usize,
     headed: bool,
     /// Still open: not ended, failed or cancelled.
     open: bool,
+}
+
+impl ByteStream {
+    /// The first frame, once all its bytes are used, goes, then its
+    /// charge; the bytes it skipped are credited back.
+    fn used(&mut self, core: &mut Core) {
+        if !self.stash.front().is_some_and(|f| self.front_at >= f.len()) {
+            return;
+        }
+        if let Some(frame) = self.stash.pop_front() {
+            frame.release(core);
+        }
+        self.front_at = 0;
+        let skipped = std::mem::take(&mut self.front_skipped);
+        if skipped > 0 {
+            core.consumed(self.id, skipped);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -846,29 +933,17 @@ struct Body {
     /// The next file byte to release.
     released: u64,
     /// Intermediate chunks the root's sniff checked, used once.
-    known: Vec<([u8; 32], Vec<u8>)>,
+    known: Known,
 }
 
 impl Body {
-    fn held(&self) -> usize {
-        let stash: usize = self.stream.as_ref().map_or(0, |s| {
-            s.stash.iter().map(Vec::len).sum::<usize>() - s.front_at
-        });
-        stash
-            + self
-                .leaves
-                .iter()
-                .filter(|l| !matches!(l.state, LeafState::Hashing | LeafState::Fallback))
-                .map(|l| l.bytes.len())
-                .sum::<usize>()
-    }
-
     fn stream_id(&self) -> Option<PieceId> {
         self.stream.as_ref().map(|s| s.id)
     }
 
-    /// Moves everything on; `Err` ends the request.
-    fn pump(&mut self, core: &mut Core) -> Result<(), Failure> {
+    /// Moves everything on: `Ok(true)` once every byte of the body is out,
+    /// and `Err` ends the request.
+    fn pump(&mut self, core: &mut Core) -> Result<bool, Failure> {
         // Until nothing moves: a chunk the sniff checked settles at once,
         // and may make the next leaf known with no piece left to wait on.
         loop {
@@ -883,7 +958,7 @@ impl Body {
             }
         }
         self.fallbacks(core)?;
-        self.release(core)
+        self.deliver(core)
     }
 
     /// Where the body stands, to tell whether a pass moved it.
@@ -914,7 +989,7 @@ impl Body {
                     address,
                     start,
                     len,
-                }) => self.push_leaf(address, start, len),
+                }) => self.push_leaf(core, address, start, len),
                 Ok(Next::Wait) => return Ok(()),
                 Ok(Next::Done) => {
                     self.tree_done = true;
@@ -924,6 +999,9 @@ impl Body {
                     self.stopped = Some(f);
                     return Ok(());
                 }
+            }
+            if self.stopped.is_some() {
+                return Ok(());
             }
         }
         let mut headers = chunk_headers();
@@ -941,34 +1019,46 @@ impl Body {
             pos: self.fs,
             stash: VecDeque::new(),
             front_at: 0,
+            front_skipped: 0,
             headed: false,
             open: true,
         });
         Ok(())
     }
 
-    fn push_leaf(&mut self, address: [u8; 32], start: u64, len: u64) {
+    /// The next leaf, its buffer made at its length within room reserved
+    /// first; without the room, the body stops.
+    fn push_leaf(&mut self, core: &mut Core, address: [u8; 32], start: u64, len: u64) {
         // A leaf's length is at most a chunk's.
+        let len = usize::try_from(len).unwrap_or(CHUNK_SIZE);
+        let Some(bytes) = Charged::make(core, len, || Vec::with_capacity(len)) else {
+            self.stopped = Some(Failure::Unverifiable);
+            return;
+        };
         self.leaves.push_back(Leaf {
             start,
             address,
-            len: usize::try_from(len).unwrap_or(CHUNK_SIZE),
-            bytes: Vec::new(),
+            len,
+            bytes: Some(bytes),
             state: LeafState::Filling,
         });
     }
 
-    /// Stops the stream: cancelled, and what it stashed dropped.
+    /// Stops the stream: cancelled, its frames dropped and the bytes no
+    /// leaf took credited back.
     fn close_stream(&mut self, core: &mut Core) {
         if let Some(s) = self.stream.as_mut() {
             if s.open {
                 s.open = false;
                 core.cancel_piece(s.id);
             }
-            let dropped = s.stash.drain(..).map(|v| v.len()).sum::<usize>() - s.front_at;
-            s.front_at = 0;
-            core.unhold(dropped);
-            core.consumed(s.id, dropped);
+            let used = std::mem::take(&mut s.front_at);
+            let mut credit = std::mem::take(&mut s.front_skipped);
+            for (i, frame) in s.stash.drain(..).enumerate() {
+                credit += frame.len().saturating_sub(if i == 0 { used } else { 0 });
+                frame.release(core);
+            }
+            core.consumed(s.id, credit);
         }
     }
 
@@ -978,7 +1068,6 @@ impl Body {
             let Some(s) = self.stream.as_mut() else {
                 return;
             };
-            let id = s.id;
             let Some(front) = s.stash.front() else {
                 break;
             };
@@ -993,13 +1082,9 @@ impl Body {
                 let gap = usize::try_from(self.fs - s.pos).unwrap_or(usize::MAX);
                 let n = gap.min(avail);
                 s.front_at += n;
-                if s.front_at == front.len() {
-                    s.stash.pop_front();
-                    s.front_at = 0;
-                }
+                s.front_skipped += n;
                 s.pos += n as u64;
-                core.unhold(n);
-                core.consumed(id, n);
+                s.used(core);
                 continue;
             }
             let pos = s.pos;
@@ -1013,7 +1098,7 @@ impl Body {
                         address,
                         start,
                         len,
-                    }) => self.push_leaf(address, start, len),
+                    }) => self.push_leaf(core, address, start, len),
                     Ok(Next::Wait) => break,
                     Ok(Next::Done) => {
                         // The leaves end here: the rest isn't used.
@@ -1029,7 +1114,12 @@ impl Body {
             let (Some(s), Some(leaf)) = (self.stream.as_mut(), self.leaves.back_mut()) else {
                 break;
             };
-            if leaf.start + leaf.bytes.len() as u64 != pos {
+            let Some(bytes) = leaf.bytes.as_mut() else {
+                // A filling leaf holds its buffer.
+                self.stopped = Some(Failure::Unverifiable);
+                continue;
+            };
+            if leaf.start + bytes.len() as u64 != pos {
                 // The tree's next leaf doesn't start where the stream is.
                 self.stopped = Some(Failure::Unverifiable);
                 continue;
@@ -1037,26 +1127,28 @@ impl Body {
             let Some(front) = s.stash.front() else {
                 break;
             };
-            let n = (leaf.len - leaf.bytes.len()).min(front.len() - s.front_at);
-            leaf.bytes
-                .extend_from_slice(&front[s.front_at..s.front_at + n]);
+            let want = leaf.len - bytes.len();
+            let end = s.front_at + want.min(front.len() - s.front_at);
+            // Copied into the leaf's own buffer: the frame stays whole, and
+            // charged, until all its bytes are used.
+            let n = bytes.fill_from(&front[s.front_at..end]);
+            let full = bytes.len() == leaf.len;
             s.front_at += n;
-            if s.front_at == front.len() {
-                s.stash.pop_front();
-                s.front_at = 0;
-            }
             s.pos += n as u64;
-            if leaf.bytes.len() == leaf.len {
+            s.used(core);
+            if full {
                 leaf.state = LeafState::Hashing;
-                let bytes = std::mem::take(&mut leaf.bytes);
-                core.hash(
-                    Tag::Leaf(leaf.start),
-                    Work::Leaf {
-                        address: leaf.address,
-                        len: leaf.len,
-                        bytes,
-                    },
-                );
+                if let Some(bytes) = leaf.bytes.take() {
+                    let (address, len) = (leaf.address, leaf.len);
+                    core.hash_charged(
+                        Tag::Leaf(leaf.start),
+                        bytes.map(|bytes| Work::Leaf {
+                            address,
+                            len,
+                            bytes,
+                        }),
+                    );
+                }
             }
         }
         // Every needed byte is in: the stream isn't needed any more.
@@ -1080,9 +1172,10 @@ impl Body {
         Ok(())
     }
 
-    /// Releases the passed leaves in order, trimmed to the body; the first
-    /// that failed, or the point the stream stopped at, ends the request.
-    fn release(&mut self, core: &mut Core) -> Result<(), Failure> {
+    /// Delivers the passed leaves in order, trimmed to the body, until it
+    /// is all out (`Ok(true)`); the first that failed, or the point the
+    /// stream stopped at, ends the request.
+    fn deliver(&mut self, core: &mut Core) -> Result<bool, Failure> {
         let from = self.stream_id();
         while let Some(front) = self.leaves.front() {
             match front.state {
@@ -1091,13 +1184,17 @@ impl Body {
                 LeafState::Filling => {
                     return match self.stopped.or_else(|| self.starved()) {
                         Some(f) => Err(f),
-                        None => Ok(()),
+                        None => Ok(false),
                     };
                 }
-                _ => return Ok(()),
+                _ => return Ok(false),
             }
-            let Some(mut leaf) = self.leaves.pop_front() else {
+            let Some(leaf) = self.leaves.pop_front() else {
                 break;
+            };
+            let Some(bytes) = leaf.bytes else {
+                // A passed leaf holds its bytes.
+                return Err(Failure::Unverifiable);
             };
             let end = leaf.start + leaf.len as u64;
             let lo = self.a.max(leaf.start);
@@ -1110,23 +1207,24 @@ impl Body {
             } else {
                 (0, 0)
             };
-            let mut kept = std::mem::take(&mut leaf.bytes);
-            let dropped = kept.len() - (keep_to - keep_from);
-            kept.truncate(keep_to);
-            if keep_from > 0 {
-                kept.drain(..keep_from);
-            }
-            core.unhold(dropped);
+            let total = bytes.len();
+            // Trimmed in place, and what it no longer holds released.
+            let mut kept = bytes.map(|mut v| {
+                v.truncate(keep_to);
+                v.drain(..keep_from.min(v.len()));
+                v.shrink_to_fit();
+                v
+            });
+            let n = kept.len();
+            kept.recharge(core, n);
             if let Some(id) = from {
-                core.consumed(id, dropped);
+                core.consumed(id, total - n);
             }
             self.released = end;
-            core.body(kept, from);
+            core.body_charged(kept, from);
         }
         if self.released > self.b {
-            self.close_stream(core);
-            core.finish();
-            return Ok(());
+            return Ok(true);
         }
         if let Some(f) = self.stopped.or_else(|| self.starved()) {
             return Err(f);
@@ -1136,17 +1234,34 @@ impl Body {
             // cover the size its root declares.
             return Err(Failure::Unverifiable);
         }
-        Ok(())
+        Ok(false)
     }
 
-    fn release_all(&mut self, core: &mut Core) {
-        core.unhold(self.held());
-        for (_, w) in self.known.drain(..) {
-            core.unhold(w.len());
-        }
-        self.leaves.clear();
+    /// The body goes: the stream closed and its frames dropped, then each
+    /// leaf's and known chunk's buffer, then the tree, each before its
+    /// charge.
+    fn release_all(mut self, core: &mut Core) {
         self.close_stream(core);
+        for leaf in std::mem::take(&mut self.leaves) {
+            if let Some(bytes) = leaf.bytes {
+                bytes.release(core);
+            }
+        }
+        release_known(core, std::mem::take(&mut self.known));
         self.tree.release(core);
+    }
+
+    /// A leaf's bytes back from a job, in the state its check gave it.
+    fn returned(&mut self, core: &mut Core, start: u64, bytes: Bytes, state: LeafState) {
+        match self.leaves.iter_mut().find(|l| l.start == start) {
+            Some(leaf) => {
+                if let Some(old) = leaf.bytes.replace(bytes) {
+                    old.release(core);
+                }
+                leaf.state = state;
+            }
+            None => bytes.release(core),
+        }
     }
 
     fn whole(
@@ -1154,55 +1269,58 @@ impl Body {
         core: &mut Core,
         tag: Tag,
         status: u16,
-        body: Vec<u8>,
-    ) -> Result<(), Failure> {
+        body: Bytes,
+    ) -> Result<bool, Failure> {
         match tag {
             Tag::Inter(start, depth) => {
                 let Some((address, _)) = self.tree.address_of(start, depth) else {
-                    core.unhold(body.len());
-                    return Ok(());
+                    body.release(core);
+                    return Ok(false);
                 };
                 if status == 200 {
-                    core.hash(
-                        tag,
-                        Work::Chunk {
-                            address,
-                            wire: body,
-                        },
-                    );
+                    core.hash_charged(tag, body.map(|wire| Work::Chunk { address, wire }));
                 } else {
-                    core.unhold(body.len());
+                    body.release(core);
                     self.tree
                         .settle(core, start, depth, Err(Failure::Status(status)));
                 }
             }
             Tag::Fallback(start) => {
                 let Some(leaf) = self.leaves.iter_mut().find(|l| l.start == start) else {
-                    core.unhold(body.len());
-                    return Ok(());
+                    body.release(core);
+                    return Ok(false);
                 };
                 if status == 200 {
-                    let bytes = std::mem::take(&mut leaf.bytes);
-                    core.hash(
+                    let bytes = match leaf.bytes.take() {
+                        Some(bytes) => bytes,
+                        None => Charged::new(core, Vec::new(), 0),
+                    };
+                    let (address, len) = (leaf.address, leaf.len);
+                    core.hash_charged(
                         tag,
-                        Work::LeafChunk {
-                            address: leaf.address,
-                            len: leaf.len,
+                        bytes.join(body).map(|(bytes, wire)| Work::LeafChunk {
+                            address,
+                            len,
                             bytes,
-                            wire: body,
-                        },
+                            wire,
+                        }),
                     );
                 } else {
-                    core.unhold(body.len());
+                    body.release(core);
                     leaf.state = LeafState::Failed(Failure::Status(status));
                 }
             }
-            _ => core.unhold(body.len()),
+            _ => body.release(core),
         }
         self.pump(core)
     }
 
-    fn failed(&mut self, core: &mut Core, tag: Tag, failure: PieceFailure) -> Result<(), Failure> {
+    fn failed(
+        &mut self,
+        core: &mut Core,
+        tag: Tag,
+        failure: PieceFailure,
+    ) -> Result<bool, Failure> {
         match tag {
             Tag::Inter(start, depth) => {
                 self.tree
@@ -1241,10 +1359,10 @@ impl Body {
         core: &mut Core,
         status: u16,
         headers: &[(String, String)],
-    ) -> Result<(), Failure> {
+    ) -> Result<bool, Failure> {
         let expected = format!("bytes {}-{}/{}", self.fs, self.fe, self.total);
         let Some(s) = self.stream.as_mut() else {
-            return Ok(());
+            return Ok(false);
         };
         s.headed = true;
         match status {
@@ -1258,19 +1376,20 @@ impl Body {
         self.pump(core)
     }
 
-    fn stream_data(&mut self, core: &mut Core, bytes: Vec<u8>) -> Result<(), Failure> {
+    fn stream_data(&mut self, core: &mut Core, bytes: Bytes) -> Result<bool, Failure> {
         match self.stream.as_mut() {
             Some(s) if s.open && s.headed => s.stash.push_back(bytes),
             Some(s) => {
-                core.unhold(bytes.len());
-                core.consumed(s.id, bytes.len());
+                let n = bytes.len();
+                bytes.release(core);
+                core.consumed(s.id, n);
             }
-            None => core.unhold(bytes.len()),
+            None => bytes.release(core),
         }
         self.pump(core)
     }
 
-    fn stream_end(&mut self, core: &mut Core) -> Result<(), Failure> {
+    fn stream_end(&mut self, core: &mut Core) -> Result<bool, Failure> {
         self.stream_stopped(Failure::Stopped);
         self.pump(core)
     }
@@ -1280,46 +1399,43 @@ impl Body {
         core: &mut Core,
         tag: Tag,
         verdict: Verdict,
-        work: Work,
-    ) -> Result<(), Failure> {
-        match (tag, verdict, work) {
-            (Tag::Inter(start, depth), Verdict::Chunk(r), Work::Chunk { address, wire }) => {
-                core.unhold(wire.len());
-                if r.is_ok() {
-                    remember(core, &address, &wire, false);
+        work: Charged<Work>,
+    ) -> Result<bool, Failure> {
+        match (tag, verdict) {
+            (Tag::Inter(start, depth), Verdict::Chunk(r)) => {
+                if let Some((address, wire)) = chunk_work(core, work) {
+                    if r.is_ok() {
+                        remember(core, &address, &wire, false);
+                    }
+                    self.tree.settle(
+                        core,
+                        start,
+                        depth,
+                        r.map(|()| wire.as_slice()).map_err(refusal),
+                    );
+                    wire.release(core);
                 }
-                self.tree.settle(
-                    core,
-                    start,
-                    depth,
-                    r.map(|()| wire.as_slice()).map_err(refusal),
-                );
             }
-            (Tag::Leaf(start), Verdict::Leaf(matched), Work::Leaf { bytes, .. }) => {
-                if let Some(leaf) = self.leaves.iter_mut().find(|l| l.start == start) {
-                    leaf.bytes = bytes;
-                    leaf.state = if matched {
+            (Tag::Leaf(start), Verdict::Leaf(matched)) => {
+                if let Some(bytes) = leaf_work(core, work) {
+                    let state = if matched {
                         LeafState::Passed
                     } else {
                         LeafState::NeedsFallback
                     };
-                } else {
-                    core.unhold(bytes.len());
+                    self.returned(core, start, bytes, state);
                 }
             }
-            (Tag::Fallback(start), Verdict::LeafChunk(r), Work::LeafChunk { bytes, wire, .. }) => {
-                core.unhold(wire.len());
-                if let Some(leaf) = self.leaves.iter_mut().find(|l| l.start == start) {
-                    leaf.bytes = bytes;
-                    leaf.state = match r {
+            (Tag::Fallback(start), Verdict::LeafChunk(r)) => {
+                if let Some(bytes) = leaf_work(core, work) {
+                    let state = match r {
                         Ok(()) => LeafState::Passed,
                         Err(r) => LeafState::Failed(refusal(r)),
                     };
-                } else {
-                    core.unhold(bytes.len());
+                    self.returned(core, start, bytes, state);
                 }
             }
-            (_, _, work) => core.unhold(work.size()),
+            _ => work.release(core),
         }
         self.pump(core)
     }
@@ -1355,10 +1471,28 @@ enum Stage {
         index: u64,
     },
     FileRoot {
-        entry: Entry,
+        entry: Charged<Entry>,
     },
     Body(Box<Body>),
     Done,
+}
+
+/// A lookup's step, read before it goes.
+enum Stepped {
+    /// The node at this reference; none when it isn't 32 bytes (an
+    /// encrypted node).
+    Need(Option<[u8; 32]>),
+    Found,
+    Ended(Ended),
+}
+
+/// How a lookup ended without an entry.
+#[derive(Debug, Clone, Copy)]
+enum Ended {
+    NotFound { root: bool },
+    Directory,
+    Failed(NodeError),
+    TooManyNodes,
 }
 
 /// The request's Swarm walk.
@@ -1371,19 +1505,16 @@ pub(crate) struct Walk {
     query: String,
     range: Option<String>,
     /// The URL root's chunk, once checked: a raw root's file root.
-    url_root: Option<Vec<u8>>,
+    url_root: Option<Bytes>,
     /// The feed the walk crossed.
     feed: Option<Feed>,
     /// A raw root's chunks the sniff checked, for its body.
-    known: Vec<([u8; 32], Vec<u8>)>,
+    known: Known,
     stage: Stage,
-    /// The manifest lookup, while it runs. It lives here alone, so its
-    /// charge and its memory go together ([`Walk::release_lookup`]).
-    lookup: Option<Box<Lookup>>,
-    /// What the lookup held when it was last charged: its root, the node
-    /// it is at, the followed fork's metadata and its phases, while it waits
-    /// for a node ([`Lookup::held`]).
-    lookup_held: usize,
+    /// The manifest lookup, boxed, while it waits for a node, charged its
+    /// root, the node it is at, the followed fork's metadata and its phases
+    /// ([`Lookup::held`]).
+    lookup: Option<Charged<Box<Lookup>>>,
 }
 
 impl Walk {
@@ -1412,7 +1543,6 @@ impl Walk {
             known: Vec::new(),
             stage: Stage::Done,
             lookup: None,
-            lookup_held: 0,
         };
         if decoded.is_err() {
             core.fail(Failure::InvalidPath);
@@ -1442,59 +1572,58 @@ impl Walk {
         }
     }
 
+    /// Ends the request with `failure`, once all the walk holds has gone.
     fn end(&mut self, core: &mut Core, failure: Failure) {
-        self.drop_stage(core);
-        self.release_lookup(core);
+        self.drop_all(core);
         core.fail(failure);
+    }
+
+    /// Everything the walk holds goes, each before its charge: the stage,
+    /// the lookup, the URL root's chunk and the sniff's.
+    fn drop_all(&mut self, core: &mut Core) {
+        self.drop_stage(core);
+        if let Some(lookup) = self.lookup.take() {
+            lookup.release(core);
+        }
+        self.release_url_root(core);
     }
 
     fn drop_stage(&mut self, core: &mut Core) {
         match std::mem::replace(&mut self.stage, Stage::Done) {
-            Stage::Load { mut load, .. } => {
-                load.release(core);
-                self.release_lookup(core);
-            }
-            Stage::FileRoot { entry } => core.unhold(entry_cost(&entry)),
-            Stage::Body(mut body) => body.release_all(core),
+            Stage::Load { load, .. } => load.release(core),
+            Stage::FileRoot { entry } => entry.release(core),
+            Stage::Body(body) => (*body).release_all(core),
             _ => {}
         }
     }
 
-    /// The lookup goes, and then its charge: the one way the charge is
-    /// released, so it never goes while the lookup lives.
-    fn release_lookup(&mut self, core: &mut Core) {
-        self.lookup = None;
-        core.unhold(std::mem::take(&mut self.lookup_held));
-    }
-
-    /// A live lookup is always charged: a lookup the walk holds with no
-    /// charge is memory past the request's count, which the machine counts
-    /// as released without its hold ([`super::Verifier::over_released`]).
-    fn audit_lookup(&self, core: &mut Core) {
-        if self.lookup.is_some() && self.lookup_held == 0 {
-            core.misheld(std::mem::size_of::<Lookup>());
+    fn release_url_root(&mut self, core: &mut Core) {
+        if let Some(wire) = self.url_root.take() {
+            wire.release(core);
         }
+        release_known(core, std::mem::take(&mut self.known));
     }
 
-    /// A lookup for the path below `node`, a parsed node whose cost the
-    /// walk holds: room for the lookup, its box and its first step is
-    /// reserved first, and with the node's cost covers them until the step
-    /// is taken ([`Walk::step`]).
-    fn start_lookup(&mut self, core: &mut Core, node: manifest::Node) {
-        let cost = node.cost();
-        let room = manifest::lookup_room(&self.path);
-        if !core.fits(room) {
-            drop(node);
-            core.unhold(cost);
+    /// A lookup for the path below `node`, a parsed node under its charge:
+    /// room for the lookup, its box and its first step is reserved first,
+    /// and with the node's charge covers them until the step is taken
+    /// ([`Walk::step`]).
+    fn start_lookup(&mut self, core: &mut Core, node: Charged<manifest::Node>) {
+        let Some(room) = Charged::room(core, manifest::lookup_room(&self.path)) else {
+            node.release(core);
             return self.end(core, Failure::Unverifiable);
-        }
-        core.hold(room);
-        let (lookup, step) = Lookup::new(node, &self.path);
-        self.lookup = Some(Box::new(lookup));
-        self.step(core, step, room + cost);
+        };
+        let path = &self.path;
+        let taken = node.join(room).map(|(node, ())| {
+            let (lookup, step) = Lookup::new(node, path);
+            (Box::new(lookup), step)
+        });
+        self.step(core, taken);
     }
 
-    /// A proven answer with a fixed body: a 404, a 308 or a 416.
+    /// A proven answer with a fixed body: a 404, a 308 or a 416. Room for
+    /// its head's headers and its body, beside what `cover` holds for
+    /// them, is reserved before the head promises the body.
     fn answer(
         &mut self,
         core: &mut Core,
@@ -1502,31 +1631,50 @@ impl Walk {
         headers: Vec<(String, String)>,
         body: Vec<u8>,
         content: ContentTrust,
+        cover: Option<Charged<()>>,
     ) {
-        self.drop_stage(core);
-        self.release_url_root(core);
-        // Room for the body before the head promises it.
-        if !core.fits(body.len()) {
-            return core.fail(Failure::Unverifiable);
+        self.drop_all(core);
+        let mut cover = match cover {
+            Some(c) => c,
+            None => Charged::new(core, (), 0),
+        };
+        let need = super::headers_cost(&headers) + body.len();
+        match Charged::room(core, need.saturating_sub(cover.cost())) {
+            Some(more) => cover = cover.join(more).map(|((), ())| ()),
+            None => {
+                drop(headers);
+                drop(body);
+                cover.release(core);
+                return core.fail(Failure::Unverifiable);
+            }
         }
-        core.head(status, headers, content);
-        core.hold(body.len());
-        core.body(body, None);
+        let n = body.len();
+        let body = cover.split(n).map(|()| body);
+        if core.head_only {
+            // Nothing follows a HEAD's head, which ends the request.
+            body.release(core);
+            return core.head_charged(status, headers, content, cover);
+        }
+        core.head_charged(status, headers, content, cover);
+        core.body_charged(body, None);
         core.finish();
-    }
-
-    fn release_url_root(&mut self, core: &mut Core) {
-        if let Some(w) = self.url_root.take() {
-            core.unhold(w.len());
-        }
-        for (_, w) in self.known.drain(..) {
-            core.unhold(w.len());
-        }
     }
 
     fn not_found(&mut self, core: &mut Core, kind: NotFound, content: ContentTrust) {
         let (h, body) = ant::not_found(kind);
-        self.answer(core, 404, h, body, content);
+        self.answer(core, 404, h, body, content, None);
+    }
+
+    /// The entry for the URL reference's own bytes, its name from the path.
+    fn bare_entry(&self, core: &mut Core) -> Charged<Entry> {
+        let entry = Entry {
+            content_type: None,
+            filename: ant::filename_from_path(&self.path),
+            reference: self.root,
+            feed: None,
+        };
+        let cost = entry_cost(&entry);
+        Charged::new(core, entry, cost)
     }
 
     /// Ant's fallback for a node that isn't a manifest: a bare request gets
@@ -1537,26 +1685,25 @@ impl Walk {
             return self.not_found(core, NotFound::Path, label);
         }
         self.drop_stage(core);
+        if let Some(lookup) = self.lookup.take() {
+            lookup.release(core);
+        }
         let Some(wire) = self.url_root.take() else {
             return self.end(core, Failure::Unverifiable);
         };
-        let entry = Entry {
-            content_type: None,
-            filename: ant::filename_from_path(&self.path),
-            reference: self.root,
-            feed: None,
-        };
+        let entry = self.bare_entry(core);
         // Those bytes are the URL reference's own: verified.
         self.feed = None;
-        // A bare path: the entry has no strings of its own.
-        self.root_passed(core, entry, wire, 0);
+        self.root_passed(core, entry, wire);
     }
 
-    fn loaded(&mut self, core: &mut Core, then: Then, loaded: Loaded, root_wire: Option<Vec<u8>>) {
+    fn loaded(&mut self, core: &mut Core, then: Then, loaded: Loaded, root_wire: Option<Bytes>) {
         match then {
             Then::Root => {
-                if let Some(w) = root_wire {
-                    self.url_root = Some(w);
+                if let Some(w) = root_wire
+                    && let Some(old) = self.url_root.replace(w)
+                {
+                    old.release(core);
                 }
                 match loaded {
                     Loaded::NotAManifest => {
@@ -1564,17 +1711,11 @@ impl Walk {
                             return self.end(core, Failure::Unverifiable);
                         };
                         if !self.bare() {
-                            core.unhold(wire.len());
+                            wire.release(core);
                             return self.not_found(core, NotFound::Path, ContentTrust::Verified);
                         }
-                        let entry = Entry {
-                            content_type: None,
-                            filename: ant::filename_from_path(&self.path),
-                            reference: self.root,
-                            feed: None,
-                        };
-                        // A bare path: the entry has no strings of its own.
-                        self.root_passed(core, entry, wire, 0);
+                        let entry = self.bare_entry(core);
+                        self.root_passed(core, entry, wire);
                     }
                     Loaded::TooLarge => self.end(core, Failure::Unverifiable),
                     Loaded::Node(bytes) => self.root_node(core, bytes),
@@ -1582,84 +1723,79 @@ impl Walk {
             }
             Then::Target => {
                 if let Some(w) = root_wire {
-                    core.unhold(w.len());
+                    w.release(core);
                 }
                 match loaded {
                     Loaded::NotAManifest => self.raw_fallback(core),
                     Loaded::TooLarge => self.end(core, Failure::Unverifiable),
-                    Loaded::Node(bytes) => {
-                        let parsed = match parse(core, bytes) {
-                            Ok(p) => p,
-                            Err(f) => return self.end(core, f),
-                        };
-                        match parsed {
-                            Ok(node) => self.start_lookup(core, node),
-                            Err(NodeError::NotAManifest) => self.raw_fallback(core),
-                            Err(NodeError::Malformed) => {
-                                let label = self.label();
-                                self.not_found(core, NotFound::Plain, label);
-                            }
-                            Err(NodeError::TooLarge) => self.end(core, Failure::Unverifiable),
+                    Loaded::Node(bytes) => match parse(core, bytes) {
+                        Err(f) => self.end(core, f),
+                        Ok(Ok(node)) => self.start_lookup(core, node),
+                        Ok(Err(NodeError::NotAManifest)) => self.raw_fallback(core),
+                        Ok(Err(NodeError::Malformed)) => {
+                            let label = self.label();
+                            self.not_found(core, NotFound::Plain, label);
                         }
-                    }
+                        Ok(Err(NodeError::TooLarge)) => self.end(core, Failure::Unverifiable),
+                    },
                 }
             }
             Then::Child => {
                 if let Some(w) = root_wire {
-                    let n = w.len();
-                    drop(w);
-                    core.unhold(n);
+                    w.release(core);
+                }
+                if matches!(loaded, Loaded::TooLarge) {
+                    return self.end(core, Failure::Unverifiable);
                 }
                 // The lookup's step, within room reserved for what it
                 // parses and copies.
-                let (room, held) = match &loaded {
-                    Loaded::Node(bytes) => (
-                        manifest::parse_room(bytes.len()) + manifest::STEP_ROOM,
-                        bytes.len(),
-                    ),
-                    _ => (manifest::STEP_ROOM, 0),
+                let parse_room = match &loaded {
+                    Loaded::Node(bytes) => manifest::parse_room(bytes.len()),
+                    _ => 0,
                 };
-                if !core.fits(room) {
-                    drop(loaded);
-                    core.unhold(held);
-                    return self.end(core, Failure::Unverifiable);
-                }
-                core.hold(room);
-                let Some(lookup) = self.lookup.as_mut() else {
-                    drop(loaded);
-                    core.unhold(room + held);
+                let Some(room) = Charged::room(core, parse_room + manifest::STEP_ROOM) else {
+                    loaded.release(core);
                     return self.end(core, Failure::Unverifiable);
                 };
-                let step = match loaded {
-                    Loaded::NotAManifest => lookup.refused(NodeError::NotAManifest),
-                    Loaded::TooLarge => {
-                        core.unhold(room);
-                        return self.end(core, Failure::Unverifiable);
+                let Some(lookup) = self.lookup.take() else {
+                    loaded.release(core);
+                    room.release(core);
+                    return self.end(core, Failure::Unverifiable);
+                };
+                // The room, the node's bytes and the lookup's charge cover
+                // the step until it is taken.
+                let taken = match loaded {
+                    Loaded::Node(bytes) => {
+                        lookup
+                            .join(room)
+                            .join(bytes)
+                            .map(|((mut lookup, ()), bytes)| {
+                                let step = lookup.node(bytes);
+                                (lookup, step)
+                            })
                     }
-                    Loaded::Node(bytes) => lookup.node(bytes),
+                    _ => lookup.join(room).map(|(mut lookup, ())| {
+                        let step = lookup.refused(NodeError::NotAManifest);
+                        (lookup, step)
+                    }),
                 };
-                // The room and the node's bytes cover the step until it is
-                // taken.
-                self.step(core, step, room + held);
+                self.step(core, taken);
             }
         }
     }
 
     /// The URL root's node: a feed, or the manifest to look the path up in.
-    fn root_node(&mut self, core: &mut Core, bytes: Vec<u8>) {
-        let parsed = match parse(core, bytes) {
-            Ok(p) => p,
+    fn root_node(&mut self, core: &mut Core, bytes: Bytes) {
+        let node = match parse(core, bytes) {
             Err(f) => return self.end(core, f),
-        };
-        let node = match parsed {
-            Ok(n) => n,
-            Err(NodeError::NotAManifest) => {
+            Ok(Ok(n)) => n,
+            Ok(Err(NodeError::NotAManifest)) => {
                 return self.loaded(core, Then::Root, Loaded::NotAManifest, None);
             }
-            Err(NodeError::Malformed) => {
+            Ok(Err(NodeError::Malformed)) => {
                 return self.not_found(core, NotFound::Plain, ContentTrust::Verified);
             }
-            Err(NodeError::TooLarge) => return self.end(core, Failure::Unverifiable),
+            Ok(Err(NodeError::TooLarge)) => return self.end(core, Failure::Unverifiable),
         };
         let feed = node
             .forks
@@ -1670,8 +1806,7 @@ impl Walk {
             return self.start_lookup(core, node);
         }
         // A feed, or metadata Ant refuses: the node isn't needed any more.
-        core.unhold(node.cost());
-        drop(node);
+        node.release(core);
         match feed {
             Ok(Some((owner, topic))) => {
                 let mut headers = chunk_headers();
@@ -1692,93 +1827,106 @@ impl Walk {
         }
     }
 
-    /// The lookup's next step. `covered` is what the walk holds, beside the
-    /// lookup's last charge, for what the step allocated: the parsed node,
-    /// the lookup's growth and the step itself. Each charge goes only once
-    /// the memory it covers has gone, or has moved to the charge that
-    /// lasts: the boxed lookup while it waits for a node, or the entry
-    /// while the file's root chunk is fetched.
-    fn step(&mut self, core: &mut Core, step: Step, covered: usize) {
+    /// The lookup's step, `taken` with the lookup under one charge, which
+    /// covers what the step allocated: the parsed node, the lookup's growth
+    /// and the step itself. The charge moves on only once what it covers
+    /// has gone, or is measured again: to the boxed lookup while it waits
+    /// for a node, or to the entry while the file's root chunk is fetched.
+    fn step(&mut self, core: &mut Core, taken: Charged<(Box<Lookup>, Step)>) {
         let label = self.label();
-        let reference = match step {
-            Step::Need(reference) => reference,
-            Step::Done(Outcome::Found { data_ref, metadata }) => {
-                // The lookup goes; its charge, with the step's, covers the
-                // outcome until the entry takes it over.
-                self.lookup = None;
-                let charged = std::mem::take(&mut self.lookup_held) + covered;
-                return self.found(core, data_ref, metadata, charged);
+        let stepped = match &taken.1 {
+            Step::Need(reference) => Stepped::Need(<[u8; 32]>::try_from(reference.as_slice()).ok()),
+            Step::Done(Outcome::Found { .. }) => Stepped::Found,
+            Step::Done(Outcome::NotFound { root }) => {
+                Stepped::Ended(Ended::NotFound { root: *root })
             }
-            // The other outcomes hold nothing of their own.
-            other => {
-                self.release_lookup(core);
-                core.unhold(covered);
-                return self.outcome(core, other, label);
-            }
+            Step::Done(Outcome::Directory) => Stepped::Ended(Ended::Directory),
+            Step::Failed(e) => Stepped::Ended(Ended::Failed(*e)),
+            Step::TooManyNodes => Stepped::Ended(Ended::TooManyNodes),
         };
-        let address = <[u8; 32]>::try_from(reference.as_slice());
-        drop(reference);
-        // What lasts while the next node loads: the boxed lookup.
-        let lasting = std::mem::size_of::<Lookup>() + self.lookup.as_ref().map_or(0, |l| l.held());
-        core.unhold(self.lookup_held + covered);
-        core.hold(lasting);
-        self.lookup_held = lasting;
-        let Ok(address) = address else {
-            // A 64-byte reference: an encrypted node.
-            return self.end(core, Failure::Unverifiable);
-        };
-        match Load::start(core, address) {
-            Ok(load) => {
-                self.stage = Stage::Load {
-                    load,
-                    then: Then::Child,
+        match stepped {
+            Stepped::Need(address) => {
+                // What lasts while the next node loads: the boxed lookup.
+                // The step goes, and the rest of the charge after it.
+                let lasting = std::mem::size_of::<Lookup>() + taken.0.held();
+                let mut lookup = taken.map(|(lookup, step)| {
+                    drop(step);
+                    lookup
+                });
+                lookup.recharge(core, lasting);
+                if let Some(old) = self.lookup.replace(lookup) {
+                    old.release(core);
+                }
+                let Some(address) = address else {
+                    // A 64-byte reference: an encrypted node.
+                    return self.end(core, Failure::Unverifiable);
+                };
+                match Load::start(core, address) {
+                    Ok(load) => {
+                        self.stage = Stage::Load {
+                            load,
+                            then: Then::Child,
+                        }
+                    }
+                    Err(f) => self.end(core, f),
                 }
             }
-            Err(f) => self.end(core, f),
+            Stepped::Found => {
+                // The lookup goes; the charge covers its outcome until the
+                // entry takes it over.
+                let found = taken.map(|(lookup, step)| {
+                    drop(lookup);
+                    match step {
+                        Step::Done(Outcome::Found { data_ref, metadata }) => (data_ref, metadata),
+                        _ => (Vec::new(), Metadata::default()),
+                    }
+                });
+                self.found(core, found);
+            }
+            Stepped::Ended(ended) => {
+                taken.release(core);
+                self.outcome(core, ended, label);
+            }
         }
     }
 
-    /// The lookup found the entry: its metadata's strings move into the
-    /// entry (a filename from the path, when it has none, within room
-    /// reserved first), and the entry's charge takes over from `charged`
-    /// while the file's root chunk is fetched. The reference is copied out
-    /// and its vector dropped before any charge moves.
-    fn found(
-        &mut self,
-        core: &mut Core,
-        data_ref: Vec<u8>,
-        mut metadata: Metadata,
-        charged: usize,
-    ) {
-        let reference = <[u8; 32]>::try_from(data_ref.as_slice());
-        drop(data_ref);
-        let Ok(reference) = reference else {
-            drop(metadata);
-            core.unhold(charged);
+    /// The lookup found the entry, its data reference and metadata under
+    /// the step's charge: the reference is copied out and its vector
+    /// dropped, the metadata's strings move into the entry (a filename from
+    /// the path, when it has none, within room reserved first), and the
+    /// charge, measured as the entry, is its own while the file's root
+    /// chunk is fetched.
+    fn found(&mut self, core: &mut Core, found: Charged<(Vec<u8>, Metadata)>) {
+        let found = found.map(|(data_ref, metadata)| {
+            let reference = <[u8; 32]>::try_from(data_ref.as_slice()).ok();
+            drop(data_ref);
+            (reference, metadata)
+        });
+        let Some(reference) = found.0 else {
+            found.release(core);
             return self.end(core, Failure::Unverifiable);
         };
-        let room = self.path.len();
-        if !core.fits(room) {
-            drop(metadata);
-            core.unhold(charged);
+        let Some(room) = Charged::room(core, self.path.len()) else {
+            found.release(core);
             return self.end(core, Failure::Unverifiable);
-        }
-        core.hold(room);
-        let content_type = take(&mut metadata, manifest::CONTENT_TYPE);
-        let filename =
-            take(&mut metadata, manifest::FILENAME).or_else(|| ant::filename_from_path(&self.path));
-        drop(metadata);
-        let entry = Entry {
-            content_type,
-            filename,
-            reference,
-            feed: self.feed,
         };
+        let (path, feed) = (&self.path, self.feed);
+        let mut entry = found.join(room).map(|((_, mut metadata), ())| {
+            let content_type = take(&mut metadata, manifest::CONTENT_TYPE);
+            let filename =
+                take(&mut metadata, manifest::FILENAME).or_else(|| ant::filename_from_path(path));
+            drop(metadata);
+            Entry {
+                content_type,
+                filename,
+                reference,
+                feed,
+            }
+        });
         let cost = entry_cost(&entry);
-        core.unhold(charged + room);
-        core.hold(cost);
+        entry.recharge(core, cost);
         self.release_url_root(core);
-        // Staged first, so an end from here releases the entry's charge.
+        // Staged first, so an end from here releases the entry.
         self.stage = Stage::FileRoot { entry };
         if fetch_chunk(core, Tag::FileRoot, &reference).is_none() {
             self.end(core, Failure::Unverifiable);
@@ -1786,84 +1934,77 @@ impl Walk {
     }
 
     /// Where a lookup ended without an entry, its charge released.
-    fn outcome(&mut self, core: &mut Core, step: Step, label: ContentTrust) {
-        match step {
-            // Taken by `step` and `found`.
-            Step::Need(_) | Step::Done(Outcome::Found { .. }) => {
-                self.end(core, Failure::Unverifiable);
-            }
-            Step::Done(Outcome::NotFound { root }) => {
+    fn outcome(&mut self, core: &mut Core, ended: Ended, label: ContentTrust) {
+        match ended {
+            Ended::NotFound { root } => {
                 let kind = if root { NotFound::Root } else { NotFound::Path };
                 self.not_found(core, kind, label);
             }
-            Step::Done(Outcome::Directory) => {
+            Ended::Directory => {
                 let (h, body) =
                     ant::redirect(&self.root_text, &self.path, &self.query, core.head_only);
-                self.answer(core, 308, h, body, label);
+                self.answer(core, 308, h, body, label, None);
             }
-            Step::Failed(NodeError::NotAManifest) => self.raw_fallback(core),
-            Step::Failed(NodeError::Malformed) => self.not_found(core, NotFound::Plain, label),
-            Step::Failed(NodeError::TooLarge) | Step::TooManyNodes => {
+            Ended::Failed(NodeError::NotAManifest) => self.raw_fallback(core),
+            Ended::Failed(NodeError::Malformed) => self.not_found(core, NotFound::Plain, label),
+            Ended::Failed(NodeError::TooLarge) | Ended::TooManyNodes => {
                 self.end(core, Failure::Unverifiable);
             }
         }
     }
 
-    /// The file's root chunk passed for `entry`, whose strings' cost the
-    /// walk holds (`held`). The head copies them, a filename escaped to at
-    /// most twice its length: room for that is held while the head is made,
-    /// then the room and the entry's charge go.
-    fn root_passed(&mut self, core: &mut Core, entry: Entry, wire: Vec<u8>, held: usize) {
-        let room = 2 * entry_cost(&entry) + HEAD_ROOM;
-        if !core.fits(room) {
-            drop(entry);
-            core.unhold(held + wire.len());
+    /// The file's root chunk passed for `entry`. The head copies its
+    /// strings, a filename escaped to at most twice its length: room for
+    /// that is reserved first, and becomes the head's.
+    fn root_passed(&mut self, core: &mut Core, entry: Charged<Entry>, wire: Bytes) {
+        let Some(room) = Charged::room(core, 2 * entry.cost() + HEAD_ROOM) else {
+            entry.release(core);
+            wire.release(core);
             return self.end(core, Failure::Unverifiable);
-        }
-        core.hold(room);
-        self.file_rooted(core, entry, wire);
-        core.unhold(held + room);
-    }
-
-    /// The file's root chunk passed: the head, then the body.
-    fn file_rooted(&mut self, core: &mut Core, entry: Entry, wire: Vec<u8>) {
-        let mut known = std::mem::take(&mut self.known);
+        };
+        // A raw root's sniffed chunks go to its body.
+        let known = std::mem::take(&mut self.known);
         self.release_url_root(core);
-        self.file_body(core, entry, wire, &mut known);
-        for (_, w) in known {
-            core.unhold(w.len());
-        }
+        self.file_body(core, entry, room, wire, known);
     }
 
-    /// The head, then the body; a raw root's sniffed chunks go to it.
+    /// The head, made within `room`, then the body. What the head doesn't
+    /// need goes before it, so a head that ends the request (a HEAD, or no
+    /// body) leaves nothing behind.
     fn file_body(
         &mut self,
         core: &mut Core,
-        entry: Entry,
-        wire: Vec<u8>,
-        known: &mut Vec<([u8; 32], Vec<u8>)>,
+        entry: Charged<Entry>,
+        room: Charged<()>,
+        wire: Bytes,
+        known: Known,
     ) {
         let Some(chunk) = chunk_view(&wire) else {
-            core.unhold(wire.len());
+            entry.release(core);
+            room.release(core);
+            wire.release(core);
+            release_known(core, known);
             return self.end(core, Failure::VerificationFailed);
         };
         // Ant's size: the span with its top byte masked.
         let mut masked = chunk.span;
         masked[SPAN_SIZE - 1] = 0;
         let total = u64::from_le_bytes(masked);
-        let (_, logical) = tree::decode_span(&chunk.span);
+        let (level, logical) = tree::decode_span(&chunk.span);
+        let payload = chunk.payload.len();
         let content = if entry.feed.is_some() {
             ContentTrust::LatestAsserted
         } else {
             ContentTrust::Verified
         };
         let leaf = tree::is_leaf(logical);
-        if logical != total
-            || (leaf && chunk.payload.len() < usize::try_from(total).unwrap_or(usize::MAX))
-        {
+        if logical != total || (leaf && payload < usize::try_from(total).unwrap_or(usize::MAX)) {
             // A span Ant reads otherwise than its joiner, or a single-chunk
             // file shorter than its span.
-            core.unhold(wire.len());
+            entry.release(core);
+            room.release(core);
+            wire.release(core);
+            release_known(core, known);
             return self.end(core, Failure::Unverifiable);
         }
         let ranges = if core.head_only {
@@ -1871,72 +2012,86 @@ impl Walk {
         } else {
             ant::parse_ranges(self.range.as_deref(), total)
         };
-        let (a, b) = match ranges {
+        let (status, headers, a, b) = match ranges {
             Ranges::Invalid | Ranges::NoOverlap => {
-                core.unhold(wire.len());
                 let t = (ranges == Ranges::NoOverlap).then_some(total);
                 let (h, body) = ant::not_satisfiable(t, entry.filename.as_deref());
-                return self.answer(core, 416, h, body.to_vec(), content);
+                let body = body.to_vec();
+                entry.release(core);
+                wire.release(core);
+                release_known(core, known);
+                return self.answer(core, 416, h, body, content, Some(room));
             }
             Ranges::Single { start, length: 0 } => {
-                core.unhold(wire.len());
-                core.head(206, ant::zero_length(&entry, total, start), content);
-                core.finish();
-                self.stage = Stage::Done;
-                return;
+                let h = ant::zero_length(&entry, total, start);
+                entry.release(core);
+                wire.release(core);
+                release_known(core, known);
+                core.head_charged(206, h, content, room);
+                return core.finish();
             }
-            Ranges::Single { start, length } => {
-                core.head(
-                    206,
-                    ant::partial(&entry, total, start, start + length - 1),
-                    content,
-                );
-                (start, start + length - 1)
-            }
+            Ranges::Single { start, length } => (
+                206,
+                ant::partial(&entry, total, start, start + length - 1),
+                start,
+                start + length - 1,
+            ),
             Ranges::Full | Ranges::Multi => {
-                core.head(200, ant::whole(&entry, total, core.head_only), content);
+                let h = ant::whole(&entry, total, core.head_only);
                 if total == 0 {
-                    core.unhold(wire.len());
-                    core.finish();
-                    self.stage = Stage::Done;
-                    return;
+                    entry.release(core);
+                    wire.release(core);
+                    release_known(core, known);
+                    core.head_charged(200, h, content, room);
+                    return core.finish();
                 }
-                (0, total - 1)
+                (200, h, 0, total - 1)
             }
         };
-        if core.ended() {
+        let reference = entry.reference;
+        entry.release(core);
+        if core.head_only {
             // A HEAD: nothing past the file's root is read.
-            core.unhold(wire.len());
-            self.stage = Stage::Done;
-            return;
+            wire.release(core);
+            release_known(core, known);
+            return core.head_charged(status, headers, content, room);
         }
+        core.head_charged(status, headers, content, room);
         if leaf {
+            release_known(core, known);
             let s = usize::try_from(a).unwrap_or(0);
             let e = usize::try_from(b).unwrap_or(0) + 1;
-            let bytes = chunk.payload[s..e].to_vec();
-            core.unhold(wire.len() - bytes.len());
-            core.body(bytes, None);
-            core.finish();
-            self.stage = Stage::Done;
-            return;
+            // The range, cut from the wire in place.
+            let mut bytes = wire.map(|mut w| {
+                w.truncate(SPAN_SIZE + e);
+                w.drain(..(SPAN_SIZE + s).min(w.len()));
+                w.shrink_to_fit();
+                w
+            });
+            let n = bytes.len();
+            bytes.recharge(core, n);
+            core.body_charged(bytes, None);
+            return core.finish();
         }
         let block = CHUNK_SIZE as u64;
         let fs = a / block * block;
         let fe = ((b / block + 1) * block).min(total) - 1;
-        let (level, _) = tree::decode_span(&chunk.span);
         let branching = if level == 0 {
             tree::MAX_REFS
         } else {
             tree::max_shards(level)
         } as u64;
         let tree = Tree::new(core, &wire, total, a, b + 1, 2 * branching * block);
-        core.unhold(wire.len());
+        wire.release(core);
         let tree = match tree {
             Ok(t) => t,
-            Err(f) => return self.end(core, f),
+            Err(f) => {
+                release_known(core, known);
+                return self.end(core, f);
+            }
         };
         let mut body = Box::new(Body {
-            reference: entry.reference,
+            reference,
             tree,
             a,
             b,
@@ -1949,13 +2104,11 @@ impl Walk {
             stopped: None,
             ended: None,
             released: fs,
-            known: std::mem::take(known),
+            known,
         });
         let r = body.pump(core);
         self.stage = Stage::Body(body);
-        if let Err(f) = r {
-            self.end(core, f);
-        }
+        self.body_result(core, r);
     }
 
     // Events, from the machine.
@@ -1966,7 +2119,7 @@ impl Walk {
         tag: Tag,
         status: u16,
         headers: &[(String, String)],
-        body: Vec<u8>,
+        body: Bytes,
     ) {
         match &mut self.stage {
             Stage::Load { load, .. } => {
@@ -1974,7 +2127,9 @@ impl Walk {
                 self.progress(core, p);
             }
             Stage::FeedIndex { owner, topic } if tag == Tag::Feed => {
-                core.unhold(body.len());
+                let (owner, topic) = (*owner, *topic);
+                // The index is in its headers; its bytes aren't read.
+                body.release(core);
                 if let Err(f) = ok_status(status) {
                     return self.end(core, f);
                 }
@@ -1982,7 +2137,6 @@ impl Walk {
                 let Some(index) = index else {
                     return self.end(core, Failure::VerificationFailed);
                 };
-                let (owner, topic) = (*owner, *topic);
                 let address = fc_swarm::verify::feed_update_address(&owner, &topic, index);
                 if fetch_chunk(core, Tag::Update, &address).is_none() {
                     return self.end(core, Failure::Unverifiable);
@@ -1998,40 +2152,32 @@ impl Walk {
                 topic,
                 index,
             } if tag == Tag::Update => {
+                let (owner, topic, index) = (*owner, *topic, *index);
                 if let Err(f) = ok_status(status) {
-                    core.unhold(body.len());
+                    body.release(core);
                     return self.end(core, f);
                 }
-                let work = Work::FeedUpdate {
-                    owner: *owner,
-                    topic: *topic,
-                    index: *index,
-                    wire: body,
-                };
-                core.hash(tag, work);
+                let work = body.map(|wire| Work::FeedUpdate {
+                    owner,
+                    topic,
+                    index,
+                    wire,
+                });
+                core.hash_charged(tag, work);
             }
-            Stage::FileRoot { .. } if tag == Tag::FileRoot => {
+            Stage::FileRoot { entry } if tag == Tag::FileRoot => {
+                let address = entry.reference;
                 if let Err(f) = ok_status(status) {
-                    core.unhold(body.len());
+                    body.release(core);
                     return self.end(core, f);
                 }
-                let Stage::FileRoot { entry } = &self.stage else {
-                    return;
-                };
-                let address = entry.reference;
-                core.hash(
-                    tag,
-                    Work::Chunk {
-                        address,
-                        wire: body,
-                    },
-                );
+                core.hash_charged(tag, body.map(|wire| Work::Chunk { address, wire }));
             }
             Stage::Body(b) => {
                 let r = b.whole(core, tag, status, body);
                 self.body_result(core, r);
             }
-            _ => core.unhold(body.len()),
+            _ => body.release(core),
         }
     }
 
@@ -2060,13 +2206,14 @@ impl Walk {
         }
     }
 
-    pub(crate) fn stream_data(&mut self, core: &mut Core, tag: Tag, id: PieceId, bytes: Vec<u8>) {
+    pub(crate) fn stream_data(&mut self, core: &mut Core, tag: Tag, id: PieceId, bytes: Bytes) {
         if let (Stage::Body(b), Tag::Bytes) = (&mut self.stage, tag) {
             let r = b.stream_data(core, bytes);
             self.body_result(core, r);
         } else {
-            core.unhold(bytes.len());
-            core.consumed(id, bytes.len());
+            let n = bytes.len();
+            bytes.release(core);
+            core.consumed(id, n);
         }
     }
 
@@ -2077,7 +2224,13 @@ impl Walk {
         }
     }
 
-    pub(crate) fn hashed(&mut self, core: &mut Core, tag: Tag, verdict: Verdict, work: Work) {
+    pub(crate) fn hashed(
+        &mut self,
+        core: &mut Core,
+        tag: Tag,
+        verdict: Verdict,
+        work: Charged<Work>,
+    ) {
         match &mut self.stage {
             Stage::Load { load, .. } => {
                 let p = load.hashed(core, tag, verdict, work);
@@ -2085,17 +2238,24 @@ impl Walk {
             }
             Stage::FeedUpdate { index, .. } if tag == Tag::Update => {
                 let index = *index;
-                let (Verdict::FeedUpdate(result), Work::FeedUpdate { wire, .. }) = (verdict, work)
-                else {
+                let Verdict::FeedUpdate(result) = verdict else {
+                    work.release(core);
+                    return self.end(core, Failure::Unverifiable);
+                };
+                let wire = work.try_map(core, |w| match w {
+                    Work::FeedUpdate { wire, .. } => Some(wire),
+                    _ => None,
+                });
+                let Some(wire) = wire else {
                     return self.end(core, Failure::Unverifiable);
                 };
                 match result {
                     Err(r) => {
-                        core.unhold(wire.len());
+                        wire.release(core);
                         self.end(core, refusal(r));
                     }
                     Ok(FeedUpdate::V1 { reference, .. }) => {
-                        core.unhold(wire.len());
+                        wire.release(core);
                         self.feed = Some(Feed { index, v2: false });
                         match Load::start(core, reference) {
                             Ok(load) => {
@@ -2110,9 +2270,12 @@ impl Walk {
                     Ok(FeedUpdate::V2 { root, .. }) => {
                         self.feed = Some(Feed { index, v2: true });
                         // The update wraps the target's root chunk itself,
-                        // checked against its address with the signature.
-                        let wrapped = wire.get(32 + 65..).map(<[u8]>::to_vec).unwrap_or_default();
-                        core.unhold(wire.len());
+                        // checked against its address with the signature:
+                        // its identifier and signature are cut off in place.
+                        let wrapped = wire.map(|mut w| {
+                            w.drain(..(32 + 65).min(w.len()));
+                            w
+                        });
                         let (load, p) = Load::with_root(core, root, wrapped);
                         self.stage = Stage::Load {
                             load,
@@ -2123,36 +2286,47 @@ impl Walk {
                 }
             }
             Stage::FileRoot { .. } if tag == Tag::FileRoot => {
-                let (Verdict::Chunk(result), Work::Chunk { address, wire }) = (verdict, work)
-                else {
+                let Verdict::Chunk(result) = verdict else {
+                    work.release(core);
+                    return self.end(core, Failure::Unverifiable);
+                };
+                let Some((address, wire)) = chunk_work(core, work) else {
                     return self.end(core, Failure::Unverifiable);
                 };
                 if let Err(r) = result {
-                    core.unhold(wire.len());
+                    wire.release(core);
                     return self.end(core, refusal(r));
                 }
                 // A file's root is structure when it is intermediate.
                 remember(core, &address, &wire, false);
                 let Stage::FileRoot { entry } = std::mem::replace(&mut self.stage, Stage::Done)
                 else {
-                    return;
+                    return wire.release(core);
                 };
-                let held = entry_cost(&entry);
-                self.root_passed(core, entry, wire, held);
+                self.root_passed(core, entry, wire);
             }
             Stage::Body(b) => {
                 let r = b.hashed(core, tag, verdict, work);
                 self.body_result(core, r);
             }
-            _ => core.unhold(work.size()),
+            _ => work.release(core),
         }
     }
 
-    fn body_result(&mut self, core: &mut Core, r: Result<(), Failure>) {
-        if let Err(f) = r {
-            self.end(core, f);
-        } else if core.ended() {
-            self.drop_stage(core);
+    /// A body's move: an error ends the request; once the body is all out,
+    /// it goes, with all the walk holds, before the request finishes.
+    fn body_result(&mut self, core: &mut Core, r: Result<bool, Failure>) {
+        match r {
+            Err(f) => self.end(core, f),
+            Ok(true) => {
+                self.drop_all(core);
+                core.finish();
+            }
+            Ok(false) => {
+                if core.ended() {
+                    self.drop_all(core);
+                }
+            }
         }
     }
 
@@ -2164,19 +2338,17 @@ impl Walk {
                 let Stage::Load { mut load, then } =
                     std::mem::replace(&mut self.stage, Stage::Done)
                 else {
-                    return;
+                    return loaded.release(core);
                 };
-                // The root chunk and a node's bytes go to the caller, held;
-                // the rest is dropped.
+                // The root chunk and a node's bytes go to the caller under
+                // their charges; the rest goes.
                 let root = load.root.take();
                 let known = std::mem::take(&mut load.known);
                 load.release(core);
                 if matches!((&then, &loaded), (Then::Root, Loaded::NotAManifest)) {
-                    self.known = known;
+                    release_known(core, std::mem::replace(&mut self.known, known));
                 } else {
-                    for (_, w) in known {
-                        core.unhold(w.len());
-                    }
+                    release_known(core, known);
                 }
                 self.loaded(core, then, loaded, root);
             }
@@ -2189,24 +2361,24 @@ impl Walk {
 /// A feed's owner and topic.
 type FeedKey = ([u8; 20], [u8; 32]);
 
-/// Parses a loaded node's bytes, which the walk holds, within the request's
-/// memory: room for the node is reserved first; once it is parsed, the
-/// bytes are released and the node's cost is held in their place. Without
-/// the room, the walk is past its memory.
-fn parse(core: &mut Core, bytes: Vec<u8>) -> Result<Result<manifest::Node, NodeError>, Failure> {
-    let n = bytes.len();
-    let room = manifest::parse_room(n);
-    if !core.fits(room) {
-        core.unhold(n);
+/// Parses a loaded node's bytes, under their charge, within the request's
+/// memory: room for the node is reserved first; the bytes are parsed in
+/// place, and the node alone is charged once it is made. Without the room,
+/// the walk is past its memory.
+fn parse(
+    core: &mut Core,
+    bytes: Bytes,
+) -> Result<Result<Charged<manifest::Node>, NodeError>, Failure> {
+    let Some(room) = Charged::room(core, manifest::parse_room(bytes.len())) else {
+        bytes.release(core);
         return Err(Failure::Unverifiable);
-    }
-    core.hold(room);
-    let parsed = manifest::parse_node_owned(bytes);
-    core.unhold(room + n);
-    if let Ok(node) = &parsed {
-        core.hold(node.cost());
-    }
-    Ok(parsed)
+    };
+    let mut parsed = bytes
+        .join(room)
+        .map(|(bytes, ())| manifest::parse_node_owned(bytes));
+    let cost = parsed.as_ref().map_or(0, manifest::Node::cost);
+    parsed.recharge(core, cost);
+    Ok(parsed.transpose(core))
 }
 
 /// What an entry's strings hold.
@@ -2258,9 +2430,11 @@ fn feed_index(value: &str) -> Option<u64> {
     u64::from_str_radix(value, 16).ok()
 }
 
+/// The machine's inputs, each value under the charge the machine took for
+/// it as it came.
 impl super::Events<Tag> for Walk {
     fn audit(&self, core: &mut Core) {
-        self.audit_lookup(core);
+        core.audit_charged();
     }
 
     fn whole(
@@ -2271,6 +2445,8 @@ impl super::Events<Tag> for Walk {
         headers: &[(String, String)],
         body: Vec<u8>,
     ) {
+        let n = body.len();
+        let body = Charged::arrived(core, body, n);
         Walk::whole(self, core, tag, status, headers, body);
     }
 
@@ -2286,6 +2462,8 @@ impl super::Events<Tag> for Walk {
     }
 
     fn stream_data(&mut self, core: &mut Core, tag: Tag, id: PieceId, bytes: Vec<u8>) {
+        let n = bytes.len();
+        let bytes = Charged::arrived(core, bytes, n);
         Walk::stream_data(self, core, tag, id, bytes);
     }
 
@@ -2298,6 +2476,8 @@ impl super::Events<Tag> for Walk {
     }
 
     fn hashed(&mut self, core: &mut Core, tag: Tag, verdict: Verdict, work: Work) {
+        let n = work.size();
+        let work = Charged::arrived(core, work, n);
         Walk::hashed(self, core, tag, verdict, work);
     }
 }
