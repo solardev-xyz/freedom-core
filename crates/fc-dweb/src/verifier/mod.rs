@@ -500,6 +500,12 @@ impl<T: Copy> Core<T> {
             .count()
     }
 
+    /// Memory the walk holds that no charge covers: counted with the
+    /// releases that had no hold, as the same fault.
+    pub(crate) fn misheld(&mut self, n: usize) {
+        self.over_released = self.over_released.saturating_add(n.max(1));
+    }
+
     /// Takes `n` bytes into the walk's holding; the caller checked
     /// [`Core::fits`] for any it allocates.
     pub(crate) fn hold(&mut self, n: usize) {
@@ -828,6 +834,9 @@ pub(crate) trait Events<T> {
     fn floor(&mut self, _core: &mut Core<T>, _check: crate::store::FloorCheck) -> bool {
         false
     }
+    /// After every input: the walk's own check that what it holds is
+    /// charged ([`Core::misheld`]).
+    fn audit(&self, _core: &mut Core<T>) {}
 }
 
 /// A core and the walk it drives.
@@ -998,6 +1007,9 @@ impl<T: Copy, W: Events<T>> Machine<T, W> {
     /// After each input: a walk that has ended is dropped with what it
     /// held, and credit owed goes out.
     fn settle(&mut self) {
+        if let Some(walk) = self.walk.as_ref() {
+            walk.audit(&mut self.core);
+        }
         if self.core.ended() {
             self.walk = None;
             self.core.walk_held = 0;

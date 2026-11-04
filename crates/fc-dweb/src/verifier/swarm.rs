@@ -1335,8 +1335,8 @@ enum Then {
     Root,
     /// A feed update's target.
     Target,
-    /// A manifest node the lookup asked for.
-    Child(Box<Lookup>),
+    /// A manifest node the lookup asked for: the lookup is the walk's.
+    Child,
 }
 
 #[derive(Debug)]
@@ -1377,6 +1377,9 @@ pub(crate) struct Walk {
     /// A raw root's chunks the sniff checked, for its body.
     known: Vec<([u8; 32], Vec<u8>)>,
     stage: Stage,
+    /// The manifest lookup, while it runs. It lives here alone, so its
+    /// charge and its memory go together ([`Walk::release_lookup`]).
+    lookup: Option<Box<Lookup>>,
     /// What the lookup held when it was last charged: its root, the node
     /// it is at, the followed fork's metadata and its phases, while it waits
     /// for a node ([`Lookup::held`]).
@@ -1408,6 +1411,7 @@ impl Walk {
             feed: None,
             known: Vec::new(),
             stage: Stage::Done,
+            lookup: None,
             lookup_held: 0,
         };
         if decoded.is_err() {
@@ -1440,18 +1444,15 @@ impl Walk {
 
     fn end(&mut self, core: &mut Core, failure: Failure) {
         self.drop_stage(core);
-        self.charge_lookup(core, 0);
+        self.release_lookup(core);
         core.fail(failure);
     }
 
     fn drop_stage(&mut self, core: &mut Core) {
         match std::mem::replace(&mut self.stage, Stage::Done) {
-            Stage::Load { mut load, then } => {
+            Stage::Load { mut load, .. } => {
                 load.release(core);
-                if let Then::Child(lookup) = then {
-                    drop(lookup);
-                    self.charge_lookup(core, 0);
-                }
+                self.release_lookup(core);
             }
             Stage::FileRoot { entry } => core.unhold(entry_cost(&entry)),
             Stage::Body(mut body) => body.release_all(core),
@@ -1459,11 +1460,20 @@ impl Walk {
         }
     }
 
-    /// The lookup's charge from now on: what it holds, or 0 once dropped.
-    fn charge_lookup(&mut self, core: &mut Core, held: usize) {
-        core.unhold(self.lookup_held);
-        core.hold(held);
-        self.lookup_held = held;
+    /// The lookup goes, and then its charge: the one way the charge is
+    /// released, so it never goes while the lookup lives.
+    fn release_lookup(&mut self, core: &mut Core) {
+        self.lookup = None;
+        core.unhold(std::mem::take(&mut self.lookup_held));
+    }
+
+    /// A live lookup is always charged: a lookup the walk holds with no
+    /// charge is memory past the request's count, which the machine counts
+    /// as released without its hold ([`super::Verifier::over_released`]).
+    fn audit_lookup(&self, core: &mut Core) {
+        if self.lookup.is_some() && self.lookup_held == 0 {
+            core.misheld(std::mem::size_of::<Lookup>());
+        }
     }
 
     /// A lookup for the path below `node`, a parsed node whose cost the
@@ -1480,7 +1490,8 @@ impl Walk {
         }
         core.hold(room);
         let (lookup, step) = Lookup::new(node, &self.path);
-        self.step(core, Box::new(lookup), step, room + cost);
+        self.lookup = Some(Box::new(lookup));
+        self.step(core, step, room + cost);
     }
 
     /// A proven answer with a fixed body: a 404, a 308 or a 416.
@@ -1593,9 +1604,11 @@ impl Walk {
                     }
                 }
             }
-            Then::Child(mut lookup) => {
+            Then::Child => {
                 if let Some(w) = root_wire {
-                    core.unhold(w.len());
+                    let n = w.len();
+                    drop(w);
+                    core.unhold(n);
                 }
                 // The lookup's step, within room reserved for what it
                 // parses and copies.
@@ -1607,10 +1620,16 @@ impl Walk {
                     _ => (manifest::STEP_ROOM, 0),
                 };
                 if !core.fits(room) {
+                    drop(loaded);
                     core.unhold(held);
                     return self.end(core, Failure::Unverifiable);
                 }
                 core.hold(room);
+                let Some(lookup) = self.lookup.as_mut() else {
+                    drop(loaded);
+                    core.unhold(room + held);
+                    return self.end(core, Failure::Unverifiable);
+                };
                 let step = match loaded {
                     Loaded::NotAManifest => lookup.refused(NodeError::NotAManifest),
                     Loaded::TooLarge => {
@@ -1621,7 +1640,7 @@ impl Walk {
                 };
                 // The room and the node's bytes cover the step until it is
                 // taken.
-                self.step(core, lookup, step, room + held);
+                self.step(core, step, room + held);
             }
         }
     }
@@ -1679,54 +1698,61 @@ impl Walk {
     /// the memory it covers has gone, or has moved to the charge that
     /// lasts: the boxed lookup while it waits for a node, or the entry
     /// while the file's root chunk is fetched.
-    fn step(&mut self, core: &mut Core, lookup: Box<Lookup>, step: Step, covered: usize) {
+    fn step(&mut self, core: &mut Core, step: Step, covered: usize) {
         let label = self.label();
-        let charged = std::mem::take(&mut self.lookup_held) + covered;
         let reference = match step {
             Step::Need(reference) => reference,
             Step::Done(Outcome::Found { data_ref, metadata }) => {
-                drop(lookup);
-                return self.found(core, &data_ref, metadata, charged);
+                // The lookup goes; its charge, with the step's, covers the
+                // outcome until the entry takes it over.
+                self.lookup = None;
+                let charged = std::mem::take(&mut self.lookup_held) + covered;
+                return self.found(core, data_ref, metadata, charged);
             }
             // The other outcomes hold nothing of their own.
             other => {
-                drop(lookup);
-                core.unhold(charged);
+                self.release_lookup(core);
+                core.unhold(covered);
                 return self.outcome(core, other, label);
             }
         };
         let address = <[u8; 32]>::try_from(reference.as_slice());
         drop(reference);
         // What lasts while the next node loads: the boxed lookup.
-        let lasting = std::mem::size_of::<Lookup>() + lookup.held();
-        core.unhold(charged);
+        let lasting = std::mem::size_of::<Lookup>() + self.lookup.as_ref().map_or(0, |l| l.held());
+        core.unhold(self.lookup_held + covered);
         core.hold(lasting);
         self.lookup_held = lasting;
         let Ok(address) = address else {
             // A 64-byte reference: an encrypted node.
-            drop(lookup);
             return self.end(core, Failure::Unverifiable);
         };
         match Load::start(core, address) {
             Ok(load) => {
                 self.stage = Stage::Load {
                     load,
-                    then: Then::Child(lookup),
+                    then: Then::Child,
                 }
             }
-            Err(f) => {
-                drop(lookup);
-                self.end(core, f);
-            }
+            Err(f) => self.end(core, f),
         }
     }
 
     /// The lookup found the entry: its metadata's strings move into the
     /// entry (a filename from the path, when it has none, within room
     /// reserved first), and the entry's charge takes over from `charged`
-    /// while the file's root chunk is fetched.
-    fn found(&mut self, core: &mut Core, data_ref: &[u8], mut metadata: Metadata, charged: usize) {
-        let Ok(reference) = <[u8; 32]>::try_from(data_ref) else {
+    /// while the file's root chunk is fetched. The reference is copied out
+    /// and its vector dropped before any charge moves.
+    fn found(
+        &mut self,
+        core: &mut Core,
+        data_ref: Vec<u8>,
+        mut metadata: Metadata,
+        charged: usize,
+    ) {
+        let reference = <[u8; 32]>::try_from(data_ref.as_slice());
+        drop(data_ref);
+        let Ok(reference) = reference else {
             drop(metadata);
             core.unhold(charged);
             return self.end(core, Failure::Unverifiable);
@@ -2233,6 +2259,10 @@ fn feed_index(value: &str) -> Option<u64> {
 }
 
 impl super::Events<Tag> for Walk {
+    fn audit(&self, core: &mut Core) {
+        self.audit_lookup(core);
+    }
+
     fn whole(
         &mut self,
         core: &mut Core,
