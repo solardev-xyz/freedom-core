@@ -1065,8 +1065,10 @@ fn budgets_exhausted_at_each_reservation() {
                         assert_eq!(got.head, honest.head, "{budget}");
                         ended += 1;
                     }
+                    // Refused for its memory, with the budget's own text:
+                    // never another cause.
                     Some(Ending::Error(502, m)) | Some(Ending::Abort(_, m)) => {
-                        assert_eq!(m, fc_dweb::verifier::IPFS_UNVERIFIABLE, "{budget}");
+                        assert_eq!(m, fc_dweb::verifier::MEMORY, "{budget}");
                         refused += 1;
                     }
                     other => panic!("{budget}: {other:?}"),
@@ -1298,7 +1300,7 @@ fn text(cid: &[u8]) -> String {
 
 /// A raw block longer than the room it was reserved at (a raw leaf at its
 /// entry): its bytes past that room need room of their own, and a request
-/// without it is `unverifiable` rather than past its budget. With room, the
+/// without it is `unverifiable` for its memory rather than past its budget. With room, the
 /// block fails its hash. The file's root is an identity CID, so the leaf's
 /// room is all the walk reserves.
 #[test]
@@ -1320,7 +1322,7 @@ fn a_raw_block_past_its_room() {
     let p = ranged(&text(&root), "/", None);
     let window = fc_dweb::verifier::STREAM_WINDOW;
     for (budget, message) in [
-        (window + 1024, fc_dweb::verifier::IPFS_UNVERIFIABLE),
+        (window + 1024, fc_dweb::verifier::MEMORY),
         (
             window + (1 << 20),
             fc_dweb::verifier::IPFS_VERIFICATION_FAILED,

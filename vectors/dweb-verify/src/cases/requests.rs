@@ -25,6 +25,8 @@ const IPFS_UNVERIFIABLE: &str = "This content can't be verified with the externa
 const IPFS_404: &str = "Not found on the external IPFS gateway";
 const IPFS_STOPPED: &str = "The external IPFS gateway stopped sending";
 const IPFS_MALFORMED: &str = "This IPFS content is malformed";
+/// A request refused for its memory, either scheme.
+const MEMORY: &str = "This content needs more memory to verify than one request may use";
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
@@ -626,6 +628,27 @@ async fn swarm(doc: &Doc, out: &mut Cases) -> Result<(), Err> {
         .ok_or("feed-encrypted")?;
     out.push("swarm/encrypted-feed-update", "a feed whose latest v1 update is 80 bytes: Ant answers the manifest's own node, the walk refuses", swarm_plan(fe["manifest"].as_str().ok_or("manifest")?, "/", &[]), "GET",
         world(json!([])), error(502, SWARM_UNVERIFIABLE), Some("encrypted-in-walk"));
+
+    // At the edge of a Swarm request's 2 MiB (0009, Bounds): the same file
+    // below a node packed with kept metadata, just inside and just outside
+    // what the request holds beside the manifest's root.
+    for (id, case, inside) in [
+        ("swarm/memory-inside", "memory-limit-inside", true),
+        ("swarm/memory-outside", "memory-limit-outside", false),
+    ] {
+        let m = doc.0["swarm"]["manifests"]
+            .as_array()
+            .and_then(|m| m.iter().find(|m| m["id"] == case))
+            .ok_or(case)?;
+        let plan = swarm_plan(m["root"].as_str().ok_or("root")?, "/a/b", &[]);
+        if inside {
+            out.push(id, "a node of 14 forks, each with a 60,000-byte Filename: the root, the node's join and its parse fit 2 MiB, and the bundled Ant's answer is served", plan, "GET",
+                world(json!([])), complete(doc.head(&format!("{case}#1"), "verified")?, content_body("memory-limit-file", 0, 12)), None);
+        } else {
+            out.push(id, "a node of 16 such forks: Ant serves the file, the request's 2 MiB can't hold the root beside the node's join and parse", plan, "GET",
+                world(json!([])), error(502, MEMORY), Some("request-memory"));
+        }
+    }
     Ok(())
 }
 

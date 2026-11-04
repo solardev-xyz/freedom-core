@@ -25,7 +25,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use fc_swarm::CHUNK_SIZE;
-use fc_swarm::manifest::{self, Lookup, NodeError, Outcome, Step};
+use fc_swarm::manifest::{self, Lookup, Metadata, NodeError, Outcome, Step};
 use fc_swarm::tree;
 use fc_swarm::verify::{Chunk, FeedUpdate, MAX_CHUNK_WIRE, Refusal, SPAN_SIZE};
 
@@ -49,6 +49,9 @@ const SNIFF_DEPTH: usize = 8;
 const NODE_HEADER: usize = 64;
 /// A parsed child reference's cost: its address and length.
 const CHILD_COST: usize = 40;
+/// A head's headers beside the entry's strings: their names, the fixed
+/// values, the ETag, the lengths and the vector that holds them.
+const HEAD_ROOM: usize = 1024;
 
 /// What a piece or a job is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -395,7 +398,7 @@ impl Tree {
             if fetch_chunk(core, Tag::Inter(start, depth), &w.address).is_none() {
                 self.ahead.remove(&(start, depth));
                 if w.blocking {
-                    return Err(Failure::Unverifiable);
+                    return Err(Failure::Memory);
                 }
                 break;
             }
@@ -497,7 +500,7 @@ enum Progress {
 
 impl Load {
     fn start(core: &mut Core, address: [u8; 32]) -> Result<Self, Failure> {
-        fetch_chunk(core, Tag::NodeRoot, &address).ok_or(Failure::Unverifiable)?;
+        fetch_chunk(core, Tag::NodeRoot, &address).ok_or(Failure::Memory)?;
         Ok(Self {
             address,
             state: LoadState::Root,
@@ -571,7 +574,7 @@ impl Load {
                 continue;
             }
             if fetch_chunk(core, Tag::Sniff, &child).is_none() {
-                return Progress::Failed(Failure::Unverifiable);
+                return Progress::Failed(Failure::Memory);
             }
             self.state = LoadState::Sniff { depth, child };
             return Progress::Pending;
@@ -601,7 +604,7 @@ impl Load {
             };
         }
         if !core.fits(size) {
-            return Progress::Failed(Failure::Unverifiable);
+            return Progress::Failed(Failure::Memory);
         }
         core.hold(size);
         let tree = match Tree::new(core, &root, len, 0, len, u64::MAX) {
@@ -649,7 +652,7 @@ impl Load {
                             continue;
                         }
                         if fetch_chunk(core, Tag::JoinLeaf(start), &address).is_none() {
-                            return Progress::Failed(Failure::Unverifiable);
+                            return Progress::Failed(Failure::Memory);
                         }
                         join.leaves.insert(start, (address, len));
                     }
@@ -932,7 +935,7 @@ impl Body {
                 headers,
                 Ask::Stream(None),
             )
-            .ok_or(Failure::Unverifiable)?;
+            .ok_or(Failure::Memory)?;
         self.stream = Some(ByteStream {
             id,
             pos: self.fs,
@@ -1070,8 +1073,7 @@ impl Body {
             if core.whole_pieces() >= MAX_CHUNK_PIECES {
                 break;
             }
-            fetch_chunk(core, Tag::Fallback(leaf.start), &leaf.address)
-                .ok_or(Failure::Unverifiable)?;
+            fetch_chunk(core, Tag::Fallback(leaf.start), &leaf.address).ok_or(Failure::Memory)?;
             leaf.state = LeafState::Fallback;
         }
         Ok(())
@@ -1374,6 +1376,10 @@ pub(crate) struct Walk {
     /// A raw root's chunks the sniff checked, for its body.
     known: Vec<([u8; 32], Vec<u8>)>,
     stage: Stage,
+    /// What the lookup held when it was last charged: its root, the node
+    /// it is at, the followed fork's metadata and its phases, while it waits
+    /// for a node ([`Lookup::held`]).
+    lookup_held: usize,
 }
 
 impl Walk {
@@ -1401,6 +1407,7 @@ impl Walk {
             feed: None,
             known: Vec::new(),
             stage: Stage::Done,
+            lookup_held: 0,
         };
         if decoded.is_err() {
             core.fail(Failure::InvalidPath);
@@ -1432,15 +1439,47 @@ impl Walk {
 
     fn end(&mut self, core: &mut Core, failure: Failure) {
         self.drop_stage(core);
+        self.charge_lookup(core, 0);
         core.fail(failure);
     }
 
     fn drop_stage(&mut self, core: &mut Core) {
         match std::mem::replace(&mut self.stage, Stage::Done) {
-            Stage::Load { mut load, .. } => load.release(core),
+            Stage::Load { mut load, then } => {
+                load.release(core);
+                if let Then::Child(lookup) = then {
+                    drop(lookup);
+                    self.charge_lookup(core, 0);
+                }
+            }
+            Stage::FileRoot { entry } => core.unhold(entry_cost(&entry)),
             Stage::Body(mut body) => body.release_all(core),
             _ => {}
         }
+    }
+
+    /// The lookup's charge from now on: what it holds, or 0 once dropped.
+    fn charge_lookup(&mut self, core: &mut Core, held: usize) {
+        core.unhold(self.lookup_held);
+        core.hold(held);
+        self.lookup_held = held;
+    }
+
+    /// A lookup for the path below `node`, a parsed node whose cost the
+    /// walk holds: room for the lookup, its box and its first step is
+    /// reserved first, and with the node's cost covers them until the step
+    /// is taken ([`Walk::step`]).
+    fn start_lookup(&mut self, core: &mut Core, node: manifest::Node) {
+        let cost = node.cost();
+        let room = manifest::lookup_room(&self.path);
+        if !core.fits(room) {
+            drop(node);
+            core.unhold(cost);
+            return self.end(core, Failure::Memory);
+        }
+        core.hold(room);
+        let (lookup, step) = Lookup::new(node, &self.path);
+        self.step(core, Box::new(lookup), step, room + cost);
     }
 
     /// A proven answer with a fixed body: a 404, a 308 or a 416.
@@ -1456,7 +1495,7 @@ impl Walk {
         self.release_url_root(core);
         // Room for the body before the head promises it.
         if !core.fits(body.len()) {
-            return core.fail(Failure::Unverifiable);
+            return core.fail(Failure::Memory);
         }
         core.head(status, headers, content);
         core.hold(body.len());
@@ -1497,7 +1536,8 @@ impl Walk {
         };
         // Those bytes are the URL reference's own: verified.
         self.feed = None;
-        self.file_rooted(core, entry, wire);
+        // A bare path: the entry has no strings of its own.
+        self.root_passed(core, entry, wire, 0);
     }
 
     fn loaded(&mut self, core: &mut Core, then: Then, loaded: Loaded, root_wire: Option<Vec<u8>>) {
@@ -1521,7 +1561,8 @@ impl Walk {
                             reference: self.root,
                             feed: None,
                         };
-                        self.file_rooted(core, entry, wire);
+                        // A bare path: the entry has no strings of its own.
+                        self.root_passed(core, entry, wire, 0);
                     }
                     Loaded::TooLarge => self.end(core, Failure::Unverifiable),
                     Loaded::Node(bytes) => self.root_node(core, bytes),
@@ -1535,12 +1576,12 @@ impl Walk {
                     Loaded::NotAManifest => self.raw_fallback(core),
                     Loaded::TooLarge => self.end(core, Failure::Unverifiable),
                     Loaded::Node(bytes) => {
-                        core.unhold(bytes.len());
-                        match manifest::parse_node(&bytes) {
-                            Ok(node) => {
-                                let (lookup, step) = Lookup::new(node, &self.path);
-                                self.step(core, Box::new(lookup), step);
-                            }
+                        let parsed = match parse(core, bytes) {
+                            Ok(p) => p,
+                            Err(f) => return self.end(core, f),
+                        };
+                        match parsed {
+                            Ok(node) => self.start_lookup(core, node),
                             Err(NodeError::NotAManifest) => self.raw_fallback(core),
                             Err(NodeError::Malformed) => {
                                 let label = self.label();
@@ -1555,23 +1596,42 @@ impl Walk {
                 if let Some(w) = root_wire {
                     core.unhold(w.len());
                 }
+                // The lookup's step, within room reserved for what it
+                // parses and copies.
+                let (room, held) = match &loaded {
+                    Loaded::Node(bytes) => (
+                        manifest::parse_room(bytes.len()) + manifest::STEP_ROOM,
+                        bytes.len(),
+                    ),
+                    _ => (manifest::STEP_ROOM, 0),
+                };
+                if !core.fits(room) {
+                    core.unhold(held);
+                    return self.end(core, Failure::Memory);
+                }
+                core.hold(room);
                 let step = match loaded {
                     Loaded::NotAManifest => lookup.refused(NodeError::NotAManifest),
-                    Loaded::TooLarge => return self.end(core, Failure::Unverifiable),
-                    Loaded::Node(bytes) => {
-                        core.unhold(bytes.len());
-                        lookup.node(&bytes)
+                    Loaded::TooLarge => {
+                        core.unhold(room);
+                        return self.end(core, Failure::Unverifiable);
                     }
+                    Loaded::Node(bytes) => lookup.node(bytes),
                 };
-                self.step(core, lookup, step);
+                // The room and the node's bytes cover the step until it is
+                // taken.
+                self.step(core, lookup, step, room + held);
             }
         }
     }
 
     /// The URL root's node: a feed, or the manifest to look the path up in.
     fn root_node(&mut self, core: &mut Core, bytes: Vec<u8>) {
-        core.unhold(bytes.len());
-        let node = match manifest::parse_node(&bytes) {
+        let parsed = match parse(core, bytes) {
+            Ok(p) => p,
+            Err(f) => return self.end(core, f),
+        };
+        let node = match parsed {
             Ok(n) => n,
             Err(NodeError::NotAManifest) => {
                 return self.loaded(core, Then::Root, Loaded::NotAManifest, None);
@@ -1581,13 +1641,18 @@ impl Walk {
             }
             Err(NodeError::TooLarge) => return self.end(core, Failure::Unverifiable),
         };
-        let slash = node
+        let feed = node
             .forks
             .iter()
             .find(|f| f.byte == b'/')
-            .map(|f| f.metadata.clone())
-            .unwrap_or_default();
-        match feed_of(&slash) {
+            .map_or(Ok(None), |f| feed_of(&f.metadata));
+        if matches!(feed, Ok(None)) {
+            return self.start_lookup(core, node);
+        }
+        // A feed, or metadata Ant refuses: the node isn't needed any more.
+        core.unhold(node.cost());
+        drop(node);
+        match feed {
             Ok(Some((owner, topic))) => {
                 let mut headers = chunk_headers();
                 headers.push(("swarm-only-root-chunk".to_owned(), "true".to_owned()));
@@ -1596,55 +1661,109 @@ impl Walk {
                     .fetch(Tag::Feed, path, headers, Ask::Whole(super::MAX_WHOLE))
                     .is_none()
                 {
-                    return self.end(core, Failure::Unverifiable);
+                    return self.end(core, Failure::Memory);
                 }
                 self.stage = Stage::FeedIndex { owner, topic };
             }
-            Ok(None) => {
-                let (lookup, step) = Lookup::new(node, &self.path);
-                self.step(core, Box::new(lookup), step);
-            }
+            // Looked up above.
+            Ok(None) => {}
             // Feed metadata Ant refuses: its lookup error is a bare 404.
             Err(()) => self.not_found(core, NotFound::Plain, ContentTrust::Verified),
         }
     }
 
-    fn step(&mut self, core: &mut Core, lookup: Box<Lookup>, step: Step) {
+    /// The lookup's next step. `covered` is what the walk holds, beside the
+    /// lookup's last charge, for what the step allocated: the parsed node,
+    /// the lookup's growth and the step itself. Each charge goes only once
+    /// the memory it covers has gone, or has moved to the charge that
+    /// lasts: the boxed lookup while it waits for a node, or the entry
+    /// while the file's root chunk is fetched.
+    fn step(&mut self, core: &mut Core, lookup: Box<Lookup>, step: Step, covered: usize) {
         let label = self.label();
-        match step {
-            Step::Need(reference) => {
-                let Ok(address) = <[u8; 32]>::try_from(reference.as_slice()) else {
-                    // A 64-byte reference: an encrypted node.
-                    return self.end(core, Failure::Unverifiable);
-                };
-                match Load::start(core, address) {
-                    Ok(load) => {
-                        self.stage = Stage::Load {
-                            load,
-                            then: Then::Child(lookup),
-                        }
-                    }
-                    Err(f) => self.end(core, f),
+        let charged = std::mem::take(&mut self.lookup_held) + covered;
+        let reference = match step {
+            Step::Need(reference) => reference,
+            Step::Done(Outcome::Found { data_ref, metadata }) => {
+                drop(lookup);
+                return self.found(core, &data_ref, metadata, charged);
+            }
+            // The other outcomes hold nothing of their own.
+            other => {
+                drop(lookup);
+                core.unhold(charged);
+                return self.outcome(core, other, label);
+            }
+        };
+        let address = <[u8; 32]>::try_from(reference.as_slice());
+        drop(reference);
+        // What lasts while the next node loads: the boxed lookup.
+        let lasting = std::mem::size_of::<Lookup>() + lookup.held();
+        core.unhold(charged);
+        core.hold(lasting);
+        self.lookup_held = lasting;
+        let Ok(address) = address else {
+            // A 64-byte reference: an encrypted node.
+            drop(lookup);
+            return self.end(core, Failure::Unverifiable);
+        };
+        match Load::start(core, address) {
+            Ok(load) => {
+                self.stage = Stage::Load {
+                    load,
+                    then: Then::Child(lookup),
                 }
             }
-            Step::Done(Outcome::Found { data_ref, metadata }) => {
-                let Ok(reference) = <[u8; 32]>::try_from(data_ref.as_slice()) else {
-                    return self.end(core, Failure::Unverifiable);
-                };
-                self.release_url_root(core);
-                let entry = Entry {
-                    content_type: metadata.get(manifest::CONTENT_TYPE).map(str::to_owned),
-                    filename: metadata
-                        .get(manifest::FILENAME)
-                        .map(str::to_owned)
-                        .or_else(|| ant::filename_from_path(&self.path)),
-                    reference,
-                    feed: self.feed,
-                };
-                if fetch_chunk(core, Tag::FileRoot, &reference).is_none() {
-                    return self.end(core, Failure::Unverifiable);
-                }
-                self.stage = Stage::FileRoot { entry };
+            Err(f) => {
+                drop(lookup);
+                self.end(core, f);
+            }
+        }
+    }
+
+    /// The lookup found the entry: its metadata's strings move into the
+    /// entry (a filename from the path, when it has none, within room
+    /// reserved first), and the entry's charge takes over from `charged`
+    /// while the file's root chunk is fetched.
+    fn found(&mut self, core: &mut Core, data_ref: &[u8], mut metadata: Metadata, charged: usize) {
+        let Ok(reference) = <[u8; 32]>::try_from(data_ref) else {
+            drop(metadata);
+            core.unhold(charged);
+            return self.end(core, Failure::Unverifiable);
+        };
+        let room = self.path.len();
+        if !core.fits(room) {
+            drop(metadata);
+            core.unhold(charged);
+            return self.end(core, Failure::Memory);
+        }
+        core.hold(room);
+        let content_type = take(&mut metadata, manifest::CONTENT_TYPE);
+        let filename =
+            take(&mut metadata, manifest::FILENAME).or_else(|| ant::filename_from_path(&self.path));
+        drop(metadata);
+        let entry = Entry {
+            content_type,
+            filename,
+            reference,
+            feed: self.feed,
+        };
+        let cost = entry_cost(&entry);
+        core.unhold(charged + room);
+        core.hold(cost);
+        self.release_url_root(core);
+        // Staged first, so an end from here releases the entry's charge.
+        self.stage = Stage::FileRoot { entry };
+        if fetch_chunk(core, Tag::FileRoot, &reference).is_none() {
+            self.end(core, Failure::Memory);
+        }
+    }
+
+    /// Where a lookup ended without an entry, its charge released.
+    fn outcome(&mut self, core: &mut Core, step: Step, label: ContentTrust) {
+        match step {
+            // Taken by `step` and `found`.
+            Step::Need(_) | Step::Done(Outcome::Found { .. }) => {
+                self.end(core, Failure::Unverifiable);
             }
             Step::Done(Outcome::NotFound { root }) => {
                 let kind = if root { NotFound::Root } else { NotFound::Path };
@@ -1661,6 +1780,22 @@ impl Walk {
                 self.end(core, Failure::Unverifiable);
             }
         }
+    }
+
+    /// The file's root chunk passed for `entry`, whose strings' cost the
+    /// walk holds (`held`). The head copies them, a filename escaped to at
+    /// most twice its length: room for that is held while the head is made,
+    /// then the room and the entry's charge go.
+    fn root_passed(&mut self, core: &mut Core, entry: Entry, wire: Vec<u8>, held: usize) {
+        let room = 2 * entry_cost(&entry) + HEAD_ROOM;
+        if !core.fits(room) {
+            drop(entry);
+            core.unhold(held + wire.len());
+            return self.end(core, Failure::Memory);
+        }
+        core.hold(room);
+        self.file_rooted(core, entry, wire);
+        core.unhold(held + room);
     }
 
     /// The file's root chunk passed: the head, then the body.
@@ -1823,7 +1958,7 @@ impl Walk {
                 let (owner, topic) = (*owner, *topic);
                 let address = fc_swarm::verify::feed_update_address(&owner, &topic, index);
                 if fetch_chunk(core, Tag::Update, &address).is_none() {
-                    return self.end(core, Failure::Unverifiable);
+                    return self.end(core, Failure::Memory);
                 }
                 self.stage = Stage::FeedUpdate {
                     owner,
@@ -1975,7 +2110,8 @@ impl Walk {
                 else {
                     return;
                 };
-                self.file_rooted(core, entry, wire);
+                let held = entry_cost(&entry);
+                self.root_passed(core, entry, wire, held);
             }
             Stage::Body(b) => {
                 let r = b.hashed(core, tag, verdict, work);
@@ -2026,6 +2162,32 @@ impl Walk {
 /// A feed's owner and topic.
 type FeedKey = ([u8; 20], [u8; 32]);
 
+/// Parses a loaded node's bytes, which the walk holds, within the request's
+/// memory: room for the node is reserved first; once it is parsed, the
+/// bytes are released and the node's cost is held in their place. Without
+/// the room, the walk is past its memory.
+fn parse(core: &mut Core, bytes: Vec<u8>) -> Result<Result<manifest::Node, NodeError>, Failure> {
+    let n = bytes.len();
+    let room = manifest::parse_room(n);
+    if !core.fits(room) {
+        core.unhold(n);
+        return Err(Failure::Memory);
+    }
+    core.hold(room);
+    let parsed = manifest::parse_node_owned(bytes);
+    core.unhold(room + n);
+    if let Ok(node) = &parsed {
+        core.hold(node.cost());
+    }
+    Ok(parsed)
+}
+
+/// What an entry's strings hold.
+fn entry_cost(e: &Entry) -> usize {
+    e.content_type.as_ref().map_or(0, String::capacity)
+        + e.filename.as_ref().map_or(0, String::capacity)
+}
+
 fn feed_of(meta: &manifest::Metadata) -> Result<Option<FeedKey>, ()> {
     let Some(owner) = meta.get(manifest::FEED_OWNER) else {
         return Ok(None);
@@ -2035,21 +2197,30 @@ fn feed_of(meta: &manifest::Metadata) -> Result<Option<FeedKey>, ()> {
         None | Some("Sequence" | "sequence") => {}
         Some(_) => return Err(()),
     }
-    let owner = hex_bytes(owner.trim_start_matches("0x")).ok_or(())?;
-    let topic = hex_bytes(topic.trim_start_matches("0x")).ok_or(())?;
-    Ok(Some((
-        owner.try_into().map_err(|_| ())?,
-        topic.try_into().map_err(|_| ())?,
-    )))
+    let owner = hex_array(owner.trim_start_matches("0x")).ok_or(())?;
+    let topic = hex_array(topic.trim_start_matches("0x")).ok_or(())?;
+    Ok(Some((owner, topic)))
 }
 
-fn hex_bytes(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
+/// `s` as exactly `N` bytes of hex, decoded into place: no allocation.
+fn hex_array<const N: usize>(s: &str) -> Option<[u8; N]> {
+    if s.len() != 2 * N {
         return None;
     }
-    (0..s.len() / 2)
-        .map(|i| u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok())
-        .collect()
+    let mut out = [0u8; N];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
+/// A metadata key's value, moved out: its string, not a copy.
+fn take(metadata: &mut Metadata, key: &str) -> Option<String> {
+    metadata
+        .0
+        .iter_mut()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| std::mem::take(v))
 }
 
 /// `swarm-feed-index`: the update's index as 16 hex digits.

@@ -377,10 +377,16 @@ impl Walk {
             file: None,
             served: Vec::new(),
         };
-        // The request's segments: their room held before they are built.
+        // The request's segments: their room held before they are built,
+        // an empty one's slot included, which the walk drops later.
         let n = path.split('/').filter(|s| !s.is_empty()).count();
-        if n > MAX_SEGMENTS || !walk.reserve_path(core, n, path.len()) {
+        if n > MAX_SEGMENTS {
             core.fail(Failure::Unverifiable);
+            return Ok(walk);
+        }
+        let slots = path.split('/').count();
+        if !walk.reserve_path(core, slots, path.len()) {
+            core.fail(Failure::Memory);
             return Ok(walk);
         }
         let Some(rest) = segments(path) else {
@@ -421,7 +427,7 @@ impl Walk {
     ) {
         self.stop(core);
         if !core.fits(body.len()) {
-            return core.fail(Failure::Unverifiable);
+            return core.fail(Failure::Memory);
         }
         core.head(status, headers, self.label);
         core.hold(body.len());
@@ -495,7 +501,7 @@ impl Walk {
             )
             .is_none()
         {
-            return core.fail(Failure::Unverifiable);
+            return core.fail(Failure::Memory);
         }
         self.stage = Stage::Record { name, hop };
     }
@@ -524,8 +530,11 @@ impl Walk {
         // their room held before they are built.
         let n = below.split('/').filter(|s| !s.is_empty()).count();
         let total = n + self.rest.len();
-        if total > MAX_SEGMENTS || !self.reserve_path(core, total, below.len()) {
+        if total > MAX_SEGMENTS {
             return self.end(core, Failure::Unverifiable);
+        }
+        if !self.reserve_path(core, total, below.len()) {
+            return self.end(core, Failure::Memory);
         }
         let mut inner = Vec::with_capacity(total);
         inner.extend(
@@ -576,7 +585,7 @@ impl Walk {
         self.settle_path(core);
         self.stage = Stage::Dag;
         if !self.needs_room(core, 1, root.len()) {
-            return self.end(core, Failure::Unverifiable);
+            return self.end(core, Failure::Memory);
         }
         self.add_need(&root, What::Path(0));
         self.root = root;
@@ -766,7 +775,7 @@ impl Walk {
             let first = self.needs.front().is_some_and(|f| f.seq == need.seq);
             if !core.fits(reserve + super::STREAM_WINDOW) {
                 if first && self.raw.is_empty() {
-                    return self.end(core, Failure::Unverifiable);
+                    return self.end(core, Failure::Memory);
                 }
                 break;
             }
@@ -943,7 +952,7 @@ impl Walk {
                 Kind::Directory => match node.links().find(|l| l.name == Some(name.as_str())) {
                     Some(link) => {
                         if !self.push_first(core, link.cid.bytes, What::Path(seg + 1)) {
-                            return Err(Failure::Unverifiable);
+                            return Err(Failure::Memory);
                         }
                     }
                     None => self.page(core, 404, "not found"),
@@ -977,7 +986,7 @@ impl Walk {
             Kind::Directory => {
                 if let Some(link) = node.links().find(|l| l.name == Some("index.html")) {
                     if !self.push_first(core, link.cid.bytes, What::Index) {
-                        return Err(Failure::Unverifiable);
+                        return Err(Failure::Memory);
                     }
                     return Ok(());
                 }
@@ -987,7 +996,7 @@ impl Walk {
                 let n = node.links().filter(named).count();
                 let held = n.saturating_mul(std::mem::size_of::<gateway::Entry<'_>>());
                 if !core.fits(held) {
-                    return Err(Failure::Unverifiable);
+                    return Err(Failure::Memory);
                 }
                 core.hold(held);
                 let mut entries = Vec::with_capacity(n);
@@ -1006,7 +1015,7 @@ impl Walk {
             Kind::HamtShard => {
                 let held = block.len() + cid.len() + MAP_ENTRY;
                 if !core.fits(held) {
-                    return Err(Failure::Unverifiable);
+                    return Err(Failure::Memory);
                 }
                 core.hold(held);
                 let mut h = Hamt {
@@ -1017,7 +1026,7 @@ impl Walk {
                 h.shards.insert(cid.to_vec(), block.to_vec());
                 self.hamt = Some(h);
                 if !self.push_shards(core, &node, 1) {
-                    return Err(Failure::Unverifiable);
+                    return Err(Failure::Memory);
                 }
                 Ok(())
             }
@@ -1112,7 +1121,7 @@ impl Walk {
             }
         };
         if !pushed {
-            self.end(core, Failure::Unverifiable);
+            self.end(core, Failure::Memory);
         }
     }
 
@@ -1165,14 +1174,14 @@ impl Walk {
         if !h.shards.contains_key(cid) {
             let held = block.len() + cid.len() + MAP_ENTRY;
             if !core.fits(held) {
-                return Err(Failure::Unverifiable);
+                return Err(Failure::Memory);
             }
             core.hold(held);
             h.held += held;
             h.shards.insert(cid.to_vec(), block.to_vec());
         }
         if !self.push_shards(core, &node, level + 1) {
-            return Err(Failure::Unverifiable);
+            return Err(Failure::Memory);
         }
         Ok(())
     }
@@ -1206,7 +1215,7 @@ impl Walk {
         if let Some(cid) = found {
             core.unhold(h.held);
             if !self.push_first(core, &cid, What::Index) {
-                self.end(core, Failure::Unverifiable);
+                self.end(core, Failure::Memory);
             }
             return;
         }
@@ -1227,7 +1236,7 @@ impl Walk {
             .saturating_add(owned);
         if !core.fits(held) {
             core.unhold(h.held);
-            return self.end(core, Failure::Unverifiable);
+            return self.end(core, Failure::Memory);
         }
         core.hold(held);
         let mut entries = Vec::with_capacity(n);
@@ -1273,7 +1282,7 @@ impl Walk {
         let n = self.segments.len() + usize::from(last.is_some());
         let bytes = self.segments.iter().map(String::len).sum::<usize>() + last.map_or(0, str::len);
         if !self.reserve_path(core, n, bytes) {
-            return Err(Failure::Unverifiable);
+            return Err(Failure::Memory);
         }
         let mut served = Vec::with_capacity(n);
         served.extend(self.segments.iter().cloned());
@@ -1349,7 +1358,7 @@ impl Walk {
         if !core.fits(len) {
             drop(entries);
             core.unhold(held);
-            return self.end(core, Failure::Unverifiable);
+            return self.end(core, Failure::Memory);
         }
         core.hold(len);
         let (h, body) = gateway::listing(&title, &base, &entries, len);
@@ -1541,7 +1550,7 @@ impl Walk {
             return Err(Failure::Unverifiable);
         }
         if !self.needs_room(core, n, cids) {
-            return Err(Failure::Unverifiable);
+            return Err(Failure::Memory);
         }
         for (link, child, size) in within() {
             self.add_need(
@@ -1704,7 +1713,7 @@ impl Walk {
                 // Room comes back as sections are used and the body is
                 // read; with neither waiting, it never will.
                 if c.pending == 0 && core.awaiting() == 0 {
-                    return Err(Failure::Unverifiable);
+                    return Err(Failure::Memory);
                 }
                 return Ok(());
             }
@@ -1728,7 +1737,7 @@ impl Walk {
                 // The section's bytes were in the reader's room and the
                 // frame's; its job's own structures need room of their own.
                 if !core.fits(SECTION_COST) {
-                    return Err(Failure::Unverifiable);
+                    return Err(Failure::Memory);
                 }
                 c.pending += size + SECTION_COST;
                 core.hold(size + SECTION_COST);
@@ -1786,7 +1795,7 @@ impl Walk {
         let take = n.min(r.reserved);
         if n > take && !core.fits(n - take) {
             core.unhold(n);
-            return self.end(core, Failure::Unverifiable);
+            return self.end(core, Failure::Memory);
         }
         r.buf.extend_from_slice(&bytes);
         r.reserved -= take;

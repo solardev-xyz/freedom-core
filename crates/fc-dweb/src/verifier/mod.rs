@@ -15,8 +15,10 @@
 //! - **Outputs** ([`Verifier::poll`]): pieces to fetch and cancel, credit
 //!   for the streamed pieces, hash jobs, then either an error before the
 //!   head or the head, the verified body and its end or abort.
-//! - **Memory:** everything the request holds counts against its 8 MiB
-//!   ([`REQUEST_BUDGET`]), reserved before it is asked for. A streamed
+//! - **Memory:** everything the request holds counts against its budget,
+//!   by its scheme ([`budget`]): 2 MiB for Swarm, 8 MiB for IPFS, reserved
+//!   before it is asked for. A walk that can't fit and has no other way on
+//!   ends with the budget's own text ([`MEMORY`]). A streamed
 //!   piece's 128 KiB window is reserved when the piece is asked for, and
 //!   credit goes back only for bytes that have left the machine, released
 //!   or dropped, so a piece never has more in flight than its window.
@@ -40,9 +42,25 @@ pub use jobs::{Hashed, Job, JobId};
 use crate::plan::{Backend, ContentTrust, ErrorPlan, Node, ResponseOp, Root, Trust, Verify};
 use crate::validate::Refusal;
 
-/// A request's memory: its piece windows, the pieces and blocks it holds,
-/// its jobs' bytes and its queued body (0009, Bounds).
-pub const REQUEST_BUDGET: usize = 8 << 20;
+/// A Swarm request's memory (0009, Bounds): its largest holding is a
+/// manifest lookup, the root node parsed beside the next node's join and
+/// parse; a file's leaves stream through one 128 KiB window.
+pub const SWARM_BUDGET: usize = 2 << 20;
+/// An IPFS request's: a CAR's reading room and its sections' jobs, or raw
+/// blocks of up to 2 MiB, and a directory's or a HAMT's structure.
+pub const IPFS_BUDGET: usize = 8 << 20;
+/// The larger budget, IPFS's.
+pub const REQUEST_BUDGET: usize = IPFS_BUDGET;
+
+/// A request's memory by its plan's root: its piece windows, the pieces and
+/// blocks it holds, its parsed structure, its jobs' bytes and its queued
+/// body (0009, Bounds).
+pub fn budget(root: &Root) -> usize {
+    match root {
+        Root::Swarm(_) => SWARM_BUDGET,
+        Root::Ipfs(_) | Root::Ipns(_) => IPFS_BUDGET,
+    }
+}
 /// A streamed piece's window, each direction (0007).
 pub const STREAM_WINDOW: usize = 128 << 10;
 /// The verified body's window: how far the body may run ahead of main's
@@ -219,6 +237,9 @@ pub const IPFS_UNVERIFIABLE: &str = "This content can't be verified with the ext
 pub const IPFS_MALFORMED: &str = "This IPFS content is malformed";
 pub const IPFS_NOT_FOUND: &str = "Not found on the external IPFS gateway";
 pub const IPFS_STOPPED: &str = "The external IPFS gateway stopped sending";
+/// A walk that needs more memory than its request's budget, where it has
+/// no other way on: the core's limit, not the node's or the content's.
+pub const MEMORY: &str = "This content needs more memory to verify than one request may use";
 pub const DEADLINE_PASSED: &str = "Deadline passed";
 pub const TOO_MANY_REQUESTS: &str = "Too many requests";
 pub const CANCELLED: &str = "The request was cancelled";
@@ -230,6 +251,11 @@ pub(crate) enum Failure {
     VerificationFailed,
     /// Content the core can't check, or a walk past its bounds.
     Unverifiable,
+    /// A reservation that doesn't fit the request's memory, where the walk
+    /// has no other way on: no fallback (raw blocks for a CAR) and nothing
+    /// to wait for. Its own text ([`MEMORY`]), so a page and a report tell
+    /// the core's limit from content it can't check.
+    Memory,
     /// Authentic content that can't be decoded or is inconsistent (IPFS).
     Malformed,
     /// A piece's final answer was this status.
@@ -279,6 +305,7 @@ impl Failure {
                 ErrorPlan::new(502, t.verification_failed)
             }
             Self::Unverifiable => ErrorPlan::new(502, t.unverifiable),
+            Self::Memory => ErrorPlan::new(502, MEMORY),
             Self::Malformed => ErrorPlan::new(502, IPFS_MALFORMED),
             Self::Status(404) => ErrorPlan::new(404, t.not_found),
             Self::Status(status) => {
@@ -316,6 +343,7 @@ impl Failure {
                 (AbortCode::VerificationFailed, t.verification_failed)
             }
             Self::Unverifiable => (AbortCode::Unverifiable, t.unverifiable),
+            Self::Memory => (AbortCode::Unverifiable, MEMORY),
             Self::Malformed => (AbortCode::Malformed, IPFS_MALFORMED),
             Self::Status(_)
             | Self::Piece(_)
@@ -393,9 +421,16 @@ pub(crate) struct Core<T> {
     pieces: BTreeMap<PieceId, Piece<T>>,
     next_piece: u64,
     jobs: BTreeMap<u64, (T, usize)>,
+    /// The jobs' bytes, all together.
+    jobs_held: usize,
     next_job: u64,
     /// Bytes the walk holds: piece bodies, stream bytes, parsed structure.
     walk_held: usize,
+    /// The most the request has reserved at once ([`Verifier::peak`]).
+    peak: usize,
+    /// Bytes released while the walk ran that it didn't hold: a release
+    /// without its hold ([`Verifier::over_released`]).
+    over_released: usize,
     queue: VecDeque<Queued>,
     queued: usize,
     /// The verified body sent, and main's credit for it.
@@ -424,8 +459,11 @@ impl<T: Copy> Core<T> {
             pieces: BTreeMap::new(),
             next_piece: 0,
             jobs: BTreeMap::new(),
+            jobs_held: 0,
             next_job: 0,
             walk_held: 0,
+            peak: 0,
+            over_released: 0,
             queue: VecDeque::new(),
             queued: 0,
             sent: 0,
@@ -446,8 +484,23 @@ impl<T: Copy> Core<T> {
                 }
             })
             .sum();
-        let jobs: usize = self.jobs.values().map(|(_, size)| size).sum();
-        pieces + jobs + self.walk_held + self.queued
+        pieces + self.jobs_held + self.walk_held + self.queued
+    }
+
+    /// Notes a reservation's growth in the request's peak.
+    fn grew(&mut self) {
+        self.peak = self.peak.max(self.reserved());
+    }
+
+    /// `n` bytes leave the walk's holding. More than it holds, while the
+    /// walk runs, is a release without its hold: counted, and never taken
+    /// below zero. Once the walk has ended its holding is gone at once, and
+    /// what it releases after that is nothing.
+    fn release(&mut self, n: usize) {
+        if n > self.walk_held && !self.ended() {
+            self.over_released += n - self.walk_held;
+        }
+        self.walk_held = self.walk_held.saturating_sub(n);
     }
 
     /// Whether `n` more bytes fit the request's memory.
@@ -479,10 +532,11 @@ impl<T: Copy> Core<T> {
     /// [`Core::fits`] for any it allocates.
     pub(crate) fn hold(&mut self, n: usize) {
         self.walk_held += n;
+        self.grew();
     }
 
     pub(crate) fn unhold(&mut self, n: usize) {
-        self.walk_held = self.walk_held.saturating_sub(n);
+        self.release(n);
     }
 
     /// Asks for a piece, reserving its room: a whole piece's bound, or a
@@ -531,6 +585,7 @@ impl<T: Copy> Core<T> {
             stream,
             max_bytes,
         }));
+        self.grew();
         Some(id)
     }
 
@@ -581,13 +636,14 @@ impl<T: Copy> Core<T> {
 
     pub(crate) fn hash(&mut self, tag: T, work: jobs::Work) {
         let size = work.size();
-        self.walk_held = self.walk_held.saturating_sub(size);
+        self.release(size);
         let id = JobId {
             request: self.request,
             seq: self.next_job,
         };
         self.next_job += 1;
         self.jobs.insert(id.seq, (tag, size));
+        self.jobs_held += size;
         self.outputs.push_back(Output::Hash(Job { id, work }));
     }
 
@@ -626,7 +682,7 @@ impl<T: Copy> Core<T> {
     /// streamed piece they came from.
     pub(crate) fn body(&mut self, bytes: Vec<u8>, from: Option<PieceId>) {
         let n = bytes.len();
-        self.walk_held = self.walk_held.saturating_sub(n);
+        self.release(n);
         if n == 0 {
             return;
         }
@@ -910,6 +966,7 @@ impl<T: Copy, W: Events<T>> Machine<T, W> {
         let Some((tag, size)) = self.core.jobs.remove(&id.seq) else {
             return Err(Misuse::DuplicateJob);
         };
+        self.core.jobs_held = self.core.jobs_held.saturating_sub(size);
         if let Some(walk) = self.walk.as_mut() {
             self.core.hold(size);
             walk.hashed(&mut self.core, tag, result.verdict, result.work);
@@ -1003,8 +1060,8 @@ macro_rules! machine {
 /// What a request runs under, beside its plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
-    /// The request's memory bound ([`REQUEST_BUDGET`]; smaller in tests of
-    /// budgets exhausted at each reservation).
+    /// The request's memory bound ([`budget`] for its scheme; smaller in
+    /// tests of budgets exhausted at each reservation).
     pub budget: usize,
     /// The wall clock, in Unix seconds, for an IPNS record's validity.
     pub now: i64,
@@ -1111,6 +1168,24 @@ impl Verifier {
         match &self.inner {
             Inner::Swarm(m) => m.core.reserved(),
             Inner::Ipfs(m) => m.core.reserved(),
+        }
+    }
+
+    /// The most the request has reserved at once, within an input too: what
+    /// its memory reached, by its own count.
+    pub fn peak(&self) -> usize {
+        match &self.inner {
+            Inner::Swarm(m) => m.core.peak,
+            Inner::Ipfs(m) => m.core.peak,
+        }
+    }
+
+    /// Bytes the walk released without holding them: zero unless its
+    /// accounting is wrong, which the tests check after every input.
+    pub fn over_released(&self) -> usize {
+        match &self.inner {
+            Inner::Swarm(m) => m.core.over_released,
+            Inner::Ipfs(m) => m.core.over_released,
         }
     }
 

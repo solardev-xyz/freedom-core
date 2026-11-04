@@ -523,6 +523,9 @@ enum Kind {
     Encrypted,
     /// A feed with no update: the node's 404, with the core's message.
     NodeMiss,
+    /// A manifest node past what a Swarm request's 2 MiB holds beside its
+    /// root: the budget's 502 (deviation `request-memory`).
+    Memory,
 }
 
 fn kind_of(e: &Json) -> Kind {
@@ -535,6 +538,7 @@ fn kind_of(e: &Json) -> Kind {
     match case {
         "feed-encrypted" | "encrypted-below-plain-root" => Kind::Encrypted,
         "feed-empty" => Kind::NodeMiss,
+        "memory-limit-outside" => Kind::Memory,
         _ => Kind::Same,
     }
 }
@@ -554,11 +558,12 @@ fn big(case: &str, id: &str, part: usize) -> bool {
 #[test]
 fn bzz_exchanges() {
     let n = replay(|case, _| !case.starts_with("file-67108865-"));
-    assert_eq!(n.total, 675, "{n:?}");
+    assert_eq!(n.total, 677, "{n:?}");
     assert_eq!(n.unplanned, 2, "{n:?}");
     assert_eq!(n.kinds[&Kind::MultiRange], 21, "{n:?}");
     assert_eq!(n.kinds.get(&Kind::Encrypted), Some(&8), "{n:?}");
     assert_eq!(n.kinds.get(&Kind::NodeMiss), Some(&7), "{n:?}");
+    assert_eq!(n.kinds.get(&Kind::Memory), Some(&1), "{n:?}");
     assert!(n.runs > 400, "{n:?}");
 }
 
@@ -751,6 +756,13 @@ fn replay_warm(choose: impl Fn(&str, &str) -> bool, warm: bool) -> Replayed {
                     "{id}"
                 );
             }
+            Kind::Memory => {
+                assert_eq!(
+                    got.ending,
+                    Some(Ending::Error(502, fc_dweb::verifier::MEMORY.to_owned())),
+                    "{id}"
+                );
+            }
         }
     }
     for id in &unplanned {
@@ -893,7 +905,7 @@ fn every_swarm_request_case() {
             n += 1;
         }
     }
-    assert_eq!(n, 33, "{n}");
+    assert_eq!(n, 35, "{n}");
 }
 
 /// The same cases with replies and hash results out of order, and a page
@@ -1087,8 +1099,9 @@ fn budgets_exhausted_at_each_reservation() {
                     assert_eq!(got.body, honest.body, "{budget}");
                     assert_eq!(got.head, honest.head, "{budget}");
                 }
+                // Refused for its memory, with the budget's own text.
                 Some(Ending::Error(502, m)) | Some(Ending::Abort(_, m)) => {
-                    assert_eq!(m, fc_dweb::verifier::SWARM_UNVERIFIABLE, "{budget}");
+                    assert_eq!(m, fc_dweb::verifier::MEMORY, "{budget}");
                 }
                 other => panic!("{budget}: {other:?}"),
             }
@@ -1334,7 +1347,7 @@ fn bytes_stashed_before_an_early_end_are_still_used() {
 #[test]
 fn bzz_exchanges_with_a_warm_cache() {
     let n = replay_warm(|case, _| !case.starts_with("file-67108865-"), true);
-    assert_eq!(n.total, 675, "{n:?}");
+    assert_eq!(n.total, 677, "{n:?}");
     assert!(n.cached > 100, "{n:?}");
 }
 

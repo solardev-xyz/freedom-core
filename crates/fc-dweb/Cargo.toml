@@ -27,5 +27,8 @@ base64 = "0.22"
 cap = "=0.1.2"
 ed25519-dalek = { version = "3.0", default-features = false }
 hex = "0.4"
+# Inside the cap: an allocator whose high-water mark resets, for each
+# request's real peak in the memory tests.
+peak_alloc = "=0.3.0"
 serde_json = "1"
 sha2 = "0.11"
