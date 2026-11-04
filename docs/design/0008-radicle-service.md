@@ -1031,6 +1031,11 @@ The source research for this design found four ways the node gives away more tha
    - it replaces `rad::init`'s `git push` (`hw/radicle/src/rad.rs:107`–`120`);
    - at start, libradicle empties libgit2's configuration search paths, so no global or system git configuration applies.
 
+9a. **The host's repository gate, and repairs with the host's key.** Found when the service was built (step 4): heartwood's gate (item 14) and its online repair (item 13) need a way in from the host.
+- `Options` takes the host's repository gate. Without one, the node gets an always-open gate, as the add-on and UniFFI always have.
+- `Embedded` steps one online repair unit (heartwood's `Repair::online`), signed with the key the node runs as. So after `rad.start` the service keeps no copy of the key ([The sealed release](#the-sealed-release)). Before the start, reconciliation signs with the key `rad.identity` delivered.
+- `Embedded` removes a quarantined repository (heartwood's `remove_repo`): it unseeds it through the node, then deletes it with the profile's policy store and COB cache.
+
 **heartwood** (the `freedom/embed` fork):
 
 10. **An optional control socket:**
@@ -1334,7 +1339,7 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 
 1. **Tests first,** in freedom-browser: the contract suite, the fixture repository and golden vectors from the v0.8.0 add-on.
 2. **Upstream:**
-   - libradicle items 1, 2 and 4–9 (item 3 needs nothing now);
+   - libradicle items 1, 2 and 4–9 (item 3 needs nothing now), and 9a, which step 4 found it needs;
    - heartwood items 10–14, on the `freedom/embed` fork.
 
    The service can start on items 1, 2, 4, 9, 10 and 13.
