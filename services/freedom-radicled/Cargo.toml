@@ -57,12 +57,12 @@ radicle = { git = "https://github.com/solardev-xyz/heartwood", rev = "6b2dc16fa6
 # freedom-ipfs-addr, the gate's pure half with no network stack (freedom-ipfs
 # #55). At freedom-ipfsd's freedom-ipfs pin, which fc-nat64 also takes it at,
 # so that it is one package.
-freedom-ipfs-addr = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "df5b69446c6d252cfaafd35ae618f62963d2e231" }
+freedom-ipfs-addr = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "af98afa939c4f2d479c562f1c4e280107e6552b0" }
 # `socks5` mode's names, resolved through Arti's RESOLVE (0008, "Modes"): the
 # SOCKS5 client's byte layer with its blocking driver, which heartwood's
 # resolver thread runs (freedom-ipfs #56). Its only dependencies are
 # freedom-ipfs-addr and thiserror.
-freedom-ipfs-socks = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "df5b69446c6d252cfaafd35ae618f62963d2e231" }
+freedom-ipfs-socks = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "af98afa939c4f2d479c562f1c4e280107e6552b0" }
 # `direct` mode's NAT64 prefixes, learned as freedom-ipfsd learns them (0008,
 # "The address policy"): shared by the services, by path.
 fc-nat64 = { path = "../nat64" }
