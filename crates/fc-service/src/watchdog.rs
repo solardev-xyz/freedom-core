@@ -8,6 +8,11 @@
 //!   teardown and disarms it once quiescence is proven. If it fires, it
 //!   logs its fixed reason (`teardown_unproven`) and exits 70, releasing
 //!   nothing.
+//! - **A standing watchdog** ([`Standing`]) is one thread for the service's
+//!   lifetime, armed and disarmed for one bound after another: radicled's
+//!   repair units (design 0008, "The unit watchdog"). No thread per bound,
+//!   so never two at once, and one that can't be started fails the
+//!   service's start, not a bound.
 //!
 //! A firing watchdog never waits on stderr: its line has at most 150 ms,
 //! under a bound armed before it is written.
@@ -73,6 +78,110 @@ impl Watchdog {
     }
 }
 
+/// A watchdog on one thread of its own for its whole life, armed for one
+/// bound after another. Arming it replaces the bound before; [`Armed`] names
+/// the bound, so standing down a bound that was replaced does nothing.
+/// Dropping it ends its thread once no bound is armed: a bound still armed
+/// is kept, and fires.
+pub struct Standing {
+    shared: Arc<Shared>,
+}
+
+/// A bound [`Standing::arm`] armed: its generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Armed(u64);
+
+struct Shared {
+    bound: Mutex<Bound>,
+    wake: Condvar,
+}
+
+struct Bound {
+    /// The last bound armed's generation.
+    generation: u64,
+    /// When the bound armed ends, if one is.
+    deadline: Option<Instant>,
+    /// The `Standing` is gone: no bound can be armed again.
+    dropped: bool,
+}
+
+impl Standing {
+    /// Starts its thread, named `reason`, which ends the process with `exit`,
+    /// logging `reason` (a fixed name), when a bound runs out. An error if
+    /// the thread can't be started.
+    pub fn start(reason: &'static str, exit: Exit) -> std::io::Result<Standing> {
+        let shared = Arc::new(Shared {
+            bound: Mutex::new(Bound {
+                generation: 0,
+                deadline: None,
+                dropped: false,
+            }),
+            wake: Condvar::new(),
+        });
+        let state = shared.clone();
+        std::thread::Builder::new()
+            .name(reason.into())
+            .spawn(move || state.watch(reason, exit))?;
+        Ok(Standing { shared })
+    }
+
+    /// Arms it to end the process `after` from now, replacing the bound
+    /// armed before, if any.
+    pub fn arm(&self, after: Duration) -> Armed {
+        let deadline = Instant::now() + after;
+        let mut bound = self.shared.lock();
+        bound.generation += 1;
+        bound.deadline = Some(deadline);
+        let armed = Armed(bound.generation);
+        drop(bound);
+        self.shared.wake.notify_all();
+        armed
+    }
+
+    /// Stands `armed` down, if it is still the bound armed.
+    pub fn disarm(&self, armed: Armed) {
+        let mut bound = self.shared.lock();
+        if bound.generation == armed.0 {
+            bound.deadline = None;
+            drop(bound);
+            self.shared.wake.notify_all();
+        }
+    }
+}
+
+impl Drop for Standing {
+    fn drop(&mut self) {
+        self.shared.lock().dropped = true;
+        self.shared.wake.notify_all();
+    }
+}
+
+impl Shared {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Bound> {
+        self.bound.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// The thread: waits for a bound, and fires if one runs out.
+    fn watch(&self, reason: &'static str, exit: Exit) {
+        let mut bound = self.lock();
+        loop {
+            bound = match bound.deadline {
+                Some(deadline) => {
+                    let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                        fire(reason, exit);
+                    };
+                    match self.wake.wait_timeout(bound, left) {
+                        Ok((bound, _)) => bound,
+                        Err(poisoned) => poisoned.into_inner().0,
+                    }
+                }
+                None if bound.dropped => return,
+                None => self.wake.wait(bound).unwrap_or_else(|p| p.into_inner()),
+            };
+        }
+    }
+}
+
 fn fire(reason: &'static str, exit: Exit) -> ! {
     crate::exit::exit_reporting(exit, crate::exit::REPORT_BOUND, || {
         crate::log::error(
@@ -114,8 +223,56 @@ mod tests {
                 .disarm();
                 std::thread::sleep(Duration::from_millis(400));
             }
+            "standing-fire" => {
+                let standing = Standing::start("unit_overrun", Exit::Internal).unwrap();
+                let _armed = standing.arm(Duration::from_millis(100));
+                std::thread::sleep(Duration::from_secs(10));
+            }
+            "standing-disarm" => {
+                // Each bound is short enough to fire within the run unless
+                // it is stood down.
+                let standing = Standing::start("unit_overrun", Exit::Internal).unwrap();
+                let started = threads();
+                assert_eq!(started.is_some(), cfg!(target_os = "linux"));
+                for _ in 0..50 {
+                    let armed = standing.arm(Duration::from_millis(200));
+                    assert_eq!(threads(), started, "a bound starts no thread");
+                    standing.disarm(armed);
+                }
+                // Arming again replaces the bound before: the first would
+                // have run out by the end of the second sleep.
+                standing.arm(Duration::from_millis(300));
+                std::thread::sleep(Duration::from_millis(200));
+                let second = standing.arm(Duration::from_millis(300));
+                std::thread::sleep(Duration::from_millis(200));
+                standing.disarm(second);
+                std::thread::sleep(Duration::from_millis(400));
+                assert_eq!(threads(), started, "one thread for every bound");
+            }
+            "standing-replaced" => {
+                // Standing down a bound that was replaced leaves the one
+                // that replaced it.
+                let standing = Standing::start("unit_overrun", Exit::Internal).unwrap();
+                let first = standing.arm(Duration::from_secs(10));
+                let _second = standing.arm(Duration::from_millis(100));
+                standing.disarm(first);
+                std::thread::sleep(Duration::from_secs(10));
+            }
+            "standing-dropped" => {
+                // A bound still armed when the watchdog is dropped is kept.
+                let standing = Standing::start("unit_overrun", Exit::Internal).unwrap();
+                standing.arm(Duration::from_millis(100));
+                drop(standing);
+                std::thread::sleep(Duration::from_secs(10));
+            }
             other => panic!("unknown mode {other}"),
         }
+    }
+
+    /// How many threads the process has; `None` where `/proc` doesn't list
+    /// them (Linux does).
+    fn threads() -> Option<usize> {
+        Some(std::fs::read_dir("/proc/self/task").ok()?.count())
     }
 
     fn run_child(mode: &str) -> (Option<i32>, String) {
@@ -152,5 +309,43 @@ mod tests {
         let (code, stderr) = run_child("disarm");
         assert_eq!(code, Some(0), "{stderr}");
         assert!(!stderr.contains("watchdog ends"), "{stderr}");
+    }
+
+    #[test]
+    fn a_standing_watchdog_fires_when_its_bound_runs_out() {
+        for mode in ["standing-fire", "standing-replaced", "standing-dropped"] {
+            let started = Instant::now();
+            let (code, stderr) = run_child(mode);
+            assert_eq!(code, Some(70), "{mode}: {stderr}");
+            assert!(
+                stderr.contains(r#""reason":"unit_overrun""#),
+                "{mode}: {stderr}"
+            );
+            assert!(started.elapsed() < Duration::from_secs(5), "{mode}");
+        }
+    }
+
+    #[test]
+    fn a_standing_watchdog_rearms_one_thread() {
+        let (code, stderr) = run_child("standing-disarm");
+        assert_eq!(code, Some(0), "{stderr}");
+        assert!(!stderr.contains("watchdog ends"), "{stderr}");
+    }
+
+    #[test]
+    fn an_idle_standing_watchdog_ends_its_thread_when_dropped() {
+        let standing = Standing::start("dropped_idle", Exit::Internal).unwrap();
+        let shared = Arc::downgrade(&standing.shared);
+        standing.disarm(standing.arm(Duration::from_secs(10)));
+        drop(standing);
+        // The thread held the last reference.
+        let started = Instant::now();
+        while shared.strong_count() > 0 {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the thread ended"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }

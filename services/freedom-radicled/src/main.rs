@@ -38,7 +38,9 @@
 //! **Exit codes** (0001's, and 0008's): 0 after `rad.shutdown`, stdin EOF,
 //! the parent gone, or a failed start step answered first; 64 for usage,
 //! including an environment main should have cleared; 70 for a panic
-//! outside a request; 74 for storage; 75 when the gate is held; 76 for a
+//! outside a request, a repair unit's overrun (`unit_overrun`), or a
+//! service that can't start (the OS's randomness, or the unit watchdog's
+//! thread); 74 for storage; 75 when the gate is held; 76 for a
 //! protocol error, the handshake's deadline, `rad.identity`'s deadline or
 //! the writer stall; 77 when confinement refuses the process
 //! (`confinement`: a thread or descriptor it didn't expect, or its own rules
@@ -186,7 +188,19 @@ fn serve(
         "serving",
         json!({ "network": network.to_json(), "confinement": confinement }),
     );
-    let service = match RadicleService::new(grant, &network, confinement) {
+    // The repair units' watchdog: one thread for the service's lifetime. One
+    // that can't be started fails the start, before any unit runs.
+    let units = match units::UnitWatch::start(testhooks::unit_limit(units::UNIT_LIMIT)) {
+        Ok(watch) => Arc::new(watch),
+        Err(e) => {
+            log::error(
+                "cannot start the unit watchdog",
+                json!({ "error": e.kind().to_string() }),
+            );
+            return Exit::Internal;
+        }
+    };
+    let service = match RadicleService::new(grant, &network, confinement, units) {
         Some(service) => Arc::new(service),
         None => {
             log::error("the OS random number generator failed", json!({}));
