@@ -15,7 +15,8 @@ use landlock::{
 
 use super::seccomp::{self, Installed};
 use super::{
-    Entry, Invalid, Network, Options, Policy, REEXEC_MARKER, Report, Resolution, Status, resolver,
+    Entry, Invalid, Network, Options, Policy, REEXEC_MARKER, Report, Resolution, Resolver, Status,
+    resolver,
 };
 
 /// The newest Landlock ABI this build knows (the `landlock` crate's).
@@ -40,8 +41,8 @@ pub(super) fn confine(policy: &Policy, options: &Options) -> Result<Report, Inva
     unregistered_descriptor(&policy.descriptors)?;
     // Read from nsswitch.conf; no lookup is made before the rules, so no
     // NSS source can connect (and keep) a socket across them.
-    let resolution =
-        (policy.system_resolver && policy.network == Network::Direct).then(resolver::resolution);
+    let resolution = (policy.resolver == Resolver::System && policy.network == Network::Direct)
+        .then(resolver::resolution);
     // Both mechanisms need it, and it is wanted whatever they do.
     let _ = rustix::thread::set_no_new_privs(true);
     let landlock = landlock(policy, options)?;
@@ -332,7 +333,7 @@ fn restrict(policy: &Policy, abi: ABI) -> Result<(), Refused> {
             .add_rule(PathBeneath::new(fd, read_write))
             .map_err(rules)?;
     }
-    let mut read_only = super::system_read_only();
+    let mut read_only = super::system_read_only(policy.resolver);
     read_only.extend(policy.read_only.iter().cloned());
     for path in &read_only {
         let fd = PathFd::new(path)
@@ -528,7 +529,7 @@ mod tests {
             refer: false,
             min_abi: 1,
             network,
-            system_resolver: false,
+            resolver: Resolver::None,
             descriptors: Vec::new(),
             interface_index: false,
         }

@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use fc_sys::macos::{self as sys, Filter};
@@ -247,17 +247,77 @@ fn grants(policy: &Policy) -> Result<Grants, Invalid> {
         })?;
         grants.read_write.push(real);
     }
-    for path in &policy.read_only {
+    let system = super::system_read_only(policy.resolver);
+    for path in policy.read_only.iter().chain(&system) {
         let Ok(real) = std::fs::canonicalize(path) else {
             continue;
         };
-        if real.is_dir() {
-            grants.read_only_dirs.push(real);
+        let list = if real.is_dir() {
+            &mut grants.read_only_dirs
         } else {
-            grants.read_only_files.push(real);
+            &mut grants.read_only_files
+        };
+        if !list.contains(&real) {
+            list.push(real);
+        }
+        for link in crossed_links(path) {
+            if !grants.links.contains(&link) {
+                grants.links.push(link);
+            }
         }
     }
     Ok(grants)
+}
+
+/// The most links one path may cross, as the kernel's `MAXSYMLINKS`.
+const MAX_LINKS: usize = 32;
+
+/// The symlinks `path` crosses on its way to where it really lives, each
+/// named where it really lives (its directory resolved): `/etc` and
+/// `/private/etc/resolv.conf` for `/etc/resolv.conf`. Seatbelt asks for
+/// metadata on each link it resolves when the service opens the path it
+/// was given. A path that isn't absolute, or crosses more than
+/// [`MAX_LINKS`], gives what was found.
+fn crossed_links(path: &Path) -> Vec<PathBuf> {
+    use std::ffi::OsString;
+    use std::path::Component;
+
+    fn names(path: &Path) -> Vec<OsString> {
+        path.components()
+            .filter_map(|component| match component {
+                Component::Normal(name) => Some(name.to_os_string()),
+                Component::ParentDir => Some(OsString::from("..")),
+                _ => None,
+            })
+            .rev()
+            .collect()
+    }
+
+    let mut links = Vec::new();
+    if !path.is_absolute() {
+        return links;
+    }
+    let mut resolved = PathBuf::from("/");
+    // What is left to walk, next name last.
+    let mut rest = names(path);
+    while let Some(name) = rest.pop() {
+        if name == ".." {
+            resolved.pop();
+            continue;
+        }
+        let next = resolved.join(&name);
+        match std::fs::read_link(&next) {
+            Ok(target) if links.len() < MAX_LINKS => {
+                links.push(next);
+                if target.is_absolute() {
+                    resolved = PathBuf::from("/");
+                }
+                rest.extend(names(&target));
+            }
+            _ => resolved = next,
+        }
+    }
+    links
 }
 
 /// A report for an outer sandbox: every property `blocked`.
@@ -408,7 +468,7 @@ mod tests {
             refer: false,
             min_abi: 1,
             network: Network::Offline,
-            system_resolver: false,
+            resolver: crate::confine::Resolver::None,
             descriptors: Vec::new(),
             interface_index: false,
         };
@@ -420,5 +480,55 @@ mod tests {
             [PathBuf::from("/private/etc/hosts")]
         );
         assert!(grants.read_only_dirs.is_empty());
+        // /etc is a link: the path the service opens crosses it.
+        assert_eq!(grants.links, [PathBuf::from("/etc")]);
+    }
+
+    #[test]
+    fn a_service_s_own_resolver_reads_resolv_conf_and_hosts_through_their_links() {
+        let policy = Policy {
+            read_write: Vec::new(),
+            read_only: Vec::new(),
+            refer: false,
+            min_abi: 1,
+            network: Network::Direct,
+            resolver: crate::confine::Resolver::ResolvConf,
+            descriptors: Vec::new(),
+            interface_index: false,
+        };
+        let grants = grants(&policy).unwrap();
+        for file in ["/etc/resolv.conf", "/etc/hosts"] {
+            let Ok(real) = std::fs::canonicalize(file) else {
+                continue;
+            };
+            assert!(grants.read_only_files.contains(&real), "{file}");
+            // Every link on the way, so the path as named opens.
+            for link in crossed_links(Path::new(file)) {
+                assert!(grants.links.contains(&link), "{link:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_links_a_path_crosses_are_named_where_they_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir(real.join("target")).unwrap();
+        std::fs::write(real.join("target").join("file"), b"x").unwrap();
+        // A relative link to a directory, then an absolute one to a file.
+        std::os::unix::fs::symlink("target", real.join("dir")).unwrap();
+        std::os::unix::fs::symlink(real.join("dir").join("file"), real.join("leaf")).unwrap();
+        let links = crossed_links(&real.join("leaf"));
+        assert_eq!(links, [real.join("leaf"), real.join("dir")]);
+        // Through the temporary directory's own link (/var), resolved.
+        let named = dir.path().join("leaf");
+        let through = crossed_links(&named);
+        assert!(
+            through.ends_with(&[real.join("leaf"), real.join("dir")]),
+            "{through:?}"
+        );
+        // A loop gives up at the kernel's bound.
+        std::os::unix::fs::symlink(real.join("loop"), real.join("loop")).unwrap();
+        assert_eq!(crossed_links(&real.join("loop")).len(), MAX_LINKS);
     }
 }
