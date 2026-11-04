@@ -60,6 +60,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 zeroize = "1"
 
+# The dirty marker's opens (src/marker.rs): `O_NOFOLLOW` and `O_NONBLOCK`.
+# Already in libradicle's graph.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
 

@@ -993,6 +993,7 @@ dependencies = [
  "fc-service",
  "fc-sys",
  "getrandom 0.4.3",
+ "libc",
  "libradicle",
  "radicle",
  "rand_core 0.10.1",
