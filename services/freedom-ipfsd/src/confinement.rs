@@ -13,8 +13,11 @@ use fc_service::network::NetworkPolicy;
 /// system's own ([`resolver_grants`]), and TCP to the proxy's port alone in
 /// `socks5` mode, keeping `descriptors` (the lock).
 ///
-/// - **`system_resolver`:** freedom-ipfs-net resolves names through the C
-///   library (`getaddrinfo`), so the report says whether that reaches DNS.
+/// - **`resolver`:** freedom-ipfs-net resolves names with hickory over
+///   `/etc/resolv.conf`'s servers, never through the C library's
+///   `getaddrinfo` ([`confine::Resolver::ResolvConf`]): nothing of
+///   `nsswitch.conf` or glibc's NSS sources is granted, and the report's
+///   `resolution` says `resolv_conf`.
 /// - **`interface_index`:** NAT64 discovery looks up a link-local
 ///   resolver's named zone (`fe80::1%eth0`) through `SIOCGIFINDEX`, the one
 ///   `ioctl` this adds, in `direct` mode alone: discovery runs only there.
@@ -31,7 +34,7 @@ pub fn policy(
         refer: false,
         min_abi: 1,
         network: network.confinement(),
-        system_resolver: true,
+        resolver: confine::Resolver::ResolvConf,
         descriptors,
         interface_index: matches!(network, NetworkPolicy::Direct),
     }

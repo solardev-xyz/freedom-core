@@ -993,6 +993,10 @@ The source research for this design found four ways the node gives away more tha
 - **This is Radicle's model, unchanged:**
   - a seeded repository is announced in the node's signed inventory and served to peers that ask for it;
   - seeding happens only on an explicit seed, clone or sync, and on the default repository at start.
+- **The default seeding policy is `block`** (decided 2026-11-04).
+  - heartwood's default is `block`, but `config.json` can change it: `node.seedingPolicy.default` can be `allow`, and the deprecated `node.policy` and `node.scope` override it.
+  - So the service forces `block` in memory, as it does the routing fields, through a new libradicle `Options` field ([Upstream changes](#upstream-changes), libradicle item 9b). That field is upstream work, not yet in the service's libradicle pin. The step that adds `rad.start`, the first to start the node, pins it.
+  - With it, no repository is seeded but by an explicit seed, clone or sync, and a repository that is unseeded, or removed from quarantine, stays unseeded until one.
 - **Browsing through `rad:`** reads local storage and announces nothing.
 - **What peers learn:** each connection receives the node's signed inventory of the repositories it seeds, tied to its node ID, which is derived from the vault. Whether to offer a setting that announces none, while still serving on request, is the user's decision ([Open questions](#open-questions), 12).
 - **No listening socket:**
@@ -1035,6 +1039,12 @@ The source research for this design found four ways the node gives away more tha
 - `Options` takes the host's repository gate. Without one, the node gets an always-open gate, as the add-on and UniFFI always have.
 - `Embedded` steps one online repair unit (heartwood's `Repair::online`), signed with the key the node runs as. So after `rad.start` the service keeps no copy of the key ([The sealed release](#the-sealed-release)). Before the start, reconciliation signs with the key `rad.identity` delivered.
 - `Embedded` removes a quarantined repository (heartwood's `remove_repo`): it unseeds it through the node, then deletes it with the profile's policy store and COB cache.
+
+9b. **The default seeding policy in `Options`** (solardev-xyz/libradicle#28). Found when the service was built (step 4): heartwood loads the default seeding policy from `config.json`, so nothing else holds the node to `block` ([Seeding and serving](#seeding-and-serving)).
+- `Options` takes `seeding_policy: Option<DefaultSeedingPolicy>`.
+- With `Some`, `run` sets it on the node's configuration, in memory, just before `Runtime::init`: after the profile is loaded, with the deprecated fields' override, and after the routing. It sets it on the profile too, so that libradicle's own policy reads agree with the node. Nothing is written to `config.json`.
+- With `None`, `config.json`'s policy applies, as today. The add-on and UniFFI pass `None`.
+- The service passes `Some(Block)`.
 
 **heartwood** (the `freedom/embed` fork):
 
@@ -1339,7 +1349,7 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 
 1. **Tests first,** in freedom-browser: the contract suite, the fixture repository and golden vectors from the v0.8.0 add-on.
 2. **Upstream:**
-   - libradicle items 1, 2 and 4–9 (item 3 needs nothing now), and 9a, which step 4 found it needs;
+   - libradicle items 1, 2 and 4–9 (item 3 needs nothing now), and 9a and 9b, which step 4 found it needs;
    - heartwood items 10–14, on the `freedom/embed` fork.
 
    The service can start on items 1, 2, 4, 9, 10 and 13.

@@ -27,7 +27,7 @@ fc-service = { path = "../../crates/fc-service" }
 # `Nat64Prefix`): freedom-ipfs-addr, the gate's pure half with no network
 # stack (freedom-ipfs #55), at the commit freedom-ipfsd pins, so both resolve
 # to one package, which freedom-ipfs-net re-exports as its gate.
-freedom-ipfs-addr = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "df5b69446c6d252cfaafd35ae618f62963d2e231" }
+freedom-ipfs-addr = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "af98afa939c4f2d479c562f1c4e280107e6552b0" }
 # Discovery's one query and its answers (src/query.rs): DNS messages, already
 # in every platform's graph (freedom-ipfs-net's resolver, libp2p-dns). It
 # encodes only its own one-question query, and decodes the answers, as
