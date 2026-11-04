@@ -393,9 +393,16 @@ pub(crate) struct Core<T> {
     pieces: BTreeMap<PieceId, Piece<T>>,
     next_piece: u64,
     jobs: BTreeMap<u64, (T, usize)>,
+    /// The jobs' bytes, all together.
+    jobs_held: usize,
     next_job: u64,
     /// Bytes the walk holds: piece bodies, stream bytes, parsed structure.
     walk_held: usize,
+    /// The most the request has reserved at once ([`Verifier::peak`]).
+    peak: usize,
+    /// Bytes released while the walk ran that it didn't hold: a release
+    /// without its hold ([`Verifier::over_released`]).
+    over_released: usize,
     queue: VecDeque<Queued>,
     queued: usize,
     /// The verified body sent, and main's credit for it.
@@ -424,8 +431,11 @@ impl<T: Copy> Core<T> {
             pieces: BTreeMap::new(),
             next_piece: 0,
             jobs: BTreeMap::new(),
+            jobs_held: 0,
             next_job: 0,
             walk_held: 0,
+            peak: 0,
+            over_released: 0,
             queue: VecDeque::new(),
             queued: 0,
             sent: 0,
@@ -446,8 +456,23 @@ impl<T: Copy> Core<T> {
                 }
             })
             .sum();
-        let jobs: usize = self.jobs.values().map(|(_, size)| size).sum();
-        pieces + jobs + self.walk_held + self.queued
+        pieces + self.jobs_held + self.walk_held + self.queued
+    }
+
+    /// Notes a reservation's growth in the request's peak.
+    fn grew(&mut self) {
+        self.peak = self.peak.max(self.reserved());
+    }
+
+    /// `n` bytes leave the walk's holding. More than it holds, while the
+    /// walk runs, is a release without its hold: counted, and never taken
+    /// below zero. Once the walk has ended its holding is gone at once, and
+    /// what it releases after that is nothing.
+    fn release(&mut self, n: usize) {
+        if n > self.walk_held && !self.ended() {
+            self.over_released += n - self.walk_held;
+        }
+        self.walk_held = self.walk_held.saturating_sub(n);
     }
 
     /// Whether `n` more bytes fit the request's memory.
@@ -479,10 +504,11 @@ impl<T: Copy> Core<T> {
     /// [`Core::fits`] for any it allocates.
     pub(crate) fn hold(&mut self, n: usize) {
         self.walk_held += n;
+        self.grew();
     }
 
     pub(crate) fn unhold(&mut self, n: usize) {
-        self.walk_held = self.walk_held.saturating_sub(n);
+        self.release(n);
     }
 
     /// Asks for a piece, reserving its room: a whole piece's bound, or a
@@ -531,6 +557,7 @@ impl<T: Copy> Core<T> {
             stream,
             max_bytes,
         }));
+        self.grew();
         Some(id)
     }
 
@@ -581,13 +608,14 @@ impl<T: Copy> Core<T> {
 
     pub(crate) fn hash(&mut self, tag: T, work: jobs::Work) {
         let size = work.size();
-        self.walk_held = self.walk_held.saturating_sub(size);
+        self.release(size);
         let id = JobId {
             request: self.request,
             seq: self.next_job,
         };
         self.next_job += 1;
         self.jobs.insert(id.seq, (tag, size));
+        self.jobs_held += size;
         self.outputs.push_back(Output::Hash(Job { id, work }));
     }
 
@@ -626,7 +654,7 @@ impl<T: Copy> Core<T> {
     /// streamed piece they came from.
     pub(crate) fn body(&mut self, bytes: Vec<u8>, from: Option<PieceId>) {
         let n = bytes.len();
-        self.walk_held = self.walk_held.saturating_sub(n);
+        self.release(n);
         if n == 0 {
             return;
         }
@@ -910,6 +938,7 @@ impl<T: Copy, W: Events<T>> Machine<T, W> {
         let Some((tag, size)) = self.core.jobs.remove(&id.seq) else {
             return Err(Misuse::DuplicateJob);
         };
+        self.core.jobs_held = self.core.jobs_held.saturating_sub(size);
         if let Some(walk) = self.walk.as_mut() {
             self.core.hold(size);
             walk.hashed(&mut self.core, tag, result.verdict, result.work);
@@ -1111,6 +1140,24 @@ impl Verifier {
         match &self.inner {
             Inner::Swarm(m) => m.core.reserved(),
             Inner::Ipfs(m) => m.core.reserved(),
+        }
+    }
+
+    /// The most the request has reserved at once, within an input too: what
+    /// its memory reached, by its own count.
+    pub fn peak(&self) -> usize {
+        match &self.inner {
+            Inner::Swarm(m) => m.core.peak,
+            Inner::Ipfs(m) => m.core.peak,
+        }
+    }
+
+    /// Bytes the walk released without holding them: zero unless its
+    /// accounting is wrong, which the tests check after every input.
+    pub fn over_released(&self) -> usize {
+        match &self.inner {
+            Inner::Swarm(m) => m.core.over_released,
+            Inner::Ipfs(m) => m.core.over_released,
         }
     }
 
