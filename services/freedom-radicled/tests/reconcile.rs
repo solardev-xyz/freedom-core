@@ -33,6 +33,11 @@ fn repaired(reply: &Value, what: &str) -> u64 {
     reply["result"]["repaired"][what].as_u64().unwrap()
 }
 
+/// `reply`, and what the quarantine record says, for a failing assertion.
+fn context(reply: &Value, dirs: &Dirs) -> String {
+    format!("{reply}; quarantined: {}", fixture::evidence(&dirs.home))
+}
+
 #[test]
 fn a_clean_home_reconciles_and_is_marked_for_the_run() {
     let dirs = Dirs::new();
@@ -93,18 +98,18 @@ fn temporary_clones_are_removed_and_lookalikes_left() {
 
     let mut radicled = identified(&dirs, Some(&SEED), &[]);
     let reply = reconcile(&mut radicled);
-    assert_eq!(repaired(&reply, "clones"), 1, "{reply}");
+    assert_eq!(repaired(&reply, "clones"), 1, "{}", context(&reply, &dirs));
     assert!(!clone.exists());
     assert!(other.exists());
     assert!(fixture::storage_of(&dirs.home, rid).is_dir());
     #[cfg(unix)]
     {
-        assert_eq!(repaired(&reply, "left"), 2, "{reply}");
+        assert_eq!(repaired(&reply, "left"), 2, "{}", context(&reply, &dirs));
         assert!(link.0.symlink_metadata().unwrap().file_type().is_symlink());
         assert!(link.1.join("kept").exists());
     }
     #[cfg(not(unix))]
-    assert_eq!(repaired(&reply, "left"), 1, "{reply}");
+    assert_eq!(repaired(&reply, "left"), 1, "{}", context(&reply, &dirs));
 }
 
 /// A kill between a COB's ref and its `rad/sigrefs`, then a start as the
@@ -121,9 +126,19 @@ fn the_running_identitys_stale_namespace_is_resigned() {
     let reply = reconcile(&mut radicled);
     let result = &reply["result"];
     assert_eq!(result["was_dirty"], true, "{reply}");
-    assert_eq!(repaired(&reply, "resigned"), 1, "{reply}");
-    assert_eq!(repaired(&reply, "caches"), 1, "{reply}");
-    assert_eq!(result["quarantined"]["count"], 0, "{reply}");
+    assert_eq!(
+        repaired(&reply, "resigned"),
+        1,
+        "{}",
+        context(&reply, &dirs)
+    );
+    assert_eq!(repaired(&reply, "caches"), 1, "{}", context(&reply, &dirs));
+    assert_eq!(
+        result["quarantined"]["count"],
+        0,
+        "{}",
+        context(&reply, &dirs)
+    );
     assert_ne!(fixture::sigrefs(&dirs.home, rid, NID), before);
     assert!(fixture::has_unsigned_ref(&dirs.home, rid, NID));
     assert_eq!(fixture::marked(&dirs.home), Some(vec![NID.to_owned()]));
@@ -145,9 +160,24 @@ fn another_identitys_stale_namespace_is_quarantined_and_kept() {
         let reply = reconcile(&mut radicled);
         let result = &reply["result"];
         assert_eq!(result["was_dirty"], true, "{reply}");
-        assert_eq!(repaired(&reply, "resigned"), 0, "{reply}");
-        assert_eq!(repaired(&reply, "quarantined"), 1, "{reply}");
-        assert_eq!(result["quarantined"]["count"], 1, "{reply}");
+        assert_eq!(
+            repaired(&reply, "resigned"),
+            0,
+            "{}",
+            context(&reply, &dirs)
+        );
+        assert_eq!(
+            repaired(&reply, "quarantined"),
+            1,
+            "{}",
+            context(&reply, &dirs)
+        );
+        assert_eq!(
+            result["quarantined"]["count"],
+            1,
+            "{}",
+            context(&reply, &dirs)
+        );
         let entry = &result["quarantined"]["first"][0];
         assert_eq!(entry["rid"], rid.to_string(), "{reply}");
         assert_eq!(entry["kind"], "namespace", "{reply}");
@@ -196,7 +226,12 @@ fn the_cutoff_answers_deadline_and_a_retry_finishes() {
     let mut radicled = identified(&dirs, Some(&SEED), &[]);
     let reply = reconcile(&mut radicled);
     assert_eq!(reply["result"]["was_dirty"], true, "{reply}");
-    assert_eq!(repaired(&reply, "resigned"), 1, "{reply}");
+    assert_eq!(
+        repaired(&reply, "resigned"),
+        1,
+        "{}",
+        context(&reply, &dirs)
+    );
 }
 
 /// A failure outside any one repository: `recovery_failed`, naming the
@@ -266,7 +301,12 @@ fn a_throwaway_run_keeps_the_real_identitys_name_for_its_next_run() {
     let mut radicled = identified(&dirs, Some(&SEED), &[]);
     let reply = reconcile(&mut radicled);
     assert_eq!(reply["result"]["was_dirty"], true, "{reply}");
-    assert_eq!(reply["result"]["quarantined"]["count"], 0, "{reply}");
+    assert_eq!(
+        reply["result"]["quarantined"]["count"],
+        0,
+        "{}",
+        context(&reply, &dirs)
+    );
     assert_eq!(fixture::marked(&dirs.home), Some(vec![NID.to_owned()]));
     drop(radicled);
 
@@ -288,8 +328,18 @@ fn a_throwaway_run_keeps_the_real_identitys_name_for_its_next_run() {
     // The real key again: its namespace is re-signed, with its own key.
     let mut radicled = identified(&dirs, Some(&SEED), &[]);
     let reply = reconcile(&mut radicled);
-    assert_eq!(repaired(&reply, "resigned"), 1, "{reply}");
-    assert_eq!(reply["result"]["quarantined"]["count"], 0, "{reply}");
+    assert_eq!(
+        repaired(&reply, "resigned"),
+        1,
+        "{}",
+        context(&reply, &dirs)
+    );
+    assert_eq!(
+        reply["result"]["quarantined"]["count"],
+        0,
+        "{}",
+        context(&reply, &dirs)
+    );
     assert_ne!(fixture::sigrefs(&dirs.home, rid, NID), before);
     assert_eq!(fixture::marked(&dirs.home), Some(vec![NID.to_owned()]));
 }
