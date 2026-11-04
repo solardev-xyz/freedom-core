@@ -33,16 +33,21 @@ fc-service = { path = "../../crates/fc-service" }
 # The sealed release of the node key (0008, "The sealed release"): the
 # service's X25519 key for one start, and opening what the core sealed to it.
 fc-seal = { path = "../../crates/fc-seal" }
-# libradicle v0.8.0 (e5b137e, the release freedom-browser pins), built with
-# `no-spawn`, explicitly (0008, "Spawn and lock"): serving runs in process
-# and `git gc` is skipped. `HostKey` holds the node key; `start_with_key`
-# (a later step) runs the node with it and writes nothing secret. Pinned by
-# commit until the upstream changes 0008 lists are released (deny.toml
-# allows solardev-xyz). src/build_info.rs reports the same commit.
-libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "e5b137e429cecabd0d0b45c2b5f36f2917853eab", features = ["no-spawn"] }
-# The node identity's public forms (`did:key`, the node ID), from heartwood
-# at the commit libradicle pins: already in libradicle's graph.
-radicle-crypto = { git = "https://github.com/solardev-xyz/heartwood", rev = "c208df3ac7626402db60752f1f38d31465731f01" }
+# libradicle at `integration/rust-core` (5448fd8), built with `no-spawn`,
+# explicitly (0008, "Spawn and lock"): serving runs in process and `git gc`
+# is skipped. It carries the upstream changes 0008 lists for the service's
+# first steps: the routing, `isolated` and `control_socket` options, the
+# bounded reads and shutdown, the node's health, the host key
+# (`HostKey`, `start_with_key`), and heartwood at 6b2dc16f, whose
+# reconciliation driver `rad.reconcile` runs on. Pinned by commit until
+# those changes are released (deny.toml allows solardev-xyz).
+# src/build_info.rs reports the same commit.
+libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "5448fd8e32250f8ed3ddb17e6a3dc96b1422972d", features = ["no-spawn"] }
+# heartwood's `radicle`, at the commit libradicle pins, so that both resolve
+# to one package (build_info's test holds them to one commit): the node
+# identity's public forms (`did:key`, the node ID), and, from the next step,
+# the reconciliation driver. Already in libradicle's graph.
+radicle = { git = "https://github.com/solardev-xyz/heartwood", rev = "6b2dc16fa657bbcb03c34eaee922d354fb1fe66e" }
 # The public key of a node key, as libradicle computes it (ed25519-dalek 2,
 # libradicle's own version, already in its graph).
 ed25519-dalek = { version = "2", default-features = false, features = ["zeroize"] }
