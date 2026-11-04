@@ -234,6 +234,8 @@ What the core asks main for while a `dweb.verify` runs.
     - A page that leaves finished bodies unread therefore holds slots, and new dweb fetches wait in main's admission (512 waiting, then 503), as they do today for any unread body.
   - **In main, the pieces:** for each piece stream, main reads from the node only as the core's credit allows, holding at most one window.
 - **`fc-protocol`** (#72) moves the role from the connection to the stream: a connection may both send and receive bodies, while service connections keep one role each. Its vectors gain the core's two directions.
+  - **The core's connection** at protocol 2 reads all four kinds (`Kinds::CORE_STREAMS`) into a `Duplex`. Its `Sender` holds the bodies the core sends, under main's IDs, and its `Inbound` the bodies the core receives, under its own. Data, end and abort go to the `Inbound`, and credit to the `Sender`. A frame the side it goes to doesn't hold is a protocol error, which fails the connection in both directions.
+  - **The `Inbound` holds no ring.** A data frame's bytes go straight to the stream's consumer, the verifier's piece, whose window is reserved. The consumer says when bytes have left it, and only then is their credit owed. Owed credit is merged per stream, written ahead of the sender's frames, and dropped at the stream's terminal or the core's cancel. A consumer that credits more than it holds is refused without failing the connection: that is the core's own bug.
 
 ### Admission, deadlines and cancel
 
