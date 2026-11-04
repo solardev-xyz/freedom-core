@@ -47,9 +47,22 @@
 mod args;
 mod build_info;
 mod confine;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "rad.start gives the node this routing, a later step"
+    )
+)]
+mod dial;
 mod env;
 mod identity;
 mod marker;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "rad.start runs discovery, a later step")
+)]
+mod nat64;
 mod reconcile;
 mod service;
 mod testhooks;
