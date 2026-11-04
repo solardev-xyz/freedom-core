@@ -17,8 +17,10 @@ use radicle::prelude::RepoId;
 use radicle::storage::git::reconcile::state::State;
 use serde_json::{Value, json};
 
-/// A unit's limit in these tests.
-const LIMIT_MS: &str = "300";
+/// A unit's limit in these tests: short enough that a hung unit ends its
+/// process quickly, long enough that every other unit returns within it on a
+/// slow runner (a re-signing unit took more than 300 ms on Windows CI).
+const LIMIT_MS: &str = "3000";
 
 /// Every kind of unit heartwood's driver runs, as its records name them.
 const KINDS: [&str; 11] = [
@@ -76,8 +78,8 @@ fn hang(dirs: &Dirs, kind: &str) {
         Some(70),
         "a {kind} unit that hangs ends the process"
     );
-    // Its limit, and the time to start the units before it.
-    assert!(started.elapsed() < Duration::from_secs(10), "{kind}");
+    // Its limit, and the time to run the units before it.
+    assert!(started.elapsed() < Duration::from_secs(12), "{kind}");
     let log = radicled.stderr();
     assert!(log.contains(r#""reason":"unit_overrun""#), "{kind}: {log}");
 }

@@ -86,15 +86,19 @@ pub struct RadicleService {
     confinement: Value,
     /// `rad.identity`'s deadline, armed by `rad.hello`'s reply.
     deadline: Mutex<Option<Watchdog>>,
+    /// The repair units' watchdog, its thread started with the service:
+    /// reconciliation's at a start, and the online repair's (a later step).
+    units: Arc<units::UnitWatch>,
 }
 
 impl RadicleService {
-    /// The service for `grant`'s home, with the key for this start; `None`
-    /// if the OS's randomness fails.
+    /// The service for `grant`'s home, with the key for this start, and
+    /// `units` the repair units' watch; `None` if the OS's randomness fails.
     pub fn new(
         grant: Grant,
         network: &fc_service::network::NetworkPolicy,
         confinement: Value,
+        units: Arc<units::UnitWatch>,
     ) -> Option<Self> {
         let identity = Identity::new(&grant.home)?;
         Some(Self {
@@ -105,6 +109,7 @@ impl RadicleService {
             network: network.to_json(),
             confinement,
             deadline: Mutex::new(None),
+            units,
         })
     }
 
@@ -170,6 +175,8 @@ impl RadicleService {
         let reconciliation = self.reconciliation.clone();
         let owed = conn.clone();
         let id = request.id;
+        // Each unit's time limit, from outside the worker.
+        let watch = self.units.clone();
         let spawned = std::thread::Builder::new()
             .name("reconcile".into())
             .spawn(move || {
@@ -183,11 +190,9 @@ impl RadicleService {
                 };
                 // A panic here ends the process (70): a crash, which main
                 // restarts, and whose next start reconciles again.
-                // Each unit's time limit, from outside the worker.
-                let watch = units::UnitWatch::new(crate::testhooks::unit_limit(units::UNIT_LIMIT));
                 let outcome = fc_service::panic::with_kind(
                     fc_service::panic::TaskKind::named("reconcile"),
-                    || reconcile::run(&run, &watch),
+                    || reconcile::run(&run, &*watch),
                 );
                 drop(signer);
                 match outcome {
