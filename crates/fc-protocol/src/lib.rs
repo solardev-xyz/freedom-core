@@ -17,3 +17,10 @@ pub mod stream;
 
 /// The protocol version negotiated in `core.hello`.
 pub const PROTOCOL_VERSION: u32 = 1;
+
+/// The version at which `freedom-cored`'s connection takes streams in both
+/// directions (design 0009, Streams in the core): main offers
+/// `frames: ["fragment", "stream"]`, the core's capabilities gain
+/// `streams`, and the connection reads [`frame::Kinds::CORE_STREAMS`] with
+/// a [`stream::Duplex`]. The core moves to it with its dweb thread.
+pub const PROTOCOL_VERSION_STREAMS: u32 = 2;
