@@ -18,7 +18,7 @@ fn mh(code: u64, digest: &[u8]) -> Result<multihash::Multihash<64>, Err> {
     Ok(multihash::Multihash::<64>::wrap(code, digest)?)
 }
 
-fn sha256_cid(codec: u64, block: &[u8]) -> Result<Cid, Err> {
+pub(super) fn sha256_cid(codec: u64, block: &[u8]) -> Result<Cid, Err> {
     Ok(Cid::new_v1(codec, mh(0x12, &Sha256::digest(block))?))
 }
 
@@ -50,13 +50,13 @@ fn native(cid: &Cid, block: &[u8]) -> Value {
     }
 }
 
-struct Link {
+pub(super) struct Link {
     hash: Option<Vec<u8>>,
     name: Option<String>,
     tsize: Option<u64>,
 }
 
-fn link(cid: &Cid, name: &str, tsize: u64) -> Link {
+pub(super) fn link(cid: &Cid, name: &str, tsize: u64) -> Link {
     Link {
         hash: Some(cid.to_bytes()),
         name: Some(name.to_string()),
@@ -79,7 +79,7 @@ fn pb_link(l: &Link) -> Vec<u8> {
 }
 
 /// A dag-pb node in its canonical form: the links, then `Data`.
-fn pb_node(links: &[Link], data: Option<&[u8]>) -> Vec<u8> {
+pub(super) fn pb_node(links: &[Link], data: Option<&[u8]>) -> Vec<u8> {
     let mut out = Vec::new();
     for l in links {
         pb_bytes(2, &pb_link(l), &mut out);
@@ -90,17 +90,17 @@ fn pb_node(links: &[Link], data: Option<&[u8]>) -> Vec<u8> {
     out
 }
 
-struct Unixfs {
-    kind: u64,
-    data: Option<Vec<u8>>,
-    filesize: Option<u64>,
-    blocksizes: Vec<u64>,
-    hash_type: Option<u64>,
-    fanout: Option<u64>,
+pub(super) struct Unixfs {
+    pub(super) kind: u64,
+    pub(super) data: Option<Vec<u8>>,
+    pub(super) filesize: Option<u64>,
+    pub(super) blocksizes: Vec<u64>,
+    pub(super) hash_type: Option<u64>,
+    pub(super) fanout: Option<u64>,
 }
 
 impl Unixfs {
-    fn new(kind: u64) -> Self {
+    pub(super) fn new(kind: u64) -> Self {
         Self {
             kind,
             data: None,
@@ -111,7 +111,7 @@ impl Unixfs {
         }
     }
 
-    fn encode(&self) -> Vec<u8> {
+    pub(super) fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         pb_varint(1, self.kind, &mut out);
         if let Some(d) = &self.data {
@@ -1736,8 +1736,22 @@ fn set_bit(bitfield: &mut [u8], i: u8, on: bool) {
 
 /// GatewayCore's answer for a path over these blocks: the native reader.
 async fn native_get(blocks: HashMap<Cid, Vec<u8>>, path: &str) -> Result<Value, Err> {
-    let core = freedom_ipfs_gateway::GatewayCore::with_provider_config(
+    let (status, _, body) = native_answer(blocks, HashMap::new(), path).await?;
+    Ok(
+        json!({ "status": status, "length": body.len(), "sha256": hex::encode(Sha256::digest(&body)) }),
+    )
+}
+
+/// GatewayCore's status, headers and body for a GET of `path` over these
+/// blocks, with a resolver that verified records naming `names`' values.
+pub(super) async fn native_answer(
+    blocks: HashMap<Cid, Vec<u8>>,
+    names: HashMap<String, String>,
+    path: &str,
+) -> Result<(u16, Vec<(String, String)>, Vec<u8>), Err> {
+    let core = freedom_ipfs_gateway::GatewayCore::with_provider_and_name_resolver_config(
         std::sync::Arc::new(crate::ipfs::MemProvider(blocks)),
+        std::sync::Arc::new(crate::ipfs::Names(names)),
         freedom_ipfs_gateway::GatewayConfig::new(8),
     );
     let parsed = freedom_ipfs_gateway::parse_native_request(freedom_ipfs_gateway::NativeRequest {
@@ -1751,13 +1765,21 @@ async fn native_get(blocks: HashMap<Cid, Vec<u8>>, path: &str) -> Result<Value, 
     .map_err(|e| e.to_string())?;
     let resp = core.handle(parsed.request).await;
     let status = resp.status().as_u16();
+    let headers = resp
+        .headers()
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.as_str().to_string(),
+                v.to_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
     let body = http_body_util::BodyExt::collect(resp.into_body())
         .await
         .map_err(|e| e.to_string())?
         .to_bytes();
-    Ok(
-        json!({ "status": status, "length": body.len(), "sha256": hex::encode(Sha256::digest(&body)) }),
-    )
+    Ok((status, headers, body.to_vec()))
 }
 
 /// hamt-lookup's cases: an entry that isn't where its hash and the

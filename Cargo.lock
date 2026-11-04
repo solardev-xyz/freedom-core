@@ -107,6 +107,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cap"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f125eb85b84a24c36b02ed1d22c9dd8632f53b3cde6e4d23512f94021030003"
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -418,7 +424,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "fc-chain"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "fc-dweb",
  "fc-json",
@@ -434,11 +440,18 @@ dependencies = [
 
 [[package]]
 name = "fc-dweb"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
+ "base64",
+ "cap",
+ "ed25519-dalek",
+ "fc-ipfs",
  "fc-json",
+ "fc-swarm",
  "hex",
+ "mime_guess",
  "serde_json",
+ "sha2",
  "sha3",
  "thiserror",
  "url",
@@ -446,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "fc-evm"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "fc-json",
  "fc-keys",
@@ -459,7 +472,7 @@ dependencies = [
 
 [[package]]
 name = "fc-ipfs"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -471,14 +484,14 @@ dependencies = [
 
 [[package]]
 name = "fc-json"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "fc-keys"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "aes",
  "base64",
@@ -503,7 +516,7 @@ dependencies = [
 
 [[package]]
 name = "fc-naming"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "blake2",
  "ens-normalize",
@@ -519,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "fc-protocol"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "base64",
  "hex",
@@ -532,7 +545,7 @@ dependencies = [
 
 [[package]]
 name = "fc-seal"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "aes-gcm",
  "hex",
@@ -547,7 +560,7 @@ dependencies = [
 
 [[package]]
 name = "fc-service"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "fc-protocol",
  "fc-sys",
@@ -563,7 +576,7 @@ dependencies = [
 
 [[package]]
 name = "fc-swarm"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "base64",
  "fc-evm",
@@ -577,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "fc-sys"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "libc",
  "windows-sys",
@@ -585,7 +598,7 @@ dependencies = [
 
 [[package]]
 name = "fc-vault"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -633,7 +646,7 @@ dependencies = [
 
 [[package]]
 name = "freedom-cored"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -961,6 +974,22 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "mime"
+version = "0.3.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
+
+[[package]]
+name = "mime_guess"
+version = "2.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7c44f8e672c00fe5308fa235f821cb4198414e1c77935c1ab6948d3fd78550e"
+dependencies = [
+ "mime",
+ "unicase",
+]
 
 [[package]]
 name = "num-bigint-dig"
@@ -1551,6 +1580,12 @@ name = "unarray"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
+
+[[package]]
+name = "unicase"
+version = "2.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "357cc3acc6a036009fd6c973ed009037c732d60d0b4f6c673e9041497482a28f"
 
 [[package]]
 name = "unicode-ident"

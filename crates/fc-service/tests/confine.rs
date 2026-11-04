@@ -901,7 +901,9 @@ mod linux {
         for case in ["processes", "ipc", "threads", "resolver"] {
             failures.extend(passed(case, &run(&world, case)));
         }
-        // The service's own resolver: reported as such, in direct mode.
+        // The service's own resolver: its files granted, and no
+        // `resolution` from `confine`, which the service reports itself
+        // once it has read its configuration.
         let own = run(&world, "resolv-conf");
         failures.extend(passed("resolv-conf", &own));
         let own_json = lines(&own)
@@ -911,7 +913,7 @@ mod linux {
         expect(
             &mut failures,
             own_json.as_ref().is_some_and(|r| {
-                r["resolution"] == "resolv_conf" && r["reasons"].get("resolution").is_none()
+                r.get("resolution").is_none() && r["reasons"].get("resolution").is_none()
             }),
             format!("resolv-conf: {}", lines(&own)),
         );

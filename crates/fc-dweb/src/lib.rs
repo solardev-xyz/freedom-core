@@ -48,8 +48,10 @@ mod names;
 mod open;
 mod plan;
 mod response;
+pub mod store;
 mod url;
 mod validate;
+pub mod verifier;
 mod verify;
 
 pub use bzz::{

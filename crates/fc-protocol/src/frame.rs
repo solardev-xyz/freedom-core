@@ -93,11 +93,20 @@ pub struct Kinds {
 }
 
 impl Kinds {
-    /// `freedom-cored`'s connections: whole messages and fragmented
-    /// responses. They never grant `stream` (design 0007).
+    /// `freedom-cored`'s connections at protocol 1: whole messages and
+    /// fragmented responses, and no stream frames (design 0007).
     pub const CORE: Kinds = Kinds {
         fragments: true,
         streams: None,
+    };
+
+    /// `freedom-cored`'s connections at protocol 2 (design 0009, Streams
+    /// in the core): whole messages, fragmented responses, and stream frames
+    /// in both directions, the core answering main's requests with bodies
+    /// and main answering the core's.
+    pub const CORE_STREAMS: Kinds = Kinds {
+        fragments: true,
+        streams: Some(Side::Both),
     };
 
     /// A service connection whose handshake granted `stream` (design 0007,

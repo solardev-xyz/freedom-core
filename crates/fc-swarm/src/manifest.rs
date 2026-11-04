@@ -445,16 +445,7 @@ impl Lookup {
     pub fn node(&mut self, bytes: &[u8]) -> Step {
         let mut child = match parse_node(bytes) {
             Ok(n) => n,
-            Err(e) => {
-                if let Phase::Prefix { then, .. } = std::mem::replace(
-                    &mut self.phase,
-                    Phase::Done(Outcome::NotFound { root: false }),
-                ) {
-                    self.restart(*then);
-                    return self.run();
-                }
-                return Step::Failed(e);
-            }
+            Err(e) => return self.refused(e),
         };
         let fork_meta = match &self.phase {
             Phase::Walk { path, at, .. } | Phase::Prefix { path, at, .. } => self
@@ -477,6 +468,21 @@ impl Lookup {
         }
         self.node = child;
         self.run()
+    }
+
+    /// The node the last [`Step::Need`] asked for can't be read, as the
+    /// caller found without joining it all: Ant's header sniff on its first
+    /// data chunk saw no version hash. It is handled as a node that fails
+    /// to parse.
+    pub fn refused(&mut self, error: NodeError) -> Step {
+        if let Phase::Prefix { then, .. } = std::mem::replace(
+            &mut self.phase,
+            Phase::Done(Outcome::NotFound { root: false }),
+        ) {
+            self.restart(*then);
+            return self.run();
+        }
+        Step::Failed(error)
     }
 
     fn run(&mut self) -> Step {

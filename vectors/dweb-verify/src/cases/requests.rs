@@ -24,6 +24,7 @@ const IPFS_FAILED: &str = "IPFS content verification failed";
 const IPFS_UNVERIFIABLE: &str = "This content can't be verified with the external IPFS gateway";
 const IPFS_404: &str = "Not found on the external IPFS gateway";
 const IPFS_STOPPED: &str = "The external IPFS gateway stopped sending";
+const IPFS_MALFORMED: &str = "This IPFS content is malformed";
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
@@ -1050,5 +1051,257 @@ pub async fn build() -> Result<Value, Err> {
     let mut out = Cases(Vec::new());
     swarm(&doc, &mut out).await?;
     ipfs(&doc, &mut out)?;
+    sizes(&mut out).await?;
+    chains(&doc, &mut out).await?;
     Ok(Value::Array(out.0))
+}
+
+/// GatewayCore's error page, as `GatewayCore` writes one for `status`.
+fn error_page(status: u16, reason: &str, detail: &str) -> (Value, Vec<u8>) {
+    let page = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>{status} {reason}</title><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"></head><body><main><h1>{reason}</h1><p>{detail}</p></main></body></html>"
+    );
+    let headers = json!([
+        ["content-type", "text/html; charset=utf-8"],
+        ["content-length", page.len().to_string()],
+    ]);
+    (headers, page.into_bytes())
+}
+
+/// The walk's `unixfs-sizes` rules (0009, Blocks and DAGs; Tests first):
+/// files built here whose sizes disagree, which the honest gateway serves
+/// beside dweb-verify.json's blocks (world.blocks). The native reader
+/// slices a child by its declared size and serves them; the core cuts the
+/// body as malformed where the sizes stop agreeing.
+async fn sizes(out: &mut Cases) -> Result<(), Err> {
+    use super::ipfs::{Unixfs, link, native_answer, pb_node, sha256_cid};
+    use sha2::Digest;
+    use std::collections::HashMap;
+    const DAG_PB: u64 = 0x70;
+    const RAW: u64 = 0x55;
+    let file = |links: &[(&cid::Cid, u64)], filesize: u64, blocksizes: &[u64]| {
+        let mut u = Unixfs::new(2);
+        u.filesize = Some(filesize);
+        u.blocksizes = blocksizes.to_vec();
+        let links: Vec<_> = links.iter().map(|(c, t)| link(c, "", *t)).collect();
+        pb_node(&links, Some(&u.encode()))
+    };
+    let a = content::bytes("checks-sizes-a", 1000);
+    let b = content::bytes("checks-sizes-b", 1000);
+    let c = content::bytes("checks-sizes-c", 999);
+    let (la, lb, lc) = (
+        sha256_cid(RAW, &a)?,
+        sha256_cid(RAW, &b)?,
+        sha256_cid(RAW, &c)?,
+    );
+    // A raw leaf longer than its entry: 1,000 bytes where 999 are declared.
+    let leaf_root = file(&[(&la, 1000), (&lb, 1000)], 1999, &[1000, 999]);
+    // A node whose filesize isn't its entry: 999 bytes where 1,000 are.
+    let inner = file(&[(&lc, 999)], 999, &[999]);
+    let li = sha256_cid(DAG_PB, &inner)?;
+    let node_root = file(&[(&la, 1000), (&li, 1100)], 2000, &[1000, 1000]);
+    // A root whose filesize isn't its content's sum: refused at the root.
+    let sum_root = file(&[(&la, 1000), (&lb, 1000)], 2001, &[1000, 1000]);
+    let mut held: HashMap<cid::Cid, Vec<u8>> = HashMap::new();
+    for block in [&a, &b, &c] {
+        held.insert(sha256_cid(RAW, block)?, block.clone());
+    }
+    held.insert(li, inner.clone());
+    for (id, note, root, len, expect) in [
+        (
+            "ipfs/sizes-leaf-longer-than-entry",
+            "a file over two raw leaves of 1,000 bytes whose blocksizes say 1,000 and 999: the first leaf is released, then the body is cut as malformed",
+            &leaf_root,
+            1999,
+            true,
+        ),
+        (
+            "ipfs/sizes-node-not-its-entry",
+            "a file whose second child is a node of 999 bytes where its entry says 1,000: the first leaf is released, then the body is cut as malformed",
+            &node_root,
+            2000,
+            true,
+        ),
+        (
+            "ipfs/sizes-filesize-not-the-sum",
+            "a file whose filesize, 2,001, isn't its blocksizes' sum, 2,000: malformed before the head",
+            &sum_root,
+            2001,
+            false,
+        ),
+    ] {
+        let rc = sha256_cid(DAG_PB, root)?;
+        let mut blocks = held.clone();
+        blocks.insert(rc, root.clone());
+        let (status, headers, body) =
+            native_answer(blocks.clone(), HashMap::new(), &format!("/ipfs/{rc}")).await?;
+        // The native reader serves each, by the declared sizes.
+        if status != 200 {
+            return Err(format!("{id}: GatewayCore answers {status}").into());
+        }
+        let head = json!({
+            "status": 200,
+            "headers": [
+                ["content-type", "application/octet-stream"],
+                ["accept-ranges", "bytes"],
+                ["content-length", len.to_string()],
+                ["etag", format!("\"fi1:{rc}:.:{len}\"")],
+                ["cache-control", "public, max-age=31536000, immutable"],
+            ],
+            "trust": { "name": null, "content": "verified" },
+        });
+        // Its head is the core's.
+        let native_head: Vec<Value> = headers.iter().map(|(k, v)| json!([k, v])).collect();
+        if expect && json!(native_head) != head["headers"] {
+            return Err(format!("{id}: GatewayCore's head is {native_head:?}").into());
+        }
+        let expected = if expect {
+            truncated(
+                head,
+                content_body("checks-sizes-a", 0, 1000),
+                "malformed",
+                IPFS_MALFORMED,
+            )
+        } else {
+            error(502, IPFS_MALFORMED)
+        };
+        // In CID order: the map keeps insertion order, and a HashMap's
+        // differs from run to run.
+        let mut sorted: Vec<(String, &Vec<u8>)> =
+            blocks.iter().map(|(c, b)| (c.to_string(), b)).collect();
+        sorted.sort();
+        let world_blocks: serde_json::Map<String, Value> =
+            sorted.into_iter().map(|(c, b)| (c, bytes(b))).collect();
+        for car in [true, false] {
+            let id = if car {
+                id.to_string()
+            } else {
+                format!("{id}-raw")
+            };
+            let note = if car {
+                format!("{note}; through a CAR")
+            } else {
+                format!("{note}; through raw blocks")
+            };
+            out.push(
+                &id,
+                &note,
+                ipfs_plan(json!({ "ipfs": rc.to_string() }), "", &[]),
+                "GET",
+                json!({ "gateway": { "car": car }, "blocks": world_blocks, "changes": [] }),
+                expected.clone(),
+                Some("unixfs-sizes"),
+            );
+            if let Some(case) = out.0.last_mut() {
+                case["native"] = json!({
+                    "status": status,
+                    "length": body.len(),
+                    "sha256": hex::encode(sha2::Sha256::digest(&body)),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// IPNS names that name names (0009, IPNS and DNSLink): GatewayCore
+/// follows three, resolves a fourth and answers 400 whatever it names,
+/// and asks for no fifth. The records are V2-only, signed by seeded
+/// Ed25519 keys; the last names site-v1, as ipns/honest's does.
+async fn chains(doc: &Doc, out: &mut Cases) -> Result<(), Err> {
+    use super::ipfs::native_answer;
+    use crate::ipns::{Key, Spec, record};
+    use sha2::Digest;
+    use std::collections::HashMap;
+    let site = doc.0["ipfs"]["directories"]
+        .as_array()
+        .and_then(|d| d.iter().find(|d| d["id"] == "site-v1"))
+        .ok_or("site-v1")?;
+    let site_root = site["root"].as_str().ok_or("root")?.to_string();
+    // GatewayCore's blocks: dweb-verify.json's, and the index document.
+    let mut blocks: HashMap<cid::Cid, Vec<u8>> = HashMap::new();
+    for (c, b) in doc.0["ipfs"]["blocks"].as_object().ok_or("blocks")? {
+        blocks.insert(c.parse()?, B64.decode(b.as_str().ok_or("block")?)?);
+    }
+    let index = site["entries"]
+        .as_array()
+        .and_then(|e| e.iter().find(|e| e["path"] == "index.html"))
+        .ok_or("index.html")?;
+    blocks.insert(
+        index["cid"].as_str().ok_or("cid")?.parse()?,
+        index["text"].as_str().ok_or("text")?.as_bytes().to_vec(),
+    );
+    let (page_headers, page) = error_page(400, "Bad Request", "dnslink recursion limit exceeded");
+    for (n, served, id, note) in [
+        (
+            3,
+            3,
+            "ipns/chain-3",
+            "three names, each record naming the next, the last site-v1: served, as GatewayCore serves three resolutions",
+        ),
+        (
+            4,
+            4,
+            "ipns/chain-4",
+            "four names: GatewayCore resolves the fourth, then answers 400 whatever it names; the core does once the fourth record passes",
+        ),
+        (
+            5,
+            4,
+            "ipns/chain-5",
+            "five names, the fifth without a record: the same 400, the fifth never asked for",
+        ),
+    ] {
+        let keys: Vec<Key> = (0..n)
+            .map(|i| Key::ed25519(&format!("requests-chain-{n}-{i}")))
+            .collect();
+        let names = keys.iter().map(Key::name).collect::<Result<Vec<_>, _>>()?;
+        let mut changes = Vec::new();
+        let mut resolves = HashMap::new();
+        for (i, key) in keys.iter().enumerate().take(served) {
+            let value = match names.get(i + 1) {
+                Some(next) => format!("/ipns/{next}"),
+                None => format!("/ipfs/{site_root}"),
+            };
+            let r = record(&Spec::v2(&value, 1), key)?;
+            changes.push(json!({ "piece": "record", "name": names[i], "record": bytes(&r) }));
+            resolves.insert(names[i].clone(), value);
+        }
+        let path = format!("/ipns/{}/", names[0]);
+        let (status, _, body) = native_answer(blocks.clone(), resolves, &path).await?;
+        let expect = if n <= 3 {
+            if status != 200 || B64.encode(&body) != doc.body("ipns-ipns-ed25519-a#1")?["base64"] {
+                return Err(format!("{id}: GatewayCore answers {status}").into());
+            }
+            complete(
+                doc.head("ipns-ipns-ed25519-a#1", "latest_asserted")?,
+                doc.body("ipns-ipns-ed25519-a#1")?,
+            )
+        } else {
+            if status != 400 || body != page {
+                return Err(format!("{id}: GatewayCore answers {status}").into());
+            }
+            complete(
+                json!({ "status": 400, "headers": page_headers, "trust": { "name": null, "content": "latest_asserted" } }),
+                bytes(&page),
+            )
+        };
+        out.push(
+            id,
+            note,
+            ipfs_plan(json!({ "ipns": names[0] }), "/", &[]),
+            "GET",
+            json!({ "gateway": { "car": true }, "changes": changes }),
+            expect,
+            None,
+        );
+        if let Some(case) = out.0.last_mut() {
+            case["native"] = json!({
+                "status": status,
+                "length": body.len(),
+                "sha256": hex::encode(sha2::Sha256::digest(&body)),
+            });
+        }
+    }
+    Ok(())
 }

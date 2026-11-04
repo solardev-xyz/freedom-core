@@ -65,7 +65,7 @@ impl BlockProvider for MemProvider {
 }
 
 /// The names a resolver that verified these records would resolve.
-struct Names(HashMap<String, String>);
+pub struct Names(pub HashMap<String, String>);
 
 #[async_trait::async_trait]
 impl NameResolver for Names {

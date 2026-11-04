@@ -22,7 +22,7 @@ pub mod ipns;
 mod murmur3;
 pub mod path;
 pub mod pb;
-mod rfc3339;
+pub mod rfc3339;
 pub mod unixfs;
 pub mod varint;
 

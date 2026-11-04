@@ -21,7 +21,8 @@ resolver = "3"
 [features]
 # Fault injection for the integration tests, read from FREEDOM_RADICLED_TEST_*
 # variables: see src/testhooks.rs. Without the feature every hook is a no-op
-# and no variable is read. A release build with it doesn't compile.
+# and no variable is read. build.rs refuses it in any release-profile or
+# optimized build, and CI checks that it does.
 testhooks = []
 
 [dependencies]

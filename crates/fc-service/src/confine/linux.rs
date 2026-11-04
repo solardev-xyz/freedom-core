@@ -64,18 +64,6 @@ pub(super) fn confine(policy: &Policy, options: &Options) -> Result<Report, Inva
             report.reasons.insert("resolution", why);
         }
     }
-    // The service's own resolver: whether it reads resolv.conf confined,
-    // asked now, under the rules.
-    if policy.resolver == Resolver::ResolvConf && policy.network == Network::Direct {
-        report.resolution = Some(Resolution::ResolvConf);
-        if std::fs::read(resolver::RESOLV_CONF).is_err() {
-            report.reasons.insert(
-                "resolution",
-                "/etc/resolv.conf can't be read: the service's resolver falls back to its built-in servers"
-                    .into(),
-            );
-        }
-    }
     Ok(report)
 }
 
