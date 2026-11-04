@@ -796,7 +796,7 @@ impl Sender {
 
     /// Fails the connection: nothing more is written, and every later call
     /// reports it.
-    fn fail(&mut self, error: StreamError) -> StreamError {
+    pub(crate) fn fail(&mut self, error: StreamError) -> StreamError {
         self.failed = Some(error);
         self.requests.clear();
         self.control.clear();
