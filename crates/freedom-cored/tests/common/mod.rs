@@ -527,6 +527,16 @@ impl Core {
         )
     }
 
+    /// The handshake at protocol 2, offering fragments and streams
+    /// (design 0009, Streams in the core).
+    pub fn hello_streams(&mut self) -> Value {
+        self.call_shell(
+            1,
+            "core.hello",
+            json!({ "protocol": 2, "shell_version": "test", "auto_lock_ms": 900_000, "frames": ["fragment", "stream"] }),
+        )
+    }
+
     pub fn hello_with(&mut self, auto_lock_ms: u64) -> Value {
         self.call_shell(
             1,

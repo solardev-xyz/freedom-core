@@ -178,6 +178,26 @@ const CAPABILITIES: &[&str] = &[
     "dweb.open",
 ];
 
+/// The methods `core.hello`'s capabilities add at protocol 2, after
+/// [`CAPABILITIES`] (design 0009): verified fetches, whose bodies stream.
+/// On a protocol-1 connection they are unknown methods, as before.
+const CAPABILITIES_STREAMS: &[&str] = &["dweb.verify", "dweb.forget"];
+
+/// `core.hello`'s capabilities at `protocol`: the methods, then the
+/// features; at protocol 2, the streamed methods and `streams` too.
+fn capabilities(protocol: u32) -> Vec<&'static str> {
+    let streams = protocol >= fc_protocol::PROTOCOL_VERSION_STREAMS;
+    let mut out: Vec<&'static str> = CAPABILITIES.to_vec();
+    if streams {
+        out.extend_from_slice(CAPABILITIES_STREAMS);
+    }
+    out.extend_from_slice(FEATURES);
+    if streams {
+        out.push("streams");
+    }
+    out
+}
+
 /// The features in `core.hello`'s capabilities, after the methods (design
 /// 0005):
 /// - `fragments`: fragmented responses with bulk credit (Frames). The core
@@ -307,6 +327,7 @@ pub fn run(options: &Options) -> Exit {
         link: Arc::clone(&link),
         credit: None,
         hello_done: false,
+        protocol: fc_protocol::PROTOCOL_VERSION,
         last_request_id: 0,
         vault: Vault::new(
             gate.identity_dir.clone(),
@@ -544,6 +565,8 @@ struct Core {
     /// The credit of the frame being handled.
     credit: Option<transport::Credit>,
     hello_done: bool,
+    /// The protocol the hello settled: 1 until then.
+    protocol: u32,
     last_request_id: u64,
     vault: Vault,
     worker: Worker,
@@ -670,8 +693,13 @@ fn loggable(method: &str) -> &'static str {
 /// debug builds the test methods, when their hook enables them. `Err` is
 /// the refusal: a method the table doesn't list is unknown; one it lists,
 /// but not for this caller, is forbidden.
-fn admitted(method: &str, caller: CallerKind, test_methods: bool) -> Result<(), ErrorBody> {
-    match methods::admit(method, caller) {
+fn admitted(
+    method: &str,
+    caller: CallerKind,
+    test_methods: bool,
+    protocol: u32,
+) -> Result<(), ErrorBody> {
+    match methods::admit(method, caller, protocol) {
         Admission::Allowed(_) => Ok(()),
         Admission::Forbidden => Err(ErrorBody::new(
             ErrorCode::Forbidden,
@@ -745,7 +773,12 @@ impl Ahead {
                 context,
                 ..
             }) if !matches!(
-                methods::admit(&method, context.caller),
+                // Read ahead of the hello: every method this build serves.
+                methods::admit(
+                    &method,
+                    context.caller,
+                    fc_protocol::PROTOCOL_VERSION_STREAMS
+                ),
                 Admission::Allowed(_)
             ) =>
             {
@@ -1061,7 +1094,7 @@ impl Core {
         let test_methods = self.test.is_some();
         #[cfg(not(debug_assertions))]
         let test_methods = false;
-        if let Err(refusal) = admitted(method, context.caller, test_methods) {
+        if let Err(refusal) = admitted(method, context.caller, test_methods, self.protocol) {
             return self.error(id, refusal);
         }
         let flow = match method {
@@ -1153,11 +1186,29 @@ impl Core {
             );
             return Flow::Exit(Exit::Protocol);
         };
-        if params.protocol != fc_protocol::PROTOCOL_VERSION {
+        // Protocol 2 adds streams (design 0009). Protocol 1 stays, without
+        // them, until the browser speaks 2: see 0009, Streams in the core.
+        let streams = match params.protocol {
+            fc_protocol::PROTOCOL_VERSION => false,
+            fc_protocol::PROTOCOL_VERSION_STREAMS => true,
+            _ => {
+                let _ = self.error(
+                    id,
+                    ErrorBody::new(ErrorCode::ProtocolMismatch, "Protocol mismatch").with_data(
+                        serde_json::json!({ "core": fc_protocol::PROTOCOL_VERSION_STREAMS }),
+                    ),
+                );
+                return Flow::Exit(Exit::Protocol);
+            }
+        };
+        // At protocol 2, main takes stream frames: its hello says so.
+        if streams && !params.frames.iter().any(|kind| kind == "stream") {
             let _ = self.error(
                 id,
-                ErrorBody::new(ErrorCode::ProtocolMismatch, "Protocol mismatch")
-                    .with_data(serde_json::json!({ "core": fc_protocol::PROTOCOL_VERSION })),
+                ErrorBody::new(
+                    ErrorCode::InvalidArgument,
+                    "core.hello at protocol 2 offers no stream frames",
+                ),
             );
             return Flow::Exit(Exit::Protocol);
         }
@@ -1167,6 +1218,7 @@ impl Core {
                 ErrorBody::new(ErrorCode::InvalidArgument, "core.hello was already sent"),
             );
         }
+        self.protocol = params.protocol;
         self.vault.set_auto_lock_ms(params.auto_lock_ms);
         spawn_adoption(params.node_roots.map(NodeRoots::valid).unwrap_or_default());
         // Granted with the handshake: main holds the core's credit from now
@@ -1188,9 +1240,9 @@ impl Core {
             &mut *payload,
             id,
             &HelloResult {
-                protocol: fc_protocol::PROTOCOL_VERSION,
+                protocol: self.protocol,
                 core_version: env!("CARGO_PKG_VERSION"),
-                capabilities: CAPABILITIES.iter().chain(FEATURES).copied().collect(),
+                capabilities: capabilities(self.protocol),
                 node_recovery: &self.node_recovery,
             },
         );
@@ -1665,14 +1717,20 @@ mod tests {
     #[test]
     fn every_method_has_a_row_and_every_row_a_handler() {
         let rows: Vec<&str> = methods::METHODS.iter().map(|m| m.name).collect();
-        let served: Vec<&str> = CAPABILITIES.iter().chain(chain::METHODS).copied().collect();
+        let served: Vec<&str> = CAPABILITIES
+            .iter()
+            .chain(CAPABILITIES_STREAMS)
+            .chain(chain::METHODS)
+            .copied()
+            .collect();
         assert_eq!(rows, served);
         for name in rows {
             assert!(
                 matches!(name, "core.hello" | "core.shutdown")
                     || Vault::handles(name)
                     || naming::handles(name)
-                    || chain::handles(name),
+                    || chain::handles(name)
+                    || CAPABILITIES_STREAMS.contains(&name),
                 "{name}"
             );
             assert_eq!(loggable(name), name);
