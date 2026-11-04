@@ -2012,11 +2012,12 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 [[package]]
 name = "libradicle"
 version = "0.8.0"
-source = "git+https://github.com/solardev-xyz/libradicle?rev=b7d62b951b313061fb9e4d5145193341e5ad7b15#b7d62b951b313061fb9e4d5145193341e5ad7b15"
+source = "git+https://github.com/solardev-xyz/libradicle?rev=9e06195b6a1425c349831de12e4b75dfab89acc7#9e06195b6a1425c349831de12e4b75dfab89acc7"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
  "git2",
+ "libc",
  "log",
  "radicle",
  "radicle-node",
@@ -2026,6 +2027,7 @@ dependencies = [
  "serde_json",
  "sqlite",
  "thiserror 2.0.20",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

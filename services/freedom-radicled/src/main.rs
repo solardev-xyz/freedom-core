@@ -16,10 +16,10 @@
 //!    a descriptor is inherited (`fc_service::confine::clean_entry`);
 //! 2. hardening;
 //! 3. libgit2's configuration search paths emptied
-//!    (`libradicle::isolate_git_config`, libradicle item 9), while the
-//!    process has one thread: no git configuration outside a repository
-//!    applies, and confinement, which leaves `/etc/gitconfig` unreadable,
-//!    fails no repository's open;
+//!    (`libradicle::isolate_git_config_single_threaded`, libradicle item 9),
+//!    while the process has one thread, which it checks: no git
+//!    configuration outside a repository applies, and confinement, which
+//!    leaves `/etc/gitconfig` unreadable, fails no repository's open;
 //! 4. the arguments, `--network` among them;
 //! 5. the environment main cleared, checked ([`env`]);
 //! 6. the gate, `<lock-dir>/radicle-<sha256(canonical home)>.lock`, before
@@ -44,8 +44,9 @@
 //! **Exit codes** (0001's, and 0008's): 0 after `rad.shutdown`, stdin EOF,
 //! the parent gone, or a failed start step answered first; 64 for usage,
 //! including an environment main should have cleared; 70 for a panic
-//! outside a request, or when libgit2's search paths or the OS's randomness
-//! fail at start; 74 for storage; 75 when the gate is held; 76 for a
+//! outside a request, or when libgit2's search paths (a process with more
+//! than one thread among the reasons) or the OS's randomness fail at start;
+//! 74 for storage; 75 when the gate is held; 76 for a
 //! protocol error, the handshake's deadline, `rad.identity`'s deadline or
 //! the writer stall; 77 when confinement refuses the process
 //! (`confinement`: a thread or descriptor it didn't expect, or its own rules
@@ -89,13 +90,13 @@ fn main() -> ExitCode {
     // nothing needed dropping, or this is the one re-exec, or it failed.
     let entry = fc_service::confine::clean_entry();
     fc_service::hardening::harden();
-    // The process's one unsafe call (Cargo.toml's lints).
-    #[allow(unsafe_code)]
-    // SAFETY: `isolate_git_config` must run before any thread can use
-    // libgit2. None can: this is the process's only thread. Nothing before
-    // it here spawns one (the panic hook, the entry's re-exec and hardening
-    // don't), and every thread the process starts, logging's writer and
-    // reconciliation's among them, starts from `serve`, after this returns.
+    // libgit2's configuration search paths, emptied while this is the
+    // process's only thread: libradicle counts the threads and refuses,
+    // changing nothing, unless there is exactly one, so this crate keeps
+    // `unsafe_code` forbidden. Nothing before it here spawns one (the panic
+    // hook, the entry's re-exec and hardening don't), and every thread the
+    // process starts, logging's writer and reconciliation's among them,
+    // starts from `serve`, after this returns. A refusal exits 70.
     // After `clean_entry`, not before, so that libgit2's initialization,
     // which can open `/dev/urandom` for its seed, comes after the check for
     // inherited descriptors.
@@ -103,7 +104,7 @@ fn main() -> ExitCode {
     // `remove_git_config_env`, its companion, isn't needed: `serve` refuses
     // every `GIT_*` variable (`env::check`) before anything opens a
     // repository, and nothing here opens one from the environment.
-    let isolated = unsafe { libradicle::isolate_git_config() };
+    let isolated = libradicle::isolate_git_config_single_threaded();
     let exit = match isolated {
         Ok(git_config) => run(started, &entry, git_config),
         Err(e) => {
