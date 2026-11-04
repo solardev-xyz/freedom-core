@@ -10,11 +10,22 @@
 //! - **What is read is bounded:** a marker larger than [`MAX_LEN`] is an
 //!   error, before it is read. It names one identity after every completed
 //!   reconciliation, and grows only by the starts that didn't complete.
-//! - **It is written durably:** to a temporary file beside it, flushed,
-//!   renamed into place, and then its directory flushed (on Unix: Windows
-//!   has no directory flush, as the core's journal has none there).
-//! - **Only a regular file is a marker.** A symlink, or a directory, at
-//!   `node/dirty` is an error, and is never followed.
+//! - **It is written durably:** to a temporary file beside it,
+//!   `node/dirty.tmp`, flushed, renamed into place, and then its directory
+//!   flushed (on Unix: Windows has no directory flush, as the core's journal
+//!   has none there).
+//! - **The temporary file is made new by every write.** Whatever a killed
+//!   write left at its path (a file, a symlink, a FIFO) is unlinked, never
+//!   opened, so a symlink's target is never touched; a directory there is an
+//!   error, and is left. The file is then created exclusively
+//!   (`create_new`, which fails on any entry, a dangling symlink too), never
+//!   following a symlink (`O_NOFOLLOW`; on Windows,
+//!   `FILE_FLAG_OPEN_REPARSE_POINT`).
+//! - **Only a regular file is a marker.** A symlink, a directory, a FIFO or
+//!   any other entry at `node/dirty` is an error, and is never followed or
+//!   read. It is judged on the handle opened: the open never follows a
+//!   symlink (as above) and never waits (`O_NONBLOCK`: a FIFO opens at once,
+//!   and is then refused); on Windows, a reparse point is refused.
 
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
@@ -124,12 +135,15 @@ impl Names {
 /// The marker in `home`, if there is one.
 pub fn read(home: &Path) -> Result<Option<Names>, Error> {
     let path = path(home);
-    let metadata = match fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
+    let file = match open_marker(&path) {
+        Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e.into()),
+        Err(e) => return Err(refused(&path, e)),
     };
-    if !metadata.file_type().is_file() {
+    // Judged on the handle, so nothing swapped in at the path since the
+    // open is read.
+    let metadata = file.metadata()?;
+    if !is_regular(&metadata) {
         return Err(Error::NotAFile);
     }
     if metadata.len() > MAX_LEN {
@@ -137,9 +151,7 @@ pub fn read(home: &Path) -> Result<Option<Names>, Error> {
     }
     let mut bytes = Vec::new();
     // Bounded again as it is read: the file may have grown since.
-    File::open(&path)?
-        .take(MAX_LEN + 1)
-        .read_to_end(&mut bytes)?;
+    file.take(MAX_LEN + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_LEN {
         return Err(Error::TooLarge);
     }
@@ -152,19 +164,100 @@ pub fn write(home: &Path, names: &Names) -> Result<(), Error> {
     let node = home.join("node");
     make_dir(&node)?;
     let staging = staging(home);
-    // A staging file left by a killed write is replaced: it was never the
-    // marker.
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&staging)?;
+    clear_staging(&staging)?;
+    let mut file = create_staging(&staging).map_err(|e| refused(&staging, e))?;
     file.write_all(&names.encode())?;
     file.sync_all()?;
     drop(file);
     fs::rename(&staging, path(home))?;
     sync_dir(&node)?;
     Ok(())
+}
+
+/// Removes what a killed write left at `staging`, which was never the
+/// marker, without opening it: a symlink is unlinked, and its target is
+/// untouched. A directory there is an error, and is left.
+fn clear_staging(staging: &Path) -> Result<(), Error> {
+    match fs::symlink_metadata(staging) {
+        Ok(metadata) if metadata.file_type().is_dir() => Err(Error::NotAFile),
+        Ok(_) => match fs::remove_file(staging) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// `FILE_FLAG_OPEN_REPARSE_POINT`: open a symlink (or another reparse point)
+/// itself, never its target.
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+/// `FILE_ATTRIBUTE_REPARSE_POINT`: a symlink, a junction or another
+/// reparse point.
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+
+/// Opens the marker for reading, never following a symlink at `path` and
+/// never waiting: on Unix `O_NOFOLLOW` and `O_NONBLOCK` (a FIFO opens at
+/// once, and its handle is then refused); on Windows a reparse point is
+/// opened itself, and its handle then refused.
+fn open_marker(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options.open(path)
+}
+
+/// Creates the staging file, new and regular: `create_new` fails on any
+/// entry at `path`, a dangling symlink too, and the open never follows one.
+fn create_staging(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options.open(path)
+}
+
+/// An open refused for what is at `path`, without following it: a symlink
+/// (`O_NOFOLLOW`'s `ELOOP`), or a directory Windows won't open as a file, is
+/// [`Error::NotAFile`]. Anything else is the open's own error.
+fn refused(path: &Path, e: io::Error) -> Error {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if !is_regular(&metadata) => Error::NotAFile,
+        _ => e.into(),
+    }
+}
+
+/// Whether `metadata` is a regular file's: on Windows, not a reparse point.
+fn is_regular(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return false;
+        }
+    }
+    metadata.file_type().is_file()
 }
 
 /// Makes `dir` if it isn't there, and flushes its parent once it is made.
@@ -265,20 +358,121 @@ mod tests {
         assert!(matches!(read(home.path()), Err(Error::TooLarge)));
     }
 
+    /// Makes a FIFO at `at`.
+    #[cfg(unix)]
+    fn fifo(at: &Path) {
+        let made = std::process::Command::new("mkfifo")
+            .arg(at)
+            .status()
+            .unwrap();
+        assert!(made.success());
+    }
+
+    /// `f`'s answer, which must come within 10 s: an open of a FIFO that
+    /// waited for its other end would never answer.
+    #[cfg(unix)]
+    fn without_waiting<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(f());
+        });
+        finished
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("waited on a FIFO")
+    }
+
     #[test]
     fn only_a_regular_file_is_a_marker() {
         let home = tempfile::tempdir().unwrap();
         fs::create_dir_all(path(home.path())).unwrap();
         assert!(matches!(read(home.path()), Err(Error::NotAFile)));
+        assert!(path(home.path()).is_dir());
         #[cfg(unix)]
         {
+            // A symlink, to a marker or to nothing, is refused, not followed.
             let home = tempfile::tempdir().unwrap();
             fs::create_dir(home.path().join("node")).unwrap();
             let elsewhere = home.path().join("elsewhere");
             fs::write(&elsewhere, br#"{"node_ids":[]}"#).unwrap();
             std::os::unix::fs::symlink(&elsewhere, path(home.path())).unwrap();
             assert!(matches!(read(home.path()), Err(Error::NotAFile)));
+            fs::remove_file(path(home.path())).unwrap();
+            std::os::unix::fs::symlink(home.path().join("nothing"), path(home.path())).unwrap();
+            assert!(matches!(read(home.path()), Err(Error::NotAFile)));
+
+            // A FIFO is refused at once, with no writer at its other end.
+            let home = tempfile::tempdir().unwrap();
+            fs::create_dir(home.path().join("node")).unwrap();
+            fifo(&path(home.path()));
+            let at = home.path().to_path_buf();
+            assert!(without_waiting(move || matches!(
+                read(&at),
+                Err(Error::NotAFile)
+            )));
         }
+    }
+
+    /// Review of #243: a write never opens what a killed write left at the
+    /// staging path, so a symlink there can't redirect the write, and the
+    /// marker it renames into place is a regular file.
+    #[cfg(unix)]
+    #[test]
+    fn a_staging_symlink_does_not_overwrite_its_target() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(home.path().join("node")).unwrap();
+        let target = home.path().join("target");
+        fs::write(&target, b"keep me").unwrap();
+        std::os::unix::fs::symlink(&target, staging(home.path())).unwrap();
+        write(home.path(), &Names::of([id(1)])).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"keep me");
+        assert!(
+            fs::symlink_metadata(path(home.path()))
+                .unwrap()
+                .file_type()
+                .is_file()
+        );
+        assert_eq!(read(home.path()).unwrap(), Some(Names::of([id(1)])));
+        assert!(fs::symlink_metadata(staging(home.path())).is_err());
+
+        // A dangling one: nothing is made where it points.
+        let nothing = home.path().join("nothing");
+        std::os::unix::fs::symlink(&nothing, staging(home.path())).unwrap();
+        write(home.path(), &Names::of([id(2)])).unwrap();
+        assert!(fs::symlink_metadata(&nothing).is_err());
+        assert_eq!(read(home.path()).unwrap(), Some(Names::of([id(2)])));
+    }
+
+    /// A FIFO left at the staging path is unlinked, never opened: an open
+    /// for writing would wait for a reader.
+    #[cfg(unix)]
+    #[test]
+    fn a_staging_fifo_is_unlinked_without_waiting() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(home.path().join("node")).unwrap();
+        fifo(&staging(home.path()));
+        let at = home.path().to_path_buf();
+        without_waiting(move || write(&at, &Names::of([id(1)]))).unwrap();
+        assert_eq!(read(home.path()).unwrap(), Some(Names::of([id(1)])));
+        assert!(fs::symlink_metadata(staging(home.path())).is_err());
+    }
+
+    /// A directory at the staging path is refused, and it and the marker
+    /// are left as they were.
+    #[test]
+    fn a_staging_directory_is_refused_and_left() {
+        let home = tempfile::tempdir().unwrap();
+        write(home.path(), &Names::of([id(1)])).unwrap();
+        fs::create_dir(staging(home.path())).unwrap();
+        fs::write(staging(home.path()).join("inside"), b"keep me").unwrap();
+        assert!(matches!(
+            write(home.path(), &Names::of([id(3)])),
+            Err(Error::NotAFile)
+        ));
+        assert_eq!(
+            fs::read(staging(home.path()).join("inside")).unwrap(),
+            b"keep me"
+        );
+        assert_eq!(read(home.path()).unwrap(), Some(Names::of([id(1)])));
     }
 
     #[test]

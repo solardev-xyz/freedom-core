@@ -144,3 +144,25 @@ pub fn nid_of(seed: &[u8; 32]) -> String {
         .to_bytes();
     radicle::prelude::NodeId::from_bytes(public).to_human()
 }
+
+/// What `home`'s quarantine record says of each repository, for a failing
+/// assertion: the evidence stays out of `rad.reconcile`'s reply.
+pub fn evidence(home: &Path) -> String {
+    let path = home.join("node").join("reconcile.db");
+    if !path.exists() {
+        return "no quarantine record".to_owned();
+    }
+    let record = radicle::storage::git::reconcile::quarantine::Quarantine::open(&path).unwrap();
+    record
+        .page(0, 16)
+        .unwrap()
+        .iter()
+        .map(|r| {
+            format!(
+                "{} {} {} {:?}: {}",
+                r.rid, r.kind, r.step, r.unit, r.evidence
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}

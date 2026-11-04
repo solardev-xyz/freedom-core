@@ -1069,6 +1069,7 @@ dependencies = [
  "freedom-ipfs-addr",
  "freedom-ipfs-socks",
  "getrandom 0.4.3",
+ "libc",
  "libradicle",
  "radicle",
  "rand_core 0.10.1",
