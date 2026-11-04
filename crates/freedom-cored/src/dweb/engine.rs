@@ -844,6 +844,8 @@ mod tests {
         hold: Option<String>,
         /// The record answered for any name.
         record: Option<Vec<u8>>,
+        /// Entity CARs, by the path they answer.
+        cars: HashMap<String, Vec<u8>>,
     }
 
     impl World {
@@ -889,7 +891,18 @@ mod tests {
                 blocks,
                 hold: None,
                 record: None,
+                cars: HashMap::new(),
             }
+        }
+
+        /// The CAR a conforming gateway answers for `path`: these blocks,
+        /// by their CIDs' text, the first the root.
+        fn car(&mut self, path: &str, cids: &[&str]) {
+            let sections: Vec<(Vec<u8>, Vec<u8>)> = cids
+                .iter()
+                .map(|c| (cid_bytes(c), self.blocks[*c].clone()))
+                .collect();
+            self.cars.insert(path.to_owned(), car(&sections));
         }
 
         /// The vectors' record `id`.
@@ -908,6 +921,14 @@ mod tests {
         fn answer(&self, p: &PieceRequest) -> Answer {
             if self.hold.as_deref().is_some_and(|h| p.path.starts_with(h)) {
                 return Answer::Hold;
+            }
+            if let Some(car) = self.cars.get(&p.path) {
+                let kind = "application/vnd.ipld.car; version=1; order=dfs; dups=y";
+                return Answer::Stream(
+                    200,
+                    vec![("content-type".into(), kind.into())],
+                    car.clone(),
+                );
             }
             let not_found = || Answer::Whole(404, vec![], b"{}".to_vec());
             if let Some(a) = p.path.strip_prefix("/chunks/") {
@@ -958,6 +979,57 @@ mod tests {
                 None => Answer::Stream(404, vec![], vec![]),
             }
         }
+    }
+
+    /// A CIDv1's bytes from its text: `b`, then lowercase base32 without
+    /// padding.
+    fn cid_bytes(text: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        let (mut acc, mut bits) = (0u32, 0);
+        for c in text.strip_prefix('b').unwrap().bytes() {
+            let v = match c {
+                b'a'..=b'z' => c - b'a',
+                b'2'..=b'7' => c - b'2' + 26,
+                _ => panic!("{text}"),
+            };
+            acc = acc << 5 | u32::from(v);
+            bits += 5;
+            if bits >= 8 {
+                bits -= 8;
+                out.push((acc >> bits) as u8);
+                acc &= (1 << bits) - 1;
+            }
+        }
+        out
+    }
+
+    fn varint(mut v: u64, out: &mut Vec<u8>) {
+        while v >= 0x80 {
+            out.push((v as u8) | 0x80);
+            v >>= 7;
+        }
+        out.push(v as u8);
+    }
+
+    /// A CAR v1 of these sections, rooted at the first.
+    fn car(sections: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
+        let root = &sections[0].0;
+        let mut h = vec![0xa2, 0x65];
+        h.extend_from_slice(b"roots");
+        h.extend_from_slice(&[0x81, 0xd8, 0x2a, 0x58, (root.len() + 1) as u8, 0x00]);
+        h.extend_from_slice(root);
+        h.push(0x67);
+        h.extend_from_slice(b"version");
+        h.push(0x01);
+        let mut out = Vec::new();
+        varint(h.len() as u64, &mut out);
+        out.extend_from_slice(&h);
+        for (cid, block) in sections {
+            varint((cid.len() + block.len()) as u64, &mut out);
+            out.extend_from_slice(cid);
+            out.extend_from_slice(block);
+        }
+        out
     }
 
     /// What a `dweb.verify` got.
@@ -1249,6 +1321,29 @@ mod tests {
         // Every grant and stream given back, nothing left queued.
         assert_eq!((e.counts(), e.granted(), e.streams()), ((0, 0), 0, 0));
         assert_eq!(e.queued(), (0, 0));
+    }
+
+    #[test]
+    fn an_ipfs_file_through_a_car() {
+        let mut w = World::new();
+        let leaf = "bafkreibllxsbtjemt7nvti7ilxfrqdyml7ne7oe4a7q4fryqj5vkv5hiia";
+        let path = format!("/ipfs/{SITE_V1}/index.html?format=car&dag-scope=entity");
+        w.car(&path, &[SITE_V1, leaf]);
+        let mut e = Engine::new(Bounds::default());
+        let mut f = Fake::new(256);
+        let mut r = ipfs(SITE_V1, "/index.html");
+        r.car = true;
+        e.verify(&mut f, 0, 1, r);
+        settle(&mut e, &mut f, &w, 0);
+        assert_eq!(f.ending(1), Some("end"), "{:?}", f.got.get(&1));
+        assert_eq!(
+            f.got[&1].body,
+            b"<!doctype html><title>site</title><p>index</p>\n"
+        );
+        // One piece: the CAR, a stream, its blocks hashed on the pool.
+        assert_eq!(f.sent.len(), 1, "{:?}", f.sent);
+        assert!(f.sent[0].1.stream);
+        assert_eq!((e.granted(), e.streams()), (0, 0));
     }
 
     #[test]
