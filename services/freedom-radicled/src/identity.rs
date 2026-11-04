@@ -205,7 +205,7 @@ fn establish(
         .to_bytes();
     let key = libradicle::HostKey::from_bytes(seed.as_mut_slice())
         .ok_or_else(|| Failure(ErrorBody::new(ErrorCode::Internal, "Internal error")))?;
-    let nid = radicle_crypto::PublicKey::from_bytes(public).to_human();
+    let nid = radicle::crypto::PublicKey::from_bytes(public).to_human();
     Ok(NodeIdentity {
         key: Some(key),
         did: format!("did:key:{nid}"),
