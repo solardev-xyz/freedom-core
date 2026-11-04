@@ -367,7 +367,7 @@ mod tests {
             );
         }
         let long = "x".repeat(MAX_HEADER + 1);
-        let nine = vec![r#"["content-type","a"]"#; 9].join(",");
+        let nine = [r#"["content-type","a"]"#; 9].join(",");
         for bad in [
             // `stalled` is a stream's abort, never a failed dial.
             r#"{"failed":"stalled"}"#.to_owned(),
