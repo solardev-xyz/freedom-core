@@ -34,7 +34,7 @@ fc-service = { path = "../../crates/fc-service" }
 # The sealed release of the node key (0008, "The sealed release"): the
 # service's X25519 key for one start, and opening what the core sealed to it.
 fc-seal = { path = "../../crates/fc-seal" }
-# libradicle at `claude/isolate-git-config-checked` (9e06195), branched from
+# libradicle at `claude/isolate-git-config-checked` (3817c7c), branched from
 # `integration/rust-core`, built with `no-spawn`, explicitly (0008, "Spawn
 # and lock"): serving runs in process and `git gc` is skipped. It carries the upstream changes 0008 lists for the service's
 # first steps: the routing, `isolated` and `control_socket` options, the
@@ -48,7 +48,7 @@ fc-seal = { path = "../../crates/fc-seal" }
 # Pinned by commit until those changes are released (deny.toml allows
 # solardev-xyz).
 # src/build_info.rs reports the same commit.
-libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "9e06195b6a1425c349831de12e4b75dfab89acc7", features = ["no-spawn"] }
+libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "3817c7c63012090086d5c6772030ac7b1d730af4", features = ["no-spawn"] }
 # heartwood's `radicle`, at the commit libradicle pins, so that both resolve
 # to one package (build_info's test holds them to one commit): the node
 # identity's public forms (`did:key`, the node ID), and, from the next step,
