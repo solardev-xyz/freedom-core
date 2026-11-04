@@ -307,8 +307,14 @@ pub fn run_shared(
             "{label}: reserved {} past the budget",
             v.reserved()
         );
-        // Every release matched a hold.
+        // Every release matched a hold, and no reservation, within an
+        // input either, passed the budget.
         assert_eq!(v.over_released(), 0, "{label}: released without a hold");
+        assert!(
+            v.peak() <= budget,
+            "{label}: reserved {} at its peak, past the budget {budget}",
+            v.peak()
+        );
         out.peak = out.peak.max(v.reserved());
         // Credit never runs past the reservation: the room main may still
         // fill on every open stream is room the machine holds reserved.

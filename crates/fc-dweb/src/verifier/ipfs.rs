@@ -377,13 +377,15 @@ impl Walk {
             file: None,
             served: Vec::new(),
         };
-        // The request's segments: their room held before they are built.
+        // The request's segments: their room held before they are built,
+        // an empty one's slot included, which the walk drops later.
         let n = path.split('/').filter(|s| !s.is_empty()).count();
         if n > MAX_SEGMENTS {
             core.fail(Failure::Unverifiable);
             return Ok(walk);
         }
-        if !walk.reserve_path(core, n, path.len()) {
+        let slots = path.split('/').count();
+        if !walk.reserve_path(core, slots, path.len()) {
             core.fail(Failure::Memory);
             return Ok(walk);
         }

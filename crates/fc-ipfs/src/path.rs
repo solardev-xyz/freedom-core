@@ -7,9 +7,15 @@
 
 /// The path's segments, decoded; `None` when a segment decodes to `.` or
 /// `..`, holds `/`, `\` or NUL once decoded, or isn't UTF-8. Empty segments
-/// are kept, as the native node keeps them.
+/// are kept, as the native node keeps them. The vector holds exactly the
+/// segments, and each string at most its segment's length, so a caller can
+/// reserve for them before they are built.
 pub fn decode_segments(path: &str) -> Option<Vec<String>> {
-    path.split('/').map(decode_segment).collect()
+    let mut out = Vec::with_capacity(path.split('/').count());
+    for segment in path.split('/') {
+        out.push(decode_segment(segment)?);
+    }
+    Some(out)
 }
 
 fn hex(b: u8) -> Option<u8> {
