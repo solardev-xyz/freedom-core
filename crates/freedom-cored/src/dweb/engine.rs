@@ -842,6 +842,8 @@ mod tests {
         blocks: HashMap<String, Vec<u8>>,
         /// Pieces whose path starts so are held back.
         hold: Option<String>,
+        /// The record answered for any name.
+        record: Option<Vec<u8>>,
     }
 
     impl World {
@@ -886,7 +888,21 @@ mod tests {
                 files,
                 blocks,
                 hold: None,
+                record: None,
             }
+        }
+
+        /// The vectors' record `id`.
+        fn record(id: &str) -> Vec<u8> {
+            let d = doc();
+            let r = d["ipfs"]["ipns"]["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["id"] == id)
+                .unwrap()
+                .clone();
+            b64(&r["record"])
         }
 
         fn answer(&self, p: &PieceRequest) -> Answer {
@@ -919,6 +935,12 @@ mod tests {
                     vec![("content-range".into(), cr)],
                     file[a..=b].to_vec(),
                 );
+            }
+            if p.path.starts_with("/ipns/") {
+                return match &self.record {
+                    Some(r) => Answer::Whole(200, vec![], r.clone()),
+                    None => not_found(),
+                };
             }
             let cid = p
                 .path
@@ -1199,6 +1221,8 @@ mod tests {
     }
 
     const SITE_A: &str = "3c8b9184787f719e7184f51b5c595a950d8cec49c765dc0e5a8f1c253e54591c";
+    /// The vectors' Ed25519 IPNS name, whose records point at site-v1.
+    const NAME: &str = "k51qzi5uqu5dgyzs7wc9fb3dpul2l0yq1x1w2pi7ef703292ycquyorqqukz56";
     const SITE_V1: &str = "bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm";
 
     #[test]
@@ -1225,6 +1249,42 @@ mod tests {
         // Every grant and stream given back, nothing left queued.
         assert_eq!((e.counts(), e.granted(), e.streams()), ((0, 0), 0, 0));
         assert_eq!(e.queued(), (0, 0));
+    }
+
+    #[test]
+    fn a_range_and_an_ipns_name() {
+        let mut w = World::new();
+        let mut e = Engine::new(Bounds::default());
+        let mut f = Fake::new(256);
+        let mut r = swarm(SITE_A, "/style.css");
+        r.plan.headers = vec![("range".into(), "bytes=100-199".into())];
+        e.verify(&mut f, 0, 1, r);
+        // An IPNS name, its record at sequence 4, in the profile's partition.
+        w.record = Some(World::record("ed25519-legacy"));
+        let mut r = ipfs(SITE_V1, "/index.html");
+        r.plan.root = Root::Ipns(NAME.into());
+        e.verify(&mut f, 0, 2, r.clone());
+        settle(&mut e, &mut f, &w, 0);
+        assert_eq!(f.got[&1].head.as_ref().unwrap().status, 206);
+        assert_eq!(f.got[&1].body, content("site-style", 5000)[100..200]);
+        assert_eq!(f.ending(2), Some("end"));
+        let head = f.got[&2].head.as_ref().unwrap();
+        assert_eq!(head.trust.content, ContentTrust::LatestAsserted);
+        // A record below the floor, in the same partition, is refused; in
+        // another, it is accepted.
+        w.record = Some(World::record("ed25519-v2"));
+        e.verify(&mut f, 0, 3, r.clone());
+        let mut other = r;
+        other.partition = Some("private-1".into());
+        other.private = true;
+        e.verify(&mut f, 0, 4, other);
+        settle(&mut e, &mut f, &w, 0);
+        assert_eq!(
+            f.ending(3),
+            Some("error 502 IPFS content verification failed")
+        );
+        assert_eq!(f.ending(4), Some("end"));
+        assert_eq!(e.granted(), 0);
     }
 
     #[test]
