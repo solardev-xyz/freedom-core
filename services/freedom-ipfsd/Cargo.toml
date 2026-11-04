@@ -9,7 +9,7 @@
 [package]
 name = "freedom-ipfsd"
 description = "The freedom-ipfs service process: IPFS nodes as owned instances, over stdin and stdout frames (design 0007)"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.99"
 publish = false
