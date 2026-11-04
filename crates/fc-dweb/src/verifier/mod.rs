@@ -400,18 +400,15 @@ pub(crate) struct Core<T> {
     jobs_held: usize,
     next_job: u64,
     /// Bytes the walk holds: piece bodies, stream bytes, parsed structure.
-    walk_held: usize,
+    /// Its count, its faults (a release without its hold,
+    /// [`Verifier::over_released`]) and the probe's ledger are
+    /// [`charged`]'s, which alone writes them.
+    walk_held: charged::Held,
     /// The most the request has reserved at once ([`Verifier::peak`]).
     peak: usize,
-    /// Bytes released while the walk ran that it didn't hold: a release
-    /// without its hold ([`Verifier::over_released`]).
-    over_released: usize,
     /// The head's headers, once the walk made them within its room, until
     /// main takes the head ([`Core::head_charged`]).
     head_held: usize,
-    /// What the walk's live [`Charged`] values are charged.
-    #[cfg(feature = "memory-probe")]
-    ledger: charged::Ledger,
     queue: VecDeque<Queued>,
     queued: usize,
     /// The verified body sent, and main's credit for it.
@@ -442,12 +439,9 @@ impl<T: Copy> Core<T> {
             jobs: BTreeMap::new(),
             jobs_held: 0,
             next_job: 0,
-            walk_held: 0,
+            walk_held: charged::Held::default(),
             peak: 0,
-            over_released: 0,
             head_held: 0,
-            #[cfg(feature = "memory-probe")]
-            ledger: charged::Ledger::default(),
             queue: VecDeque::new(),
             queued: 0,
             sent: 0,
@@ -468,7 +462,7 @@ impl<T: Copy> Core<T> {
                 }
             })
             .sum();
-        pieces + self.jobs_held + self.walk_held + self.queued + self.head_held
+        pieces + self.jobs_held + self.walk_held.get() + self.queued + self.head_held
     }
 
     /// Notes a reservation's growth in the request's peak.
@@ -501,47 +495,26 @@ impl<T: Copy> Core<T> {
             .count()
     }
 
-    /// Memory the walk holds that its charges don't match: counted with
-    /// the releases that had no hold, as the same fault.
-    #[cfg(feature = "memory-probe")]
-    fn misheld(&mut self, n: usize) {
-        self.over_released = self.over_released.saturating_add(n.max(1));
-    }
-
-    /// After a release, or as the walk's holding goes at its end: its live
-    /// [`Charged`] values are still covered. One the walk still has once
-    /// its charge has gone is memory past the request's count.
-    #[cfg(feature = "memory-probe")]
-    fn check_live(&mut self) {
-        let live = self.ledger.live();
-        if live > self.walk_held {
-            self.misheld(live - self.walk_held);
-        }
+    /// After a release of the walk's memory, the test's look at the
+    /// allocator ([`probe`]).
+    fn released(&self) {
+        #[cfg(feature = "memory-probe")]
         probe::released(self.reserved());
     }
 
     /// The walk's holding goes at once, at the request's end: nothing it
     /// charged may still be live.
     fn drop_walk_held(&mut self) {
-        self.walk_held = 0;
-        #[cfg(feature = "memory-probe")]
-        self.check_live();
+        self.walk_held.clear();
+        self.released();
     }
 
     /// After an input, for a walk whose memory is all [`Charged`] (the
-    /// Swarm walk's): what it holds is what its live values are charged,
-    /// no less (memory past the count) and no more (a charge whose value
-    /// went without it).
-    #[cfg(feature = "memory-probe")]
+    /// Swarm walk's): what it holds is what its live values are charged
+    /// ([`charged::Held::audit`]).
     pub(crate) fn audit_charged(&mut self) {
-        let live = self.ledger.live();
-        if live != self.walk_held {
-            self.misheld(live.abs_diff(self.walk_held));
-        }
+        self.walk_held.audit();
     }
-
-    #[cfg(not(feature = "memory-probe"))]
-    pub(crate) fn audit_charged(&mut self) {}
 
     /// Asks for a piece, reserving its room: a whole piece's bound, or a
     /// stream's window. `None` when it doesn't fit.
@@ -644,15 +617,11 @@ impl<T: Copy> Core<T> {
         self.unhold(size);
     }
 
-    /// [`Core::hash`] for charged work: its charge, measured as the job's
-    /// size, moves to the job before the walk's goes.
-    pub(crate) fn hash_charged(&mut self, tag: T, mut work: Charged<jobs::Work>) {
-        let size = work.size();
-        work.recharge(self, size);
-        let (work, size, tally) = work.into_parts();
-        self.queue_job(tag, work);
-        tally.done();
-        self.unhold(size);
+    /// [`Core::hash`] for charged work: the job has it, counted as its
+    /// size, before the walk's charge goes.
+    pub(crate) fn hash_charged(&mut self, tag: T, work: Charged<jobs::Work>) {
+        work.hand_over(self, |core, work| core.queue_job(tag, work));
+        self.grew();
     }
 
     /// The job out, its bytes counted as its own.
@@ -708,15 +677,14 @@ impl<T: Copy> Core<T> {
         self.pump();
     }
 
-    /// [`Core::body`] for charged bytes: their charge, measured as their
-    /// length, moves to the queue before the walk's goes.
-    pub(crate) fn body_charged(&mut self, mut bytes: Charged<Vec<u8>>, from: Option<PieceId>) {
-        let n = bytes.len();
-        bytes.recharge(self, n);
-        let (bytes, n, tally) = bytes.into_parts();
-        self.enqueue(bytes, from);
-        tally.done();
-        self.unhold(n);
+    /// [`Core::body`] for charged bytes: the queue has them, shrunk to
+    /// their length, which it counts, before the walk's charge goes.
+    pub(crate) fn body_charged(&mut self, bytes: Charged<Vec<u8>>, from: Option<PieceId>) {
+        bytes.hand_over(self, |core, mut bytes| {
+            bytes.shrink_to_fit();
+            core.enqueue(bytes, from);
+        });
+        self.grew();
         self.pump();
     }
 
@@ -744,27 +712,24 @@ impl<T: Copy> Core<T> {
         }
     }
 
-    /// [`Core::head`] with headers the walk made within `room`: the room,
-    /// measured as the headers, is the head's until main takes it
-    /// ([`Verifier::poll`]), and goes from the walk's holding after the
-    /// head has it.
+    /// [`Core::head`] with headers the walk made within `room`: the head
+    /// counts what the headers hold until main takes it
+    /// ([`Verifier::poll`]), and the room goes from the walk's holding
+    /// after the head has them.
     pub(crate) fn head_charged(
         &mut self,
         status: u16,
         headers: Vec<(String, String)>,
         content: ContentTrust,
-        mut room: Charged<()>,
+        room: Charged<()>,
     ) {
         if self.phase != Phase::Walking {
             drop(headers);
             return room.release(self);
         }
         let cost = headers_cost(&headers);
-        room.recharge(self, cost);
-        let ((), cost, tally) = room.into_parts();
-        self.head_held = cost;
-        tally.done();
-        self.unhold(cost);
+        room.hand_over(self, |core, ()| core.head_held = cost);
+        self.grew();
         self.head(status, headers, content);
     }
 
@@ -877,7 +842,9 @@ impl<T: Copy> Core<T> {
 
 /// The walk's raw hold and release, by count. The machine and the IPFS
 /// walk use them; the Swarm walk doesn't import them, and holds its memory
-/// only as [`Charged`] values.
+/// only as [`Charged`] values. With the probe, a release that leaves a live
+/// `Charged` value uncovered is a fault at that release
+/// ([`charged::Held::take`]).
 pub(crate) trait Holding {
     /// Takes `n` bytes into the walk's holding; the caller checked
     /// [`Core::fits`] for any it allocates.
@@ -892,17 +859,14 @@ pub(crate) trait Holding {
 
 impl<T: Copy> Holding for Core<T> {
     fn hold(&mut self, n: usize) {
-        self.walk_held += n;
+        self.walk_held.add(n);
         self.grew();
     }
 
     fn unhold(&mut self, n: usize) {
-        if n > self.walk_held && !self.ended() {
-            self.over_released += n - self.walk_held;
-        }
-        self.walk_held = self.walk_held.saturating_sub(n);
-        #[cfg(feature = "memory-probe")]
-        self.check_live();
+        let running = !self.ended();
+        self.walk_held.take(n, running);
+        self.released();
     }
 }
 
@@ -1334,8 +1298,8 @@ impl Verifier {
     /// Swarm walk holds and what its live values are charged.
     pub fn over_released(&self) -> usize {
         match &self.inner {
-            Inner::Swarm(m) => m.core.over_released,
-            Inner::Ipfs(m) => m.core.over_released,
+            Inner::Swarm(m) => m.core.walk_held.faults(),
+            Inner::Ipfs(m) => m.core.walk_held.faults(),
         }
     }
 

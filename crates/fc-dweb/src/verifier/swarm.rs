@@ -35,9 +35,9 @@ use super::jobs::{Verdict, Work};
 use super::{Ask, Failure, MAX_CHUNK_PIECES, PieceFailure, PieceId};
 
 /// The machine's bookkeeping, with the Swarm walk's tags. The walk holds
-/// its memory only as [`Charged`] values, and doesn't import the raw hold
-/// and release ([`super::Holding`]): a charge can't go while what it covers
-/// is live.
+/// its memory only as [`Charged`] values, whose charges only `charged.rs`
+/// sets, from what it measures, and doesn't import the raw hold and release
+/// ([`super::Holding`]): a charge can't go while what it covers is live.
 type Core = super::Core<Tag>;
 /// Bytes the walk holds, under their charge.
 type Bytes = Charged<Vec<u8>>;
@@ -202,10 +202,11 @@ fn chunk_work(core: &mut Core, work: Charged<Work>) -> Option<([u8; 32], Bytes)>
     Some((address, wire))
 }
 
-/// A leaf job's streamed bytes, back under the work's charge; a
-/// fallback's chunk beside them goes first, then its part of the charge.
+/// A leaf job's streamed bytes, back under the work's charge and measured
+/// again: a fallback's chunk beside them goes first, then its part of the
+/// charge.
 fn leaf_work(core: &mut Core, work: Charged<Work>) -> Option<Bytes> {
-    let mut bytes = work.try_map(core, |w| match w {
+    let bytes = work.try_map(core, |w| match w {
         Work::Leaf { bytes, .. } => Some(bytes),
         Work::LeafChunk { bytes, wire, .. } => {
             drop(wire);
@@ -213,9 +214,7 @@ fn leaf_work(core: &mut Core, work: Charged<Work>) -> Option<Bytes> {
         }
         _ => None,
     })?;
-    let n = bytes.len();
-    bytes.recharge(core, n);
-    Some(bytes)
+    Some(bytes.remake(core, |bytes| bytes))
 }
 
 // ---------------------------------------------------------------------------
@@ -1209,14 +1208,8 @@ impl Body {
             };
             let total = bytes.len();
             // Trimmed in place, and what it no longer holds released.
-            let mut kept = bytes.map(|mut v| {
-                v.truncate(keep_to);
-                v.drain(..keep_from.min(v.len()));
-                v.shrink_to_fit();
-                v
-            });
+            let kept = bytes.keep(core, keep_from, keep_to);
             let n = kept.len();
-            kept.recharge(core, n);
             if let Some(id) = from {
                 core.consumed(id, total - n);
             }
@@ -1673,8 +1666,7 @@ impl Walk {
             reference: self.root,
             feed: None,
         };
-        let cost = entry_cost(&entry);
-        Charged::new(core, entry, cost)
+        Charged::measured(core, entry)
     }
 
     /// Ant's fallback for a node that isn't a manifest: a bare request gets
@@ -1848,12 +1840,10 @@ impl Walk {
             Stepped::Need(address) => {
                 // What lasts while the next node loads: the boxed lookup.
                 // The step goes, and the rest of the charge after it.
-                let lasting = std::mem::size_of::<Lookup>() + taken.0.held();
-                let mut lookup = taken.map(|(lookup, step)| {
+                let lookup = taken.remake(core, |(lookup, step)| {
                     drop(step);
                     lookup
                 });
-                lookup.recharge(core, lasting);
                 if let Some(old) = self.lookup.replace(lookup) {
                     old.release(core);
                 }
@@ -1911,7 +1901,7 @@ impl Walk {
             return self.end(core, Failure::Unverifiable);
         };
         let (path, feed) = (&self.path, self.feed);
-        let mut entry = found.join(room).map(|((_, mut metadata), ())| {
+        let entry = found.join(room).remake(core, |((_, mut metadata), ())| {
             let content_type = take(&mut metadata, manifest::CONTENT_TYPE);
             let filename =
                 take(&mut metadata, manifest::FILENAME).or_else(|| ant::filename_from_path(path));
@@ -1923,8 +1913,6 @@ impl Walk {
                 feed,
             }
         });
-        let cost = entry_cost(&entry);
-        entry.recharge(core, cost);
         self.release_url_root(core);
         // Staged first, so an end from here releases the entry.
         self.stage = Stage::FileRoot { entry };
@@ -2062,14 +2050,7 @@ impl Walk {
             let s = usize::try_from(a).unwrap_or(0);
             let e = usize::try_from(b).unwrap_or(0) + 1;
             // The range, cut from the wire in place.
-            let mut bytes = wire.map(|mut w| {
-                w.truncate(SPAN_SIZE + e);
-                w.drain(..(SPAN_SIZE + s).min(w.len()));
-                w.shrink_to_fit();
-                w
-            });
-            let n = bytes.len();
-            bytes.recharge(core, n);
+            let bytes = wire.keep(core, SPAN_SIZE + s, SPAN_SIZE + e);
             core.body_charged(bytes, None);
             return core.finish();
         }
@@ -2373,18 +2354,10 @@ fn parse(
         bytes.release(core);
         return Err(Failure::Unverifiable);
     };
-    let mut parsed = bytes
+    Ok(bytes
         .join(room)
-        .map(|(bytes, ())| manifest::parse_node_owned(bytes));
-    let cost = parsed.as_ref().map_or(0, manifest::Node::cost);
-    parsed.recharge(core, cost);
-    Ok(parsed.transpose(core))
-}
-
-/// What an entry's strings hold.
-fn entry_cost(e: &Entry) -> usize {
-    e.content_type.as_ref().map_or(0, String::capacity)
-        + e.filename.as_ref().map_or(0, String::capacity)
+        .remake(core, |(bytes, ())| manifest::parse_node_owned(bytes))
+        .transpose(core))
 }
 
 fn feed_of(meta: &manifest::Metadata) -> Result<Option<FeedKey>, ()> {
