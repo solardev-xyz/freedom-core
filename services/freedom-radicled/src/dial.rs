@@ -121,6 +121,10 @@ impl fmt::Display for Error {
 /// The routing the node gets under `policy`: its gate, its proxy and its
 /// onion route, in memory over `config.json` (0008, "Every routing field is
 /// set in memory"). `configured` are the profile's own seeds and peers.
+///
+/// heartwood reaches the proxy and the onion route without asking the gate,
+/// so an isolated node (`Options::isolated`) must have neither: libradicle
+/// drops both, whatever this routing says (libradicle#26).
 pub fn routing(
     policy: &NetworkPolicy,
     configured: &[ConnectAddress],

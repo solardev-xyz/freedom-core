@@ -266,3 +266,135 @@ fn the_gate_prints_no_target_or_credential() {
     let gate = gate(&["seed.lan:8776"], &[], Nat64State::NONE);
     assert_eq!(format!("{gate:?}"), "DialGate { .. }");
 }
+
+/// A loopback listener standing in for Arti, which only notes whether a
+/// connection was made to it.
+struct Recorder(TcpListener);
+
+impl Recorder {
+    fn new() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        Self(listener)
+    }
+
+    fn addr(&self) -> SocketAddr {
+        self.0.local_addr().unwrap()
+    }
+
+    /// Whether a connection was made to it, waiting up to `within` for one.
+    fn dialled(&self, within: Duration) -> bool {
+        let until = Instant::now() + within;
+        loop {
+            match self.0.accept() {
+                Ok(_) => return true,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= until {
+                        return false;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+    }
+}
+
+/// The node ID of the key with `seed`, repeated, as its seed.
+fn node_id(seed: u8) -> radicle::prelude::NodeId {
+    use radicle::crypto::Signer as _;
+
+    *radicle::crypto::SigningKey::from_seed(radicle::crypto::Seed::new([seed; 32])).public_key()
+}
+
+/// A Radicle home for a test node, on the test network, with no seeds:
+/// short enough for its control socket's path.
+fn node_home() -> tempfile::TempDir {
+    let mut home = tempfile::Builder::new().prefix("dial").tempdir().unwrap();
+    if cfg!(unix) && home.path().join("node/control.sock").as_os_str().len() > 100 {
+        home = tempfile::Builder::new()
+            .prefix("dial")
+            .tempdir_in("/tmp")
+            .unwrap();
+    }
+    std::fs::write(
+        home.path().join("config.json"),
+        r#"{"preferredSeeds":[],"node":{"alias":"dial","network":"test"}}"#,
+    )
+    .unwrap();
+    home
+}
+
+#[test]
+// Review of #245, round 1: `socks5` routing gives the node a global proxy
+// and an onion route, both Arti, and heartwood reaches either without asking
+// the gate. An isolated node opens no socket (0008, R-12 part 3), so with
+// this routing an explicit connect to an onion or a named peer, asked
+// through the control socket, never reaches the proxy. libradicle#26 drops
+// both routes under `isolated`; libradicle before it (5448fd8) reached the
+// proxy here.
+fn socks5_routing_on_an_isolated_node_reaches_no_proxy() {
+    use radicle::node::Handle as _;
+
+    let proxy = Recorder::new();
+    let routing = routing(
+        &NetworkPolicy::Socks5 {
+            proxy: proxy.addr(),
+        },
+        &[],
+        Nat64::fixed(Nat64State::NONE),
+    )
+    .unwrap();
+    assert_eq!(routing.proxy, Some(proxy.addr()));
+    assert_eq!(
+        routing.onion,
+        AddressConfig::Proxy {
+            address: proxy.addr()
+        }
+    );
+
+    let home = node_home();
+    let mut seed = [12u8; 32];
+    let node = libradicle::Embedded::start_with_key(
+        libradicle::Options {
+            home: home.path().to_path_buf(),
+            alias: "dial".into(),
+            listen: vec![],
+            control_socket: true,
+            routing: Some(routing),
+            isolated: true,
+        },
+        libradicle::HostKey::from_bytes(&mut seed).unwrap(),
+    )
+    .unwrap();
+    let control = || radicle::node::Node::new(home.path().join("node").join("control.sock"));
+
+    let onion = "xmrhfasfg5suueegrnc4gsgyi2tyclcy5oz7f5drnrodmdtob6t2ioyd.onion:8776";
+    for (target, peer) in [(onion, 4), ("seed.example:8776", 5)] {
+        // Whatever the answer, short of `Connected`: what matters is whether
+        // a socket reached the proxy. Each target is a peer of its own, so
+        // that one attempt's session doesn't answer for the next.
+        let result = control().connect(
+            node_id(peer),
+            address(target),
+            radicle::node::ConnectOptions {
+                persistent: false,
+                timeout: Duration::from_secs(2),
+            },
+        );
+        assert!(
+            !proxy.dialled(Duration::from_millis(500)),
+            "{target}: an isolated node reached its proxy ({result:?})"
+        );
+        assert!(
+            !matches!(result, Ok(radicle::node::ConnectResult::Connected)),
+            "{target}: {result:?}"
+        );
+    }
+    // The running configuration has neither route.
+    let config = control().config().unwrap();
+    assert_eq!(config.proxy, None);
+    assert_eq!(config.onion, AddressConfig::Drop);
+
+    node.shutdown().unwrap();
+}
