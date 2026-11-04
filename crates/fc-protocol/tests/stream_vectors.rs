@@ -11,9 +11,9 @@ use std::collections::BTreeMap;
 use fc_protocol::frame::{Decoder, Frame, KIND_JSON, Kinds, MAX_PAYLOAD};
 use fc_protocol::message::Message;
 use fc_protocol::stream::{
-    Abort, AbortCode, Arrived, CREDIT_LEN, Cancel, Credited, Delivery, Duplex, ID_LEN,
+    Abort, AbortCode, Arrived, CREDIT_LEN, Cancel, Credited, Delivery, Duplex, ID_LEN, Inbound,
     InboundState, MAX_ABORT, MAX_DATA, MAX_PULL, Received, Receiver, Replied, Retire, SMALL_FRAME,
-    Side, StreamFrame, StreamState, WINDOW, WRITER_DATA_CAP, Wrote, credit_frame,
+    Sender, Side, StreamFrame, StreamState, WINDOW, WRITER_DATA_CAP, Wrote, credit_frame,
 };
 use serde_json::{Value as Json, json};
 
@@ -226,14 +226,103 @@ fn encodings() {
 
 // ---- the service's side ------------------------------------------------------
 
+/// The side that sends bodies: a service's [`Sender`], or the core's
+/// [`Duplex`].
+enum Conn {
+    Service(Sender, Inbound),
+    Core(Duplex),
+}
+
+impl Conn {
+    fn sender(&self) -> &Sender {
+        match self {
+            Conn::Service(s, _) => s,
+            Conn::Core(d) => d.sender(),
+        }
+    }
+
+    fn sender_mut(&mut self) -> &mut Sender {
+        match self {
+            Conn::Service(s, _) => s,
+            Conn::Core(d) => d.sender_mut(),
+        }
+    }
+
+    fn inbound(&self) -> &Inbound {
+        match self {
+            Conn::Service(_, none) => none,
+            Conn::Core(d) => d.inbound(),
+        }
+    }
+
+    fn core(&mut self) -> &mut Duplex {
+        match self {
+            Conn::Core(d) => d,
+            Conn::Service(..) => panic!("the core's own requests on a service connection"),
+        }
+    }
+
+    fn request(&mut self, id: u64) -> Result<(), fc_protocol::stream::StreamError> {
+        match self {
+            Conn::Service(s, _) => s.request(id),
+            Conn::Core(d) => d.request(id),
+        }
+    }
+
+    fn cancel(&mut self, id: u64) -> Result<Cancel, fc_protocol::stream::StreamError> {
+        match self {
+            Conn::Service(s, _) => s.cancel(id),
+            Conn::Core(d) => d.cancel(id),
+        }
+    }
+
+    fn receive(
+        &mut self,
+        frame: StreamFrame<'_>,
+    ) -> Result<Received, fc_protocol::stream::StreamError> {
+        match self {
+            Conn::Service(s, _) => s.receive(frame).map(Received::Credited),
+            Conn::Core(d) => d.receive(frame),
+        }
+    }
+
+    fn owed(&self) -> usize {
+        match self {
+            Conn::Service(..) => 0,
+            Conn::Core(d) => d.owed(),
+        }
+    }
+
+    fn next_frame(&mut self, out: &mut Vec<u8>) -> Option<Wrote> {
+        match self {
+            Conn::Service(s, _) => s.next_frame(out).map(Wrote::Sent),
+            Conn::Core(d) => d.next_frame(out),
+        }
+    }
+}
+
+/// A `sender` case's code on the core's connection, whose verified bodies
+/// end only with 0009's codes: each of 0007's stands for one of them, so
+/// the service's cases hold there too.
+fn on_core(code: AbortCode) -> AbortCode {
+    match code {
+        AbortCode::Internal => AbortCode::PieceFailed,
+        AbortCode::BodyStreamError => AbortCode::Unverifiable,
+        AbortCode::Stopped => AbortCode::Malformed,
+        other => other,
+    }
+}
+
 /// Plays the side that sends bodies: the service against a sender (the
 /// `sender` cases), or the core against both its directions (the `duplex`
 /// cases). The producers offer the body bytes of `formats.body_bytes`,
 /// every frame main sends goes through the codec, and every written frame
-/// is decoded as main would decode it. A [`Duplex`] whose own requests
-/// stay empty is a sender, so both run through one.
+/// is decoded as main would decode it.
 struct Service {
-    d: Duplex,
+    d: Conn,
+    /// A `sender` case on the core's connection: its codes as [`on_core`]
+    /// maps them.
+    mapped: bool,
     /// The core's connection at protocol 2, rather than a service's.
     core: bool,
     /// The next body byte main sends on each of the core's own streams.
@@ -276,9 +365,21 @@ fn protocol<T>(
 }
 
 impl Service {
-    fn new(core: bool, data_cap: usize) -> Self {
+    /// A case's code, as this side writes it.
+    fn code(&self, name: &Json) -> AbortCode {
+        let code = code(name);
+        if self.mapped { on_core(code) } else { code }
+    }
+
+    fn new(core: bool, mapped: bool, data_cap: usize) -> Self {
+        let d = if core {
+            Conn::Core(Duplex::with_data_cap(data_cap))
+        } else {
+            Conn::Service(Sender::with_data_cap(data_cap), Inbound::new())
+        };
         Self {
-            d: Duplex::with_data_cap(data_cap),
+            d,
+            mapped,
             core,
             inbound: BTreeMap::new(),
             offered: BTreeMap::new(),
@@ -325,9 +426,9 @@ impl Service {
                 })
             }
             // The core's own requests, which main answers.
-            "ask" => protocol(self.d.ask(id), |()| json!("ok")),
+            "ask" => protocol(self.d.core().ask(id), |()| json!("ok")),
             "answered" => protocol(
-                self.d.answered(id, action[2].as_bool().unwrap()),
+                self.d.core().answered(id, action[2].as_bool().unwrap()),
                 |replied| match replied {
                     Replied::Deliver => json!("deliver"),
                     Replied::Retired => json!("retired"),
@@ -378,11 +479,11 @@ impl Service {
                     other => panic!("{other:?}"),
                 })
             }
-            "release" => match self.d.release(id, n(&action[2])) {
+            "release" => match self.d.core().release(id, n(&action[2])) {
                 Ok(()) => json!("ok"),
                 Err(_) => json!({ "refused": "overcredit" }),
             },
-            "drop" => match self.d.withdraw(id) {
+            "drop" => match self.d.core().withdraw(id) {
                 Retire::SendCancel => json!("send_cancel"),
                 Retire::Freed => json!("freed"),
                 Retire::Nothing => json!("nothing"),
@@ -419,7 +520,7 @@ impl Service {
             }
             "finish" => refusal(self.d.sender_mut().finish(id)),
             "abort" => {
-                let abort = Abort::new(code(&action[2]), "aborted");
+                let abort = Abort::new(self.code(&action[2]), "aborted");
                 refusal(self.d.sender_mut().abort(id, &abort))
             }
             other => panic!("action {other}"),
@@ -517,7 +618,7 @@ impl Service {
                 );
             }
             "abort" => {
-                let code = code(&e[2]);
+                let code = self.code(&e[2]);
                 assert_eq!(written, Written::Abort { id, code }, "{at}");
                 match StreamFrame::from_frame(&frame).unwrap() {
                     StreamFrame::Abort { id: got, abort } => {
@@ -572,12 +673,12 @@ impl Service {
 }
 
 /// Runs a `sender` or `duplex` case.
-fn play(case: &Json, core: bool) {
+fn play(case: &Json, core: bool, mapped: bool) {
     let id = case["id"].as_str().unwrap();
     let cap = case["config"]["data_cap"]
         .as_u64()
         .map_or(WRITER_DATA_CAP, |cap| usize::try_from(cap).unwrap());
-    let mut service = Service::new(core, cap);
+    let mut service = Service::new(core, mapped, cap);
     for (i, step) in case["steps"].as_array().unwrap().iter().enumerate() {
         let at = format!("{id} step {i}");
         if let Some(frames) = step.get("write").or_else(|| step.get("write_some")) {
@@ -617,7 +718,7 @@ fn play(case: &Json, core: bool) {
 fn sender() {
     let v = vectors();
     for case in cases(&v, "sender") {
-        play(case, false);
+        play(case, false, false);
     }
 }
 
@@ -627,11 +728,16 @@ fn duplex() {
     let duplex = cases(&v, "duplex");
     assert!(duplex.len() >= 18);
     for case in duplex {
-        play(case, true);
+        play(case, true, false);
     }
-    // The sender's cases hold on the core's connection too.
+    // The sender's cases hold on the core's connection too, each of 0007's
+    // codes standing for one of the verified body's; but for the service's
+    // own code rule, which the duplex cases state for the core.
     for case in cases(&v, "sender") {
-        play(case, true);
+        if case["id"].as_str().unwrap().starts_with("service-never-sends-") {
+            continue;
+        }
+        play(case, true, true);
     }
 }
 

@@ -25,7 +25,13 @@ const SMALL_FRAME = 4 * 1024;
 const WRITER_DATA_CAP = 16 * 1024 * 1024;
 const MAX_PAYLOAD = 1024 * 1024;
 const MAX_ID = 2 ** 53 - 1;
-const ABORT_CODES = ['cancelled', 'internal', 'body_stream_error', 'stopped', 'busy'];
+// Every code decodes; which a stream may end with depends on who sends it.
+const SERVICE_CODES = ['cancelled', 'internal', 'body_stream_error', 'stopped', 'busy'];
+// A verified body the core sends main (0009, Failures: after the head).
+const CORE_BODY_CODES = ['verification_failed', 'unverifiable', 'malformed', 'piece_failed', 'busy', 'cancelled'];
+// A piece main sends the core: the core's cancel, main's idle timer, the node's failing body.
+const PIECE_CODES = ['cancelled', 'stalled', 'body_stream_error'];
+const ABORT_CODES = [...SERVICE_CODES, 'verification_failed', 'unverifiable', 'malformed', 'piece_failed', 'stalled'];
 const SIDES = ['receiver', 'sender', 'core', 'core_streams'];
 
 const FORMATS = {
@@ -35,6 +41,7 @@ const FORMATS = {
   encodings: '`frame` encodes to exactly `hex`, or is refused with `error` and nothing written. `frame` is as in `frames`.',
   sender: 'The service\'s side. Steps run in order. A step with `do` is an action with its `expect`ed result: ["request", id] main\'s request (ok, or a protocol error); ["cancel", id] main\'s cancel ("cancelled": the reply or abort is queued and the work is to stop; "late": nothing changes); ["credit", id, n] main\'s credit frame ("taken" into the stream\'s account, "late" for a stream that has ended, or a protocol error); ["head", id, body] the response that heads request id, opening a stream if body is true; ["reply", id] the request\'s one reply without a body (an error, or a result); ["push", id, n] the producer offers its next n body bytes (`taken` says how many were queued; the producer keeps the rest); ["finish", id] the end, after every byte queued; ["abort", id, code]. Producer refusals are `refused`: gone, unknown, answered, not_open, ended, too_large or closed. A step with `write` takes frames from the writer until it has none, and they must be exactly those listed; `write_some` takes exactly those listed and may leave more. Written frames are ["head", id], ["reply", id], ["cancelled", id] (the reply a cancel made the request\'s only one), ["data", id, offset, length] (bytes of the body from offset), ["end", id] and ["abort", id, code]. `check` compares the writer\'s held bytes (queued body bytes across streams) and, per ID, whether the request is live, its producer\'s room (the window\'s room within the writer\'s, null without a body that takes bytes) and its queued bytes (null without a body). A push takes as much as the room allows, except that one the writer\'s cap would cut below 4 KiB takes nothing. `repeat` runs its step that many times. `config.data_cap` replaces the writer\'s 16 MiB cap. After a protocol error, every main step reports the same error, every producer step is refused with `closed`, and nothing is written.',
   duplex: 'freedom-cored\'s side at protocol 2 (design 0009, Streams in the core): one connection, the bodies the core sends in answer to main\'s requests and those main sends in answer to the core\'s. The two are numbered apart, each in its requester\'s ID space, so one number may name a stream in each; a frame\'s kind says which. The steps for main\'s requests are `sender`\'s, with ["credit", id, n] main\'s credit frame through a core_streams decoder. The core\'s own: ["ask", id] the core sends request id (ok, or request_order for the core\'s own bug); ["answered", id, opens] main\'s reply to it, a head with body: true when opens ("deliver", "retired", or a protocol error); ["data", id, n] a data frame from main with its next n bytes of the core\'s stream id ("data": they go to the stream\'s consumer, "dropped", or a protocol error); ["end", id] ("end", "dropped", or an error); ["aborted", id, code] an abort frame from main ("abort", "dropped", or an error); ["release", id, n] the stream\'s consumer lets go of n bytes ("ok": their credit is owed while the stream is open, nothing otherwise; or refused overcredit, past what the stream holds, which changes nothing); ["drop", id] the core cancels its request ("send_cancel": what is owed for it is dropped, and its frames are dropped as they come; or "nothing"). `write` and `write_some` are `sender`\'s, its frames with ["credit", id, n] among them: owed credit, merged per stream while unwritten, written before the sender\'s frames. `check` compares `sender`\'s fields, and `inbound`, per ID: the core\'s record ({state: pending, retired_pending, open or retiring, received, returned}, or null), and `owed`: the streams with credit owed and unwritten. After a protocol error in either direction, every step that takes a frame or a reply reports the same error, producer steps are refused with closed, release is ok and owes nothing, and nothing is written.',
+  abort_codes: 'Every abort code decodes; which a stream may end with depends on who sends it (0007, Errors; 0009, Failures and Streams in the core). A service\'s body, on a service connection: cancelled, internal, body_stream_error, stopped, busy. A verified body the core sends main on its protocol-2 connection: verification_failed, unverifiable, malformed, piece_failed, busy, cancelled. A piece main streams to the core: cancelled, stalled, body_stream_error. A sender refuses to write any other (refused code), and a receiver takes any other as a protocol error (abort_code). The receiver cases are main\'s side of a service connection; the sender cases are the service\'s, and, replayed on the core\'s connection, each 0007 code stands for one of the verified body\'s.',
   receiver: 'Main\'s side. ["request", id] main sends request id (ok, or request_order for main\'s own bug); ["reply", id, opens] its reply arrives, a head with body: true when opens ("deliver", "retired", or a protocol error); ["data", id, n] a data frame with the service\'s next n bytes of stream id; ["end", id]; ["abort", id, code]. Frames give "data", "end" (bytes are left to pull), "end_drained" (nothing is left: the record and ring are gone), "abort", "dropped" (the stream is retiring), or a protocol error. ["pull", id, max] the consumer pulls: null without a record, else the chunk as [offset, length] of the body, the credit to send (null for none) and whether it is the last. ["cancel", id] a local cancel: "send_cancel", "freed" (end had arrived: nothing is sent) or "nothing". `check` compares, per ID, the record (null for none) with its state (pending, retired_pending, open, eof, retiring), whether its ring is allocated, the bytes in it, and received and returned bytes; and the outstanding records. After a protocol error, every frame and reply reports the same error.',
 };
 
@@ -92,7 +99,7 @@ function frameCases() {
   add('abort', 'abort: JSON { code, message }', 'receiver',
     [abortFrame(42, abortJson('internal', 'x'))], ok(['abort', 42, 'internal', 'x']));
   for (const code of ABORT_CODES) {
-    add(`abort-code-${code}`, 'abort codes (0007, Errors)', 'receiver',
+    add(`abort-code-${code}`, 'abort codes (0007, Errors; 0009): every one decodes, and which a stream may end with is checked where it is taken', 'receiver',
       [abortFrame(42, abortJson(code, 'm'))], ok(['abort', 42, code, 'm']));
   }
   add('abort-whitespace', 'abort: JSON, with JSON\'s whitespace', 'receiver',
@@ -647,6 +654,15 @@ function senderCases() {
     steps.push(S.write(W.data(40, 0, 32)));
     add('cancel-cycles-with-the-writer-busy', 'repeated control-only cancels and aborts while another stream waits: each terminated stream leaves the writer\'s schedule', steps);
   }
+  // Design 0009: a service's streams end only with 0007's codes.
+  const later = ABORT_CODES.filter((c) => !SERVICE_CODES.includes(c));
+  later.forEach((code, i) => {
+    const id = 41 + i;
+    add(`service-never-sends-${code}`, 'a service\'s body ends only with 0007\'s codes: one of 0009\'s is refused, and the stream stays open', [
+      S.request(id), S.head(id, true), S.abort(id, code, refused('code')),
+      S.abort(id, 'internal'), S.write(W.head(id), W.abort(id, 'internal')),
+    ]);
+  });
   return cases;
 }
 
@@ -834,6 +850,14 @@ function receiverCases() {
     R.request(41), ...opened(42), R.request(43), R.cancel(41, 'send_cancel'), R.cancel(42, 'send_cancel'),
     R.check({}, 3), R.reply(43, false), R.check({}, 2),
   ]);
+  // Design 0009: on a service connection, an abort with one of 0009's
+  // codes is a protocol error.
+  for (const code of ABORT_CODES.filter((c) => !SERVICE_CODES.includes(c))) {
+    add(`service-abort-with-${code}`, 'a service\'s stream ends only with 0007\'s codes: one of 0009\'s is a protocol error', [
+      ...opened(41), R.data(41, 10), R.abort(41, code, error('abort_code')),
+      R.abort(41, 'internal', error('abort_code')),
+    ]);
+  }
   return cases;
 }
 
@@ -907,7 +931,7 @@ function duplexCases() {
   ]);
   add('owed-credit-goes-at-the-terminal', 'credit still owed when the stream\'s end or abort arrives would cross it: it is dropped', [
     ...asked(6), D.data(6, 50), D.release(6, 50), D.check({}, {}, 1), D.end(6), D.check({}, { 6: null }, 0), S.write(),
-    ...asked(7), D.data(7, 50), D.release(7, 50), D.aborted(7, 'internal'), D.check({}, { 7: null }, 0), S.write(),
+    ...asked(7), D.data(7, 50), D.release(7, 50), D.aborted(7, 'stalled'), D.check({}, { 7: null }, 0), S.write(),
   ]);
   add('no-credit-after-abort', 'after an abort nothing more can come', [
     ...asked(6), D.data(6, 50), D.aborted(6, 'body_stream_error'), D.release(6, 50), S.write(),
@@ -947,6 +971,30 @@ function duplexCases() {
   add('unsolicited-reply', 'a reply to no pending request of the core\'s is a protocol error', [
     D.ask(1), D.answered(2, false, error('unsolicited_response')),
   ]);
+  // Design 0009: the core's verified bodies end only with 0009's codes,
+  // and main ends a piece only with a piece's.
+  ABORT_CODES.forEach((code, i) => {
+    const id = 21 + i;
+    const allowed = CORE_BODY_CODES.includes(code);
+    add(`core-body-${allowed ? 'ends-with' : 'never-ends-with'}-${code}`, allowed
+      ? 'the core\'s verified body ends with one of 0009\'s codes'
+      : 'the core\'s verified body never ends with a code outside 0009\'s: refused, and the stream stays open', [
+      S.request(id), S.head(id, true),
+      allowed ? S.abort(id, code) : S.abort(id, code, refused('code')),
+      allowed ? S.write(W.head(id), W.abort(id, code)) : S.write(W.head(id)),
+    ]);
+  });
+  ABORT_CODES.forEach((code, i) => {
+    const id = 41 + i;
+    const allowed = PIECE_CODES.includes(code);
+    add(`piece-${allowed ? 'ends-with' : 'never-ends-with'}-${code}`, allowed
+      ? 'main ends a piece with cancelled, stalled or body_stream_error'
+      : 'main ends a piece only with cancelled, stalled or body_stream_error: any other code is a protocol error', [
+      ...asked(id), D.data(id, 10),
+      allowed ? D.aborted(id, code) : D.aborted(id, code, error('abort_code')),
+      D.check({}, { [id]: null }),
+    ]);
+  });
   return cases;
 }
 
@@ -978,8 +1026,8 @@ function checkFrame(f, where) {
 
 const CATEGORIES = ['bad_length', 'unknown_kind', 'stream_length', 'data_empty', 'stream_direction', 'stream_id',
   'abort_payload', 'credit_zero', 'request_order', 'stream_unknown', 'stream_not_open', 'credit_overgrant',
-  'window_overrun', 'unsolicited_response'];
-const REFUSALS = ['gone', 'unknown', 'answered', 'not_open', 'ended', 'too_large', 'closed', 'overcredit'];
+  'window_overrun', 'unsolicited_response', 'abort_code'];
+const REFUSALS = ['gone', 'unknown', 'answered', 'not_open', 'ended', 'too_large', 'closed', 'overcredit', 'code'];
 const isError = (e) => e && typeof e === 'object' && CATEGORIES.includes(e.error) && Object.keys(e).length === 1;
 const isRefusal = (e) => e && typeof e === 'object' && REFUSALS.includes(e.refused) && Object.keys(e).length === 1;
 

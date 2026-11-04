@@ -49,7 +49,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use super::{
-    Abort, AbortCode, MAX_DATA, SMALL_FRAME, StreamError, StreamFrame, WINDOW, put_header,
+    Abort, AbortCode, Codes, MAX_DATA, SMALL_FRAME, StreamError, StreamFrame, WINDOW, put_header,
 };
 use crate::frame::{FrameError, KIND_ABORT, KIND_DATA, KIND_END, KIND_JSON, MAX_PAYLOAD};
 use crate::message::check_id;
@@ -82,6 +82,11 @@ pub enum SendError {
     /// 2^64 bytes.
     #[error("too large")]
     TooLarge,
+    /// An abort with a code this sender's streams never end with
+    /// ([`Codes`]): a 0009 code on a service connection, or 0007's own on
+    /// the core's verified bodies.
+    #[error("an abort code this side doesn't send")]
+    Code,
     /// The connection failed with a protocol error.
     #[error("the connection failed")]
     Closed,
@@ -98,6 +103,7 @@ impl SendError {
             SendError::Ended => "ended",
             SendError::TooLarge => "too_large",
             SendError::Closed => "closed",
+            SendError::Code => "code",
         }
     }
 }
@@ -287,6 +293,9 @@ pub struct Sender {
     rotation: VecDeque<u64>,
     held: usize,
     failed: Option<StreamError>,
+    /// The codes its streams may end with: a service's, unless made for
+    /// the core's verified bodies.
+    codes: Codes,
 }
 
 impl Default for Sender {
@@ -313,7 +322,14 @@ impl Sender {
             rotation: VecDeque::new(),
             held: 0,
             failed: None,
+            codes: Codes::Service,
         }
+    }
+
+    /// The same sender, its streams ending only with `codes`.
+    pub fn with_codes(mut self, codes: Codes) -> Self {
+        self.codes = codes;
+        self
     }
 
     // ---- main's frames ---------------------------------------------------
@@ -503,6 +519,9 @@ impl Sender {
     /// unwritten.
     pub fn abort(&mut self, id: u64, abort: &Abort) -> Result<(), SendError> {
         self.usable()?;
+        if !self.codes.allows(abort.code) {
+            return Err(SendError::Code);
+        }
         let json = abort.to_json().map_err(|_| SendError::TooLarge)?;
         let body = match self.requests.get_mut(&id) {
             Some(

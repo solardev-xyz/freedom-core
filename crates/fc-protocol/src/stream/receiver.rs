@@ -27,7 +27,7 @@
 
 use std::collections::BTreeMap;
 
-use super::{Abort, ID_LEN, MAX_PULL, StreamError, StreamFrame, WINDOW, check_length};
+use super::{Abort, Codes, ID_LEN, MAX_PULL, StreamError, StreamFrame, WINDOW, check_length};
 use crate::frame::{FrameError, KIND_DATA, KIND_STREAM_CREDIT};
 use crate::message::check_id;
 
@@ -137,11 +137,24 @@ pub struct Receiver {
     highest: u64,
     entries: BTreeMap<u64, Entry>,
     failed: Option<StreamError>,
+    /// The codes the other side may end a stream with: a service's.
+    codes: Codes,
 }
 
 impl Receiver {
+    /// Main's side of a service connection: its streams end only with
+    /// 0007's codes.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Main's side of the core's protocol-2 connection, for the verified
+    /// bodies the core sends (design 0009): they end only with 0009's codes.
+    pub fn for_core_bodies() -> Self {
+        Self {
+            codes: Codes::CoreBody,
+            ..Self::default()
+        }
     }
 
     /// Main sent request `id`. Its ID must be above every earlier one; an
@@ -198,6 +211,11 @@ impl Receiver {
             && let Err(error) = check_length(KIND_DATA, ID_LEN.saturating_add(bytes.len()))
         {
             return Err(self.fail(StreamError::Frame(error)));
+        }
+        if let StreamFrame::Abort { abort, .. } = &frame
+            && !self.codes.allows(abort.code)
+        {
+            return Err(self.fail(StreamError::AbortCode(id)));
         }
         if id > self.highest {
             return Err(self.fail(StreamError::Unknown(id)));

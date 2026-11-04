@@ -25,7 +25,7 @@
 use std::collections::BTreeMap;
 
 use super::{
-    Arrived, Cancel, Credited, Inbound, Overcredit, Replied, Retire, Sender, StreamError,
+    Arrived, Cancel, Codes, Credited, Inbound, Overcredit, Replied, Retire, Sender, StreamError,
     StreamFrame, Written, put_header,
 };
 use crate::frame::KIND_STREAM_CREDIT;
@@ -66,15 +66,17 @@ pub struct Duplex {
 }
 
 impl Duplex {
+    /// The core's streams: its verified bodies end only with 0009's codes,
+    /// and main's pieces only with a piece's ([`Codes`]).
     pub fn new() -> Self {
-        Self::default()
+        Self::with_data_cap(super::WRITER_DATA_CAP)
     }
 
     /// A duplex whose sender's writer holds at most `data_cap` queued body
     /// bytes ([`Sender::with_data_cap`]).
     pub fn with_data_cap(data_cap: usize) -> Self {
         Self {
-            sender: Sender::with_data_cap(data_cap),
+            sender: Sender::with_data_cap(data_cap).with_codes(Codes::CoreBody),
             ..Self::default()
         }
     }
@@ -288,7 +290,7 @@ mod tests {
                 1 => {
                     d.receive(StreamFrame::Abort {
                         id,
-                        abort: Abort::new(AbortCode::Stopped, "stopped"),
+                        abort: Abort::new(AbortCode::BodyStreamError, "the node's body failed"),
                     })
                     .unwrap();
                 }

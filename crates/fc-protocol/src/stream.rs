@@ -161,6 +161,11 @@ pub enum StreamError {
     /// second one.
     #[error("a response to {0}, which is not pending")]
     UnsolicitedResponse(u64),
+    /// An abort whose code this side never takes from the other ([`Codes`]):
+    /// a 0009 code on a service connection, or one main may not end a piece
+    /// with.
+    #[error("an abort of stream {0} with a code not taken here")]
+    AbortCode(u64),
 }
 
 impl StreamError {
@@ -178,14 +183,16 @@ impl StreamError {
             StreamError::Overgrant(_) => "credit_overgrant",
             StreamError::Overrun(_) => "window_overrun",
             StreamError::UnsolicitedResponse(_) => "unsolicited_response",
+            StreamError::AbortCode(_) => "abort_code",
         }
     }
 }
 
-/// Why a body was truncated (design 0007, Errors). On the wire it is a
-/// JSON string, and only a string: serde's derived enum would also take an
-/// externally tagged unit variant (`{"cancelled": null}`), which design 0007
-/// and main's `frame.js` refuse.
+/// Why a body was truncated (design 0007, Errors; 0009, Failures). On the
+/// wire it is a JSON string, and only a string: serde's derived enum would
+/// also take an externally tagged unit variant (`{"cancelled": null}`),
+/// which design 0007 and main's `frame.js` refuse. Which codes a stream
+/// may end with depends on who sends it ([`Codes`]); every one decodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AbortCode {
@@ -199,16 +206,33 @@ pub enum AbortCode {
     Stopped,
     /// The stream's next block couldn't reserve memory in time.
     Busy,
+    /// A verified body: a piece failed its check (0009).
+    VerificationFailed,
+    /// A verified body: content the core can't check, or past its request's
+    /// memory (0009).
+    Unverifiable,
+    /// A verified body: authentic content that can't be decoded (0009).
+    Malformed,
+    /// A verified body: a piece stopped or failed after the head (0009).
+    PieceFailed,
+    /// A piece main streams to the core: main's body idle timer ended it
+    /// (0009).
+    Stalled,
 }
 
 impl AbortCode {
-    /// Every code, in the order the design lists them.
-    const ALL: [AbortCode; 5] = [
+    /// Every code: 0007's, then 0009's.
+    const ALL: [AbortCode; 10] = [
         AbortCode::Cancelled,
         AbortCode::Internal,
         AbortCode::BodyStreamError,
         AbortCode::Stopped,
         AbortCode::Busy,
+        AbortCode::VerificationFailed,
+        AbortCode::Unverifiable,
+        AbortCode::Malformed,
+        AbortCode::PieceFailed,
+        AbortCode::Stalled,
     ];
 
     /// The code on the wire.
@@ -219,6 +243,11 @@ impl AbortCode {
             AbortCode::BodyStreamError => "body_stream_error",
             AbortCode::Stopped => "stopped",
             AbortCode::Busy => "busy",
+            AbortCode::VerificationFailed => "verification_failed",
+            AbortCode::Unverifiable => "unverifiable",
+            AbortCode::Malformed => "malformed",
+            AbortCode::PieceFailed => "piece_failed",
+            AbortCode::Stalled => "stalled",
         }
     }
 
@@ -237,7 +266,52 @@ const ABORT_CODE_NAMES: &[&str] = &[
     "body_stream_error",
     "stopped",
     "busy",
+    "verification_failed",
+    "unverifiable",
+    "malformed",
+    "piece_failed",
+    "stalled",
 ];
+
+/// Which codes a stream may end with, by who sends it. A sender refuses to
+/// write any other, and a receiver takes any other as a protocol error, so
+/// a service connection never carries a 0009 code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Codes {
+    /// A service's body, on a service connection (0007): its five codes.
+    #[default]
+    Service,
+    /// A verified body the core sends main on its protocol-2 connection
+    /// (0009, Failures: after the head): `verification_failed`,
+    /// `unverifiable`, `malformed`, `piece_failed`, `busy`, `cancelled`.
+    CoreBody,
+    /// A piece main sends the core (`shell.dweb_get`, 0009): `cancelled`
+    /// (the core's cancel), `stalled` (main's body idle timer) and
+    /// `body_stream_error` (the node's body failed).
+    Piece,
+}
+
+impl Codes {
+    pub fn allows(self, code: AbortCode) -> bool {
+        use AbortCode as C;
+        match self {
+            Codes::Service => matches!(
+                code,
+                C::Cancelled | C::Internal | C::BodyStreamError | C::Stopped | C::Busy
+            ),
+            Codes::CoreBody => matches!(
+                code,
+                C::VerificationFailed
+                    | C::Unverifiable
+                    | C::Malformed
+                    | C::PieceFailed
+                    | C::Busy
+                    | C::Cancelled
+            ),
+            Codes::Piece => matches!(code, C::Cancelled | C::Stalled | C::BodyStreamError),
+        }
+    }
+}
 
 /// A string naming one of the codes: escapes are read as JSON reads them,
 /// and anything but a string (an object, a number) is refused.

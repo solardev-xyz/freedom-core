@@ -27,7 +27,9 @@
 
 use std::collections::BTreeMap;
 
-use super::{Abort, ID_LEN, Replied, Retire, StreamError, StreamFrame, WINDOW, check_length};
+use super::{
+    Abort, Codes, ID_LEN, Replied, Retire, StreamError, StreamFrame, WINDOW, check_length,
+};
 use crate::frame::{FrameError, KIND_DATA, KIND_STREAM_CREDIT};
 use crate::message::check_id;
 
@@ -155,6 +157,12 @@ impl Inbound {
             && let Err(error) = check_length(KIND_DATA, ID_LEN.saturating_add(bytes.len()))
         {
             return Err(self.fail(StreamError::Frame(error)));
+        }
+        // Main ends a piece only with a piece's codes (design 0009).
+        if let StreamFrame::Abort { abort, .. } = frame
+            && !Codes::Piece.allows(abort.code)
+        {
+            return Err(self.fail(StreamError::AbortCode(id)));
         }
         if id > self.highest {
             return Err(self.fail(StreamError::Unknown(id)));
