@@ -36,10 +36,9 @@ static PEAK: AtomicUsize = AtomicUsize::new(0);
 const SLACK: usize = 256 << 10;
 const CAR_TYPE: &str = "application/vnd.ipld.car; version=1; order=dfs; dups=y";
 const RAW_TYPE: &str = "application/vnd.ipld.raw";
-const UNVERIFIABLE: &str =
-    "error 502 This content can't be verified with the external IPFS gateway";
-const SWARM_UNVERIFIABLE: &str =
-    "error 502 This content can't be verified with the external Swarm node";
+/// A request refused for its memory, either scheme.
+const MEMORY_REFUSED: &str =
+    "error 502 This content needs more memory to verify than one request may use";
 
 fn varint(mut v: u64, out: &mut Vec<u8>) {
     while v >= 0x80 {
@@ -355,17 +354,23 @@ fn swarm_file(data: &[u8], chunks: &mut World) -> [u8; 32] {
 /// loads it twice and is a 404. Its root, Ant's chunks, what the parsed
 /// root holds, and the other node's length.
 fn big_manifest() -> (String, World, usize, usize) {
+    manifest_of(7, 60_000)
+}
+
+/// [`big_manifest`] with `forks` forks a node, each with a `Filename` of
+/// `len` bytes.
+fn manifest_of(forks: u8, len: usize) -> (String, World, usize, usize) {
     let meta = |c: u8| {
-        let name = char::from(c).to_string().repeat(60_000);
+        let name = char::from(c).to_string().repeat(len);
         Some(format!(r#"{{"Filename":"{name}"}}"#))
     };
     let mut chunks = HashMap::new();
-    let forks: Vec<_> = (b'b'..=b'h')
+    let forks: Vec<_> = (b'b'..b'b' + forks)
         .map(|c| (vec![c], [0x11; 32], meta(c)))
         .collect();
     let child = mantaray(&[0; 32], &forks);
     let child_address = swarm_file(&child, &mut chunks);
-    let mut root_forks = forks[..6].to_vec();
+    let mut root_forks = forks[..forks.len() - 1].to_vec();
     root_forks.push((b"a/".to_vec(), child_address, meta(b'a')));
     let root = mantaray(&[0; 32], &root_forks);
     let root_cost = fc_swarm::manifest::parse_node(&root).unwrap().cost();
@@ -566,11 +571,11 @@ fn dense_structure_stays_within_the_budget() {
         REQUEST_BUDGET,
         false,
     );
-    assert_eq!(got.2, UNVERIFIABLE, "{got:?}");
+    assert_eq!(got.2, MEMORY_REFUSED, "{got:?}");
     // Without room for them, the entries alone are refused: room for the
     // CAR and the block, not for the entries' 3 MiB.
     let got = bounded("directory, 65,536 entries", &root, &world, 15 << 18, false);
-    assert_eq!(got.2, UNVERIFIABLE, "{got:?}");
+    assert_eq!(got.2, MEMORY_REFUSED, "{got:?}");
     // A directory whose page fits is listed.
     let (root, world) = directory(5_000);
     let got = bounded(
@@ -585,15 +590,15 @@ fn dense_structure_stays_within_the_budget() {
     // A HAMT of 65,536 entries in 257 shards.
     let (root, world) = hamt();
     let got = bounded("HAMT, 65,536 entries", &root, &world, REQUEST_BUDGET, false);
-    assert_eq!(got.2, UNVERIFIABLE, "{got:?}");
+    assert_eq!(got.2, MEMORY_REFUSED, "{got:?}");
     // Room for the CAR and the shards, not for the entries.
     let got = bounded("HAMT, 65,536 entries", &root, &world, 4 << 20, false);
-    assert_eq!(got.2, UNVERIFIABLE, "{got:?}");
+    assert_eq!(got.2, MEMORY_REFUSED, "{got:?}");
     // A file node of 65,536 children: its worklist doesn't fit 4 MiB, and
     // fits 8 MiB.
     let (root, world) = wide_file(65_536);
     let got = bounded("file, 65,536 children", &root, &world, 4 << 20, false);
-    assert_eq!(got.2, UNVERIFIABLE, "{got:?}");
+    assert_eq!(got.2, MEMORY_REFUSED, "{got:?}");
     let got = bounded(
         "file, 65,536 children",
         &root,
@@ -648,5 +653,5 @@ fn dense_structure_stays_within_the_budget() {
     let got = capped("manifest, nodes of 420 KB", &p, 1 << 20, |v| {
         swarm_drive(v, &chunks)
     });
-    assert_eq!(got.2, SWARM_UNVERIFIABLE, "{got:?}");
+    assert_eq!(got.2, MEMORY_REFUSED, "{got:?}");
 }

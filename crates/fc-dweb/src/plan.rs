@@ -360,6 +360,13 @@ pub enum ContentTrust {
 }
 
 impl ContentTrust {
+    pub const ALL: [Self; 4] = [
+        Self::NodeAsserted,
+        Self::Unverified,
+        Self::Verified,
+        Self::LatestAsserted,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::NodeAsserted => "node_asserted",
@@ -367,6 +374,10 @@ impl ContentTrust {
             Self::Verified => "verified",
             Self::LatestAsserted => "latest_asserted",
         }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|t| t.as_str() == name)
     }
 }
 
@@ -436,6 +447,127 @@ pub struct Verify {
     pub timers: Timers,
     pub response: Vec<ResponseOp>,
     pub trust: Trust,
+}
+
+impl Verify {
+    /// A `{ verify }` plan as main sends it back in `dweb.verify` (0009,
+    /// `dweb.verify`): exactly the members [`Plan::to_value`] writes, each
+    /// of its type, or `None`. This reads the plan's shape; the verifier
+    /// checks its rules again ([`crate::verifier::Verifier::new`]).
+    pub fn from_value(value: &JsValue) -> Option<Self> {
+        let [body] = members(value, ["verify"])?;
+        let [
+            node,
+            root,
+            path,
+            query,
+            headers,
+            retry,
+            timers,
+            response,
+            trust,
+        ] = members(
+            body,
+            [
+                "node", "root", "path", "query", "headers", "retry", "timers", "response", "trust",
+            ],
+        )?;
+        let node = match node.as_str()? {
+            "ant" => Node::Ant,
+            "ipfs" => Node::Ipfs,
+            _ => return None,
+        };
+        let JsValue::Object(root) = root else {
+            return None;
+        };
+        let [(key, reference)] = root.as_slice() else {
+            return None;
+        };
+        let reference = reference.as_str()?.to_owned();
+        let root = match key.as_str() {
+            "swarm" => Root::Swarm(reference),
+            "ipfs" => Root::Ipfs(reference),
+            "ipns" => Root::Ipns(reference),
+            _ => return None,
+        };
+        let [statuses, on_error, attempts, delays_ms] =
+            members(retry, ["statuses", "on_error", "attempts", "delays_ms"])?;
+        let JsValue::Bool(on_error) = on_error else {
+            return None;
+        };
+        let retry = Retry {
+            statuses: list(statuses, integer)?,
+            on_error: *on_error,
+            attempts: integer(attempts)?,
+            delays_ms: list(delays_ms, integer)?,
+        };
+        let [queue_ms, headers_ms, body_idle_ms] =
+            members(timers, ["queue_ms", "headers_ms", "body_idle_ms"])?;
+        let bound = |v: &JsValue| match v {
+            JsValue::Null => Some(None),
+            v => integer(v).map(Some),
+        };
+        let timers = Timers {
+            queue_ms: bound(queue_ms)?,
+            headers_ms: bound(headers_ms)?,
+            body_idle_ms: integer(body_idle_ms)?,
+        };
+        let [name, content] = members(trust, ["name", "content"])?;
+        let trust = Trust {
+            name: match name {
+                JsValue::Null => None,
+                v => Some(v.as_str()?.to_owned()),
+            },
+            content: ContentTrust::from_name(content.as_str()?)?,
+        };
+        Some(Self {
+            node,
+            root,
+            path: path.as_str()?.to_owned(),
+            query: query.as_str()?.to_owned(),
+            headers: list(headers, |pair| {
+                let [n, v] = pair.as_array()? else {
+                    return None;
+                };
+                Some((n.as_str()?.to_owned(), v.as_str()?.to_owned()))
+            })?,
+            retry,
+            timers,
+            response: list(response, |op| ResponseOp::from_name(op.as_str()?))?,
+            trust,
+        })
+    }
+}
+
+/// An object's members `keys`, in that order, when it has exactly those.
+fn members<'v, const N: usize>(value: &'v JsValue, keys: [&str; N]) -> Option<[&'v JsValue; N]> {
+    let JsValue::Object(props) = value else {
+        return None;
+    };
+    if props.len() != N {
+        return None;
+    }
+    let found: Vec<&JsValue> = keys
+        .iter()
+        .map(|key| value.get(key))
+        .collect::<Option<_>>()?;
+    found.try_into().ok()
+}
+
+/// A whole number that fits `T`.
+fn integer<T: TryFrom<u64>>(value: &JsValue) -> Option<T> {
+    let JsValue::Number(n) = *value else {
+        return None;
+    };
+    if !(0.0..=9_007_199_254_740_991.0).contains(&n) || n.fract() != 0.0 {
+        return None;
+    }
+    T::try_from(n as u64).ok()
+}
+
+/// An array's items, each read by `item`.
+fn list<T>(value: &JsValue, item: impl Fn(&JsValue) -> Option<T>) -> Option<Vec<T>> {
+    value.as_array()?.iter().map(item).collect()
 }
 
 /// A redirect answered without a node.

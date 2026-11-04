@@ -1087,8 +1087,9 @@ fn budgets_exhausted_at_each_reservation() {
                     assert_eq!(got.body, honest.body, "{budget}");
                     assert_eq!(got.head, honest.head, "{budget}");
                 }
+                // Refused for its memory, with the budget's own text.
                 Some(Ending::Error(502, m)) | Some(Ending::Abort(_, m)) => {
-                    assert_eq!(m, fc_dweb::verifier::SWARM_UNVERIFIABLE, "{budget}");
+                    assert_eq!(m, fc_dweb::verifier::MEMORY, "{budget}");
                 }
                 other => panic!("{budget}: {other:?}"),
             }

@@ -192,3 +192,69 @@ fn validation() {
         assert!(seen.contains(reason), "no vector for {reason}");
     }
 }
+
+/// Every verify plan of the vectors, as main sends it back in
+/// `dweb.verify`, reads as the plan it was, and writes back the same.
+#[test]
+fn verify_plans_read_back_as_written() {
+    let v = vectors();
+    let mut n = 0;
+    for entry in v["requests"].as_array().unwrap() {
+        let plan = &entry["plan"];
+        if plan.get("verify").is_none() {
+            continue;
+        }
+        let read = fc_dweb::Verify::from_value(&js_value(plan))
+            .unwrap_or_else(|| panic!("{}: not read", id(entry)));
+        assert_eq!(plan_json(&Plan::Verify(read)), *plan, "{}", id(entry));
+        n += 1;
+    }
+    assert_eq!(n, 246, "{n}");
+}
+
+/// A change to a plan's JSON.
+type Edit = Box<dyn Fn(&mut Json)>;
+
+/// Anything but the shape `dweb.open` writes is refused: a member missing
+/// or added, a value of another type or out of range.
+#[test]
+fn a_verify_plan_of_another_shape_reads_as_nothing() {
+    let v = vectors();
+    let plan = v["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| &e["plan"])
+        .find(|p| p.get("verify").is_some())
+        .unwrap()
+        .clone();
+    assert!(fc_dweb::Verify::from_value(&js_value(&plan)).is_some());
+    let edits: Vec<Edit> = vec![
+        Box::new(|p| p["extra"] = Json::Bool(true)),
+        Box::new(|p| p["verify"]["extra"] = Json::Bool(true)),
+        Box::new(|p| {
+            p["verify"].as_object_mut().unwrap().remove("query");
+        }),
+        Box::new(|p| p["verify"]["node"] = "bee".into()),
+        Box::new(|p| p["verify"]["root"] = serde_json::json!({ "swarm": "a", "ipfs": "b" })),
+        Box::new(|p| p["verify"]["root"] = serde_json::json!({ "bzz": "a" })),
+        Box::new(|p| p["verify"]["path"] = 1.into()),
+        Box::new(|p| p["verify"]["headers"] = serde_json::json!([["range"]])),
+        Box::new(|p| p["verify"]["retry"]["attempts"] = 1.5.into()),
+        Box::new(|p| p["verify"]["retry"]["attempts"] = (-1).into()),
+        Box::new(|p| p["verify"]["retry"]["statuses"] = serde_json::json!([70000])),
+        Box::new(|p| p["verify"]["retry"]["on_error"] = 1.into()),
+        Box::new(|p| p["verify"]["timers"]["body_idle_ms"] = Json::Null),
+        Box::new(|p| p["verify"]["response"] = serde_json::json!(["strip_everything"])),
+        Box::new(|p| p["verify"]["trust"]["content"] = "trusted".into()),
+        Box::new(|p| p["verify"]["trust"]["name"] = 1.into()),
+    ];
+    for (i, edit) in edits.iter().enumerate() {
+        let mut changed = plan.clone();
+        edit(&mut changed);
+        assert!(
+            fc_dweb::Verify::from_value(&js_value(&changed)).is_none(),
+            "{i}: {changed}"
+        );
+    }
+}

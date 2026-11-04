@@ -10,8 +10,7 @@ use base64::Engine as _;
 use fc_dweb::Verify;
 use fc_dweb::store::{FloorCheck, Store, Ticket};
 use fc_dweb::verifier::{
-    Head, Method, Options, Output, PieceFailure, PieceId, PieceRequest, REQUEST_BUDGET,
-    STREAM_WINDOW, Verifier,
+    Head, Method, Options, Output, PieceFailure, PieceId, PieceRequest, STREAM_WINDOW, Verifier,
 };
 use serde_json::Value as Json;
 use sha2::{Digest, Sha256};
@@ -102,8 +101,12 @@ pub enum Order {
     Lifo,
 }
 
+/// [`Opts::budget`]'s default: the plan's scheme's budget.
+pub const BY_SCHEME: usize = usize::MAX;
+
 #[derive(Debug, Clone, Copy)]
 pub struct Opts {
+    /// The request's memory, or [`BY_SCHEME`].
     pub budget: usize,
     pub order: Order,
     /// The page's credit per step, or all at once; `Some(0)`: a page that
@@ -124,7 +127,7 @@ pub struct Opts {
 impl Default for Opts {
     fn default() -> Self {
         Self {
-            budget: REQUEST_BUDGET,
+            budget: BY_SCHEME,
             order: Order::Fifo,
             page: None,
             cancel_after: None,
@@ -173,6 +176,11 @@ pub fn run_shared(
     partition: Option<&str>,
 ) -> Run {
     let ticket: Option<Ticket> = store.as_deref_mut().map(|s| s.begin(partition));
+    let budget = if opts.budget == BY_SCHEME {
+        fc_dweb::verifier::budget(&plan.root)
+    } else {
+        opts.budget
+    };
     let mut v = Verifier::new(
         7,
         plan,
@@ -180,7 +188,7 @@ pub fn run_shared(
         partition,
         partition.is_some(),
         Options {
-            budget: opts.budget,
+            budget,
             now: opts.now,
             car: opts.car,
         },
@@ -295,7 +303,7 @@ pub fn run_shared(
             }
         }
         assert!(
-            v.reserved() <= opts.budget,
+            v.reserved() <= budget,
             "{label}: reserved {} past the budget",
             v.reserved()
         );

@@ -15,8 +15,10 @@
 //! - **Outputs** ([`Verifier::poll`]): pieces to fetch and cancel, credit
 //!   for the streamed pieces, hash jobs, then either an error before the
 //!   head or the head, the verified body and its end or abort.
-//! - **Memory:** everything the request holds counts against its 8 MiB
-//!   ([`REQUEST_BUDGET`]), reserved before it is asked for. A streamed
+//! - **Memory:** everything the request holds counts against its budget,
+//!   by its scheme ([`budget`]): 2 MiB for Swarm, 8 MiB for IPFS, reserved
+//!   before it is asked for. A walk that can't fit and has no other way on
+//!   ends with the budget's own text ([`MEMORY`]). A streamed
 //!   piece's 128 KiB window is reserved when the piece is asked for, and
 //!   credit goes back only for bytes that have left the machine, released
 //!   or dropped, so a piece never has more in flight than its window.
@@ -40,9 +42,25 @@ pub use jobs::{Hashed, Job, JobId};
 use crate::plan::{Backend, ContentTrust, ErrorPlan, Node, ResponseOp, Root, Trust, Verify};
 use crate::validate::Refusal;
 
-/// A request's memory: its piece windows, the pieces and blocks it holds,
-/// its jobs' bytes and its queued body (0009, Bounds).
-pub const REQUEST_BUDGET: usize = 8 << 20;
+/// A Swarm request's memory (0009, Bounds): its largest holding is a
+/// manifest lookup, the root node parsed beside the next node's join and
+/// parse; a file's leaves stream through one 128 KiB window.
+pub const SWARM_BUDGET: usize = 2 << 20;
+/// An IPFS request's: a CAR's reading room and its sections' jobs, or raw
+/// blocks of up to 2 MiB, and a directory's or a HAMT's structure.
+pub const IPFS_BUDGET: usize = 8 << 20;
+/// The larger budget, IPFS's.
+pub const REQUEST_BUDGET: usize = IPFS_BUDGET;
+
+/// A request's memory by its plan's root: its piece windows, the pieces and
+/// blocks it holds, its parsed structure, its jobs' bytes and its queued
+/// body (0009, Bounds).
+pub fn budget(root: &Root) -> usize {
+    match root {
+        Root::Swarm(_) => SWARM_BUDGET,
+        Root::Ipfs(_) | Root::Ipns(_) => IPFS_BUDGET,
+    }
+}
 /// A streamed piece's window, each direction (0007).
 pub const STREAM_WINDOW: usize = 128 << 10;
 /// The verified body's window: how far the body may run ahead of main's
@@ -219,6 +237,9 @@ pub const IPFS_UNVERIFIABLE: &str = "This content can't be verified with the ext
 pub const IPFS_MALFORMED: &str = "This IPFS content is malformed";
 pub const IPFS_NOT_FOUND: &str = "Not found on the external IPFS gateway";
 pub const IPFS_STOPPED: &str = "The external IPFS gateway stopped sending";
+/// A walk that needs more memory than its request's budget, where it has
+/// no other way on: the core's limit, not the node's or the content's.
+pub const MEMORY: &str = "This content needs more memory to verify than one request may use";
 pub const DEADLINE_PASSED: &str = "Deadline passed";
 pub const TOO_MANY_REQUESTS: &str = "Too many requests";
 pub const CANCELLED: &str = "The request was cancelled";
@@ -230,6 +251,11 @@ pub(crate) enum Failure {
     VerificationFailed,
     /// Content the core can't check, or a walk past its bounds.
     Unverifiable,
+    /// A reservation that doesn't fit the request's memory, where the walk
+    /// has no other way on: no fallback (raw blocks for a CAR) and nothing
+    /// to wait for. Its own text ([`MEMORY`]), so a page and a report tell
+    /// the core's limit from content it can't check.
+    Memory,
     /// Authentic content that can't be decoded or is inconsistent (IPFS).
     Malformed,
     /// A piece's final answer was this status.
@@ -279,6 +305,7 @@ impl Failure {
                 ErrorPlan::new(502, t.verification_failed)
             }
             Self::Unverifiable => ErrorPlan::new(502, t.unverifiable),
+            Self::Memory => ErrorPlan::new(502, MEMORY),
             Self::Malformed => ErrorPlan::new(502, IPFS_MALFORMED),
             Self::Status(404) => ErrorPlan::new(404, t.not_found),
             Self::Status(status) => {
@@ -316,6 +343,7 @@ impl Failure {
                 (AbortCode::VerificationFailed, t.verification_failed)
             }
             Self::Unverifiable => (AbortCode::Unverifiable, t.unverifiable),
+            Self::Memory => (AbortCode::Unverifiable, MEMORY),
             Self::Malformed => (AbortCode::Malformed, IPFS_MALFORMED),
             Self::Status(_)
             | Self::Piece(_)
@@ -1003,8 +1031,8 @@ macro_rules! machine {
 /// What a request runs under, beside its plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
-    /// The request's memory bound ([`REQUEST_BUDGET`]; smaller in tests of
-    /// budgets exhausted at each reservation).
+    /// The request's memory bound ([`budget`] for its scheme; smaller in
+    /// tests of budgets exhausted at each reservation).
     pub budget: usize,
     /// The wall clock, in Unix seconds, for an IPNS record's validity.
     pub now: i64,

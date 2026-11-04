@@ -395,7 +395,7 @@ impl Tree {
             if fetch_chunk(core, Tag::Inter(start, depth), &w.address).is_none() {
                 self.ahead.remove(&(start, depth));
                 if w.blocking {
-                    return Err(Failure::Unverifiable);
+                    return Err(Failure::Memory);
                 }
                 break;
             }
@@ -497,7 +497,7 @@ enum Progress {
 
 impl Load {
     fn start(core: &mut Core, address: [u8; 32]) -> Result<Self, Failure> {
-        fetch_chunk(core, Tag::NodeRoot, &address).ok_or(Failure::Unverifiable)?;
+        fetch_chunk(core, Tag::NodeRoot, &address).ok_or(Failure::Memory)?;
         Ok(Self {
             address,
             state: LoadState::Root,
@@ -571,7 +571,7 @@ impl Load {
                 continue;
             }
             if fetch_chunk(core, Tag::Sniff, &child).is_none() {
-                return Progress::Failed(Failure::Unverifiable);
+                return Progress::Failed(Failure::Memory);
             }
             self.state = LoadState::Sniff { depth, child };
             return Progress::Pending;
@@ -601,7 +601,7 @@ impl Load {
             };
         }
         if !core.fits(size) {
-            return Progress::Failed(Failure::Unverifiable);
+            return Progress::Failed(Failure::Memory);
         }
         core.hold(size);
         let tree = match Tree::new(core, &root, len, 0, len, u64::MAX) {
@@ -649,7 +649,7 @@ impl Load {
                             continue;
                         }
                         if fetch_chunk(core, Tag::JoinLeaf(start), &address).is_none() {
-                            return Progress::Failed(Failure::Unverifiable);
+                            return Progress::Failed(Failure::Memory);
                         }
                         join.leaves.insert(start, (address, len));
                     }
@@ -932,7 +932,7 @@ impl Body {
                 headers,
                 Ask::Stream(None),
             )
-            .ok_or(Failure::Unverifiable)?;
+            .ok_or(Failure::Memory)?;
         self.stream = Some(ByteStream {
             id,
             pos: self.fs,
@@ -1070,8 +1070,7 @@ impl Body {
             if core.whole_pieces() >= MAX_CHUNK_PIECES {
                 break;
             }
-            fetch_chunk(core, Tag::Fallback(leaf.start), &leaf.address)
-                .ok_or(Failure::Unverifiable)?;
+            fetch_chunk(core, Tag::Fallback(leaf.start), &leaf.address).ok_or(Failure::Memory)?;
             leaf.state = LeafState::Fallback;
         }
         Ok(())
@@ -1470,7 +1469,7 @@ impl Walk {
         let room = manifest::lookup_room(&self.path);
         if !core.fits(room) {
             core.unhold(cost);
-            return self.end(core, Failure::Unverifiable);
+            return self.end(core, Failure::Memory);
         }
         core.hold(room);
         let (lookup, step) = Lookup::new(node, &self.path);
@@ -1491,7 +1490,7 @@ impl Walk {
         self.release_url_root(core);
         // Room for the body before the head promises it.
         if !core.fits(body.len()) {
-            return core.fail(Failure::Unverifiable);
+            return core.fail(Failure::Memory);
         }
         core.head(status, headers, content);
         core.hold(body.len());
@@ -1601,7 +1600,7 @@ impl Walk {
                 };
                 if !core.fits(room) {
                     core.unhold(held);
-                    return self.end(core, Failure::Unverifiable);
+                    return self.end(core, Failure::Memory);
                 }
                 core.hold(room);
                 let step = match loaded {
@@ -1654,7 +1653,7 @@ impl Walk {
                     .fetch(Tag::Feed, path, headers, Ask::Whole(super::MAX_WHOLE))
                     .is_none()
                 {
-                    return self.end(core, Failure::Unverifiable);
+                    return self.end(core, Failure::Memory);
                 }
                 self.stage = Stage::FeedIndex { owner, topic };
             }
@@ -1721,7 +1720,7 @@ impl Walk {
                 // count against the request.
                 let cost = entry_cost(&entry);
                 if !core.fits(cost) || fetch_chunk(core, Tag::FileRoot, &reference).is_none() {
-                    return self.end(core, Failure::Unverifiable);
+                    return self.end(core, Failure::Memory);
                 }
                 core.hold(cost);
                 self.stage = Stage::FileRoot { entry };
@@ -1903,7 +1902,7 @@ impl Walk {
                 let (owner, topic) = (*owner, *topic);
                 let address = fc_swarm::verify::feed_update_address(&owner, &topic, index);
                 if fetch_chunk(core, Tag::Update, &address).is_none() {
-                    return self.end(core, Failure::Unverifiable);
+                    return self.end(core, Failure::Memory);
                 }
                 self.stage = Stage::FeedUpdate {
                     owner,
@@ -2116,7 +2115,7 @@ fn parse(core: &mut Core, bytes: Vec<u8>) -> Result<Result<manifest::Node, NodeE
     let room = manifest::parse_room(n);
     if !core.fits(room) {
         core.unhold(n);
-        return Err(Failure::Unverifiable);
+        return Err(Failure::Memory);
     }
     core.hold(room);
     let parsed = manifest::parse_node_owned(bytes);
