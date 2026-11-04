@@ -122,6 +122,13 @@ pub fn claim() {
     ACQUIRED.fetch_add(1, Ordering::SeqCst);
 }
 
+/// Whether the calling thread is ending the process: it has claimed the
+/// exit, or it is the timer ending it for the owner. Such a thread must not
+/// wait for another exit, which would park waiting for it.
+pub(crate) fn ending_here() -> bool {
+    HELD.try_with(Cell::get).unwrap_or(Held::No) != Held::No
+}
+
 fn park_forever() -> ! {
     loop {
         std::thread::park();
