@@ -993,6 +993,7 @@ The source research for this design found four ways the node gives away more tha
 - **This is Radicle's model, unchanged:**
   - a seeded repository is announced in the node's signed inventory and served to peers that ask for it;
   - seeding happens only on an explicit seed, clone or sync, and on the default repository at start.
+- **The default seeding policy is `block`** (decided 2026-11-04): the service starts the node with heartwood's blocking default, forced in memory as the routing fields are, whatever `config.json` says. So no repository is seeded but by an explicit seed, clone or sync, and a repository that is unseeded, or removed from quarantine, stays unseeded until one.
 - **Browsing through `rad:`** reads local storage and announces nothing.
 - **What peers learn:** each connection receives the node's signed inventory of the repositories it seeds, tied to its node ID, which is derived from the vault. Whether to offer a setting that announces none, while still serving on request, is the user's decision ([Open questions](#open-questions), 12).
 - **No listening socket:**
