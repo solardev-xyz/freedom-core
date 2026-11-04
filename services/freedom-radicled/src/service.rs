@@ -85,6 +85,9 @@ pub struct RadicleService {
     confinement: Value,
     /// `rad.identity`'s deadline, armed by `rad.hello`'s reply.
     deadline: Mutex<Option<Watchdog>>,
+    /// main's proof that libgit2 reads no git configuration outside a
+    /// repository, for reconciliation.
+    git_config: libradicle::GitConfigIsolated,
 }
 
 impl RadicleService {
@@ -94,6 +97,7 @@ impl RadicleService {
         grant: Grant,
         network: &fc_service::network::NetworkPolicy,
         confinement: Value,
+        git_config: libradicle::GitConfigIsolated,
     ) -> Option<Self> {
         let identity = Identity::new(&grant.home)?;
         Some(Self {
@@ -104,6 +108,7 @@ impl RadicleService {
             network: network.to_json(),
             confinement,
             deadline: Mutex::new(None),
+            git_config,
         })
     }
 
@@ -169,6 +174,7 @@ impl RadicleService {
         let reconciliation = self.reconciliation.clone();
         let owed = conn.clone();
         let id = request.id;
+        let git_config = self.git_config;
         let spawned = std::thread::Builder::new()
             .name("reconcile".into())
             .spawn(move || {
@@ -184,7 +190,7 @@ impl RadicleService {
                 // restarts, and whose next start reconciles again.
                 let outcome = fc_service::panic::with_kind(
                     fc_service::panic::TaskKind::named("reconcile"),
-                    || reconcile::run(&run, &()),
+                    || reconcile::run(&run, &(), git_config),
                 );
                 drop(signer);
                 match outcome {

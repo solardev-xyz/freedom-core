@@ -47,6 +47,7 @@ pub fn with_node<R>(
                 onion: radicle::node::config::AddressConfig::Drop,
                 gate: super::hermetic::gate(),
             }),
+            seeding_policy: None,
             isolated: true,
         },
         key,
