@@ -1,5 +1,6 @@
-//! Fault injection for the integration tests. **Debug builds only:** in
-//! release builds every hook is a no-op and no variable is read.
+//! Fault injection for the integration tests. **Only with the `testhooks`
+//! feature,** which build.rs refuses outside debug and test builds: without
+//! it every hook is a no-op and no variable is read.
 //!
 //! - `FREEDOM_CORED_TEST_SNAPSHOT_DELAY_MS` stalls the startup snapshot read.
 //! - `FREEDOM_CORED_TEST_JOB_DELAY_MS` stalls each vault job before it does
@@ -33,8 +34,8 @@
 //!   identity is compared, `renaming` right before a staged node file is
 //!   renamed. It stands for a same-user process winning a race.
 //! - `FREEDOM_CORED_TEST_METHODS` enables the `test.*` methods
-//!   (`testmethods`), which make responses of any size. Release builds
-//!   don't compile them, nor this hook.
+//!   (`testmethods`), which make responses of any size. Builds without the
+//!   feature don't compile them, nor this hook.
 //! - `FREEDOM_CORED_TEST_HOLD_REPLY` names a request ID: its reply, if it
 //!   is one valid only under the vault's epoch (`nodes.seal_radicle_key`),
 //!   waits in the loop's outbox as if the writer had no room, until the
@@ -43,17 +44,17 @@
 use std::time::Duration;
 
 /// Set as the core begins to exit; it releases a held commit.
-#[cfg(debug_assertions)]
+#[cfg(feature = "testhooks")]
 static EXITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The core is about to wait for committed work and exit.
-#[cfg(debug_assertions)]
+#[cfg(feature = "testhooks")]
 pub fn exiting() {
     EXITING.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Waits until `release` exists, `also` holds, or 120 s pass.
-#[cfg(debug_assertions)]
+#[cfg(feature = "testhooks")]
 fn hold(release: &std::ffi::OsStr, also: impl Fn() -> bool) {
     let until = std::time::Instant::now() + Duration::from_secs(120);
     while !std::path::Path::new(release).exists() && !also() && std::time::Instant::now() < until {
@@ -61,33 +62,33 @@ fn hold(release: &std::ffi::OsStr, also: impl Fn() -> bool) {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "testhooks")]
 fn millis(name: &str) -> Option<u64> {
     std::env::var(name).ok().and_then(|v| v.parse().ok())
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "testhooks")]
 pub fn snapshot_delay() {
     if let Some(ms) = millis("FREEDOM_CORED_TEST_SNAPSHOT_DELAY_MS") {
         std::thread::sleep(Duration::from_millis(ms));
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "testhooks")]
 pub fn job_delay() {
     if let Some(ms) = millis("FREEDOM_CORED_TEST_JOB_DELAY_MS") {
         std::thread::sleep(Duration::from_millis(ms));
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "testhooks")]
 pub fn refused_claim_hold() {
     if let Some(release) = std::env::var_os("FREEDOM_CORED_TEST_REFUSED_CLAIM_HOLD") {
         hold(&release, || false);
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "testhooks")]
 pub fn commit_delay() {
     if let Ok(marker) = std::env::var("FREEDOM_CORED_TEST_COMMIT_MARKER") {
         let _ = std::fs::write(marker, b"claimed");
@@ -102,17 +103,17 @@ pub fn commit_delay() {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "testhooks")]
 pub fn kdf_deadline(default: Duration) -> Duration {
     millis("FREEDOM_CORED_TEST_KDF_DEADLINE_MS").map_or(default, Duration::from_millis)
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "testhooks")]
 pub fn stall(default: Duration) -> Duration {
     millis("FREEDOM_CORED_TEST_STALL_MS").map_or(default, Duration::from_millis)
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "testhooks")]
 pub fn chain_bounds(mut bounds: fc_chain::machine::Bounds) -> fc_chain::machine::Bounds {
     if let Some(total) = millis("FREEDOM_CORED_TEST_CHAIN_TOTAL_BYTES") {
         bounds.total_bytes = usize::try_from(total).unwrap_or(usize::MAX);
@@ -120,7 +121,7 @@ pub fn chain_bounds(mut bounds: fc_chain::machine::Bounds) -> fc_chain::machine:
     bounds
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "testhooks")]
 fn naming_mark(line: &str) {
     use std::io::Write as _;
     if let Some(marker) = std::env::var_os("FREEDOM_CORED_TEST_NAMING_MARKER") {
@@ -133,17 +134,17 @@ fn naming_mark(line: &str) {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "testhooks")]
 pub fn naming_reply() {
     naming_mark("reply");
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "testhooks")]
 pub fn naming_drain(frames: usize) {
     naming_mark(&format!("drain {frames}"));
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "testhooks")]
 pub fn swap(stage: &str, path: &std::path::Path) {
     let Ok(spec) = std::env::var("FREEDOM_CORED_TEST_SWAP") else {
         return;
@@ -155,7 +156,7 @@ pub fn swap(stage: &str, path: &std::path::Path) {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "testhooks")]
 pub fn hold_reply(id: u64) -> bool {
     std::env::var("FREEDOM_CORED_TEST_HOLD_REPLY")
         .ok()
@@ -163,51 +164,51 @@ pub fn hold_reply(id: u64) -> bool {
         == Some(id)
 }
 
-#[cfg(not(debug_assertions))]
+#[cfg(not(feature = "testhooks"))]
 pub fn hold_reply(_id: u64) -> bool {
     false
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "testhooks")]
 pub fn test_methods() -> bool {
     std::env::var_os("FREEDOM_CORED_TEST_METHODS").is_some()
 }
 
-#[cfg(not(debug_assertions))]
+#[cfg(not(feature = "testhooks"))]
 pub fn snapshot_delay() {}
 
-#[cfg(not(debug_assertions))]
+#[cfg(not(feature = "testhooks"))]
 pub fn job_delay() {}
 
-#[cfg(not(debug_assertions))]
+#[cfg(not(feature = "testhooks"))]
 pub fn commit_delay() {}
 
-#[cfg(not(debug_assertions))]
+#[cfg(not(feature = "testhooks"))]
 pub fn refused_claim_hold() {}
 
-#[cfg(not(debug_assertions))]
+#[cfg(not(feature = "testhooks"))]
 pub fn exiting() {}
 
-#[cfg(not(debug_assertions))]
+#[cfg(not(feature = "testhooks"))]
 pub fn kdf_deadline(default: Duration) -> Duration {
     default
 }
 
-#[cfg(not(debug_assertions))]
+#[cfg(not(feature = "testhooks"))]
 pub fn stall(default: Duration) -> Duration {
     default
 }
 
-#[cfg(not(debug_assertions))]
+#[cfg(not(feature = "testhooks"))]
 pub fn swap(_stage: &str, _path: &std::path::Path) {}
 
-#[cfg(not(debug_assertions))]
+#[cfg(not(feature = "testhooks"))]
 pub fn naming_reply() {}
 
-#[cfg(not(debug_assertions))]
+#[cfg(not(feature = "testhooks"))]
 pub fn naming_drain(_frames: usize) {}
 
-#[cfg(not(debug_assertions))]
+#[cfg(not(feature = "testhooks"))]
 pub fn chain_bounds(bounds: fc_chain::machine::Bounds) -> fc_chain::machine::Bounds {
     bounds
 }
