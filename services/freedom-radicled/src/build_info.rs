@@ -4,8 +4,8 @@
 
 /// The libradicle version the pinned commit carries.
 pub const LIBRADICLE_VERSION: &str = "0.8.0";
-/// The pinned commit: `integration/rust-core` at libradicle#21's merge.
-pub const LIBRADICLE_COMMIT: &str = "5448fd8e32250f8ed3ddb17e6a3dc96b1422972d";
+/// The pinned commit: `integration/rust-core` at libradicle#26's merge.
+pub const LIBRADICLE_COMMIT: &str = "84557e831a3cd3cc8e76bf158d7b443a2b6fdac3";
 
 #[cfg(test)]
 mod tests {
