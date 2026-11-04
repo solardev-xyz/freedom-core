@@ -3,10 +3,13 @@
 //!
 //! | Kind | Name | Direction | Payload after the 8-byte stream ID |
 //! |---|---|---|---|
-//! | `0x02` | data | service → main | 1 to 65 536 body bytes |
-//! | `0x03` | end | service → main | none: the body is complete |
-//! | `0x04` | abort | service → main | JSON `{ code, message }`, ≤ 1 KiB: the body is truncated |
-//! | `0x05` | credit | main → service | a `u32` big-endian above zero: bytes main has handed on |
+//! | `0x02` | data | the answering side → the requester | 1 to 65 536 body bytes |
+//! | `0x03` | end | the answering side → the requester | none: the body is complete |
+//! | `0x04` | abort | the answering side → the requester | JSON `{ code, message }`, ≤ 1 KiB: the body is truncated |
+//! | `0x05` | credit | the requester → the answering side | a `u32` big-endian above zero: bytes it has handed on |
+//!
+//! On a service connection the service answers and main requests. On the
+//! core's at protocol 2 both do: main answers the core's `shell.dweb_get`.
 //!
 //! The stream ID is the envelope ID of the request whose response opened
 //! it, and request IDs strictly increase within a connection. A head (a
@@ -25,6 +28,13 @@
 //! - **The side that receives them** ([`Receiver`], main): checked
 //!   receive accounting, one 128 KiB ring per stream, pulls of up to
 //!   64 KiB that return credit, and retirement on a local cancel.
+//! - **Both, on one connection** ([`Duplex`], `freedom-cored` at protocol
+//!   2, design 0009): the bodies the core sends in answer to main's
+//!   requests ([`Sender`]) and those main sends in answer to the core's
+//!   ([`Inbound`]), each in its requester's ID space, so a frame's kind says
+//!   which. The core holds no ring: data goes straight to the stream's
+//!   consumer, which holds it in room it reserved, and its credit is sent,
+//!   ahead of the sender's frames, once the consumer lets the bytes go.
 //!
 //! Sans-I/O, like the rest of the crate: the caller feeds frames and events
 //! in and takes frames and deliveries out. `vectors/streams.json` holds the
@@ -40,9 +50,13 @@ use crate::frame::{
 };
 use crate::message::check_id;
 
+mod duplex;
+mod inbound;
 mod receiver;
 mod sender;
 
+pub use duplex::{Duplex, Received, Wrote};
+pub use inbound::{Arrived, Inbound, InboundInfo, InboundState, Overcredit};
 pub use receiver::{Delivery, Pulled, Receiver, Replied, Retire, StreamInfo, StreamState};
 pub use sender::{Cancel, Credited, SendError, Sender, Settled, Written};
 
@@ -74,6 +88,10 @@ pub enum Side {
     Receiver,
     /// Sends bodies (the service): takes credit; sends data, end and abort.
     Sender,
+    /// Both (`freedom-cored`'s connection at protocol 2, design 0009): it
+    /// takes all four, and a frame's kind says which of its streams it
+    /// names ([`Duplex`]).
+    Both,
 }
 
 impl Side {
@@ -82,6 +100,7 @@ impl Side {
         match self {
             Side::Receiver => matches!(kind, KIND_DATA | KIND_END | KIND_ABORT),
             Side::Sender => kind == KIND_STREAM_CREDIT,
+            Side::Both => matches!(kind, KIND_DATA | KIND_END | KIND_ABORT | KIND_STREAM_CREDIT),
         }
     }
 }
